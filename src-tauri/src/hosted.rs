@@ -544,8 +544,10 @@ pub async fn start_hosted_app(handle: tauri::AppHandle, app: AppId) -> Result<Va
             AppId::Setup => directory.join(app.exe()),
             AppId::Mcp => directory.join("apps").join("mcp").join(app.exe()),
         };
-        // The portable preview pair is discoverable, but still requires the exact pinned hash.
-        let path = if adjacent.is_file() {
+        // Reuse the user's verified selection. Hosting still requires the exact build pin.
+        let path = if let Some(installed) = manager.hosted_candidate(app)? {
+            installed
+        } else if adjacent.is_file() {
             adjacent
         } else {
             handle

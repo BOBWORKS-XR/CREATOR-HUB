@@ -23,8 +23,10 @@ Choose Open app to use your usual app with all its settings. If more than one
 copy is found, choose Use this copy next to the one you recognise. Nothing is
 merged or removed.
 
-Using the full apps inside the Hub window needs a future update. Until then,
-they open in their own windows. Hub will not replace your MCP with a limited page.
+The coordinated preview supports the accepted Project Setup and MCP builds inside
+Hub. Install/update the app first, then choose Open hosted development preview.
+MCP asks for approval before enabling its normal controls. Other versions keep
+opening in their own windows; unverified files cannot be used for hosting.
 
 The older MCP 2.6.0 installer has a setup problem. Hub blocks that installer,
 but you can keep using an existing MCP. Check for an update before installing.
@@ -34,5 +36,6 @@ Unknown app files are not opened or replaced.
 
 ## Validation Boundary
 
-Automated checks are recorded separately. Installation and removal still need
-their final Windows test. Don't share this as a finished release yet.
+Automated checks and exact installer hashes are recorded with the candidate.
+See the coordinated prerelease testing guide for coverage and remaining limits.
+This is not a finished stable release or proof of every Unity/SDK workflow.

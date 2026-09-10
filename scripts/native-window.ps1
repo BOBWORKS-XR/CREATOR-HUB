@@ -21,7 +21,8 @@ public static class NativeTestWindows {
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr root, Visit cb, IntPtr data);
-    [DllImport("user32.dll")] private static extern int GetDlgCtrlID(IntPtr h);
+    [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr h, StringBuilder value, int size);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool SetWindowText(IntPtr h, string value);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder value, int size);
@@ -69,7 +70,14 @@ foreach ($window in $windows) {
     if ($Action -eq 'button') {
         $button = $window.FindFirst([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $Value))
         if ($null -ne $button) {
-            if ($button.Current.NativeWindowHandle -ne 0) { [void][NativeTestWindows]::PostMessage([IntPtr]$button.Current.NativeWindowHandle, 0xF5, [IntPtr]::Zero, [IntPtr]::Zero) }
+            if ($button.Current.NativeWindowHandle -ne 0) {
+                $control = [IntPtr]$button.Current.NativeWindowHandle
+                $id = [NativeTestWindows]::GetDlgCtrlID($control)
+                $parent = [NativeTestWindows]::GetParent($control)
+                if ($id -le 0 -or $id -gt 65535 -or $parent -ne [IntPtr]$window.Current.NativeWindowHandle) { throw 'Requested button is not a direct owned dialog control.' }
+                # BM_CLICK is unreliable for inactive hidden dialogs. Use the actual control ID.
+                [void][NativeTestWindows]::PostMessage($parent, 0x111, [IntPtr]$id, $control)
+            }
             else { $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke() }
             exit
         }

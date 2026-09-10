@@ -632,6 +632,17 @@ impl Manager {
         ))
     }
 
+    pub fn hosted_candidate(&self, app: AppId) -> Result<Option<PathBuf>, String> {
+        match installed(app)? {
+            Some((path, Some(_))) => Ok(Some(path)),
+            Some((_, None)) => Err(
+                "This app is not a verified release. Choose a verified copy or update it first."
+                    .into(),
+            ),
+            None => Ok(None),
+        }
+    }
+
     pub fn open(&self, app: AppId) -> Result<String, String> {
         let _operation = self.begin()?;
         let (path, known) = installed(app)?.ok_or("This app is not installed.")?;

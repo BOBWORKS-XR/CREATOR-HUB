@@ -15,8 +15,9 @@ Hub only. Your MCP, Project Setup, settings and Unity projects stay where they a
 - **Creator Hub update** checks Hub itself on the same stable/test channel.
   Verified downloads do not install until you click **Update Hub** and approve.
   In-app Hub restart is implemented but still awaiting installed-upgrade acceptance.
-- Full apps inside the Hub window need a future update. This installer does not
-  replace your MCP with a limited, read-only page.
+- **Open hosted development preview** opens a compatible app inside Hub after
+  you approve. The MCP preview includes its normal controls, not just a read-only
+  snapshot. Other app versions remain available in their own window.
 
 The older MCP 2.6.0 installer has a setup problem and is blocked, but an existing
 verified MCP can still be opened. See [local setup notes](docs/INSTALLABLE-PREVIEW.md).
@@ -31,10 +32,11 @@ or "Not now" means Hub-only installation, without changing the other apps.
 Standalone apps keep their Creator menu when Hub is absent. See the
 [hosted-app plan](docs/HOSTED-APPS.md).
 
-The separate paired development builds test Project Setup and MCP inside Hub.
-They are not included in the Hub-only installer. Existing public apps still open
-in their own windows. Writable MCP development builds still need native acceptance;
-their availability is not inferred from an installed app's version. Fixed `--open-app mcp|setup`
+The coordinated Windows preview uses Project Setup `0.3.0-alpha.1` and MCP
+`2.7.0-alpha.1`. Hub installs them separately from their verified public releases;
+they are not duplicated inside the Hub installer. Only exact reviewed installed
+executable hashes enable hosted controls. Native suite acceptance is recorded
+with the final candidate, not inferred from a version label. Fixed `--open-app mcp|setup`
 navigation and single-window launch handling are tested on Windows. Persistent
 adoption, standalone shortcut handoff and transfer of an already-open app are
 not implemented yet.
@@ -58,8 +60,9 @@ See the [coordinated release gates](docs/RELEASE-GATES.md) for remaining blocker
   Hub's saved list; it never deletes project content or another app's entries.
 - Project Setup hosted UI with native requirements/folder picking, retained form
   state across navigation, scoped progress and native busy-close protection.
-- Read-only MCP hosted UI with saved-config snapshots, native folder picking,
-  a separate backend/resource directory and a native command allowlist.
+- MCP hosted UI with an explicit native approval prompt for normal controls,
+  a separate backend/resource directory, guarded writes and a native command
+  allowlist. Read-only hosting remains available in development builds.
 - In-app verified download, install, open, installed-app reuse and update checks.
 - Available/installed versions, download progress, cancellation and visible errors.
 - Prereleases and verified background update downloads are enabled by default.
@@ -69,9 +72,9 @@ See the [coordinated release gates](docs/RELEASE-GATES.md) for remaining blocker
   future releases. Bounded metadata/downloads and Semantic Version comparison.
 - Running-app/server checks, no forced Unity or AI client closure, no automatic
   downgrade, and no silent duplicate installation over unknown/legacy copies.
-- Legacy NSIS releases use their normal installer window. Their silent path can
-  force-close apps, so this build does not promise zero-click legacy upgrades.
-  Native security/installer prompts may require interaction.
+- Reviewed new installers support in-app upgrades at the normal installation
+  location. Legacy MSI, unknown and custom installs require attention rather
+  than an automatic replacement. Native security/consent prompts may still appear.
 - Compact shared interface, morphing logo drawer, keyboard/reduced-motion support,
   gray Hub cube and official white SideQuest mark for Creator Converter.
 - Creator Converter and Creator Plugins are Coming soon. Plugins is planned as
@@ -135,6 +138,11 @@ install/upgrade acceptance and guarded GUI restart acceptance remain release
 gates. A successful installer exit is not enough: its installed launcher must
 match the signed/pinned hash. Failed native installers are not assumed to be
 transactional; Hub reports failure and retains cached installers.
+
+See the [coordinated prerelease checklist](docs/PRERELEASE-TESTING.md) for the
+exact test flow, channel choices, and remaining self-update limitations. Original
+dependency notices ship in each installer's `licenses` folder; third-party
+components and brand assets retain their own terms.
 
 See [Roadmap](docs/ROADMAP.md) and [release catalog contract](docs/RELEASE-CATALOG.md).
 

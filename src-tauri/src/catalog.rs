@@ -414,6 +414,35 @@ mod tests {
     }
 
     #[test]
+    fn channel_changes_accept_only_newer_releases() {
+        let item = |version: &str, prerelease| GithubRelease {
+            tag_name: format!("v{version}"),
+            draft: false,
+            prerelease,
+            assets: vec![
+                GithubAsset {
+                    name: DESCRIPTOR_NAME.into(),
+                },
+                GithubAsset {
+                    name: format!("{DESCRIPTOR_NAME}.minisig"),
+                },
+            ],
+        };
+        let stable = Version::parse("2.6.0").unwrap();
+        let preview = Version::parse("2.7.0-alpha.1").unwrap();
+        assert_eq!(
+            candidate_versions(vec![item("2.7.0-alpha.1", true)], true, &stable),
+            vec![preview.clone()]
+        );
+        assert!(candidate_versions(vec![item("2.7.0-alpha.1", true)], false, &stable).is_empty());
+        assert_eq!(
+            candidate_versions(vec![item("2.7.0", false)], false, &preview),
+            vec![Version::parse("2.7.0").unwrap()]
+        );
+        assert!(candidate_versions(vec![item("2.6.0", false)], false, &preview).is_empty());
+    }
+
+    #[test]
     fn unsigned_newer_release_does_not_hide_a_ready_update() {
         let items = serde_json::json!([
             {"tag_name":"v3.0.0", "draft":false, "prerelease":false, "assets":[]},

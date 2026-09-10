@@ -167,7 +167,7 @@
     } else byId('tool-state').textContent = inventory?.supported === false ? 'Windows x64 app management is available in this build. macOS and Linux are not supported yet.' : 'App inventory is unavailable. Retry the update check.';
     byId('compatibility-status').textContent = state?.hostedPreview ? 'Test version available' : state?.trusted ? 'Your app is ready' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
     byId('compatibility-detail').textContent = state?.hostedPreview
-      ? `This is a separate test version${state.hostedPreview === 'read-only' ? '; changes are disabled' : ''}. Open app takes you to your usual app with all its settings.`
+      ? `The hosted preview uses your verified app and saved settings${state.hostedPreview === 'read-only' ? '; changes are disabled' : ', with your approval'}. Open app remains available for a separate window.`
       : 'Apps open in their own window and keep your settings. Using them inside Hub needs a future update, which is not available here yet.';
     const copies = byId('detected-copies');
     copies.replaceChildren();

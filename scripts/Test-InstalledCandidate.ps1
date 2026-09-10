@@ -74,6 +74,9 @@ try {
     Require ($owned.WaitForExit(10000) -and $owned.ExitCode -eq 0) 'Owned fixture did not exit cooperatively.'
     Run-Installer ('/S /NS /UPDATE /D=' + $installed) 0 'Installed Hub update succeeds after cooperative exit'
     Require ((Hash (Join-Path $installed 'creator-hub.exe')) -eq (Hash $expectedExe)) 'Updated Hub differs from installer payload.'
+    foreach ($name in @('LICENSE.txt', 'THIRD_PARTY_NOTICES.txt', 'rust-dependencies.json')) {
+        Require ((Hash (Join-Path $installed ('licenses\' + $name))) -eq (Hash (Join-Path $output ('licenses\' + $name)))) "Installed license differs: $name"
+    }
     Require ((Get-Content -LiteralPath (Join-Path $data 'ci-settings-sentinel.json') -Raw) -ceq '{"preserve":"fixture"}') 'Settings sentinel changed.'
     Require ((Get-Content -LiteralPath (Join-Path $installed 'ci-unmanaged-sentinel.txt') -Raw) -ceq 'preserve fixture content') 'Unmanaged sentinel changed.'
     Require ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -eq $version) 'Installed version is incorrect.'

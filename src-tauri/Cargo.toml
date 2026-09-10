@@ -3,6 +3,7 @@ name = "creator-hub"
 version = "0.1.0-alpha.3"
 description = "Creator Hub app manager"
 authors = ["Creator Works"]
+license = "MIT"
 edition = "2021"
 
 [build-dependencies]

@@ -35,8 +35,22 @@ basis of source tests alone:
 
 - `identityProtocol: 1`: exact read-only `--creator-hub-info` acceptance.
 - `lifecycleProtocol: 1`: tested native guarded close and busy/closing behavior.
-- `installerProtocol: 1`: no forced process termination in installer AND prior
-  uninstaller path. Legacy NSIS uninstallers prevent assuming this property.
+- `installerProtocol: 1`: native acceptance of the new guarded installer's
+  `/UPDATE` path at the verified default directory, with no matching MSI record.
+  This does not authorize arbitrary old uninstallers or custom/MSI migrations.
+  Hub checks both user/machine uninstall records immediately before execution.
+
+Protocol promotion requires an explicit reviewed receipt matching the exact
+app, version, size, installer hash, and installed executable hash. The receipt
+links the app repository's native acceptance runs and records
+`installerScope: guarded-nsis-update-default-location-no-msi`. The signing tool
+will not infer these claims from a green source test.
+
+For Hub itself, the signer also produces `latest.json` with a detached installer
+signature for the official Tauri updater. Verify using the `verify-release`
+Rust example before uploading. The example uses Hub's embedded key, compares
+both file hashes and updater URL/version, and checks tamper rejection. Keep
+the private key outside the repository; only public signatures go to GitHub.
 
 Release `lifecycleProtocol: 1` can expose the common advisory Windows properties
 `CreatorSuite.LifecycleProtocol`, `CreatorSuite.LauncherBusy`, and
