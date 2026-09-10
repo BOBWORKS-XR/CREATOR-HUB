@@ -188,7 +188,7 @@ async function closeHosted(app) {
     assert.equal(isolated, true);
     await frames[app].evaluate(() => window.scrollTo(0, 0));
     await page.evaluate(() => window.scrollTo(0, 0));
-    await page.screenshot({ path: path.join(out, `hosted-${app}.png`) });
+    await page.screenshot({ path: path.join(out, `hosted-${app}.png`), animations: 'disabled' });
     report.checks.push(`${app}: verified installed copy opens without an EXE picker, explicit native consent, isolated real hosted UI`);
   }
   await frames.mcp.locator('#browseProjectBtn').click();
@@ -214,7 +214,7 @@ async function closeHosted(app) {
   }
   await show('mcp');
   await page.setViewportSize({ width: 560, height: 680 });
-  await page.screenshot({ path: path.join(out, 'hosted-mcp-small.png') });
+  await page.screenshot({ path: path.join(out, 'hosted-mcp-small.png'), animations: 'disabled' });
   await closeHosted('mcp');
   if (!mcpOnly) {
     await show('setup');
