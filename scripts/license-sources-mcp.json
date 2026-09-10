@@ -1,0 +1,269 @@
+{
+  "schemaVersion": 1,
+  "groups": [
+    {
+      "id": "alloc-stdlib-022",
+      "packages": [
+        [
+          "alloc-stdlib",
+          "0.2.2",
+          "6032b6a9b20e03737135c55a0270ccffcc1438ef"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE",
+          "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/6032b6a9b20e03737135c55a0270ccffcc1438ef/LICENSE",
+          "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+        }
+      ]
+    },
+    {
+      "id": "convert-case-040",
+      "packages": [
+        [
+          "convert_case",
+          "0.4.0",
+          "300d9eef9e8c970e15f324afbc3df8b6a4ebbf71"
+        ]
+      ],
+      "note": "Published revision declares MIT; include the complete upstream MIT notice added two commits later.",
+      "files": [
+        {
+          "name": "LICENSE",
+          "url": "https://raw.githubusercontent.com/rutrum/convert-case/f72ca63c9d579fbab22e361c76e39d31d1e86a2e/LICENSE",
+          "sha256": "797087750c4103075e96bb7a60202a040812f8679ae2f7263148a1cc0b298d28"
+        }
+      ]
+    },
+    {
+      "id": "legacy-license-texts",
+      "sourceHeaders": [
+        {
+          "package": "fxhash@0.2.1",
+          "file": "lib.rs",
+          "sha256": "885b72a1c977dc1c3ff4e0652719e62b6d8c3e713403e571afd581283f72df7b",
+          "lines": 9
+        }
+      ],
+      "packages": [
+        [
+          "fxhash",
+          "0.2.1",
+          "manifest:Cargo.toml.orig:42f07fb23f8b37acf45914ccb71df077455a353850e148afeabb5c684f8ebaab"
+        ],
+        [
+          "mac",
+          "0.1.1",
+          "manifest:Cargo.toml:6d465c5e5a4b3e197049e9fb7393b2f996c1c654e6ded700afce046fac2f7969"
+        ]
+      ],
+      "note": "These published archives declare dual MIT/Apache-2.0 but contain no complete license text or VCS receipt. Preserve their original manifest and authors and supplement the declared terms with canonical SPDX license texts.",
+      "files": [
+        {
+          "name": "LICENSE-MIT.txt",
+          "url": "https://raw.githubusercontent.com/spdx/license-list-data/16f3aa6c3bdd62e50f8b1cf618f32d2a510250ee/text/MIT.txt",
+          "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5"
+        },
+        {
+          "name": "LICENSE-APACHE.txt",
+          "url": "https://raw.githubusercontent.com/spdx/license-list-data/16f3aa6c3bdd62e50f8b1cf618f32d2a510250ee/text/Apache-2.0.txt",
+          "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff"
+        }
+      ]
+    },
+    {
+      "id": "match-token",
+      "packages": [
+        [
+          "match_token",
+          "0.1.0",
+          "0e4e125b8672abad4ff14d1e0043d3be9305af6a"
+        ]
+      ],
+      "files": [
+        {
+          "name": "COPYRIGHT",
+          "url": "https://raw.githubusercontent.com/servo/html5ever/0e4e125b8672abad4ff14d1e0043d3be9305af6a/COPYRIGHT",
+          "sha256": "c6b91503fc0a9852e688b56eef715dba9a1ab4b074e86875af2471ce0163b2e5"
+        },
+        {
+          "name": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/servo/html5ever/0e4e125b8672abad4ff14d1e0043d3be9305af6a/LICENSE-MIT",
+          "sha256": "86dd7f026f916daf7511e39951ad8ea8cf55a8db67ae64060dacf829761c18f3"
+        },
+        {
+          "name": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/servo/html5ever/0e4e125b8672abad4ff14d1e0043d3be9305af6a/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        }
+      ]
+    },
+    {
+      "id": "phf-080",
+      "packages": [
+        [
+          "phf",
+          "0.8.0",
+          "81c7cc5b48649108428671d3b8ad151f6fbdb359"
+        ],
+        [
+          "phf_codegen",
+          "0.8.0",
+          "81c7cc5b48649108428671d3b8ad151f6fbdb359"
+        ],
+        [
+          "phf_generator",
+          "0.8.0",
+          "81c7cc5b48649108428671d3b8ad151f6fbdb359"
+        ],
+        [
+          "phf_shared",
+          "0.8.0",
+          "81c7cc5b48649108428671d3b8ad151f6fbdb359"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE",
+          "url": "https://raw.githubusercontent.com/rust-phf/rust-phf/81c7cc5b48649108428671d3b8ad151f6fbdb359/LICENSE",
+          "sha256": "d8870d5e2ab20fc50915b711c5aa7588131c9abcc1bcb980da1efd7486522a46"
+        }
+      ]
+    },
+    {
+      "id": "phf-101",
+      "packages": [
+        [
+          "phf",
+          "0.10.1",
+          "bed01538ae576876f11189d541875d228acef9e8"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE",
+          "url": "https://raw.githubusercontent.com/rust-phf/rust-phf/bed01538ae576876f11189d541875d228acef9e8/LICENSE",
+          "sha256": "d8870d5e2ab20fc50915b711c5aa7588131c9abcc1bcb980da1efd7486522a46"
+        }
+      ]
+    },
+    {
+      "id": "phf-100",
+      "packages": [
+        [
+          "phf_generator",
+          "0.10.0",
+          "3ea14b2166553ad6e7b9afe7244144f5d661b6c6"
+        ],
+        [
+          "phf_shared",
+          "0.10.0",
+          "3ea14b2166553ad6e7b9afe7244144f5d661b6c6"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE",
+          "url": "https://raw.githubusercontent.com/rust-phf/rust-phf/3ea14b2166553ad6e7b9afe7244144f5d661b6c6/LICENSE",
+          "sha256": "d8870d5e2ab20fc50915b711c5aa7588131c9abcc1bcb980da1efd7486522a46"
+        }
+      ]
+    },
+    {
+      "id": "phf-macros-100",
+      "packages": [
+        [
+          "phf_macros",
+          "0.10.0",
+          "3cc6f05cb07933af4cf886645d1170bdcb306b6b"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE",
+          "url": "https://raw.githubusercontent.com/rust-phf/rust-phf/3cc6f05cb07933af4cf886645d1170bdcb306b6b/LICENSE",
+          "sha256": "d8870d5e2ab20fc50915b711c5aa7588131c9abcc1bcb980da1efd7486522a46"
+        }
+      ]
+    },
+    {
+      "id": "selectors-024",
+      "packages": [
+        [
+          "selectors",
+          "0.24.0",
+          "e82d7868d999d84f6d59719e4c397e5252aecb85"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE-MPL-2.0.txt",
+          "url": "https://www.mozilla.org/media/MPL/2.0/index.815ca599c9df.txt",
+          "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
+        }
+      ]
+    },
+    {
+      "id": "tauri-plugin-252",
+      "packages": [
+        [
+          "tauri-plugin",
+          "2.5.2",
+          "4408f72af66c4827799c7fad80e9d9a73a4973a6"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE_MIT",
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/4408f72af66c4827799c7fad80e9d9a73a4973a6/LICENSE_MIT",
+          "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+        },
+        {
+          "name": "LICENSE_APACHE-2.0",
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/4408f72af66c4827799c7fad80e9d9a73a4973a6/LICENSE_APACHE-2.0",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        }
+      ]
+    },
+    {
+      "id": "webview2-com-380",
+      "packages": [
+        [
+          "webview2-com",
+          "0.38.0",
+          "c028bc6bfb3a5b85f46afa6ed87115b841f0ea45"
+        ],
+        [
+          "webview2-com-sys",
+          "0.38.0",
+          "c028bc6bfb3a5b85f46afa6ed87115b841f0ea45"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE",
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/c028bc6bfb3a5b85f46afa6ed87115b841f0ea45/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+        }
+      ]
+    },
+    {
+      "id": "webview2-com-macros-080",
+      "packages": [
+        [
+          "webview2-com-macros",
+          "0.8.0",
+          "2a4d92c91002f91b49fd282abbbe8ec8d3318339"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE",
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/2a4d92c91002f91b49fd282abbbe8ec8d3318339/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+        }
+      ]
+    }
+  ]
+}

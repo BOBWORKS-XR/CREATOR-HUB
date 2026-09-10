@@ -3,19 +3,35 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const overrides = require('./license-sources.json');
+if (fs.existsSync(path.join(__dirname, 'license-sources-mcp.json'))) overrides.groups.push(...require('./license-sources-mcp.json').groups);
 
 function overrideLicenseFiles(pkg, root) {
   const group = overrides.groups.find(group => group.packages.some(([name, version]) => name === pkg.name && version === pkg.version));
   if (!group) return [];
   const entry = group.packages.find(([name, version]) => name === pkg.name && version === pkg.version);
-  const vcs = JSON.parse(fs.readFileSync(path.join(root, '.cargo_vcs_info.json'), 'utf8'));
-  if (vcs.git?.sha1 !== entry[2]) throw Error(`Upstream license revision differs for ${pkg.name}@${pkg.version}.`);
-  return group.files.map(source => {
+  const manifest = /^manifest:(Cargo\.toml(?:\.orig)?):([a-f0-9]{64})$/.exec(entry[2]);
+  if (manifest) {
+    const bytes = fs.readFileSync(path.join(root, manifest[1]));
+    if (crypto.createHash('sha256').update(bytes).digest('hex') !== manifest[2]) throw Error(`Published license declaration differs for ${pkg.name}.`);
+  } else {
+    const vcs = JSON.parse(fs.readFileSync(path.join(root, '.cargo_vcs_info.json'), 'utf8'));
+    if (vcs.git?.sha1 !== entry[2]) throw Error(`Upstream license revision differs for ${pkg.name}@${pkg.version}.`);
+  }
+  const files = group.files.map(source => {
     const file = path.join(__dirname, 'license-overrides', group.id, source.name);
     const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
     if (hash !== source.sha256) throw Error(`Upstream license bytes changed for ${pkg.name}.`);
-    return { file, name: source.name, upstream: source.url };
+    return { file, name: source.name, upstream: source.url, note: group.note };
   });
+  if (manifest) files.push({ file: path.join(root, manifest[1]), name: manifest[1] });
+  for (const source of group.sourceHeaders || []) {
+    if (source.package !== `${pkg.name}@${pkg.version}`) continue;
+    const file = path.join(root, source.file);
+    const bytes = fs.readFileSync(file);
+    if (crypto.createHash('sha256').update(bytes).digest('hex') !== source.sha256) throw Error(`Original attribution differs for ${pkg.name}.`);
+    files.push({ file, name: `${source.file} copyright header`, bytes: Buffer.from(bytes.toString('utf8').split(/\r?\n/).slice(0, source.lines).join('\n')) });
+  }
+  return files;
 }
 
 function licenseFiles(root, declared) {
@@ -67,12 +83,12 @@ function collect(metadata, extras) {
     let files = licenseFiles(root, pkg.license_file).map(file => ({ file, name: path.relative(root, file).replaceAll('\\', '/') }));
     if (!files.length) files = overrideLicenseFiles(pkg, root);
     if (!files.length) { missing.push(`${pkg.name}@${pkg.version} (${pkg.license || 'no declared license'})`); continue; }
-    const item = { name: pkg.name, version: pkg.version, license: pkg.license, repository: pkg.repository, files: [] };
-    notices.push(`\n=== ${pkg.name} ${pkg.version} ===\nDeclared license: ${pkg.license || 'See included license files'}\nSource: ${pkg.source?.startsWith('registry+') ? `https://crates.io/crates/${pkg.name}/${pkg.version}` : pkg.repository || 'See package source'}\n`);
-    for (const { file, name, upstream } of files) {
-      const bytes = fs.readFileSync(file);
-      item.files.push({ name, ...(upstream && { upstream }), sha256: crypto.createHash('sha256').update(bytes).digest('hex') });
-      notices.push(`\n--- ${name} ---\n${upstream ? `Original license source: ${upstream}\n` : ''}${bytes.toString('utf8')}\n`);
+    const item = { name: pkg.name, version: pkg.version, license: pkg.license, authors: pkg.authors || [], repository: pkg.repository, files: [] };
+    notices.push(`\n=== ${pkg.name} ${pkg.version} ===\nAuthors: ${(pkg.authors || []).join(', ')}\nDeclared license: ${pkg.license || 'See included license files'}\nSource: ${pkg.source?.startsWith('registry+') ? `https://crates.io/crates/${pkg.name}/${pkg.version}` : pkg.repository || 'See package source'}\n`);
+    for (const { file, name, upstream, note, bytes: excerpt } of files) {
+      const bytes = excerpt || fs.readFileSync(file);
+      item.files.push({ name, ...(upstream && { upstream }), ...(note && { note }), sha256: crypto.createHash('sha256').update(bytes).digest('hex') });
+      notices.push(`\n--- ${name} ---\n${note ? `${note}\n` : ''}${upstream ? `Notice source: ${upstream}\n` : ''}${bytes.toString('utf8')}\n`);
     }
     inventory.push(item);
   }
@@ -92,7 +108,7 @@ function main() {
   fs.copyFileSync(appLicense, path.join(output, 'LICENSE.txt'));
   fs.writeFileSync(path.join(output, 'THIRD_PARTY_NOTICES.txt'), data.text);
   fs.writeFileSync(path.join(output, 'rust-dependencies.json'), `${JSON.stringify({ schemaVersion: 1, platform: 'windows-x86_64', packages: data.inventory }, null, 2)}\n`);
-  process.stdout.write(`Collected original notices for ${data.inventory.length} Rust dependencies.\n`);
+  process.stdout.write(`Collected license notices for ${data.inventory.length} Rust dependencies.\n`);
 }
 
 module.exports = { licenseFiles, overrideLicenseFiles, productionPackages, collect };
