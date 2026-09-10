@@ -29,11 +29,26 @@ function Run-Installer([string]$Arguments, [int]$Expected, [string]$Label) {
     $psi.Arguments = $Arguments
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
+    $timer = [Diagnostics.Stopwatch]::StartNew()
     $child = [Diagnostics.Process]::Start($psi)
     try {
         Require ($child.WaitForExit(180000)) "$Label exceeded its deadline; no process was force-closed."
+        $checks.Add([pscustomobject]@{ test = $Label; exitCode = $child.ExitCode; expectedExitCode = $Expected; elapsedMilliseconds = $timer.ElapsedMilliseconds; passed = ($child.ExitCode -eq $Expected) })
+        if ($child.ExitCode -ne $Expected) {
+            $report.failureProcesses = @(Get-Process -Name creator-hub -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path)
+            # Capture the same 32-bit PowerShell guard after failure, not a warmup that masks it.
+            $probeInfo = [Diagnostics.ProcessStartInfo]::new((Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'))
+            $probeInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "& { try { $running = @(Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -eq ''creator-hub'' }); if ($running.Count -gt 0) { exit 10 }; exit 0 } catch { exit 11 } }"'
+            $probeInfo.UseShellExecute = $false
+            $probeInfo.CreateNoWindow = $true
+            $probe = [Diagnostics.Process]::Start($probeInfo)
+            $probeTimer = [Diagnostics.Stopwatch]::StartNew()
+            try {
+                $finished = $probe.WaitForExit(30000)
+                $report.postFailureGuardProbe = @{ finished = $finished; exitCode = $(if ($finished) { $probe.ExitCode } else { $null }); elapsedMilliseconds = $probeTimer.ElapsedMilliseconds }
+            } finally { $probe.Dispose() }
+        }
         Require ($child.ExitCode -eq $Expected) "$Label returned $($child.ExitCode), expected $Expected."
-        $checks.Add([pscustomobject]@{ test = $Label; exitCode = $child.ExitCode; passed = $true })
     } finally { $child.Dispose() }
 }
 function Snapshot {
@@ -53,7 +68,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $data 'ci-settings-sentinel.json'), '{"preserve":"fixture"}')
     [IO.File]::WriteAllText((Join-Path $installed 'ci-unmanaged-sentinel.txt'), 'preserve fixture content')
     $before = Snapshot
-    $fixture = Join-Path $output 'installed-guard-fixture'
+    $fixture = Join-Path $output ('installed-guard-fixture-' + [Guid]::NewGuid().ToString('N'))
     $null = New-Item -ItemType Directory -Path $fixture
     $fixtureExe = Join-Path $fixture 'creator-hub.exe'
     $stopFile = Join-Path $fixture 'stop'

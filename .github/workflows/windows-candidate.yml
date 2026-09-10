@@ -4,12 +4,19 @@ on:
   push:
     branches: [ui-preview]
   workflow_dispatch:
+    inputs:
+      candidate_run:
+        description: Reuse an existing candidate run for native acceptance only
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
+    if: ${{ !inputs.candidate_run }}
     runs-on: windows-latest
     timeout-minutes: 45
     env:
@@ -70,6 +77,7 @@ jobs:
 
   native-suite:
     needs: build
+    if: ${{ always() && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.candidate_run != '')) }}
     name: Native suite (${{ matrix.baseline }})
     runs-on: windows-latest
     timeout-minutes: 25
@@ -90,6 +98,8 @@ jobs:
         with:
           name: creator-hub-windows-candidate
           path: .
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run || github.run_id }}
       - name: Install the exact tested Hub package
         shell: powershell
         run: |
