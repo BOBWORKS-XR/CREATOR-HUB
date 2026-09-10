@@ -84,7 +84,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        baseline: [clean, legacy]
+        baseline: [clean, legacy, mcp-only]
     steps:
       - uses: actions/checkout@v6
         with:

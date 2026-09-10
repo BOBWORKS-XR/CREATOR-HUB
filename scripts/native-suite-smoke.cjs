@@ -14,11 +14,13 @@ const apps = {
   mcp: path.join(process.env.LOCALAPPDATA, 'Creator Works MCP', 'creator-works-mcp-launcher.exe'),
   setup: path.join(process.env.LOCALAPPDATA, 'Creator Project Setup', 'creator-project-setup.exe'),
 };
-const upgrade = process.env.CREATOR_SUITE_BASELINE === 'legacy';
+const mcpOnly = process.env.CREATOR_SUITE_BASELINE === 'mcp-only';
+const upgrade = mcpOnly || process.env.CREATOR_SUITE_BASELINE === 'legacy';
+const selectedApps = mcpOnly ? ['mcp'] : ['setup', 'mcp'];
 for (const exe of Object.values(apps)) assert.equal(fs.existsSync(exe), false, 'Expected a clean app installation target');
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out, { recursive: true });
-const report = { passed: false, flow: upgrade ? 'upgrade' : 'clean-install', hubSha256: hash(hub), checks: [], userMachineUsed: false, unityProjectCreated: false, selfUpdateTested: false };
+const report = { passed: false, flow: mcpOnly ? 'mcp-only-upgrade' : upgrade ? 'upgrade' : 'clean-install', hubSha256: hash(hub), checks: [], userMachineUsed: false, unityProjectCreated: false, selfUpdateTested: false };
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function hash(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); }
 function native(pid, exe, action, value = '') {
@@ -81,6 +83,7 @@ async function closeHosted(app) {
         sha: '11d6fc0fb95e33023a90a8722cf9234f82de6e175689bd915401bac3d49bc8c2', exe: 'b712aadd91ac63ea64b5bbead28d7dc2fc83d4102f989999d7ea85b427649676' },
     };
     for (const [app, baseline] of Object.entries(baselines)) {
+      if (!selectedApps.includes(app)) continue;
       // Only a disposable test prepares these old releases; Hub still blocks defective installers.
       const response = await fetch(`https://github.com/BOBWORKS-XR/${baseline.repo}/releases/download/v${baseline.version}/${baseline.asset}`, { signal: AbortSignal.timeout(120000) });
       assert.equal(response.ok, true);
@@ -112,7 +115,7 @@ async function closeHosted(app) {
   assert.equal(await page.locator('#preview-channel').isChecked(), true);
   assert.match(await page.evaluate(() => window.__TAURI__.core.invoke('app_inventory', { check: false, preview: true }).then(() => 'ALLOWED', String)), /trusted shell/);
   const inventory = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: true, preview: true }));
-  for (const app of ['setup', 'mcp']) {
+  for (const app of selectedApps) {
     const state = inventory.apps.find(item => item.app === app);
     assert.equal(state.availableVersion, pins[app].version);
     assert.equal(state.installed, upgrade);
@@ -132,7 +135,7 @@ async function closeHosted(app) {
   if (upgrade) assert.equal(hash(configPath), originalConfigHash);
   else seedConfig();
 
-  for (const app of ['setup', 'mcp']) {
+  for (const app of selectedApps) {
     await show(app);
     await page.locator(`#host-${app}-button`).click();
     backends[app] = await backend(app);
@@ -180,17 +183,24 @@ async function closeHosted(app) {
   await retry(() => native(backends.mcp, apps.mcp, 'button', 'Cancel'));
   await page.waitForFunction(() => !document.querySelector('#hosted-stop').disabled);
   report.checks.push('Real MCP folder picker blocks Hub close; cancellation releases the operation');
-  await show('setup');
-  assert.equal(await frames.setup.locator('#project-name').inputValue(), 'Unsaved test draft');
+  if (!mcpOnly) {
+    await show('setup');
+    assert.equal(await frames.setup.locator('#project-name').inputValue(), 'Unsaved test draft');
+  }
   await show('mcp');
   await page.setViewportSize({ width: 560, height: 680 });
   await page.screenshot({ path: path.join(out, 'hosted-mcp-small.png') });
   await closeHosted('mcp');
-  await show('setup');
-  assert.equal(await frames.setup.locator('#project-name').inputValue(), 'Unsaved test draft');
-  await closeHosted('setup');
+  if (!mcpOnly) {
+    await show('setup');
+    assert.equal(await frames.setup.locator('#project-name').inputValue(), 'Unsaved test draft');
+    await closeHosted('setup');
+  } else {
+    assert.equal(fs.existsSync(apps.setup), false, 'MCP does not need or install Project Setup');
+    report.checks.push('Existing MCP upgrades and runs inside Hub while Project Setup remains uninstalled');
+  }
   assert.deepEqual(errors, []);
-  report.checks.push('Both hosted views retain state; closing each drains only its own process; no JavaScript errors');
+  report.checks.push(`${mcpOnly ? 'MCP hosted view' : 'Both hosted views'} retain state; closing each drains only its own process; no JavaScript errors`);
   report.passed = true;
 })().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; }).finally(async () => {
   if (page && !report.passed) {
