@@ -13,6 +13,10 @@ if (-not $sevenZip) { $sevenZip = 'C:\Program Files\7-Zip\7z.exe' }
 if ($LASTEXITCODE -ne 0) { throw 'Installer extraction failed.' }
 $installedExe = Join-Path $extracted 'creator-hub.exe'
 if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) { throw 'Installer launcher payload is missing.' }
+$preflightExe = Join-Path $extracted '$PLUGINSDIR\creator-hub-preflight.exe'
+if ((Get-FileHash -LiteralPath $preflightExe).Hash -ne (Get-FileHash -LiteralPath $installedExe).Hash) {
+    throw 'Installer preflight must be the exact packaged launcher, not a stale helper.'
+}
 foreach ($name in @('LICENSE.txt', 'THIRD_PARTY_NOTICES.txt', 'rust-dependencies.json')) {
     if ((Get-FileHash -LiteralPath (Join-Path $output ('licenses\' + $name))).Hash -ne
         (Get-FileHash -LiteralPath (Join-Path $extracted ('licenses\' + $name))).Hash) { throw "Packaged license differs: $name" }
@@ -29,6 +33,7 @@ $report = [ordered]@{
     version = $version
     installerSha256 = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
     executableSha256 = (Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    preflightSha256 = (Get-FileHash -LiteralPath $preflightExe -Algorithm SHA256).Hash.ToLowerInvariant()
     guard = $guard
     installedAcceptance = $acceptance
     installedUpgradeTested = $false
