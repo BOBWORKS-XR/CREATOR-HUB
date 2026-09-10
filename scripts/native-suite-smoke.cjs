@@ -168,19 +168,26 @@ async function closeHosted(app) {
       if (upgrade) {
         assert.match(await frames.mcp.locator('#projectsList').innerText(), new RegExp(savedProjectName));
         assert.equal(await frames.mcp.locator('#projectPath').inputValue(), path.join(process.env.RUNNER_TEMP, 'Existing project fixture'));
+        report.checks.push('Valid existing MCP project list and active selection survive upgrade and appear in the hosted interface');
       }
       await frames.mcp.locator('details.advanced-section > summary').click();
       const original = JSON.parse(fs.readFileSync(configPath, 'utf8'));
       assert.equal(original.auto_start, false);
-      await frames.mcp.locator('#autoConfig').check();
+      assert.equal(await frames.mcp.locator('#autoConfig').isChecked(), false);
+      await frames.mcp.locator('label[for="autoConfig"]').click();
+      assert.equal(await frames.mcp.locator('#autoConfig').isChecked(), true);
       await retry(() => assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).auto_start, true));
-      await frames.mcp.locator('#autoConfig').uncheck();
+      await retry(async () => assert.equal(await frames.mcp.locator('#autoConfig').isEnabled(), true));
+      await frames.mcp.locator('label[for="autoConfig"]').click();
+      assert.equal(await frames.mcp.locator('#autoConfig').isChecked(), false);
       await retry(() => assert.deepEqual(JSON.parse(fs.readFileSync(configPath, 'utf8')), original));
-      if (upgrade) report.checks.push('Valid existing MCP project list and active selection survive upgrade and appear in the hosted interface');
+      await frames.mcp.locator('details.advanced-section > summary').click();
       report.checks.push('MCP normal controls write and restore an isolated launcher preference through the real hosted backend');
     }
     const isolated = await frames[app].evaluate(() => { try { void parent.document.body; return false; } catch { return true; } });
     assert.equal(isolated, true);
+    await frames[app].evaluate(() => window.scrollTo(0, 0));
+    await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: path.join(out, `hosted-${app}.png`) });
     report.checks.push(`${app}: verified installed copy opens without an EXE picker, explicit native consent, isolated real hosted UI`);
   }
