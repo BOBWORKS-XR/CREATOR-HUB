@@ -3,6 +3,7 @@
 mod catalog;
 mod hosted;
 mod hosted_operation;
+mod installer_preflight;
 mod launch;
 mod manager;
 mod platform;
@@ -148,6 +149,9 @@ fn open_resource(resource: String) -> Result<(), String> {
 }
 
 fn main() {
+    if let Some(wait) = installer_preflight::mode(std::env::args_os().skip(1)) {
+        std::process::exit(installer_preflight::run(wait));
+    }
     let initial_view = match launch::parse(std::env::args_os().skip(1)) {
         Ok(view) => view,
         Err(()) => std::process::exit(2),

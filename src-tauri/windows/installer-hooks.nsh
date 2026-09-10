@@ -8,13 +8,15 @@
   ; finish, but never bypass the same running-app guard or terminate a process.
   Push $2
   Push $3
+  InitPluginsDir
+  File /oname=$PLUGINSDIR\creator-hub-preflight.exe "${MAINBINARYSRCPATH}"
   ${GetParameters} $2
   ClearErrors
   ${GetOptions} $2 "/UPDATE" $3
   ${IfNot} ${Errors}
-    nsExec::ExecToStack /TIMEOUT=12000 `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "& { try { $$deadline = [DateTime]::UtcNow.AddSeconds(8); do { $$running = @(Get-Process -ErrorAction Stop | Where-Object { $$_.ProcessName -eq 'creator-hub' }); if ($$running.Count -eq 0) { exit 0 }; Start-Sleep -Milliseconds 100 } while ([DateTime]::UtcNow -lt $$deadline); exit 10 } catch { exit 11 } }"`
+    nsExec::ExecToStack /TIMEOUT=12000 `"$PLUGINSDIR\creator-hub-preflight.exe" --installer-preflight-wait`
   ${Else}
-    nsExec::ExecToStack /TIMEOUT=12000 `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "& { try { $$running = @(Get-Process -ErrorAction Stop | Where-Object { $$_.ProcessName -eq 'creator-hub' }); if ($$running.Count -gt 0) { exit 10 }; exit 0 } catch { exit 11 } }"`
+    nsExec::ExecToStack /TIMEOUT=12000 `"$PLUGINSDIR\creator-hub-preflight.exe" --installer-preflight`
   ${EndIf}
   Pop $0
   Pop $1

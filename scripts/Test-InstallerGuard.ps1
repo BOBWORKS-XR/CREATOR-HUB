@@ -1,11 +1,11 @@
-param([string]$MakeNsis = "$env:LOCALAPPDATA\tauri\NSIS\makensis.exe")
+param([string]$MakeNsis = "$env:LOCALAPPDATA\tauri\NSIS\makensis.exe", [Parameter(Mandatory = $true)][string]$HubExecutable)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $root = Join-Path $repo ("artifacts\installer-guard-" + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $root)
 $exe = Join-Path $root 'guard-fixture.exe'
 $guard = Join-Path $repo 'src-tauri\windows\installer-hooks.nsh'
-& $MakeNsis /V2 "/DGUARD_FILE=$guard" "/DFIXTURE_EXE=$exe" (Join-Path $PSScriptRoot 'installer-guard-fixture.nsi')
+& $MakeNsis /V2 "/DGUARD_FILE=$guard" "/DMAINBINARYSRCPATH=$HubExecutable" "/DFIXTURE_EXE=$exe" (Join-Path $PSScriptRoot 'installer-guard-fixture.nsi')
 if ($LASTEXITCODE -ne 0) { throw 'No-install guard fixture failed to compile.' }
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $fixtureNode = Join-Path $root 'creator-hub.exe'

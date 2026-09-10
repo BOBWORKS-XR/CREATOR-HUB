@@ -36,16 +36,16 @@ function Run-Installer([string]$Arguments, [int]$Expected, [string]$Label) {
         $checks.Add([pscustomobject]@{ test = $Label; exitCode = $child.ExitCode; expectedExitCode = $Expected; elapsedMilliseconds = $timer.ElapsedMilliseconds; passed = ($child.ExitCode -eq $Expected) })
         if ($child.ExitCode -ne $Expected) {
             $report.failureProcesses = @(Get-Process -Name creator-hub -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path)
-            # Capture the same 32-bit PowerShell guard after failure, not a warmup that masks it.
-            $probeInfo = [Diagnostics.ProcessStartInfo]::new((Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'))
-            $probeInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "& { try { $running = @(Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -eq ''creator-hub'' }); if ($running.Count -gt 0) { exit 10 }; exit 0 } catch { exit 11 } }"'
+            # Probe only after a failure so a warmup cannot mask a cold-start defect.
+            $probeInfo = [Diagnostics.ProcessStartInfo]::new($expectedExe)
+            $probeInfo.Arguments = '--installer-preflight'
             $probeInfo.UseShellExecute = $false
             $probeInfo.CreateNoWindow = $true
             $probe = [Diagnostics.Process]::Start($probeInfo)
             $probeTimer = [Diagnostics.Stopwatch]::StartNew()
             try {
                 $finished = $probe.WaitForExit(30000)
-                $report.postFailureGuardProbe = @{ finished = $finished; exitCode = $(if ($finished) { $probe.ExitCode } else { $null }); elapsedMilliseconds = $probeTimer.ElapsedMilliseconds }
+                $report.postFailureGuardProbe = @{ method = 'native-toolhelp'; finished = $finished; exitCode = $(if ($finished) { $probe.ExitCode } else { $null }); elapsedMilliseconds = $probeTimer.ElapsedMilliseconds }
             } finally { $probe.Dispose() }
         }
         Require ($child.ExitCode -eq $Expected) "$Label returned $($child.ExitCode), expected $Expected."

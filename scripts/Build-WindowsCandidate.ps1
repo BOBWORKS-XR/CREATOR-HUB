@@ -17,7 +17,7 @@ foreach ($name in @('LICENSE.txt', 'THIRD_PARTY_NOTICES.txt', 'rust-dependencies
     if ((Get-FileHash -LiteralPath (Join-Path $output ('licenses\' + $name))).Hash -ne
         (Get-FileHash -LiteralPath (Join-Path $extracted ('licenses\' + $name))).Hash) { throw "Packaged license differs: $name" }
 }
-$guard = (& (Join-Path $PSScriptRoot 'Test-InstallerGuard.ps1') | Out-String) | ConvertFrom-Json
+$guard = (& (Join-Path $PSScriptRoot 'Test-InstallerGuard.ps1') -HubExecutable $installedExe | Out-String) | ConvertFrom-Json
 if (-not $guard.passed) { throw 'The installer running-app guard failed.' }
 $acceptance = $null
 if ($env:GITHUB_ACTIONS -eq 'true') {
