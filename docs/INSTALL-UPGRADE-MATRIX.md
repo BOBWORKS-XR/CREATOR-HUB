@@ -10,11 +10,13 @@ with preserved content and backup; native MCP read-only hosting, both original
 and optional lifecycle protocols; busy-close refusal; single-window launches;
 source/UI regression tests; non-installing installer-guard fixtures.
 
-NOT yet passed: actual installed MCP upgrade, migration from all older releases,
+NOT yet passed: migration from all older releases,
 interactive old-uninstaller/Retry flows, full writable MCP hosting, persistent
 adoption, existing standalone form handoff or Hub uninstall recovery.
-The prepared disposable-runner script currently tests only 2.6.0 -> 2.6.1 and
-has not run. Passing that one path will not satisfy this full matrix.
+The current disposable-runner script targets 2.6.0 -> 2.7.0-alpha.1 via the
+same /UPDATE arguments used by Hub. Run 34521776854 passed on a disposable
+Windows worker, including busy-runtime refusal, cooperative exit and payload/
+opaque-file preservation. Passing one path does not satisfy this full matrix.
 
 ## Source Audit Findings
 
@@ -69,14 +71,15 @@ an MSI baseline is not equivalent to an EXE baseline of the same version.
 | Creator Works MCP | 2.5.0 | NSIS EXE, MSI | Not run |
 | Creator Works MCP | 2.5.1 | NSIS EXE | Not run |
 | Creator Works MCP | 2.6.0-rc.1 | NSIS EXE | Not run |
-| Creator Works MCP | 2.6.0 | NSIS EXE | Prepared, not run |
+| Creator Works MCP | 2.6.0 | NSIS EXE | Silent /UPDATE to 2.7.0-alpha.1 passed; interactive/first GUI still separate |
 | Creator Project Setup | 0.2.2 | NSIS EXE, portable EXE/ZIP | Not run |
 
 Primary inventories:
 [MCP releases](https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases)
 and [Setup 0.2.2](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/tag/v0.2.2).
 Setup 0.2.2 is public, published 2026-09-10 at 12:14:13 UTC, even if not announced.
-The new Hub-compatible Setup and Hub itself are still local development builds.
+The new Hub-compatible Setup and Hub itself are development candidates being
+built and tested on GitHub, not yet published installers.
 Do not delete/reclassify existing public assets to simplify the upgrade tests.
 
 MCP standalone ZIPs, source checkouts and privately shared development installers

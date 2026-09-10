@@ -334,12 +334,21 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         let config: tauri_plugin_updater::Config = serde_json::from_value(value).unwrap();
-        assert_eq!(
-            base64::engine::general_purpose::STANDARD
-                .decode(config.pubkey)
-                .unwrap(),
-            include_bytes!("catalog-key.pub")
-        );
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(config.pubkey)
+            .unwrap();
+        let configured =
+            minisign_verify::PublicKey::decode(std::str::from_utf8(&decoded).unwrap()).unwrap();
+        let embedded = include_str!("catalog-key.pub");
+        for text in [
+            embedded.to_owned(),
+            embedded.replace("\r\n", "\n").replace('\n', "\r\n"),
+        ] {
+            assert_eq!(
+                configured,
+                minisign_verify::PublicKey::decode(&text).unwrap()
+            );
+        }
         assert!(!config.dangerous_insecure_transport_protocol);
         assert!(!config.dangerous_accept_invalid_certs);
         assert!(!config.dangerous_accept_invalid_hostnames);

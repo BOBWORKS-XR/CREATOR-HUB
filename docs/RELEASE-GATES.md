@@ -1,22 +1,38 @@
 # Coordinated Release Gates
 
 Requested 2026-09-10: Creator Hub, Creator Works MCP and Creator Project Setup.
-No push, public repository creation, tag or release until the relevant gates
-pass and the package evidence is recorded. A preview must not be advertised as
+The user approved the public Hub repository and test-branch pushes. Public
+installers and release tags still require the relevant acceptance gates and
+recorded package evidence. A preview must not be advertised as
 completed adoption. Runtime acceptance is distinct from source/unit tests.
 
 ## Status
 
-2026-09-10 scope update: a separate Hub-only alpha.2 installer is being prepared
-for local testing. It has no embedded app payloads or adoption claims. Installed
+2026-09-10 scope update: a separate Hub-only alpha.3 installer is being prepared
+on GitHub for prerelease testing. It has no embedded app payloads or adoption claims. Installed
 apps remain standalone, unknown/multiple copies need explicit selection, and
 the known-broken MCP 2.6.0 installer is denied by hash. This does not complete the
-full embedded/adoption release gates below. Native install/remove acceptance
-is still required before public distribution.
+full embedded/adoption release gates below. Native installation/upgrade and GUI
+startup acceptance is now part of the Windows candidate workflow. A completed
+build alone does not pass that gate. Hub self-update handoff remains separate.
+
+The new updater passed local source, signature-contract and interface review.
+Review found a missing plugin configuration and premature cleanup before a
+failed installer launch; both were corrected. The configuration regression test
+uses the actual generated Tauri context. Do not infer signed self-update or
+restart acceptance from that test. Public Hub update assets are not yet published.
+
+MCP test-branch run 34521776854 passed its disposable Windows 2.6.0 to
+2.7.0-alpha.1 upgrade: active private-runtime refusal in ordinary and /UPDATE
+modes, successful update after cooperative exit, extracted payload hashes,
+opaque settings/unmanaged-file preservation and busy-uninstall refusal.
+This does not prove all historical migrations or first writable GUI use.
+General MCP CI run 34521779687 also passed Windows/macOS/Linux launcher checks
+and Node 20/22/24 server checks; this is not native installer acceptance on macOS/Linux.
 
 See [installation/upgrade matrix](INSTALL-UPGRADE-MATRIX.md) for the full public
 baseline inventory and untested scenarios, and [local user test](LOCAL-USER-TEST.md)
-for a non-installing preview test. The prepared 2.6.0 -> 2.6.1 check is not broad
+for a non-installing preview test. The current 2.6.0 -> 2.7.0-alpha.1 check is not broad
 historical upgrade coverage. Setup 0.2.2 is already public and remains a baseline.
 
 | Gate | Status | Evidence / remaining work |
@@ -53,8 +69,11 @@ The current upgrade CI sentinel proves opaque-file preservation, not valid
 launcher settings or first GUI load. Valid historical configs and fake client
 profiles, including alternate homes/custom managed fields, remain required.
 
-This machine has no Windows Sandbox. A test-only GitHub branch for clean Windows
-installed-upgrade acceptance was proposed to the user, not pushed or dispatched.
+This machine has no Windows Sandbox. User-approved test-only GitHub branches
+now run clean Windows installed-upgrade acceptance on disposable hosted runners.
+The first installer fixture printed ready but exited before the guard ran;
+this was not evidence that the installer killed it. Explicit keepalive fixtures
+now have cooperative stop signals, exit diagnostics and prelaunch survival checks.
 Silent NSIS acceptance does not prove the interactive uninstall-selection page
 or Retry dialog. Keep those gates distinct. The older user-owned hosted Setup
 session must be closed normally before the simultaneous-backend native trial.
