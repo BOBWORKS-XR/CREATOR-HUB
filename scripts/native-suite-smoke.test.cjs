@@ -15,3 +15,18 @@ test('real suite install test refuses local and self-hosted machines before read
     assert.doesNotMatch(result.stderr, /ENOENT/);
   }
 });
+
+test('test browser policy refuses local and self-hosted machines before accessing files or registry', { skip: process.platform !== 'win32' }, () => {
+  for (const env of [{ GITHUB_ACTIONS: 'false' }, { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'self-hosted', RUNNER_OS: 'Windows' }]) {
+    for (const action of ['Enable', 'Restore']) {
+      const result = spawnSync('powershell.exe', ['-NoProfile', '-File', path.join(__dirname, 'native-webview-policy.ps1'), '-Action', action, '-StateFile', 'not-an-owned-receipt.json'], {
+        encoding: 'utf8', windowsHide: true, timeout: 10000,
+        env: { ...process.env, ...env },
+      });
+      assert.ifError(result.error);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /restricted to a disposable GitHub-hosted Windows runner/);
+      assert.doesNotMatch(result.stderr, /Cannot find path|UnauthorizedAccess|Invalid test policy receipt/);
+    }
+  }
+});
