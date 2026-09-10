@@ -109,6 +109,101 @@ pub struct Running {
     pub gui: Vec<u32>,
     pub other_copy: bool,
     pub server: bool,
+    pub blockers: Vec<UpdateBlocker>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateBlocker {
+    pub pid: u32,
+    pub name: String,
+    pub executable: Option<PathBuf>,
+    pub parent: Option<ProcessOwner>,
+    pub kind: &'static str,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessOwner {
+    pub pid: u32,
+    pub name: String,
+    pub executable: Option<PathBuf>,
+}
+
+impl Running {
+    pub fn background_block_message(&self) -> Option<String> {
+        if !self.server && !self.other_copy {
+            return None;
+        }
+        let names = self
+            .blockers
+            .iter()
+            .take(5)
+            .map(|b| {
+                let owner = b
+                    .parent
+                    .as_ref()
+                    .map(|p| format!(", started by {} (PID {})", p.name, p.pid))
+                    .unwrap_or_default();
+                format!("{} (PID {}){owner}", b.name, b.pid)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let action = if self.server {
+            "Finish your work, disconnect this MCP in your AI app, or close the listed app."
+        } else {
+            "Finish your work and close the other copy of this app."
+        };
+        Some(format!("Update paused: {names}. {action} Then choose Check again. If it remains after closing its app, save your work and restart Windows. Hub will not force-close your AI app. Uninstalling is not needed to close these connections."))
+    }
+}
+
+fn process_blocker(
+    system: &System,
+    pid: sysinfo::Pid,
+    process: &sysinfo::Process,
+    kind: &'static str,
+) -> UpdateBlocker {
+    let parent = process
+        .parent()
+        .and_then(|id| system.process(id).map(|p| (id, p)))
+        // Ignore parent IDs whose current process started after this child.
+        .filter(|(_, p)| parent_predates_child(process.start_time(), p.start_time()))
+        .map(|(id, p)| ProcessOwner {
+            pid: id.as_u32(),
+            name: p.name().to_string_lossy().chars().take(128).collect(),
+            executable: p.exe().map(Path::to_path_buf),
+        });
+    UpdateBlocker {
+        pid: pid.as_u32(),
+        name: process.name().to_string_lossy().chars().take(128).collect(),
+        executable: process.exe().map(Path::to_path_buf),
+        parent,
+        kind,
+    }
+}
+
+fn parent_predates_child(child: u64, parent: u64) -> bool {
+    child > 0 && parent > 0 && parent <= child
+}
+
+fn mcp_connection_kind(
+    root: &Path,
+    executable: Option<&Path>,
+    command: &str,
+) -> Result<Option<&'static str>, ()> {
+    if executable.is_some_and(|path| path.starts_with(root)) {
+        return Ok(Some("connection"));
+    }
+    if command.is_empty() {
+        return Err(());
+    }
+    let command = command.to_ascii_lowercase();
+    let root = root.to_string_lossy().to_ascii_lowercase();
+    Ok((command.contains(&root)
+        || command.contains("banter-mcp")
+        || command.contains("creator-works-mcp"))
+    .then_some("possibleConnection"))
 }
 
 #[cfg(any(windows, test))]
@@ -218,6 +313,130 @@ fn gui_name(app: AppId, name: &str) -> bool {
 mod legacy_name_tests {
     use super::*;
     #[test]
+    fn unreadable_commands_stay_blocked_and_heuristic_matches_are_not_called_proven() {
+        let root = Path::new("fixture/mcp");
+        assert_eq!(
+            mcp_connection_kind(root, Some(&root.join("server/runtime/node.exe")), ""),
+            Ok(Some("connection"))
+        );
+        assert_eq!(
+            mcp_connection_kind(root, Some(Path::new("other/node.exe")), ""),
+            Err(())
+        );
+        assert_eq!(mcp_connection_kind(root, None, ""), Err(()));
+        assert_eq!(
+            mcp_connection_kind(
+                root,
+                Some(Path::new("other/node.exe")),
+                "node creator-works-mcp.mjs"
+            ),
+            Ok(Some("possibleConnection"))
+        );
+        assert_eq!(
+            mcp_connection_kind(
+                root,
+                Some(Path::new("other/node.exe")),
+                "node unrelated-server.js"
+            ),
+            Ok(None)
+        );
+        assert!(parent_predates_child(100, 99));
+        assert!(parent_predates_child(100, 100));
+        assert!(!parent_predates_child(100, 101));
+        assert!(!parent_predates_child(100, 0));
+        assert!(!parent_predates_child(0, 99));
+    }
+    #[test]
+    fn update_messages_identify_actual_clients_without_a_codex_assumption() {
+        let mut state = Running {
+            gui: vec![],
+            server: true,
+            other_copy: false,
+            blockers: vec![],
+        };
+        for (pid, client) in [(40, "claude.exe"), (50, "opencode.exe")] {
+            state.blockers.push(UpdateBlocker {
+                pid,
+                name: "node.exe".into(),
+                kind: "connection",
+                executable: Some(PathBuf::from("private/node.exe")),
+                parent: Some(ProcessOwner {
+                    pid: pid + 1,
+                    name: client.into(),
+                    executable: None,
+                }),
+            });
+        }
+        let text = state.background_block_message().unwrap();
+        for expected in [
+            "node.exe (PID 40)",
+            "claude.exe (PID 41)",
+            "opencode.exe (PID 51)",
+            "Check again",
+            "will not force-close",
+        ] {
+            assert!(text.contains(expected));
+        }
+        assert!(!text.to_lowercase().contains("codex"));
+        let data = serde_json::to_value(&state.blockers).unwrap();
+        assert_eq!(data[0]["parent"]["name"], "claude.exe");
+        assert!(data[0].get("commandLine").is_none());
+        assert!(data[0]["parent"].get("commandLine").is_none());
+        state.blockers[0].parent = None;
+        assert!(state
+            .background_block_message()
+            .unwrap()
+            .contains("node.exe (PID 40)"));
+    }
+
+    #[test]
+    fn gui_only_does_not_bypass_guarded_close_and_other_copies_do_not_get_mcp_instructions() {
+        let mut state = Running {
+            gui: vec![12],
+            server: false,
+            other_copy: false,
+            blockers: vec![],
+        };
+        assert!(state.background_block_message().is_none());
+        state.other_copy = true;
+        state.blockers.push(UpdateBlocker {
+            pid: 42,
+            name: "creator-project-setup.exe".into(),
+            executable: None,
+            parent: None,
+            kind: "otherCopy",
+        });
+        let message = state.background_block_message().unwrap();
+        assert!(message.contains("close the other copy"));
+        assert!(!message.contains("disconnect this MCP"));
+        assert!(message.contains("PID 42"));
+    }
+
+    #[test]
+    #[ignore = "Read-only process snapshot; never installs or stops processes"]
+    fn live_update_blockers() {
+        let state = running(AppId::Mcp, &default_exe(AppId::Mcp).unwrap()).unwrap();
+        println!(
+            "MCP launchers: {}; connections: {}; other copy: {}; identified parents: {}",
+            state.gui.len(),
+            state
+                .blockers
+                .iter()
+                .filter(|b| b.kind == "connection")
+                .count(),
+            state.other_copy,
+            state.blockers.iter().filter(|b| b.parent.is_some()).count()
+        );
+        assert_eq!(
+            state.background_block_message().is_some(),
+            state.server || state.other_copy
+        );
+        for blocker in &state.blockers {
+            assert!(blocker.pid > 0);
+        }
+    }
+
+    #[test]
     fn installer_matching_includes_case_and_concatenated_field_boundaries() {
         assert!(matches_installer_product(
             "Creator Works MCP",
@@ -306,9 +525,9 @@ pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
         gui: Vec::new(),
         other_copy: false,
         server: false,
+        blockers: Vec::new(),
     };
     let root = exe.parent().ok_or("Invalid app path.")?;
-    let root_text = root.to_string_lossy().to_ascii_lowercase();
     for (pid, process) in system.processes() {
         let name = process.name().to_string_lossy().to_ascii_lowercase();
         let portable_setup = app == AppId::Setup
@@ -319,11 +538,12 @@ pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
         if is_gui {
             match process.exe() {
                 Some(actual) if same_path(actual, exe) => result.gui.push(pid.as_u32()),
-                Some(_) => result.other_copy = true,
+                Some(_) => {
+                    result.other_copy = true;
+                    result.blockers.push(process_blocker(&system, *pid, process, "otherCopy"));
+                }
                 None => {
-                    return Err(
-                        "An app process cannot be inspected. Close it before continuing.".into(),
-                    )
+                    return Err(format!("Cannot check {} (PID {}). Close that app and choose Check again. Hub will not force-close your apps.", process.name().to_string_lossy(), pid.as_u32()))
                 }
             }
         }
@@ -335,18 +555,16 @@ pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
                 .collect::<Vec<_>>()
                 .join(" ")
                 .to_ascii_lowercase();
-            if command.is_empty() {
-                return Err(
-                    "A Node process cannot be inspected. MCP update safety is unverified.".into(),
-                );
+            let kind = mcp_connection_kind(root, process.exe(), &command).map_err(|()| format!("Cannot check node (PID {}). Hub cannot tell whether it belongs to MCP, so the update is paused. Save your work and close the app using it, then choose Check again. If it remains, restart Windows. Do not end unfamiliar tasks.", pid.as_u32()))?;
+            if let Some(kind) = kind {
+                result.server = true;
+                result
+                    .blockers
+                    .push(process_blocker(&system, *pid, process, kind));
             }
-            let bundled = process.exe().is_some_and(|p| p.starts_with(root));
-            result.server |= bundled
-                || command.contains(&root_text)
-                || command.contains("banter-mcp")
-                || command.contains("creator-works-mcp");
         }
     }
+    result.blockers.sort_by_key(|b| b.pid);
     Ok(result)
 }
 

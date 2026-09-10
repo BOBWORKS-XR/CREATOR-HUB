@@ -4,9 +4,9 @@ async function load(page) {
   await page.addInitScript(() => {
     window.calls = [];
     window.projects = { projects: [
-      { id: 'creator', name: 'Creator Forest', path: 'E:\\UnityTest\\Creator Forest', sdk: 'creator', sdkLabel: 'Creator SDK / Altspace', unityVersion: '6000.3.21f1', source: 'Unity Hub', added: false },
-      { id: 'banter', name: 'Banter Playground', path: 'E:\\UnityTest\\Banter Playground', sdk: 'banter', sdkLabel: 'Banter SDK', unityVersion: '2022.3.39f1', source: 'Creator Works MCP', added: true },
-      { id: 'plain', name: 'Plain Unity', path: 'E:\\UnityTest\\Plain', sdk: 'unity', sdkLabel: 'Unity / no SDK detected', unityVersion: '6000.3.21f1', source: 'Unity Hub', added: false },
+      { id: 'creator', name: 'Creator Forest', path: 'E:\\UnityTest\\Creator Forest', sdk: 'creator', sdkLabel: 'Creator SDK / Altspace', unityVersion: '6000.3.21f1', source: 'Unity Hub', added: false, modifiedAtMs: Date.UTC(2026, 8, 11, 12) },
+      { id: 'banter', name: 'Banter Playground', path: 'E:\\UnityTest\\Banter Playground', sdk: 'banter', sdkLabel: 'Banter SDK', unityVersion: '2022.3.39f1', source: 'Creator Works MCP', added: true, modifiedAtMs: Date.UTC(2026, 8, 10, 12) },
+      { id: 'plain', name: 'Plain Unity', path: 'E:\\UnityTest\\Plain', sdk: 'unity', sdkLabel: 'Unity / no SDK detected', unityVersion: '6000.3.21f1', source: 'Unity Hub', added: false, modifiedAtMs: Date.UTC(2026, 8, 11, 13) },
       { id: 'missing', name: 'Missing project', path: 'E:\\gone', sdk: 'unknown', sdkLabel: 'SDK unknown', unityVersion: '', source: 'Unity Hub', added: false, issue: 'Project folder is missing or unavailable.' },
     ], warnings: [] };
     window.__TAURI__ = {
@@ -32,6 +32,65 @@ async function load(page) {
   await expect(page.locator('#project-status')).toContainText('4 known projects');
 }
 
+const projectNames = page => page.locator('.project-info > strong');
+
+test('newest saved project is first by default, with alphabetical sorting available', async ({ page }) => {
+  await load(page);
+  await expect(page.getByRole('combobox', { name: 'Sort projects' })).toHaveValue('modified');
+  await expect(projectNames(page)).toHaveText(['Creator Forest', 'Banter Playground']);
+  await page.locator('#project-sdk').selectOption('all');
+  await expect(projectNames(page)).toHaveText(['Plain Unity', 'Creator Forest', 'Banter Playground', 'Missing project']);
+  await expect(page.locator('.project-row').last().locator('.project-modified')).toHaveText('Modified date unavailable');
+  await page.getByRole('combobox', { name: 'Sort projects' }).selectOption('name');
+  await expect(projectNames(page)).toHaveText(['Banter Playground', 'Creator Forest', 'Missing project', 'Plain Unity']);
+  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'project_inventory').length)).toBe(1);
+});
+
+test('sorting keeps search, SDK filter and navigation choices, without native writes', async ({ page }) => {
+  await load(page);
+  await page.locator('#project-sort').selectOption('name');
+  await page.locator('#project-search').fill('Forest');
+  await page.locator('#project-sdk').selectOption('creator');
+  await page.locator('#hub-pages [data-view="hub"]').click();
+  await page.locator('#hub-pages [data-view="projects"]').click();
+  await expect(page.locator('#project-sort')).toHaveValue('name');
+  await expect(page.locator('#project-sdk')).toHaveValue('creator');
+  await expect(page.locator('#project-search')).toHaveValue('Forest');
+  await expect(projectNames(page)).toHaveText(['Creator Forest']);
+  expect(await page.evaluate(() => window.calls.filter(c => /project/.test(c.command)))).toEqual([{ command: 'project_inventory', args: {} }]);
+});
+
+test('equal dates use natural alphabetical order; unknown or invalid dates sort last', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => {
+    const template = window.projects.projects[0];
+    window.projects.projects = [
+      ['Project 10', 1000, 'B'], ['Project 2', 1000, 'A'], ['Project 2', 1000, 'B'],
+      ['Zero', 0, 'C'], ['A unknown', null, 'D'], ['B missing', undefined, 'E'],
+      ['C invalid', '2026-09-11', 'F'], ['D out of range', 9000000000000000, 'G'],
+      ['E negative', -1, 'H'],
+    ].map(([name, modifiedAtMs, suffix], index) => ({ ...template, name, modifiedAtMs, path: `E:\\${suffix}`, id: String(index) }));
+  });
+  await page.locator('#refresh-projects').click();
+  await expect(projectNames(page)).toHaveText(['Project 2', 'Project 2', 'Project 10', 'Zero', 'A unknown', 'B missing', 'C invalid', 'D out of range', 'E negative']);
+  await expect(page.locator('.project-info > small').first()).toHaveText('E:\\A');
+  await expect(page.locator('.project-modified').filter({ hasText: 'unavailable' })).toHaveCount(5);
+});
+
+test('refresh reorders modified dates and preserves an explicitly selected name sort', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => window.projects.projects[1].modifiedAtMs = Date.UTC(2026, 8, 12));
+  await page.locator('#refresh-projects').click();
+  await expect(projectNames(page)).toHaveText(['Banter Playground', 'Creator Forest']);
+  await page.locator('#project-sort').selectOption('name');
+  await page.evaluate(() => window.projects.projects[0].modifiedAtMs = Date.UTC(2026, 8, 13));
+  await page.locator('#refresh-projects').click();
+  await expect(page.locator('#project-sort')).toHaveValue('name');
+  await expect(projectNames(page)).toHaveText(['Banter Playground', 'Creator Forest']);
+  await page.locator('#project-sort').selectOption('modified');
+  await expect(projectNames(page)).toHaveText(['Creator Forest', 'Banter Playground']);
+});
+
 test('projects are read on demand; filters and navigation preserve the list without polling', async ({ page }) => {
   await load(page);
   await expect(page.locator('.project-row')).toHaveCount(2);
@@ -53,6 +112,8 @@ test('explicit launch sends only a known ID and prevents double clicks', async (
   await page.getByRole('button', { name: 'Open Creator Forest', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Open Creator Forest', exact: true })).toBeDisabled();
   await expect(page.locator('#refresh-projects')).toBeDisabled();
+  await page.locator('#project-sort').selectOption('name');
+  await expect(page.getByRole('button', { name: 'Open Creator Forest', exact: true })).toBeDisabled();
   expect(await page.evaluate(() => window.calls.filter(c => c.command === 'open_unity_project'))).toEqual([{ command: 'open_unity_project', args: { id: 'creator' } }]);
   await page.evaluate(() => window.finishOpen('Unity launch requested.'));
   await expect(page.locator('#project-status')).toHaveText('Unity launch requested.');
@@ -83,6 +144,16 @@ for (const width of [940, 560, 390, 320]) test(`project content fits at ${width}
   expect(await button.evaluate(element => getComputedStyle(element).fontSize)).toBe('14px');
   await button.focus();
   await expect(button).toBeFocused();
+  const sort = page.getByRole('combobox', { name: 'Sort projects' });
+  await sort.focus();
+  await expect(sort).toBeFocused();
+  const filterBoxes = await page.locator('.project-filters > *').evaluateAll(elements => elements.map(element => {
+    const { left, right, top, bottom } = element.getBoundingClientRect(); return { left, right, top, bottom };
+  }));
+  for (let i = 0; i < filterBoxes.length; i++) for (let j = i + 1; j < filterBoxes.length; j++) {
+    const a = filterBoxes[i], b = filterBoxes[j];
+    expect(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top).toBe(true);
+  }
   await page.screenshot({ path: testInfo.outputPath('projects-open-button.png'), fullPage: true });
   await page.evaluate(() => {
     window.projects.projects[0].name = '<img src=x onerror="window.injected=true">';

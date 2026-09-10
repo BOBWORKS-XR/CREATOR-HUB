@@ -55,6 +55,7 @@ pub struct AppState {
     pub installed: bool,
     pub trusted: bool,
     pub running: bool,
+    pub update_blockers: Vec<platform::UpdateBlocker>,
     pub update_available: bool,
     pub downloaded: bool,
     pub issue: Option<String>,
@@ -379,6 +380,7 @@ impl Manager {
                 installed: false,
                 trusted: false,
                 running: false,
+                update_blockers: Vec::new(),
                 update_available: false,
                 downloaded: verified_download(&release),
                 issue: None,
@@ -403,17 +405,24 @@ impl Manager {
                         state.issue = Some("Hub couldn't verify this app. Choose an official copy. Nothing was changed.".into());
                     }
                     match platform::running(app, &path) {
-                        Ok(running) => state.running = !running.gui.is_empty() || running.server,
+                        Ok(running) => {
+                            state.running =
+                                !running.gui.is_empty() || running.server || running.other_copy;
+                            state.update_blockers = running.blockers;
+                        }
                         Err(error) => state.issue = Some(error),
                     }
                 }
-                Ok(None) => {
-                    match platform::running(app, &platform::default_exe(app)?) {
-                        Ok(r) if r.other_copy || !r.gui.is_empty() => state.issue = Some("A standalone copy is running. Choose Use existing app instead of creating a second installation.".into()),
-                        Err(error) => state.issue = Some(error),
-                        _ => {}
+                Ok(None) => match platform::running(app, &platform::default_exe(app)?) {
+                    Ok(r) => {
+                        if r.other_copy || !r.gui.is_empty() {
+                            state.issue = Some("A standalone copy is running. Choose Use existing app instead of creating a second installation.".into());
+                        }
+                        state.running = r.server || r.other_copy || !r.gui.is_empty();
+                        state.update_blockers = r.blockers;
                     }
-                }
+                    Err(error) => state.issue = Some(error),
+                },
                 Err(error) => state.issue = Some(error),
             }
             if state.issue.is_some() && !state.installed {
@@ -545,10 +554,13 @@ impl Manager {
             platform::verify_nsis_update_target(app.name(), &target)?;
         }
         platform::reject_links(&target)?;
+        if let Some(message) = platform::running(app, &target)?.background_block_message() {
+            return Err(message);
+        }
         let installer = self.download(app, &release, &progress)?;
         let running = platform::running(app, &target)?;
-        if running.server || running.other_copy {
-            return Err("Close active MCP client connections and other copies of this app before installing. No process was stopped.".into());
+        if let Some(message) = running.background_block_message() {
+            return Err(message);
         }
         if !running.gui.is_empty() {
             let close_supported = current
@@ -573,6 +585,9 @@ impl Manager {
             return Err("Installation cancelled before starting the installer.".into());
         }
         let final_check = platform::running(app, &target)?;
+        if let Some(message) = final_check.background_block_message() {
+            return Err(message);
+        }
         if !final_check.gui.is_empty() || final_check.server || final_check.other_copy {
             return Err("The app became active. Installation was paused.".into());
         }

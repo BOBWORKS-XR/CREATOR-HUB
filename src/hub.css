@@ -17,6 +17,7 @@ main { padding-top: 20px; }
 .project-filters input, .project-filters select { min-height: 36px; padding: 7px 10px; background: #111518; border: 1px solid #374149; color: #edf1f3; border-radius: 4px; font: inherit; min-width: 0; max-width: 100%; }
 .project-filters input { flex: 1 1 220px; }
 .project-filters select { flex: 0 1 240px; }
+#project-sort { flex-basis: 180px; }
 .project-filters :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 .project-row { display: flex; align-items: center; gap: 16px; padding: 14px 8px; border-bottom: 1px solid #20282d; border-radius: 4px; }
 .project-row:hover { background: #14191d; }
@@ -39,6 +40,13 @@ main { padding-top: 20px; }
 input[type="checkbox"] { accent-color: var(--cyan); width: 15px; height: 15px; flex-shrink: 0; }
 .catalog-status { margin-top: 12px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .tool-state { margin-top: 16px; font-size: 12px; color: var(--muted); line-height: 1.6; overflow-wrap: anywhere; }
+.update-blockers { margin-top: 18px; padding: 14px 0; border-top: 1px solid var(--line); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.update-blockers h3 { font-size: 15px; margin-bottom: 8px; }
+.update-blockers p { color: var(--muted); margin: 6px 0; }
+.update-blockers details { margin: 10px 0; }
+.update-blockers summary { cursor: pointer; }
+.update-blockers ul { padding-left: 20px; }
+.update-blockers li { margin: 10px 0; font-size: 12px; }
 .operation-progress { margin-top: 20px; padding: 12px 0; border-top: 1px solid var(--line); font-size: 12px; }
 .operation-progress > div { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .operation-progress strong { font-weight: 500; line-height: 1.5; }

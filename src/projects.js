@@ -2,6 +2,12 @@
   const byId = id => document.getElementById(id);
   let snapshot = null;
   let busy = false;
+  const names = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+  const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  function modifiedDate(project) {
+    const value = project.modifiedAtMs;
+    return Number.isSafeInteger(value) && value >= 0 && value <= 8640000000000000 ? value : null;
+  }
   function element(tag, text, className) {
     const node = document.createElement(tag);
     node.textContent = text;
@@ -14,9 +20,17 @@
     byId('view-projects').setAttribute('aria-busy', String(busy));
     const query = byId('project-search').value.trim().toLowerCase();
     const filter = byId('project-sdk').value;
+    const sort = byId('project-sort').value;
     const projects = (snapshot?.projects || []).filter(project => {
       const sdkMatch = filter === 'all' || (filter === 'sdk' ? ['creator', 'banter', 'mixed'].includes(project.sdk) : project.sdk === filter || project.sdk === 'mixed');
       return sdkMatch && `${project.name} ${project.path}`.toLowerCase().includes(query);
+    }).sort((a, b) => {
+      if (sort === 'modified') {
+        const first = modifiedDate(a);
+        const second = modifiedDate(b);
+        if (first !== second) return first === null ? 1 : second === null ? -1 : second - first;
+      }
+      return names.compare(a.name, b.name) || names.compare(a.path, b.path) || a.id.localeCompare(b.id);
     });
     byId('project-warnings').textContent = (snapshot?.warnings || []).join(' ');
     const rows = projects.map(project => {
@@ -25,6 +39,9 @@
       info.append(element('strong', project.name), element('small', project.path));
       const tags = element('div', '', 'project-tags');
       tags.append(element('span', project.sdkLabel, `sdk-label sdk-${project.sdk}`), element('span', project.unityVersion ? `Unity ${project.unityVersion}` : 'Version unknown'), element('span', project.source));
+      const modified = modifiedDate(project);
+      const date = element('span', modified === null ? 'Modified date unavailable' : `Modified ${dateFormat.format(modified)}`, 'project-modified');
+      tags.append(date);
       info.append(tags);
       if (project.issue) info.append(element('p', project.issue, 'project-issue'));
       const actions = element('div', '', 'project-actions');
@@ -67,5 +84,6 @@
   byId('add-project').addEventListener('click', () => run('add_project_folder'));
   byId('project-search').addEventListener('input', render);
   byId('project-sdk').addEventListener('change', render);
+  byId('project-sort').addEventListener('change', render);
   window.CreatorProjects = Object.freeze({ show: () => { if (!snapshot) run('project_inventory'); } });
 })();

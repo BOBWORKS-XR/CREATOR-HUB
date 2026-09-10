@@ -11,10 +11,15 @@ async function load(page, launchView = 'hub', options = {}) {
     window.hubUpdate = { currentVersion: '0.1.0-alpha.3', availableVersion: null, downloaded: false };
     window.inventory = { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: false, trusted: false, availableVersion: app === 'mcp' ? '2.6.0' : '0.2.2', downloaded: false, issue: null, installerInteractive: true })) };
     if (options.updateAvailable) Object.assign(window.inventory.apps[0], { installed: true, trusted: true, installedVersion: '2.5.0', updateAvailable: true });
+    if (options.blockers) window.inventory.apps[0].updateBlockers = options.blockers;
     window.__TAURI__ = { event: { listen: async (name, handler) => { window.events[name] = handler; return () => {}; } }, core: { invoke: async (command, args) => {
       window.calls.push({ command, args });
       if (command === 'get_launch_request') return { view: launchView, revision: 0 };
-      if (command === 'app_inventory') return window.inventory;
+      if (command === 'app_inventory') {
+        if (window.failInventory) throw window.failInventory;
+        if (window.holdInventory) return new Promise(resolve => { window.finishInventory = () => resolve(window.inventory); });
+        return window.inventory;
+      }
       if (command === 'hub_update_status') return window.hubUpdate;
       if (command === 'download_hub_update') { window.hubUpdate.downloaded = true; return 'Hub update downloaded.'; }
       if (window.failOpen) throw 'Browser is unavailable.';
@@ -27,6 +32,73 @@ async function load(page, launchView = 'hub', options = {}) {
   await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === 'app_inventory' && c.args.check))).toBe(true);
   await expect(page.locator('#catalog-status')).toHaveText(/^(Update check complete\. Installation always needs your approval\.|Installed apps checked\.)$/);
 }
+
+for (const width of [940, 560, 320]) test(`upgrade blockers are actionable, client-agnostic and safe to recheck at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 700 });
+  await load(page, 'mcp', { updateAvailable: true, preferences: { 'creator-hub.auto-download': 'false' }, blockers: [
+    { pid: 40, name: 'node.exe', executable: 'C:\\Apps\\Creator Works MCP\\server\\runtime\\node.exe', kind: 'connection', parent: { pid: 41, name: 'claude.exe', executable: 'C:\\Apps\\' + 'LongName'.repeat(20) + '\\claude.exe' } },
+    { pid: 50, name: 'node.exe', executable: 'C:\\Apps\\node.exe', kind: 'possibleConnection', parent: null },
+  ] });
+  await expect(page.locator('#release-button')).toBeDisabled();
+  await expect(page.locator('#open-button')).toBeEnabled();
+  await expect(page.locator('#update-blockers-help')).toContainText('will not force-close');
+  await expect(page.locator('#update-blockers-help')).toContainText('restart Windows');
+  await expect(page.locator('#update-blockers-help')).toContainText('Do not end unfamiliar tasks');
+  await page.locator('#update-blockers-details summary').click();
+  await expect(page.locator('#update-blockers-list')).toContainText('claude.exe (PID 41)');
+  await expect(page.locator('#update-blockers-list')).toContainText('Starting app could not be identified');
+  await expect(page.locator('#update-blockers-list')).toContainText('Possible MCP connection');
+  await page.locator('#recheck-app').click();
+  await expect(page.locator('#update-blockers')).toBeVisible();
+  await expect(page.locator('#release-button')).toBeDisabled();
+  await expect(page.locator('#update-blockers-help')).toContainText('restart Windows');
+  expect(await page.locator('#update-blockers-list').innerText()).not.toContain('Codex');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('upgrade-blockers.png'), fullPage: true });
+  await page.evaluate(() => { window.calls = []; window.holdInventory = true; });
+  await page.getByRole('button', { name: 'Check again', exact: true }).click();
+  await expect(page.locator('#recheck-app')).toBeDisabled();
+  await expect(page.locator('#release-button')).toBeDisabled();
+  await page.evaluate(() => { window.inventory.apps[0].updateBlockers = []; window.finishInventory(); });
+  await expect(page.locator('#update-blockers')).toBeHidden();
+  await expect(page.locator('#release-button')).toBeEnabled();
+  await expect(page.locator('#release-button')).toBeFocused();
+  expect(await page.evaluate(() => window.calls.map(c => c.command))).toEqual(['app_inventory', 'hub_update_status']);
+  expect(await page.evaluate(() => window.calls[0].args.check)).toBe(false);
+  await page.evaluate(() => window.holdInventory = false);
+  await page.locator('#release-button').click();
+  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'install_app').length)).toBe(1);
+});
+
+test('failed blocker recheck retains protection and does not report success', async ({ page }) => {
+  await load(page, 'mcp', { updateAvailable: true, preferences: { 'creator-hub.auto-download': 'false' }, blockers: [
+    { pid: 40, name: '<img src=x onerror="window.injected=true">', kind: 'connection', parent: null },
+  ] });
+  await page.locator('#update-blockers-details summary').click();
+  await expect(page.locator('#update-blockers-list img')).toHaveCount(0);
+  await page.evaluate(() => { window.failInventory = 'Process inventory unavailable.'; window.calls = []; });
+  await page.locator('#recheck-app').click();
+  await expect(page.locator('#update-blockers-status')).toHaveText('Could not check running apps. Try again.');
+  await expect(page.locator('#release-button')).toBeDisabled();
+  await expect(page.locator('#recheck-app')).toBeEnabled();
+  expect(await page.evaluate(() => window.calls.map(c => c.command))).toEqual(['app_inventory']);
+  expect(await page.evaluate(() => window.injected)).toBeUndefined();
+});
+
+test('uninspectable processes can be rechecked and a current app remains openable', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => Object.assign(window.inventory.apps[0], { issue: 'Cannot check node (PID 99). Choose Check again.' }));
+  await page.locator('#check-updates').click();
+  await page.getByRole('button', { name: 'View Creator Works MCP', exact: true }).click();
+  await expect(page.locator('#update-blockers')).toBeVisible();
+  await expect(page.locator('#update-blockers-details')).toBeHidden();
+  await expect(page.locator('#release-button')).toBeDisabled();
+  await page.evaluate(() => Object.assign(window.inventory.apps[0], { issue: null, installed: true, trusted: true, installedVersion: '2.6.0', updateAvailable: false,
+    updateBlockers: [{ pid: 40, name: 'node.exe', kind: 'connection', parent: null }] }));
+  await page.locator('#recheck-app').click();
+  await expect(page.locator('#primary-label')).toHaveText('Open app');
+  await expect(page.locator('#release-button')).toBeEnabled();
+});
 
 test('new profiles enable prereleases and verified downloads without authorizing installation', async ({ page }) => {
   await load(page, 'hub', { updateAvailable: true });

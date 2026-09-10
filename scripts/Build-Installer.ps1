@@ -42,6 +42,7 @@ try {
     Copy-Item -LiteralPath $installer -Destination (Join-Path $output "Creator-Hub-${version}-Windows-setup.exe")
     Copy-Item -LiteralPath (Join-Path $target 'release\creator-hub.exe') -Destination $output
     Copy-Item -LiteralPath (Join-Path $root 'docs\INSTALLABLE-PREVIEW.md') -Destination (Join-Path $output 'README.md')
+    Copy-Item -LiteralPath (Join-Path $root 'docs\HOTFIX-ALPHA4.md') -Destination $output
     $hashes = Get-ChildItem -LiteralPath $output -File | ForEach-Object { "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" }
     $hashes | Set-Content -LiteralPath (Join-Path $output 'SHA256SUMS.txt') -Encoding ascii
     Write-Output $output

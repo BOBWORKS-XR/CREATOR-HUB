@@ -1,7 +1,13 @@
-# Creator Hub 0.1.0-alpha.3 for Windows
+# Creator Hub Windows Preview
 
-This is a public Windows test release, not a stable release.
-[Download the installer](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.3).
+The published Windows test release is 0.1.0-alpha.3, not a stable release.
+[Published installer](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.3).
+
+Source builds now identify as **0.1.0-alpha.4**, an unpublished hotfix candidate.
+It adds recently-modified/name sorting to Projects and clearer running-connection
+details with a read-only **Check again** action before upgrades. It does not stop
+AI clients, uninstall MCP or erase application data. See
+[hotfix validation](HOTFIX-ALPHA4.md) before distributing a candidate.
 
 Hub now checks for its own updates as well as MCP and Project Setup updates.
 Test updates and verified downloads start enabled; you can turn either off.

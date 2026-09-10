@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::Mutex,
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 use tauri::Manager as _;
 use tauri_plugin_dialog::DialogExt;
@@ -33,6 +33,7 @@ pub struct Project {
     source: String,
     added: bool,
     issue: Option<String>,
+    modified_at_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -140,6 +141,75 @@ fn dependency(root: &Path, deps: &Value, name: &str) -> bool {
             .is_ok_and(|v| v["name"] == name)
 }
 
+// Inspect saved source metadata only, never Library, Temp, logs or MCP state.
+// A partial scan must not be advertised as the project's last modified date.
+fn modified_at(root: &Path, remaining: &mut usize, deadline: Instant) -> Option<u64> {
+    crate::platform::reject_links(root).ok()?;
+    let mut pending = Vec::new();
+    for name in ["Assets", "Packages", "ProjectSettings"] {
+        let path = root.join(name);
+        let metadata = fs::symlink_metadata(&path).ok()?;
+        pending.push((path, metadata));
+    }
+    let mut latest = None;
+    while let Some((path, metadata)) = pending.pop() {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        *remaining = remaining.checked_sub(1)?;
+        let mut linked = metadata.file_type().is_symlink();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            linked |= metadata.file_attributes() & 0x400 != 0;
+        }
+        if linked {
+            continue;
+        }
+        let timestamp = u64::try_from(
+            metadata
+                .modified()
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_millis(),
+        )
+        .ok()?;
+        latest = Some(latest.map_or(timestamp, |previous: u64| previous.max(timestamp)));
+        if metadata.is_dir() {
+            for entry in fs::read_dir(&path).ok()? {
+                if pending.len() >= *remaining || Instant::now() >= deadline {
+                    return None;
+                }
+                let entry = entry.ok()?;
+                // Windows directory enumeration already supplies this metadata;
+                // avoid another filesystem query for every asset.
+                let metadata = entry.metadata().ok()?;
+                pending.push((entry.path(), metadata));
+            }
+        }
+    }
+    (Instant::now() < deadline).then_some(latest).flatten()
+}
+
+fn collect_modified_dates(projects: &mut [Project]) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut remaining = 2_000_000;
+    for project in projects {
+        if project.issue.is_some() || remaining == 0 || Instant::now() >= deadline {
+            continue;
+        }
+        let mut allowance = remaining.min(200_000);
+        let before = allowance;
+        project.modified_at_ms = modified_at(
+            Path::new(&project.path),
+            &mut allowance,
+            deadline.min(Instant::now() + Duration::from_millis(500)),
+        );
+        remaining -= before - allowance;
+    }
+}
+
 fn inspect(path: &Path, source: &str, added: bool) -> Project {
     let mut result = Project {
         id: key(path),
@@ -155,6 +225,7 @@ fn inspect(path: &Path, source: &str, added: bool) -> Project {
         source: source.into(),
         added,
         issue: None,
+        modified_at_ms: None,
     };
     let checked = (|| {
         if !local_path(path) {
@@ -360,6 +431,7 @@ fn discover(config: &Path, saved_file: &Path, current_hub: Result<Value, String>
     }
     let mut projects: Vec<_> = projects.into_values().collect();
     projects.sort_by_key(|p| p.name.to_lowercase());
+    collect_modified_dates(&mut projects);
     Snapshot { projects, warnings }
 }
 
@@ -524,6 +596,80 @@ mod tests {
         .unwrap();
     }
 
+    fn set_modified(path: &Path, seconds: u64) {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(seconds)))
+            .unwrap();
+    }
+
+    fn modification(root: &Path) -> Option<u64> {
+        modified_at(root, &mut 10_000, Instant::now() + Duration::from_secs(10))
+    }
+
+    #[test]
+    fn modified_date_tracks_nested_sources_not_generated_unity_or_mcp_files() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), json!({}));
+        let scene = root.path().join("Assets/Scenes/Nested/World.unity");
+        fs::create_dir_all(scene.parent().unwrap()).unwrap();
+        fs::write(&scene, "test scene").unwrap();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 86_400;
+        set_modified(&scene, stamp);
+        for name in ["Library", "Temp", "Logs", ".mcp", ".git"] {
+            let file = root.path().join(name).join("generated.txt");
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, "not an authored project edit").unwrap();
+            set_modified(&file, stamp + 100);
+        }
+        assert_eq!(modification(root.path()), Some(stamp * 1000));
+        assert_eq!(fs::read_to_string(&scene).unwrap(), "test scene");
+        set_modified(&scene, stamp + 200);
+        assert_eq!(modification(root.path()), Some((stamp + 200) * 1000));
+        for name in [
+            "Packages/manifest.json",
+            "ProjectSettings/ProjectVersion.txt",
+        ] {
+            set_modified(&root.path().join(name), stamp + 300);
+            assert_eq!(modification(root.path()), Some((stamp + 300) * 1000));
+        }
+        let record = inspect(root.path(), "test", false);
+        let mut records = vec![record];
+        collect_modified_dates(&mut records);
+        assert_eq!(
+            serde_json::to_value(&records[0]).unwrap()["modifiedAtMs"],
+            (stamp + 300) * 1000
+        );
+    }
+
+    #[test]
+    fn incomplete_or_unavailable_modified_dates_remain_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), json!({}));
+        assert!(modification(root.path()).is_some());
+        assert_eq!(
+            modified_at(
+                root.path(),
+                &mut 1,
+                Instant::now() + Duration::from_secs(10)
+            ),
+            None
+        );
+        assert_eq!(modified_at(root.path(), &mut 10_000, Instant::now()), None);
+        fs::remove_file(root.path().join("Packages/manifest.json")).unwrap();
+        fs::remove_dir(root.path().join("Packages")).unwrap();
+        assert_eq!(modification(root.path()), None);
+        let mut records = vec![inspect(root.path(), "test", false)];
+        collect_modified_dates(&mut records);
+        assert!(records[0].modified_at_ms.is_none());
+    }
+
     #[test]
     fn sdk_profiles_do_not_guess_from_project_name() {
         let root = tempfile::tempdir().unwrap();
@@ -664,6 +810,7 @@ mod tests {
     #[test]
     #[ignore = "Read-only inventory of this machine; no Unity launch or project writes"]
     fn live_project_inventory() {
+        let started = Instant::now();
         let result = discover(
             &dirs::config_dir().unwrap(),
             &saved_path().unwrap(),
@@ -675,10 +822,14 @@ mod tests {
             .filter(|p| matches!(p.sdk.as_str(), "creator" | "banter" | "mixed"))
             .count();
         println!(
-            "Known projects: {}; SDK projects: {}; source warnings: {}",
+            "Known projects: {}; SDK projects: {}; source warnings: {}; valid projects: {}; modified dates: {}; unavailable dates: {}; elapsed: {:?}",
             result.projects.len(),
             count,
-            result.warnings.len()
+            result.warnings.len(),
+            result.projects.iter().filter(|p| p.issue.is_none()).count(),
+            result.projects.iter().filter(|p| p.modified_at_ms.is_some()).count(),
+            result.projects.iter().filter(|p| p.modified_at_ms.is_none()).count(),
+            started.elapsed()
         );
         assert!(count > 0);
     }

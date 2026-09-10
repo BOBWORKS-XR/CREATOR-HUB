@@ -98,6 +98,31 @@ telemetry, community package hosting or arbitrary install URLs are added.
 
 ## Development
 
+### Hotfix Candidate: 0.1.0-alpha.4 (Unpublished)
+
+This source branch adds project sorting and clearer upgrade-blocker guidance.
+The published alpha.3 installers remain unchanged. Hub identifies running MCP
+connections and their starting app when available, without assuming a particular
+AI client. **Check again** refreshes local status only: it does not download,
+install or stop processes. Finish work and disconnect MCP in your AI client
+before retrying an update. No uninstall is required to close a connection.
+See [hotfix validation and remaining limits](docs/HOTFIX-ALPHA4.md).
+
+### Projects Sorting
+
+Projects default to **Recently modified**, with **Name A-Z** available beside
+the existing search and SDK filter. Equal dates sort by name; unknown dates go
+last. Sorting and filtering do not launch Unity or change project files.
+
+The date is the newest saved file/folder timestamp under `Assets`, `Packages`
+and `ProjectSettings`, not the root folder timestamp or the last time Unity was
+opened. Generated `Library`, `Temp`, logs and MCP state outside those folders
+are excluded. Linked folders are not followed. Dates are read on initial project
+discovery and explicit Refresh, not continuously; unsaved Editor changes are not
+included. Metadata checks run off the UI thread, with per-project and total
+time/entry limits. An unreadable or incomplete scan shows **Modified date
+unavailable**, never a guessed date. This change is not in the published alpha.3.
+
 ```powershell
 npm ci
 npm run test:ui

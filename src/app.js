@@ -149,8 +149,9 @@
     }
     const blocked = busy || !inventory?.supported || !state || Boolean(state.issue);
     const opening = state?.installed && state.trusted && !state.updateAvailable;
+    const blockers = state?.updateBlockers || [];
     const needsRelease = !opening && state?.installBlocked;
-    byId('release-button').disabled = needsRelease ? busy : blocked;
+    byId('release-button').disabled = needsRelease ? busy : blocked || (!opening && blockers.length > 0);
     byId('download-button').disabled = busy || !inventory?.supported || !state || state.downloaded || Boolean(state.installBlocked);
     byId('adopt-button').disabled = busy || !inventory?.supported;
     byId('open-button').disabled = blocked || !state?.trusted;
@@ -165,6 +166,22 @@
         state.installerInteractive && !opening && !needsRelease ? 'This release uses its normal installer window. Keep the default folder.' : '', state.issue, state.checkWarning, state.installBlocked].filter(Boolean);
       byId('tool-state').replaceChildren(...lines.map(text => { const p = document.createElement('p'); p.textContent = text; return p; }));
     } else byId('tool-state').textContent = inventory?.supported === false ? 'Windows x64 app management is available in this build. macOS and Linux are not supported yet.' : 'App inventory is unavailable. Retry the update check.';
+    byId('update-blockers').classList.toggle('hidden', !state || (!state.issue && !blockers.length));
+    byId('update-blockers-help').textContent = blockers.length
+      ? `${blockers.some(b => b.kind !== 'otherCopy') ? 'Finish your work, then disconnect MCP in your AI app or close the listed app.' : 'Finish your work and close the other copy of this app.'} Check again when you are ready. If it is still listed after closing its app, save your work and restart Windows. Do not end unfamiliar tasks. Hub will not force-close your apps. Uninstalling is not needed to close these connections.`
+      : 'Resolve the issue above, then check again. Nothing will be installed by this check.';
+    byId('recheck-app').disabled = busy;
+    byId('update-blockers-details').classList.toggle('hidden', !blockers.length);
+    byId('update-blockers-list').replaceChildren(...blockers.map(blocker => {
+      const row = document.createElement('li');
+      const name = document.createElement('strong');
+      name.textContent = `${blocker.kind === 'connection' ? 'MCP runtime in use' : blocker.kind === 'possibleConnection' ? 'Possible MCP connection' : 'Another app copy'}: ${blocker.name} (PID ${blocker.pid})`;
+      row.append(name);
+      for (const text of [blocker.executable, blocker.parent ? `Started by ${blocker.parent.name} (PID ${blocker.parent.pid})` : 'Starting app could not be identified.', blocker.parent?.executable].filter(Boolean)) {
+        const line = document.createElement('p'); line.textContent = text; row.append(line);
+      }
+      return row;
+    }));
     byId('compatibility-status').textContent = state?.hostedPreview ? 'Test version available' : state?.trusted ? 'Your app is ready' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
     byId('compatibility-detail').textContent = state?.hostedPreview
       ? `The hosted preview uses your verified app and saved settings${state.hostedPreview === 'read-only' ? '; changes are disabled' : ', with your approval'}. Open app remains available for a separate window.`
@@ -203,6 +220,7 @@
 
   async function refresh(check = false) {
     if (busy) return;
+    let succeeded = false;
     busy = true; renderState();
     byId('catalog-status').textContent = check ? 'Checking verified releases...' : 'Checking installed apps...';
     try {
@@ -215,6 +233,7 @@
       byId('catalog-status').textContent = !inventory.supported ? 'App management requires Windows x64 in this build.'
         : inventory.apps.some(app => app.checkWarning) ? 'Some update checks failed. Last verified releases remain available.'
         : check ? 'Update check complete. Installation always needs your approval.' : 'Installed apps checked.';
+      succeeded = true;
     } catch (reason) { byId('catalog-status').textContent = String(reason); }
     finally { busy = false; renderState(); }
     if (check && byId('auto-download').checked && inventory?.supported) {
@@ -224,6 +243,7 @@
       }
       if (byId('auto-download').checked && hubUpdate?.availableVersion && !hubUpdate.downloaded && !hubUpdate.installBlocked) await hubAction('download_hub_update');
     }
+    return succeeded;
   }
 
   async function hubAction(command) {
@@ -267,6 +287,17 @@
   byId('open-button').addEventListener('click', () => action('open_app'));
   byId('adopt-button').addEventListener('click', () => action('use_existing_app'));
   byId('check-updates').addEventListener('click', () => refresh(true));
+  byId('recheck-app').addEventListener('click', async () => {
+    if (busy) return;
+    const app = current;
+    byId('update-blockers-status').textContent = 'Checking running apps...';
+    const succeeded = await refresh(false);
+    byId('update-blockers-status').textContent = succeeded ? 'Check complete. Review the app status above.' : 'Could not check running apps. Try again.';
+    if (succeeded && app === current && !appState()?.issue && !appState()?.updateBlockers?.length) {
+      error.classList.add('hidden');
+      byId('release-button').focus();
+    }
+  });
   byId('hub-update-button').addEventListener('click', () => hubAction('install_hub_update'));
   byId('cancel-download').addEventListener('click', async () => {
     byId('cancel-download').disabled = true;
