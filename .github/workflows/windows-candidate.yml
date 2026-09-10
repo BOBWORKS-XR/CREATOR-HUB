@@ -118,6 +118,7 @@ jobs:
             artifacts/native-suite-*/*.png
             artifacts/native-suite-*/*dialogs.json
             artifacts/native-suite-*/*startup.json
+            artifacts/native-suite-*/webview-policy.json
             artifacts/native-suite-*/mcp-picker.json
             dist/Creator-Hub-*-Windows-Candidate/installed-acceptance.json
           if-no-files-found: error

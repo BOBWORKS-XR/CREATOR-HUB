@@ -37,6 +37,10 @@ async function retry(fn, seconds = 30) {
 let child;
 let browser;
 let page;
+const policyState = path.join(out, 'webview-policy.json');
+function webviewPolicy(action) {
+  return execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts/native-webview-policy.ps1'), '-Action', action, '-StateFile', policyState], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+}
 const backends = {};
 const frames = {};
 const configPath = path.join(process.env.APPDATA, 'creator-works-mcp', 'launcher-config.json');
@@ -101,11 +105,19 @@ async function closeHosted(app) {
     seedConfig();
   }
   const originalConfigHash = upgrade ? hash(configPath) : null;
+  webviewPolicy('Enable');
   child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238', WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview') } });
   report.hubPid = child.pid;
   child.on('error', error => { report.hubSpawnError = String(error); });
   browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'));
+  const startup = execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts/native-startup-diagnostics.ps1')], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  fs.writeFileSync(path.join(out, 'hub-startup.json'), startup);
+  const diagnostics = JSON.parse(startup.replace(/^\uFEFF/, ''));
+  assert.ok(diagnostics.processes.some(process => process.ParentProcessId === child.pid && process.CommandLine?.includes('--remote-debugging-port=9238')), 'Expected test debugger on Hub browser process');
+  assert.ok(diagnostics.listeners.length > 0);
+  assert.ok(diagnostics.listeners.every(listener => ['127.0.0.1', '::1'].includes(listener.LocalAddress)), 'Test debugger must listen on loopback only');
+  report.checks.push('Disposable test policy enables loopback-only browser connection; shipped Hub executable unchanged');
   page = await retry(async () => {
     const found = browser.contexts().flatMap(context => context.pages()).find(p => p.url().includes('tauri.localhost'));
     assert.ok(found); return found;
@@ -223,6 +235,7 @@ async function closeHosted(app) {
   if (browser) await browser.close();
   for (let i = 0; child && child.exitCode === null && i < 120; i++) await delay(250);
   if (child && child.exitCode === null) { report.cleanup = 'Hub did not close normally; no process was forced closed.'; report.passed = false; process.exitCode = 1; child.unref(); }
+  try { webviewPolicy('Restore'); report.testPolicyRestored = true; } catch (error) { report.testPolicyRestoreError = String(error); report.passed = false; process.exitCode = 1; }
   fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ out, ...report }, null, 2));
 });
