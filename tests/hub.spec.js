@@ -1,15 +1,41 @@
 const { test, expect } = require('@playwright/test');
+const fs = require('node:fs');
+const path = require('node:path');
 
 async function load(page) {
   await page.addInitScript(() => {
     window.calls = [];
-    window.__TAURI__ = { core: { invoke: async (command, args) => {
+    window.events = {};
+    window.inventory = { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: false, trusted: false, availableVersion: app === 'mcp' ? '2.6.0' : '0.2.2', downloaded: false, issue: null, installerInteractive: true })) };
+    window.__TAURI__ = { event: { listen: async (name, handler) => { window.events[name] = handler; return () => {}; } }, core: { invoke: async (command, args) => {
       window.calls.push({ command, args });
+      if (command === 'app_inventory') return window.inventory;
       if (window.failOpen) throw 'Browser is unavailable.';
+      if (window.failAction) throw window.failAction;
+      if (window.holdAction && ['download_app', 'install_app'].includes(command)) return new Promise(resolve => { window.finishAction = resolve; });
+      return 'Operation complete.';
     } } };
   });
   await page.goto('http://127.0.0.1:4188');
+  await expect(page.locator('#catalog-status')).toContainText('Update check complete');
 }
+
+test('native Hub icon retains transparency and the gray cube backplate', async ({ page }) => {
+  const png = fs.readFileSync(path.resolve('src-tauri/icons/hub-source.png')).toString('base64');
+  const pixels = await page.evaluate(async source => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${source}`;
+    await img.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width; canvas.height = img.height;
+    const context = canvas.getContext('2d');
+    context.drawImage(img, 0, 0);
+    return { size: [img.width, img.height], corner: [...context.getImageData(0, 0, 1, 1).data], topFace: [...context.getImageData(128, 60, 1, 1).data] };
+  }, png);
+  expect(pixels.size).toEqual([256, 256]);
+  expect(pixels.corner[3]).toBe(0);
+  expect(pixels.topFace).toEqual([105, 117, 127, 255]);
+});
 
 test('catalog navigation changes no external or project state', async ({ page }) => {
   await load(page);
@@ -24,21 +50,21 @@ test('catalog navigation changes no external or project state', async ({ page })
   await expect(page.locator('#tool-title')).toHaveText('Creator Project Setup');
   await expect(page.locator('#tool-facts')).toContainText('Android and Windows');
   await expect(page.locator('#suite-menu')).toBeHidden();
-  expect(await page.evaluate(() => window.calls)).toEqual([]);
+  expect(await page.evaluate(() => window.calls.filter(call => call.command !== 'app_inventory'))).toEqual([]);
 });
 
-test('release actions use named resources and report failure', async ({ page }) => {
+test('installation uses native app IDs and reports failure without a browser detour', async ({ page }) => {
   await load(page);
   await page.getByRole('button', { name: 'View Creator Works MCP', exact: true }).click();
   await page.locator('#release-button').click();
-  expect(await page.evaluate(() => window.calls)).toEqual([{ command: 'open_resource', args: { resource: 'mcp-releases' } }]);
+  expect(await page.evaluate(() => window.calls.filter(call => call.command !== 'app_inventory'))).toEqual([{ command: 'install_app', args: { app: 'mcp', version: '2.6.0', reopen: true, closeRunning: false } }]);
   await page.evaluate(() => window.failOpen = true);
   await page.locator('#source-button').click();
   await expect(page.getByRole('alert')).toContainText('Browser is unavailable');
   await page.evaluate(() => window.failOpen = false);
   await page.locator('#source-button').click();
   await expect(page.getByRole('alert')).toBeHidden();
-  await expect(page.getByRole('button', { name: /^Install$|^Update$|^Open app$/ })).toHaveCount(0);
+  await expect(page.locator('#release-button')).toContainText('Install app');
 });
 
 test('switcher keyboard and outside dismissal preserve navigation', async ({ page }) => {
@@ -52,7 +78,7 @@ test('switcher keyboard and outside dismissal preserve navigation', async ({ pag
   await expect(page.locator('#suite-trigger')).toBeFocused();
   await expect(page.locator('#suite-menu')).toBeHidden();
   await page.locator('#suite-trigger').click();
-  await page.locator('#page-title').click();
+  await page.locator('#suite-dismiss').click({ position: { x: 500, y: 25 } });
   await expect(page.locator('#suite-menu')).toBeHidden();
 });
 
@@ -60,8 +86,8 @@ test('URL parameters cannot claim hosted or installed state', async ({ page }) =
   await load(page);
   await page.goto('http://127.0.0.1:4188/?hosted=true&installed=true&path=C:/bad.exe');
   await expect(page.locator('#suite-trigger')).toBeVisible();
-  await expect(page.locator('.development-status')).toContainText('In development');
-  expect(await page.evaluate(() => window.calls)).toEqual([]);
+  await expect(page.locator('#status-mcp')).toContainText('Available');
+  expect(await page.evaluate(() => window.calls.filter(call => call.command !== 'app_inventory'))).toEqual([]);
 });
 
 for (const width of [940, 720, 560, 390]) {
@@ -71,13 +97,97 @@ for (const width of [940, 720, 560, 390]) {
     page.on('pageerror', error => errors.push(error.message));
     await load(page);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    for (const img of await page.locator('.app-row img').all()) expect(await img.evaluate(item => item.naturalWidth)).toBe(1024);
+    for (const img of await page.locator('.app-row img').all()) expect(await img.evaluate(item => item.naturalWidth)).toBeGreaterThan(0);
     await page.screenshot({ path: testInfo.outputPath('hub.png'), fullPage: true });
     await page.locator('#suite-trigger').click();
+    await expect(page.locator('#suite-shell')).toHaveCSS('width', '224px');
+    await expect(page.locator('#suite-shell')).toHaveCSS('height', '352px');
+    await expect(page.locator('.app-header .title-block')).toHaveCSS('opacity', '0');
+    await expect(page.locator('.suite-brand')).toHaveCSS('opacity', '1');
+    await expect(page.locator('.suite-brand')).toHaveCSS('visibility', 'visible');
+    expect(await page.locator('.suite-brand').evaluate(el => el.getBoundingClientRect().x)).toBe(15);
+    expect(await page.locator('#suite-shell').evaluate(el => el.scrollLeft)).toBe(0);
     await page.screenshot({ path: testInfo.outputPath('menu.png'), fullPage: true });
+    if (width === 940) {
+      await page.waitForTimeout(500);
+      await page.screenshot({ path: testInfo.outputPath('drawer-settled.png'), fullPage: true });
+    }
     await page.locator('#suite-menu [data-view="setup"]').click();
+    await expect(page.locator('#suite-shell')).toHaveCSS('width', '55px');
+    await expect(page.locator('#suite-shell')).toHaveCSS('height', '48px');
+    await expect(page.locator('.app-header .title-block')).toHaveCSS('opacity', '1');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath('setup-detail.png'), fullPage: true });
     expect(errors).toEqual([]);
   });
 }
+
+test('morphing drawer reverses, restores focus and honors reduced motion', async ({ page }) => {
+  await load(page);
+  const before = await page.locator('.app-list').boundingBox();
+  const closed = await page.locator('#suite-trigger').boundingBox();
+  await page.locator('#suite-trigger').click();
+  await expect(page.locator('#suite-shell')).toHaveCSS('width', '224px');
+  await expect(page.locator('#suite-shell')).toHaveCSS('height', '352px');
+  expect((await page.locator('#suite-trigger').boundingBox()).x - closed.x).toBe(169);
+  expect(await page.locator('.app-list').boundingBox()).toEqual(before);
+  await expect(page.locator('#suite-close')).toHaveCount(0);
+  await page.locator('#suite-trigger').click();
+  await expect(page.locator('#suite-menu')).toBeHidden();
+  await expect(page.locator('#suite-menu')).toHaveJSProperty('inert', true);
+  await expect(page.locator('#suite-trigger')).toBeFocused();
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.locator('#suite-trigger').click();
+  await expect(page.locator('#suite-shell')).toHaveCSS('transition-duration', '0s');
+  await expect(page.locator('#suite-shell')).toHaveCSS('width', '224px');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.app-header .title-block')).toHaveCSS('opacity', '1');
+});
+
+test('Creator Plugins is a roadmap view without installation or account actions', async ({ page }) => {
+  await load(page);
+  await page.getByRole('button', { name: 'View Creator Plugins' }).click();
+  await expect(page.locator('#plugins-title')).toBeFocused();
+  await expect(page.locator('#view-plugins')).toContainText('No platform fees');
+  await expect(page.locator('#release-button')).toBeHidden();
+  expect(await page.evaluate(() => window.calls.filter(c => c.command !== 'app_inventory'))).toEqual([]);
+});
+
+test('download progress cancels, prevents duplicate actions and never auto-installs', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => window.holdAction = true);
+  await page.getByRole('button', { name: 'View Creator Works MCP', exact: true }).click();
+  await page.locator('#download-button').click();
+  await expect(page.locator('#release-button')).toBeDisabled();
+  await page.evaluate(() => window.events['app-progress']({ payload: { app: 'mcp', message: 'Downloading Creator Works MCP', received: 1048576, total: 2097152, cancellable: true } }));
+  await expect(page.locator('#progress-bytes')).toHaveText('1.0 / 2.0 MB');
+  await page.locator('#cancel-download').click();
+  await page.evaluate(() => window.finishAction('Download cancelled.'));
+  await expect(page.locator('#progress-message')).toHaveText('Download cancelled.');
+  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'install_app'))).toEqual([]);
+});
+
+test('installed apps open and unverified installations remain blocked', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => Object.assign(window.inventory.apps[0], { installed: true, trusted: true, installedVersion: '2.6.0' }));
+  await page.locator('#check-updates').click();
+  await page.getByRole('button', { name: 'View Creator Works MCP', exact: true }).click();
+  await expect(page.locator('#release-button')).toContainText('Open app');
+  await page.locator('#release-button').click();
+  expect(await page.evaluate(() => window.calls.some(c => c.command === 'open_app'))).toBe(true);
+  await page.evaluate(() => Object.assign(window.inventory.apps[0], { trusted: false, issue: 'Existing app is unverified.' }));
+  await page.getByRole('button', { name: 'All apps' }).click();
+  await page.locator('#check-updates').click();
+  await page.getByRole('button', { name: 'View Creator Works MCP', exact: true }).click();
+  await expect(page.locator('#release-button')).toBeDisabled();
+  await expect(page.locator('#tool-state')).toContainText('unverified');
+});
+
+test('update download opt-in does not authorize installation', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => Object.assign(window.inventory.apps[0], { installed: true, trusted: true, installedVersion: '2.5.0', updateAvailable: true }));
+  await page.locator('#auto-download').check();
+  await page.locator('#check-updates').click();
+  await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === 'download_app'))).toBe(true);
+  expect(await page.evaluate(() => window.calls.some(c => c.command === 'install_app'))).toBe(false);
+});

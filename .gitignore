@@ -4,3 +4,5 @@ src-tauri/gen/
 dist/
 test-results/
 playwright-report/
+*.key
+*.key.pub

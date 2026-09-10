@@ -6,7 +6,7 @@
   "build": { "frontendDist": "../src" },
   "app": {
     "withGlobalTauri": true,
-    "windows": [{ "title": "Creator Hub - Interface Preview", "width": 940, "height": 580, "minWidth": 560, "minHeight": 480, "center": true }],
+    "windows": [{ "title": "Creator Hub - Development Preview", "width": 940, "height": 580, "minWidth": 560, "minHeight": 480, "center": true }],
     "security": { "csp": "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost" }
   },
   "bundle": {

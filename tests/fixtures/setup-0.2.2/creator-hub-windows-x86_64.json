@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "appId": "creator-project-setup",
+  "version": "0.2.2",
+  "platform": "windows",
+  "architecture": "x86_64",
+  "packageType": "nsis",
+  "assetName": "Creator-Project-Setup-0.2.2-Windows-setup.exe",
+  "byteLength": 2577201,
+  "sha256": "b3f9ed80e9319c4ce7339836310bbfbf7342da665fef155937a5701eda2229e5",
+  "executableSha256": "23006194bd8214b92c980dc1042466d598d6d1daaed26819ab697d67159db49b",
+  "identityProtocol": 0,
+  "lifecycleProtocol": 0,
+  "installerProtocol": 0,
+  "minHubVersion": "0.1.0-alpha.1"
+}

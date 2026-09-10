@@ -2,6 +2,18 @@
 .icon-back { --icon: url("icons/arrow-up-right.svg"); transform: rotate(-135deg); }
 .icon-clock { --icon: url("icons/clock-3.svg"); }
 main { padding-top: 20px; }
+.plugins-summary { color: var(--muted); margin: 12px 0 20px; line-height: 1.5; }
+.update-preferences { display: flex; gap: 12px 24px; flex-wrap: wrap; margin-top: 18px; color: var(--muted); font-size: 12px; }
+.update-preferences label { display: flex; align-items: center; gap: 7px; line-height: 1.5; }
+input[type="checkbox"] { accent-color: var(--cyan); width: 15px; height: 15px; flex-shrink: 0; }
+.catalog-status { margin-top: 12px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.tool-state { margin-top: 16px; font-size: 12px; color: var(--muted); line-height: 1.6; overflow-wrap: anywhere; }
+.operation-progress { margin-top: 20px; padding: 12px 0; border-top: 1px solid var(--line); font-size: 12px; }
+.operation-progress > div { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.operation-progress strong { font-weight: 500; line-height: 1.5; }
+.operation-progress progress { display: block; accent-color: var(--cyan); width: 100%; height: 6px; margin: 12px 0 8px; }
+.operation-progress progress[hidden] { display: none; }
+#progress-bytes { font-size: 11px; color: var(--muted); }
 .preview-status { color: var(--amber); font-size: 11px; flex-shrink: 0; }
 .page-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 38px; margin-bottom: 10px; }
 .page-heading > span { color: var(--muted); font-size: 11px; }

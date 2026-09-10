@@ -1,20 +1,30 @@
 # Creator Hub
 
-Local interface preview, `0.1.0-alpha.1`. Not published as an installer or stable
-release. Creator Project Setup and Creator Works MCP remain independent apps.
+Lightweight Windows app manager for Creator Works MCP and Creator Project Setup.
+Local development preview `0.1.0-alpha.1`; not a public seamless-update release.
+Both tools remain usable independently.
 
-## This Pass
+## Current Implementation
 
-- Compact shared Creator styling, original cube art, H/M/P corner badges.
-- Left-edge logo tab and keyboard-accessible app switcher.
-- Flat catalog and detail views for MCP and Project Setup.
-- Native commands open a finite list of public release/source pages.
-- URP Converter is Coming soon, with no install action.
+- In-app verified download, install, open, installed-app reuse and update checks.
+- Available/installed versions, download progress, cancellation and visible errors.
+- Prereleases and background update downloads are separate opt-ins. Installation
+  always requires approval; a download never authorizes execution by itself.
+- Pinned hashes for current public releases; signed Minisign descriptors for
+  future releases. Bounded metadata/downloads and Semantic Version comparison.
+- Running-app/server checks, no forced Unity or AI client closure, no automatic
+  downgrade, and no silent duplicate installation over unknown/legacy copies.
+- Legacy NSIS releases use their normal installer window. Their silent path can
+  force-close apps, so this build does not promise zero-click legacy upgrades.
+  Native security/installer prompts may require interaction.
+- Compact shared interface, morphing logo drawer, keyboard/reduced-motion support,
+  gray Hub cube and official white SideQuest mark for Creator Converter.
+- Creator Converter and Creator Plugins are Coming soon. Plugins is planned as
+  a no-fee community directory, not a payment or subscription service.
 
-No project scanning, application launching, install discovery, background
-downloads, update checks, telemetry or mandatory onboarding is implemented.
-The app does not claim another app is installed or hide its controls based on
-query parameters. It accepts no command-line routes in this preview.
+Hub does not modify Unity projects, bridges or AI settings as an inventory action.
+Installers retain ownership of their own settings and migrations. No accounts,
+telemetry, community hosting, hosted tool UI or arbitrary install URLs are added.
 
 ## Development
 
@@ -25,34 +35,31 @@ npm run check
 npm run build -- --no-bundle
 ```
 
-Native builds require the normal Tauri/Rust platform toolchain. Windows is the
-current build target. macOS/Linux are not yet built or tested for this Hub.
-The standalone Windows EXE uses the system WebView2 runtime; it is unsigned.
+Windows x64 is implemented. macOS/Linux native install and lifecycle support is
+not implemented or tested. The unsigned EXE requires the normal system WebView2
+runtime. Native builds use Tauri/Rust; no Unity Editor is bundled.
 
-The initial local build reused the sibling Setup project's Cargo target cache
-via `CARGO_TARGET_DIR`, then copied the Hub EXE to this project's `dist`. That
-is a local build optimization, not a source or runtime dependency on Setup.
+## Validation and Limits
 
-## Verification
+Browser tests exercise app states, install routing, progress/cancellation,
+opt-ins, Plugins, responsive layout, drawer behavior and image rendering.
+Rust tests cover catalog/signature/hash rejection, cancellation, disk failures,
+atomic local record replacement and close-state protection. Separate opt-in
+network tests download the real pinned installers without executing them; real
+Windows inventory tests do not launch or replace apps.
 
-- Eight Playwright tests: catalog routing, keyboard and outside dismissal,
-  pinned resource IDs, link failures, and no false hosted/installation state.
-- Screenshots checked at 940, 720, 560 and 390 pixels.
-- Native resource allowlist unit test and strict Clippy checks.
-- Windows release EXE built. Desktop automation failed before opening the native
-  preview, so native visual acceptance remains pending.
-- No live Unity project, installed MCP or stable release was changed.
+Signed descriptor publication in both app release pipelines, clean-VM native
+install/upgrade acceptance and guarded GUI restart acceptance remain release
+gates. A successful installer exit is not enough: its installed launcher must
+match the signed/pinned hash. Failed native installers are not assumed to be
+transactional; Hub reports failure and retains cached installers.
 
-## Next Gates
+See [Roadmap](docs/ROADMAP.md) and [release catalog contract](docs/RELEASE-CATALOG.md).
 
-Follow the [approved Creator Hub plan](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/blob/master/docs/CREATOR-HUB-PLAN.md).
-Next is an authenticated release catalog and deterministic version comparison,
-then verified install/adoption, running-app protection, and explicit updates.
-Keep portable/standalone tools independent. Hosted interfaces come later and
-must reuse each tool's implementation rather than embed an EXE window.
+## Assets and License
 
-## Assets And License
-
-MIT. Creator Works cube artwork reused from the existing suite. Selected Lucide
-icons retain their complete upstream license in `src/icons/LICENSE-lucide`.
-Unity and SideQuest products and trademarks belong to their respective owners.
+MIT. Original Creator Works artwork; Hub's gray backplate is original geometry,
+not Unity artwork. SideQuest's unmodified logo remains its property and is not
+relicensed under MIT. See [third-party assets](docs/THIRD-PARTY-ASSETS.md).
+Selected Lucide SVGs keep their upstream license. Minisign verification uses
+Frank Denis's MIT-licensed `minisign-verify`; signing uses Tauri's official CLI.
