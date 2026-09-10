@@ -1,3 +1,4 @@
 # Signatures cover exact bytes, independent of checkout platform.
 tests/fixtures/** -text
+scripts/license-overrides/** -text
 src/sidequest-mark-white.svg -text

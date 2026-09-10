@@ -1,0 +1,191 @@
+{
+  "schemaVersion": 1,
+  "groups": [
+    {
+      "id": "alloc-stdlib",
+      "packages": [
+        [
+          "alloc-stdlib",
+          "0.2.4",
+          "ae42d22078b98549e987d2f03d12df7b984fde47"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE",
+          "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE",
+          "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+        }
+      ]
+    },
+    {
+      "id": "defmt-parser",
+      "packages": [
+        [
+          "defmt-parser",
+          "1.0.0",
+          "4a8cdb44891ed57b8ff5a023b6bec7137c48708f"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE",
+          "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90"
+        },
+        {
+          "name": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+          "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50"
+        }
+      ]
+    },
+    {
+      "id": "selectors",
+      "packages": [
+        [
+          "selectors",
+          "0.36.1",
+          "635e1a19d02960588a00e189bd4bd5bdb150ec3d"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE-MPL-2.0.txt",
+          "url": "https://www.mozilla.org/media/MPL/2.0/index.815ca599c9df.txt",
+          "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
+        }
+      ]
+    },
+    {
+      "id": "tauri-plugin",
+      "packages": [
+        [
+          "tauri-plugin",
+          "2.6.3",
+          "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE_APACHE-2.0",
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_APACHE-2.0",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        },
+        {
+          "name": "LICENSE_MIT",
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_MIT",
+          "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+        }
+      ]
+    },
+    {
+      "id": "unic",
+      "packages": [
+        [
+          "unic-char-property",
+          "0.9.0",
+          "5878605364af97a3358368a6eaef02104af2e016"
+        ],
+        [
+          "unic-char-range",
+          "0.9.0",
+          "5878605364af97a3358368a6eaef02104af2e016"
+        ],
+        [
+          "unic-common",
+          "0.9.0",
+          "5878605364af97a3358368a6eaef02104af2e016"
+        ],
+        [
+          "unic-ucd-version",
+          "0.9.0",
+          "5878605364af97a3358368a6eaef02104af2e016"
+        ]
+      ],
+      "files": [
+        {
+          "name": "COPYRIGHT.md",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md",
+          "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b"
+        },
+        {
+          "name": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "name": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "id": "unic-ident",
+      "packages": [
+        [
+          "unic-ucd-ident",
+          "0.9.0",
+          "8a6ce83063d90b91ae2ce59eddb803edd393fca9"
+        ]
+      ],
+      "files": [
+        {
+          "name": "COPYRIGHT.md",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT.md",
+          "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b"
+        },
+        {
+          "name": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "name": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "id": "webview2-com",
+      "packages": [
+        [
+          "webview2-com",
+          "0.38.2",
+          "b74dc5e2b394044bea5191052868ce7a106c202c"
+        ],
+        [
+          "webview2-com-sys",
+          "0.38.2",
+          "b74dc5e2b394044bea5191052868ce7a106c202c"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE",
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/b74dc5e2b394044bea5191052868ce7a106c202c/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+        }
+      ]
+    },
+    {
+      "id": "webview2-com-macros",
+      "packages": [
+        [
+          "webview2-com-macros",
+          "0.8.1",
+          "dffa41a8a46d3f5565eefbff2de57d38d399f158"
+        ]
+      ],
+      "files": [
+        {
+          "name": "LICENSE",
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+        }
+      ]
+    }
+  ]
+}
