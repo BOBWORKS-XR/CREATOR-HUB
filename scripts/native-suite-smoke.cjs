@@ -198,12 +198,16 @@ async function closeHosted(app) {
     fs.writeFileSync(path.join(out, 'mcp-picker.json'), snapshot);
   });
   assert.equal(await page.locator('#hosted-stop').isDisabled(), true);
+  assert.doesNotMatch(await page.locator('#action-error').innerText(), /An app operation is running/);
   native(child.pid, hub, 'close');
-  await delay(500);
+  await page.waitForFunction(() => {
+    const error = document.querySelector('#action-error');
+    return !error.classList.contains('hidden') && error.textContent === 'An app operation is running. Cancel the download or finish the installer before closing Hub.';
+  });
   assert.equal(child.exitCode, null);
   await retry(() => native(backends.mcp, apps.mcp, 'button', 'Cancel'));
   await page.waitForFunction(() => !document.querySelector('#hosted-stop').disabled);
-  report.checks.push('Real MCP folder picker blocks Hub close; cancellation releases the operation');
+  report.checks.push('Real MCP folder picker blocks native Hub close with the actual refusal warning; cancellation releases the operation');
   if (!mcpOnly) {
     await show('setup');
     assert.equal(await frames.setup.locator('#project-name').inputValue(), 'Unsaved test draft');

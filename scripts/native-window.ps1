@@ -43,9 +43,10 @@ public static class NativeTestWindows {
 '@
 $handles = [NativeTestWindows]::ForProcess($TargetPid)
 if ($Action -eq 'close') {
-    foreach ($handle in $handles) {
-        if ([NativeTestWindows]::Text($handle) -like 'Creator Hub*') { [void][NativeTestWindows]::PostMessage($handle, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) }
-    }
+    $closeHandles = @($handles | Where-Object { [NativeTestWindows]::Text($_) -like 'Creator Hub*' })
+    if ($closeHandles.Count -ne 1) { throw 'Expected exactly one owned Creator Hub window to close.' }
+    if (-not [NativeTestWindows]::PostMessage($closeHandles[0], 0x10, [IntPtr]::Zero, [IntPtr]::Zero)) { throw "Could not post the owned close request: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())." }
+    'WM_CLOSE posted to the exact owned Hub window.'
     exit
 }
 if ($Action -eq 'file') {
@@ -63,7 +64,7 @@ $windows = @($handles | ForEach-Object { [Windows.Automation.AutomationElement]:
 if ($Action -eq 'snapshot') {
     $result = foreach ($window in $windows) {
         $children = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
-        [PSCustomObject]@{ title = $window.Current.Name; handle = $window.Current.NativeWindowHandle; class = [NativeTestWindows]::Class([IntPtr]$window.Current.NativeWindowHandle); controls = @($children | ForEach-Object { [PSCustomObject]@{ name=$_.Current.Name; id=$_.Current.AutomationId; type=$_.Current.ControlType.ProgrammaticName; handle=$_.Current.NativeWindowHandle; processId=$_.Current.ProcessId } }) }
+        [PSCustomObject]@{ title = $window.Current.Name; handle = $window.Current.NativeWindowHandle; class = [NativeTestWindows]::Class([IntPtr]$window.Current.NativeWindowHandle); controls = @($children | ForEach-Object { [PSCustomObject]@{ name=$_.Current.Name; id=$_.Current.AutomationId; type=$_.Current.ControlType.ProgrammaticName; handle=$_.Current.NativeWindowHandle; processId=$_.Current.ProcessId; parent=[NativeTestWindows]::GetParent([IntPtr]$_.Current.NativeWindowHandle).ToInt64() } }) }
     }
     ConvertTo-Json -InputObject @($result) -Depth 4 -Compress
     exit
