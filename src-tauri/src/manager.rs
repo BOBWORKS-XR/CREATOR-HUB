@@ -528,9 +528,6 @@ impl Manager {
         if let Some(reason) = release.install_block_reason(app) {
             return Err(reason);
         }
-        if paths(app)?.len() > 1 {
-            return Err("Multiple installations are present. Hub can open your selected copy, but updates are paused until competing installations are resolved.".into());
-        }
         let current = installed(app)?;
         let target = platform::default_exe(app)?;
         if let Some((path, known)) = &current {
@@ -545,6 +542,7 @@ impl Manager {
             if !platform::same_path(path, &target) {
                 return Err("This app uses a custom or portable location. Keep using that copy; Hub will not create a second installation.".into());
             }
+            platform::verify_nsis_update_target(app.name(), &target)?;
         }
         platform::reject_links(&target)?;
         let installer = self.download(app, &release, &progress)?;
@@ -581,14 +579,26 @@ impl Manager {
         if file_hash(&installer)? != release.sha256 {
             return Err("Cached installer changed. Download it again.".into());
         }
-        // Legacy NSIS silent mode can kill a running app. Only a reviewed new
-        // installer AND a compatible existing uninstaller may use silent mode.
-        let safe_silent = release.installer_protocol == 1
-            && current
-                .as_ref()
-                .is_none_or(|(_, r)| r.as_ref().is_some_and(|r| r.installer_protocol == 1));
+        // /UPDATE bypasses old NSIS uninstallers; matching MSI entries are
+        // refused. Silent mode still requires a signed, guarded new installer.
+        let safe_silent = release.installer_protocol == 1;
         progress(Progress { app, phase: "installing".into(), message: if safe_silent { "Installing the verified app..." } else { "Complete the app installer window. Hub will verify the result and reopen the app when it finishes." }.into(), received: 0, total: 0, cancellable: false });
         let mut command = platform::command(&installer);
+        if current.is_some() {
+            platform::verify_nsis_update_target(app.name(), &target)?;
+            let expected = current
+                .as_ref()
+                .and_then(|(_, known)| known.as_ref())
+                .ok_or("The installed app could not be rechecked.")?;
+            if file_hash(&target)? != expected.executable_sha256 {
+                return Err(
+                    "The installed app changed while downloading. Check for updates again.".into(),
+                );
+            }
+            command.arg("/UPDATE");
+        } else if target.exists() {
+            return Err("An app was installed while downloading. Check for updates again.".into());
+        }
         if safe_silent {
             command.arg("/S");
         }

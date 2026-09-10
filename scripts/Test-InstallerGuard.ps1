@@ -14,14 +14,16 @@ $before = @(Get-Process -Name creator-hub -ErrorAction SilentlyContinue | Select
 $psi = [Diagnostics.ProcessStartInfo]::new($fixtureNode)
 $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
-$psi.RedirectStandardInput = $true
 $psi.RedirectStandardOutput = $true
-$psi.Arguments = '-e "process.stdin.once(''data'',()=>process.exit(0));process.stdout.write(''ready\n'')"'
+$psi.RedirectStandardError = $true
+$stopFile = Join-Path $root 'owned-fixture.stop'
+$psi.Arguments = '"{0}" "{1}"' -f (Join-Path $PSScriptRoot 'owned-hub-fixture.cjs'), $stopFile
 $owned = [Diagnostics.Process]::Start($psi)
 $report = [ordered]@{ passed=$false; guardSha256=(Get-FileHash -LiteralPath $guard -Algorithm SHA256).Hash.ToLowerInvariant(); fixture=$exe }
 try {
     $ready = $owned.StandardOutput.ReadLineAsync()
     if (-not $ready.Wait(10000) -or $ready.Result -ne 'ready') { throw 'Owned fixture did not start.' }
+    if ($owned.WaitForExit(500)) { throw 'Owned fixture exited before the guard could test it.' }
     $run = Start-Process -FilePath $exe -ArgumentList '/S' -PassThru -WindowStyle Hidden
     if (-not $run.WaitForExit(20000)) { throw "Guard did not exit: inspect fixture PID $($run.Id). No process was stopped." }
     $report.exitCode = $run.ExitCode
@@ -38,8 +40,7 @@ try {
     if ($before.Count -eq 0) {
         $update = Start-Process -FilePath $exe -ArgumentList '/S /UPDATE' -PassThru -WindowStyle Hidden
         Start-Sleep -Milliseconds 750
-        $owned.StandardInput.WriteLine('exit')
-        $owned.StandardInput.Close()
+        [IO.File]::WriteAllText($stopFile, 'exit')
         if (-not $owned.WaitForExit(10000)) { throw 'Owned update fixture did not exit cooperatively.' }
         if (-not $update.WaitForExit(20000)) { throw 'Update guard did not complete after cooperative exit.' }
         $report.updateAcceptedAfterExit = $update.ExitCode -eq 0 -and (Test-Path -LiteralPath (Join-Path $root 'install-section.reached'))
@@ -48,9 +49,13 @@ try {
     }
     $report.passed = $true
 } finally {
-    if (-not $owned.HasExited) { $owned.StandardInput.WriteLine('exit'); $owned.StandardInput.Close() }
+    if (-not $owned.HasExited) { [IO.File]::WriteAllText($stopFile, 'exit') }
     if (-not $owned.WaitForExit(10000)) { throw "Owned fixture did not exit cooperatively: $($owned.Id)" }
+    $report.fixtureExitCode = $owned.ExitCode
+    $report.fixtureStderr = $owned.StandardError.ReadToEnd()
+    if ($report.fixtureExitCode -ne 0) { $report.passed = $false }
     $owned.Dispose()
     $report | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'report.json') -Encoding UTF8
     Write-Output ($report | ConvertTo-Json)
+    if ($report.fixtureExitCode -ne 0) { throw 'The owned fixture exited abnormally; inspect report.json.' }
 }

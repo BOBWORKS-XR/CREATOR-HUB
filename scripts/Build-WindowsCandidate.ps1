@@ -15,11 +15,18 @@ $installedExe = Join-Path $extracted 'creator-hub.exe'
 if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) { throw 'Installer launcher payload is missing.' }
 $guard = (& (Join-Path $PSScriptRoot 'Test-InstallerGuard.ps1') | Out-String) | ConvertFrom-Json
 if (-not $guard.passed) { throw 'The installer running-app guard failed.' }
+$acceptance = $null
+if ($env:GITHUB_ACTIONS -eq 'true') {
+    & (Join-Path $PSScriptRoot 'Test-InstalledCandidate.ps1') -CandidateDirectory $output
+    $acceptance = Get-Content -LiteralPath (Join-Path $output 'installed-acceptance.json') -Raw | ConvertFrom-Json
+    if (-not $acceptance.passed) { throw 'Installed candidate acceptance failed.' }
+}
 $report = [ordered]@{
     version = $version
     installerSha256 = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
     executableSha256 = (Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash.ToLowerInvariant()
     guard = $guard
+    installedAcceptance = $acceptance
     installedUpgradeTested = $false
     selfUpdateTested = $false
     publicationReady = $false

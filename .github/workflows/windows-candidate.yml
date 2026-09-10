@@ -57,4 +57,5 @@ jobs:
           path: |
             dist/Creator-Hub-*-Windows-Candidate/
             test-results/
+            artifacts/installer-guard-*/report.json
           if-no-files-found: error

@@ -4,6 +4,12 @@
   "version": "0.1.0-alpha.3",
   "identifier": "com.creatorworks.hub",
   "build": { "frontendDist": "../src" },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IENyZWF0b3IgSHViIHJlbGVhc2UgZGVzY3JpcHRvciBrZXkgMjAyNi0wOQpSV1QrYXkrUjJnZldNWWloN1J2YkdJdWVKbC9IV0xlZklvWUFCakIyTzY4UGFEWGg0Vzd6dThWUAo=",
+      "windows": { "installMode": "passive" }
+    }
+  },
   "app": {
     "withGlobalTauri": true,
     "windows": [{ "title": "Creator Hub - Development Preview", "width": 940, "height": 580, "minWidth": 560, "minHeight": 480, "center": true }],

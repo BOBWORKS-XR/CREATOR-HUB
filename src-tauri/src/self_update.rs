@@ -108,6 +108,7 @@ fn installed_location() -> Result<PathBuf, String> {
             return Err("Another Hub copy is installed. Open that copy before updating.".into());
         }
     }
+    platform::verify_nsis_update_target("Creator Hub", &exe)?;
     Ok(exe)
 }
 
@@ -286,6 +287,10 @@ pub async fn install_hub_update(
         // Tauri owns the Windows installer handoff and application restart.
         let endpoint = catalog::release_url(REPO, &release.version, "latest.json");
         let updater = handle.updater_builder()
+            // The default callback destroys the UI before ShellExecute succeeds.
+            // There are no hosted sessions here; let the plugin exit only after
+            // a successful launch so a refused launch can still show an error.
+            .on_before_exit(|| {})
             .endpoints(vec![endpoint.parse().map_err(|_| "Invalid Hub update endpoint.")?])
             .map_err(|_| "Cannot prepare the Hub update.")?
             .timeout(Duration::from_secs(30))
@@ -318,6 +323,28 @@ pub async fn install_hub_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packaged_updater_configuration_initializes_with_the_catalog_key() {
+        let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let value = context
+            .config()
+            .plugins
+            .0
+            .get("updater")
+            .cloned()
+            .unwrap_or_default();
+        let config: tauri_plugin_updater::Config = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(config.pubkey)
+                .unwrap(),
+            include_bytes!("catalog-key.pub")
+        );
+        assert!(!config.dangerous_insecure_transport_protocol);
+        assert!(!config.dangerous_accept_invalid_certs);
+        assert!(!config.dangerous_accept_invalid_hostnames);
+        assert!(config.endpoints.is_empty());
+    }
     #[test]
     fn hub_updates_require_correct_identity_newer_version_and_guarded_installer() {
         let mut r = catalog::bootstrap(catalog::AppId::Setup);

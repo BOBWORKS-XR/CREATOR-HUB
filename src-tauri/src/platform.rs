@@ -111,6 +111,101 @@ pub struct Running {
     pub server: bool,
 }
 
+#[cfg(any(windows, test))]
+fn matches_installer_product(product: &str, display: &str, publisher: &str) -> bool {
+    // Tauri's NSIS PageReinstall compares concatenated fields with StrCmp.
+    format!("{display}{publisher}").eq_ignore_ascii_case(&format!("{product}Creator Works"))
+}
+
+#[cfg(any(windows, test))]
+fn check_update_record(uninstall: &str, location: &str, folder: &Path) -> Result<(), String> {
+    if uninstall.to_ascii_lowercase().contains("msiexec") {
+        return Err("This app uses an older Windows installer. Automatic upgrade is paused to protect that installation.".into());
+    }
+    if !same_path(Path::new(location.trim_matches('"')), folder) {
+        return Err(
+            "Another installation uses this app's name. Choose or repair it before updating."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+// /UPDATE skips old NSIS removal, but a matching MSI record overrides it.
+pub fn verify_nsis_update_target(product: &str, exe: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use winreg::{enums::*, RegKey};
+        fn optional_string(key: &RegKey, name: &str) -> Result<String, String> {
+            match key.get_value(name) {
+                Ok(value) => Ok(value),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+                Err(_) => Err("An installation record could not be read safely.".into()),
+            }
+        }
+        let folder = exe.parent().ok_or("Invalid installed app path.")?;
+        let product_key = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(format!("Software\\Creator Works\\{product}"))
+            .map_err(|_| "The app's installation record is missing. Repair it before updating.")?;
+        let saved: String = product_key
+            .get_value("")
+            .map_err(|_| "The installed app folder could not be checked.")?;
+        if !same_path(Path::new(&saved), folder) {
+            return Err(
+                "The saved installation folder differs. Repair the app before updating.".into(),
+            );
+        }
+        let mut found = false;
+        for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+            for view in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+                let root = match RegKey::predef(hive).open_subkey_with_flags(
+                    "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+                    KEY_READ | view,
+                ) {
+                    Ok(root) => root,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(_) => {
+                        return Err("Windows installation records could not be checked.".into())
+                    }
+                };
+                for (index, name) in root.enum_keys().enumerate() {
+                    if index >= 10000 {
+                        return Err("Too many installation records to check safely.".into());
+                    }
+                    let name =
+                        name.map_err(|_| "Windows installation records could not be read.")?;
+                    let key = root
+                        .open_subkey(&name)
+                        .map_err(|_| "An installation record could not be read.")?;
+                    let display = optional_string(&key, "DisplayName")?;
+                    let publisher = optional_string(&key, "Publisher")?;
+                    if !matches_installer_product(product, &display, &publisher) {
+                        continue;
+                    }
+                    let uninstall: String = key
+                        .get_value("UninstallString")
+                        .map_err(|_| "The existing app's installer type could not be checked.")?;
+                    let location: String = key.get_value("InstallLocation").map_err(|_| {
+                        "The existing app's installation folder could not be checked."
+                    })?;
+                    check_update_record(&uninstall, &location, folder)?;
+                    found = true;
+                }
+            }
+        }
+        if found {
+            Ok(())
+        } else {
+            Err("The app's installation record is missing. Repair it before updating.".into())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (product, exe);
+        Err("Windows installation records are required.".into())
+    }
+}
+
 fn gui_name(app: AppId, name: &str) -> bool {
     name.eq_ignore_ascii_case(app.exe())
         || (app == AppId::Mcp
@@ -122,6 +217,58 @@ fn gui_name(app: AppId, name: &str) -> bool {
 #[cfg(test)]
 mod legacy_name_tests {
     use super::*;
+    #[test]
+    fn installer_matching_includes_case_and_concatenated_field_boundaries() {
+        assert!(matches_installer_product(
+            "Creator Works MCP",
+            "Creator Works MCP",
+            "Creator Works"
+        ));
+        assert!(matches_installer_product(
+            "Creator Works MCP",
+            "creator works mcp",
+            "creator works"
+        ));
+        assert!(matches_installer_product(
+            "Creator Works MCP",
+            "Creator Works M",
+            "CPCreator Works"
+        ));
+        assert!(!matches_installer_product(
+            "Creator Works MCP",
+            "BANTWORKS MCP",
+            "Creator Works"
+        ));
+        assert!(!matches_installer_product(
+            "Creator Works MCP",
+            "Creator Works MCP",
+            "Someone else"
+        ));
+    }
+    #[test]
+    fn update_records_reject_msi_and_different_or_missing_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("selected");
+        let other = root.path().join("other");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let location = format!("\"{}\"", target.display());
+        assert!(check_update_record("uninstall.exe", &location, &target).is_ok());
+        assert!(check_update_record("MsIExec.exe /X {fixture}", &location, &target).is_err());
+        assert!(check_update_record("uninstall.exe", &location, &other).is_err());
+        assert!(check_update_record("uninstall.exe", "missing", &target).is_err());
+    }
+    #[test]
+    #[ignore = "Explicit read-only check of this machine's registered MCP destination"]
+    fn installed_mcp_destination_allows_legacy_side_by_side_without_migration() {
+        assert_eq!(
+            std::env::var("CREATOR_HUB_REAL_NSIS_CHECK").as_deref(),
+            Ok("1")
+        );
+        let exe = default_exe(AppId::Mcp).unwrap();
+        assert!(exe.is_file());
+        verify_nsis_update_target(AppId::Mcp.name(), &exe).unwrap();
+    }
     #[test]
     fn real_bantworks_binary_and_older_alias_are_detected_without_matching_other_apps() {
         for name in [
