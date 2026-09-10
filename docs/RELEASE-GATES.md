@@ -8,13 +8,22 @@ completed adoption. Runtime acceptance is distinct from source/unit tests.
 
 ## Status
 
-2026-09-10 scope update: a separate Hub-only alpha.3 installer is being prepared
-on GitHub for prerelease testing. It has no embedded app payloads or adoption claims. Installed
-apps remain standalone, unknown/multiple copies need explicit selection, and
+2026-09-10 scope update: the coordinated alpha.3 installer is being prepared
+on GitHub for prerelease testing. It has no embedded app payloads or adoption claims.
+Exact reviewed app builds can open inside Hub after native consent; standalone
+opening remains available. Unknown/multiple copies need explicit selection, and
 the known-broken MCP 2.6.0 installer is denied by hash. This does not complete the
 full embedded/adoption release gates below. Native installation/upgrade and GUI
 startup acceptance is now part of the Windows candidate workflow. A completed
 build alone does not pass that gate. Hub self-update handoff remains separate.
+
+Current release flow and supported channel choices are in
+[Prerelease Testing](PRERELEASE-TESTING.md). The final workflow runs both clean
+installation and real older-version upgrades through Hub, followed by both native
+hosted apps. Project Setup's notice-complete candidate34527681202 and installed
+upgrade34528338440 passed. MCP's notice-complete candidate34527053871 and general
+CI34527053003 passed, including an exact extracted-EXE metadata smoke with no
+configuration changes. Neither result alone proves the final Hub integration.
 
 The new updater passed local source, signature-contract and interface review.
 Review found a missing plugin configuration and premature cleanup before a
@@ -54,16 +63,17 @@ historical upgrade coverage. Setup 0.2.2 is already public and remains a baselin
 | Versions, README, licenses, hashes and signed catalog descriptors | Pending final binaries | Do not sign a descriptor for an unverified extracted executable |
 | macOS/Linux native support | Unverified | Do not label Windows testing as cross-platform acceptance |
 
-Local regression checkpoint: Hub 37 browser tests and 27 Rust tests passed;
+Earlier baseline checkpoint: Hub 37 browser tests and 27 Rust tests passed;
 Setup 32 browser tests, 33 Rust tests and two real-EXE metadata tests passed.
 Both pass strict Clippy. Opt-in live tests are not represented as ordinary unit
 coverage. Native reports and exact candidate hashes are in the local development
 handoff; tests must be repeated where later code changes affect their coverage.
 
-The read-only MCP feature candidate is separate from the stable installer
-hotfix. Forward-port and retest the installer correction before publishing a
-Hub-compatible MCP installer. Passing hosted UI tests does not validate its
-installer or retroactively update the public 2.6.0 package.
+The installer hotfix has now been forward-ported into the MCP feature branch.
+The notice-complete artifact must repeat installed acceptance before publishing.
+Passing hosted UI tests does not validate its installer or retroactively update
+the public 2.6.0 package. Current local Hub regression:40 Rust tests plus57 browser
+tests pass, with four explicit live Rust tests excluded from that count.
 
 The current upgrade CI sentinel proves opaque-file preservation, not valid
 launcher settings or first GUI load. Valid historical configs and fake client

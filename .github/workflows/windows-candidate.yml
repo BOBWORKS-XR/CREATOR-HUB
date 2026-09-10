@@ -20,16 +20,23 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Read accepted app source revisions
+        id: apps
+        shell: pwsh
+        run: |
+          $pins = Get-Content scripts/prerelease-apps.json -Raw | ConvertFrom-Json
+          "setup=$($pins.setup.sourceRevision)" >> $env:GITHUB_OUTPUT
+          "mcp=$($pins.mcp.sourceRevision)" >> $env:GITHUB_OUTPUT
       - uses: actions/checkout@v6
         with:
           repository: BOBWORKS-XR/CREATOR-PROJECT-SETUP
-          ref: d09751051f22fd1dc8079f0a16a6ed6a39f7e61a
+          ref: ${{ steps.apps.outputs.setup }}
           path: .test-fixtures/setup
           persist-credentials: false
       - uses: actions/checkout@v6
         with:
           repository: BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP
-          ref: 82fa30e73898b471234a3c54ef11fd08096fc884
+          ref: ${{ steps.apps.outputs.mcp }}
           path: .test-fixtures/mcp
           persist-credentials: false
       - uses: actions/setup-node@v6
@@ -40,6 +47,7 @@ jobs:
         with:
           components: clippy
       - run: npm ci
+      - run: node --test scripts/*.test.cjs
       - run: npx playwright install chromium
       - name: Hub interface tests
         run: npm run test:ui
@@ -49,7 +57,7 @@ jobs:
         run: cargo clippy --release --locked --manifest-path src-tauri/Cargo.toml -- -D warnings
       - name: Build and verify installer candidate
         shell: powershell
-        run: .\scripts\Build-WindowsCandidate.ps1
+        run: .\scripts\Build-WindowsCandidate.ps1 -HostedPins scripts/prerelease-apps.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -58,4 +66,47 @@ jobs:
             dist/Creator-Hub-*-Windows-Candidate/
             test-results/
             artifacts/installer-guard-*/report.json
+          if-no-files-found: error
+
+  native-suite:
+    needs: build
+    name: Native suite (${{ matrix.baseline }})
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        baseline: [clean, legacy]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: creator-hub-windows-candidate
+          path: .
+      - name: Install the exact tested Hub package
+        shell: powershell
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          .\scripts\Test-InstalledCandidate.ps1 -CandidateDirectory "dist\Creator-Hub-$version-Windows-Candidate"
+      - name: Test real public installs and both hosted applications
+        env:
+          CREATOR_SUITE_BASELINE: ${{ matrix.baseline }}
+        run: node scripts/native-suite-smoke.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-suite-${{ matrix.baseline }}
+          path: |
+            artifacts/native-suite-*/report.json
+            artifacts/native-suite-*/*.png
+            artifacts/native-suite-*/*dialogs.json
+            artifacts/native-suite-*/mcp-picker.json
+            dist/Creator-Hub-*-Windows-Candidate/installed-acceptance.json
           if-no-files-found: error

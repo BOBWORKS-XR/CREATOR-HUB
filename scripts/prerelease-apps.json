@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "setup": {
+    "version": "0.3.0-alpha.1",
+    "assetName": "Creator-Project-Setup-0.3.0-alpha.1-Windows-setup.exe",
+    "installerSha256": "0fdef05fa42fb88cb4bba4929d87065d5114a202c8c2d59ddb3672dbab99f3be",
+    "executableSha256": "e160787c2e5e1ff0012e2e0aa74ecfa516434e05d2c255f6d11340724690e6f0",
+    "acceptanceRun": "34528338440",
+    "sourceRevision": "4ba97911ce135faa2f1ea495dd01bf1ea0c1f55d"
+  },
+  "mcp": {
+    "version": "2.7.0-alpha.1",
+    "assetName": "Creator-Works-MCP-2.7.0-alpha.1-Windows-setup.exe",
+    "installerSha256": "8f39b9f2e120076346873dc8cc3186e6a2c055e1cca4cf9b8b66dfb700f12c41",
+    "executableSha256": "04971c5c6cc2c3346606d4ae96bbea465c9924b564a1fe928f7d7d006527de65",
+    "acceptanceRun": "34527053871",
+    "sourceRevision": "72048832e74c50d87f719387db58d79d66e05efb"
+  }
+}

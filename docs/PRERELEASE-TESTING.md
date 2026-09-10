@@ -36,10 +36,12 @@ Each app's exact installer must pass its own Windows install/upgrade checks.
 Its signed descriptor binds installer size/hash and the EXE extracted from that
 installer. Hub pins those installed EXEs; portable companion EXEs are not substitutes.
 
-The Hub candidate additionally runs `native-suite-smoke.cjs` on a disposable
-GitHub-hosted Windows machine. It tests public signed release discovery, download,
-actual in-app installation, native consent, both hosted interfaces, an isolated
-MCP preference write/restoration, folder-picker close protection, and scoped exit.
+The Hub candidate additionally runs `native-suite-smoke.cjs` on separate disposable
+GitHub-hosted Windows machines for clean installation and an older-version upgrade.
+It tests public signed release discovery, download, actual in-app installation,
+preservation of a valid saved MCP project list/selection, native consent, both
+hosted interfaces, an isolated MCP preference write/restoration, folder-picker
+close protection, and scoped exit.
 The test refuses a local/self-hosted machine before resolving app paths.
 
 Reports and screenshots are uploaded with the candidate. A failed check blocks

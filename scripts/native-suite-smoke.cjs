@@ -148,7 +148,10 @@ async function closeHosted(app) {
     } else {
       await frames.mcp.waitForFunction(() => window.CreatorRuntime?.hosted && !window.CreatorRuntime.readOnly && !document.querySelector('#workspaceControls').disabled);
       assert.equal(await frames.mcp.locator('#browseProjectBtn').isEnabled(), true);
-      if (upgrade) assert.match(await frames.mcp.locator('#projectsList').innerText(), new RegExp(savedProjectName));
+      if (upgrade) {
+        assert.match(await frames.mcp.locator('#projectsList').innerText(), new RegExp(savedProjectName));
+        assert.equal(await frames.mcp.locator('#projectPath').inputValue(), path.join(process.env.RUNNER_TEMP, 'Existing project fixture'));
+      }
       await frames.mcp.locator('details.advanced-section > summary').click();
       const original = JSON.parse(fs.readFileSync(configPath, 'utf8'));
       assert.equal(original.auto_start, false);
