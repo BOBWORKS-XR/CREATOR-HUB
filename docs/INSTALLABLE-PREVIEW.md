@@ -1,11 +1,13 @@
 # Creator Hub 0.1.0-alpha.3 for Windows
 
-This is a local test build, not a public stable release.
+This is a public Windows test release, not a stable release.
+[Download the installer](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.3).
 
 Hub now checks for its own updates as well as MCP and Project Setup updates.
 Test updates and verified downloads start enabled; you can turn either off.
-Installing still needs your approval. Self-update restart is awaiting its final
-installed test, so this candidate is not yet the published test release.
+Installing still needs your approval. A full Hub self-update to a later signed
+version remains untested. The app install/upgrade flow passed the separate
+[native acceptance checks](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34536443333).
 
 ## Install
 
@@ -18,6 +20,11 @@ Windows may show an unsigned-publisher warning. If a Microsoft runtime is missin
 the installer will offer to download it.
 
 ## Existing Apps
+
+Already using MCP? Install Hub first, leave Include prereleases enabled, and
+choose Update app on the MCP page. No separate MCP download or Project Setup
+installation is needed. This was tested with MCP 2.6.0, preserving its settings
+and selected project through the update to 2.7.0-alpha.1.
 
 Choose Open app to use your usual app with all its settings. If more than one
 copy is found, choose Use this copy next to the one you recognise. Nothing is

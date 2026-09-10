@@ -8,6 +8,22 @@ completed adoption. Runtime acceptance is distinct from source/unit tests.
 
 ## Status
 
+2026-09-11 prerelease acceptance: Hub `0.1.0-alpha.3`, MCP `2.7.0-alpha.1` and
+Setup `0.3.0-alpha.1` have passed the scoped Windows install/upgrade flow.
+Hub build job [34533143879](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34533143879)
+passed installer packaging, native preflight and own installed checks. Initial
+downstream test-harness failures were corrected without changing that installer.
+[Native acceptance 34536443333](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34536443333)
+then passed clean, dual-app legacy and MCP-only upgrades using the signed public
+app releases. Valid MCP settings/selection, writable controls, native consent,
+actual close refusal and scoped backend exit passed. No user machine or Unity
+project was used. Release reports bind the exact installer and installed EXE.
+
+The dated entries below retain the broader adoption plan and earlier evidence.
+They do not undo this scoped prerelease acceptance. Automatic adoption, historical
+MSI/BANTWORKS migration, higher-version Hub self-update and project/headset tests
+remain outside the passed scope.
+
 2026-09-10 scope update: the coordinated alpha.3 installer is being prepared
 on GitHub for prerelease testing. It has no embedded app payloads or adoption claims.
 Exact reviewed app builds can open inside Hub after native consent; standalone

@@ -1,10 +1,20 @@
 # Creator Hub
 
 Lightweight Windows app manager for Creator Works MCP and Creator Project Setup.
-Windows prerelease candidate `0.1.0-alpha.3`; not a stable release.
+Windows prerelease `0.1.0-alpha.3`; not a stable release.
 Both tools remain usable independently.
 
 ## Try the Installer
+
+**Already use Creator Works MCP?** Install Hub, then
+choose **Update app** on its MCP page. You do not need Project Setup or a separate
+MCP download. The MCP `2.6.0` to `2.7.0-alpha.1` route passed real Windows testing,
+including its saved project list and settings. Historical BANTWORKS/MSI installs and duplicate
+copies may require attention; do not uninstall them just to make Hub detect an app.
+
+[Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.3).
+Choose `Creator-Hub-0.1.0-alpha.3-Windows-setup.exe`. Leave **Include prereleases**
+enabled to see the matching MCP and Project Setup previews.
 
 Close old Creator Hub preview windows, then run the new installer. It installs
 Hub only. Your MCP, Project Setup, settings and Unity projects stay where they are.
@@ -133,9 +143,15 @@ atomic local record replacement and close-state protection. Separate opt-in
 network tests download the real pinned installers without executing them; real
 Windows inventory tests do not launch or replace apps.
 
-Signed descriptor publication in both app release pipelines, clean-VM native
-install/upgrade acceptance and guarded GUI restart acceptance remain release
-gates. A successful installer exit is not enough: its installed launcher must
+The coordinated MCP and Project Setup prereleases have published signed
+descriptors and passed their installed Windows upgrade tests. Hub's own installer
+has passed clean installation, busy-app refusal, cooperative update and GUI
+startup checks on disposable Windows workers. The final
+[native acceptance run](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34536443333)
+passed fresh installs, both-app upgrades and MCP-only upgrades through Hub,
+including native consent, saved MCP project/selection, a preference round-trip,
+actual busy-close refusal and scoped exit. Project Setup is not required for MCP.
+A successful installer exit is not enough: its installed launcher must
 match the signed/pinned hash. Failed native installers are not assumed to be
 transactional; Hub reports failure and retains cached installers.
 

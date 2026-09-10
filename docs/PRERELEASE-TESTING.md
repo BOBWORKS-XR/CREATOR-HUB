@@ -5,6 +5,10 @@ Creator Project Setup 0.3.0-alpha.1. These are test releases, not stable release
 
 ## Try the Flow
 
+Existing MCP users start with Hub, not a separate MCP prerelease installation.
+Project Setup is optional. [Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.3)
+and choose the `Windows-setup.exe` asset.
+
 1. Save your work and close the old Hub. Install the new Hub EXE once.
 2. Leave **Include prereleases** enabled. Choose **Check for updates**.
 3. Choose MCP or Project Setup, then **Install app** or **Update app** and approve.
@@ -32,17 +36,27 @@ Do not assume a successful download proves that restart path.
 
 ## Evidence Before Publication
 
+Passed [native acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34536443333):
+clean installation, MCP `2.6.0` to `2.7.0-alpha.1` with no Setup installed, and
+both-app upgrades including Setup `0.2.2` to `0.3.0-alpha.1`. Existing valid MCP
+project selection and an isolated setting were checked in the actual hosted UI.
+The close test observes Hub's native refusal warning while a real picker is open.
+
 Each app's exact installer must pass its own Windows install/upgrade checks.
 Its signed descriptor binds installer size/hash and the EXE extracted from that
 installer. Hub pins those installed EXEs; portable companion EXEs are not substitutes.
 
 The Hub candidate additionally runs `native-suite-smoke.cjs` on separate disposable
-GitHub-hosted Windows machines for clean installation and an older-version upgrade.
+GitHub-hosted Windows machines for clean installation, an older-version upgrade
+of both apps, and an MCP-only upgrade with Project Setup left uninstalled.
 It tests public signed release discovery, download, actual in-app installation,
 preservation of a valid saved MCP project list/selection, native consent, both
 hosted interfaces, an isolated MCP preference write/restoration, folder-picker
 close protection, and scoped exit.
 The test refuses a local/self-hosted machine before resolving app paths.
+Its browser connection uses a temporary app-specific debugging policy only on
+those disposable workers, checks that the port is loopback-only and removes the
+owned policy afterward. Shipped app security settings are unchanged.
 
 Reports and screenshots are uploaded with the candidate. A failed check blocks
 Hub publication; browser mocks and an installer exit code alone do not pass it.
