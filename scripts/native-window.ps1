@@ -19,7 +19,7 @@ public static class NativeTestWindows {
     [DllImport("user32.dll")] private static extern bool EnumWindows(Visit cb, IntPtr data);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll", SetLastError=true)] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr root, Visit cb, IntPtr data);
     [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
@@ -27,6 +27,8 @@ public static class NativeTestWindows {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool SetWindowText(IntPtr h, string value);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder value, int size);
     public static string Text(IntPtr h) { var value=new StringBuilder(32768); GetWindowText(h,value,value.Capacity); return value.ToString(); }
+    public static string Class(IntPtr h) { var value=new StringBuilder(256); GetClassName(h,value,value.Capacity); return value.ToString(); }
+    public static uint ProcessId(IntPtr h) { uint pid; GetWindowThreadProcessId(h,out pid); return pid; }
     public static IntPtr FileEdit(IntPtr root) {
         IntPtr result=IntPtr.Zero;
         EnumChildWindows(root,(h,_)=> { var name=new StringBuilder(256); GetClassName(h,name,256); if(GetDlgCtrlID(h)==1148 && name.ToString()=="Edit") result=h; return true; },IntPtr.Zero);
@@ -61,15 +63,33 @@ $windows = @($handles | ForEach-Object { [Windows.Automation.AutomationElement]:
 if ($Action -eq 'snapshot') {
     $result = foreach ($window in $windows) {
         $children = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
-        [PSCustomObject]@{ title = $window.Current.Name; handle = $window.Current.NativeWindowHandle; controls = @($children | ForEach-Object { [PSCustomObject]@{ name=$_.Current.Name; id=$_.Current.AutomationId; type=$_.Current.ControlType.ProgrammaticName } }) }
+        [PSCustomObject]@{ title = $window.Current.Name; handle = $window.Current.NativeWindowHandle; class = [NativeTestWindows]::Class([IntPtr]$window.Current.NativeWindowHandle); controls = @($children | ForEach-Object { [PSCustomObject]@{ name=$_.Current.Name; id=$_.Current.AutomationId; type=$_.Current.ControlType.ProgrammaticName; handle=$_.Current.NativeWindowHandle; processId=$_.Current.ProcessId } }) }
     }
     ConvertTo-Json -InputObject @($result) -Depth 4 -Compress
     exit
 }
 foreach ($window in $windows) {
     if ($Action -eq 'button') {
-        $button = $window.FindFirst([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $Value))
+        $matchesByName = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $Value))
+        if ($matchesByName.Count -gt 1) { throw 'Requested dialog control is ambiguous.' }
+        $button = if ($matchesByName.Count -eq 1) { $matchesByName[0] } else { $null }
         if ($null -ne $button) {
+            if ($button.Current.AutomationId -match '^CommandButton_(1000|1001)$') {
+                $id = [int]$Matches[1]
+                $dialog = [IntPtr]$window.Current.NativeWindowHandle
+                $titles = @{
+                    'Install' = @('Install Creator app'); 'Cancel' = @('Install Creator app')
+                    'Enable MCP controls' = @('Open MCP in Creator Hub?'); 'Open read-only preview' = @('Open MCP in Creator Hub?')
+                    'Open in Hub' = @('Open Setup in Creator Hub?'); 'Not now' = @('Open MCP in Creator Hub?', 'Open Setup in Creator Hub?')
+                    'Close view' = @('Close hosted app?'); 'Keep open' = @('Close hosted app?')
+                }
+                if (-not $titles.ContainsKey($Value) -or $window.Current.Name -cnotin $titles[$Value]) { throw 'Requested task dialog title does not match the expected action.' }
+                if ([NativeTestWindows]::Class($dialog) -ne '#32770' -or [NativeTestWindows]::ProcessId($dialog) -ne $TargetPid -or $button.Current.ProcessId -ne $TargetPid) { throw 'Requested task dialog does not belong to the expected process.' }
+                if (-not [NativeTestWindows]::IsWindowVisible($dialog) -or -not $button.Current.IsEnabled -or $button.Current.IsOffscreen) { throw 'Requested task dialog control is not ready.' }
+                # RFD custom TaskDialog controls can share a proxy HWND. TDM_CLICK_BUTTON uses their observed UIA ID.
+                if (-not [NativeTestWindows]::PostMessage($dialog, 0x466, [IntPtr]$id, [IntPtr]::Zero)) { throw "Could not invoke the owned task dialog button: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())." }
+                exit
+            }
             if ($button.Current.NativeWindowHandle -ne 0) {
                 $control = [IntPtr]$button.Current.NativeWindowHandle
                 $id = [NativeTestWindows]::GetDlgCtrlID($control)
