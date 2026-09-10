@@ -12,26 +12,26 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
 
 #[derive(Default)]
 pub struct Manager {
-    busy: AtomicBool,
+    busy: Arc<AtomicBool>,
     closing: Mutex<bool>,
     cancel: AtomicBool,
     releases: Mutex<Vec<(AppId, Release)>>,
 }
 
-pub struct Operation<'a> {
-    manager: &'a Manager,
+pub struct Operation {
+    busy: Arc<AtomicBool>,
     _lock: File,
 }
-impl Drop for Operation<'_> {
+impl Drop for Operation {
     fn drop(&mut self) {
-        self.manager.busy.store(false, Ordering::SeqCst);
+        self.busy.store(false, Ordering::SeqCst);
     }
 }
 
@@ -60,6 +60,36 @@ pub struct AppState {
     pub issue: Option<String>,
     pub check_warning: Option<String>,
     pub installer_interactive: bool,
+    pub install_blocked: Option<String>,
+    pub required_hub_version: Option<String>,
+    pub installed_path: Option<PathBuf>,
+    pub detected_copies: Vec<DetectedCopy>,
+    pub hosted_preview: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedCopy {
+    path: PathBuf,
+    version: Option<String>,
+    verified: bool,
+}
+
+fn detected_copies(app: AppId) -> Vec<DetectedCopy> {
+    paths(app)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| {
+            let known = file_hash(&path)
+                .ok()
+                .and_then(|hash| known_executable(app, &hash).ok().flatten());
+            DetectedCopy {
+                path,
+                verified: known.is_some(),
+                version: known.map(|r| r.version),
+            }
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -82,14 +112,14 @@ fn root() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn child_dir(name: &str) -> Result<PathBuf, String> {
+pub(crate) fn child_dir(name: &str) -> Result<PathBuf, String> {
     let path = root()?.join(name);
     platform::reject_links(&path)?;
     fs::create_dir_all(&path).map_err(|_| "Cannot create Hub's local cache.")?;
     Ok(path)
 }
 
-fn bounded_read(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+pub(crate) fn bounded_read(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     platform::reject_links(path)?;
     let mut bytes = Vec::new();
     File::open(path)
@@ -103,7 +133,7 @@ fn bounded_read(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
     platform::reject_links(path)?;
     let pending = path.with_extension("pending");
     platform::reject_links(&pending)?;
@@ -115,7 +145,7 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
     fs::rename(&pending, path).map_err(|_| "Cannot promote local record.".into())
 }
 
-fn file_hash(path: &Path) -> Result<String, String> {
+pub(crate) fn file_hash(path: &Path) -> Result<String, String> {
     platform::reject_links(path)?;
     let mut file = File::open(path).map_err(|_| "App file is unavailable or locked.")?;
     if file
@@ -216,7 +246,7 @@ fn installed(app: AppId) -> Result<Option<(PathBuf, Option<Release>)>, String> {
             found.retain(|path| platform::same_path(path, &selected.path));
         }
         if found.len() != 1 {
-            return Err("Multiple or legacy installations were found. Use existing app to select a verified copy for opening. Hub will not remove or update competing copies automatically.".into());
+            return Err("More than one copy of this app was found. Choose the one you want to use. Hub won't remove either copy.".into());
         }
     }
     let Some(path) = found.into_iter().next() else {
@@ -257,7 +287,10 @@ impl Manager {
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
     }
-    pub fn begin(&self) -> Result<Operation<'_>, String> {
+    pub(crate) fn cancellation(&self) -> &AtomicBool {
+        &self.cancel
+    }
+    pub fn begin(&self) -> Result<Operation, String> {
         let closing = self
             .closing
             .lock()
@@ -287,7 +320,7 @@ impl Manager {
             Ok(lock) => {
                 self.cancel.store(false, Ordering::SeqCst);
                 Ok(Operation {
-                    manager: self,
+                    busy: Arc::clone(&self.busy),
                     _lock: lock,
                 })
             }
@@ -351,17 +384,23 @@ impl Manager {
                 issue: None,
                 check_warning: warning,
                 installer_interactive: release.installer_protocol == 0,
+                install_blocked: release.install_block_reason(app),
+                required_hub_version: release.required_hub_version().map(String::from),
+                installed_path: None,
+                detected_copies: Vec::new(),
+                hosted_preview: crate::hosted::preview_mode(app),
             };
             match installed(app) {
                 Ok(Some((path, known))) => {
                     state.installed = true;
+                    state.installed_path = Some(path.clone());
                     state.trusted = known.is_some();
                     if let Some(known) = known {
                         state.update_available = Version::parse(&release.version).unwrap()
                             > Version::parse(&known.version).unwrap();
                         state.installed_version = Some(known.version);
                     } else {
-                        state.issue = Some("Existing app found, but its executable is not in the verified release catalog. It will not be launched or overwritten.".into());
+                        state.issue = Some("Hub couldn't verify this app. Choose an official copy. Nothing was changed.".into());
                     }
                     match platform::running(app, &path) {
                         Ok(running) => state.running = !running.gui.is_empty() || running.server,
@@ -376,6 +415,9 @@ impl Manager {
                     }
                 }
                 Err(error) => state.issue = Some(error),
+            }
+            if state.issue.is_some() && !state.installed {
+                state.detected_copies = detected_copies(app);
             }
             selected.push((app, release));
             states.push(state);
@@ -459,6 +501,9 @@ impl Manager {
     ) -> Result<String, String> {
         let _operation = self.begin()?;
         let release = self.selected(app, &version)?;
+        if let Some(reason) = release.install_block_reason(app) {
+            return Err(reason);
+        }
         self.download(app, &release, &progress)?;
         Ok(format!(
             "{} {} downloaded and verified. Installation has not started.",
@@ -480,6 +525,9 @@ impl Manager {
             return Err("App installation is available on Windows x64 only in this build.".into());
         }
         let release = self.selected(app, &version)?;
+        if let Some(reason) = release.install_block_reason(app) {
+            return Err(reason);
+        }
         if paths(app)?.len() > 1 {
             return Err("Multiple installations are present. Hub can open your selected copy, but updates are paused until competing installations are resolved.".into());
         }
@@ -606,6 +654,19 @@ impl Manager {
             &serde_json::to_vec(&Adoption { path }).unwrap(),
         )
     }
+
+    pub fn select_detected(&self, app: AppId, path: PathBuf) -> Result<(), String> {
+        if !paths(app)?
+            .iter()
+            .any(|known| platform::same_path(known, &path))
+        {
+            return Err(
+                "That app is no longer in the detected locations. Refresh and select it again."
+                    .into(),
+            );
+        }
+        self.adopt(app, path)
+    }
 }
 
 fn open_verified(app: AppId, path: &Path) -> Result<(), String> {
@@ -729,12 +790,26 @@ fn download_stream(
     cancel: &AtomicBool,
     progress: impl Fn(u64),
 ) -> Result<(), String> {
+    download_stream_url(
+        &app.download_url(&release.version, &release.asset_name),
+        release,
+        target,
+        cancel,
+        progress,
+    )
+}
+
+pub(crate) fn download_stream_url(
+    url: &str,
+    release: &Release,
+    target: impl Write,
+    cancel: &AtomicBool,
+    progress: impl Fn(u64),
+) -> Result<(), String> {
     tauri::async_runtime::block_on(async {
         progress(0);
         let client = catalog::streaming_client()?;
-        let request = client
-            .get(app.download_url(&release.version, &release.asset_name))
-            .send();
+        let request = client.get(url).send();
         let mut response = cancellable(request, cancel)
             .await?
             .and_then(|r| r.error_for_status())
@@ -866,11 +941,17 @@ mod tests {
         assert_eq!(snapshot.apps.len(), 2);
         for state in snapshot.apps {
             println!(
-                "{}: installed={}, trusted={}, attention={}",
+                "{}: installed={}, trusted={}, attention={}, detected={}, verifiedCopies={}",
                 state.app.name(),
                 state.installed,
                 state.trusted,
-                state.issue.is_some()
+                state.issue.is_some(),
+                state.detected_copies.len(),
+                state
+                    .detected_copies
+                    .iter()
+                    .filter(|copy| copy.verified)
+                    .count()
             );
         }
     }

@@ -1,0 +1,81 @@
+# Coordinated Release Gates
+
+Requested 2026-09-10: Creator Hub, Creator Works MCP and Creator Project Setup.
+No push, public repository creation, tag or release until the relevant gates
+pass and the package evidence is recorded. A preview must not be advertised as
+completed adoption. Runtime acceptance is distinct from source/unit tests.
+
+## Status
+
+2026-09-10 scope update: a separate Hub-only alpha.2 installer is being prepared
+for local testing. It has no embedded app payloads or adoption claims. Installed
+apps remain standalone, unknown/multiple copies need explicit selection, and
+the known-broken MCP 2.6.0 installer is denied by hash. This does not complete the
+full embedded/adoption release gates below. Native install/remove acceptance
+is still required before public distribution.
+
+See [installation/upgrade matrix](INSTALL-UPGRADE-MATRIX.md) for the full public
+baseline inventory and untested scenarios, and [local user test](LOCAL-USER-TEST.md)
+for a non-installing preview test. The prepared 2.6.0 -> 2.6.1 check is not broad
+historical upgrade coverage. Setup 0.2.2 is already public and remains a baseline.
+
+| Gate | Status | Evidence / remaining work |
+| --- | --- | --- |
+| Hub Projects page | Native listing and guard checks passed | hosted-native-1789060313732: 62 known / 36 SDK locations, filters/search retained, unknown-ID launch rejected; valid Editor launch and native add/remove acceptance still pending |
+| MCP installer path-with-spaces defect | Confirmed broken; 2.6.1 candidate built | Final packaged `-File` guard: 199 Node, 23 Rust and 24 WinPS checks plus native no-install harness pass; actual installed upgrade and interactive old-uninstaller/Retry acceptance remain separate gates |
+| Setup real creation and reopen validation | Passed on prior Setup-first pair | Native report hosted-native-1789053314825; repeat against final artifacts |
+| Setup inspection, backup, repair and stale-plan protection | Real repair and second validation passed | Disposable CreatorSetupRepair-ReleaseGate-20260910-1; preserved scene/custom content/custom VS selections, backup retained, 31,904 VS nodes/172 Creator nodes; hosted final-pair repetition pending |
+| Setup early old-uninstaller guard | Native A/B passed; installer rebuilt | Baseline reached legacy page while app ran; new MUI GUI-init check refused with exit 10 before the page; fixture and existing processes survived. No production installer executed |
+| MCP read-only hosting | Passed, including optional lifecycle events and legacy initialization | Native reports hosted-native-1789058480012 and hosted-native-1789058550242; actual config metadata/hashes unchanged, no mutation authority |
+| Full MCP hosted operations | Writable candidate implemented; native acceptance pending | Existing handlers, exact payload pins, per-session consent, GUI ownership, workflow guard and local unknown-outcome records; 44 browser tests passed, final Projects alignment reran 7 tests; no installed replacement |
+| Both native app backends together | Waiting for earlier Setup session to close | Duplicate Setup refusal passed in hosted-native-1789054989770 |
+| Single Hub window and safe launch routing | Warm and cold Windows acceptance passed | hosted-native-1789055985436 plus launch-burst-1789056244398: three rounds of four concurrent cold launches, exactly one instance each; fixed view IDs only, invalid args rejected |
+| Verified installed-app discovery and downloads | Implemented; final release regression pending | Hash/signature, cancellation, process and filesystem guards |
+| Update-and-adopt consent, state preservation and standalone fallback | Incomplete | No silent absorption, no copied settings, no shortcut changes on failed/declined adoption |
+| Final installer execution/upgrade acceptance | Pending | Existing clients, locked runtime, cancel/retry, no destructive partial upgrade; isolated environment only |
+| Historical BANTWORKS/MSI migration | Confirmed code gaps, not just unrun tests | Legacy GUI-name guard corrected in source; product identity migration and MSI discovered-source preflight remain incomplete; see installation matrix |
+| Offline startup, failure recovery and Hub removal | Pending | Retain usable standalone apps and unknown-operation outcomes |
+| Versions, README, licenses, hashes and signed catalog descriptors | Pending final binaries | Do not sign a descriptor for an unverified extracted executable |
+| macOS/Linux native support | Unverified | Do not label Windows testing as cross-platform acceptance |
+
+Local regression checkpoint: Hub 37 browser tests and 27 Rust tests passed;
+Setup 32 browser tests, 33 Rust tests and two real-EXE metadata tests passed.
+Both pass strict Clippy. Opt-in live tests are not represented as ordinary unit
+coverage. Native reports and exact candidate hashes are in the local development
+handoff; tests must be repeated where later code changes affect their coverage.
+
+The read-only MCP feature candidate is separate from the stable installer
+hotfix. Forward-port and retest the installer correction before publishing a
+Hub-compatible MCP installer. Passing hosted UI tests does not validate its
+installer or retroactively update the public 2.6.0 package.
+
+The current upgrade CI sentinel proves opaque-file preservation, not valid
+launcher settings or first GUI load. Valid historical configs and fake client
+profiles, including alternate homes/custom managed fields, remain required.
+
+This machine has no Windows Sandbox. A test-only GitHub branch for clean Windows
+installed-upgrade acceptance was proposed to the user, not pushed or dispatched.
+Silent NSIS acceptance does not prove the interactive uninstall-selection page
+or Retry dialog. Keep those gates distinct. The older user-owned hosted Setup
+session must be closed normally before the simultaneous-backend native trial.
+
+## Publication Order
+
+1. Test the MCP stable installer hotfix independently; do not bundle experimental
+   Hub changes into that recovery release.
+2. Finish and test the app/Hub compatibility contract together, including normal
+   standalone use. Preserve the stable releases as rollback/reference artifacts.
+3. Build and test the exact candidates, record hashes and limitations, then
+   prepare matching app release descriptors and Hub catalog compatibility.
+4. Review the staged diffs/docs for private paths, feedback, secrets and artifacts.
+5. Push reviewed commits/tags and publish only tested artifacts. Verify downloads
+   against recorded hashes after publication. If any core gate remains failed,
+   hold the affected release and report the concrete blocker.
+
+## Protected State
+
+Do not force-close Unity, Unity Hub, AI clients, MCP stdio processes or unrelated
+Creator windows. Never install a test build over the user's live installation.
+Use E:\UnityTest for fresh disposable project fixtures; existing projects and
+their manual content are not release-test fixtures without explicit selection.
+Keep screenshots, machine-specific reports and private feedback out of git.

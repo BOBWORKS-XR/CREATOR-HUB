@@ -82,7 +82,7 @@ pub fn registered(app: AppId) -> Result<Vec<PathBuf>, String> {
                         .map_err(|_| "Existing registration has no readable install location.")?;
                     let path = PathBuf::from(location.trim_matches('"')).join(
                         if *name == "BANTWORKS MCP" {
-                            "banter-mcp-launcher.exe"
+                            "bantworks-mcp-launcher.exe"
                         } else {
                             app.exe()
                         },
@@ -111,6 +111,38 @@ pub struct Running {
     pub server: bool,
 }
 
+fn gui_name(app: AppId, name: &str) -> bool {
+    name.eq_ignore_ascii_case(app.exe())
+        || (app == AppId::Mcp
+            && ["bantworks-mcp-launcher.exe", "banter-mcp-launcher.exe"]
+                .iter()
+                .any(|legacy| name.eq_ignore_ascii_case(legacy)))
+}
+
+#[cfg(test)]
+mod legacy_name_tests {
+    use super::*;
+    #[test]
+    fn real_bantworks_binary_and_older_alias_are_detected_without_matching_other_apps() {
+        for name in [
+            "bantworks-mcp-launcher.exe",
+            "BANTWORKS-MCP-LAUNCHER.EXE",
+            "banter-mcp-launcher.exe",
+            "creator-works-mcp-launcher.exe",
+        ] {
+            assert!(gui_name(AppId::Mcp, name));
+            assert!(!gui_name(AppId::Setup, name));
+        }
+        for name in [
+            "bantworks-mcp-launcher.exe.bak",
+            "other.exe",
+            "creator-project-setup.exe",
+        ] {
+            assert!(!gui_name(AppId::Mcp, name));
+        }
+    }
+}
+
 pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
     let mut system = System::new();
     system.refresh_processes_specifics(
@@ -136,9 +168,7 @@ pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
             && name.starts_with("creator-project-setup-")
             && name.ends_with(".exe")
             && !name.ends_with("-setup.exe");
-        let is_gui = name == app.exe()
-            || portable_setup
-            || (app == AppId::Mcp && name == "banter-mcp-launcher.exe");
+        let is_gui = gui_name(app, &name) || portable_setup;
         if is_gui {
             match process.exe() {
                 Some(actual) if same_path(actual, exe) => result.gui.push(pid.as_u32()),

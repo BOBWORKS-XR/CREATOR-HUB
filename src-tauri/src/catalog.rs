@@ -70,18 +70,34 @@ pub struct Release {
 }
 
 impl Release {
+    pub fn required_hub_version(&self) -> Option<&str> {
+        let minimum = Version::parse(&self.min_hub_version).ok()?;
+        (minimum > Version::parse(env!("CARGO_PKG_VERSION")).unwrap())
+            .then_some(self.min_hub_version.as_str())
+    }
+
+    pub fn install_block_reason(&self, app: AppId) -> Option<String> {
+        if app == AppId::Mcp && self.sha256 == bootstrap(AppId::Mcp).sha256 {
+            Some("This MCP installer has a setup problem, so Hub won't run it. Your current MCP can still be used. Check for an update before installing.".into())
+        } else {
+            self.required_hub_version().map(|version| format!("Update Creator Hub to {version} or later first. Your current app can still be used."))
+        }
+    }
+
     pub fn validate(&self, app: AppId, preview: bool) -> Result<Version, String> {
+        self.validate_id(app.id(), preview)
+    }
+
+    pub(crate) fn validate_id(&self, app_id: &str, preview: bool) -> Result<Version, String> {
         let version = Version::parse(&self.version).map_err(|_| "Invalid release version.")?;
-        let min =
-            Version::parse(&self.min_hub_version).map_err(|_| "Invalid minimum Hub version.")?;
+        Version::parse(&self.min_hub_version).map_err(|_| "Invalid minimum Hub version.")?;
         if self.schema_version != 1
-            || self.app_id != app.id()
+            || self.app_id != app_id
             || self.platform != "windows"
             || self.architecture != "x86_64"
             || self.identity_protocol > 1
             || self.lifecycle_protocol > 1
             || self.installer_protocol > 1
-            || min > Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
             || (!preview && !version.pre.is_empty())
             || !version.build.is_empty()
         {
@@ -216,6 +232,15 @@ pub fn verify_signed(
     signature: &[u8],
     preview: bool,
 ) -> Result<Release, String> {
+    verify_signed_id(app.id(), data, signature, preview)
+}
+
+pub(crate) fn verify_signed_id(
+    app_id: &str,
+    data: &[u8],
+    signature: &[u8],
+    preview: bool,
+) -> Result<Release, String> {
     if data.len() > MAX_METADATA as usize || signature.len() > 4096 {
         return Err("Signed metadata is too large.".into());
     }
@@ -229,7 +254,7 @@ pub fn verify_signed(
         .map_err(|_| "Release signature verification failed.")?;
     let release: Release =
         serde_json::from_slice(data).map_err(|_| "Invalid signed release descriptor.")?;
-    release.validate(app, preview)?;
+    release.validate_id(app_id, preview)?;
     Ok(release)
 }
 
@@ -238,6 +263,40 @@ struct GithubRelease {
     tag_name: String,
     draft: bool,
     prerelease: bool,
+    #[serde(default)]
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Deserialize)]
+struct GithubAsset {
+    name: String,
+}
+
+fn candidate_versions(
+    items: Vec<GithubRelease>,
+    preview: bool,
+    baseline: &Version,
+) -> Vec<Version> {
+    let signature_name = format!("{DESCRIPTOR_NAME}.minisig");
+    let mut versions: Vec<_> = items
+        .into_iter()
+        .filter(|r| !r.draft && (preview || !r.prerelease))
+        // Old/manual releases without both signed catalog files are not Hub updates.
+        .filter(|r| {
+            r.assets.iter().any(|a| a.name == DESCRIPTOR_NAME)
+                && r.assets.iter().any(|a| a.name == signature_name)
+        })
+        .filter_map(|r| {
+            let tag = r.tag_name.strip_prefix('v')?;
+            let version = Version::parse(tag).ok()?;
+            (version.to_string() == tag).then_some(version)
+        })
+        .filter(|v| (preview || v.pre.is_empty()) && v.build.is_empty() && v > baseline)
+        .collect();
+    versions.sort();
+    versions.dedup();
+    versions.reverse();
+    versions
 }
 
 pub type SignedRelease = (Release, Vec<u8>, Vec<u8>);
@@ -247,32 +306,40 @@ pub fn discover(
     app: AppId,
     preview: bool,
 ) -> Result<Option<SignedRelease>, String> {
+    discover_from(
+        client,
+        app.repo(),
+        app.id(),
+        preview,
+        &Version::parse(&bootstrap(app).version).unwrap(),
+    )
+}
+
+pub(crate) fn release_url(repo: &str, version: &str, asset: &str) -> String {
+    format!("https://github.com/BOBWORKS-XR/{repo}/releases/download/v{version}/{asset}")
+}
+
+pub(crate) fn discover_from(
+    client: &Client,
+    repo: &str,
+    app_id: &str,
+    preview: bool,
+    baseline: &Version,
+) -> Result<Option<SignedRelease>, String> {
     let url = format!(
         "https://api.github.com/repos/BOBWORKS-XR/{}/releases?per_page=10",
-        app.repo()
+        repo
     );
     let items: Vec<GithubRelease> = serde_json::from_slice(&fetch_small(client, &url, 256 * 1024)?)
         .map_err(|_| "GitHub returned invalid release metadata.")?;
-    let mut versions: Vec<Version> = items
-        .into_iter()
-        .filter(|r| !r.draft && (preview || !r.prerelease))
-        .filter_map(|r| {
-            r.tag_name
-                .strip_prefix('v')
-                .and_then(|v| Version::parse(v).ok())
-        })
-        .filter(|v| (preview || v.pre.is_empty()) && v.build.is_empty())
-        .collect();
-    versions.sort();
-    versions.dedup();
-    let baseline = Version::parse(&bootstrap(app).version).unwrap();
-    let Some(version) = versions.last().filter(|v| **v > baseline) else {
+    let versions = candidate_versions(items, preview, baseline);
+    let Some(version) = versions.first() else {
         return Ok(None);
     };
-    let url = app.download_url(&version.to_string(), DESCRIPTOR_NAME);
+    let url = release_url(repo, &version.to_string(), DESCRIPTOR_NAME);
     let bytes = fetch_small(client, &url, MAX_METADATA)?;
     let signature = fetch_small(client, &format!("{url}.minisig"), 4096)?;
-    let release = verify_signed(app, &bytes, &signature, preview)?;
+    let release = verify_signed_id(app_id, &bytes, &signature, preview)?;
     if release.version != version.to_string() {
         return Err("Release tag and signed version differ.".into());
     }
@@ -287,6 +354,18 @@ mod tests {
         for app in AppId::ALL {
             bootstrap(app).validate(app, false).unwrap();
         }
+    }
+    #[test]
+    fn defective_installer_is_blocked_by_artifact_not_version_label() {
+        let mut mcp = bootstrap(AppId::Mcp);
+        assert!(mcp.install_block_reason(AppId::Mcp).is_some());
+        mcp.version = "2.9.0".into();
+        assert!(mcp.install_block_reason(AppId::Mcp).is_some());
+        mcp.sha256 = "a".repeat(64);
+        assert!(mcp.install_block_reason(AppId::Mcp).is_none());
+        assert!(bootstrap(AppId::Setup)
+            .install_block_reason(AppId::Setup)
+            .is_none());
     }
     #[test]
     fn no_command_or_path_can_be_injected() {
@@ -311,6 +390,13 @@ mod tests {
         assert!(r.validate(AppId::Setup, false).is_err());
         assert!(r.validate(AppId::Setup, true).is_ok());
         r.min_hub_version = "99.0.0".into();
+        assert!(r.validate(AppId::Setup, true).is_ok());
+        assert_eq!(r.required_hub_version(), Some("99.0.0"));
+        assert!(r
+            .install_block_reason(AppId::Setup)
+            .unwrap()
+            .contains("Update Creator Hub"));
+        r.min_hub_version = "not-a-version".into();
         assert!(r.validate(AppId::Setup, true).is_err());
         assert!(verify_signed(AppId::Setup, b"{}", b"bad", false).is_err());
         assert!(verify_signed(
@@ -325,6 +411,58 @@ mod tests {
     fn versions_compare_numerically() {
         assert!(Version::parse("2.10.0").unwrap() > Version::parse("2.9.9").unwrap());
         assert!(Version::parse("2.7.0-alpha.1").unwrap() < Version::parse("2.7.0").unwrap());
+    }
+
+    #[test]
+    fn unsigned_newer_release_does_not_hide_a_ready_update() {
+        let items = serde_json::json!([
+            {"tag_name":"v3.0.0", "draft":false, "prerelease":false, "assets":[]},
+            {"tag_name":"v2.8.0", "draft":false, "prerelease":false,
+             "assets":[{"name":DESCRIPTOR_NAME}]},
+            {"tag_name":"v2.7.0", "draft":false, "prerelease":false,
+             "assets":[{"name":DESCRIPTOR_NAME},{"name":format!("{DESCRIPTOR_NAME}.minisig")}]}
+        ]);
+        let versions = candidate_versions(
+            serde_json::from_value(items).unwrap(),
+            false,
+            &Version::parse("2.6.0").unwrap(),
+        );
+        assert_eq!(versions, vec![Version::parse("2.7.0").unwrap()]);
+    }
+
+    #[test]
+    fn discovery_respects_drafts_channel_and_baseline() {
+        let make = |tag: &str, draft, prerelease| GithubRelease {
+            tag_name: tag.into(),
+            draft,
+            prerelease,
+            assets: vec![
+                GithubAsset {
+                    name: DESCRIPTOR_NAME.into(),
+                },
+                GithubAsset {
+                    name: format!("{DESCRIPTOR_NAME}.minisig"),
+                },
+            ],
+        };
+        let items = || {
+            vec![
+                make("v2.7.0-alpha.1", false, true),
+                make("v2.8.0", true, false),
+                make("v2.9.0-beta.1", false, false),
+                make("v2.6.0", false, false),
+                make("v2.6.1", false, false),
+                make("v2.6.1", false, false),
+                make("v3.0.0+build", false, false),
+                make("bad", false, false),
+            ]
+        };
+        let baseline = Version::parse("2.6.0").unwrap();
+        assert_eq!(
+            candidate_versions(items(), false, &baseline),
+            vec![Version::parse("2.6.1").unwrap()]
+        );
+        assert_eq!(candidate_versions(items(), true, &baseline).len(), 3);
     }
     #[test]
     fn real_signed_release_fixture_verifies_and_tampering_is_rejected() {

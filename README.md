@@ -1,15 +1,70 @@
 # Creator Hub
 
 Lightweight Windows app manager for Creator Works MCP and Creator Project Setup.
-Local development preview `0.1.0-alpha.1`; not a public seamless-update release.
+Windows prerelease candidate `0.1.0-alpha.3`; not a stable release.
 Both tools remain usable independently.
+
+## Try the Installer
+
+Close old Creator Hub preview windows, then run the new installer. It installs
+Hub only. Your MCP, Project Setup, settings and Unity projects stay where they are.
+
+- **Open app** opens your usual app with its existing settings.
+- **Use this copy** lets you choose when Hub finds more than one installation.
+- **Check for an update** checks inside Hub, without a browser detour.
+- **Creator Hub update** checks Hub itself on the same stable/test channel.
+  Verified downloads do not install until you click **Update Hub** and approve.
+  In-app Hub restart is implemented but still awaiting installed-upgrade acceptance.
+- Full apps inside the Hub window need a future update. This installer does not
+  replace your MCP with a limited, read-only page.
+
+The older MCP 2.6.0 installer has a setup problem and is blocked, but an existing
+verified MCP can still be opened. See [local setup notes](docs/INSTALLABLE-PREVIEW.md).
+
+## Corrected Product Direction
+
+The long-term goal is one window containing the installed Creator apps.
+Planned onboarding detects existing apps and offers
+"Update and add to Hub", preserving their installations and settings. Once
+adopted, their shortcuts open the corresponding view inside Hub. Nothing found
+or "Not now" means Hub-only installation, without changing the other apps.
+Standalone apps keep their Creator menu when Hub is absent. See the
+[hosted-app plan](docs/HOSTED-APPS.md).
+
+The separate paired development builds test Project Setup and MCP inside Hub.
+They are not included in the Hub-only installer. Existing public apps still open
+in their own windows. Writable MCP development builds still need native acceptance;
+their availability is not inferred from an installed app's version. Fixed `--open-app mcp|setup`
+navigation and single-window launch handling are tested on Windows. Persistent
+adoption, standalone shortcut handoff and transfer of an already-open app are
+not implemented yet.
+See the [hosted preview](docs/HOSTED-PREVIEW.md) and
+[tested native contract](docs/HOSTING-PROTOCOL-PREVIEW.md).
+
+A real project has been created, compiled and reopened/validated through the
+hosted interface, including Creator Visual Scripting and both build targets.
+An isolated real repair also preserved the scene, custom content and Visual
+Scripting selections, retained its backup and passed a second validation.
+See the [coordinated release gates](docs/RELEASE-GATES.md) for remaining blockers.
 
 ## Current Implementation
 
+- Hub Projects page with search, SDK filters and explicit local-folder additions.
+  Reads known MCP/Unity Hub locations and package manifests without scanning drives
+  or modifying project files. The Windows preview reuses Project Setup's pinned
+  Unity helper for current Hub discovery and exact installed Editor selection.
+  No helper is downloaded automatically; fallback lists remain available when it
+  is missing, but opening requires the approved helper. Folder removal only edits
+  Hub's saved list; it never deletes project content or another app's entries.
+- Project Setup hosted UI with native requirements/folder picking, retained form
+  state across navigation, scoped progress and native busy-close protection.
+- Read-only MCP hosted UI with saved-config snapshots, native folder picking,
+  a separate backend/resource directory and a native command allowlist.
 - In-app verified download, install, open, installed-app reuse and update checks.
 - Available/installed versions, download progress, cancellation and visible errors.
-- Prereleases and background update downloads are separate opt-ins. Installation
-  always requires approval; a download never authorizes execution by itself.
+- Prereleases and verified background update downloads are enabled by default.
+  Each can be turned off independently, and saved choices are preserved.
+  Installation always requires approval; a download never authorizes execution.
 - Pinned hashes for current public releases; signed Minisign descriptors for
   future releases. Bounded metadata/downloads and Semantic Version comparison.
 - Running-app/server checks, no forced Unity or AI client closure, no automatic
@@ -21,10 +76,12 @@ Both tools remain usable independently.
   gray Hub cube and official white SideQuest mark for Creator Converter.
 - Creator Converter and Creator Plugins are Coming soon. Plugins is planned as
   a no-fee community directory, not a payment or subscription service.
+  Packages and Community Tools have separate planned sections, including opt-in
+  sharing of useful MCP-created utilities. See the [reviewed submission design](docs/COMMUNITY-INDEX.md).
 
 Hub does not modify Unity projects, bridges or AI settings as an inventory action.
 Installers retain ownership of their own settings and migrations. No accounts,
-telemetry, community hosting, hosted tool UI or arbitrary install URLs are added.
+telemetry, community package hosting or arbitrary install URLs are added.
 
 ## Development
 
@@ -34,6 +91,31 @@ npm run test:ui
 npm run check
 npm run build -- --no-bundle
 ```
+
+Build the Hub-only Windows installer, without any experimental app payloads:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Build-Installer.ps1
+```
+
+Build the paired hosted development preview from both source checkouts:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Build-HostedPreview.ps1
+```
+
+This pins the newly built Setup EXE into Hub and writes both executables into
+`dist/Creator-Hub-Hosted-Setup-Preview`. They remain separate standalone-capable
+applications; this is not a public Hub installer or automatic adoption release.
+
+Supply paired `-McpPreview <approved EXE>` and `-McpSha256 <exact SHA-256>`
+arguments to include the separate read-only MCP backend. This writes a new
+`dist/Creator-Hub-Hosted-Apps-Preview` directory without replacing the Setup-only
+pair. A mismatched or unpinned MCP executable cannot start.
+
+The optional `-McpLifecyclePreview` switch enables the tested revision 2
+read-only event handshake for a matching MCP candidate. It does not enable MCP
+configuration writes or production adoption. Omit it for the original protocol.
 
 Windows x64 is implemented. macOS/Linux native install and lifecycle support is
 not implemented or tested. The unsigned EXE requires the normal system WebView2

@@ -2,5 +2,9 @@
   "identifier": "default",
   "description": "Local Creator Hub window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten",
+    "allow-open-resource", "allow-app-inventory", "allow-download-app", "allow-install-app",
+    "allow-open-app", "allow-cancel-download", "allow-use-existing-app", "allow-get-launch-request", "allow-start-hosted-app",
+    "allow-hosted-app-call", "allow-stop-hosted-app", "allow-abort-hosted-app",
+    "allow-project-inventory", "allow-add-project-folder", "allow-remove-project-folder", "allow-open-unity-project"]
 }

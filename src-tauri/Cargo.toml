@@ -1,6 +1,6 @@
 [package]
 name = "creator-hub"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.3"
 description = "Creator Hub app manager"
 authors = ["Creator Works"]
 edition = "2021"
@@ -11,6 +11,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "=2.4.4"
+tauri-plugin-updater = { version = "=2.11.0", default-features = false, features = ["native-tls", "system-proxy"] }
+base64 = "0.22"
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -20,14 +23,13 @@ minisign-verify = "0.2.5"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls", "json"] }
 sysinfo = "0.38"
 fs2 = "0.4"
+getrandom = "0.3"
 tokio = { version = "1", features = ["macros", "time"] }
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
-
-[dev-dependencies]
-tempfile = "3"
 
 [features]
 default = ["custom-protocol"]

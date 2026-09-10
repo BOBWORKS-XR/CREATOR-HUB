@@ -1,11 +1,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod catalog;
+mod hosted;
+mod hosted_operation;
+mod launch;
 mod manager;
 mod platform;
+mod projects;
+mod self_update;
 use catalog::AppId;
 use tauri::{Emitter, Manager as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+struct ShellKey(String);
 
 #[tauri::command]
 async fn app_inventory(
@@ -67,8 +74,21 @@ async fn open_app(handle: tauri::AppHandle, app: AppId) -> Result<String, String
 }
 
 #[tauri::command]
-async fn use_existing_app(handle: tauri::AppHandle, app: AppId) -> Result<String, String> {
+async fn use_existing_app(
+    handle: tauri::AppHandle,
+    app: AppId,
+    path: Option<std::path::PathBuf>,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        if let Some(path) = path {
+            handle
+                .state::<manager::Manager>()
+                .select_detected(app, path)?;
+            return Ok(
+                "Existing app selected and verified. Its settings and installation are unchanged."
+                    .into(),
+            );
+        }
         let Some(path) = handle
             .dialog()
             .file()
@@ -92,7 +112,7 @@ fn resource_url(resource: &str) -> Option<&'static str> {
         "mcp-source" => Some("https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP"),
         "setup-source" => Some("https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP"),
         "hub-plan" => Some("https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/blob/master/docs/CREATOR-HUB-PLAN.md"),
-        "github" => Some("https://github.com/BOBWORKS-XR"),
+        "github" => Some("https://github.com/BOBWORKS-XR/CREATOR-HUB"),
         "sdk-source" => Some("https://greenfield-registry.sdq.st/-/web/detail/com.sidequest.creator-sdk"),
         _ => None,
     }
@@ -128,12 +148,47 @@ fn open_resource(resource: String) -> Result<(), String> {
 }
 
 fn main() {
-    // No arbitrary paths, commands, or installation routes on the command line.
-    if std::env::args_os().len() != 1 {
-        std::process::exit(2);
-    }
+    let initial_view = match launch::parse(std::env::args_os().skip(1)) {
+        Ok(view) => view,
+        Err(()) => std::process::exit(2),
+    };
+    let mut random = [0u8; 32];
+    getrandom::fill(&mut random).expect("Cannot initialize Hub's private shell authority");
+    let shell_key: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let initialize = format!("if(window === window.top) Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}});", shell_key);
+    let commands: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        open_resource,
+        app_inventory,
+        download_app,
+        install_app,
+        open_app,
+        cancel_download,
+        use_existing_app,
+        self_update::hub_update_status,
+        self_update::download_hub_update,
+        self_update::install_hub_update,
+        projects::project_inventory,
+        projects::add_project_folder,
+        projects::remove_project_folder,
+        projects::open_unity_project,
+        launch::get_launch_request,
+        hosted::start_hosted_app,
+        hosted::hosted_app_call,
+        hosted::stop_hosted_app,
+        hosted::abort_hosted_app
+    ];
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, arguments, _cwd| {
+            launch::activate(app, arguments);
+        }))
+        .manage(launch::Launch::new(initial_view))
+        .manage(ShellKey(shell_key))
+        .append_invoke_initialization_script(initialize)
         .manage(manager::Manager::default())
+        .manage(self_update::SelfUpdate::default())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(hosted::Hosting::default())
+        .manage(projects::Projects::default())
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -143,12 +198,21 @@ fn main() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![open_resource, app_inventory, download_app, install_app, open_app, cancel_download, use_existing_app])
+        .invoke_handler(move |invoke| {
+            let app = invoke.message.webview_ref().app_handle();
+            let key = app.state::<ShellKey>();
+            if invoke.message.headers().get("x-creator-shell-key").and_then(|value| value.to_str().ok()) != Some(key.0.as_str()) {
+                invoke.resolver.reject("Hub commands are available only to its trusted shell.");
+                return true;
+            }
+            commands(invoke)
+        })
         .build(tauri::generate_context!())
         .expect("Creator Hub could not start")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 if !app.state::<manager::Manager>().allow_close() { api.prevent_exit(); }
+                else { app.state::<hosted::Hosting>().close_idle(); }
             }
         });
 }

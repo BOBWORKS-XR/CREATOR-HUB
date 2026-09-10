@@ -1,0 +1,60 @@
+name: Windows candidate
+
+on:
+  push:
+    branches: [ui-preview]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
+      CREATOR_SETUP_SOURCE: ${{ github.workspace }}/.test-fixtures/setup/src
+      CREATOR_MCP_SOURCE: ${{ github.workspace }}/.test-fixtures/mcp/launcher/src
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          repository: BOBWORKS-XR/CREATOR-PROJECT-SETUP
+          ref: d09751051f22fd1dc8079f0a16a6ed6a39f7e61a
+          path: .test-fixtures/setup
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          repository: BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP
+          ref: 82fa30e73898b471234a3c54ef11fd08096fc884
+          path: .test-fixtures/mcp
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: npm ci
+      - run: npx playwright install chromium
+      - name: Hub interface tests
+        run: npm run test:ui
+      - name: Rust tests
+        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml
+      - name: Rust lint
+        run: cargo clippy --release --locked --manifest-path src-tauri/Cargo.toml -- -D warnings
+      - name: Build and verify installer candidate
+        shell: powershell
+        run: .\scripts\Build-WindowsCandidate.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: creator-hub-windows-candidate
+          path: |
+            dist/Creator-Hub-*-Windows-Candidate/
+            test-results/
+          if-no-files-found: error

@@ -26,6 +26,10 @@
     <span class="preview-status">Development preview</span>
   </header>
   <main>
+    <nav id="hub-pages" class="hub-pages" aria-label="Hub pages">
+      <button class="text-button current" data-view="hub" type="button" aria-current="page">Apps</button>
+      <button class="text-button" data-view="projects" type="button">Projects</button>
+    </nav>
     <section id="view-hub" aria-labelledby="apps-title">
       <div class="page-heading"><h2 id="apps-title">Apps</h2><button id="check-updates" class="text-button" type="button"><span class="icon icon-refresh" aria-hidden="true"></span>Check for updates</button></div>
       <div class="app-list">
@@ -42,16 +46,36 @@
         <div class="app-row unavailable"><span class="suite-mark converter-mark"><img src="sidequest-mark-white.svg" alt=""><span class="suite-letter">C</span></span><span class="app-row-copy"><strong>Creator Converter</strong><small>SideQuest / Built-in rendering to Universal Render Pipeline.</small></span><span class="row-status">Coming soon</span></div>
         <button class="app-row" type="button" data-view="plugins" aria-label="View Creator Plugins"><span class="suite-mark"><span class="icon icon-plugins" aria-hidden="true"></span></span><span class="app-row-copy"><strong>Creator Plugins</strong><small>Community projects, packages and tools.</small></span><span class="row-status">Coming soon</span><span class="icon icon-arrow" aria-hidden="true"></span></button>
       </div>
-      <div class="update-preferences"><label><input id="preview-channel" type="checkbox"> Include prereleases</label><label><input id="auto-download" type="checkbox"> Download verified updates automatically</label></div>
+      <div class="update-preferences"><label><input id="preview-channel" type="checkbox" checked> Include prereleases</label><label><input id="auto-download" type="checkbox" checked> Download verified updates automatically</label></div>
+      <section class="hub-update" aria-labelledby="hub-update-title">
+        <div class="page-heading"><h2 id="hub-update-title" tabindex="-1">Creator Hub update</h2><button id="hub-update-button" class="primary-button" type="button" disabled><span class="icon icon-download" aria-hidden="true"></span>Update Hub</button></div>
+        <p id="hub-update-status" role="status">Checking Hub...</p>
+        <p id="hub-update-warning" class="secondary hidden"></p>
+      </section>
       <p id="catalog-status" class="catalog-status" role="status">Checking installed apps...</p>
+    </section>
+    <section id="view-projects" class="hidden" aria-labelledby="projects-title">
+      <div class="page-heading"><h2 id="projects-title" tabindex="-1">Projects</h2><div class="project-actions"><button id="refresh-projects" class="icon-button" type="button" title="Refresh projects" aria-label="Refresh projects"><span class="icon icon-refresh" aria-hidden="true"></span></button><button id="add-project" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span>Add project</button><button class="text-button" data-view="setup" type="button">New project</button></div></div>
+      <div class="project-filters"><input id="project-search" type="search" aria-label="Search projects" placeholder="Search projects"><select id="project-sdk" aria-label="Filter by SDK"><option value="sdk">Creator SDK + Banter</option><option value="creator">Creator SDK / Altspace</option><option value="banter">Banter SDK</option><option value="all">All known projects</option></select></div>
+      <p id="project-status" class="catalog-status" role="status"></p>
+      <p id="project-warnings" class="catalog-status"></p>
+      <div id="project-list" class="project-list"></div>
     </section>
     <section id="view-detail" class="hidden" aria-labelledby="tool-title">
       <div class="page-heading"><button class="text-button" type="button" data-view="hub"><span class="icon icon-back" aria-hidden="true"></span>All apps</button><span>Standalone app</span></div>
       <div class="tool-heading"><span class="suite-mark tool-mark"><img src="creator-works-logo.png" alt=""><span id="tool-letter" class="suite-letter">M</span></span><div><h2 id="tool-title"></h2><p id="tool-summary"></p></div></div>
       <dl id="tool-facts" class="tool-facts"></dl>
+      <div class="compatibility-note" role="status"><strong id="compatibility-status"></strong><p id="compatibility-detail"></p></div>
       <div id="tool-state" class="tool-state"></div>
+      <div id="detected-copies"></div>
+      <button id="host-setup-button" class="primary-button hidden" type="button">Open hosted Setup preview</button>
+      <button id="host-mcp-button" class="primary-button hidden" type="button">Open hosted MCP preview</button>
       <div class="tool-actions"><button id="release-button" class="primary-button" type="button" disabled><span class="icon icon-download" aria-hidden="true"></span><span id="primary-label">Checking</span></button><button id="download-button" class="text-button" type="button" disabled><span class="icon icon-download" aria-hidden="true"></span>Download only</button><button id="open-button" class="text-button hidden" type="button">Open app</button><button id="adopt-button" class="text-button" type="button">Use existing app</button><button id="source-button" class="text-button" type="button">Source on GitHub <span class="icon icon-external" aria-hidden="true"></span></button></div>
       <div id="install-options" class="update-preferences"><label><input id="reopen-app" type="checkbox" checked> Open after installation</label><label><input id="close-running" type="checkbox"> Allow compatible idle app to close for update</label></div>
+    </section>
+    <section id="view-hosted" class="hidden" aria-label="Hosted Creator app" inert>
+      <div class="hosted-toolbar"><span id="hosted-status" role="status">Opening app</span><button id="hosted-stop" class="text-button" type="button">Close view</button></div>
+      <div id="hosted-content"></div>
     </section>
     <div id="action-error" class="result hidden" role="alert"></div>
     <div id="operation-progress" class="operation-progress hidden" role="status"><div><strong id="progress-message"></strong><button id="cancel-download" class="text-button hidden" type="button">Cancel download</button></div><progress id="download-progress" max="1"></progress><span id="progress-bytes"></span></div>
@@ -60,9 +84,13 @@
       <h2 id="plugins-title" tabindex="-1">Creator Plugins</h2>
       <p class="plugins-summary">Community projects, packages and tools. No platform fees.</p>
       <dl class="tool-facts"><div><dt>Sharing</dt><dd>Links to creators' GitHub repositories and websites.</dd></div><div><dt>Status</dt><dd>Planned. Submissions and package hosting are not open yet.</dd></div></dl>
+      <div class="community-sections"><section><h3>Packages</h3><p>Unity assets, SDK extensions and plugins.</p></section><section><h3>Community Tools</h3><p>Reusable Editor scripts and apps, including tools created with MCP.</p><small>Local drafts first. Public sharing by the author, with a license and test notes.</small></section></div>
     </section>
   </main>
-  <footer><span>Creator Hub <span class="footer-version">0.1.0-alpha.1</span></span><div class="footer-links"><button class="text-button" type="button" data-resource="hub-plan">Roadmap <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="github">GitHub <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="sdk-source">Creator SDK source <span class="icon icon-external" aria-hidden="true"></span></button></div></footer>
+  <footer><span>Creator Hub <span class="footer-version">0.1.0-alpha.3</span></span><div class="footer-links"><button class="text-button" type="button" data-resource="hub-plan">Roadmap <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="github">GitHub <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="sdk-source">Creator SDK source <span class="icon icon-external" aria-hidden="true"></span></button></div></footer>
+  <script src="native.js"></script>
+  <script src="hosted.js"></script>
+  <script src="projects.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

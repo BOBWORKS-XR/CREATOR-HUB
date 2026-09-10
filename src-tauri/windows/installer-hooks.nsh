@@ -1,0 +1,49 @@
+; Preserve active Hub workflows; never use Tauri's default force-close path.
+!ifmacrondef CheckIfAppIsRunning
+  !error "Expected Tauri running-app macro is missing; review installer template"
+!endif
+!macroundef CheckIfAppIsRunning
+!macro CheckIfAppIsRunning executableName productName
+  ; Tauri launches /UPDATE immediately before exiting. Allow that exit to
+  ; finish, but never bypass the same running-app guard or terminate a process.
+  Push $2
+  Push $3
+  ${GetParameters} $2
+  ClearErrors
+  ${GetOptions} $2 "/UPDATE" $3
+  ${IfNot} ${Errors}
+    nsExec::ExecToStack /TIMEOUT=12000 `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "& { try { $$deadline = [DateTime]::UtcNow.AddSeconds(8); do { $$running = @(Get-Process -ErrorAction Stop | Where-Object { $$_.ProcessName -eq 'creator-hub' }); if ($$running.Count -eq 0) { exit 0 }; Start-Sleep -Milliseconds 100 } while ([DateTime]::UtcNow -lt $$deadline); exit 10 } catch { exit 11 } }"`
+  ${Else}
+    nsExec::ExecToStack /TIMEOUT=12000 `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "& { try { $$running = @(Get-Process -ErrorAction Stop | Where-Object { $$_.ProcessName -eq 'creator-hub' }); if ($$running.Count -gt 0) { exit 10 }; exit 0 } catch { exit 11 } }"`
+  ${EndIf}
+  Pop $0
+  Pop $1
+  Pop $3
+  Pop $2
+  ${If} $0 != "0"
+    MessageBox MB_ICONSTOP|MB_OK \
+      "Close Creator Hub before continuing.$\r$\n$\r$\nSave your work, close any old Hub preview windows, then run this installer again. Your other apps can stay open.$\r$\n$\r$\nIf Hub is already closed, the safety check failed. Nothing was installed." /SD IDOK
+    SetErrorLevel 10
+    Abort
+  ${EndIf}
+!macroend
+
+; The legacy uninstall page can run before the install section.
+!ifdef MUI_CUSTOMFUNCTION_GUIINIT
+  !error "Review existing GUI initialization before adding Hub preflight"
+!endif
+!define MUI_CUSTOMFUNCTION_GUIINIT CreatorHubEarlyPreflight
+Function CreatorHubEarlyPreflight
+  Push $0
+  Push $1
+  !insertmacro CheckIfAppIsRunning "creator-hub.exe" "Creator Hub"
+  Pop $1
+  Pop $0
+FunctionEnd
+
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro CheckIfAppIsRunning "creator-hub.exe" "Creator Hub"
+!macroend
+!macro NSIS_HOOK_PREUNINSTALL
+  !insertmacro CheckIfAppIsRunning "creator-hub.exe" "Creator Hub"
+!macroend

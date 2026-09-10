@@ -1,18 +1,24 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Creator Hub",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.3",
   "identifier": "com.creatorworks.hub",
   "build": { "frontendDist": "../src" },
   "app": {
     "withGlobalTauri": true,
     "windows": [{ "title": "Creator Hub - Development Preview", "width": 940, "height": 580, "minWidth": 560, "minHeight": 480, "center": true }],
-    "security": { "csp": "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost" }
+    "security": { "csp": "default-src 'self'; frame-src 'self' about:; img-src 'self' data:; style-src 'self' data:; script-src 'self' data:; connect-src ipc: http://ipc.localhost" }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": ["nsis"],
     "category": "DeveloperTool",
     "publisher": "Creator Works",
-    "icon": ["icons/icon.ico", "icons/icon.png"]
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": false },
+      "nsis": { "installMode": "currentUser", "installerHooks": "windows/installer-hooks.nsh" }
+    }
   }
 }
