@@ -1,0 +1,17 @@
+{
+  "name": "creator-hub",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "Creator Hub interface preview",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "test:ui": "playwright test",
+    "check": "cargo test --release --manifest-path src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@tauri-apps/cli": "2.11.4",
+    "lucide-static": "1.44.0"
+  }
+}

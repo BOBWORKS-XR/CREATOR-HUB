@@ -1,0 +1,38 @@
+.icon-arrow { --icon: url("icons/arrow-up-right.svg"); }
+.icon-back { --icon: url("icons/arrow-up-right.svg"); transform: rotate(-135deg); }
+.icon-clock { --icon: url("icons/clock-3.svg"); }
+main { padding-top: 20px; }
+.preview-status { color: var(--amber); font-size: 11px; flex-shrink: 0; }
+.page-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 38px; margin-bottom: 10px; }
+.page-heading > span { color: var(--muted); font-size: 11px; }
+.app-row { width: 100%; min-height: 86px; display: flex; align-items: center; gap: 18px; padding: 16px 12px; background: none; text-align: left; border-radius: 4px; border-bottom: 1px solid #20282d; }
+button.app-row:hover { background: #181d21; }
+.app-row-copy { flex: 1; min-width: 0; }
+.app-row-copy strong { display: block; font-size: 14px; font-weight: 600; }
+.app-row-copy small { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.row-status { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+.app-row > .icon { color: var(--muted); }
+.unavailable .app-row-copy strong { color: var(--muted); }
+.development-status { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 11px; margin: 24px 12px 8px; }
+.development-status strong { margin-left: auto; color: var(--amber); font-weight: 400; }
+.tool-heading { display: flex; align-items: center; gap: 16px; margin: 14px 0 24px; }
+.tool-heading > div { min-width: 0; }
+.tool-heading h2 { font-size: 17px; }
+.tool-heading p { margin-top: 6px; color: var(--muted); line-height: 1.5; font-size: 12px; }
+.tool-mark { flex-basis: 42px; width: 42px; height: 42px; }
+.tool-mark img { width: 40px; height: 40px; }
+.tool-facts { margin: 0; }
+.tool-facts > div { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 16px; padding: 12px 0; border-bottom: 1px solid #20282d; font-size: 12px; line-height: 1.5; }
+.tool-facts dt { color: var(--muted); }
+.tool-facts dd { margin: 0; }
+.tool-actions { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; margin-top: 22px; }
+.tool-actions .primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: auto; min-width: 164px; margin: 0; }
+@media (max-width: 560px) {
+  .app-row { gap: 12px; flex-wrap: wrap; }
+  .app-row-copy { flex-basis: calc(100% - 60px); }
+  .row-status { margin-left: 46px; }
+  .app-row > .icon { margin-left: auto; }
+  .tool-facts > div { grid-template-columns: 90px minmax(0, 1fr); }
+  .tool-actions { gap: 12px; }
+  .development-status strong { margin-left: 26px; }
+}

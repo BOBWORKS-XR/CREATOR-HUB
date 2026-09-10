@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Creator Hub</title>
+  <link rel="stylesheet" href="base.css">
+  <link rel="stylesheet" href="suite.css">
+  <link rel="stylesheet" href="hub.css">
+</head>
+<body>
+  <button class="suite-trigger" id="suite-trigger" type="button" aria-expanded="false" aria-controls="suite-menu" aria-label="Open Creator apps" title="Creator apps"><span class="suite-mark hub-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span></button>
+  <nav id="suite-menu" class="suite-menu hidden" aria-label="Creator apps">
+    <div class="suite-menu-heading"><span>Creator apps</span><button id="suite-close" class="icon-button" type="button" aria-label="Close Creator apps" title="Close"><span class="icon icon-close" aria-hidden="true"></span></button></div>
+    <button class="suite-item current" data-view="hub" type="button" aria-current="page"><span class="suite-mark hub-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span><span class="suite-item-copy"><strong>Creator Hub</strong><small>Apps</small></span></button>
+    <button class="suite-item" data-view="mcp" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">M</span></span><span class="suite-item-copy"><strong>Creator Works MCP</strong><small>Unity integration</small></span></button>
+    <button class="suite-item" data-view="setup" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span><span class="suite-item-copy"><strong>Project Setup</strong><small>Unity + Creator SDK</small></span></button>
+    <div class="suite-item unavailable"><span class="suite-future-mark" aria-hidden="true">U</span><span class="suite-item-copy"><strong>URP Converter</strong><small>Coming soon</small></span></div>
+  </nav>
+  <header class="app-header">
+    <div class="title-block"><h1 id="page-title" class="brand-name"><span>CREATOR</span> <strong>HUB</strong></h1><p id="mode-description">Unity tools. One place.</p></div>
+    <span class="preview-status">Interface preview</span>
+  </header>
+  <main>
+    <section id="view-hub" aria-labelledby="apps-title">
+      <div class="page-heading"><h2 id="apps-title">Apps</h2><span>Standalone releases</span></div>
+      <div class="app-list">
+        <button class="app-row" type="button" data-view="mcp" aria-label="View Creator Works MCP">
+          <span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">M</span></span>
+          <span class="app-row-copy"><strong>Creator Works MCP</strong><small>AI tools for Unity, Visual Scripting and Creator SDK.</small></span>
+          <span class="row-status">Available</span><span class="icon icon-arrow" aria-hidden="true"></span>
+        </button>
+        <button class="app-row" type="button" data-view="setup" aria-label="View Creator Project Setup">
+          <span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span>
+          <span class="app-row-copy"><strong>Creator Project Setup</strong><small>New projects, SDK setup and existing-project checks.</small></span>
+          <span class="row-status">Available</span><span class="icon icon-arrow" aria-hidden="true"></span>
+        </button>
+        <div class="app-row unavailable"><span class="suite-future-mark" aria-hidden="true">U</span><span class="app-row-copy"><strong>URP Converter</strong><small>Built-in rendering to Universal Render Pipeline.</small></span><span class="row-status">Coming soon</span></div>
+      </div>
+      <div class="development-status"><span class="icon icon-clock" aria-hidden="true"></span><span>Hub-managed installs and updates</span><strong>In development</strong></div>
+    </section>
+    <section id="view-detail" class="hidden" aria-labelledby="tool-title">
+      <div class="page-heading"><button class="text-button" type="button" data-view="hub"><span class="icon icon-back" aria-hidden="true"></span>All apps</button><span>Standalone app</span></div>
+      <div class="tool-heading"><span class="suite-mark tool-mark"><img src="creator-works-logo.png" alt=""><span id="tool-letter" class="suite-letter">M</span></span><div><h2 id="tool-title"></h2><p id="tool-summary"></p></div></div>
+      <dl id="tool-facts" class="tool-facts"></dl>
+      <div class="tool-actions"><button id="release-button" class="primary-button" type="button"><span class="icon icon-external" aria-hidden="true"></span>View releases</button><button id="source-button" class="text-button" type="button">Source on GitHub <span class="icon icon-external" aria-hidden="true"></span></button></div>
+    </section>
+    <div id="action-error" class="result hidden" role="alert"></div>
+  </main>
+  <footer><span>Creator Hub <span class="footer-version">0.1.0-alpha.1</span></span><div class="footer-links"><button class="text-button" type="button" data-resource="hub-plan">Roadmap <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="github">GitHub <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="sdk-source">Creator SDK source <span class="icon icon-external" aria-hidden="true"></span></button></div></footer>
+  <script src="app.js"></script>
+</body>
+</html>
