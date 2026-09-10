@@ -103,6 +103,8 @@ async function closeHosted(app) {
   const originalConfigHash = upgrade ? hash(configPath) : null;
   child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238', WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview') } });
+  report.hubPid = child.pid;
+  child.on('error', error => { report.hubSpawnError = String(error); });
   browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'));
   page = await retry(async () => {
     const found = browser.contexts().flatMap(context => context.pages()).find(p => p.url().includes('tauri.localhost'));
@@ -203,6 +205,14 @@ async function closeHosted(app) {
   report.checks.push(`${mcpOnly ? 'MCP hosted view' : 'Both hosted views'} retain state; closing each drains only its own process; no JavaScript errors`);
   report.passed = true;
 })().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; }).finally(async () => {
+  report.hubExitBeforeCleanup = child?.exitCode;
+  if (child && !report.passed) {
+    try { fs.writeFileSync(path.join(out, 'hub-failure-dialogs.json'), native(child.pid, hub, 'snapshot')); } catch (error) { report.windowCaptureError = String(error); }
+    try {
+      const capture = execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts/native-startup-diagnostics.ps1')], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+      fs.writeFileSync(path.join(out, 'hub-startup.json'), capture);
+    } catch (error) { report.startupCaptureError = String(error); }
+  }
   if (page && !report.passed) {
     try { await page.screenshot({ path: path.join(out, 'failure.png') }); } catch {}
     for (const [app, pid] of Object.entries(backends)) {
