@@ -82,6 +82,13 @@ pub fn preview_mode(app: AppId) -> Option<&'static str> {
         },
     )
 }
+pub fn preview_compatibility(app: AppId, installed_hash: &str) -> Option<bool> {
+    compatible_hash(expected_hash(app), installed_hash)
+}
+fn compatible_hash(expected: &str, installed: &str) -> Option<bool> {
+    // Inventory guidance only. Startup still locks and re-verifies the actual file.
+    crate::catalog::hash_valid(expected).then_some(expected == installed)
+}
 const MAX_FRAME: usize = 2 * 1024 * 1024;
 const MAX_REQUEST: usize = 64 * 1024;
 const MAX_LIFECYCLE_FRAME: usize = 512;
@@ -595,6 +602,15 @@ pub async fn stop_hosted_app(handle: tauri::AppHandle, session: String) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hosted_compatibility_requires_an_approved_matching_hash() {
+        let expected = "a".repeat(64);
+        assert_eq!(compatible_hash(&expected, &expected), Some(true));
+        assert_eq!(compatible_hash(&expected, &"b".repeat(64)), Some(false));
+        assert_eq!(compatible_hash(&expected, ""), Some(false));
+        assert_eq!(compatible_hash("", ""), None);
+        assert_eq!(compatible_hash("invalid", "invalid"), None);
+    }
     #[test]
     fn stored_session_identity_controls_authority_and_close_is_scoped() {
         let temp = tempfile::tempdir().unwrap();

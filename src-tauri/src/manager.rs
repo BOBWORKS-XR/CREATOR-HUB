@@ -66,6 +66,7 @@ pub struct AppState {
     pub installed_path: Option<PathBuf>,
     pub detected_copies: Vec<DetectedCopy>,
     pub hosted_preview: Option<&'static str>,
+    pub hosted_compatible: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -391,6 +392,7 @@ impl Manager {
                 installed_path: None,
                 detected_copies: Vec::new(),
                 hosted_preview: crate::hosted::preview_mode(app),
+                hosted_compatible: None,
             };
             match installed(app) {
                 Ok(Some((path, known))) => {
@@ -398,6 +400,8 @@ impl Manager {
                     state.installed_path = Some(path.clone());
                     state.trusted = known.is_some();
                     if let Some(known) = known {
+                        state.hosted_compatible =
+                            crate::hosted::preview_compatibility(app, &known.executable_sha256);
                         state.update_available = Version::parse(&release.version).unwrap()
                             > Version::parse(&known.version).unwrap();
                         state.installed_version = Some(known.version);

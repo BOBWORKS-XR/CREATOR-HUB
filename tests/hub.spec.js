@@ -147,6 +147,64 @@ test('blocked or offline Hub updates remain in-app and never run an installer', 
   expect(await page.evaluate(() => window.calls.some(c => ['download_hub_update', 'install_hub_update', 'open_resource'].includes(c.command)))).toBe(false);
 });
 
+for (const width of [940, 390]) for (const updateAvailable of [false, true]) test(`mismatched hosted Setup gives update guidance and preserves standalone opening (update ${updateAvailable}, ${width}px)`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 720 });
+  await load(page);
+  await page.evaluate(updateAvailable => Object.assign(window.inventory.apps[1], {
+    installed: true, trusted: true, installedVersion: '0.3.0-alpha.1',
+    availableVersion: updateAvailable ? '0.3.0-alpha.2' : '0.3.0-alpha.1', updateAvailable,
+    hostedPreview: 'writable', hostedCompatible: false,
+  }), updateAvailable);
+  await page.locator('#check-updates').click();
+  await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
+  await expect(page.locator('#host-setup-button')).toBeDisabled();
+  await expect(page.locator('#compatibility-status')).toHaveText('Update needed for Hub');
+  await expect(page.locator('#compatibility-detail')).toContainText(updateAvailable ? 'Update this app' : 'Check for updates');
+  await expect(page.locator('#compatibility-detail')).toContainText('separate window');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('setup-update-guidance.png'), fullPage: true });
+  await page.locator(updateAvailable ? '#open-button' : '#release-button').click();
+  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'open_app'))).toEqual([{ command: 'open_app', args: { app: 'setup' } }]);
+  expect(await page.evaluate(() => window.calls.some(c => ['install_app', 'install_hub_update', 'start_hosted_app', 'open_resource'].includes(c.command)))).toBe(false);
+});
+
+test('matching hosted Setup remains available after inventory refresh', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => Object.assign(window.inventory.apps[1], {
+    installed: true, trusted: true, installedVersion: '0.3.0-alpha.2', availableVersion: '0.3.0-alpha.2',
+    hostedPreview: 'writable', hostedCompatible: true,
+  }));
+  await page.locator('#check-updates').click();
+  await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
+  await expect(page.locator('#host-setup-button')).toBeEnabled();
+  await expect(page.locator('#compatibility-status')).toHaveText('Test version available');
+});
+
+test('Setup requiring newer Hub explains the order and refresh clears a resolved mismatch', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => Object.assign(window.inventory.apps[1], {
+    installed: true, trusted: true, installedVersion: '0.3.0-alpha.1', availableVersion: '0.3.0-alpha.2',
+    updateAvailable: true, hostedPreview: 'writable', hostedCompatible: false,
+    requiredHubVersion: '0.1.0-alpha.5', installBlocked: 'Update Creator Hub first.',
+  }));
+  await page.locator('#check-updates').click();
+  await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
+  await expect(page.locator('#host-setup-button')).toBeDisabled();
+  await expect(page.locator('#compatibility-detail')).toContainText('Update Hub first');
+  await expect(page.locator('#open-button')).toBeEnabled();
+  await page.locator('#release-button').click();
+  await expect(page.locator('#hub-update-title')).toBeFocused();
+  await page.evaluate(() => Object.assign(window.inventory.apps[1], {
+    installedVersion: '0.3.0-alpha.2', updateAvailable: false, hostedCompatible: true,
+    requiredHubVersion: null, installBlocked: null,
+  }));
+  await page.locator('#check-updates').click();
+  await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
+  await expect(page.locator('#host-setup-button')).toBeEnabled();
+  await expect(page.locator('#compatibility-status')).toHaveText('Test version available');
+  expect(await page.evaluate(() => window.calls.some(c => ['install_app', 'install_hub_update', 'start_hosted_app', 'open_resource'].includes(c.command)))).toBe(false);
+});
+
 test('saved off preferences survive startup and suppress automatic downloads', async ({ page }) => {
   await load(page, 'hub', { preferences: { 'creator-hub.preview': 'false', 'creator-hub.auto-download': 'false' }, updateAvailable: true });
   await expect(page.locator('#preview-channel')).not.toBeChecked();

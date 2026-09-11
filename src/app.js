@@ -141,10 +141,11 @@
       byId(`status-${app.app}`).textContent = app.issue ? 'Needs attention' : app.updateAvailable ? 'Update available' : app.installed ? `Installed ${app.installedVersion || ''}` : `Available ${app.availableVersion}`;
     }
     const state = appState();
+    const hostedMismatch = state?.hostedCompatible === false;
     for (const app of ['setup', 'mcp']) {
       const button = byId(`host-${app}-button`);
       button.classList.toggle('hidden', current !== app || !state?.hostedPreview);
-      button.disabled = busy;
+      button.disabled = busy || hostedMismatch;
       button.textContent = state?.hostedPreview === 'read-only' ? 'Open read-only development preview' : 'Open hosted development preview';
     }
     const blocked = busy || !inventory?.supported || !state || Boolean(state.issue);
@@ -182,8 +183,10 @@
       }
       return row;
     }));
-    byId('compatibility-status').textContent = state?.hostedPreview ? 'Test version available' : state?.trusted ? 'Your app is ready' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
-    byId('compatibility-detail').textContent = state?.hostedPreview
+    byId('compatibility-status').textContent = hostedMismatch ? 'Update needed for Hub' : state?.hostedPreview ? 'Test version available' : state?.trusted ? 'Your app is ready' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
+    byId('compatibility-detail').textContent = hostedMismatch
+      ? `${state.requiredHubVersion ? 'Update Hub first, then check this app for updates.' : state.updateAvailable ? 'Update this app to open it inside Hub.' : 'Check for updates to get matching versions of Hub and this app.'} You can still use Open app for a separate window.`
+      : state?.hostedPreview
       ? `The hosted preview uses your verified app and saved settings${state.hostedPreview === 'read-only' ? '; changes are disabled' : ', with your approval'}. Open app remains available for a separate window.`
       : 'Apps open in their own window and keep your settings. Using them inside Hub needs a future update, which is not available here yet.';
     const copies = byId('detected-copies');
