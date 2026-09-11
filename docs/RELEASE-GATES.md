@@ -8,12 +8,18 @@ completed adoption. Runtime acceptance is distinct from source/unit tests.
 
 ## Status
 
-2026-09-11 alpha.5 candidate: matching Setup 0.3.0-alpha.2 passed its two-baseline
-installed acceptance (34588485597). Hub source compatibility and transition tests
-pass; the paired installer/native acceptance is pending. Staged-cache tests use
-the real signature and exact artifact, but do not claim public-feed discovery.
-Both releases stay drafts until their joint gate; publish Setup with minimum Hub
-alpha.5 before publishing that matching Hub. See [alpha.5 scope](HOTFIX-ALPHA5.md).
+2026-09-11 alpha.5 published prerelease: matching Setup 0.3.0-alpha.2 passed its
+two-baseline installed acceptance (34588485597). Hub's build job (34589242223)
+passed; a downstream draft-fixture access failure required a workflow-only fix,
+not a rebuilt product. [Staged native acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34590430861)
+then passed all three lanes. Setup was published with minimum Hub alpha.5,
+followed by the matching Hub. [Public native acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34591146264)
+passed all three lanes again, with staging disabled and the same installer.
+Both suites covered clean installs and Hub alpha.3/alpha.4 upgrades. Anonymous
+downloads of all 19 Hub and 11 Setup assets matched the reviewed files and passed
+signature verification. MCP 2.7.0-alpha.1 is unchanged. No local installed apps,
+Unity projects or bridges were changed. Full signed Hub self-update/restart is
+still untested. See [alpha.5 evidence and boundaries](HOTFIX-ALPHA5.md).
 
 2026-09-11 alpha.4 hotfix: [build](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34576073539)
 and [corrected native harness](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34576995054)
@@ -40,6 +46,11 @@ The dated entries below retain the broader adoption plan and earlier evidence.
 They do not undo this scoped prerelease acceptance. Automatic adoption, historical
 MSI/BANTWORKS migration, higher-version Hub self-update and project/headset tests
 remain outside the passed scope.
+
+## Earlier Planning Notes (2026-09-10)
+
+The statuses below are historical. Use the dated acceptance entries above for
+the published prereleases; incomplete broader adoption tasks remain separate.
 
 2026-09-10 scope update: the coordinated alpha.3 installer is being prepared
 on GitHub for prerelease testing. It has no embedded app payloads or adoption claims.

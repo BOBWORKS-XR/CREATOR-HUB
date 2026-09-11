@@ -1,17 +1,22 @@
 # Creator Hub
 
 Lightweight Windows app manager for Creator Works MCP and Creator Project Setup.
-Windows prerelease `0.1.0-alpha.4`; not a stable release.
+Windows prerelease `0.1.0-alpha.5`; not a stable release.
 Both tools remain usable independently.
 
-## Next Hotfix Candidate
+## New in Alpha.5
 
-Hub `0.1.0-alpha.5` pairs with Project Setup `0.3.0-alpha.2` for clearer setup
-errors and optional local diagnostic receipts. Hub now explains when an app
-needs updating before it can open inside Hub; the usual separate app window
-remains available. MCP is unchanged. The matching installer tests and coordinated
-release are being prepared; this is not a new public-download announcement.
-See [scope and acceptance boundaries](docs/HOTFIX-ALPHA5.md).
+Hub `0.1.0-alpha.5` and Project Setup `0.3.0-alpha.2` are now available:
+
+- Clearer setup errors and versioned local diagnostic receipts in Project Setup.
+  Sharing those files is optional; nothing is uploaded automatically.
+- Clear update guidance when an installed app cannot yet open inside Hub.
+  The usual **Open app** option remains available for a separate window.
+- Public-download, clean-install and upgrade tests passed for the matching pair.
+  MCP stays at `2.7.0-alpha.1`; there is no MCP or Unity bridge update in this hotfix.
+
+**Update Hub first, then Project Setup.** Keep **Include prereleases** enabled.
+See [tested scope and remaining limits](docs/HOTFIX-ALPHA5.md).
 
 ## New in Alpha.4
 
@@ -24,8 +29,8 @@ See [scope and acceptance boundaries](docs/HOTFIX-ALPHA5.md).
   legacy MCP/Setup upgrades, and a running private-runtime blocker that exits
   cooperatively before a separately approved update.
 
-MCP `2.7.0-alpha.1` and Project Setup `0.3.0-alpha.1` are unchanged in this Hub
-hotfix. See [validation and limits](docs/HOTFIX-ALPHA4.md).
+Alpha.4 did not change MCP `2.7.0-alpha.1` or Project Setup `0.3.0-alpha.1`.
+See [alpha.4 validation and limits](docs/HOTFIX-ALPHA4.md).
 
 ## Try the Installer
 
@@ -35,8 +40,8 @@ MCP download. The MCP `2.6.0` to `2.7.0-alpha.1` route passed real Windows testi
 including its saved project list and settings. Historical BANTWORKS/MSI installs and duplicate
 copies may require attention; do not uninstall them just to make Hub detect an app.
 
-[Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.4).
-Choose `Creator-Hub-0.1.0-alpha.4-Windows-setup.exe`. Leave **Include prereleases**
+[Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.5).
+Choose `Creator-Hub-0.1.0-alpha.5-Windows-setup.exe`. Leave **Include prereleases**
 enabled to see the matching MCP and Project Setup previews.
 
 Close old Creator Hub preview windows, then run the new installer. It installs
@@ -66,7 +71,7 @@ or "Not now" means Hub-only installation, without changing the other apps.
 Standalone apps keep their Creator menu when Hub is absent. See the
 [hosted-app plan](docs/HOSTED-APPS.md).
 
-The coordinated Windows preview uses Project Setup `0.3.0-alpha.1` and MCP
+The coordinated Windows preview uses Project Setup `0.3.0-alpha.2` and MCP
 `2.7.0-alpha.1`. Hub installs them separately from their verified public releases;
 they are not duplicated inside the Hub installer. Only exact reviewed installed
 executable hashes enable hosted controls. Native suite acceptance is recorded

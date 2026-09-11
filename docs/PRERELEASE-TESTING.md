@@ -1,12 +1,13 @@
 # Coordinated Windows Preview
 
-Target versions: Creator Hub 0.1.0-alpha.4, Creator Works MCP 2.7.0-alpha.1,
-Creator Project Setup 0.3.0-alpha.1. These are test releases, not stable releases.
+Current versions: Creator Hub 0.1.0-alpha.5, Creator Works MCP 2.7.0-alpha.1,
+Creator Project Setup 0.3.0-alpha.2. These are test releases, not stable releases.
+Update Hub before Project Setup; this hotfix does not change MCP or Unity bridges.
 
 ## Try the Flow
 
 Existing MCP users start with Hub, not a separate MCP prerelease installation.
-Project Setup is optional. [Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.4)
+Project Setup is optional. [Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.5)
 and choose the `Windows-setup.exe` asset.
 
 1. Save your work and close the old Hub. Install the new Hub EXE once.
@@ -37,17 +38,24 @@ Do not assume a successful download proves that restart path.
 - Downloading never authorizes installation. Unknown signatures, hashes, app
   copies, MSI migrations, and unsafe installation locations are refused.
 
-## Evidence Before Publication
+## Release Evidence
 
-Passed [native acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34576995054):
-clean installation, MCP `2.6.0` to `2.7.0-alpha.1` with no Setup installed, and
-both-app upgrades including Setup `0.2.2` to `0.3.0-alpha.1`. Existing valid MCP
-project selection and an isolated setting were checked in the actual hosted UI.
-The close test observes Hub's native refusal warning while a real picker is open.
-The same installer passed public Hub `0.1.0-alpha.3` to `0.1.0-alpha.4` upgrades.
+Passed [prepublication staged acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34590430861)
+and [post-publication native acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34591146264)
+using the same Hub installer. Both runs passed clean, legacy and MCP-only lanes,
+including Hub `0.1.0-alpha.3` and `0.1.0-alpha.4` to `0.1.0-alpha.5` upgrades.
+The public run used staging disabled and the actual public signed app downloads;
+the MCP-only lane left Project Setup uninstalled. The paired Setup is
+`0.3.0-alpha.2`; MCP remains `2.7.0-alpha.1`. Existing valid MCP project selection
+and an isolated setting were checked in the actual hosted UI. The close test
+observes Hub's native refusal warning while a real picker is open.
 A real private-runtime fixture verifies persistent blocker/recheck behavior,
 backend update refusal and preservation before cooperative exit and a separately
 approved update. This fixture does not make MCP requests or prove idle-orphan recovery.
+
+See [alpha.5 evidence](HOTFIX-ALPHA5.md) for exact hashes, the workflow-only
+correction before acceptance and remaining test boundaries. Earlier alpha.4
+acceptance is retained in [its historical report](HOTFIX-ALPHA4.md).
 
 Each app's exact installer must pass its own Windows install/upgrade checks.
 Its signed descriptor binds installer size/hash and the EXE extracted from that

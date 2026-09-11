@@ -1,6 +1,8 @@
 # Creator Hub Windows Preview
 
-This package is the Windows test build 0.1.0-alpha.5, not a stable release.
+The current public Windows prerelease is
+[0.1.0-alpha.5](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.5),
+not a stable release.
 Use the acceptance reports supplied with this exact installer; a completed build
 alone is not proof of a successful upgrade.
 
@@ -17,9 +19,9 @@ AI clients, uninstall MCP or erase application data. See
 Hub now checks for its own updates as well as MCP and Project Setup updates.
 Test updates and verified downloads start enabled; you can turn either off.
 Installing still needs your approval. A full Hub self-update to a later signed
-version remains untested. Installer-driven alpha.3-to-alpha.4 Hub upgrades and
-the app install/upgrade flow passed the separate
-[native acceptance checks](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34576995054).
+version remains untested. Installer-driven alpha.3/alpha.4-to-alpha.5 Hub upgrades
+and the matching app install/upgrade flow passed the
+[public native acceptance checks](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34591146264).
 
 ## Install
 
