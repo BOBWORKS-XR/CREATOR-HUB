@@ -8,6 +8,16 @@ completed adoption. Runtime acceptance is distinct from source/unit tests.
 
 ## Status
 
+2026-09-11 alpha.4 hotfix: [build](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34576073539)
+and [corrected native harness](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34576995054)
+accepted the same installer. All three native paths passed, including a public
+alpha.3 Hub upgrade and persistent private-runtime refusal/recheck before
+cooperative exit. The exact accepted installer also passed a local alpha.3
+upgrade and read-only project/hosted-app checks, preserving companion binaries,
+MCP settings and existing private-runtime processes. See
+[alpha.4 evidence](HOTFIX-ALPHA4.md). Signed in-app Hub self-update/restart,
+historical MSI/BANTWORKS migration, and in-flight MCP shutdown remain separate.
+
 2026-09-11 prerelease acceptance: Hub `0.1.0-alpha.3`, MCP `2.7.0-alpha.1` and
 Setup `0.3.0-alpha.1` have passed the scoped Windows install/upgrade flow.
 Hub build job [34533143879](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34533143879)

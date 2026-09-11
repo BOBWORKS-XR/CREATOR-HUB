@@ -1,18 +1,21 @@
 # Coordinated Windows Preview
 
-Target versions: Creator Hub 0.1.0-alpha.3, Creator Works MCP 2.7.0-alpha.1,
+Target versions: Creator Hub 0.1.0-alpha.4, Creator Works MCP 2.7.0-alpha.1,
 Creator Project Setup 0.3.0-alpha.1. These are test releases, not stable releases.
 
 ## Try the Flow
 
 Existing MCP users start with Hub, not a separate MCP prerelease installation.
-Project Setup is optional. [Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.3)
+Project Setup is optional. [Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.4)
 and choose the `Windows-setup.exe` asset.
 
 1. Save your work and close the old Hub. Install the new Hub EXE once.
 2. Leave **Include prereleases** enabled. Choose **Check for updates**.
 3. Choose MCP or Project Setup, then **Install app** or **Update app** and approve.
-4. Close an old app or active MCP clients if prompted. Hub never force-closes them.
+4. Close an old app or disconnect MCP in the identified AI client if prompted.
+   **Check again** only checks local status. Follow the recovery guidance if a
+   connection persists; Hub never force-closes clients or requires uninstalling
+   just to close a connection.
 5. Choose **Open hosted development preview** to use the accepted app inside Hub.
    MCP asks before enabling controls. Your existing project list and settings
    belong to the installed app; Hub does not replace them with a separate list.
@@ -36,11 +39,15 @@ Do not assume a successful download proves that restart path.
 
 ## Evidence Before Publication
 
-Passed [native acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34536443333):
+Passed [native acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34576995054):
 clean installation, MCP `2.6.0` to `2.7.0-alpha.1` with no Setup installed, and
 both-app upgrades including Setup `0.2.2` to `0.3.0-alpha.1`. Existing valid MCP
 project selection and an isolated setting were checked in the actual hosted UI.
 The close test observes Hub's native refusal warning while a real picker is open.
+The same installer passed public Hub `0.1.0-alpha.3` to `0.1.0-alpha.4` upgrades.
+A real private-runtime fixture verifies persistent blocker/recheck behavior,
+backend update refusal and preservation before cooperative exit and a separately
+approved update. This fixture does not make MCP requests or prove idle-orphan recovery.
 
 Each app's exact installer must pass its own Windows install/upgrade checks.
 Its signed descriptor binds installer size/hash and the EXE extracted from that

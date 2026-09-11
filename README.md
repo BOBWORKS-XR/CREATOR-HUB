@@ -1,8 +1,22 @@
 # Creator Hub
 
 Lightweight Windows app manager for Creator Works MCP and Creator Project Setup.
-Windows prerelease `0.1.0-alpha.3`; not a stable release.
+Windows prerelease `0.1.0-alpha.4`; not a stable release.
 Both tools remain usable independently.
+
+## New in Alpha.4
+
+- Projects open in **Recently modified** order, with **Name A-Z** available.
+- Update blockers show process IDs, executable paths and the starting app when
+  identifiable. This works independently of which AI client you use.
+- **Check again** refreshes local status without installing or stopping anything.
+  Recovery guidance explains what to do if a connection remains after its app closes.
+- Real Windows tests cover alpha.3-to-alpha.4 Hub upgrades, clean installs,
+  legacy MCP/Setup upgrades, and a running private-runtime blocker that exits
+  cooperatively before a separately approved update.
+
+MCP `2.7.0-alpha.1` and Project Setup `0.3.0-alpha.1` are unchanged in this Hub
+hotfix. See [validation and limits](docs/HOTFIX-ALPHA4.md).
 
 ## Try the Installer
 
@@ -12,8 +26,8 @@ MCP download. The MCP `2.6.0` to `2.7.0-alpha.1` route passed real Windows testi
 including its saved project list and settings. Historical BANTWORKS/MSI installs and duplicate
 copies may require attention; do not uninstall them just to make Hub detect an app.
 
-[Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.3).
-Choose `Creator-Hub-0.1.0-alpha.3-Windows-setup.exe`. Leave **Include prereleases**
+[Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.4).
+Choose `Creator-Hub-0.1.0-alpha.4-Windows-setup.exe`. Leave **Include prereleases**
 enabled to see the matching MCP and Project Setup previews.
 
 Close old Creator Hub preview windows, then run the new installer. It installs
@@ -24,7 +38,8 @@ Hub only. Your MCP, Project Setup, settings and Unity projects stay where they a
 - **Check for an update** checks inside Hub, without a browser detour.
 - **Creator Hub update** checks Hub itself on the same stable/test channel.
   Verified downloads do not install until you click **Update Hub** and approve.
-  In-app Hub restart is implemented but still awaiting installed-upgrade acceptance.
+  Installer-driven Hub upgrades passed; the complete signed in-app self-update
+  and restart route remains untested.
 - **Open hosted development preview** opens a compatible app inside Hub after
   you approve. The MCP preview includes its normal controls, not just a read-only
   snapshot. Other app versions remain available in their own window.
@@ -98,14 +113,15 @@ telemetry, community package hosting or arbitrary install URLs are added.
 
 ## Development
 
-### Hotfix Candidate: 0.1.0-alpha.4 (Unpublished)
+### Upgrade Blocker Guidance
 
-This source branch adds project sorting and clearer upgrade-blocker guidance.
+Alpha.4 adds project sorting and clearer upgrade-blocker guidance.
 The published alpha.3 installers remain unchanged. Hub identifies running MCP
-connections and their starting app when available, without assuming a particular
+runtimes and their starting app when available, without assuming a particular
 AI client. **Check again** refreshes local status only: it does not download,
 install or stop processes. Finish work and disconnect MCP in your AI client
-before retrying an update. No uninstall is required to close a connection.
+before retrying an update. Broad command matches are labelled **Possible MCP
+connection**, not proven ownership. No uninstall is required to close a connection.
 See [hotfix validation and remaining limits](docs/HOTFIX-ALPHA4.md).
 
 ### Projects Sorting
@@ -121,7 +137,7 @@ are excluded. Linked folders are not followed. Dates are read on initial project
 discovery and explicit Refresh, not continuously; unsaved Editor changes are not
 included. Metadata checks run off the UI thread, with per-project and total
 time/entry limits. An unreadable or incomplete scan shows **Modified date
-unavailable**, never a guessed date. This change is not in the published alpha.3.
+unavailable**, never a guessed date.
 
 ```powershell
 npm ci
@@ -171,11 +187,15 @@ Windows inventory tests do not launch or replace apps.
 The coordinated MCP and Project Setup prereleases have published signed
 descriptors and passed their installed Windows upgrade tests. Hub's own installer
 has passed clean installation, busy-app refusal, cooperative update and GUI
-startup checks on disposable Windows workers. The final
-[native acceptance run](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34536443333)
+startup checks on disposable Windows workers. Alpha.4 also passed an upgrade
+from the published alpha.3 installer with existing files and settings preserved.
+The final
+[native acceptance run](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34576995054)
 passed fresh installs, both-app upgrades and MCP-only upgrades through Hub,
 including native consent, saved MCP project/selection, a preference round-trip,
-actual busy-close refusal and scoped exit. Project Setup is not required for MCP.
+actual busy-close refusal and scoped exit. A real private-runtime fixture blocked
+installation until its cooperative exit; no AI client was force-closed.
+Project Setup is not required for MCP.
 A successful installer exit is not enough: its installed launcher must
 match the signed/pinned hash. Failed native installers are not assumed to be
 transactional; Hub reports failure and retains cached installers.

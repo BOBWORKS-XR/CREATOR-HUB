@@ -1,7 +1,7 @@
-# Alpha.4 Hotfix Candidate
+# Alpha.4 Hotfix
 
-Status: local candidate, not published or installed on the user's machine.
-The public alpha.3 release is unchanged. MCP and Project Setup payloads and
+Status: Windows prerelease with installer and native acceptance completed.
+The alpha.3 release is unchanged. MCP and Project Setup payloads and
 their accepted hashes are unchanged.
 
 ## Changes
@@ -43,7 +43,35 @@ Read-only project inventory: 62 projects, 51 valid projects with complete dates,
 11 unavailable projects; measured 1.06 seconds on the development machine.
 This is one local timing sample, not a cross-machine performance guarantee.
 
-Final automated test results and candidate hashes are recorded in the local
-hotfix build receipt. New exact-installer Windows acceptance and a user upgrade
-retry are still needed before calling the reported installation problem fixed.
-No Unity scene, headset, account-usage or token-saving claim is made.
+## Release Acceptance
+
+- [Build job](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34576073539):
+  49 Rust tests passed, five explicit live tests ignored; 66 browser tests,
+  strict Clippy, packaging checks, clean installation, same-version update,
+  active-Hub refusal, exact installed hashes and GUI startup passed.
+- The first native harness attempted to click a hidden navigation control.
+  Correcting test navigation did not rebuild or alter the installer.
+- [Final native acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34576995054)
+  passed all three clean, legacy and MCP-only paths using that exact installer.
+  Legacy lanes include public Hub alpha.3-to-alpha.4 upgrades and preservation of
+  existing files/settings. The private-runtime fixture verifies blocker display,
+  persistent recheck, backend installation refusal, cooperative exit and then a
+  separately approved MCP update. It is not a real in-flight MCP request test.
+- Both installed companion apps passed native hosting, consent, retained forms,
+  MCP preference round-trip, busy-close refusal and scoped backend exit.
+- The accepted installer was also installed locally over alpha.3. Real project
+  sorting, live blocker guidance/recheck and both hosted apps passed. Companion
+  binaries, MCP configuration and Hub app selections were unchanged; the existing
+  private-runtime processes remained alive. No Unity project was modified.
+
+Installer SHA256:
+`425f0e6d5399227f9e5e257ad2b5c2e9fc57b6e58ed27a56d1f13b29c93e67c9`
+
+Actual installed EXE SHA256:
+`b789ae255dd220a1ebe0493b7264f24846efb594c8b5bd8b85e5e891f22d9a4e`
+
+The complete higher-version signed in-app Hub self-update/restart path remains
+untested. This is not proof that every historical BANTWORKS/MSI migration or the
+original user's unavailable process snapshot has been resolved. No Unity scene,
+headset, account-usage or token-saving claim is made. Windows publisher signing
+is absent; signed update metadata is a separate protection.
