@@ -1,4 +1,4 @@
-// Executes real public installers and writable controls on disposable CI only.
+// Executes real installers and writable controls on disposable CI only.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -17,10 +17,12 @@ const apps = {
 const mcpOnly = process.env.CREATOR_SUITE_BASELINE === 'mcp-only';
 const upgrade = mcpOnly || process.env.CREATOR_SUITE_BASELINE === 'legacy';
 const selectedApps = mcpOnly ? ['mcp'] : ['setup', 'mcp'];
+const stagedSetup = process.env.CREATOR_STAGED_SETUP === '1';
 for (const exe of Object.values(apps)) assert.equal(fs.existsSync(exe), false, 'Expected a clean app installation target');
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out, { recursive: true });
 const report = { passed: false, flow: mcpOnly ? 'mcp-only-upgrade' : upgrade ? 'upgrade' : 'clean-install', hubSha256: hash(hub), checks: [], userMachineUsed: false, unityProjectCreated: false, selfUpdateTested: false };
+report.setupReleaseSource = mcpOnly ? 'not-tested' : stagedSetup ? 'signed-staged-cache' : 'public-release';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function hash(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); }
 function native(pid, exe, action, value = '') {
@@ -130,7 +132,7 @@ async function closeHosted(app) {
   await page.waitForFunction(() => window.CreatorHubNative && !document.querySelector('#check-updates').disabled, null, { timeout: 120000 });
   assert.equal(await page.locator('#preview-channel').isChecked(), true);
   assert.match(await page.evaluate(() => window.__TAURI__.core.invoke('app_inventory', { check: false, preview: true }).then(() => 'ALLOWED', String)), /trusted shell/);
-  const inventory = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: true, preview: true }));
+  const inventory = await page.evaluate(check => window.CreatorHubNative.invoke('app_inventory', { check, preview: true }), !stagedSetup);
   for (const app of selectedApps) {
     const state = inventory.apps.find(item => item.app === app);
     assert.equal(state.availableVersion, pins[app].version);
@@ -139,6 +141,11 @@ async function closeHosted(app) {
     assert.equal(state.installerInteractive, false);
     assert.ok(!state.issue && !state.installBlocked && !state.checkWarning, JSON.stringify(state));
     await show(app);
+    if (upgrade) {
+      assert.equal(state.hostedCompatible, false);
+      assert.equal(await page.locator(`#host-${app}-button`).isDisabled(), true);
+      assert.match(await page.locator('#compatibility-detail').innerText(), /Update this app/);
+    }
     if (upgrade && app === 'mcp') {
       const runtime = path.join(path.dirname(apps.mcp), 'server', 'runtime', 'node.exe');
       assert.ok(fs.existsSync(runtime), 'Expected the legacy private runtime');
@@ -181,9 +188,11 @@ async function closeHosted(app) {
     await retry(() => native(child.pid, hub, 'button', 'Install'));
     await page.waitForFunction(() => !document.querySelector('#release-button').disabled && document.querySelector('#primary-label').textContent === 'Open app', null, { timeout: 180000 });
     assert.equal(hash(apps[app]), pins[app].executableSha256);
+    const refreshed = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
+    assert.equal(refreshed.apps.find(item => item.app === app).hostedCompatible, true);
     if (upgrade) assert.equal(fs.readFileSync(path.join(path.dirname(apps[app]), 'ci-unmanaged-sentinel.txt'), 'utf8'), 'preserve suite test content');
     for (const name of ['LICENSE.txt', 'THIRD_PARTY_NOTICES.txt', 'rust-dependencies.json']) assert.ok(fs.statSync(path.join(path.dirname(apps[app]), 'licenses', name)).size > 0);
-    report.checks.push(`${app}: real public signed discovery, download, native Install consent, ${upgrade ? 'upgrade preserving unmanaged content' : 'clean install'}, exact installed hash and licenses`);
+    report.checks.push(`${app}: ${app === 'setup' && stagedSetup ? 'native signed staged-catalog/cache validation (public feed not tested)' : 'public signed release and verified download'}, native Install consent, ${upgrade ? 'upgrade preserving unmanaged content' : 'clean install'}, exact installed hash, hosted compatibility and licenses`);
   }
   if (upgrade) assert.equal(hash(configPath), originalConfigHash);
   else seedConfig();

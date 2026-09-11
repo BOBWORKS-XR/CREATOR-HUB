@@ -8,6 +8,13 @@ completed adoption. Runtime acceptance is distinct from source/unit tests.
 
 ## Status
 
+2026-09-11 alpha.5 candidate: matching Setup 0.3.0-alpha.2 passed its two-baseline
+installed acceptance (34588485597). Hub source compatibility and transition tests
+pass; the paired installer/native acceptance is pending. Staged-cache tests use
+the real signature and exact artifact, but do not claim public-feed discovery.
+Both releases stay drafts until their joint gate; publish Setup with minimum Hub
+alpha.5 before publishing that matching Hub. See [alpha.5 scope](HOTFIX-ALPHA5.md).
+
 2026-09-11 alpha.4 hotfix: [build](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34576073539)
 and [corrected native harness](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34576995054)
 accepted the same installer. All three native paths passed, including a public

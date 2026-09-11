@@ -9,6 +9,11 @@ on:
         description: Reuse an existing candidate run for native acceptance only
         required: false
         type: string
+      staged_setup:
+        description: Use the reviewed signed Setup draft cache instead of asserting public Setup discovery
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -104,11 +109,24 @@ jobs:
         shell: powershell
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $baseline = if ('${{ matrix.baseline }}' -eq 'clean') { 'clean' } else { 'alpha.3' }
+          $baseline = if ('${{ matrix.baseline }}' -eq 'clean') { 'clean' } elseif ('${{ matrix.baseline }}' -eq 'legacy') { 'alpha.4' } else { 'alpha.3' }
           .\scripts\Test-InstalledCandidate.ps1 -CandidateDirectory "dist\Creator-Hub-$version-Windows-Candidate" -HubBaseline $baseline
-      - name: Test real public installs and both hosted applications
+      - name: Download the exact staged Setup installer from this repository's draft
+        if: ${{ inputs.staged_setup }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $asset = (Get-Content scripts/prerelease-apps.json -Raw | ConvertFrom-Json).setup.assetName
+          gh release download "v$version" --repo BOBWORKS-XR/CREATOR-HUB --pattern $asset --dir artifacts/staged-setup
+          if ($LASTEXITCODE -ne 0) { throw 'Staged installer download failed.' }
+          node scripts/stage-setup-cache.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Staged cache preparation failed.' }
+      - name: Test native installs and both hosted applications
         env:
           CREATOR_SUITE_BASELINE: ${{ matrix.baseline }}
+          CREATOR_STAGED_SETUP: ${{ inputs.staged_setup && '1' || '' }}
         run: node scripts/native-suite-smoke.cjs
       - uses: actions/upload-artifact@v4
         if: always()
@@ -121,5 +139,6 @@ jobs:
             artifacts/native-suite-*/*startup.json
             artifacts/native-suite-*/webview-policy.json
             artifacts/native-suite-*/mcp-picker.json
+            artifacts/staged-setup/receipt.json
             dist/Creator-Hub-*-Windows-Candidate/installed-acceptance.json
           if-no-files-found: error

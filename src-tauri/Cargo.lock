@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "creator-hub"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "base64 0.22.1",
  "dirs",

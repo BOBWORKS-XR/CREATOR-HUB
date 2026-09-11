@@ -414,6 +414,27 @@ mod tests {
     }
 
     #[test]
+    fn staged_setup_signature_and_hub_minimum_are_bound_to_the_real_fixture() {
+        let bytes =
+            include_bytes!("../../tests/fixtures/staged-setup/creator-hub-windows-x86_64.json");
+        let sig = include_bytes!(
+            "../../tests/fixtures/staged-setup/creator-hub-windows-x86_64.json.minisig"
+        );
+        let release = verify_signed(AppId::Setup, bytes, sig, true).unwrap();
+        assert_eq!(release.version, "0.3.0-alpha.2");
+        assert_eq!(release.min_hub_version, "0.1.0-alpha.5");
+        assert!(
+            Version::parse(&release.min_hub_version).unwrap()
+                > Version::parse("0.1.0-alpha.4").unwrap()
+        );
+        assert_eq!(release.required_hub_version(), None);
+        let mut tampered = bytes.to_vec();
+        tampered[0] ^= 1;
+        assert!(verify_signed(AppId::Setup, &tampered, sig, true).is_err());
+        assert!(verify_signed(AppId::Setup, bytes, sig, false).is_err());
+    }
+
+    #[test]
     fn channel_changes_accept_only_newer_releases() {
         let item = |version: &str, prerelease| GithubRelease {
             tag_name: format!("v{version}"),

@@ -1,7 +1,13 @@
 # Creator Hub Windows Preview
 
-The Windows test release is 0.1.0-alpha.4, not a stable release.
-[Installer](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.4).
+This package is the Windows test build 0.1.0-alpha.5, not a stable release.
+Use the acceptance reports supplied with this exact installer; a completed build
+alone is not proof of a successful upgrade.
+
+Alpha.5 supports Project Setup 0.3.0-alpha.2 and gives clear update guidance when
+an app cannot yet open inside Hub. Update Hub first, then Project Setup. The
+usual separate app window stays available. MCP 2.7.0-alpha.1 is unchanged.
+See [this hotfix's scope](HOTFIX-ALPHA5.md).
 
 Alpha.4 adds recently-modified/name sorting to Projects and clearer running-connection
 details with a read-only **Check again** action before upgrades. It does not stop

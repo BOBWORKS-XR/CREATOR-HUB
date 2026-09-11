@@ -4,6 +4,15 @@ Lightweight Windows app manager for Creator Works MCP and Creator Project Setup.
 Windows prerelease `0.1.0-alpha.4`; not a stable release.
 Both tools remain usable independently.
 
+## Next Hotfix Candidate
+
+Hub `0.1.0-alpha.5` pairs with Project Setup `0.3.0-alpha.2` for clearer setup
+errors and optional local diagnostic receipts. Hub now explains when an app
+needs updating before it can open inside Hub; the usual separate app window
+remains available. MCP is unchanged. The matching installer tests and coordinated
+release are being prepared; this is not a new public-download announcement.
+See [scope and acceptance boundaries](docs/HOTFIX-ALPHA5.md).
+
 ## New in Alpha.4
 
 - Projects open in **Recently modified** order, with **Name A-Z** available.

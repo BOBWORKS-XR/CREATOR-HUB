@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$CandidateDirectory,
-    [ValidateSet('clean', 'alpha.3')][string]$HubBaseline = 'clean'
+    [ValidateSet('clean', 'alpha.3', 'alpha.4')][string]$HubBaseline = 'clean'
 )
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
@@ -67,14 +67,19 @@ function Snapshot {
 try {
     $report.installerSha256 = Hash $installer
     $report.expectedExecutableSha256 = Hash $expectedExe
-    if ($HubBaseline -eq 'alpha.3') {
-        $baselineInstaller = Join-Path $output 'Creator-Hub-0.1.0-alpha.3-Windows-setup.exe'
+    if ($HubBaseline -ne 'clean') {
+        $baseline = if ($HubBaseline -eq 'alpha.4') {
+            @{ Version = '0.1.0-alpha.4'; Installer = '425f0e6d5399227f9e5e257ad2b5c2e9fc57b6e58ed27a56d1f13b29c93e67c9'; Exe = 'b789ae255dd220a1ebe0493b7264f24846efb594c8b5bd8b85e5e891f22d9a4e' }
+        } else {
+            @{ Version = '0.1.0-alpha.3'; Installer = '1a2239d83171b94849ba96a8e235daf4f3e50faff24ccb63e9f8d44e1d7c5fda'; Exe = '0f24647616177a85936a66fbcc31c55ba929712cd4153b8aecc5bd060b380f00' }
+        }
+        $baselineInstaller = Join-Path $output "Creator-Hub-$($baseline.Version)-Windows-setup.exe"
         Require (-not (Test-Path -LiteralPath $baselineInstaller)) 'Baseline installer path already exists.'
-        Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.0-alpha.3/Creator-Hub-0.1.0-alpha.3-Windows-setup.exe' -OutFile $baselineInstaller -TimeoutSec 120
-        Require ((Hash $baselineInstaller) -eq '1a2239d83171b94849ba96a8e235daf4f3e50faff24ccb63e9f8d44e1d7c5fda') 'Public baseline installer hash differs.'
-        Run-Installer '/S /NS' 0 'Install verified public Hub alpha.3 baseline' $baselineInstaller
-        Require ((Hash (Join-Path $installed 'creator-hub.exe')) -eq '0f24647616177a85936a66fbcc31c55ba929712cd4153b8aecc5bd060b380f00') 'Public baseline installed executable differs.'
-        Require ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -eq '0.1.0-alpha.3') 'Baseline installed version differs.'
+        Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v$($baseline.Version)/Creator-Hub-$($baseline.Version)-Windows-setup.exe" -OutFile $baselineInstaller -TimeoutSec 120
+        Require ((Hash $baselineInstaller) -eq $baseline.Installer) 'Public baseline installer hash differs.'
+        Run-Installer '/S /NS' 0 "Install verified public Hub $HubBaseline baseline" $baselineInstaller
+        Require ((Hash (Join-Path $installed 'creator-hub.exe')) -eq $baseline.Exe) 'Public baseline installed executable differs.'
+        Require ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -eq $baseline.Version) 'Baseline installed version differs.'
     } else {
         Run-Installer '/S /NS' 0 'Clean Hub installation'
         Require ((Hash (Join-Path $installed 'creator-hub.exe')) -eq (Hash $expectedExe)) 'Installed Hub differs from extracted installer payload.'
@@ -111,7 +116,7 @@ try {
     Require ((Get-Content -LiteralPath (Join-Path $installed 'ci-unmanaged-sentinel.txt') -Raw) -ceq 'preserve fixture content') 'Unmanaged sentinel changed.'
     Require ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -eq $version) 'Installed version is incorrect.'
     $report.sameVersionUpdateTested = $HubBaseline -eq 'clean'
-    $report.crossVersionUpdateTested = $HubBaseline -eq 'alpha.3'
+    $report.crossVersionUpdateTested = $HubBaseline -ne 'clean'
     $report.installedExecutableSha256 = Hash (Join-Path $installed 'creator-hub.exe')
 
     # Open the real packaged GUI on the disposable worker, not a metadata-only stub.
