@@ -148,7 +148,10 @@ async function closeHosted(app) {
       runtimeFixture.stderr.on('data', chunk => { report.runtimeFixtureStderr = (report.runtimeFixtureStderr || '') + chunk; });
       runtimeFixture.on('error', error => { report.runtimeFixtureError = String(error); });
       await retry(() => { assert.match(output, /ready/); assert.equal(runtimeFixture.exitCode, null); });
+      await show('hub');
       await page.locator('#check-updates').click();
+      await retry(async () => assert.equal(await page.locator('#check-updates').isEnabled(), true), 120);
+      await show('mcp');
       await page.locator('#update-blockers').waitFor();
       await retry(async () => assert.equal(await page.locator('#recheck-app').isEnabled(), true));
       assert.equal(await page.locator('#release-button').isDisabled(), true);
