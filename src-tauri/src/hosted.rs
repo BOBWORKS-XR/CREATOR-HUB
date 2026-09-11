@@ -8,7 +8,7 @@ use std::{
     path::Path,
     process::{ChildStdin, Command, Stdio},
     sync::{mpsc, Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager as _};
 
@@ -93,6 +93,32 @@ const MAX_FRAME: usize = 2 * 1024 * 1024;
 const MAX_REQUEST: usize = 64 * 1024;
 const MAX_LIFECYCLE_FRAME: usize = 512;
 const MAX_SAFE_SEQUENCE: u64 = (1_u64 << 53) - 1;
+
+#[derive(Default)]
+struct SetupProgressGate {
+    last_sent: [Option<Instant>; 3],
+}
+impl SetupProgressGate {
+    fn accept(&mut self, frame: &Value, session: &str, now: Instant) -> bool {
+        if frame["type"] != "event" || frame["session"] != session {
+            return false;
+        }
+        let slot = match frame["name"].as_str() {
+            Some("setup-progress") => 0,
+            Some("existing-progress") => 1,
+            Some("requirements-progress") => 2,
+            _ => return false,
+        };
+        // Each bounded stream gets its first event, including an immediate stage handoff.
+        if self.last_sent[slot]
+            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(40))
+        {
+            return false;
+        }
+        self.last_sent[slot] = Some(now);
+        true
+    }
+}
 
 fn initialize_args(read_only_events: bool) -> Value {
     if read_only_events {
@@ -339,7 +365,7 @@ impl Hosting {
         let session = nonce.clone();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(output);
-            let mut last_event = std::time::Instant::now() - Duration::from_secs(1);
+            let mut setup_progress = SetupProgressGate::default();
             let mut last_lifecycle_sequence = None;
             let failure = loop {
                 match read_frame(&mut reader) {
@@ -352,9 +378,8 @@ impl Hosting {
                                 }
                                 // Advisory only. Never release Manager's operation from an event.
                                 let _ = app.emit("hosted-app-event", frame);
-                            } else if kind == AppId::Setup && ["setup-progress", "existing-progress"].contains(&frame["name"].as_str().unwrap_or("")) && last_event.elapsed() >= Duration::from_millis(40) {
+                            } else if kind == AppId::Setup && setup_progress.accept(&frame, &session, Instant::now()) {
                                 let _ = app.emit("hosted-app-event", frame);
-                                last_event = std::time::Instant::now();
                             }
                         } else if sender.try_send(Ok(frame)).is_err() { break "Hosted response queue overflowed.".to_owned(); }
                     }
@@ -653,6 +678,12 @@ mod tests {
                 .unwrap_err(),
             "This command is not available to that hosted app."
         );
+        assert_eq!(
+            hosting
+                .call(&manager, "setup", "requirements-progress", json!({}))
+                .unwrap_err(),
+            "This command is not available to that hosted app."
+        );
         assert!(hosting
             .call(&manager, "mcp", "get_hosted_snapshot", json!([]))
             .is_err());
@@ -669,6 +700,72 @@ mod tests {
             .contains("Stale"));
         hosting.abort_initialization("setup").unwrap();
         assert!(hosting.0.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn setup_progress_preserves_immediate_requirements_to_creation_handoff() {
+        let mut gate = SetupProgressGate::default();
+        let now = Instant::now();
+        let requirements = json!({
+            "type":"event", "session":"setup", "name":"requirements-progress",
+            "payload":{"stage":"Requirements ready", "detail":"Licence checked", "percent":null}
+        });
+        let creation = json!({
+            "type":"event", "session":"setup", "name":"setup-progress",
+            "payload":{"step":1,"detail":"Creating project"}
+        });
+        assert!(gate.accept(&requirements, "setup", now));
+        assert!(gate.accept(&creation, "setup", now));
+        assert!(!gate.accept(&requirements, "setup", now + Duration::from_millis(39)));
+        assert!(!gate.accept(&creation, "setup", now + Duration::from_millis(39)));
+        assert!(gate.accept(&requirements, "setup", now + Duration::from_millis(40)));
+        assert!(gate.accept(&creation, "setup", now + Duration::from_millis(40)));
+    }
+    #[test]
+    fn setup_progress_rejects_invalid_envelopes_without_spending_valid_budget() {
+        let valid = json!({
+            "type":"event", "session":"setup", "name":"requirements-progress",
+            "payload":{"stage":"Downloading", "detail":"Unity Editor", "percent":42}
+        });
+        let now = Instant::now();
+        for (field, value) in [
+            ("session", json!("mcp")),
+            ("session", Value::Null),
+            ("type", json!("result")),
+            ("type", Value::Null),
+            ("name", json!("unknown-progress")),
+            ("name", json!("creator-mcp-lifecycle")),
+            ("name", Value::Null),
+            ("name", json!(42)),
+        ] {
+            let mut gate = SetupProgressGate::default();
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(!gate.accept(&invalid, "setup", now));
+            assert!(gate.accept(&valid, "setup", now));
+        }
+    }
+    #[test]
+    fn setup_progress_flood_stays_bounded_per_allowlisted_type() {
+        let mut gate = SetupProgressGate::default();
+        let names = [
+            "setup-progress",
+            "existing-progress",
+            "requirements-progress",
+        ];
+        let mut counts = [0; 3];
+        let start = Instant::now();
+        for milliseconds in 0..120 {
+            let now = start + Duration::from_millis(milliseconds);
+            for (slot, name) in names.iter().enumerate() {
+                let frame = json!({"type":"event", "session":"setup", "name":name});
+                if gate.accept(&frame, "setup", now) {
+                    counts[slot] += 1;
+                }
+            }
+            let unknown = json!({"type":"event", "session":"setup", "name":"other"});
+            assert!(!gate.accept(&unknown, "setup", now));
+        }
+        assert_eq!(counts, [3; 3]);
     }
     #[test]
     fn frames_are_bounded_and_complete() {

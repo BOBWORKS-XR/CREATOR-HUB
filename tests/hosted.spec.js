@@ -1,14 +1,16 @@
 const { test, expect } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
+const semver = require('semver');
 
 const setupSource = process.env.CREATOR_SETUP_SOURCE || path.resolve('../CREATOR-PROJECT-SETUP/src');
+const setupVersion = JSON.parse(fs.readFileSync(path.resolve(setupSource, '../package.json'), 'utf8')).version;
 const files = Object.fromEntries(fs.readdirSync(setupSource, { recursive: true }).filter(name => fs.statSync(path.join(setupSource, name)).isFile()).map(name => [name.replaceAll('\\', '/'), fs.readFileSync(path.join(setupSource, name)).toString('base64')]));
 const mcpSource = process.env.CREATOR_MCP_SOURCE || path.resolve('../creator-works-hub-compatibility/launcher/src');
 const mcpFiles = Object.fromEntries(fs.readdirSync(mcpSource, { recursive: true }).filter(name => fs.statSync(path.join(mcpSource, name)).isFile()).map(name => [name.replaceAll('\\', '/'), fs.readFileSync(path.join(mcpSource, name)).toString('base64')]));
 
 async function open(page, options = {}) {
-  await page.addInitScript(({ files, mcpFiles, options }) => {
+  await page.addInitScript(({ files, mcpFiles, options, setupVersion }) => {
     if (window !== window.parent) return;
     window.hostCalls = [];
     window.events = {};
@@ -27,7 +29,7 @@ async function open(page, options = {}) {
           if (options.decline) throw 'Opening Setup in Hub was declined. Standalone Setup is unchanged.';
           if (args.app === 'mcp') return { session: 'b'.repeat(64), appId: 'creator-works-mcp', version: '2.7.0-alpha.1', files: mcpFiles,
             ...(options.writableMcp ? { hostingRevision: 2, effectiveMode: 'writable' } : {}) };
-          return { session: 'a'.repeat(64), appId: 'creator-project-setup', version: '0.3.0-alpha.1', files };
+          return { session: 'a'.repeat(64), appId: 'creator-project-setup', version: setupVersion, files };
         }
         if (command === 'stop_hosted_app') return !options.keepOpen;
         if (command !== 'hosted_app_call') return;
@@ -68,7 +70,7 @@ async function open(page, options = {}) {
         }
       } },
     };
-  }, { files, mcpFiles, options });
+  }, { files, mcpFiles, options, setupVersion });
   await page.goto('http://127.0.0.1:4188/');
   await expect(page.locator('#catalog-status')).toContainText('Update check complete');
   await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
@@ -124,6 +126,113 @@ test('progress and completion continue while the hosted view is hidden', async (
   await expect(setup.locator('#open-project-button')).toBeVisible();
   await expect(page.locator('#hosted-stop')).toBeEnabled();
   expect(await page.evaluate(() => window.hostCalls.filter(call => call.args?.command === 'create_project').length)).toBe(1);
+});
+
+for (const width of [940, 390]) test(`requirements progress is visible and keeps Setup busy at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 720 });
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const setup = await open(page, { pending: true });
+  test.skip(semver.lt(setupVersion, '0.3.0-alpha.3'),
+    'This Setup source predates the requirements UI; protocol forwarding is tested separately.');
+  await setup.locator('#project-name').fill('Requirements progress test');
+  await setup.locator('#create-button').click();
+  await expect.poll(() => page.evaluate(() => typeof window.finishCreate)).toBe('function');
+  await page.evaluate(() => window.events['hosted-app-event']({ payload: {
+    session: 'a'.repeat(64), name: 'requirements-progress',
+    payload: { stage: 'Installing Unity requirements', detail: 'Downloading the selected Unity Editor and Android modules.', percent: 42 },
+  } }));
+  await expect(setup.locator('#activity-title')).toHaveText('Installing Unity requirements');
+  await expect(setup.locator('#activity-message')).toHaveText('Downloading the selected Unity Editor and Android modules.');
+  await expect(setup.locator('#download-progress')).toBeVisible();
+  await expect(setup.locator('#download-progress')).toHaveAttribute('value', '42');
+  await expect(setup.locator('#stage-progress')).toBeHidden();
+  await expect(setup.locator('#create-button')).toBeDisabled();
+  await expect(page.locator('#hosted-stop')).toBeDisabled();
+  expect(await setup.locator('html').evaluate(element => element.scrollWidth <= innerWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('hosted-requirements-progress.png'), fullPage: true });
+  await switchTo(page, 'hub');
+  await page.evaluate(() => window.events['hosted-app-event']({ payload: {
+    session: 'a'.repeat(64), name: 'requirements-progress',
+    payload: { stage: 'Checking Unity licence', detail: 'Waiting for the licence check.', percent: null },
+  } }));
+  await switchTo(page, 'setup');
+  await expect(setup.locator('#activity-title')).toHaveText('Checking Unity licence');
+  await expect(setup.locator('#download-progress')).not.toHaveAttribute('value');
+  await expect(page.locator('#hosted-stop')).toBeDisabled();
+  await page.evaluate(() => window.finishCreate());
+  await expect(setup.locator('#result')).toContainText('Ready');
+  await expect(page.locator('#hosted-stop')).toBeEnabled();
+  expect(await page.evaluate(() => window.hostCalls.filter(call => call.args?.command === 'create_project').length)).toBe(1);
+  expect(errors).toEqual([]);
+});
+
+test('requirements-to-setup progress transition keeps order and restores creation progress', async ({ page }) => {
+  const setup = await open(page, { pending: true });
+  await setup.locator('#create-button').click();
+  await expect.poll(() => page.evaluate(() => typeof window.finishCreate)).toBe('function');
+  await setup.locator('body').evaluate(async () => {
+    window.progressNames = [];
+    for (const name of ['requirements-progress', 'setup-progress']) {
+      await window.CreatorRuntime.listen(name, () => window.progressNames.push(name));
+    }
+  });
+  await page.evaluate(() => {
+    const emit = (name, payload) => window.events['hosted-app-event']({ payload: { session: 'a'.repeat(64), name, payload } });
+    emit('requirements-progress', { stage: 'Requirements ready', detail: 'Unity requirements are ready.', percent: 100 });
+    emit('setup-progress', { step: 3, detail: 'Initializing Creator SDK and Visual Scripting.' });
+  });
+  await expect(setup.locator('#activity-message')).toHaveText('Initializing Creator SDK and Visual Scripting.');
+  expect(await setup.locator('body').evaluate(() => window.progressNames)).toEqual(['requirements-progress', 'setup-progress']);
+  await expect(setup.locator('#download-progress')).toBeHidden();
+  await expect(setup.locator('#stage-progress')).toBeVisible();
+  await expect(page.locator('#hosted-stop')).toBeDisabled();
+  await page.evaluate(() => window.finishCreate());
+  await expect(setup.locator('#result')).toContainText('Ready');
+});
+
+test('requirements progress rejects foreign sessions and unknown names without crossing into MCP', async ({ page }) => {
+  await page.addInitScript(() => {
+    if (window !== window.parent) return;
+    window.forwardedProgress = [];
+    const postMessage = MessagePort.prototype.postMessage;
+    MessagePort.prototype.postMessage = function (message, ...args) {
+      if (message?.type === 'event') window.forwardedProgress.push(message.name);
+      return postMessage.call(this, message, ...args);
+    };
+  });
+  const setup = await open(page);
+  const mcp = await openMcp(page);
+  await setup.locator('body').evaluate(async () => {
+    window.progressNames = [];
+    for (const name of ['requirements-progress', 'setup-progress', 'existing-progress', 'unknown-progress', 'creator-mcp-lifecycle']) {
+      await window.CreatorRuntime.listen(name, () => window.progressNames.push(name));
+    }
+  });
+  await mcp.locator('body').evaluate(async () => {
+    window.progressNames = [];
+    await window.CreatorRuntime.listen('creator-mcp-lifecycle', () => window.progressNames.push('creator-mcp-lifecycle'));
+  });
+  await page.evaluate(() => {
+    const emit = (session, name) => window.events['hosted-app-event']({ payload: { session, name, payload: {} } });
+    emit('wrong', 'requirements-progress');
+    emit(undefined, 'requirements-progress');
+    emit('b'.repeat(64), 'requirements-progress');
+    emit('a'.repeat(64), 'unknown-progress');
+    emit('a'.repeat(64), 'creator-mcp-lifecycle');
+    emit('a'.repeat(64), 'requirements-progress');
+    emit('a'.repeat(64), 'existing-progress');
+    emit('a'.repeat(64), 'setup-progress');
+    emit('b'.repeat(64), 'creator-mcp-lifecycle');
+  });
+  // Known events are ordering barriers for both private message ports.
+  await expect.poll(() => setup.locator('body').evaluate(() => window.progressNames.at(-1))).toBe('setup-progress');
+  await expect.poll(() => mcp.locator('body').evaluate(() => window.progressNames.at(-1))).toBe('creator-mcp-lifecycle');
+  expect(await setup.locator('body').evaluate(() => window.progressNames)).toEqual(['requirements-progress', 'existing-progress', 'setup-progress']);
+  expect(await mcp.locator('body').evaluate(() => window.progressNames)).toEqual(['creator-mcp-lifecycle']);
+  expect(await page.evaluate(() => window.forwardedProgress)).toEqual(['requirements-progress', 'existing-progress', 'setup-progress', 'creator-mcp-lifecycle']);
+  expect(await page.evaluate(() => window.hostCalls.some(call => ['install_app', 'stop_hosted_app'].includes(call.command) || call.args?.command === 'create_project'))).toBe(false);
 });
 
 test('existing inspection and approved repair use the same reviewed request', async ({ page }) => {
