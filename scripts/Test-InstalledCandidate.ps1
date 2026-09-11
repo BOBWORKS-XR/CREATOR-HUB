@@ -1,4 +1,7 @@
-param([Parameter(Mandatory = $true)][string]$CandidateDirectory)
+param(
+    [Parameter(Mandatory = $true)][string]$CandidateDirectory,
+    [ValidateSet('clean', 'alpha.3')][string]$HubBaseline = 'clean'
+)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
     throw 'Real installation acceptance is restricted to a disposable GitHub-hosted Windows runner.'
@@ -19,13 +22,13 @@ foreach ($path in @($installed, $data, $productKey, $uninstallKey)) {
 }
 if (Get-Process -Name creator-hub -ErrorAction SilentlyContinue) { throw 'A Hub process already exists.' }
 $checks = [Collections.Generic.List[object]]::new()
-$report = [ordered]@{ passed = $false; version = $version; guiStartupTested = $false; sameVersionUpdateTested = $false; selfUpdateTested = $false }
+$report = [ordered]@{ passed = $false; version = $version; baseline = $HubBaseline; guiStartupTested = $false; sameVersionUpdateTested = $false; crossVersionUpdateTested = $false; selfUpdateTested = $false }
 $owned = $null
 $gui = $null
 function Hash([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Require($Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
-function Run-Installer([string]$Arguments, [int]$Expected, [string]$Label) {
-    $psi = [Diagnostics.ProcessStartInfo]::new($installer)
+function Run-Installer([string]$Arguments, [int]$Expected, [string]$Label, [string]$InstallerPath = $installer) {
+    $psi = [Diagnostics.ProcessStartInfo]::new($InstallerPath)
     $psi.Arguments = $Arguments
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
@@ -62,8 +65,20 @@ function Snapshot {
     } | ConvertTo-Json -Depth 5 -Compress
 }
 try {
-    Run-Installer '/S /NS' 0 'Clean Hub installation'
-    Require ((Hash (Join-Path $installed 'creator-hub.exe')) -eq (Hash $expectedExe)) 'Installed Hub differs from extracted installer payload.'
+    $report.installerSha256 = Hash $installer
+    $report.expectedExecutableSha256 = Hash $expectedExe
+    if ($HubBaseline -eq 'alpha.3') {
+        $baselineInstaller = Join-Path $output 'Creator-Hub-0.1.0-alpha.3-Windows-setup.exe'
+        Require (-not (Test-Path -LiteralPath $baselineInstaller)) 'Baseline installer path already exists.'
+        Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.0-alpha.3/Creator-Hub-0.1.0-alpha.3-Windows-setup.exe' -OutFile $baselineInstaller -TimeoutSec 120
+        Require ((Hash $baselineInstaller) -eq '1a2239d83171b94849ba96a8e235daf4f3e50faff24ccb63e9f8d44e1d7c5fda') 'Public baseline installer hash differs.'
+        Run-Installer '/S /NS' 0 'Install verified public Hub alpha.3 baseline' $baselineInstaller
+        Require ((Hash (Join-Path $installed 'creator-hub.exe')) -eq '0f24647616177a85936a66fbcc31c55ba929712cd4153b8aecc5bd060b380f00') 'Public baseline installed executable differs.'
+        Require ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -eq '0.1.0-alpha.3') 'Baseline installed version differs.'
+    } else {
+        Run-Installer '/S /NS' 0 'Clean Hub installation'
+        Require ((Hash (Join-Path $installed 'creator-hub.exe')) -eq (Hash $expectedExe)) 'Installed Hub differs from extracted installer payload.'
+    }
     $null = New-Item -ItemType Directory -Path $data
     [IO.File]::WriteAllText((Join-Path $data 'ci-settings-sentinel.json'), '{"preserve":"fixture"}')
     [IO.File]::WriteAllText((Join-Path $installed 'ci-unmanaged-sentinel.txt'), 'preserve fixture content')
@@ -95,7 +110,9 @@ try {
     Require ((Get-Content -LiteralPath (Join-Path $data 'ci-settings-sentinel.json') -Raw) -ceq '{"preserve":"fixture"}') 'Settings sentinel changed.'
     Require ((Get-Content -LiteralPath (Join-Path $installed 'ci-unmanaged-sentinel.txt') -Raw) -ceq 'preserve fixture content') 'Unmanaged sentinel changed.'
     Require ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -eq $version) 'Installed version is incorrect.'
-    $report.sameVersionUpdateTested = $true
+    $report.sameVersionUpdateTested = $HubBaseline -eq 'clean'
+    $report.crossVersionUpdateTested = $HubBaseline -eq 'alpha.3'
+    $report.installedExecutableSha256 = Hash (Join-Path $installed 'creator-hub.exe')
 
     # Open the real packaged GUI on the disposable worker, not a metadata-only stub.
     $gui = Start-Process -FilePath (Join-Path $installed 'creator-hub.exe') -PassThru -WindowStyle Hidden

@@ -30,3 +30,16 @@ test('test browser policy refuses local and self-hosted machines before accessin
     }
   }
 });
+
+test('installed candidate acceptance refuses local machines for both Hub baselines', { skip: process.platform !== 'win32' }, () => {
+  for (const baseline of ['clean', 'alpha.3']) {
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-File', path.join(__dirname, 'Test-InstalledCandidate.ps1'), '-CandidateDirectory', 'not-a-candidate', '-HubBaseline', baseline], {
+      encoding: 'utf8', windowsHide: true, timeout: 10000,
+      env: { ...process.env, GITHUB_ACTIONS: 'false' },
+    });
+    assert.ifError(result.error);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /restricted to a disposable GitHub-hosted Windows runner/);
+    assert.doesNotMatch(result.stderr, /Cannot find path/);
+  }
+});

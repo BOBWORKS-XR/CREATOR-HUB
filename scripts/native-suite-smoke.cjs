@@ -37,6 +37,8 @@ async function retry(fn, seconds = 30) {
 let child;
 let browser;
 let page;
+let runtimeFixture;
+const runtimeStop = path.join(out, 'stop-owned-runtime');
 const policyState = path.join(out, 'webview-policy.json');
 function webviewPolicy(action) {
   return execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts/native-webview-policy.ps1'), '-Action', action, '-StateFile', policyState], { encoding: 'utf8', timeout: 30000, windowsHide: true });
@@ -137,6 +139,40 @@ async function closeHosted(app) {
     assert.equal(state.installerInteractive, false);
     assert.ok(!state.issue && !state.installBlocked && !state.checkWarning, JSON.stringify(state));
     await show(app);
+    if (upgrade && app === 'mcp') {
+      const runtime = path.join(path.dirname(apps.mcp), 'server', 'runtime', 'node.exe');
+      assert.ok(fs.existsSync(runtime), 'Expected the legacy private runtime');
+      runtimeFixture = spawn(runtime, [path.resolve('scripts/owned-hub-fixture.cjs'), runtimeStop], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      let output = '';
+      runtimeFixture.stdout.on('data', chunk => { output += chunk; });
+      runtimeFixture.stderr.on('data', chunk => { report.runtimeFixtureStderr = (report.runtimeFixtureStderr || '') + chunk; });
+      runtimeFixture.on('error', error => { report.runtimeFixtureError = String(error); });
+      await retry(() => { assert.match(output, /ready/); assert.equal(runtimeFixture.exitCode, null); });
+      await page.locator('#check-updates').click();
+      await page.locator('#update-blockers').waitFor();
+      await retry(async () => assert.equal(await page.locator('#recheck-app').isEnabled(), true));
+      assert.equal(await page.locator('#release-button').isDisabled(), true);
+      await page.locator('#update-blockers-details summary').click();
+      assert.match(await page.locator('#update-blockers-list').innerText(), new RegExp(`PID ${runtimeFixture.pid}\\b`));
+      assert.match(await page.locator('#update-blockers-help').innerText(), /restart Windows/);
+      await page.locator('#recheck-app').click();
+      await retry(async () => assert.equal(await page.locator('#recheck-app').isEnabled(), true));
+      assert.equal(await page.locator('#release-button').isDisabled(), true);
+      const beforeApp = hash(apps.mcp);
+      const refused = page.evaluate(version => window.CreatorHubNative.invoke('install_app', { app: 'mcp', version, reopen: false, closeRunning: false }).then(() => 'UNEXPECTED INSTALL', String), pins.mcp.version);
+      await retry(() => native(child.pid, hub, 'button', 'Install'));
+      assert.match(await refused, /Update paused/);
+      assert.equal(runtimeFixture.exitCode, null);
+      assert.equal(hash(apps.mcp), beforeApp);
+      assert.equal(hash(configPath), originalConfigHash);
+      await page.screenshot({ path: path.join(out, 'runtime-blocker.png'), animations: 'disabled' });
+      fs.writeFileSync(runtimeStop, 'exit', { flag: 'wx' });
+      await retry(() => assert.equal(runtimeFixture.exitCode, 0));
+      await page.locator('#recheck-app').click();
+      await page.locator('#update-blockers').waitFor({ state: 'hidden' });
+      assert.equal(await page.locator('#release-button').isEnabled(), true);
+      report.checks.push('Actual legacy private-runtime fixture blocks native update without stopping it; persistent Check again preserves files/settings; cooperative exit enables a separately approved update');
+    }
     await page.locator('#reopen-app').uncheck();
     await page.locator('#release-button').click();
     await retry(() => native(child.pid, hub, 'button', 'Install'));
@@ -228,6 +264,11 @@ async function closeHosted(app) {
   report.checks.push(`${mcpOnly ? 'MCP hosted view' : 'Both hosted views'} retain state; closing each drains only its own process; no JavaScript errors`);
   report.passed = true;
 })().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; }).finally(async () => {
+  if (runtimeFixture && runtimeFixture.exitCode === null) {
+    if (!fs.existsSync(runtimeStop)) fs.writeFileSync(runtimeStop, 'exit', { flag: 'wx' });
+    try { await retry(() => assert.equal(runtimeFixture.exitCode, 0), 10); }
+    catch (error) { report.runtimeFixtureCleanupError = String(error); report.passed = false; process.exitCode = 1; }
+  }
   report.hubExitBeforeCleanup = child?.exitCode;
   if (child && !report.passed) {
     try { fs.writeFileSync(path.join(out, 'hub-failure-dialogs.json'), native(child.pid, hub, 'snapshot')); } catch (error) { report.windowCaptureError = String(error); }

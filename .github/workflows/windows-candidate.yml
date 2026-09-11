@@ -104,7 +104,8 @@ jobs:
         shell: powershell
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          .\scripts\Test-InstalledCandidate.ps1 -CandidateDirectory "dist\Creator-Hub-$version-Windows-Candidate"
+          $baseline = if ('${{ matrix.baseline }}' -eq 'clean') { 'clean' } else { 'alpha.3' }
+          .\scripts\Test-InstalledCandidate.ps1 -CandidateDirectory "dist\Creator-Hub-$version-Windows-Candidate" -HubBaseline $baseline
       - name: Test real public installs and both hosted applications
         env:
           CREATOR_SUITE_BASELINE: ${{ matrix.baseline }}
