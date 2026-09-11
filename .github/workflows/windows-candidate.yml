@@ -80,9 +80,38 @@ jobs:
             artifacts/installer-guard-*/report.json
           if-no-files-found: error
 
-  native-suite:
+  stage_setup:
     needs: build
-    if: ${{ always() && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.candidate_run != '')) }}
+    if: ${{ always() && inputs.staged_setup && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.candidate_run != '')) }}
+    runs-on: windows-latest
+    timeout-minutes: 5
+    # Draft visibility needs push access. Keep this token out of jobs that run apps.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Fetch the exact draft fixture without executing it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $pin = (Get-Content scripts/prerelease-apps.json -Raw | ConvertFrom-Json).setup
+          gh release download "v$version" --repo BOBWORKS-XR/CREATOR-HUB --pattern $pin.assetName --dir artifacts/staged-setup
+          if ($LASTEXITCODE -ne 0) { throw 'Staged installer download failed.' }
+          $file = Join-Path artifacts/staged-setup $pin.assetName
+          if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $pin.installerSha256) { throw 'Staged installer hash differs.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: accepted-staged-setup-installer
+          path: artifacts/staged-setup/*.exe
+          if-no-files-found: error
+
+  native-suite:
+    needs: [build, stage_setup]
+    if: ${{ always() && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.candidate_run != '')) && (!inputs.staged_setup || needs.stage_setup.result == 'success') }}
     name: Native suite (${{ matrix.baseline }})
     runs-on: windows-latest
     timeout-minutes: 25
@@ -111,18 +140,15 @@ jobs:
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $baseline = if ('${{ matrix.baseline }}' -eq 'clean') { 'clean' } elseif ('${{ matrix.baseline }}' -eq 'legacy') { 'alpha.4' } else { 'alpha.3' }
           .\scripts\Test-InstalledCandidate.ps1 -CandidateDirectory "dist\Creator-Hub-$version-Windows-Candidate" -HubBaseline $baseline
-      - name: Download the exact staged Setup installer from this repository's draft
+      - name: Download the verified staged Setup fixture from this test run
         if: ${{ inputs.staged_setup }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: pwsh
-        run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $asset = (Get-Content scripts/prerelease-apps.json -Raw | ConvertFrom-Json).setup.assetName
-          gh release download "v$version" --repo BOBWORKS-XR/CREATOR-HUB --pattern $asset --dir artifacts/staged-setup
-          if ($LASTEXITCODE -ne 0) { throw 'Staged installer download failed.' }
-          node scripts/stage-setup-cache.cjs
-          if ($LASTEXITCODE -ne 0) { throw 'Staged cache preparation failed.' }
+        uses: actions/download-artifact@v4
+        with:
+          name: accepted-staged-setup-installer
+          path: artifacts/staged-setup
+      - name: Stage signed Setup cache for native verification
+        if: ${{ inputs.staged_setup }}
+        run: node scripts/stage-setup-cache.cjs
       - name: Test native installs and both hosted applications
         env:
           CREATOR_SUITE_BASELINE: ${{ matrix.baseline }}
