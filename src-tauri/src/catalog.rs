@@ -421,11 +421,11 @@ mod tests {
             "../../tests/fixtures/staged-setup/creator-hub-windows-x86_64.json.minisig"
         );
         let release = verify_signed(AppId::Setup, bytes, sig, true).unwrap();
-        assert_eq!(release.version, "0.3.0-alpha.2");
-        assert_eq!(release.min_hub_version, "0.1.0-alpha.5");
+        assert_eq!(release.version, "0.3.0-alpha.6");
+        assert_eq!(release.min_hub_version, "0.1.0-alpha.6");
         assert!(
             Version::parse(&release.min_hub_version).unwrap()
-                > Version::parse("0.1.0-alpha.4").unwrap()
+                > Version::parse("0.1.0-alpha.5").unwrap()
         );
         assert_eq!(release.required_hub_version(), None);
         let mut tampered = bytes.to_vec();

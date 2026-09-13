@@ -1,13 +1,13 @@
 # Coordinated Windows Preview
 
-Current versions: Creator Hub 0.1.0-alpha.5, Creator Works MCP 2.7.0-alpha.1,
-Creator Project Setup 0.3.0-alpha.2. These are test releases, not stable releases.
+Current versions: Creator Hub 0.1.0-alpha.6, Creator Works MCP 2.7.0-alpha.1,
+Creator Project Setup 0.3.0-alpha.6. These are test releases, not stable releases.
 Update Hub before Project Setup; this hotfix does not change MCP or Unity bridges.
 
 ## Try the Flow
 
 Existing MCP users start with Hub, not a separate MCP prerelease installation.
-Project Setup is optional. [Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.5)
+Project Setup is optional. [Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.6)
 and choose the `Windows-setup.exe` asset.
 
 1. Save your work and close the old Hub. Install the new Hub EXE once.
@@ -30,6 +30,13 @@ Do not assume a successful download proves that restart path.
 
 ## Stable and Test Updates
 
+For alpha.6, check that Setup's requirements and download progress remain visible
+inside Hub, including after switching to another view and back. On a new throwaway
+project, the final requirements list should match the installed tools. Share the
+exact message and version if it changes incorrectly; logs and feedback are optional.
+See [alpha.6 evidence and limits](HOTFIX-ALPHA6.md). Older acceptance below is not
+automatically acceptance of a newer build.
+
 - Enabling prereleases permits a newer test version over an older stable version.
 - Disabling prereleases permits a newer stable version over an older test version.
 - Disabling prereleases does **not** silently downgrade a newer test version to
@@ -39,6 +46,16 @@ Do not assume a successful download proves that restart path.
   copies, MSI migrations, and unsafe installation locations are refused.
 
 ## Release Evidence
+
+Alpha.6 passed [its candidate and staged native suite](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34754847040)
+and [public native suite](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34756015590)
+on clean, both-app upgrade and MCP-only routes. Hub alpha.5 and alpha.3 upgrades
+were tested. The public suite reused the same installer with staging disabled;
+all 22 Hub and 11 Setup public assets were independently downloaded and verified.
+See [alpha.6 evidence](HOTFIX-ALPHA6.md) for exact hashes, the separate successful
+clean-runner Setup prerequisite test, and remaining limits.
+
+The checks below describe the earlier alpha.5 pair.
 
 Passed [prepublication staged acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34590430861)
 and [post-publication native acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34591146264)

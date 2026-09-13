@@ -1,15 +1,16 @@
 # Creator Hub Windows Preview
 
 The current public Windows prerelease is
-[0.1.0-alpha.5](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.5),
+[0.1.0-alpha.6](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.6),
 not a stable release.
 Use the acceptance reports supplied with this exact installer; a completed build
 alone is not proof of a successful upgrade.
 
-Alpha.5 supports Project Setup 0.3.0-alpha.2 and gives clear update guidance when
-an app cannot yet open inside Hub. Update Hub first, then Project Setup. The
-usual separate app window stays available. MCP 2.7.0-alpha.1 is unchanged.
-See [this hotfix's scope](HOTFIX-ALPHA5.md).
+Alpha.6 supports Project Setup 0.3.0-alpha.6, including requirements and download
+progress inside Hub. The matching Setup refreshes its detected requirements after
+checks and creation. Update Hub first, then Project Setup. The usual separate app
+window stays available. MCP 2.7.0-alpha.1 is unchanged.
+See [this prerelease's scope and known limits](HOTFIX-ALPHA6.md).
 
 Alpha.4 adds recently-modified/name sorting to Projects and clearer running-connection
 details with a read-only **Check again** action before upgrades. It does not stop
@@ -19,7 +20,7 @@ AI clients, uninstall MCP or erase application data. See
 Hub now checks for its own updates as well as MCP and Project Setup updates.
 Test updates and verified downloads start enabled; you can turn either off.
 Installing still needs your approval. A full Hub self-update to a later signed
-version remains untested. Installer-driven alpha.3/alpha.4-to-alpha.5 Hub upgrades
+version remains untested. Earlier installer-driven alpha.3/alpha.4-to-alpha.5 Hub upgrades
 and the matching app install/upgrade flow passed the
 [public native acceptance checks](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34591146264).
 
@@ -60,3 +61,6 @@ Unknown app files are not opened or replaced.
 Automated checks and exact installer hashes are recorded with the candidate.
 See the coordinated prerelease testing guide for coverage and remaining limits.
 This is not a finished stable release or proof of every Unity/SDK workflow.
+An abnormal local test teardown left a completed Setup process; that shutdown
+case remains under investigation. Normal closing passed separately. Avoid
+forcibly ending Hub during project work, and report unexpected leftover processes.

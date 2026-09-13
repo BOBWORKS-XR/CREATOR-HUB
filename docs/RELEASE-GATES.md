@@ -8,6 +8,25 @@ completed adoption. Runtime acceptance is distinct from source/unit tests.
 
 ## Status
 
+2026-09-13 alpha.6 published prerelease: the user explicitly approved coordinated
+publication. Hub 0.1.0-alpha.6 pairs with Setup 0.3.0-alpha.6; MCP
+2.7.0-alpha.1 is unchanged. Exact candidate CI and all three staged native lanes
+passed in [34754847040](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34754847040),
+including public Hub alpha.5/alpha.3 upgrades. Signed metadata and updater
+signatures, exact installer/payload hashes and tamper rejection were verified.
+Fresh Setup prerequisite acceptance also passed in
+[34754298548](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/actions/runs/34754298548),
+without a Unity account, activation or project creation. Setup alpha.6 was
+published and all 11 assets independently downloaded and verified. The same Hub
+installer passed [public native acceptance 34756015590](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34756015590)
+with staging disabled in all three lanes. All 22 published Hub assets were
+independently downloaded, byte-matched and passed signature/updater verification.
+The Hub tag is product source cfa2fa5; Setup is product source a025a11. Stable
+releases, old assets and local installed apps are unchanged. README-only updates
+do not replace accepted installer bytes.
+The local assisted creation/normal-close test is supporting evidence only; its
+first abnormal-teardown orphan case remains unresolved. See [alpha.6](HOTFIX-ALPHA6.md).
+
 2026-09-11 alpha.5 published prerelease: matching Setup 0.3.0-alpha.2 passed its
 two-baseline installed acceptance (34588485597). Hub's build job (34589242223)
 passed; a downstream draft-fixture access failure required a workflow-only fix,

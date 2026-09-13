@@ -136,7 +136,7 @@
   };
   window.__TAURI__.event.listen('hosted-app-event', ({ payload }) => {
     for (const [app, state] of sessions) {
-      const allowed = app === 'mcp' ? payload.name === 'creator-mcp-lifecycle' : ['setup-progress', 'existing-progress'].includes(payload.name);
+      const allowed = app === 'mcp' ? payload.name === 'creator-mcp-lifecycle' : ['setup-progress', 'existing-progress', 'requirements-progress'].includes(payload.name);
       if (allowed && payload.session === state.session && !state.failed) state.port?.postMessage({ type: 'event', name: payload.name, payload: payload.payload });
     }
   });
