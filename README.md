@@ -19,6 +19,11 @@ Both tools remain usable independently.
 Save your work before an update; Hub never force-closes Unity or your AI client.
 See [alpha.6 testing and known limits](docs/HOTFIX-ALPHA6.md).
 
+The matching public downloads passed clean-install and upgrade tests, including
+existing MCP settings and opening both tools inside Hub. A separate clean Windows
+test passed Unity prerequisite installation and missing-JDK repair. Unity account
+activation and a full in-app Hub self-update/restart are not covered by those tests.
+
 ## New in Alpha.5
 
 Hub `0.1.0-alpha.5` and Project Setup `0.3.0-alpha.2` are now available:
