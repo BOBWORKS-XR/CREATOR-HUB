@@ -37,6 +37,16 @@ Authenticode signing; Windows may still show an unsigned-publisher warning.
 Release preparation is in progress. Publish only after exact CI installer and
 native suite evidence is recorded; a local build or version label is not enough.
 
+The paired Setup candidate is from source `a025a112519994670af8f48d848e408ec9dfa492`
+and [candidate run 34754280271](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/actions/runs/34754280271).
+[Installed acceptance 34754654023](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/actions/runs/34754654023)
+passed upgrades from public 0.2.2, alpha.1 and alpha.2, including active-app
+refusal, preserved snapshots, cooperative fixture exit, exact installed payload
+and notices, synthetic sentinels, and normal GUI startup/close. The exact installed
+EXE pin is `ace1fa411559e84a10cc0bc7884a14aa427ae4f3fba197cc87b2b4b3cc02d800`.
+Setup's signed descriptor requires Hub alpha.6. These checks are not the paired
+Hub suite or proof of real-user migration across every installer type.
+
 The earlier local matched candidate created and reopened a fresh Creator SDK
 project through Hub. Requirements stayed ready, both progress types reached the
 view, and normal Close Setup exited its backend. The observer-assisted test is
