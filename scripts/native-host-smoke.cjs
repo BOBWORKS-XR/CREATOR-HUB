@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { setupOperationFinished } = require('./native-smoke-state.cjs');
 const hub = path.resolve(process.env.CREATOR_HUB_EXE || '../CREATOR-PROJECT-SETUP/src-tauri/target/release/creator-hub.exe');
 const setup = path.resolve(process.env.CREATOR_SETUP_EXE || '../CREATOR-PROJECT-SETUP/src-tauri/target/release/creator-project-setup.exe');
 const mcp = process.env.CREATOR_MCP_EXE ? path.resolve(process.env.CREATOR_MCP_EXE) : null;
@@ -13,6 +14,19 @@ if (lifecyclePreview && !mcp) throw Error('Read-only lifecycle acceptance requir
 const out = path.resolve('artifacts', `hosted-native-${Date.now()}`);
 fs.mkdirSync(out, { recursive: true });
 const report = { started: new Date().toISOString(), hub, setup, hubSha256: crypto.createHash('sha256').update(fs.readFileSync(hub)).digest('hex'), setupSha256: crypto.createHash('sha256').update(fs.readFileSync(setup)).digest('hex'), checks: [] };
+for (const [name, actual] of [['HUB', report.hubSha256], ['SETUP', report.setupSha256]]) {
+  const expected = process.env[`CREATOR_HOST_SMOKE_${name}_SHA256`];
+  if (expected) assert.equal(actual, expected.toLowerCase(), `${name} candidate changed before launch`);
+}
+let requestedProject = null;
+if (process.env.CREATOR_HOST_SMOKE_PROJECT_PARENT) {
+  const parent = path.resolve(process.env.CREATOR_HOST_SMOKE_PROJECT_PARENT);
+  assert.equal(fs.statSync(parent).isDirectory(), true);
+  const name = process.env.CREATOR_HOST_SMOKE_PROJECT_NAME || `CreatorHostedSmoke-${Date.now()}`;
+  assert.match(name, /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/, 'Use a single, safe project folder name');
+  requestedProject = { parent, name, path: path.join(parent, name) };
+  assert.equal(fs.existsSync(requestedProject.path), false, 'Never reuse or overwrite a project');
+}
 if (mcp) { report.mcp = mcp; report.mcpSha256 = crypto.createHash('sha256').update(fs.readFileSync(mcp)).digest('hex'); }
 const configMetadata = () => ['creator-works-mcp', 'banter-mcp'].map(name => {
   const file = path.join(process.env.APPDATA, name, 'launcher-config.json');
@@ -41,6 +55,7 @@ async function childPid(executable) {
 async function switchTo(page, app) {
   await page.locator('#suite-trigger').click();
   await page.locator(`#suite-menu [data-view="${app}"]`).click();
+  await page.locator('#suite-menu').waitFor({ state: 'hidden' });
 }
 const child = spawn(hub, process.env.CREATOR_HOST_SMOKE_LAUNCH === '1' ? ['--open-app', 'setup'] : [], { windowsHide: true, stdio: 'ignore', env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`, WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview-profile') } });
 const extraProcesses = [];
@@ -51,6 +66,8 @@ async function launchAgain(args, expected = 0) {
   assert.equal(process.exitCode, expected);
 }
 let browser;
+let liveSetupFrame;
+let leaveBusyOperation = false;
 (async () => {
   browser = await retry(() => chromium.connectOverCDP(`http://127.0.0.1:${port}`));
   const page = await retry(async () => { const p = browser.contexts().flatMap(context => context.pages()).find(p => p.url().includes('tauri.localhost')); if (!p) throw Error('Hub webview is not ready'); return p; });
@@ -104,10 +121,34 @@ let browser;
   }
   if (process.env.CREATOR_HOST_SMOKE_OPEN === '1') {
     let frame = null;
+    let setupBackendPid = null;
     if (process.env.CREATOR_HOST_SMOKE_SKIP_SETUP !== '1') {
+    const setupState = legitimate.apps.find(app => app.app === 'setup');
+    assert.ok(setupState, 'Setup is missing from native inventory');
+    const adjacentSetup = path.join(path.dirname(hub), 'creator-project-setup.exe');
+    const route = setupState.installedPath ? 'installed' : fs.existsSync(adjacentSetup) ? 'adjacent' : 'picker';
+    const selectedSetup = setupState.installedPath || (route === 'adjacent' ? adjacentSetup : setup);
+    assert.equal(path.toNamespacedPath(selectedSetup).toLowerCase(), path.toNamespacedPath(setup).toLowerCase(), 'Native selection differs from expected Setup');
+    if (route === 'installed') {
+      assert.equal(setupState.trusted, true, 'Installed Setup is not verified');
+      assert.equal(setupState.hostedCompatible, true, 'Installed Setup does not match the compiled hosting pin');
+    }
+    if (process.env.CREATOR_HOST_SMOKE_SETUP_ROUTE) assert.equal(route, process.env.CREATOR_HOST_SMOKE_SETUP_ROUTE);
+    report.checks.push({ name: 'native Setup route matches exact expected candidate', result: { route, path: selectedSetup } });
+    await page.evaluate(() => {
+      const original = window.CreatorHubNative.invoke;
+      window.nativeSetupEvidence = {};
+      window.CreatorHubNative = { invoke: async (...args) => {
+        const result = await original(...args);
+        if (args[0] === 'start_hosted_app' && args[1].app === 'setup') window.nativeSetupEvidence.session = result.session;
+        if (args[0] === 'hosted_app_call' && args[1].command === 'probe_environment') window.nativeSetupEvidence.environment = result;
+        if (args[0] === 'hosted_app_call' && args[1].command === 'create_project') window.nativeSetupEvidence.creation = result;
+        return result;
+      } };
+    });
     await page.getByRole('button', { name: 'View Creator Project Setup', exact:true }).click();
     await page.locator('#host-setup-button').click();
-    if (path.dirname(hub) !== path.dirname(setup)) await retry(() => native(child.pid, hub, 'file', setup));
+    if (route === 'picker') await retry(() => native(child.pid, hub, 'file', setup));
     if (process.env.CREATOR_HOST_SMOKE_EXPECT_RUNNING_GUARD === '1') {
       await page.waitForFunction(() => document.querySelector('#action-error').textContent.includes('already running'));
       report.checks.push({ name:'running standalone Setup prevents a second hosted backend', result:await page.locator('#action-error').innerText() });
@@ -119,6 +160,7 @@ let browser;
       if (!/^\d+$/.test(value)) throw Error('No unique hosted Setup child');
       return Number(value);
     });
+    setupBackendPid = backendPid;
     await retry(() => native(backendPid, setup, 'button', 'Open in Hub'));
     // WebView2's srcdoc child can report an empty URL to CDP; use its frame tree identity.
     frame = await retry(async () => {
@@ -126,6 +168,7 @@ let browser;
       if (!value) throw Error('Hosted frame not attached');
       return value;
     });
+    liveSetupFrame = frame;
     await frame.locator('#requirements .requirement').first().waitFor({ timeout:60000 });
     report.checks.push({ name:'actual Setup backend returned installed environment', result: await frame.locator('#requirements').innerText() });
     const windows = JSON.parse(native(backendPid, setup, 'snapshot'));
@@ -155,17 +198,23 @@ let browser;
     report.checks.push({ name:'native Hub close refused during real Setup folder picker', result:true });
     await retry(() => native(backendPid, setup, 'button', 'Cancel'));
     await page.waitForFunction(() => !document.querySelector('#hosted-stop').disabled);
-    if (process.env.CREATOR_HOST_SMOKE_PROJECT_PARENT) {
-      const parent = path.resolve(process.env.CREATOR_HOST_SMOKE_PROJECT_PARENT);
-      assert.equal(fs.statSync(parent).isDirectory(), true);
-      const projectName = `CreatorHostedSmoke-${Date.now()}`;
-      const projectPath = path.join(parent, projectName);
+    if (requestedProject) {
+      const { parent, name: projectName, path: projectPath } = requestedProject;
       assert.equal(fs.existsSync(projectPath), false);
       report.testProject = projectPath;
-      await page.evaluate(() => {
+      report.environmentBefore = await page.evaluate(() => window.nativeSetupEvidence.environment);
+      if (process.env.CREATOR_HOST_SMOKE_EXISTING_REQUIREMENTS_ONLY === '1') {
+        assert.equal(report.environmentBefore?.ready, true, 'Missing prerequisites: no installation authorized');
+        assert.equal(report.environmentBefore?.hubInstalled, true, 'Unity Hub must already be installed');
+        assert.equal(await frame.locator('#requirements .bad').count(), 0);
+      }
+      await page.evaluate(async () => {
         window.nativeProgress = [];
-        window.__TAURI__.event.listen('hosted-app-event', ({ payload }) => {
-          if (payload.name === 'setup-progress' && window.nativeProgress.length < 100) window.nativeProgress.push(payload.payload);
+        window.nativeProgressDropped = 0;
+        await window.__TAURI__.event.listen('hosted-app-event', ({ payload }) => {
+          if (payload.session !== window.nativeSetupEvidence.session || !['setup-progress', 'requirements-progress'].includes(payload.name)) return;
+          if (window.nativeProgress.length >= 200) { window.nativeProgressDropped++; return; }
+          window.nativeProgress.push({ name: payload.name, ...payload.payload });
         });
       });
       await frame.locator('#project-name').fill(projectName);
@@ -178,13 +227,25 @@ let browser;
       assert.equal(child.exitCode, null);
       report.checks.push({ name:'native close refused during real Unity creation', result:true });
       await page.locator('#suite-trigger').click(); await page.locator('#suite-menu [data-view="hub"]').click();
-      await frame.locator('#result.success').waitFor({ state:'attached', timeout:900000 });
-      await page.locator('#suite-trigger').click(); await page.locator('#suite-menu [data-view="setup"]').click();
+      await page.waitForFunction(() => window.nativeProgress.some(event => event.name === 'setup-progress' && event.step >= 3), null, { timeout:180000 });
+      await switchTo(page, 'setup');
+      report.requirementsDuringImport = await frame.locator('#requirements').innerText();
+      assert.equal(await frame.locator('#requirements .bad').count(), 0);
+      await page.screenshot({ path: path.join(out, 'native-hosted-setup-import.png') });
+      await switchTo(page, 'hub');
+      await frame.waitForFunction(setupOperationFinished, null, { timeout:900000, polling:250 });
+      await switchTo(page, 'setup');
       report.creationResult = await frame.locator('#result').innerText();
       report.progress = await page.evaluate(() => window.nativeProgress);
+      report.progressDropped = await page.evaluate(() => window.nativeProgressDropped);
+      report.nativeSetupEvidence = await page.evaluate(() => window.nativeSetupEvidence);
       assert.match(report.creationResult, /Ready/);
+      assert.equal(report.nativeSetupEvidence.creation?.success, true);
+      assert.equal(path.resolve(report.nativeSetupEvidence.creation.projectPath), projectPath);
       assert.ok(fs.existsSync(path.join(projectPath, 'ProjectSettings', 'ProjectVersion.txt')));
-      assert.ok(report.progress.some(event => event.step >= 3));
+      assert.ok(report.progress.some(event => event.name === 'setup-progress' && event.step >= 3));
+      assert.ok(report.progress.some(event => event.name === 'setup-progress' && event.environment?.ready === true), 'Fresh checked requirements must reach the hosted view');
+      assert.ok(report.progress.some(event => event.name === 'requirements-progress'), 'Native prerequisite/licence progress must reach Hub');
       report.checks.push({ name:'real Unity creation, validation and hidden-view progress', result:report.creationResult });
     }
     await page.screenshot({ path:path.join(out, 'native-hosted-setup.png') });
@@ -299,22 +360,58 @@ let browser;
       assert.deepEqual(configMetadata(), beforeConfigs);
       report.checks.push({ name: 'current and legacy MCP configuration metadata and hashes unchanged', result: true });
     }
+    if (frame && !mcp) {
+      await switchTo(page, 'setup');
+      await page.locator('#hosted-stop').click();
+      await retry(() => native(child.pid, hub, 'button', 'Close view'));
+      await retry(async () => { if (!frame.isDetached()) throw Error('Setup view is still attached'); });
+      await retry(() => execFileSync('powershell.exe', ['-NoProfile', '-Command', `if (Get-Process -Id ${setupBackendPid} -ErrorAction SilentlyContinue) { exit 1 }`], { windowsHide: true, encoding: 'utf8' }));
+      report.checks.push({ name: 'normal Close Setup detaches the view and exits its exact backend', result: true });
+      liveSetupFrame = null;
+    }
     assert.deepEqual(errors, []);
     report.checks.push({ name:'native JavaScript errors', result:errors });
   }
+  assert.deepEqual(configMetadata(), beforeConfigs);
+  report.checks.push({ name: 'current and legacy MCP configuration metadata and hashes unchanged', result: true });
   report.passed = true;
-})().catch(error => { report.passed = false; report.error = String(error.stack || error); process.exitCode = 1; }).finally(async () => {
+})().catch(async error => {
+  report.passed = false;
+  report.error = String(error.stack || error);
+  process.exitCode = 1;
+  if (liveSetupFrame && browser?.isConnected()) {
+    try {
+      const active = await liveSetupFrame.evaluate(() => {
+        const activity = document.querySelector('#activity');
+        return Boolean(activity && !activity.classList.contains('hidden'));
+      });
+      if (active) {
+        console.log('The test failed while Setup is busy; waiting for its owned operation without closing Hub.');
+        leaveBusyOperation = true;
+        await liveSetupFrame.waitForFunction(setupOperationFinished, null, { timeout:900000, polling:250 });
+        report.operationAfterTestFailure = await liveSetupFrame.locator('#result').textContent();
+        leaveBusyOperation = false;
+      }
+    } catch (waitError) {
+      leaveBusyOperation = true;
+      report.pendingOperation = String(waitError.message);
+    }
+  }
+}).finally(async () => {
   for (const extra of extraProcesses) if (extra.exitCode === null) {
     try { native(extra.pid, hub, 'close'); } catch { /* Never force-close a test or user process. */ }
   }
-  try { native(child.pid, hub, 'close'); } catch (error) { report.cleanup = String(error.message); }
-  if (browser) await browser.close();
-  for (let i=0; i<120 && child.exitCode === null; i++) {
+  if (!leaveBusyOperation) {
+    try { native(child.pid, hub, 'close'); } catch (error) { report.cleanup = String(error.message); }
+  }
+  for (let i=0; i<120 && child.exitCode === null && !leaveBusyOperation; i++) {
     await delay(250);
     if (i === 40 || i === 80) { try { native(child.pid, hub, 'close'); } catch { /* The exact test process may already have exited. */ } }
   }
   if (child.exitCode === null) { report.cleanup = 'Test Hub remains open, possibly busy. Nothing was force-closed.'; process.exitCode = 1; child.unref(); }
+  if (browser && child.exitCode !== null) await browser.close();
   for (const extra of extraProcesses) if (extra.exitCode === null) { report.extraCleanup = 'A secondary test process remains open.'; process.exitCode = 1; extra.unref(); }
+  if (report.cleanup || report.extraCleanup) report.passed = false;
   fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({out, ...report}, null, 2));
 });

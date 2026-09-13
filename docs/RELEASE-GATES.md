@@ -8,6 +8,14 @@ completed adoption. Runtime acceptance is distinct from source/unit tests.
 
 ## Status
 
+2026-09-13 alpha.6 preparation: the user explicitly approved coordinated
+prerelease publication. Hub 0.1.0-alpha.6 targets Setup 0.3.0-alpha.6; MCP
+2.7.0-alpha.1 is unchanged. Exact candidate CI, staged native acceptance, signed
+metadata and public-download verification remain publication gates. No existing
+release assets or local installed apps are to be replaced during preparation.
+The local assisted creation/normal-close test is supporting evidence only; its
+first abnormal-teardown orphan case remains unresolved. See [alpha.6](HOTFIX-ALPHA6.md).
+
 2026-09-11 alpha.5 published prerelease: matching Setup 0.3.0-alpha.2 passed its
 two-baseline installed acceptance (34588485597). Hub's build job (34589242223)
 passed; a downstream draft-fixture access failure required a workflow-only fix,

@@ -1,13 +1,13 @@
 # Coordinated Windows Preview
 
-Current versions: Creator Hub 0.1.0-alpha.5, Creator Works MCP 2.7.0-alpha.1,
-Creator Project Setup 0.3.0-alpha.2. These are test releases, not stable releases.
+Current versions: Creator Hub 0.1.0-alpha.6, Creator Works MCP 2.7.0-alpha.1,
+Creator Project Setup 0.3.0-alpha.6. These are test releases, not stable releases.
 Update Hub before Project Setup; this hotfix does not change MCP or Unity bridges.
 
 ## Try the Flow
 
 Existing MCP users start with Hub, not a separate MCP prerelease installation.
-Project Setup is optional. [Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.5)
+Project Setup is optional. [Download the Windows preview](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.6)
 and choose the `Windows-setup.exe` asset.
 
 1. Save your work and close the old Hub. Install the new Hub EXE once.
@@ -29,6 +29,13 @@ to a later signed Hub version remains a separately recorded acceptance test.
 Do not assume a successful download proves that restart path.
 
 ## Stable and Test Updates
+
+For alpha.6, check that Setup's requirements and download progress remain visible
+inside Hub, including after switching to another view and back. On a new throwaway
+project, the final requirements list should match the installed tools. Share the
+exact message and version if it changes incorrectly; logs and feedback are optional.
+See [alpha.6 evidence and limits](HOTFIX-ALPHA6.md). Older acceptance below is not
+automatically acceptance of a newer build.
 
 - Enabling prereleases permits a newer test version over an older stable version.
 - Disabling prereleases permits a newer stable version over an older test version.
