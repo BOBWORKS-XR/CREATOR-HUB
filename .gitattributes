@@ -2,3 +2,4 @@
 tests/fixtures/** -text
 scripts/license-overrides/** -text
 src/sidequest-mark-white.svg -text
+unity/com.creatorworks.plugins/** -text
