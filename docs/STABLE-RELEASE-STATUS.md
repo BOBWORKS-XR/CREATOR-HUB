@@ -1,10 +1,30 @@
 # Coordinated stable release status
 
 2026-09-15. The user explicitly authorized stable releases for all three apps.
-This supersedes older alpha.8 publication holds. Setup 0.3.0 is now public;
-Hub and MCP publication remain conditional on their exact-binary checks.
+This supersedes older alpha.8 publication holds. Setup 0.3.0 and MCP 2.7.0 are
+public; Hub publication remains conditional on its exact-binary checks.
 
 ## Latest checkpoint
+
+MCP 2.7.0 is public with 16 verified assets. Public installer name is
+`Creator.Works.MCP_2.7.0_x64-setup.exe` (the verified f403da hash below), now
+reflected in Hub's pins. The MCP task re-downloaded installer/metadata/signature/
+checksums and reverified hashes, signature and tamper rejection. Its tag/master
+55fe93e is a docs/test/workflow-only descendant of app-source 5b65478. The tag's
+legacy release workflow skipped every rebuild/publish job.
+
+Hub build 35005538731 did not produce an installer: 102 Rust tests passed and one
+hosted broken-output test failed at the child fixture exit assertion. The prior
+test discarded stderr and did not distinguish a nonzero exit from exceeding its
+three-second wait. Both variants and all 103 native tests pass locally. Commit
+f759479 adds bounded stderr/status/late-exit diagnostics without changing product
+behavior or relaxing that assertion; all-target Clippy also passes. New build
+35006894107 from f759479 is running. Preserve the first failed run; do not claim
+its cause was fixed or that Hub's final native acceptance has run yet.
+
+Setup's canonical macOS fixture-path and assertion-formatting follow-up passed
+CI 35005878626 on Windows, Linux, Apple silicon and Intel macOS, plus the frontend.
+These are source/build checks, not macOS/Linux physical Unity acceptance.
 
 Setup 0.3.0 was published with all 13 GitHub asset digests verified and the
 public installer/metadata downloaded again and checked against Hub's trust key.
