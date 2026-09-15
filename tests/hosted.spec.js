@@ -25,7 +25,7 @@ async function open(page, options = {}) {
         window.hostCalls.push({ command, args });
         if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
         if (command === 'project_inventory') return { projects: [], warnings: [] };
-        if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: true, trusted: true, hostedCompatible: true, availableVersion: '0.3.0-alpha.1', installedVersion: '0.3.0-alpha.1', hostedPreview: app === 'mcp' && !options.writableMcp ? 'read-only' : 'writable' })) };
+        if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: true, trusted: true, hostedCompatible: true, updateAvailable: app === 'setup' && Boolean(window.setupUpdate), availableVersion: window.setupUpdate ? '0.3.0' : '0.3.0-alpha.1', installedVersion: '0.3.0-alpha.1', hostedPreview: app === 'mcp' && !options.writableMcp ? 'read-only' : 'writable' })) };
         if (command === 'start_hosted_app') {
           if (options.decline) throw 'Opening Setup in Hub was declined. Standalone Setup is unchanged.';
           if (args.app === 'mcp') return { session: 'b'.repeat(64), appId: 'creator-works-mcp', version: '2.7.0-alpha.1', files: mcpFiles,
@@ -85,6 +85,49 @@ async function switchTo(page, name) {
   await page.locator('#suite-trigger').click();
   await page.locator(`#suite-menu [data-view="${name}"]`).click();
 }
+
+for (const decline of [false, true]) test(`Apps update asks to close an existing hosted view; declined=${decline}`, async ({ page }) => {
+  const setup = await open(page, { keepOpen: decline });
+  await setup.locator('#project-name').fill('Keep my unsaved draft');
+  await switchTo(page, 'hub');
+  await page.locator('#hub-pages [data-view="hub"]').click();
+  await page.evaluate(() => { window.setupUpdate = true; });
+  await page.locator('#auto-download').uncheck();
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#update-setup')).toBeEnabled();
+  await expect(page.locator('#update-reason-setup')).toContainText('asks to close');
+  await page.evaluate(() => window.hostCalls = []);
+  await page.locator('#update-setup').click();
+  await expect(page.locator('#view-hub')).toBeVisible();
+  if (decline) {
+    await expect(page.locator('#action-error')).toContainText('Update not started');
+    expect(await page.evaluate(() => window.hostCalls.some(c => c.command === 'install_app'))).toBe(false);
+    await switchTo(page, 'setup');
+    await expect(setup.locator('#project-name')).toHaveValue('Keep my unsaved draft');
+  } else {
+    await expect(page.locator('#setup-host-frame')).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() => window.hostCalls.filter(c => c.command === 'install_app').length)).toBe(1);
+    const actions = await page.evaluate(() => window.hostCalls.filter(c => ['stop_hosted_app', 'install_app', 'start_hosted_app', 'open_app'].includes(c.command)));
+    expect(actions.map(c => c.command)).toEqual(['stop_hosted_app', 'install_app']);
+    expect(actions[1].args).toEqual({ app: 'setup', version: '0.3.0', reopen: false, closeRunning: false });
+  }
+});
+
+test('Apps update cannot close a hosted Setup workflow that is still running', async ({ page }) => {
+  const setup = await open(page, { pending: true });
+  await setup.locator('#create-button').click();
+  await expect(page.locator('#hosted-stop')).toBeDisabled();
+  await switchTo(page, 'hub'); await page.locator('#hub-pages [data-view="hub"]').click();
+  await page.evaluate(() => { window.setupUpdate = true; });
+  await page.locator('#auto-download').uncheck(); await page.locator('#check-updates').click();
+  await page.evaluate(() => window.hostCalls = []);
+  await page.locator('#update-setup').click();
+  await expect(page.locator('#action-error')).toContainText('Update not started');
+  expect(await page.evaluate(() => window.hostCalls.some(c => ['stop_hosted_app', 'install_app', 'start_hosted_app'].includes(c.command)))).toBe(false);
+  await page.evaluate(() => window.finishCreate());
+  await switchTo(page, 'setup');
+  await expect(setup.locator('#result')).toContainText('Ready');
+});
 
 for (const width of [940, 720, 560, 390]) test(`real Setup interface hosted at ${width}px`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: 720 });

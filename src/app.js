@@ -132,6 +132,16 @@
   window.addEventListener('creator-host-closed', () => show(current));
 
   function appState() { return inventory?.apps?.find(app => app.app === current); }
+  function updateReason(state) {
+    if (!inventory?.supported) return 'App updates require Windows x64 in this build.';
+    if (state.issue) return state.issue;
+    if (!state.trusted) return 'This installation must be verified before updating.';
+    if (state.installBlocked) return state.installBlocked;
+    if (state.requiredHubVersion) return `Update Creator Hub to ${state.requiredHubVersion} first.`;
+    if (window.CreatorHosted.active(state.app)) return 'Updating asks to close this app\'s Hub view first. Unsaved work is not closed automatically.';
+    if (state.updateBlockers?.length) return 'Close the running app or disconnect its active MCP connections, then Check for updates. Nothing will be force-closed.';
+    return '';
+  }
   function renderState() {
     byId('check-updates').disabled = busy;
     byId('preview-channel').disabled = busy;
@@ -143,6 +153,15 @@
     byId('hub-update-warning').classList.toggle('hidden', !byId('hub-update-warning').textContent);
     for (const app of inventory?.apps || []) {
       byId(`status-${app.app}`).textContent = app.issue ? 'Needs attention' : app.updateAvailable ? 'Update available' : app.installed ? `Installed ${app.installedVersion || ''}` : `Available ${app.availableVersion}`;
+      const update = byId(`update-${app.app}`), reason = byId(`update-reason-${app.app}`);
+      const available = Boolean(app.installed && app.updateAvailable);
+      const hosted = window.CreatorHosted.active(app.app);
+      update.classList.toggle('hidden', !available);
+      update.disabled = busy || !inventory.supported || Boolean(app.issue) || !app.trusted
+        || (!app.requiredHubVersion && (Boolean(app.installBlocked) || (!hosted && Boolean(app.updateBlockers?.length))));
+      update.querySelector('span:last-child').textContent = app.requiredHubVersion ? 'Update Hub first' : 'Update app';
+      reason.textContent = available ? updateReason(app) : '';
+      reason.classList.toggle('hidden', !reason.textContent);
     }
     const state = appState();
     const hostedMismatch = state?.hostedCompatible === false;
@@ -273,7 +292,7 @@
     try {
       const args = { app, ...extra };
       if (['download_app', 'install_app'].includes(command)) args.version = version;
-      if (command === 'install_app') { args.reopen = byId('reopen-app').checked; args.closeRunning = byId('close-running').checked; }
+      if (command === 'install_app') { args.reopen = extra.reopen ?? byId('reopen-app').checked; args.closeRunning = extra.closeRunning ?? byId('close-running').checked; }
       const message = await invoke(command, args);
       setProgress({ message, total: 0, cancellable: false });
     } catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
@@ -284,6 +303,28 @@
     }
   }
 
+  for (const app of ['mcp', 'setup']) byId(`update-${app}`).addEventListener('click', async () => {
+    if (busy) return;
+    let state = inventory?.apps?.find(item => item.app === app);
+    if (!state?.installed || !state.updateAvailable || !inventory.supported || state.issue || !state.trusted) return;
+    if (state.requiredHubVersion) { byId('hub-update-title').focus(); return refresh(true); }
+    if (state.installBlocked) return;
+    if (window.CreatorHosted.active(app)) {
+      busy = true; renderState();
+      let closed = false;
+      try { closed = await window.CreatorHosted.close(app); }
+      finally { busy = false; renderState(); }
+      if (!closed) {
+        error.textContent = 'Update not started. The app view is still open; finish its work or approve closing it before updating.';
+        error.classList.remove('hidden'); return;
+      }
+      if (!await refresh(false)) return;
+      state = inventory?.apps?.find(item => item.app === app);
+    }
+    if (!state?.installed || !state.updateAvailable || state.issue || !state.trusted || state.installBlocked || state.requiredHubVersion || state.updateBlockers?.length) return;
+    // Row updates stay on Apps and never inherit another app's hidden close/reopen choices.
+    await action('install_app', app, state.availableVersion, { reopen: false, closeRunning: false });
+  });
   byId('release-button').addEventListener('click', () => {
     const state = appState();
     if (state?.requiredHubVersion && !(state.installed && state.trusted && !state.updateAvailable)) {

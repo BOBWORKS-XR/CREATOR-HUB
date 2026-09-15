@@ -58,6 +58,10 @@ input[type="checkbox"] { accent-color: var(--cyan); width: 15px; height: 15px; f
 .page-heading > span { color: var(--muted); font-size: 11px; }
 .app-row { width: 100%; min-height: 86px; display: flex; align-items: center; gap: 18px; padding: 16px 12px; background: none; text-align: left; border-radius: 4px; border-bottom: 1px solid #20282d; }
 button.app-row:hover { background: #181d21; }
+.app-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 16px; border-bottom: 1px solid #20282d; }
+.app-entry > .app-row { min-width: 0; border-bottom: 0; }
+.row-update { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 136px; margin-right: 12px; }
+.row-update-reason { grid-column: 1 / -1; color: var(--amber); margin: 0 12px 12px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .app-row-copy { flex: 1; min-width: 0; }
 .app-row-copy strong { display: block; font-size: 14px; font-weight: 600; }
 .app-row-copy small { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.5; }
@@ -79,6 +83,8 @@ button.app-row:hover { background: #181d21; }
 .tool-actions { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; margin-top: 22px; }
 .tool-actions .primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: auto; min-width: 164px; margin: 0; }
 @media (max-width: 560px) {
+  .app-entry { grid-template-columns: minmax(0, 1fr); }
+  .row-update { justify-self: end; margin-bottom: 12px; }
   .app-row { gap: 12px; flex-wrap: wrap; }
   .app-row-copy { flex-basis: calc(100% - 60px); }
   .row-status { margin-left: 46px; }

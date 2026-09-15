@@ -36,6 +36,58 @@ async function load(page, launchView = 'hub', options = {}) {
   if (launchView === 'hub') await page.locator('#hub-pages [data-view="hub"]').click();
 }
 
+for (const app of ['mcp', 'setup']) for (const width of [940, 390, 320]) test(`Apps row updates ${app} without opening its view at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 780 });
+  await load(page, 'hub', { preferences: { 'creator-hub.auto-download': 'false' } });
+  await page.evaluate(app => {
+    Object.assign(window.inventory.apps.find(item => item.app === app), { installed: true, trusted: true, installedVersion: '0.0.1', updateAvailable: true });
+    document.querySelector('#close-running').checked = true;
+    document.querySelector('#reopen-app').checked = true;
+  }, app);
+  await page.locator('#check-updates').click();
+  const update = page.locator(`#update-${app}`);
+  await expect(update).toBeVisible(); await expect(update).toBeEnabled();
+  const entry = page.locator(`#entry-${app}`);
+  expect(await entry.locator('button button').count()).toBe(0);
+  const buttonBox = await update.boundingBox(), openBox = await entry.locator('.app-row').boundingBox();
+  expect(buttonBox.x >= openBox.x + openBox.width || buttonBox.y >= openBox.y + openBox.height).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('apps-update.png'), fullPage: true });
+  await page.evaluate(() => { window.calls = []; window.holdAction = true; });
+  await update.click();
+  await expect(update).toBeDisabled();
+  await expect(page.locator('#view-hub')).toBeVisible(); await expect(page.locator('#view-detail')).toBeHidden();
+  expect(await page.evaluate(() => window.calls)).toEqual([{ command: 'install_app', args: { app, version: app === 'mcp' ? '2.6.0' : '0.2.2', reopen: false, closeRunning: false } }]);
+  await page.evaluate(() => window.finishAction('Installation cancelled. Nothing was installed.'));
+  await expect(update).toBeEnabled();
+});
+
+test('Apps row exposes blockers and routes minimum-version updates to Hub without installing', async ({ page }) => {
+  await load(page, 'hub', { updateAvailable: true, preferences: { 'creator-hub.auto-download': 'false' }, blockers: [{ name: 'node.exe', kind: 'connection', pid: 45 }] });
+  await expect(page.locator('#update-mcp')).toBeDisabled();
+  await expect(page.locator('#update-reason-mcp')).toContainText('disconnect its active MCP connections');
+  await page.evaluate(() => Object.assign(window.inventory.apps[0], { updateBlockers: [], requiredHubVersion: '9.0.0', installBlocked: 'Update Creator Hub to 9.0.0 first.' }));
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#update-mcp')).toBeEnabled();
+  await expect(page.locator('#update-mcp')).toContainText('Update Hub first');
+  await page.evaluate(() => window.calls = []);
+  await page.locator('#update-mcp').click();
+  await expect(page.locator('#hub-update-title')).toBeFocused();
+  await expect(page.locator('#view-hub')).toBeVisible();
+  expect(await page.evaluate(() => window.calls.some(c => ['install_app', 'start_hosted_app', 'stop_hosted_app', 'open_resource'].includes(c.command)))).toBe(false);
+});
+
+test('Apps row hides updates for current or missing apps and refuses unknown installations', async ({ page }) => {
+  await load(page, 'hub', { preferences: { 'creator-hub.auto-download': 'false' } });
+  await expect(page.locator('#update-mcp')).toBeHidden();
+  await expect(page.locator('#update-setup')).toBeHidden();
+  await page.evaluate(() => Object.assign(window.inventory.apps[0], { installed: true, trusted: false, updateAvailable: true, issue: 'Unrecognized app copy. No files will be replaced.' }));
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#update-mcp')).toBeDisabled();
+  await expect(page.locator('#update-reason-mcp')).toContainText('Unrecognized app copy');
+  expect(await page.evaluate(() => window.calls.some(c => c.command === 'install_app'))).toBe(false);
+});
+
 for (const width of [940, 560, 320]) test(`upgrade blockers are actionable, client-agnostic and safe to recheck at ${width}px`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: 700 });
   await load(page, 'mcp', { updateAvailable: true, preferences: { 'creator-hub.auto-download': 'false' }, blockers: [

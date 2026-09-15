@@ -34,16 +34,24 @@
     <section id="view-hub" aria-labelledby="apps-title">
       <div class="page-heading"><h2 id="apps-title">Apps</h2><button id="check-updates" class="text-button" type="button"><span class="icon icon-refresh" aria-hidden="true"></span>Check for updates</button></div>
       <div class="app-list">
+        <div class="app-entry" id="entry-mcp">
         <button class="app-row" type="button" data-view="mcp" aria-label="View Creator Works MCP">
           <span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">M</span></span>
           <span class="app-row-copy"><strong>Creator Works MCP</strong><small>AI tools for Unity, Visual Scripting and Creator SDK.</small></span>
           <span id="status-mcp" class="row-status">Checking</span><span class="icon icon-arrow" aria-hidden="true"></span>
         </button>
+        <button id="update-mcp" class="primary-button row-update hidden" type="button" aria-label="Update Creator Works MCP" aria-describedby="update-reason-mcp"><span class="icon icon-download" aria-hidden="true"></span><span>Update app</span></button>
+        <p id="update-reason-mcp" class="row-update-reason hidden" role="status"></p>
+        </div>
+        <div class="app-entry" id="entry-setup">
         <button class="app-row" type="button" data-view="setup" aria-label="View Creator Project Setup">
           <span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span>
           <span class="app-row-copy"><strong>Creator Project Setup</strong><small>New projects, SDK setup and existing-project checks.</small></span>
           <span id="status-setup" class="row-status">Checking</span><span class="icon icon-arrow" aria-hidden="true"></span>
         </button>
+        <button id="update-setup" class="primary-button row-update hidden" type="button" aria-label="Update Creator Project Setup" aria-describedby="update-reason-setup"><span class="icon icon-download" aria-hidden="true"></span><span>Update app</span></button>
+        <p id="update-reason-setup" class="row-update-reason hidden" role="status"></p>
+        </div>
         <div class="app-row unavailable"><span class="suite-mark converter-mark"><img src="sidequest-mark-white.svg" alt=""><span class="suite-letter">C</span></span><span class="app-row-copy"><strong>Creator Converter</strong><small>SideQuest / Built-in rendering to Universal Render Pipeline.</small></span><span class="row-status">Coming soon</span></div>
         <button class="app-row" type="button" data-view="plugins" aria-label="View Creator Plugins"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.png" alt=""></span><span class="app-row-copy"><strong>Creator Plugins</strong><small>Community projects, packages and tools.</small></span><span class="row-status">Browse</span><span class="icon icon-arrow" aria-hidden="true"></span></button>
       </div>

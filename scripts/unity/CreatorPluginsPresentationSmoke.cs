@@ -22,6 +22,8 @@ public static class CreatorPluginsPresentationSmoke
         string project = Path.GetDirectoryName(Application.dataPath);
         if (!File.Exists(Path.Combine(project, ".presentation-test-fixture"))) throw new Exception("Refusing a real project.");
         CreatorPluginsWindow window = null;
+        bool hadLayout = EditorPrefs.HasKey(CreatorPluginsWindow.LayoutPreference);
+        string savedLayout = EditorPrefs.GetString(CreatorPluginsWindow.LayoutPreference, "list");
         var report = new Report { unity = Application.unityVersion };
         try
         {
@@ -45,8 +47,26 @@ public static class CreatorPluginsPresentationSmoke
             changed.category = "ai-skill"; changed.reviewStatus = "listed";
             Check(!PluginProtocol.CanImport(changed), "AI skill does not route into Unity");
 
+            EditorPrefs.DeleteKey(CreatorPluginsWindow.LayoutPreference);
             window = ScriptableObject.CreateInstance<CreatorPluginsWindow>();
+            Check(Get<bool>(window, "gridView"), "fresh window defaults to grid");
             Call(window, "StopDownload");
+            Check(CreatorPluginsWindow.GridColumns(330) == 1, "narrow grid has one column");
+            Check(CreatorPluginsWindow.GridColumns(540) == 2, "medium grid has two columns");
+            Check(CreatorPluginsWindow.GridColumns(810) == 3, "wide grid has three columns");
+            Check(CreatorPluginsWindow.GridColumns(0) == 1, "grid always has a column");
+            Set(window, "selected", entry); Set(window, "search", "kept search");
+            Call(window, "SetLayout", true);
+            Check(Get<bool>(window, "gridView") && EditorPrefs.GetString(CreatorPluginsWindow.LayoutPreference) == "grid", "grid selection persisted");
+            Check(Get<Listing>(window, "selected") == entry && Get<string>(window, "search") == "kept search", "view switch preserves selected detail and search");
+            var reopened = ScriptableObject.CreateInstance<CreatorPluginsWindow>();
+            Check(Get<bool>(reopened, "gridView"), "reopened window restores grid");
+            UnityEngine.Object.DestroyImmediate(reopened);
+            Call(window, "SetLayout", false);
+            Check(!Get<bool>(window, "gridView") && EditorPrefs.GetString(CreatorPluginsWindow.LayoutPreference) == "list", "list selection persisted");
+            reopened = ScriptableObject.CreateInstance<CreatorPluginsWindow>();
+            Check(!Get<bool>(reopened, "gridView"), "explicit list preference survives reopen");
+            UnityEngine.Object.DestroyImmediate(reopened);
             var noImage = JsonUtility.FromJson<Listing>(JsonUtility.ToJson(entry)); noImage.previewImage = "http://unapproved.invalid/image.png";
             Call(window, "RequestPreview", noImage);
             Check(Get<object>(window, "previewRequest") == null, "unapproved preview not fetched");
@@ -117,6 +137,7 @@ public static class CreatorPluginsPresentationSmoke
         finally
         {
             if (window != null) UnityEngine.Object.DestroyImmediate(window);
+            if (hadLayout) EditorPrefs.SetString(CreatorPluginsWindow.LayoutPreference, savedLayout); else EditorPrefs.DeleteKey(CreatorPluginsWindow.LayoutPreference);
             report.checks = checks.ToArray();
             File.WriteAllText(Path.Combine(project, "presentation-result.json"), JsonUtility.ToJson(report, true));
             EditorApplication.Exit(report.passed ? 0 : 1);

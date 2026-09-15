@@ -117,6 +117,7 @@
     render();
   }
   window.CreatorHosted = {
+    close: closeApp,
     active: app => Boolean(sessions.get(app)?.ready),
     writable: app => Boolean(sessions.get(app)?.writable),
     async start(app) {
@@ -143,19 +144,20 @@
   window.__TAURI__.event.listen('hosted-app-disconnected', ({ payload }) => {
     for (const state of sessions.values()) if (payload.session === state.session) disconnect(state, payload.error);
   });
-  stop.addEventListener('click', async () => {
-    const app = selected;
+  async function closeApp(app) {
     const state = sessions.get(app);
-    if (!state?.session || state.inFlight || state.workflow || state.closing) return;
+    if (!state?.session || state.inFlight || state.workflow || state.closing) return false;
     state.closing = true;
     render();
     // Confirmation is native: closing this view discards its unsaved form state.
     try {
       const closed = await invoke('stop_hosted_app', { session: state.session });
-      if (closed === false) return;
+      if (closed === false) return false;
       state.port?.close(); state.frame?.remove(); sessions.delete(app);
       window.dispatchEvent(new Event('creator-host-closed'));
-    } catch (error) { state.status = String(error); }
+      return true;
+    } catch (error) { state.status = String(error); return false; }
     finally { state.closing = false; render(); }
-  });
+  }
+  stop.addEventListener('click', () => closeApp(selected));
 })();

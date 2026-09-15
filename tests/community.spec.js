@@ -40,6 +40,64 @@ async function load(page, options = {}) {
   await page.getByRole('button', { name: 'View Creator Plugins' }).click();
   await expect(page.locator('.community-count')).toHaveText('1 contribution');
 }
+for (const width of [1100, 680, 390, 320]) test(`grid view preserves cards, details and controls at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 820 }); await load(page, { listed: true });
+  await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'grid');
+  await page.getByRole('button', { name: 'List view', exact: true }).click();
+  await page.evaluate(() => {
+    const original = window.snapshot.entries[0];
+    window.snapshot.entries = Array.from({ length: 4 }, (_, index) => ({ ...structuredClone(original), id: `grid.${index}`, name: index === 3 ? 'LongUnbrokenContributionName'.repeat(5) : `Start Location ${index}`, previewImage: index === 2 ? null : original.previewImage }));
+  });
+  await page.getByRole('button', { name: 'Refresh catalogue' }).click();
+  await page.locator('.community-details summary').first().click();
+  const before = await page.evaluate(() => window.calls.length);
+  await page.getByRole('button', { name: 'Grid view', exact: true }).click();
+  await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'grid');
+  await expect(page.getByRole('button', { name: 'Grid view', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.community-details').first()).toHaveAttribute('open', '');
+  expect(await page.evaluate(() => window.calls.length)).toBe(before);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const cards = await page.locator('.community-item').evaluateAll(nodes => nodes.map(node => ({ x: node.getBoundingClientRect().x, y: node.getBoundingClientRect().y, width: node.getBoundingClientRect().width })));
+  if (width >= 680) expect(cards[0].y).toBe(cards[1].y);
+  else expect(cards[1].y).toBeGreaterThan(cards[0].y);
+  await page.locator('.community-details summary').first().click();
+  await expect(page.locator('[data-id="grid.2"] .community-visual')).toContainText('No preview supplied');
+  await page.screenshot({ path: testInfo.outputPath('plugins-grid.png'), fullPage: true });
+  await page.evaluate(() => { window.holdDownload = true; });
+  await page.getByRole('button', { name: 'Download package' }).first().click();
+  await page.getByRole('button', { name: 'List view', exact: true }).click();
+  await page.getByRole('button', { name: 'Grid view', exact: true }).click();
+  for (const control of await page.getByRole('button', { name: 'Download package' }).all()) await expect(control).toBeDisabled();
+  await page.evaluate(() => window.finishDownload('Saved. No import.'));
+  await expect(page.getByRole('button', { name: 'Download package' }).first()).toBeEnabled();
+  await page.reload();
+  await page.locator('#hub-pages [data-view="hub"]').click();
+  await page.getByRole('button', { name: 'View Creator Plugins' }).click();
+  await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'grid');
+  await page.getByRole('searchbox', { name: 'Search contributions' }).fill('no-match');
+  await expect(page.locator('.community-empty')).toContainText('No matching contributions');
+});
+
+test('layout controls work when preference storage is blocked', async ({ page }) => {
+  await page.addInitScript(() => { Object.defineProperty(window, 'localStorage', { get() { throw new Error('Storage unavailable'); } }); });
+  await load(page);
+  await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'grid');
+  await page.getByRole('button', { name: 'List view', exact: true }).click();
+  await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'list');
+  await expect(page.getByRole('heading', { name: 'Start Location' })).toBeVisible();
+});
+
+test('an explicit List preference survives reload instead of being reset to the Grid default', async ({ page }) => {
+  await load(page);
+  await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'grid');
+  await page.getByRole('button', { name: 'List view', exact: true }).click();
+  await page.reload();
+  await page.locator('#hub-pages [data-view="hub"]').click();
+  await page.getByRole('button', { name: 'View Creator Plugins' }).click();
+  await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'list');
+  await expect(page.getByRole('button', { name: 'List view', exact: true })).toHaveAttribute('aria-pressed', 'true');
+});
+
 for (const width of [1100, 680, 390, 320]) test(`community is readable and the actual graph image renders at ${width}px`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: 820 }); await load(page);
   await expect(page.getByRole('heading', { name: 'Start Location' })).toBeVisible();
