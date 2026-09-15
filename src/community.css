@@ -3,7 +3,6 @@
 #view-plugins .icon-folder { --icon: url("icons/folder-open.svg"); }
 #view-plugins .icon-layout-grid { --icon: url("icons/layout-grid.svg"); }
 #view-plugins .icon-list { --icon: url("icons/list.svg"); }
-body:has(#view-plugins:not(.hidden)) #suite-shell { position: absolute; }
 #view-plugins [hidden] { display: none !important; }
 .community-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 10px 0 22px; }
 .community-heading-actions { display: flex; gap: 8px; flex-wrap: wrap; }

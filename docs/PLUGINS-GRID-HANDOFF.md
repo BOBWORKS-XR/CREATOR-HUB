@@ -3,6 +3,23 @@
 Status: local post-release implementation, 2026-09-15. Public Hub 0.1.0,
 Setup 0.3.0 and MCP 2.7.0 binaries and tags are unchanged.
 
+## Hub 0.1.1 Hotfix Candidate
+
+The Hub-only candidate now includes the grid, stable-helper migration and direct
+Apps-row update controls below. The Plugins menu stays fixed while scrolling,
+with a reserved content gutter. The heading, drawer brand and enlarged 40px
+trigger mark switch to Creator Plugins on that page and restore Hub elsewhere.
+The existing transparent PNG is used; later opaque logo drafts are not shipped.
+
+Regression proof: the previous menu moved from y=13 to y=-1700 after scrolling;
+the new tests preserve its viewport position in Grid/List at 940px and 320px.
+All 137 Hub UI tests, 104 Rust tests (nine opt-in diagnostics ignored), 13 script
+tests and strict release Clippy pass locally. Disposable native acceptance now
+covers the published stable Hub 0.1.0 baseline, Apps-row update Cancel/retry and
+both alpha.8 and stable Unity helper backup/update. Its candidate run is pending.
+No installed app or public release asset has changed. Standalone Setup and MCP
+remain on their local feature branches; this hotfix does not publish them.
+
 ## Changes
 
 - Shared desktop List/Grid buttons, responsive cards and locally persisted choice.
@@ -12,9 +29,9 @@ Setup 0.3.0 and MCP 2.7.0 binaries and tags are unchanged.
   bottom edge. Selected details use the full width below their row.
 - Known stable Unity helper files can be upgraded with an exact backup. Modified
   or mixed-version helper files are refused. Existing metadata and content remain.
-- Exact shared files are in Hub, Setup and MCP. The MCP task verified the final
+- Shared grid JS/C# files are in Hub, Setup and MCP. The MCP task verified the final
   Grid-default JS/C# hashes after porting.
-  No application version bump, installer rebuild or publication for this follow-up.
+  Hub's subsequent 0.1.1 candidate is recorded above; standalone packaging is pending.
 
 Desktop preference: `creator-plugins.layout.v1`; Unity preference:
 `CreatorWorks.Plugins.CatalogueLayout.v1`. Default is Grid; an explicit saved List

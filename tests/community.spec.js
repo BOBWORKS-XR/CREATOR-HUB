@@ -40,6 +40,62 @@ async function load(page, options = {}) {
   await page.getByRole('button', { name: 'View Creator Plugins' }).click();
   await expect(page.locator('.community-count')).toHaveText('1 contribution');
 }
+for (const width of [940, 320]) for (const layout of ['grid', 'list']) test(`Plugins menu stays reachable while scrolling ${layout} at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 720 });
+  await load(page, { listed: true });
+  await page.evaluate(() => {
+    const original = window.snapshot.entries[0];
+    window.snapshot.entries = Array.from({ length: 12 }, (_, index) => ({ ...structuredClone(original), id: `scroll.${index}`, name: `Start Location ${index}` }));
+  });
+  await page.getByRole('button', { name: 'Refresh catalogue' }).click();
+  await expect(page.locator('.community-count')).toHaveText('12 contributions');
+  await page.getByRole('button', { name: layout === 'grid' ? 'Grid view' : 'List view', exact: true }).click();
+  const trigger = page.locator('#suite-trigger');
+  const initial = await trigger.boundingBox();
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(500);
+  const scrolled = await trigger.boundingBox();
+  expect(scrolled.y).toBe(initial.y);
+  expect(scrolled.y).toBeGreaterThanOrEqual(0);
+  expect(scrolled.y + scrolled.height).toBeLessThan(720);
+  const scrollY = await page.evaluate(() => window.scrollY);
+  await trigger.click();
+  await expect(page.locator('#suite-menu')).toBeVisible();
+  await expect(page.locator('#suite-shell')).toHaveCSS('width', '224px');
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrollY);
+  await page.screenshot({ path: testInfo.outputPath('plugins-menu-scrolled.png') });
+  const calls = await page.evaluate(() => window.calls.length);
+  await page.locator('#suite-dismiss').click({ position: { x: width - 20, y: 400 } });
+  await expect(page.locator('#suite-menu')).toBeHidden();
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrollY);
+  expect(await page.evaluate(() => window.calls.length)).toBe(calls);
+  await trigger.click();
+  await page.locator('#suite-menu [data-view="hub"]').click();
+  await expect(page.locator('#view-projects')).toBeVisible();
+  await expect(page.locator('#view-plugins')).toBeHidden();
+});
+
+for (const width of [940, 320]) test(`Plugins heading and menu icon follow the current page at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 720 });
+  await load(page, { listed: true });
+  await expect(page.locator('#page-title')).toHaveText('CREATOR PLUGINS');
+  await expect(page.locator('#suite-trigger .plugins-mark img')).toHaveAttribute('src', 'icons/creator-plugins.png');
+  await expect(page.locator('#suite-trigger .suite-letter')).toHaveCount(0);
+  await page.locator('#suite-trigger img').evaluate(image => image.decode());
+  await page.evaluate(() => window.scrollTo(0, 0));
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('plugins-heading.png') });
+  await page.locator('#suite-trigger').click();
+  await expect(page.locator('.suite-brand')).toHaveText('CREATOR PLUGINS');
+  await expect(page.locator('.suite-brand')).toHaveCSS('opacity', '1');
+  expect(await page.locator('.suite-brand').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  await page.locator('#suite-menu [data-view="hub"]').click();
+  await expect(page.locator('#page-title')).toHaveText('CREATOR HUB');
+  await expect(page.locator('#mode-description')).toHaveText('Unity tools. One place.');
+  await expect(page.locator('#suite-trigger .hub-mark .suite-letter')).toHaveText('H');
+  await expect(page.locator('.suite-brand')).toHaveText('CREATOR HUB');
+});
+
 for (const width of [1100, 680, 390, 320]) test(`grid view preserves cards, details and controls at ${width}px`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: 820 }); await load(page, { listed: true });
   await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'grid');

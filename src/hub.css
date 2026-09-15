@@ -112,3 +112,5 @@ button.app-row:hover { background: #181d21; }
 @media (max-width: 480px) { .detected-copy { align-items: flex-start; flex-direction: column; } }
 .hub-update { margin-top: 24px; padding-top: 16px; border-top: 1px solid #293137; }
 .hub-update p { overflow-wrap: anywhere; }
+body:has(#view-plugins:not(.hidden)) > main,
+body:has(#view-plugins:not(.hidden)) > footer { padding-left: 76px; }

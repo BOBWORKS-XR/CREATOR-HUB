@@ -70,19 +70,21 @@ async function verifyPackagedHelper() {
   const saved = original ? JSON.parse(original.toString('utf8')) : { paths: [] };
   const helper = path.resolve('unity/com.creatorworks.plugins');
   const legacy = path.resolve('tests/fixtures/helper-alpha8/unity/com.creatorworks.plugins');
+  const stable = path.resolve('tests/fixtures/helper-stable-0.1.0/unity/com.creatorworks.plugins');
   const names = ['package.json', 'LICENSE.md', 'Editor/CreatorWorks.Plugins.Editor.asmdef', 'Editor/CreatorPluginsWindow.cs'];
-  const fixtures = ['missing', 'outdated'].map(kind => {
+  const fixtures = ['missing', 'outdated', 'stable'].map(kind => {
     const root = path.join(out, `Unity-menu-${kind}`);
     for (const folder of ['Assets', 'Packages', 'ProjectSettings']) fs.mkdirSync(path.join(root, folder), { recursive: true });
     fs.writeFileSync(path.join(root, 'ProjectSettings/ProjectVersion.txt'), 'm_EditorVersion: 6000.3.21f1\n', { flag: 'wx' });
     fs.writeFileSync(path.join(root, 'Packages/manifest.json'), '{"dependencies":{}}\n', { flag: 'wx' });
     fs.writeFileSync(path.join(root, 'Assets/scene-sentinel.unity'), 'Preserve user content exactly.\n', { flag: 'wx' });
     const destination = path.join(root, 'Packages/com.creatorworks.plugins');
-    if (kind === 'outdated') {
-      fs.cpSync(legacy, destination, { recursive: true, errorOnExist: true, force: false });
+    const baseline = kind === 'stable' ? stable : legacy;
+    if (kind !== 'missing') {
+      fs.cpSync(baseline, destination, { recursive: true, errorOnExist: true, force: false });
       fs.writeFileSync(path.join(destination, 'Editor/CreatorPluginsWindow.cs.meta'), 'fileFormatVersion: 2\nguid: 11111111111111111111111111111111\n', { flag: 'wx' });
     }
-    return { root, destination, kind };
+    return { root, destination, kind, baseline };
   });
   fs.mkdirSync(path.dirname(registry), { recursive: true });
   fs.writeFileSync(registry, JSON.stringify({ ...saved, paths: [...saved.paths, ...fixtures.map(f => f.root)] }));
@@ -91,23 +93,23 @@ async function verifyPackagedHelper() {
     for (const fixture of fixtures) {
       const target = targets.projects.find(p => p.path.toLowerCase() === fixture.root.toLowerCase());
       assert.ok(target, 'Disposable helper target must be discovered');
-      assert.equal(target.helper, fixture.kind);
+      assert.equal(target.helper, fixture.kind === 'missing' ? 'missing' : 'outdated');
       const invoke = () => page.evaluate(projectId => window.CreatorHubNative.invoke('install_community_menu', { projectId }), target.id);
       const cancelled = invoke();
       await retry(() => native(child.pid, hub, 'button', 'Cancel'));
       assert.match(await cancelled, /cancelled/);
-      assert.equal(fs.existsSync(fixture.destination), fixture.kind === 'outdated');
+      assert.equal(fs.existsSync(fixture.destination), fixture.kind !== 'missing');
       const installing = invoke();
-      await retry(() => native(child.pid, hub, 'button', fixture.kind === 'outdated' ? 'Update menu' : 'Add menu'));
+      await retry(() => native(child.pid, hub, 'button', fixture.kind === 'missing' ? 'Add menu' : 'Update menu'));
       assert.match(await installing, /menu (added|updated)/);
       for (const name of names) assert.equal(hash(path.join(fixture.destination, name)), hash(path.join(helper, name)));
       assert.equal(fs.readFileSync(path.join(fixture.root, 'Assets/scene-sentinel.unity'), 'utf8'), 'Preserve user content exactly.\n');
       assert.equal(fs.readFileSync(path.join(fixture.root, 'Packages/manifest.json'), 'utf8'), '{"dependencies":{}}\n');
-      if (fixture.kind === 'outdated') {
+      if (fixture.kind !== 'missing') {
         const backups = fs.readdirSync(path.join(fixture.root, '.creator-plugins/helper-backups'));
         assert.equal(backups.length, 1);
         const backup = path.join(fixture.root, '.creator-plugins/helper-backups', backups[0], 'com.creatorworks.plugins');
-        for (const name of names) assert.equal(hash(path.join(backup, name)), hash(path.join(legacy, name)));
+        for (const name of names) assert.equal(hash(path.join(backup, name)), hash(path.join(fixture.baseline, name)));
         assert.equal(hash(path.join(backup, 'Editor/CreatorPluginsWindow.cs.meta')), hash(path.join(fixture.destination, 'Editor/CreatorPluginsWindow.cs.meta')));
       }
     }
@@ -240,10 +242,31 @@ async function closeHosted(app) {
       assert.equal(await page.locator('#release-button').isEnabled(), true);
       report.checks.push('Actual legacy private-runtime fixture blocks native update without stopping it; persistent Check again preserves files/settings; cooperative exit enables a separately approved update');
     }
-    await page.locator('#reopen-app').uncheck();
-    await page.locator('#release-button').click();
+    if (upgrade) {
+      await show('hub');
+      const before = hash(apps[app]);
+      await page.locator(`#update-${app}`).click();
+      await retry(() => native(child.pid, hub, 'button', 'Cancel'));
+      await retry(async () => assert.equal(await page.locator(`#update-${app}`).isEnabled(), true));
+      assert.equal(hash(apps[app]), before);
+      assert.equal(hash(configPath), originalConfigHash);
+      assert.equal(await page.locator('#view-hub').isVisible(), true);
+      await page.locator(`#update-${app}`).click();
+    } else {
+      await page.locator('#reopen-app').uncheck();
+      await page.locator('#release-button').click();
+    }
     await retry(() => native(child.pid, hub, 'button', 'Install'));
-    await page.waitForFunction(() => !document.querySelector('#release-button').disabled && document.querySelector('#primary-label').textContent === 'Open app', null, { timeout: 180000 });
+    if (upgrade) {
+      await retry(async () => {
+        assert.equal(await page.locator(`#update-${app}`).isVisible(), false);
+        assert.equal(await page.locator('#check-updates').isEnabled(), true);
+      }, 180);
+      assert.equal(await page.locator('#view-hub').isVisible(), true);
+      report.checks.push(`${app}: Apps-row Update app cancellation preserves files/settings; retry installs with native consent without opening app details`);
+    } else {
+      await page.waitForFunction(() => !document.querySelector('#release-button').disabled && document.querySelector('#primary-label').textContent === 'Open app', null, { timeout: 180000 });
+    }
     assert.equal(hash(apps[app]), pins[app].executableSha256);
     const refreshed = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
     assert.equal(refreshed.apps.find(item => item.app === app).hostedCompatible, true);

@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$CandidateDirectory,
-    [ValidateSet('clean', 'alpha.3', 'alpha.4', 'alpha.5', 'alpha.6')][string]$HubBaseline = 'clean'
+    [ValidateSet('clean', 'alpha.3', 'alpha.4', 'alpha.5', 'alpha.6', 'stable-0.1.0')][string]$HubBaseline = 'clean'
 )
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
@@ -68,7 +68,9 @@ try {
     $report.installerSha256 = Hash $installer
     $report.expectedExecutableSha256 = Hash $expectedExe
     if ($HubBaseline -ne 'clean') {
-        $baseline = if ($HubBaseline -eq 'alpha.6') {
+        $baseline = if ($HubBaseline -eq 'stable-0.1.0') {
+            @{ Version = '0.1.0'; Installer = '6a8c36305e5bb573c6fd27be846dca5448b10326f6445f018a193575ce54ff95'; Exe = 'ab39023374ccf9738bb070089327ddb52337032780c7a9124b87ff2a82e5a2de' }
+        } elseif ($HubBaseline -eq 'alpha.6') {
             @{ Version = '0.1.0-alpha.6'; Installer = '107ad181baced72dc8f6e107c04b96e9c8c9447b023407be4e441867560c048d'; Exe = '8c07418efee8f474eaf32d6d5dbd3f6ccabccd23fbcaf33520e9cc25b510a1eb' }
         } elseif ($HubBaseline -eq 'alpha.5') {
             @{ Version = '0.1.0-alpha.5'; Installer = 'befcc1da883c9ad13af7c7971865bf1c3cf7a63102a297af743e5f059ad96fbc'; Exe = '1196f20b748aff1ab2d269736308939dc0e221a13c9f220857017284ba7b4427' }
