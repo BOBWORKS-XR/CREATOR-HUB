@@ -47,6 +47,16 @@ automatically acceptance of a newer build.
 
 ## Release Evidence
 
+Alpha.6 passed [its candidate and staged native suite](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34754847040)
+and [public native suite](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34756015590)
+on clean, both-app upgrade and MCP-only routes. Hub alpha.5 and alpha.3 upgrades
+were tested. The public suite reused the same installer with staging disabled;
+all 22 Hub and 11 Setup public assets were independently downloaded and verified.
+See [alpha.6 evidence](HOTFIX-ALPHA6.md) for exact hashes, the separate successful
+clean-runner Setup prerequisite test, and remaining limits.
+
+The checks below describe the earlier alpha.5 pair.
+
 Passed [prepublication staged acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34590430861)
 and [post-publication native acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34591146264)
 using the same Hub installer. Both runs passed clean, legacy and MCP-only lanes,

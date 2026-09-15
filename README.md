@@ -11,6 +11,8 @@ and choose `Creator-Hub-0.1.0-Windows-setup.exe`.
 The matching companion versions are **Project Setup 0.3.0** and **MCP 2.7.0**.
 Hub installs these apps separately and opens compatible versions inside Hub.
 Both also work standalone; Hub does not create duplicate MCP servers.
+Earlier published acceptance remains in the
+[alpha.6 release history](docs/README-ALPHA6-RELEASE-HISTORY.md).
 
 - **Projects first:** detected Creator SDK / Altspace and Banter projects, search,
   sorting and opening in the matching installed Unity Editor.

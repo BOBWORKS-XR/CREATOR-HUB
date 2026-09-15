@@ -34,8 +34,34 @@ Authenticode signing; Windows may still show an unsigned-publisher warning.
 
 ## Evidence
 
-Release preparation is in progress. Publish only after exact CI installer and
-native suite evidence is recorded; a local build or version label is not enough.
+[Hub candidate and staged native acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34754847040)
+passed from source `cfa2fa5c1e6848082f01b6724b7400e47ba40360`: 78 UI tests,
+54 Rust tests, 11 Node tests, strict release Clippy, installer guard and installed
+acceptance. Five explicit live Rust tests were not part of the unit count.
+All three native lanes passed: clean installation, both-app upgrade and MCP-only
+upgrade. Hub upgrades used public alpha.5 and alpha.3 baselines. Checks included
+active-process refusal, cooperative fixture exit, exact installed hashes/notices,
+saved MCP selection and a restored preference, native consent, real folder-picker
+close protection, both hosted interfaces and scoped normal backend exit.
+
+The staged suite used the signed Setup cache, not public Setup discovery. Its
+`unityProjectCreated` and `selfUpdateTested` fields remain false.
+[Public native acceptance](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/34756015590)
+then passed all three lanes with staging disabled and the exact same Hub candidate
+from run 34754847040, without rebuilding. Clean and both-app upgrade lanes used
+the actual public signed Setup and MCP releases; the MCP-only lane left Setup
+uninstalled. All 22 public Hub assets were subsequently downloaded without
+authentication, byte-matched to the reviewed release and passed the compiled-key
+signature, updater and tamper verification. The tag remains on the actual product
+source above; subsequent documentation edits do not replace its installer.
+
+Exact Hub installer SHA-256:
+`107ad181baced72dc8f6e107c04b96e9c8c9447b023407be4e441867560c048d`.
+Installed EXE and installer preflight payload SHA-256:
+`8c07418efee8f474eaf32d6d5dbd3f6ccabccd23fbcaf33520e9cc25b510a1eb`.
+The signed metadata, installer updater signature, actual payload and tamper
+rejection passed the compiled-key verifier. These checks do not prove a full
+in-app self-update and restart.
 
 The paired Setup candidate is from source `a025a112519994670af8f48d848e408ec9dfa492`
 and [candidate run 34754280271](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/actions/runs/34754280271).
@@ -44,8 +70,17 @@ passed upgrades from public 0.2.2, alpha.1 and alpha.2, including active-app
 refusal, preserved snapshots, cooperative fixture exit, exact installed payload
 and notices, synthetic sentinels, and normal GUI startup/close. The exact installed
 EXE pin is `ace1fa411559e84a10cc0bc7884a14aa427ae4f3fba197cc87b2b4b3cc02d800`.
-Setup's signed descriptor requires Hub alpha.6. These checks are not the paired
-Hub suite or proof of real-user migration across every installer type.
+Setup's signed descriptor requires Hub alpha.6. These checks are not proof of
+real-user migration across every installer type.
+
+[Fresh Setup prerequisite acceptance](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/actions/runs/34754298548)
+passed on a clean disposable Windows runner from the same Setup source. It
+installed and checked Unity 6000.3.21f1 requirements, exercised cancellation and
+reuse, repaired a missing JDK and executed Java, javac, ADB and NDK clang. It
+captured real download byte/rate progress. No Unity account was used; license
+activation and project creation were not tested by that run. All 11 public Setup
+release assets were separately downloaded without authentication, matched to the
+reviewed files and passed signature and tamper verification.
 
 The earlier local matched candidate created and reopened a fresh Creator SDK
 project through Hub. Requirements stayed ready, both progress types reached the
@@ -61,8 +96,9 @@ Original installed applications and settings were restored after that local test
   ending Hub during project work and report any leftover process with its error.
 - The complete signed Hub self-update/restart flow remains untested. Use the
   versioned Hub installer when testing that route is not appropriate.
-- Fresh-computer prerequisite downloads, Unity sign-in/licensing, custom Unity
-  Hub locations, historical MSI/BANTWORKS migrations and headset behavior need
-  separate coverage. A successful Unity validation is not a VR performance test.
+- The clean-runner prerequisite test is not every fresh computer. Unity
+  sign-in/licensing, custom Unity Hub locations, historical MSI/BANTWORKS
+  migrations and headset behavior need separate coverage. A successful Unity
+  validation is not a VR performance test.
 - Persistent adoption, replacing app shortcuts and taking over already-open
   apps are not included. Standalone tools remain independent.
