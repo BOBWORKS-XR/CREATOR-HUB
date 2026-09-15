@@ -1,19 +1,20 @@
 {
   "schemaVersion": 1,
   "setup": {
-    "version": "0.3.0-alpha.6",
-    "assetName": "Creator-Project-Setup-0.3.0-alpha.6-Windows-setup.exe",
-    "installerSha256": "57bc1b1047b38790b174c1dd60576b639e91453f33e27004ce5a9d8055b60547",
-    "executableSha256": "ace1fa411559e84a10cc0bc7884a14aa427ae4f3fba197cc87b2b4b3cc02d800",
-    "acceptanceRun": "34754654023",
-    "sourceRevision": "a025a112519994670af8f48d848e408ec9dfa492"
+    "version": "0.3.0",
+    "assetName": "Creator-Project-Setup-0.3.0-Windows-setup.exe",
+    "installerSha256": "1cb72e2ea31345a4679aabf2b0756e847b10b68bc2043988147c2449584e02f2",
+    "executableSha256": "ed0a57b2421c844a9d30dc5f69f0a358ae9fe32cf6e3b5fd6570028a3337f27d",
+    "acceptanceRun": "35004470795",
+    "sourceRevision": "f8d5423df9a477ceb65ec62a00358c7900703b66"
   },
   "mcp": {
-    "version": "2.7.0-alpha.1",
-    "assetName": "Creator-Works-MCP-2.7.0-alpha.1-Windows-setup.exe",
-    "installerSha256": "8f39b9f2e120076346873dc8cc3186e6a2c055e1cca4cf9b8b66dfb700f12c41",
-    "executableSha256": "04971c5c6cc2c3346606d4ae96bbea465c9924b564a1fe928f7d7d006527de65",
-    "acceptanceRun": "34527053871",
-    "sourceRevision": "72048832e74c50d87f719387db58d79d66e05efb"
+    "version": "2.7.0",
+    "assetName": "Creator-Works-MCP-2.7.0-Windows-setup.exe",
+    "installerSha256": "f403da14237a16d3e7a50620d484c60c0a3fbdbb6abfe1ccaf21e4ffb78e1da9",
+    "executableSha256": "0fc9f6023973378778a00b063c383f37f2973eec9d89a96b084391c89f2287cd",
+    "acceptanceRun": "35003567089",
+    "lifecycleAcceptanceRun": "35004965231",
+    "sourceRevision": "5b65478f126a9cf89c07b6136309d57f7782e40d"
   }
 }
