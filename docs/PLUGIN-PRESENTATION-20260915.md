@@ -8,8 +8,9 @@ Publication remains on hold pending the user's alpha.8 feedback and approval.
 
 - Normal Hub launch and the Creator Hub drawer entry open Projects. Apps and
   direct MCP/Setup destinations remain available.
-- Plugins uses a gray Hub cube with a cyan/red puzzle overlay in the shared app
-  navigation. The source SVG is `src/icons/creator-plugins.svg`.
+- The initial gray Hub cube with a puzzle overlay was rejected. It is superseded
+  by the approved three-puzzle-face corner in `src/icons/creator-plugins.png`;
+  see `PLUGINS-ICON.md`. The tests below describe the earlier source snapshot.
 - The Unity catalogue shows a thumbnail, name, contributor and short description
   without opening Details. Thumbnail downloads/cache are bounded and independent
   of the package action request.

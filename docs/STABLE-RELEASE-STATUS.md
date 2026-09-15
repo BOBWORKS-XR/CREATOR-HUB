@@ -4,6 +4,34 @@
 This supersedes older alpha.8 publication holds. No stable release has been
 published by this pass yet. Publishing remains conditional on exact-binary checks.
 
+## Latest checkpoint
+
+The three-puzzle-face Plugins icon was approved on 2026-09-15 and is now in Hub,
+Setup and MCP source. Production PNG SHA-256:
+`ff107f1c0bca0380f35f25754fd023d60311fa4457f6fd84255a8f41f78fee6d`.
+Hub's 114 UI tests and Setup's 59 UI tests passed again after this change.
+MCP reported 243 Node tests and 22 UI groups passed, including PNG checks.
+
+Pre-logo Setup candidate 35000700601 passed. Installed replay 35002542577 at
+`f81819f` passed all three baselines (0.2.2, alpha.1, alpha.6). Prior acceptance
+35002191261 failed before installation on an outdated baseline-list assertion;
+that test expectation was corrected, without changing candidate bytes.
+The earlier guard timeout was not reproduced; its cause remains unknown.
+
+MCP independently verified all three upgrade receipts and actual packaged busy/
+idle lifecycle checks from replay 35002220505. Original candidate source
+`8caf8a818ff5654dc255ab2c02fcf7c21525e7d5`, installer
+`762258ab39822d38d67810b8fda3b51cd017503178a23d08ecfb340f92282c77`,
+launcher `a35414684d943d214f9584d79debbb64db8e482489bc3c40fafc02368e9fb1dc`.
+The initial alpha.2 baseline refusal remains unexplained, not declared fixed.
+
+Those passing artifacts contain the earlier logo and are not the final release.
+Final builds: Setup 35003479084 at `f8d5423`, MCP 35003567089 at `5b65478`.
+Their new hashes and fresh installed acceptance are pending. Setup's new
+CI-only chooser lifecycle check uses the existing real guarded command and
+does not add production IPC, install Unity or select a project. Its local
+execution-refusal test and syntax checks pass; native acceptance is pending.
+
 ## Versions and ownership
 
 - Hub 0.1.0: this checkout; known-helper update/backup, shared native queue/history,
@@ -64,9 +92,10 @@ or exact packaged acceptance by themselves.
 
 ## Remaining work
 
-1. Resolve the Setup guard-test and MCP alpha.2 baseline failures from diagnostics.
-2. Download verified candidates and run installed upgrade matrices against public
-   baselines, without touching installed personal apps or active MCP servers.
+1. Retain the earlier intermittent failures as unexplained evidence; both prior
+   replay matrices passed without application fixes for those failures.
+2. Download the final logo candidates and repeat exact installed upgrade/lifecycle
+   checks, without touching installed personal apps or active MCP servers.
 3. Bind Hub hosting pins to the accepted companion artifacts; build/test Hub.
 4. Exercise exact packaged helper installation/old-helper update through the Hub
    native suite. Real Unity cancellation/retry/C# reload passed above.

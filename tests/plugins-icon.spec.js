@@ -1,8 +1,10 @@
 const { test, expect } = require('@playwright/test');
 
-test('Plugins mark retains the Hub cube and two-color puzzle at menu size', async ({ page }, testInfo) => {
+test('Plugins mark renders the approved three-piece cube at menu size', async ({ page }, testInfo) => {
   await page.goto('http://127.0.0.1:4188');
+  await page.locator('#hub-pages [data-view="hub"]').click();
   const mark = page.locator('.app-row .plugins-mark');
+  await expect(mark.locator('img')).toHaveAttribute('src', 'icons/creator-plugins.png');
   await mark.locator('img').evaluate(image => image.decode());
   const colors = await mark.locator('img').evaluate(image => {
     const canvas = document.createElement('canvas');
