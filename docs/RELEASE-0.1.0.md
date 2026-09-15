@@ -1,0 +1,39 @@
+# Creator Hub 0.1.0
+
+The coordinated Windows release for **Creator Hub**, **Creator Works MCP 2.7.0**
+and **Creator Project Setup 0.3.0**.
+
+## Highlights
+
+- **Projects first:** open your Creator SDK/Altspace and Banter projects from one list.
+- Download, install, update and open the matching Creator apps inside Hub.
+  Standalone apps remain available and keep their existing settings.
+- **Creator Plugins:** searchable community contributions with type filters,
+  images, author credit, descriptions and incorporation instructions.
+- Add the Creator Plugins menu to a selected Unity project. Its catalogue shows
+  thumbnail cards and a direct **Import into project** action.
+- Cancelled Unity imports can be retried without closing the Plugins window.
+  Completed request history and final import receipts are retained.
+- Recognized old menu files can be updated with a backup. Unknown or locally
+  edited helpers are not overwritten; Unity metadata and project content stay intact.
+- Categories include Visual Scripting, prefabs, plugins, Editor tools, recipes,
+  MCP tools and AI skills. AI contributions are not automatically installed into clients.
+
+## Updating
+
+Update Hub first, then select MCP or Project Setup from its app menu. Installation
+requires approval. Active MCP connections, busy apps and unknown installations
+block replacement with recovery guidance; the suite does not force-close them.
+Creator Converter is coming later. Community submissions are welcome at
+https://github.com/SideQuestVR/Creator-Community/issues/new?template=contribution.yml.
+
+## Scope
+
+Windows x64. Signed catalogue metadata and hashes are separate from Windows
+publisher signing; the executables are not Authenticode signed. Check the attached
+acceptance reports for exact installer hashes and tested upgrade paths. The Unity
+checks cover 2022.3.39f1 and 6000.3.21f1, including cancellation/retry and real C#
+import/reload/reopen behavior. They do not prove every plugin's code safety,
+SDK compatibility, gameplay or headset performance. Unity still lets you select
+the package files to import. A future Hub self-update and macOS/Linux native
+acceptance are separate checks.

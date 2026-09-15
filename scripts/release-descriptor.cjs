@@ -16,8 +16,10 @@ function validVersion(version) {
 }
 
 function reviewReceipt(receipt, descriptor, application) {
-  if (!receipt || receipt.schemaVersion !== 1 || receipt.approvedForPrerelease !== true || !semver.prerelease(descriptor.version)) {
-    throw Error('A reviewed prerelease receipt is required to change protocol claims.');
+  if (!validVersion(descriptor.version)) throw Error('Invalid reviewed release version.');
+  const approval = semver.prerelease(descriptor.version) ? 'approvedForPrerelease' : 'approvedForStable';
+  if (!receipt || receipt.schemaVersion !== 1 || receipt[approval] !== true) {
+    throw Error(`A reviewed ${approval === 'approvedForStable' ? 'stable' : 'prerelease'} receipt is required to change protocol claims.`);
   }
   for (const key of ['appId', 'version', 'byteLength', 'sha256', 'executableSha256']) {
     if (receipt[key] !== descriptor[key]) throw Error(`Receipt does not match the exact artifact: ${key}.`);
@@ -40,7 +42,7 @@ function updaterManifest(application, version, asset, signature) {
   if (!validVersion(version) || !/^[a-zA-Z0-9._-]+\.exe$/.test(asset) || asset.includes('..')) throw Error('Invalid updater release.');
   const decoded = Buffer.from(signature, 'base64');
   if (!signature || decoded.toString('base64') !== signature || !decoded.toString('utf8').startsWith('untrusted comment:')) throw Error('Invalid updater signature.');
-  return { version, notes: 'Creator Hub prerelease update.', platforms: {
+  return { version, notes: semver.prerelease(version) ? 'Creator Hub prerelease update.' : 'Creator Hub update.', platforms: {
     'windows-x86_64': { signature, url: `https://github.com/BOBWORKS-XR/${application.repo}/releases/download/v${version}/${asset}` },
   } };
 }

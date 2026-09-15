@@ -28,11 +28,41 @@ async function load(page) {
   });
   await page.goto('http://127.0.0.1:4188');
   await expect(page.locator('#catalog-status')).toContainText('Update check complete');
-  await page.locator('#hub-pages [data-view="projects"]').click();
+  await expect(page.locator('#view-projects')).toBeVisible();
+  await expect(page.locator('#view-hub')).toBeHidden();
   await expect(page.locator('#project-status')).toContainText('4 known projects');
 }
 
 const projectNames = page => page.locator('.project-info > strong');
+
+test('Hub opens Projects by default without opening or modifying a project', async ({ page }) => {
+  await load(page);
+  await expect(page.locator('#hub-pages [data-view="projects"]')).toHaveAttribute('aria-current', 'page');
+  await expect(page.locator('#projects-title')).toBeFocused();
+  expect(await page.evaluate(() => window.calls.filter(c => /project/.test(c.command)))).toEqual([{ command: 'project_inventory', args: {} }]);
+});
+
+test('Creator Hub menu returns to Projects and retains filters from Apps or another app', async ({ page }) => {
+  await load(page);
+  await page.locator('#project-search').fill('Forest');
+  await page.locator('#project-sort').selectOption('name');
+  for (const view of ['hub', 'mcp', 'setup']) {
+    if (view === 'hub') await page.locator('#hub-pages [data-view="hub"]').click();
+    else {
+      await page.locator('#suite-trigger').click();
+      await page.locator(`#suite-menu [data-view="${view}"]`).click();
+    }
+    await expect(page.locator('#view-projects')).toBeHidden();
+    await page.locator('#suite-trigger').click();
+    await page.locator('#suite-menu [data-view="hub"]').click();
+    await expect(page.locator('#view-projects')).toBeVisible();
+    await expect(page.locator('#project-search')).toHaveValue('Forest');
+    await expect(page.locator('#project-sort')).toHaveValue('name');
+    await expect(page.locator('#suite-menu')).toBeHidden();
+    await expect(page.locator('#projects-title')).toBeFocused();
+  }
+  expect(await page.evaluate(() => window.calls.filter(c => /project/.test(c.command)))).toEqual([{ command: 'project_inventory', args: {} }]);
+});
 
 test('newest saved project is first by default, with alphabetical sorting available', async ({ page }) => {
   await load(page);

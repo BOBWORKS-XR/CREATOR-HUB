@@ -27,3 +27,13 @@ test('Hub updater feed binds the same versioned repository asset and detached si
   for (const asset of ['../setup.exe', 'file with spaces.exe', 'other.exe?x=1']) assert.throws(() => updaterManifest(applications.hub, descriptor.version, asset, signature));
   assert.throws(() => updaterManifest(applications.hub, descriptor.version, 'setup.exe', 'invalid'));
 });
+test('stable publication requires explicit stable approval bound to the exact artifact', () => {
+  const stable = { ...descriptor, version: '0.1.0' };
+  assert.throws(() => reviewReceipt({ ...receipt, version: stable.version }, stable, applications.hub), /stable receipt/);
+  const reviewed = { ...receipt, version: stable.version, approvedForStable: true, approvedForPrerelease: false };
+  assert.equal(reviewReceipt(reviewed, stable, applications.hub).installerProtocol, 1);
+  assert.throws(() => reviewReceipt({ ...reviewed, sha256: 'c'.repeat(64) }, stable, applications.hub), /exact artifact/);
+  assert.throws(() => reviewReceipt({ ...reviewed, version: descriptor.version }, descriptor, applications.hub), /prerelease receipt/);
+  const signature = Buffer.from('untrusted comment: test\nfixture').toString('base64');
+  assert.equal(updaterManifest(applications.hub, stable.version, 'Creator-Hub-0.1.0-Windows-setup.exe', signature).notes, 'Creator Hub update.');
+});

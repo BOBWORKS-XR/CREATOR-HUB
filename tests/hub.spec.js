@@ -15,6 +15,7 @@ async function load(page, launchView = 'hub', options = {}) {
     window.__TAURI__ = { event: { listen: async (name, handler) => { window.events[name] = handler; return () => {}; } }, core: { invoke: async (command, args) => {
       window.calls.push({ command, args });
       if (command === 'get_launch_request') return { view: launchView, revision: 0 };
+      if (command === 'project_inventory') return { projects: [], warnings: [] };
       if (command === 'community_catalogue') return { entries: [], warnings: [], stale: false };
       if (command === 'app_inventory') {
         if (window.failInventory) throw window.failInventory;
@@ -32,6 +33,7 @@ async function load(page, launchView = 'hub', options = {}) {
   await page.goto('http://127.0.0.1:4188');
   await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === 'app_inventory' && c.args.check))).toBe(true);
   await expect(page.locator('#catalog-status')).toHaveText(/^(Update check complete\. Installation always needs your approval\.|Installed apps checked\.)$/);
+  if (launchView === 'hub') await page.locator('#hub-pages [data-view="hub"]').click();
 }
 
 for (const width of [940, 560, 320]) test(`upgrade blockers are actionable, client-agnostic and safe to recheck at ${width}px`, async ({ page }, testInfo) => {
@@ -284,14 +286,14 @@ test('catalog navigation changes no external or project state', async ({ page })
   await expect(page.locator('#tool-title')).toHaveText('Creator Project Setup');
   await expect(page.locator('#tool-facts')).toContainText('Android and Windows');
   await expect(page.locator('#suite-menu')).toBeHidden();
-  expect(await page.evaluate(() => window.calls.filter(call => !['app_inventory', 'get_launch_request', 'hub_update_status'].includes(call.command)))).toEqual([]);
+  expect(await page.evaluate(() => window.calls.filter(call => !['app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(call.command)))).toEqual([]);
 });
 
 test('installation uses native app IDs and reports failure without a browser detour', async ({ page }) => {
   await load(page);
   await page.getByRole('button', { name: 'View Creator Works MCP', exact: true }).click();
   await page.locator('#release-button').click();
-  expect(await page.evaluate(() => window.calls.filter(call => !['app_inventory', 'get_launch_request', 'hub_update_status'].includes(call.command)))).toEqual([{ command: 'install_app', args: { app: 'mcp', version: '2.6.0', reopen: true, closeRunning: false } }]);
+  expect(await page.evaluate(() => window.calls.filter(call => !['app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(call.command)))).toEqual([{ command: 'install_app', args: { app: 'mcp', version: '2.6.0', reopen: true, closeRunning: false } }]);
   await page.evaluate(() => window.failOpen = true);
   await page.locator('#source-button').click();
   await expect(page.getByRole('alert')).toContainText('Browser is unavailable');
@@ -321,7 +323,7 @@ test('URL parameters cannot claim hosted or installed state', async ({ page }) =
   await page.goto('http://127.0.0.1:4188/?hosted=true&installed=true&path=C:/bad.exe');
   await expect(page.locator('#suite-trigger')).toBeVisible();
   await expect(page.locator('#status-mcp')).toContainText('Available');
-  expect(await page.evaluate(() => window.calls.filter(call => !['app_inventory', 'get_launch_request', 'hub_update_status'].includes(call.command)))).toEqual([]);
+  expect(await page.evaluate(() => window.calls.filter(call => !['app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(call.command)))).toEqual([]);
 });
 
 for (const width of [940, 720, 560, 390]) {
@@ -385,7 +387,7 @@ test('Creator Plugins browses the catalogue without installation or account acti
   await expect(page.locator('#view-plugins')).toContainText('No contributions are listed yet');
   await expect(page.locator('#view-plugins')).toContainText('Editor tools');
   await expect(page.locator('#release-button')).toBeHidden();
-  expect(await page.evaluate(() => window.calls.filter(c => !['app_inventory', 'get_launch_request', 'hub_update_status', 'community_catalogue'].includes(c.command)))).toEqual([]);
+  expect(await page.evaluate(() => window.calls.filter(c => !['app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory', 'community_catalogue'].includes(c.command)))).toEqual([]);
 });
 
 test('download progress cancels, prevents duplicate actions and never auto-installs', async ({ page }) => {

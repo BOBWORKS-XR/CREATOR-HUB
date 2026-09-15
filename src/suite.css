@@ -29,6 +29,7 @@ body.suite-open .app-header .title-block { opacity: 0; pointer-events: none; }
 .hub-mark::after { background: linear-gradient(90deg, #4c5964 50%, #343f48 50%); clip-path: polygon(6% 25%, 50% 50%, 94% 25%, 94% 75%, 50% 100%, 6% 75%); }
 .hub-mark img { position: relative; z-index: 1; width: 22px; height: 22px; }
 .hub-mark .suite-letter { z-index: 2; }
+.plugins-mark img { width: 34px; height: 34px; }
 .converter-mark { background: #000; border-radius: 5px; }
 .converter-mark img { width: 22px; height: 22px; }
 .suite-menu { position: absolute; top: 48px; left: 0; width: 223px; height: calc(100% - 48px); overflow-y: auto; overflow-x: hidden; padding: 6px; background: transparent; opacity: 0; visibility: hidden; transform: translateX(-12px); transition: opacity 100ms ease, transform 180ms ease, visibility 0s linear 220ms; }

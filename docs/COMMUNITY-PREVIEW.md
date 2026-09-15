@@ -1,4 +1,4 @@
-# Community Catalogue Preview
+# Creator Plugins
 
 This is a page in Creator Hub and both standalone apps, not a fourth app.
 The shared source is `src/community.js`, `src/community.css`,
@@ -39,7 +39,7 @@ Never run a downloaded file or automatically import it into Unity.
 
 ## Add To Project
 
-The alpha.8 candidate enables experimental project integration. The native
+The coordinated Windows release enables project integration. The native
 capability and catalogue flag share one setting; the UI defaults to disabled
 unless the native response explicitly enables it. Publication still requires
 acceptance of the exact packaged build. Project consent, catalogue authority,
@@ -52,13 +52,14 @@ project path. Unity 2022.3 or newer is required. Missing SDKs are identified,
 not treated as evidence that a community package is compatible.
 
 `Add Unity menu` installs an Editor-only embedded package after native consent
-and only while the selected project's Editor is closed. Existing different
-helper files are never replaced. The manifest and scenes are not rewritten.
+and only while the selected project's Editor is closed. A recognized old helper
+can be updated with a complete backup and preserved Unity metadata. Unknown or
+locally edited helper files are not replaced. The manifest and scenes are not rewritten.
 The menu is `Creator Plugins > Browse`; it needs neither MCP nor an SDK.
 
 `Add to project` rechecks a listed, current catalogue entry and its exact bytes,
 then asks for native consent and queues it outside `Assets`. In Unity, the user
-chooses `Review import` and sees the ordinary interactive package import dialog.
+chooses `Import into project` and sees the ordinary interactive package import dialog.
 Unity import itself can add code or replace selected assets; this is why it is
 reviewed, never silently executed. A checksum is not a code-safety guarantee.
 
@@ -88,9 +89,11 @@ or mismatched tracking files fail visibly. Intermediate receipts from older loca
 previews are preserved and require inspection; they are never overwritten or
 used as permission to repeat an import.
 
-Current preview limits are 32 MiB per package, 100 retained inbox requests per
-project, and exact-match helper reuse. Automatic history cleanup, helper upgrades
-and bulk imports are not implemented. Full or changed queues fail visibly.
+Current limits are 32 MiB per package and 100 unresolved inbox requests per
+project. Explicit retry/enqueue archives completed requests without replacing
+their final receipts. Recovery scans are bounded to 1000 inbox entries. Automatic
+history deletion and bulk imports are not implemented. Full or changed queues
+fail visibly. Cancellation offers retry without reopening the window.
 
 Image and payload hosts, redirects, paths, schema version, item counts and
 metadata sizes are bounded. Text is rendered as text, not HTML. Catalogue state
@@ -108,6 +111,6 @@ provides the shared page; standalone navigation preserves existing project forms
 - `node scripts/preview-community.cjs` opens a local browser preview on port 4190.
   It uses the explicit local fixture and cannot install or import anything.
 
-This local Hub candidate also includes the reviewed hosted-pipe drain change
-from `92e3ef9`. New app hashes must be reviewed and coordinated before shipping
-a matched suite update. No installed apps or public releases were updated.
+Hosted application hashes are tied to the accepted companion installers. Release
+evidence distinguishes source tests, real Unity imports and packaged native
+installation checks; none alone proves every community contribution is safe.

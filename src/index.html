@@ -15,16 +15,16 @@
   <div class="suite-brand" aria-hidden="true"><span>CREATOR</span> <strong>HUB</strong></div>
   <button class="suite-trigger" id="suite-trigger" type="button" aria-expanded="false" aria-controls="suite-menu" aria-label="Open Creator apps" title="Creator apps"><span class="suite-mark hub-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span></button>
   <nav id="suite-menu" class="suite-menu" aria-label="Creator apps" aria-hidden="true" inert>
-    <button class="suite-item current" data-view="hub" type="button" aria-current="page"><span class="suite-mark hub-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span><span class="suite-item-copy"><strong>Creator Hub</strong><small>Apps</small></span></button>
+    <button class="suite-item current" data-view="hub" type="button" aria-current="page"><span class="suite-mark hub-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span><span class="suite-item-copy"><strong>Creator Hub</strong><small>Projects</small></span></button>
     <button class="suite-item" data-view="mcp" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">M</span></span><span class="suite-item-copy"><strong>Creator Works MCP</strong><small>Unity integration</small></span></button>
     <button class="suite-item" data-view="setup" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span><span class="suite-item-copy"><strong>Project Setup</strong><small>Unity + Creator SDK</small></span></button>
     <div class="suite-item unavailable"><span class="suite-mark converter-mark"><img src="sidequest-mark-white.svg" alt=""><span class="suite-letter">C</span></span><span class="suite-item-copy"><strong>Creator Converter</strong><small>SideQuest / Coming soon</small></span></div>
-    <button class="suite-item" data-view="plugins" type="button"><span class="suite-mark"><span class="icon icon-plugins" aria-hidden="true"></span></span><span class="suite-item-copy"><strong>Creator Plugins</strong><small>Community contributions</small></span></button>
+    <button class="suite-item" data-view="plugins" type="button"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.svg" alt=""></span><span class="suite-item-copy"><strong>Creator Plugins</strong><small>Community contributions</small></span></button>
   </nav>
   </div>
   <header class="app-header">
     <div class="title-block"><h1 id="page-title" class="brand-name"><span>CREATOR</span> <strong>HUB</strong></h1><p id="mode-description">Unity tools. One place.</p></div>
-    <span class="preview-status">Development preview</span>
+    <span class="preview-status">Windows</span>
   </header>
   <main>
     <nav id="hub-pages" class="hub-pages" aria-label="Hub pages">
@@ -45,7 +45,7 @@
           <span id="status-setup" class="row-status">Checking</span><span class="icon icon-arrow" aria-hidden="true"></span>
         </button>
         <div class="app-row unavailable"><span class="suite-mark converter-mark"><img src="sidequest-mark-white.svg" alt=""><span class="suite-letter">C</span></span><span class="app-row-copy"><strong>Creator Converter</strong><small>SideQuest / Built-in rendering to Universal Render Pipeline.</small></span><span class="row-status">Coming soon</span></div>
-        <button class="app-row" type="button" data-view="plugins" aria-label="View Creator Plugins"><span class="suite-mark"><span class="icon icon-plugins" aria-hidden="true"></span></span><span class="app-row-copy"><strong>Creator Plugins</strong><small>Community projects, packages and tools.</small></span><span class="row-status">Browse</span><span class="icon icon-arrow" aria-hidden="true"></span></button>
+        <button class="app-row" type="button" data-view="plugins" aria-label="View Creator Plugins"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.svg" alt=""></span><span class="app-row-copy"><strong>Creator Plugins</strong><small>Community projects, packages and tools.</small></span><span class="row-status">Browse</span><span class="icon icon-arrow" aria-hidden="true"></span></button>
       </div>
       <div class="update-preferences"><label><input id="preview-channel" type="checkbox" checked> Include prereleases</label><label><input id="auto-download" type="checkbox" checked> Download verified updates automatically</label></div>
       <section class="hub-update" aria-labelledby="hub-update-title">
@@ -83,7 +83,7 @@
     <div id="operation-progress" class="operation-progress hidden" role="status"><div><strong id="progress-message"></strong><button id="cancel-download" class="text-button hidden" type="button">Cancel download</button></div><progress id="download-progress" max="1"></progress><span id="progress-bytes"></span></div>
     <section id="view-plugins" class="hidden" aria-labelledby="plugins-title"></section>
   </main>
-  <footer><span>Creator Hub <span class="footer-version">0.1.0-alpha.8</span></span><div class="footer-links"><button class="text-button" type="button" data-resource="hub-plan">Roadmap <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="github">GitHub <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="sdk-source">Creator SDK source <span class="icon icon-external" aria-hidden="true"></span></button></div></footer>
+  <footer><span>Creator Hub <span class="footer-version">0.1.0</span></span><div class="footer-links"><button class="text-button" type="button" data-resource="hub-plan">Roadmap <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="github">GitHub <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="sdk-source">Creator SDK source <span class="icon icon-external" aria-hidden="true"></span></button></div></footer>
   <script src="native.js"></script>
   <script src="hosted.js"></script>
   <script src="projects.js"></script>

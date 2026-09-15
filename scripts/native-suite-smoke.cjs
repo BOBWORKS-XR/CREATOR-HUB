@@ -62,6 +62,61 @@ function seedConfig() {
 async function show(app) {
   await page.locator('#suite-trigger').click();
   await page.locator(`#suite-menu [data-view="${app}"]`).click();
+  if (app === 'hub') await page.locator('#hub-pages [data-view="hub"]').click();
+}
+async function verifyPackagedHelper() {
+  const registry = path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'projects.json');
+  const original = fs.existsSync(registry) ? fs.readFileSync(registry) : null;
+  const saved = original ? JSON.parse(original.toString('utf8')) : { paths: [] };
+  const helper = path.resolve('unity/com.creatorworks.plugins');
+  const legacy = path.resolve('tests/fixtures/helper-alpha8/unity/com.creatorworks.plugins');
+  const names = ['package.json', 'LICENSE.md', 'Editor/CreatorWorks.Plugins.Editor.asmdef', 'Editor/CreatorPluginsWindow.cs'];
+  const fixtures = ['missing', 'outdated'].map(kind => {
+    const root = path.join(out, `Unity-menu-${kind}`);
+    for (const folder of ['Assets', 'Packages', 'ProjectSettings']) fs.mkdirSync(path.join(root, folder), { recursive: true });
+    fs.writeFileSync(path.join(root, 'ProjectSettings/ProjectVersion.txt'), 'm_EditorVersion: 6000.3.21f1\n', { flag: 'wx' });
+    fs.writeFileSync(path.join(root, 'Packages/manifest.json'), '{"dependencies":{}}\n', { flag: 'wx' });
+    fs.writeFileSync(path.join(root, 'Assets/scene-sentinel.unity'), 'Preserve user content exactly.\n', { flag: 'wx' });
+    const destination = path.join(root, 'Packages/com.creatorworks.plugins');
+    if (kind === 'outdated') {
+      fs.cpSync(legacy, destination, { recursive: true, errorOnExist: true, force: false });
+      fs.writeFileSync(path.join(destination, 'Editor/CreatorPluginsWindow.cs.meta'), 'fileFormatVersion: 2\nguid: 11111111111111111111111111111111\n', { flag: 'wx' });
+    }
+    return { root, destination, kind };
+  });
+  fs.mkdirSync(path.dirname(registry), { recursive: true });
+  fs.writeFileSync(registry, JSON.stringify({ ...saved, paths: [...saved.paths, ...fixtures.map(f => f.root)] }));
+  try {
+    const targets = await page.evaluate(() => window.CreatorHubNative.invoke('community_projects', {}));
+    for (const fixture of fixtures) {
+      const target = targets.projects.find(p => p.path.toLowerCase() === fixture.root.toLowerCase());
+      assert.ok(target, 'Disposable helper target must be discovered');
+      assert.equal(target.helper, fixture.kind);
+      const invoke = () => page.evaluate(projectId => window.CreatorHubNative.invoke('install_community_menu', { projectId }), target.id);
+      const cancelled = invoke();
+      await retry(() => native(child.pid, hub, 'button', 'Cancel'));
+      assert.match(await cancelled, /cancelled/);
+      assert.equal(fs.existsSync(fixture.destination), fixture.kind === 'outdated');
+      const installing = invoke();
+      await retry(() => native(child.pid, hub, 'button', fixture.kind === 'outdated' ? 'Update menu' : 'Add menu'));
+      assert.match(await installing, /menu (added|updated)/);
+      for (const name of names) assert.equal(hash(path.join(fixture.destination, name)), hash(path.join(helper, name)));
+      assert.equal(fs.readFileSync(path.join(fixture.root, 'Assets/scene-sentinel.unity'), 'utf8'), 'Preserve user content exactly.\n');
+      assert.equal(fs.readFileSync(path.join(fixture.root, 'Packages/manifest.json'), 'utf8'), '{"dependencies":{}}\n');
+      if (fixture.kind === 'outdated') {
+        const backups = fs.readdirSync(path.join(fixture.root, '.creator-plugins/helper-backups'));
+        assert.equal(backups.length, 1);
+        const backup = path.join(fixture.root, '.creator-plugins/helper-backups', backups[0], 'com.creatorworks.plugins');
+        for (const name of names) assert.equal(hash(path.join(backup, name)), hash(path.join(legacy, name)));
+        assert.equal(hash(path.join(backup, 'Editor/CreatorPluginsWindow.cs.meta')), hash(path.join(fixture.destination, 'Editor/CreatorPluginsWindow.cs.meta')));
+      }
+    }
+    report.packagedHelper = { passed: true, hashes: Object.fromEntries(names.map(name => [name, hash(path.join(helper, name))])) };
+    report.checks.push('Exact packaged Hub: native menu consent/cancel, fresh install, recognized-helper upgrade with complete backup, preserved metadata and unchanged project files');
+  } finally {
+    if (original) fs.writeFileSync(registry, original);
+    else fs.unlinkSync(registry);
+  }
 }
 async function backend(app) {
   return retry(() => {
@@ -130,6 +185,8 @@ async function closeHosted(app) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.waitForFunction(() => window.CreatorHubNative && !document.querySelector('#check-updates').disabled, null, { timeout: 120000 });
+  assert.equal(await page.locator('#view-projects').isVisible(), true, 'Normal launch opens Projects');
+  await show('hub');
   assert.equal(await page.locator('#preview-channel').isChecked(), true);
   assert.match(await page.evaluate(() => window.__TAURI__.core.invoke('app_inventory', { check: false, preview: true }).then(() => 'ALLOWED', String)), /trusted shell/);
   const inventory = await page.evaluate(check => window.CreatorHubNative.invoke('app_inventory', { check, preview: true }), !stagedSetup);
@@ -196,6 +253,8 @@ async function closeHosted(app) {
   }
   if (upgrade) assert.equal(hash(configPath), originalConfigHash);
   else seedConfig();
+
+  await verifyPackagedHelper();
 
   for (const app of selectedApps) {
     await show(app);

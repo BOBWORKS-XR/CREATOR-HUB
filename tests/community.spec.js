@@ -9,6 +9,7 @@ async function load(page, options = {}) {
     window.__TAURI__ = { event: { listen: async () => () => {} }, core: { invoke: async (command, args) => {
       window.calls.push({ command, args });
       if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
+      if (command === 'project_inventory') return { projects: [], warnings: [] };
       if (command === 'app_inventory') return { supported: true, apps: [] };
       if (command === 'hub_update_status') return { currentVersion: '0.1.0-alpha.6' };
       if (command === 'community_catalogue') {
@@ -35,6 +36,7 @@ async function load(page, options = {}) {
   await page.route('https://cdn.sidequestvr.com/file/4591279/image.png', route => options.badImage ? route.abort() : route.fulfill({ path: path.join(__dirname, 'fixtures/community/preview.png'), contentType: 'image/png' }));
   await page.goto('http://127.0.0.1:4188');
   await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === 'get_launch_request'))).toBe(true);
+  await page.locator('#hub-pages [data-view="hub"]').click();
   await page.getByRole('button', { name: 'View Creator Plugins' }).click();
   await expect(page.locator('.community-count')).toHaveText('1 contribution');
 }
@@ -66,6 +68,7 @@ test('search, filters, zero results, reset and navigation retain catalogue state
   await page.getByRole('searchbox', { name: 'Search contributions' }).fill('egon');
   await expect(page.locator('.community-count')).toHaveText('1 contribution');
   await page.locator('#suite-trigger').click(); await page.locator('#suite-menu [data-view="hub"]').click();
+  await page.locator('#hub-pages [data-view="hub"]').click();
   await page.getByRole('button', { name: 'View Creator Plugins' }).click();
   await expect(page.getByRole('searchbox', { name: 'Search contributions' })).toHaveValue('egon');
   expect(await page.evaluate(() => window.calls.filter(c => c.command === 'community_catalogue').length)).toBe(1);
@@ -73,7 +76,7 @@ test('search, filters, zero results, reset and navigation retain catalogue state
 test('pending entries cannot download and never infer tested versions', async ({ page }) => {
   await load(page); await expect(page.getByRole('button', { name: 'Download package' })).toHaveCount(0);
   await expect(page.locator('.community-review')).toHaveText('Review pending');
-  expect(await page.evaluate(() => window.calls.some(c => /download|install|project/.test(c.command)))).toBe(false);
+  expect(await page.evaluate(() => window.calls.some(c => c.command !== 'project_inventory' && /download|install|project/.test(c.command)))).toBe(false);
 });
 
 test('public browse-only mode keeps downloads but exposes no Unity write controls', async ({ page }) => {
@@ -190,7 +193,7 @@ test('helper install keeps the dialog open during the action and uses only the s
   await expect(dialog).toContainText('E:\\UnityTest\\Example Space');
   await page.evaluate(() => { window.holdInstall = true; });
   await dialog.getByRole('button', { name: 'Add menu to project' }).click(); await page.keyboard.press('Escape');
-  await expect(dialog).toContainText('Adding the Unity menu... Please wait.');
+  await expect(dialog).toContainText('Preparing the Unity menu... Please wait.');
   await expect(dialog).toBeVisible(); await expect(dialog.getByRole('button', { name: 'Close', exact: true })).toBeDisabled();
   await page.evaluate(() => window.finishInstall());
   await expect(dialog).toContainText('Creator Plugins menu installed.');
@@ -219,6 +222,21 @@ for (const [helper, projectOpen, expected] of [['missing', true, 'Close this pro
   await load(page, { helper, projectOpen }); await page.getByRole('button', { name: 'Add Unity menu', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Add Unity menu' }); await dialog.locator('select').selectOption('chosen-project');
   await expect(dialog).toContainText(expected); await expect(dialog.getByRole('button', { name: 'Add menu to project' })).toBeDisabled();
+});
+
+for (const projectOpen of [false, true]) test(`known older helper offers a backed-up update, open=${projectOpen}`, async ({ page }) => {
+  await load(page, { helper: 'outdated', projectOpen });
+  await page.getByRole('button', { name: 'Add Unity menu', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add Unity menu' });
+  await dialog.locator('select').selectOption('chosen-project');
+  const update = dialog.getByRole('button', { name: 'Update menu in project' });
+  if (projectOpen) {
+    await expect(update).toBeDisabled(); await expect(dialog).toContainText('Close this project');
+  } else {
+    await expect(update).toBeEnabled(); await expect(dialog).toContainText('backs it up');
+    await update.click(); await expect(dialog).toContainText('Creator Plugins menu installed.');
+    expect(await page.evaluate(() => window.calls.filter(c => c.command === 'install_community_menu'))).toEqual([{ command: 'install_community_menu', args: { projectId: 'chosen-project' } }]);
+  }
 });
 
 test('adding a package queues once and receipt checks distinguish review from imported', async ({ page }) => {

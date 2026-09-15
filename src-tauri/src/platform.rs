@@ -309,6 +309,142 @@ fn gui_name(app: AppId, name: &str) -> bool {
                 .any(|legacy| name.eq_ignore_ascii_case(legacy)))
 }
 
+pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_exe(UpdateKind::Always)
+            .with_cmd(UpdateKind::Always),
+    );
+    if system.processes().is_empty() {
+        return Err("Running apps could not be inspected.".into());
+    }
+    let mut result = Running {
+        gui: Vec::new(),
+        other_copy: false,
+        server: false,
+        blockers: Vec::new(),
+    };
+    let root = exe.parent().ok_or("Invalid app path.")?;
+    for (pid, process) in system.processes() {
+        let name = process.name().to_string_lossy().to_ascii_lowercase();
+        let portable_setup = app == AppId::Setup
+            && name.starts_with("creator-project-setup-")
+            && name.ends_with(".exe")
+            && !name.ends_with("-setup.exe");
+        let is_gui = gui_name(app, &name) || portable_setup;
+        if is_gui {
+            match process.exe() {
+                Some(actual) if same_path(actual, exe) => result.gui.push(pid.as_u32()),
+                Some(_) => {
+                    result.other_copy = true;
+                    result.blockers.push(process_blocker(&system, *pid, process, "otherCopy"));
+                }
+                None => {
+                    return Err(format!("Cannot check {} (PID {}). Close that app and choose Check again. Hub will not force-close your apps.", process.name().to_string_lossy(), pid.as_u32()))
+                }
+            }
+        }
+        if app == AppId::Mcp && (name == "node.exe" || name == "node") {
+            let command = process
+                .cmd()
+                .iter()
+                .map(|a| a.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase();
+            let kind = mcp_connection_kind(root, process.exe(), &command).map_err(|()| format!("Cannot check node (PID {}). Hub cannot tell whether it belongs to MCP, so the update is paused. Save your work and close the app using it, then choose Check again. If it remains, restart Windows. Do not end unfamiliar tasks.", pid.as_u32()))?;
+            if let Some(kind) = kind {
+                result.server = true;
+                result
+                    .blockers
+                    .push(process_blocker(&system, *pid, process, kind));
+            }
+        }
+    }
+    result.blockers.sort_by_key(|b| b.pid);
+    Ok(result)
+}
+
+pub fn window_action(pids: &[u32], executable: &Path, close: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::*;
+        use windows_sys::Win32::{Foundation::*, UI::WindowsAndMessaging::*};
+        struct Context<'a> {
+            pids: &'a [u32],
+            executable: &'a Path,
+            close: bool,
+            found: bool,
+        }
+        unsafe extern "system" fn visit(hwnd: HWND, context: LPARAM) -> i32 {
+            let context = &mut *(context as *mut Context<'_>);
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if context.pids.contains(&pid)
+                && IsWindowVisible(hwnd) != 0
+                && GetWindow(hwnd, GW_OWNER).is_null()
+            {
+                let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                if handle.is_null() {
+                    return 1;
+                }
+                let mut buffer = [0u16; 32768];
+                let mut length = buffer.len() as u32;
+                let matched =
+                    QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) != 0
+                        && same_path(
+                            &PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize])),
+                            context.executable,
+                        );
+                if !matched {
+                    CloseHandle(handle);
+                    return 1;
+                }
+                if context.close
+                    && (GetPropW(hwnd, windows_sys::w!("CreatorSuite.LifecycleProtocol")) as usize
+                        != 1
+                        || !GetPropW(hwnd, windows_sys::w!("CreatorSuite.LauncherBusy")).is_null()
+                        || !GetPropW(hwnd, windows_sys::w!("CreatorSuite.Closing")).is_null())
+                {
+                    CloseHandle(handle);
+                    return 1;
+                }
+                context.found = true;
+                if context.close {
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                } else {
+                    ShowWindowAsync(hwnd, SW_RESTORE);
+                    SetForegroundWindow(hwnd);
+                }
+                CloseHandle(handle);
+            }
+            1
+        }
+        let mut context = Context {
+            pids,
+            executable,
+            close,
+            found: false,
+        };
+        unsafe {
+            EnumWindows(Some(visit), &mut context as *mut _ as LPARAM);
+        }
+        if context.found {
+            Ok(())
+        } else {
+            Err("The app is starting or has no available window. Try again shortly.".into())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (pids, executable, close);
+        Err("Native app lifecycle is not supported on this platform yet.".into())
+    }
+}
+
 #[cfg(test)]
 mod legacy_name_tests {
     use super::*;
@@ -506,141 +642,5 @@ mod legacy_name_tests {
         ] {
             assert!(!gui_name(AppId::Mcp, name));
         }
-    }
-}
-
-pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing()
-            .with_exe(UpdateKind::Always)
-            .with_cmd(UpdateKind::Always),
-    );
-    if system.processes().is_empty() {
-        return Err("Running apps could not be inspected.".into());
-    }
-    let mut result = Running {
-        gui: Vec::new(),
-        other_copy: false,
-        server: false,
-        blockers: Vec::new(),
-    };
-    let root = exe.parent().ok_or("Invalid app path.")?;
-    for (pid, process) in system.processes() {
-        let name = process.name().to_string_lossy().to_ascii_lowercase();
-        let portable_setup = app == AppId::Setup
-            && name.starts_with("creator-project-setup-")
-            && name.ends_with(".exe")
-            && !name.ends_with("-setup.exe");
-        let is_gui = gui_name(app, &name) || portable_setup;
-        if is_gui {
-            match process.exe() {
-                Some(actual) if same_path(actual, exe) => result.gui.push(pid.as_u32()),
-                Some(_) => {
-                    result.other_copy = true;
-                    result.blockers.push(process_blocker(&system, *pid, process, "otherCopy"));
-                }
-                None => {
-                    return Err(format!("Cannot check {} (PID {}). Close that app and choose Check again. Hub will not force-close your apps.", process.name().to_string_lossy(), pid.as_u32()))
-                }
-            }
-        }
-        if app == AppId::Mcp && (name == "node.exe" || name == "node") {
-            let command = process
-                .cmd()
-                .iter()
-                .map(|a| a.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_ascii_lowercase();
-            let kind = mcp_connection_kind(root, process.exe(), &command).map_err(|()| format!("Cannot check node (PID {}). Hub cannot tell whether it belongs to MCP, so the update is paused. Save your work and close the app using it, then choose Check again. If it remains, restart Windows. Do not end unfamiliar tasks.", pid.as_u32()))?;
-            if let Some(kind) = kind {
-                result.server = true;
-                result
-                    .blockers
-                    .push(process_blocker(&system, *pid, process, kind));
-            }
-        }
-    }
-    result.blockers.sort_by_key(|b| b.pid);
-    Ok(result)
-}
-
-pub fn window_action(pids: &[u32], executable: &Path, close: bool) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::System::Threading::*;
-        use windows_sys::Win32::{Foundation::*, UI::WindowsAndMessaging::*};
-        struct Context<'a> {
-            pids: &'a [u32],
-            executable: &'a Path,
-            close: bool,
-            found: bool,
-        }
-        unsafe extern "system" fn visit(hwnd: HWND, context: LPARAM) -> i32 {
-            let context = &mut *(context as *mut Context<'_>);
-            let mut pid = 0;
-            GetWindowThreadProcessId(hwnd, &mut pid);
-            if context.pids.contains(&pid)
-                && IsWindowVisible(hwnd) != 0
-                && GetWindow(hwnd, GW_OWNER).is_null()
-            {
-                let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-                if handle.is_null() {
-                    return 1;
-                }
-                let mut buffer = [0u16; 32768];
-                let mut length = buffer.len() as u32;
-                let matched =
-                    QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) != 0
-                        && same_path(
-                            &PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize])),
-                            context.executable,
-                        );
-                if !matched {
-                    CloseHandle(handle);
-                    return 1;
-                }
-                if context.close
-                    && (GetPropW(hwnd, windows_sys::w!("CreatorSuite.LifecycleProtocol")) as usize
-                        != 1
-                        || !GetPropW(hwnd, windows_sys::w!("CreatorSuite.LauncherBusy")).is_null()
-                        || !GetPropW(hwnd, windows_sys::w!("CreatorSuite.Closing")).is_null())
-                {
-                    CloseHandle(handle);
-                    return 1;
-                }
-                context.found = true;
-                if context.close {
-                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                } else {
-                    ShowWindowAsync(hwnd, SW_RESTORE);
-                    SetForegroundWindow(hwnd);
-                }
-                CloseHandle(handle);
-            }
-            1
-        }
-        let mut context = Context {
-            pids,
-            executable,
-            close,
-            found: false,
-        };
-        unsafe {
-            EnumWindows(Some(visit), &mut context as *mut _ as LPARAM);
-        }
-        if context.found {
-            Ok(())
-        } else {
-            Err("The app is starting or has no available window. Try again shortly.".into())
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (pids, executable, close);
-        Err("Native app lifecycle is not supported on this platform yet.".into())
     }
 }
