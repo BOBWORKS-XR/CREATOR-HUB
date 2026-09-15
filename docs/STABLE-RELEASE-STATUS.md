@@ -1,10 +1,45 @@
 # Coordinated stable release status
 
 2026-09-15. The user explicitly authorized stable releases for all three apps.
-This supersedes older alpha.8 publication holds. Setup 0.3.0 and MCP 2.7.0 are
-public; Hub publication remains conditional on its exact-binary checks.
+This supersedes older alpha.8 publication holds. Hub 0.1.0, Setup 0.3.0 and MCP
+2.7.0 are now public stable releases. Published binaries are frozen.
 
 ## Latest checkpoint
+
+Hub 0.1.0 is public/latest at
+https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0.
+Exact source/tag: `f75947911049c261c8db6f750be0c9e1a3e740be`.
+Run 35006894107 passed build, 114 UI tests, 103 Rust tests (nine opt-in ignored),
+13 script tests, lint and all four native suite jobs. Installer acceptance covered
+clean/same-version and public alpha.3, alpha.5 and alpha.6 upgrades. Native suite
+covered clean, legacy, MCP-only and latest-Hub routes using public Setup/MCP.
+
+- Installer: 5,988,479 bytes, SHA-256
+  `6a8c36305e5bb573c6fd27be846dca5448b10326f6445f018a193575ce54ff95`.
+- Installed executable: SHA-256
+  `ab39023374ccf9738bb070089327ddb52337032780c7a9124b87ff2a82e5a2de`.
+- Actual packaged menu install/update tested native Cancel and confirmation,
+  complete backup, preserved metadata and unchanged fixture project files.
+- Real hosted controls, preserved MCP settings/selection, active-runtime update
+  refusal, native folder-picker close guard and normal hosted close all passed.
+- All 17 public assets match reviewed local digests and sizes. Five public assets
+  were downloaded again; application trust-key verification, updater signature
+  and tamper rejection passed. No accepted binaries were rebuilt for publication.
+
+Evidence: `artifacts/stable-0.1.0-final-ci`, `stable-0.1.0-release`,
+`stable-0.1.0-public-check` and `stable-0.1.0-public-verification.json`.
+The separate `release-acceptance.json` records final approval; the original
+candidate report is retained unchanged with its pre-acceptance flags. The window
+title still says Development Preview, but package/release identity is 0.1.0.
+Future in-app Hub self-update and physical macOS/Linux acceptance remain untested.
+
+Next separate update: remembered List/Grid view for desktop Plugins and the Unity
+window. Do not amend the stable tag or replace published assets for that feature.
+Two Discord posts are requested: MCP-first and Hub/Project-Setup-first, both with
+Creator Plugins and the optional Unity window. Setup migration into Hub stays a
+later phase. Earlier checkpoint statements below are historical, not current gates.
+
+## Previous checkpoint (superseded)
 
 MCP 2.7.0 is public with 16 verified assets. Public installer name is
 `Creator.Works.MCP_2.7.0_x64-setup.exe` (the verified f403da hash below), now
@@ -142,7 +177,7 @@ or exact packaged acceptance by themselves.
 - READMEs rewritten for the coordinated versions; old text retained as dated
   history. Windows x64 scope and unsigned publisher status remain explicit.
 
-## Remaining work
+## Earlier remaining work (completed by the latest checkpoint)
 
 1. Retain the earlier intermittent failures as unexplained evidence; both prior
    replay matrices passed without application fixes for those failures.
