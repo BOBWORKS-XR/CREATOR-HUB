@@ -534,6 +534,17 @@ impl Manager {
         ))
     }
 
+    pub fn disconnect_mcp(&self, approve: impl FnOnce(usize) -> bool) -> Result<String, String> {
+        let _operation = self.begin()?;
+        let (target, known) = installed(AppId::Mcp)?.ok_or("MCP is not installed.")?;
+        if known.is_none() {
+            return Err("Verify this MCP installation before disconnecting its runtime.".into());
+        }
+        let root = target.parent().ok_or("Invalid MCP installation path.")?;
+        let count = crate::mcp_runtime::disconnect(root, approve)?;
+        Ok(format!("Disconnected {count} MCP runtime(s). Nothing was installed. Update MCP, then reconnect it in your AI client. Unity work already submitted may still finish."))
+    }
+
     pub fn install(
         &self,
         app: AppId,

@@ -145,7 +145,9 @@
     if (state.installBlocked) return state.installBlocked;
     if (state.requiredHubVersion) return `Update Creator Hub to ${state.requiredHubVersion} first.`;
     if (window.CreatorHosted.active(state.app)) return 'Updating asks to close this app\'s Hub view first. Unsaved work is not closed automatically.';
-    if (state.updateBlockers?.length) return 'Close the running app or disconnect its active MCP connections, then Check for updates. Nothing will be force-closed.';
+    if (state.updateBlockers?.length) return state.updateBlockers.some(b => b.kind === 'connection')
+      ? 'Finish active AI work, then Disconnect MCP for update. Only the private MCP runtime is stopped, after your confirmation.'
+      : 'Close the listed app or disconnect its MCP connection, then Check for updates. Unrecognised processes will not be closed.';
     return '';
   }
   function renderState() {
@@ -174,6 +176,12 @@
       reason.classList.toggle('hidden', !reason.textContent);
     }
     const state = appState();
+    const mcp = inventory?.apps?.find(app => app.app === 'mcp');
+    const canDisconnect = Boolean(mcp?.installed && mcp.trusted && !mcp.issue && mcp.updateBlockers?.some(b => b.kind === 'connection'));
+    for (const id of ['disconnect-mcp-row', 'disconnect-mcp-detail']) {
+      byId(id).classList.toggle('hidden', !canDisconnect || (id.endsWith('detail') && current !== 'mcp'));
+      byId(id).disabled = busy || Boolean(inventoryError) || !inventory?.supported;
+    }
     const hostedMismatch = state?.hostedCompatible === false;
     const canHost = state?.installed && state.trusted && state.hostedPreview && state.hostedCompatible === true && !state.issue;
     for (const app of ['setup', 'mcp']) {
@@ -205,7 +213,7 @@
     } else byId('tool-state').textContent = inventory?.supported === false ? 'Windows x64 app management is available in this build. macOS and Linux are not supported yet.' : busy ? 'Checking installed apps and available updates...' : 'App inventory is unavailable. Use Retry app discovery above.';
     byId('update-blockers').classList.toggle('hidden', !state || (!state.issue && !blockers.length));
     byId('update-blockers-help').textContent = blockers.length
-      ? `${blockers.some(b => b.kind !== 'otherCopy') ? 'Finish your work, then disconnect MCP in your AI app or close the listed app.' : 'Finish your work and close the other copy of this app.'} Check again when you are ready. If it is still listed after closing its app, save your work and restart Windows. Do not end unfamiliar tasks. Hub will not force-close your apps. Uninstalling is not needed to close these connections.`
+      ? `${blockers.some(b => b.kind === 'connection') ? 'Finish active AI work, then use Disconnect MCP for update to stop its private runtime, including stuck connections. You will be asked to confirm. If your client reconnects automatically, pause or disable this MCP in that client first.' : 'Finish your work, then disconnect MCP in your AI app or close the listed app.'} Check again when ready. Hub will not force-close AI apps, Unity or unrelated Node processes. Do not end unfamiliar tasks. Uninstalling is not needed.`
       : 'Resolve the issue above, then check again. Nothing will be installed by this check.';
     byId('recheck-app').disabled = busy;
     byId('update-blockers-details').classList.toggle('hidden', !blockers.length);
@@ -356,6 +364,7 @@
   byId('download-button').addEventListener('click', () => action('download_app'));
   byId('open-button').addEventListener('click', () => action('open_app'));
   byId('adopt-button').addEventListener('click', () => action('use_existing_app'));
+  for (const id of ['disconnect-mcp-row', 'disconnect-mcp-detail']) byId(id).addEventListener('click', () => action('disconnect_mcp', 'mcp'));
   byId('check-updates').addEventListener('click', () => refresh(true));
   byId('retry-inventory').addEventListener('click', () => refresh(false));
   byId('recheck-app').addEventListener('click', async () => {

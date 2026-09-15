@@ -40,7 +40,18 @@ let child;
 let browser;
 let page;
 let runtimeFixture;
+const extraRuntimeFixtures = [];
 const runtimeStop = path.join(out, 'stop-owned-runtime');
+async function extraRuntime(executable, label) {
+  const stop = path.join(out, `stop-${label}`);
+  const process = spawn(executable, [path.resolve('scripts/owned-hub-fixture.cjs'), stop], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  extraRuntimeFixtures.push({ process, stop });
+  let output = '', errors = '';
+  process.stdout.on('data', chunk => { output += chunk; });
+  process.stderr.on('data', chunk => { errors += chunk; });
+  await retry(() => { assert.match(output, /ready/, errors); assert.equal(process.exitCode, null); });
+  return process;
+}
 const policyState = path.join(out, 'webview-policy.json');
 function webviewPolicy(action) {
   return execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts/native-webview-policy.ps1'), '-Action', action, '-StateFile', policyState], { encoding: 'utf8', timeout: 30000, windowsHide: true });
@@ -219,6 +230,8 @@ async function closeHosted(app) {
       runtimeFixture.stderr.on('data', chunk => { report.runtimeFixtureStderr = (report.runtimeFixtureStderr || '') + chunk; });
       runtimeFixture.on('error', error => { report.runtimeFixtureError = String(error); });
       await retry(() => { assert.match(output, /ready/); assert.equal(runtimeFixture.exitCode, null); });
+      const secondRuntime = await extraRuntime(runtime, 'second-private-runtime');
+      const unrelatedRuntime = await extraRuntime(process.execPath, 'unrelated-runtime');
       await show('hub');
       await page.locator('#check-updates').click();
       await retry(async () => assert.equal(await page.locator('#check-updates').isEnabled(), true), 120);
@@ -228,7 +241,7 @@ async function closeHosted(app) {
       assert.equal(await page.locator('#release-button').isDisabled(), true);
       await page.locator('#update-blockers-details summary').click();
       assert.match(await page.locator('#update-blockers-list').innerText(), new RegExp(`PID ${runtimeFixture.pid}\\b`));
-      assert.match(await page.locator('#update-blockers-help').innerText(), /restart Windows/);
+      assert.match(await page.locator('#update-blockers-help').innerText(), /Disconnect MCP for update/);
       await page.locator('#recheck-app').click();
       await retry(async () => assert.equal(await page.locator('#recheck-app').isEnabled(), true));
       assert.equal(await page.locator('#release-button').isDisabled(), true);
@@ -240,12 +253,23 @@ async function closeHosted(app) {
       assert.equal(hash(apps.mcp), beforeApp);
       assert.equal(hash(configPath), originalConfigHash);
       await page.screenshot({ path: path.join(out, 'runtime-blocker.png'), animations: 'disabled' });
-      fs.writeFileSync(runtimeStop, 'exit', { flag: 'wx' });
-      await retry(() => assert.equal(runtimeFixture.exitCode, 0));
-      await page.locator('#recheck-app').click();
-      await page.locator('#update-blockers').waitFor({ state: 'hidden' });
-      assert.equal(await page.locator('#release-button').isEnabled(), true);
-      report.checks.push('Actual legacy private-runtime fixture blocks native update without stopping it; persistent Check again preserves files/settings; cooperative exit enables a separately approved update');
+      await page.locator('#disconnect-mcp-detail').click();
+      await retry(() => native(child.pid, hub, 'button', 'Cancel'));
+      await retry(async () => assert.equal(await page.locator('#disconnect-mcp-detail').isEnabled(), true));
+      assert.equal(runtimeFixture.exitCode, null);
+      assert.equal(secondRuntime.exitCode, null);
+      assert.equal(unrelatedRuntime.exitCode, null);
+      assert.equal(hash(apps.mcp), beforeApp);
+      assert.equal(hash(configPath), originalConfigHash);
+      await show('hub');
+      await page.locator('#disconnect-mcp-row').click();
+      await retry(() => native(child.pid, hub, 'button', 'Disconnect MCP'));
+      await retry(() => { assert.equal(runtimeFixture.exitCode, 0); assert.equal(secondRuntime.exitCode, 0); });
+      await retry(async () => assert.equal(await page.locator('#update-mcp').isEnabled(), true));
+      assert.equal(unrelatedRuntime.exitCode, null);
+      assert.equal(hash(apps.mcp), beforeApp);
+      assert.equal(hash(configPath), originalConfigHash);
+      report.checks.push('Packaged Hub native disconnect Cancel preserves both legacy private runtimes; Apps-row confirmed disconnect stops both, preserves unrelated Node/files/settings, and enables a separately approved update');
     }
     if (upgrade) {
       await show('hub');
@@ -367,6 +391,12 @@ async function closeHosted(app) {
     if (!fs.existsSync(runtimeStop)) fs.writeFileSync(runtimeStop, 'exit', { flag: 'wx' });
     try { await retry(() => assert.equal(runtimeFixture.exitCode, 0), 10); }
     catch (error) { report.runtimeFixtureCleanupError = String(error); report.passed = false; process.exitCode = 1; }
+  }
+  for (const fixture of extraRuntimeFixtures) {
+    if (fixture.process.exitCode !== null) continue;
+    if (!fs.existsSync(fixture.stop)) fs.writeFileSync(fixture.stop, 'exit', { flag: 'wx' });
+    try { await retry(() => assert.equal(fixture.process.exitCode, 0), 10); }
+    catch (error) { report.extraRuntimeCleanupError = String(error); report.passed = false; process.exitCode = 1; }
   }
   report.hubExitBeforeCleanup = child?.exitCode;
   if (child && !report.passed) {

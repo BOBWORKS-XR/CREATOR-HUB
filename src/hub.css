@@ -64,6 +64,8 @@ button.app-row:hover { background: #181d21; }
 .app-entry > .app-row { min-width: 0; border-bottom: 0; }
 .row-update { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 136px; margin-right: 12px; }
 .row-update-reason { grid-column: 1 / -1; color: var(--amber); margin: 0 12px 12px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.row-runtime { grid-column: 1 / -1; justify-self: start; margin: 0 12px 12px; }
+#disconnect-mcp-detail { margin-right: 12px; }
 .app-row-copy { flex: 1; min-width: 0; }
 .app-row-copy strong { display: block; font-size: 14px; font-weight: 600; }
 .app-row-copy small { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.5; }

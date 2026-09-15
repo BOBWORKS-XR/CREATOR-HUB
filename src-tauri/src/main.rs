@@ -8,6 +8,7 @@ mod hosted_operation;
 mod installer_preflight;
 mod launch;
 mod manager;
+mod mcp_runtime;
 mod platform;
 mod projects;
 mod self_update;
@@ -138,6 +139,17 @@ async fn download_app(
     })
     .await
     .map_err(|_| "Download worker failed.")?
+}
+
+#[tauri::command]
+async fn disconnect_mcp(handle: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        handle.state::<manager::Manager>().disconnect_mcp(|count| {
+            handle.dialog().message(format!("Stop {count} private Creator Works MCP runtime(s) so MCP can be updated?\n\nFinish active AI work first. This ends MCP connections, including stuck ones. AI apps, Unity, unrelated Node processes, projects and settings are not closed or changed. Unity commands already submitted may still finish.\n\nPause or disable this MCP in your AI client if it reconnects automatically. Reconnect after updating."))
+                .title("Disconnect MCP for update").kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom("Disconnect MCP".into(), "Cancel".into())).blocking_show()
+        })
+    }).await.map_err(|_| "MCP disconnect worker failed.")?
 }
 
 #[tauri::command]
@@ -272,6 +284,7 @@ fn main() {
         app_inventory,
         download_app,
         install_app,
+        disconnect_mcp,
         open_app,
         cancel_download,
         use_existing_app,

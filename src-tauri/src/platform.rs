@@ -149,7 +149,9 @@ impl Running {
             })
             .collect::<Vec<_>>()
             .join("; ");
-        let action = if self.server {
+        let action = if self.blockers.iter().any(|b| b.kind == "connection") {
+            "Finish active AI work, then choose Disconnect MCP for update in Hub. If your AI client reconnects automatically, pause or disable this MCP there first."
+        } else if self.server {
             "Finish your work, disconnect this MCP in your AI app, or close the listed app."
         } else {
             "Finish your work and close the other copy of this app."
@@ -192,7 +194,7 @@ fn mcp_connection_kind(
     executable: Option<&Path>,
     command: &str,
 ) -> Result<Option<&'static str>, ()> {
-    if executable.is_some_and(|path| path.starts_with(root)) {
+    if executable.is_some_and(|path| crate::mcp_runtime::is_private_runtime(root, path)) {
         return Ok(Some("connection"));
     }
     if command.is_empty() {

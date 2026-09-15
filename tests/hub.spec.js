@@ -65,7 +65,7 @@ for (const app of ['mcp', 'setup']) for (const width of [940, 390, 320]) test(`A
 test('Apps row exposes blockers and routes minimum-version updates to Hub without installing', async ({ page }) => {
   await load(page, 'hub', { updateAvailable: true, preferences: { 'creator-hub.auto-download': 'false' }, blockers: [{ name: 'node.exe', kind: 'connection', pid: 45 }] });
   await expect(page.locator('#update-mcp')).toBeDisabled();
-  await expect(page.locator('#update-reason-mcp')).toContainText('disconnect its active MCP connections');
+  await expect(page.locator('#update-reason-mcp')).toContainText('Disconnect MCP for update');
   await page.evaluate(() => Object.assign(window.inventory.apps[0], { updateBlockers: [], requiredHubVersion: '9.0.0', installBlocked: 'Update Creator Hub to 9.0.0 first.' }));
   await page.locator('#check-updates').click();
   await expect(page.locator('#update-mcp')).toBeEnabled();
@@ -88,6 +88,33 @@ test('Apps row hides updates for current or missing apps and refuses unknown ins
   expect(await page.evaluate(() => window.calls.some(c => c.command === 'install_app'))).toBe(false);
 });
 
+for (const view of ['hub', 'mcp']) test(`MCP disconnect on ${view} confirms separately and never starts an update`, async ({ page }) => {
+  await load(page, view, { updateAvailable: true, preferences: { 'creator-hub.auto-download': 'false' },
+    blockers: [{ name: 'node.exe', kind: 'connection', pid: 45 }] });
+  const button = page.locator(view === 'hub' ? '#disconnect-mcp-row' : '#disconnect-mcp-detail');
+  await expect(button).toBeVisible();
+  await page.evaluate(() => { window.calls = []; window.failAction = 'MCP disconnect cancelled. No connections were closed.'; });
+  await button.click();
+  await expect(button).toBeEnabled();
+  await expect(page.locator(view === 'hub' ? '#update-mcp' : '#release-button')).toBeDisabled();
+  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'disconnect_mcp').length)).toBe(1);
+  expect(await page.evaluate(() => window.calls.some(c => c.command === 'install_app'))).toBe(false);
+  await page.evaluate(() => { window.calls = []; window.failAction = null; window.inventory.apps[0].updateBlockers = []; });
+  await button.click();
+  await expect(button).toBeHidden();
+  await expect(page.locator(view === 'hub' ? '#update-mcp' : '#release-button')).toBeEnabled();
+  expect(await page.evaluate(() => window.calls.map(c => c.command))).toEqual(['disconnect_mcp', 'app_inventory', 'hub_update_status']);
+});
+
+test('MCP cleanup is not offered for unverified or merely possible connections', async ({ page }) => {
+  await load(page, 'mcp', { updateAvailable: true, blockers: [{ name: 'node.exe', kind: 'possibleConnection', pid: 45 }] });
+  await expect(page.locator('#disconnect-mcp-detail')).toBeHidden();
+  await page.evaluate(() => { window.inventory.apps[0].trusted = false; window.inventory.apps[0].updateBlockers = [{ kind: 'connection', pid: 45 }]; });
+  await page.locator('#recheck-app').click();
+  await expect(page.locator('#disconnect-mcp-detail')).toBeHidden();
+  expect(await page.evaluate(() => window.calls.some(c => c.command === 'disconnect_mcp'))).toBe(false);
+});
+
 for (const width of [940, 560, 320]) test(`upgrade blockers are actionable, client-agnostic and safe to recheck at ${width}px`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: 700 });
   await load(page, 'mcp', { updateAvailable: true, preferences: { 'creator-hub.auto-download': 'false' }, blockers: [
@@ -97,7 +124,7 @@ for (const width of [940, 560, 320]) test(`upgrade blockers are actionable, clie
   await expect(page.locator('#release-button')).toBeDisabled();
   await expect(page.locator('#open-button')).toBeEnabled();
   await expect(page.locator('#update-blockers-help')).toContainText('will not force-close');
-  await expect(page.locator('#update-blockers-help')).toContainText('restart Windows');
+  await expect(page.locator('#update-blockers-help')).toContainText('Disconnect MCP for update');
   await expect(page.locator('#update-blockers-help')).toContainText('Do not end unfamiliar tasks');
   await page.locator('#update-blockers-details summary').click();
   await expect(page.locator('#update-blockers-list')).toContainText('claude.exe (PID 41)');
@@ -106,7 +133,7 @@ for (const width of [940, 560, 320]) test(`upgrade blockers are actionable, clie
   await page.locator('#recheck-app').click();
   await expect(page.locator('#update-blockers')).toBeVisible();
   await expect(page.locator('#release-button')).toBeDisabled();
-  await expect(page.locator('#update-blockers-help')).toContainText('restart Windows');
+  await expect(page.locator('#update-blockers-help')).toContainText('pause or disable this MCP');
   expect(await page.locator('#update-blockers-list').innerText()).not.toContain('Codex');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('upgrade-blockers.png'), fullPage: true });
