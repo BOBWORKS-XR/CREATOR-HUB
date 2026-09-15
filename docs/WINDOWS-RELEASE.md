@@ -1,9 +1,15 @@
-# Creator Hub 0.1.1 for Windows
+# Creator Hub 0.1.2 for Windows
 
 Install Hub, then choose Creator Works MCP or Creator Project Setup from its
 app menu. Hub downloads verified official installers and asks before installing.
 Compatible apps can open inside Hub or in their own windows, using their existing
 settings. This release supports MCP 2.7.0 and Project Setup 0.3.0.
+
+The 0.1.2 hotfix prevents startup project scanning from blocking app discovery,
+shows the executable's actual version and provides visible discovery errors with
+a retry action. Hub's own update check remains independent of companion errors.
+From 0.1.1, use Apps > Check for updates after its project scan has finished, or
+close Hub and run the 0.1.2 installer. No uninstallation is needed.
 
 Projects opens first, with Creator SDK/Altspace and Banter projects together.
 Creator Plugins offers remembered Grid/List views, community contributions, category filters and a Unity

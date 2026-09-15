@@ -4,7 +4,36 @@
 This supersedes older alpha.8 publication holds. Hub 0.1.0, Setup 0.3.0 and MCP
 2.7.0 are now public stable releases. Published binaries are frozen.
 
-## Hub 0.1.1 Hotfix: Public
+## Hub 0.1.2 Hotfix: Public
+
+Published 2026-09-16 (local): https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.2.
+Exact source/tag: `108b016322262eaa5d8b6f2c3177bdb7b8363661`.
+Run 35032986083 passed 141 UI tests, 105 Rust tests (nine opt-in ignored), 16
+script tests, strict lint, packaging and all four native suite routes.
+
+- Packaged startup displays 0.1.2 and discovers companion apps without a manual
+  retry. The project/app discovery race, hard-coded footer and hidden error are
+  addressed; app discovery failure no longer skips Hub's own update check.
+- Clean/same-version and alpha.3/alpha.5/0.1.1 installer upgrades passed. Native
+  MCP/Setup updates passed cancellation/retry and preserved settings. Hosted UI,
+  running-app protection and the unchanged packaged Unity helper passed.
+- Installer: 5,993,585 bytes; SHA-256
+  `a7da62fe16a99beead8872d0b1f185eb0db60ed6253d13f12ff190e89a9d4ef0`.
+- Executable: 13,458,432 bytes; SHA-256
+  `efa17b33e2abca6a0f2de39996dabf81e98a41052e33b21a25b8b96ffa66b31e`.
+- All 17 public asset digests/sizes match. Five anonymous public downloads and
+  application trust-key/updater-signature/tamper checks passed. All 17 assets of
+  0.1.1 are unchanged. The signed update descriptor requires Hub 0.1.0.
+- MCP 2.7.0 and Setup 0.3.0 installers remain unchanged. The user PC was not
+  reinstalled; its manual update-check retry restored app discovery.
+- Full in-app Hub self-update/restart remains untested. The installer is not
+  Authenticode-signed. These Windows checks do not certify arbitrary plugins.
+
+Evidence: `artifacts/hotfix-0.1.2-ci`, `hotfix-0.1.2-release`,
+`hotfix-0.1.2-public-check`, `hotfix-0.1.2-reviewed-receipt.json` and
+`hotfix-0.1.2-public-verification.json`.
+
+## Previous Hub 0.1.1 Hotfix
 
 Published 2026-09-15: https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.1.
 Exact source/tag: `37f393bf42ec22bd424c4d6d701dfecb1cd43570`.

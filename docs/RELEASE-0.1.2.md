@@ -22,7 +22,15 @@ integrity; they are not a claim that community package code is safe.
 
 ## Acceptance
 
-Release candidate acceptance is pending. Publication requires passing UI, Rust,
-script, lint, packaged startup, clean-install and native upgrade checks against
-the exact installer. The full in-app Hub self-update/restart is a separate test
-and is not claimed by installer upgrade acceptance.
+The [Windows acceptance run](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35032986083)
+passed 141 UI tests, 105 Rust tests, 16 script tests and strict lint. All four
+native routes passed: clean install, legacy companions, MCP-only and Hub 0.1.1
+upgrade. Packaged startup shows 0.1.2 and discovers apps without a manual retry.
+Native app-update cancellation/retry, protected settings and hosted views passed.
+
+Installer SHA-256:
+`a7da62fe16a99beead8872d0b1f185eb0db60ed6253d13f12ff190e89a9d4ef0`.
+
+Acceptance reports and signed update metadata accompany the exact tested
+installer. The full in-app Hub self-update/restart remains untested; installer
+upgrade acceptance and signature verification are separate checks.

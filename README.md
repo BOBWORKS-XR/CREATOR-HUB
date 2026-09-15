@@ -3,10 +3,14 @@
 **Unity tools in one window.** Open Creator SDK / Altspace and Banter projects,
 manage Creator Works MCP and Creator Project Setup, and browse community plugins.
 
-## Windows 0.1.1
+## Windows 0.1.2
 
-[Download Creator Hub](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.1)
-and choose `Creator-Hub-0.1.1-Windows-setup.exe`.
+[Download Creator Hub](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.2)
+and choose `Creator-Hub-0.1.2-Windows-setup.exe`.
+
+This hotfix resolves the startup project/app discovery conflict and displays the
+correct Hub version. Failed discovery now has a visible retry action and no
+longer prevents Hub's own update check.
 
 The matching companion versions are **Project Setup 0.3.0** and **MCP 2.7.0**.
 Hub installs these apps separately and opens compatible versions inside Hub.
@@ -31,8 +35,10 @@ Earlier published acceptance remains in the
 Existing users: **update Hub first**, then the companion apps. A stable version
 can update an older prerelease. Channel settings do not authorize downgrades or
 silent installation. Your project folders and app settings stay put.
-Older previews reporting an intermediate-version requirement can use the 0.1.1
-installer directly. See the [hotfix notes and acceptance](docs/RELEASE-0.1.1.md).
+Older previews reporting an intermediate-version requirement can use the 0.1.2
+installer directly. If 0.1.1 shows unavailable apps, use Apps > Check for updates
+after the project scan finishes. Its old footer says 0.1.0 incorrectly; reinstalling
+0.1.1 does not correct that label. See the [hotfix notes and acceptance](docs/RELEASE-0.1.2.md).
 
 ## Companion Apps
 

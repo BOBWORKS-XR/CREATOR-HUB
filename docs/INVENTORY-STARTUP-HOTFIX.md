@@ -1,6 +1,21 @@
 # Hub discovery and displayed-version hotfix
 
-Status: authorized for release as 0.1.2; candidate acceptance and publication pending. Recorded 2026-09-16.
+Status: published as stable 0.1.2 after exact-artifact acceptance. Recorded 2026-09-16.
+
+## Published result
+
+- Release: https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.2 (public/latest).
+- Source/tag: `108b016322262eaa5d8b6f2c3177bdb7b8363661`.
+- CI: https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35032986083.
+- All four native routes, 141 UI tests, 105 Rust tests, 16 script tests and strict
+  lint passed. Actual packaged startup displays 0.1.2 and discovers apps without
+  manual retry. Exact public 0.1.1 to 0.1.2 installer upgrade passed.
+- Public installer SHA256: `a7da62fe16a99beead8872d0b1f185eb0db60ed6253d13f12ff190e89a9d4ef0`.
+- Public executable SHA256: `efa17b33e2abca6a0f2de39996dabf81e98a41052e33b21a25b8b96ffa66b31e`.
+- All 17 public asset sizes/digests and five anonymous downloads were verified;
+  signatures and tamper rejection passed. Old 0.1.1 assets remain unchanged.
+- No user installation was replaced. The full in-app self-update/restart is not
+  proven by the installer upgrade tests and remains a separate acceptance path.
 
 ## Confirmed baseline
 
@@ -38,7 +53,7 @@ cargo clippy --release --locked --manifest-path src-tauri/Cargo.toml -- -D warni
 node --test scripts/*.test.cjs
 ```
 
-## Remaining release gate
+## Earlier pre-release checkpoint (superseded)
 
 These changes are based on `7fc8835` on `feature/plugins-list-grid`. No published assets, tags, version numbers, MCP/Setup sources, installed binaries, or user project files were replaced. Existing untracked logo drafts are unrelated and preserved.
 
