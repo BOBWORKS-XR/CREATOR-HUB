@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod catalog;
+mod community;
+mod community_project;
 mod hosted;
 mod hosted_operation;
 mod installer_preflight;
@@ -14,6 +16,99 @@ use tauri::{Emitter, Manager as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 struct ShellKey(String);
+
+#[tauri::command]
+async fn community_projects(
+    handle: tauri::AppHandle,
+) -> Result<community_project::Targets, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = handle.state::<manager::Manager>().begin()?;
+        let extra = projects::community_paths(&handle)?;
+        community_project::projects_worker(handle, extra)
+    })
+    .await
+    .map_err(|_| "Project discovery worker failed.")?
+}
+#[tauri::command]
+async fn choose_community_project(
+    handle: tauri::AppHandle,
+) -> Result<Option<community_project::Target>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = handle.state::<manager::Manager>().begin()?;
+        community_project::pick_worker(handle)
+    })
+    .await
+    .map_err(|_| "Project selection worker failed.")?
+}
+#[tauri::command]
+async fn install_community_menu(
+    handle: tauri::AppHandle,
+    project_id: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = handle.state::<manager::Manager>().begin()?;
+        community_project::install_worker(handle, project_id)
+    })
+    .await
+    .map_err(|_| "Unity menu worker failed.")?
+}
+#[tauri::command]
+async fn queue_community_import(
+    handle: tauri::AppHandle,
+    id: String,
+    project_id: String,
+) -> Result<community_project::Outcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = handle.state::<manager::Manager>().begin()?;
+        community::queue_import_worker(handle, id, project_id)
+    })
+    .await
+    .map_err(|_| "Unity import queue worker failed.")?
+}
+#[tauri::command]
+async fn community_import_status(
+    handle: tauri::AppHandle,
+    project_id: String,
+    request_id: String,
+) -> Result<community_project::Outcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        community_project::status_worker(handle, project_id, request_id)
+    })
+    .await
+    .map_err(|_| "Unity receipt worker failed.")?
+}
+
+#[tauri::command]
+async fn community_catalogue(
+    handle: tauri::AppHandle,
+    refresh: bool,
+) -> Result<community::Snapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || community::catalogue_worker(handle, refresh))
+        .await
+        .map_err(|_| "Community worker failed.")?
+}
+#[tauri::command]
+async fn open_community_link(
+    handle: tauri::AppHandle,
+    id: String,
+    kind: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || community::open_link_worker(handle, id, kind))
+        .await
+        .map_err(|_| "Community link worker failed.")?
+}
+#[tauri::command]
+async fn download_community_package(
+    handle: tauri::AppHandle,
+    id: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = handle.state::<manager::Manager>().begin()?;
+        community::download_worker(handle, id)
+    })
+    .await
+    .map_err(|_| "Community download worker failed.")?
+}
 
 #[tauri::command]
 async fn app_inventory(
@@ -162,6 +257,14 @@ fn main() {
     let initialize = format!("if(window === window.top) Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}});", shell_key);
     let commands: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
         open_resource,
+        community_catalogue,
+        community_projects,
+        choose_community_project,
+        install_community_menu,
+        queue_community_import,
+        community_import_status,
+        open_community_link,
+        download_community_package,
         app_inventory,
         download_app,
         install_app,
@@ -189,6 +292,8 @@ fn main() {
         .manage(ShellKey(shell_key))
         .append_invoke_initialization_script(initialize)
         .manage(manager::Manager::default())
+        .manage(community::Community::default())
+        .manage(community_project::ProjectImports::default())
         .manage(self_update::SelfUpdate::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(hosted::Hosting::default())

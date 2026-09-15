@@ -1,6 +1,6 @@
 [package]
 name = "creator-hub"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.8"
 description = "Creator Hub app manager"
 authors = ["Creator Works"]
 license = "MIT"
@@ -27,11 +27,16 @@ fs2 = "0.4"
 getrandom = "0.3"
 tokio = { version = "1", features = ["macros", "time"] }
 tempfile = "3"
+flate2 = "=1.1.10"
+tar = "=0.4.46"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem"] }
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

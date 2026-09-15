@@ -273,6 +273,15 @@ fn verified_download(release: &Release) -> bool {
 }
 
 impl Manager {
+    #[cfg(test)]
+    pub(crate) fn fixture_operation(&self, file: File) -> Operation {
+        assert!(!self.busy.swap(true, Ordering::SeqCst));
+        Operation {
+            busy: Arc::clone(&self.busy),
+            _lock: file,
+        }
+    }
+
     pub fn busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
     }

@@ -60,6 +60,8 @@
     byId('mode-description').textContent = hosted ? (view === 'setup' ? 'Unity and Creator SDK. Android + Windows.' :
       (window.CreatorHosted.writable(view) ? 'Unity project connections and MCP setup.' : 'Unity project connections. Read-only preview.')) : 'Unity tools. One place.';
     document.querySelector('#view-plugins').classList.toggle('hidden', view !== 'plugins');
+    if (view === 'plugins') window.CreatorCommunity.show();
+    else window.CreatorCommunity.closePreview();
     for (const item of menu.querySelectorAll('[data-view]')) {
       const selected = item.dataset.view === (view === 'projects' ? 'hub' : view);
       item.classList.toggle('current', selected);
@@ -120,7 +122,9 @@
   document.querySelector('#source-button').addEventListener('click', () => { if (Object.hasOwn(tools, current)) open(`${current}-source`); });
   for (const app of ['setup', 'mcp']) byId(`host-${app}-button`).addEventListener('click', async () => {
     if (busy) return;
+    error.classList.add('hidden');
     busy = true; byId(`host-${app}-button`).disabled = true; renderState();
+    byId('compatibility-detail').textContent = 'Opening in Hub... Check for a permission window from the installed app.';
     try { await window.CreatorHosted.start(app); if (current === app) show(app); }
     catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
     finally { busy = false; byId(`host-${app}-button`).disabled = false; renderState(); }
@@ -142,21 +146,24 @@
     }
     const state = appState();
     const hostedMismatch = state?.hostedCompatible === false;
+    const canHost = state?.installed && state.trusted && state.hostedPreview && state.hostedCompatible === true && !state.issue;
     for (const app of ['setup', 'mcp']) {
       const button = byId(`host-${app}-button`);
       button.classList.toggle('hidden', current !== app || !state?.hostedPreview);
-      button.disabled = busy || hostedMismatch;
-      button.textContent = state?.hostedPreview === 'read-only' ? 'Open read-only development preview' : 'Open hosted development preview';
+      button.disabled = busy || !canHost;
+      button.textContent = state?.hostedPreview === 'read-only' ? 'Open in Hub (read-only)' : 'Open in Hub';
     }
     const blocked = busy || !inventory?.supported || !state || Boolean(state.issue);
     const opening = state?.installed && state.trusted && !state.updateAvailable;
     const blockers = state?.updateBlockers || [];
     const needsRelease = !opening && state?.installBlocked;
     byId('release-button').disabled = needsRelease ? busy : blocked || (!opening && blockers.length > 0);
+    byId('release-button').classList.toggle('hidden', Boolean(opening && canHost));
     byId('download-button').disabled = busy || !inventory?.supported || !state || state.downloaded || Boolean(state.installBlocked);
     byId('adopt-button').disabled = busy || !inventory?.supported;
     byId('open-button').disabled = blocked || !state?.trusted;
-    byId('open-button').classList.toggle('hidden', !state?.installed || !state.updateAvailable);
+    byId('open-button').classList.toggle('hidden', !state?.installed || (!state.updateAvailable && !canHost));
+    byId('open-button').textContent = canHost ? 'Open separately' : 'Open app';
     byId('primary-label').textContent = !state ? 'Unavailable' : opening ? 'Open app' : state.requiredHubVersion ? 'Update Hub first' : needsRelease ? 'Check for an update' : state.updateAvailable ? 'Update app' : 'Install app';
     byId('install-options').classList.toggle('hidden', Boolean(opening || needsRelease) || !state || !inventory?.supported);
     byId('download-button').classList.toggle('hidden', Boolean(opening || needsRelease));
@@ -183,11 +190,11 @@
       }
       return row;
     }));
-    byId('compatibility-status').textContent = hostedMismatch ? 'Update needed for Hub' : state?.hostedPreview ? 'Test version available' : state?.trusted ? 'Your app is ready' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
+    byId('compatibility-status').textContent = hostedMismatch ? 'Update needed for Hub' : canHost ? 'Ready to open in Hub' : state?.trusted ? 'Your app is ready' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
     byId('compatibility-detail').textContent = hostedMismatch
       ? `${state.requiredHubVersion ? 'Update Hub first, then check this app for updates.' : state.updateAvailable ? 'Update this app to open it inside Hub.' : 'Check for updates to get matching versions of Hub and this app.'} You can still use Open app for a separate window.`
       : state?.hostedPreview
-      ? `The hosted preview uses your verified app and saved settings${state.hostedPreview === 'read-only' ? '; changes are disabled' : ', with your approval'}. Open app remains available for a separate window.`
+      ? `Uses your installed app and existing settings${state.hostedPreview === 'read-only' ? '; changes are disabled' : ''}. This app version asks for permission when opening in Hub. Open separately remains available.`
       : 'Apps open in their own window and keep your settings. Using them inside Hub needs a future update, which is not available here yet.';
     const copies = byId('detected-copies');
     copies.replaceChildren();

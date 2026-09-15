@@ -570,12 +570,14 @@ dependencies = [
 
 [[package]]
 name = "creator-hub"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.8"
 dependencies = [
  "base64 0.22.1",
  "dirs",
+ "flate2",
  "fs2",
  "getrandom 0.3.4",
+ "libc",
  "minisign-verify",
  "reqwest",
  "semver",
@@ -583,6 +585,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sysinfo",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

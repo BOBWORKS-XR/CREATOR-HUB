@@ -15,6 +15,7 @@ async function load(page, launchView = 'hub', options = {}) {
     window.__TAURI__ = { event: { listen: async (name, handler) => { window.events[name] = handler; return () => {}; } }, core: { invoke: async (command, args) => {
       window.calls.push({ command, args });
       if (command === 'get_launch_request') return { view: launchView, revision: 0 };
+      if (command === 'community_catalogue') return { entries: [], warnings: [], stale: false };
       if (command === 'app_inventory') {
         if (window.failInventory) throw window.failInventory;
         if (window.holdInventory) return new Promise(resolve => { window.finishInventory = () => resolve(window.inventory); });
@@ -177,7 +178,11 @@ test('matching hosted Setup remains available after inventory refresh', async ({
   await page.locator('#check-updates').click();
   await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
   await expect(page.locator('#host-setup-button')).toBeEnabled();
-  await expect(page.locator('#compatibility-status')).toHaveText('Test version available');
+  await expect(page.locator('#host-setup-button')).toHaveText('Open in Hub');
+  await expect(page.locator('#release-button')).toBeHidden();
+  await expect(page.locator('#open-button')).toHaveText('Open separately');
+  await expect(page.locator('#compatibility-status')).toHaveText('Ready to open in Hub');
+  expect(await page.evaluate(() => window.calls.some(c => ['start_hosted_app', 'install_app', 'use_existing_app'].includes(c.command)))).toBe(false);
 });
 
 test('Setup requiring newer Hub explains the order and refresh clears a resolved mismatch', async ({ page }) => {
@@ -201,7 +206,7 @@ test('Setup requiring newer Hub explains the order and refresh clears a resolved
   await page.locator('#check-updates').click();
   await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
   await expect(page.locator('#host-setup-button')).toBeEnabled();
-  await expect(page.locator('#compatibility-status')).toHaveText('Test version available');
+  await expect(page.locator('#compatibility-status')).toHaveText('Ready to open in Hub');
   expect(await page.evaluate(() => window.calls.some(c => ['install_app', 'install_hub_update', 'start_hosted_app', 'open_resource'].includes(c.command)))).toBe(false);
 });
 
@@ -373,14 +378,14 @@ test('morphing drawer reverses, restores focus and honors reduced motion', async
   await expect(page.locator('.app-header .title-block')).toHaveCSS('opacity', '1');
 });
 
-test('Creator Plugins is a roadmap view without installation or account actions', async ({ page }) => {
+test('Creator Plugins browses the catalogue without installation or account actions', async ({ page }) => {
   await load(page);
   await page.getByRole('button', { name: 'View Creator Plugins' }).click();
   await expect(page.locator('#plugins-title')).toBeFocused();
-  await expect(page.locator('#view-plugins')).toContainText('No platform fees');
-  await expect(page.locator('#view-plugins')).toContainText('Community Tools');
+  await expect(page.locator('#view-plugins')).toContainText('No contributions are listed yet');
+  await expect(page.locator('#view-plugins')).toContainText('Editor tools');
   await expect(page.locator('#release-button')).toBeHidden();
-  expect(await page.evaluate(() => window.calls.filter(c => !['app_inventory', 'get_launch_request', 'hub_update_status'].includes(c.command)))).toEqual([]);
+  expect(await page.evaluate(() => window.calls.filter(c => !['app_inventory', 'get_launch_request', 'hub_update_status', 'community_catalogue'].includes(c.command)))).toEqual([]);
 });
 
 test('download progress cancels, prevents duplicate actions and never auto-installs', async ({ page }) => {

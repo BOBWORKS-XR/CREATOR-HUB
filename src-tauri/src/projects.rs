@@ -449,6 +449,15 @@ fn refresh(handle: &tauri::AppHandle) -> Result<Snapshot, String> {
     Ok(result)
 }
 
+pub fn community_paths(handle: &tauri::AppHandle) -> Result<Vec<PathBuf>, String> {
+    Ok(refresh(handle)?
+        .projects
+        .into_iter()
+        .filter(|p| p.issue.is_none())
+        .map(|p| PathBuf::from(p.path))
+        .collect())
+}
+
 #[tauri::command]
 pub async fn project_inventory(handle: tauri::AppHandle) -> Result<Snapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {

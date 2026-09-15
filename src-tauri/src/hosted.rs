@@ -170,20 +170,31 @@ pub struct Hosting(Mutex<Vec<Session>>);
 struct Session {
     app: AppId,
     writable: bool,
-    input: Option<ChildStdin>,
+    connection: Arc<SessionConnection>,
     replies: mpsc::Receiver<Result<Value, String>>,
     id: u64,
     nonce: String,
-    operation: Arc<Mutex<crate::hosted_operation::SessionOperation<crate::manager::Operation>>>,
     _verified_executable: Arc<File>,
+}
+#[derive(Default)]
+struct SessionConnection {
+    input: Mutex<Option<ChildStdin>>,
+    operation: Mutex<crate::hosted_operation::SessionOperation<crate::manager::Operation>>,
+}
+impl SessionConnection {
+    fn disconnect(&self) {
+        if let Ok(mut operation) = self.operation.lock() {
+            operation.disconnect();
+        }
+        if let Ok(mut input) = self.input.lock() {
+            input.take();
+        }
+    }
 }
 impl Drop for Session {
     fn drop(&mut self) {
         // EOF asks the backend to exit after its current operation. Never kill Unity work.
-        self.input.take();
-        if let Ok(mut operation) = self.operation.lock() {
-            operation.disconnect();
-        }
+        self.connection.disconnect();
     }
 }
 
@@ -247,6 +258,50 @@ fn read_frame(reader: &mut impl BufRead) -> Result<Option<(Value, usize)>, Strin
         .map_err(|_| "Invalid hosted response JSON.".into())
 }
 
+fn receive_output(
+    mut reader: impl BufRead,
+    kind: AppId,
+    read_only_events: bool,
+    session: &str,
+    sender: &mpsc::SyncSender<Result<Value, String>>,
+    connection: &SessionConnection,
+    mut emit: impl FnMut(Value),
+) -> String {
+    let mut setup_progress = SetupProgressGate::default();
+    let mut last_lifecycle_sequence = None;
+    let failure = loop {
+        match read_frame(&mut reader) {
+            Ok(Some((frame, wire_bytes))) if frame["session"] == session => {
+                if frame["type"] == "event" {
+                    if kind == AppId::Mcp && read_only_events {
+                        match lifecycle_sequence(&frame, wire_bytes, session, last_lifecycle_sequence) {
+                            Ok(sequence) => last_lifecycle_sequence = Some(sequence),
+                            Err(error) => break error,
+                        }
+                        // Advisory only. Never release Manager's operation from an event.
+                        emit(frame);
+                    } else if kind == AppId::Setup
+                        && setup_progress.accept(&frame, session, Instant::now())
+                    {
+                        emit(frame);
+                    }
+                } else if sender.try_send(Ok(frame)).is_err() {
+                    break "Hosted response queue overflowed.".to_owned();
+                }
+            }
+            Ok(Some(_)) => break "Hosted app sent a mismatched session identity.".to_owned(),
+            Ok(None) => break "Hosted app disconnected. A running operation's outcome may be unknown; do not retry automatically.".to_owned(),
+            Err(error) => break error,
+        }
+    };
+    // A reader can fail between requests, with nobody waiting for a reply.
+    // Signal EOF independently of the Session lock; retain the lease until exit.
+    // Close the unusable output pipe before waiting on a concurrent input writer.
+    drop(reader);
+    connection.disconnect();
+    failure
+}
+
 impl Session {
     fn send(&mut self, command: &str, args: Value) -> Result<(), String> {
         let bytes = serde_json::to_vec(
@@ -256,12 +311,16 @@ impl Session {
         if bytes.len() + 1 > MAX_REQUEST {
             return Err("Hosted request exceeds 64 KiB. Nothing was sent.".into());
         }
-        self.input
-            .as_mut()
-            .ok_or("Hosted app is disconnected.")?
+        let mut input = self
+            .connection
+            .input
+            .lock()
+            .map_err(|_| "Hosted input state unavailable.")?;
+        let input = input.as_mut().ok_or("Hosted app is disconnected.")?;
+        input
             .write_all(&bytes)
-            .and_then(|_| self.input.as_mut().unwrap().write_all(b"\n"))
-            .and_then(|_| self.input.as_mut().unwrap().flush())
+            .and_then(|_| input.write_all(b"\n"))
+            .and_then(|_| input.flush())
             .map_err(|_| {
                 "Hosted app disconnected. Operation outcome is unknown; do not retry automatically."
                     .into()
@@ -336,22 +395,23 @@ impl Hosting {
             .stderr
             .take()
             .ok_or("Missing hosted diagnostic pipe.")?;
-        let operation = Arc::new(Mutex::new(
-            crate::hosted_operation::SessionOperation::default(),
-        ));
-        let process_operation = Arc::clone(&operation);
+        let connection = Arc::new(SessionConnection {
+            input: Mutex::new(Some(input)),
+            ..Default::default()
+        });
+        let process_connection = Arc::clone(&connection);
         let process_image = Arc::clone(&verified);
         std::thread::spawn(move || {
             // EOF/output failure is not exit. Hold both native authority and the
             // verified image until Windows confirms the backend actually drained.
             if child.wait().is_ok() {
-                if let Ok(mut operation) = process_operation.lock() {
+                if let Ok(mut operation) = process_connection.operation.lock() {
                     operation.backend_exited();
                 }
             } else {
                 // An uninspectable child is not safe to replace. Quarantine the
                 // lease for this Hub process instead of pretending it is idle.
-                std::mem::forget((process_operation, process_image));
+                std::mem::forget((process_connection, process_image));
             }
         });
         // Drain diagnostics independently; never mix them into RPC or retain unbounded logs.
@@ -363,31 +423,19 @@ impl Hosting {
         let (sender, receiver) = mpsc::sync_channel(4);
         let app = handle.clone();
         let session = nonce.clone();
+        let output_connection = Arc::clone(&connection);
         std::thread::spawn(move || {
-            let mut reader = BufReader::new(output);
-            let mut setup_progress = SetupProgressGate::default();
-            let mut last_lifecycle_sequence = None;
-            let failure = loop {
-                match read_frame(&mut reader) {
-                    Ok(Some((frame, wire_bytes))) if frame["session"] == session => {
-                        if frame["type"] == "event" {
-                            if kind == AppId::Mcp && read_only_events {
-                                match lifecycle_sequence(&frame, wire_bytes, &session, last_lifecycle_sequence) {
-                                    Ok(sequence) => last_lifecycle_sequence = Some(sequence),
-                                    Err(error) => break error,
-                                }
-                                // Advisory only. Never release Manager's operation from an event.
-                                let _ = app.emit("hosted-app-event", frame);
-                            } else if kind == AppId::Setup && setup_progress.accept(&frame, &session, Instant::now()) {
-                                let _ = app.emit("hosted-app-event", frame);
-                            }
-                        } else if sender.try_send(Ok(frame)).is_err() { break "Hosted response queue overflowed.".to_owned(); }
-                    }
-                    Ok(Some(_)) => break "Hosted app sent a mismatched session identity.".to_owned(),
-                    Ok(None) => break "Hosted app disconnected. A running operation's outcome may be unknown; do not retry automatically.".to_owned(),
-                    Err(error) => break error,
-                }
-            };
+            let failure = receive_output(
+                BufReader::new(output),
+                kind,
+                read_only_events,
+                &session,
+                &sender,
+                &output_connection,
+                |frame| {
+                    let _ = app.emit("hosted-app-event", frame);
+                },
+            );
             let _ = sender.try_send(Err(failure.clone()));
             let _ = app.emit(
                 "hosted-app-disconnected",
@@ -397,11 +445,10 @@ impl Hosting {
         let mut backend = Session {
             app: kind,
             writable,
-            input: Some(input),
+            connection,
             replies: receiver,
             id: 0,
             nonce,
-            operation,
             _verified_executable: verified,
         };
         let hello = if writable {
@@ -455,7 +502,13 @@ impl Hosting {
         {
             return Err("This command is not available to that hosted app.".into());
         }
-        if backend.input.is_none() {
+        if backend
+            .connection
+            .input
+            .lock()
+            .map_err(|_| "Hosted input state unavailable.")?
+            .is_none()
+        {
             return Err("Hosted app is disconnected. Nothing was sent.".into());
         }
         let next_id = backend
@@ -464,6 +517,7 @@ impl Hosting {
             .filter(|id| *id <= MAX_SAFE_SEQUENCE)
             .ok_or("Hosted session exhausted.")?;
         backend
+            .connection
             .operation
             .lock()
             .map_err(|_| "Hosted operation state unavailable.")?
@@ -495,21 +549,19 @@ impl Hosting {
         match result {
             Ok(result) => {
                 let completion = backend
+                    .connection
                     .operation
                     .lock()
                     .map_err(|_| "Hosted operation state unavailable.")?
                     .complete(&result);
                 if let Err(error) = completion {
-                    backend.input.take();
+                    backend.connection.disconnect();
                     return Err(error);
                 }
                 result
             }
             Err(error) => {
-                if let Ok(mut operation) = backend.operation.lock() {
-                    operation.disconnect();
-                }
-                backend.input.take();
+                backend.connection.disconnect();
                 Err(error)
             }
         }
@@ -522,6 +574,7 @@ impl Hosting {
             .position(|backend| backend.nonce == session)
             .ok_or("Stale hosted session.")?;
         if state[index]
+            .connection
             .operation
             .lock()
             .map_err(|_| "Hosted operation state unavailable.")?
@@ -536,6 +589,7 @@ impl Hosting {
         if let Ok(mut state) = self.0.try_lock() {
             state.retain(|session| {
                 session
+                    .connection
                     .operation
                     .lock()
                     .map_or(true, |operation| operation.busy())
@@ -627,6 +681,263 @@ pub async fn stop_hosted_app(handle: tauri::AppHandle, session: String) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn broken_output_between_workflow_requests_drains_input_without_releasing_update_guard() {
+        assert_broken_output_drains(true);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn broken_output_during_command_drains_input_without_releasing_update_guard() {
+        assert_broken_output_drains(false);
+    }
+
+    #[cfg(windows)]
+    fn assert_broken_output_drains(between_requests: bool) {
+        use std::os::windows::process::CommandExt;
+        struct Fixture(std::process::Child);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                // This is only the disposable child created by this test.
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let drained = temp.path().join("drained.txt");
+        let release = temp.path().join("release.txt");
+        let mut fixture = Fixture(Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "[Console]::Out.WriteLine('{not-json}'); [Console]::Out.Flush(); $null = [Console]::In.ReadToEnd(); [IO.File]::WriteAllText($env:CREATOR_TEST_DRAINED, 'accepted work finished'); while (-not [IO.File]::Exists($env:CREATOR_TEST_RELEASE)) { Start-Sleep -Milliseconds 20 }"])
+            .env("CREATOR_TEST_DRAINED", &drained)
+            .env("CREATOR_TEST_RELEASE", &release)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .creation_flags(0x08000000).spawn().unwrap());
+        let manager = crate::manager::Manager::default();
+        let connection = Arc::new(SessionConnection {
+            input: Mutex::new(fixture.0.stdin.take()),
+            ..Default::default()
+        });
+        connection
+            .operation
+            .lock()
+            .unwrap()
+            .begin("begin_ui_operation", &json!({}), || {
+                Ok(manager
+                    .fixture_operation(File::create(temp.path().join("operation.lock")).unwrap()))
+            })
+            .unwrap();
+        if between_requests {
+            connection
+                .operation
+                .lock()
+                .unwrap()
+                .complete(&Ok(json!(7)))
+                .unwrap();
+        }
+        let (sender, receiver) = mpsc::sync_channel(4);
+        let image = temp.path().join("image-fixture");
+        std::fs::write(&image, b"fixture").unwrap();
+        let mut backend = Session {
+            app: AppId::Mcp,
+            writable: true,
+            connection: Arc::clone(&connection),
+            replies: receiver,
+            id: 1,
+            nonce: "fixture".into(),
+            _verified_executable: Arc::new(File::open(image).unwrap()),
+        };
+        let failure = receive_output(
+            BufReader::new(fixture.0.stdout.take().unwrap()),
+            AppId::Mcp,
+            true,
+            "fixture",
+            &sender,
+            &connection,
+            |_| panic!("Invalid output must not emit an event"),
+        );
+        assert!(failure.contains("Invalid hosted response JSON"));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !drained.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            drained.exists(),
+            "Hub left stdin open after its output reader failed"
+        );
+        assert!(backend
+            .send("get_hosted_snapshot", json!({}))
+            .unwrap_err()
+            .contains("disconnected"));
+        assert!(!manager.allow_close());
+        assert!(
+            manager.begin().is_err(),
+            "An update must not overlap the draining backend"
+        );
+        assert!(
+            fixture.0.try_wait().unwrap().is_none(),
+            "Draining is not a forced kill"
+        );
+        std::fs::write(&release, b"exit normally").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while fixture.0.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(fixture
+            .0
+            .try_wait()
+            .unwrap()
+            .is_some_and(|status| status.success()));
+        connection.operation.lock().unwrap().backend_exited();
+        assert!(!manager.busy());
+        assert!(manager.allow_close());
+        drop(backend);
+    }
+
+    #[test]
+    fn every_terminal_output_route_disables_new_requests_and_keeps_active_authority() {
+        let reply = "{\"session\":\"fixture\",\"id\":1,\"ok\":true,\"result\":null}\n";
+        let cases = [
+            (String::new(), "disconnected"),
+            ("not json\n".into(), "JSON"),
+            ("{}\n".into(), "mismatched"),
+            ("{}".into(), "oversized"),
+            ("x".repeat(MAX_FRAME + 1), "oversized"),
+            (
+                "{\"type\":\"event\",\"session\":\"fixture\"}\n".into(),
+                "lifecycle",
+            ),
+            (reply.repeat(5), "overflowed"),
+        ];
+        let temp = tempfile::tempdir().unwrap();
+        for (index, (bytes, expected)) in cases.into_iter().enumerate() {
+            let manager = crate::manager::Manager::default();
+            let connection = SessionConnection::default();
+            connection
+                .operation
+                .lock()
+                .unwrap()
+                .begin("begin_ui_operation", &json!({}), || {
+                    Ok(manager.fixture_operation(
+                        File::create(temp.path().join(index.to_string())).unwrap(),
+                    ))
+                })
+                .unwrap();
+            connection
+                .operation
+                .lock()
+                .unwrap()
+                .complete(&Ok(json!(7)))
+                .unwrap();
+            let (sender, _receiver) = mpsc::sync_channel(4);
+            let failure = receive_output(
+                bytes.as_bytes(),
+                AppId::Mcp,
+                true,
+                "fixture",
+                &sender,
+                &connection,
+                |_| panic!("No valid event expected"),
+            );
+            assert!(failure.contains(expected), "{index}: {failure}");
+            assert!(connection
+                .operation
+                .lock()
+                .unwrap()
+                .begin("get_hosted_snapshot", &json!({}), || panic!(
+                    "Never reserve work on a failed connection"
+                ))
+                .is_err());
+            assert!(manager.busy());
+            connection.disconnect();
+            assert!(
+                manager.busy(),
+                "Repeated disconnect must not release the lease"
+            );
+            connection.operation.lock().unwrap().backend_exited();
+            assert!(!manager.busy());
+        }
+    }
+
+    #[test]
+    fn read_error_disconnects_only_its_own_session() {
+        struct BrokenPipe;
+        impl Read for BrokenPipe {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        let connection = SessionConnection::default();
+        let unaffected = SessionConnection::default();
+        let (sender, _receiver) = mpsc::sync_channel(4);
+        let failure = receive_output(
+            BufReader::new(BrokenPipe),
+            AppId::Setup,
+            false,
+            "fixture",
+            &sender,
+            &connection,
+            |_| panic!(),
+        );
+        assert_eq!(failure, "Hosted pipe read failed.");
+        assert!(connection
+            .operation
+            .lock()
+            .unwrap()
+            .begin("probe_environment", &json!({}), || panic!())
+            .is_err());
+        assert_eq!(
+            unaffected
+                .operation
+                .lock()
+                .unwrap()
+                .begin("probe_environment", &json!({}), || Err(
+                    "unaffected session still accepts reservation".into()
+                ))
+                .unwrap_err(),
+            "unaffected session still accepts reservation"
+        );
+    }
+
+    #[test]
+    fn output_pipe_is_dropped_before_waiting_for_the_input_lock() {
+        struct NotifyDrop(mpsc::SyncSender<()>);
+        impl Read for NotifyDrop {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        impl Drop for NotifyDrop {
+            fn drop(&mut self) {
+                let _ = self.0.try_send(());
+            }
+        }
+        let connection = Arc::new(SessionConnection::default());
+        let input = connection.input.lock().unwrap();
+        let reader_connection = Arc::clone(&connection);
+        let (dropped, observed_drop) = mpsc::sync_channel(1);
+        let reader = std::thread::spawn(move || {
+            let (sender, _receiver) = mpsc::sync_channel(4);
+            receive_output(
+                BufReader::new(NotifyDrop(dropped)),
+                AppId::Mcp,
+                true,
+                "fixture",
+                &sender,
+                &reader_connection,
+                |_| panic!(),
+            )
+        });
+        let dropped_before_unlock = observed_drop.recv_timeout(Duration::from_secs(3)).is_ok();
+        drop(input);
+        assert_eq!(reader.join().unwrap(), "Hosted pipe read failed.");
+        assert!(
+            dropped_before_unlock,
+            "Drop stdout before waiting for a concurrent writer"
+        );
+    }
+
     #[test]
     fn hosted_compatibility_requires_an_approved_matching_hash() {
         let expected = "a".repeat(64);
@@ -644,13 +955,10 @@ mod tests {
         let fixture = |app, nonce: &str| Session {
             app,
             writable: false,
-            input: None,
+            connection: Arc::new(SessionConnection::default()),
             replies: mpsc::sync_channel(1).1,
             id: 0,
             nonce: nonce.into(),
-            operation: Arc::new(Mutex::new(
-                crate::hosted_operation::SessionOperation::default(),
-            )),
             _verified_executable: Arc::new(File::open(&path).unwrap()),
         };
         let hosting = Hosting(Mutex::new(vec![

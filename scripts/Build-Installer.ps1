@@ -8,9 +8,14 @@ $output = Join-Path $root "dist\$OutputName"
 if (Test-Path -LiteralPath $output) { throw 'Installer output already exists. Choose a new name; existing artifacts are immutable.' }
 $variables = @('CREATOR_SETUP_HOST_SHA256', 'CREATOR_MCP_HOST_SHA256', 'CREATOR_MCP_HOST_READONLY_EVENTS', 'CREATOR_MCP_HOST_WRITABLE')
 $saved = @{}
+$savedTarget = $env:CARGO_TARGET_DIR
 try {
     # Ignore ambient developer pins. Only a reviewed, explicit receipt can enable hosting.
     foreach ($key in $variables) { $saved[$key] = [Environment]::GetEnvironmentVariable($key); [Environment]::SetEnvironmentVariable($key, $null) }
+    # NSIS cannot resolve an unset environment reference in its embedded preflight path.
+    $target = if ($savedTarget) { $savedTarget } else { Join-Path $root 'src-tauri\target' }
+    if (-not [IO.Path]::IsPathRooted($target)) { $target = Join-Path $root $target }
+    $env:CARGO_TARGET_DIR = [IO.Path]::GetFullPath($target)
     $pins = $null
     if ($HostedPins) {
         $pins = Get-Content -LiteralPath $HostedPins -Raw | ConvertFrom-Json
@@ -42,11 +47,12 @@ try {
     Copy-Item -LiteralPath $installer -Destination (Join-Path $output "Creator-Hub-${version}-Windows-setup.exe")
     Copy-Item -LiteralPath (Join-Path $target 'release\creator-hub.exe') -Destination $output
     Copy-Item -LiteralPath (Join-Path $root 'docs\INSTALLABLE-PREVIEW.md') -Destination (Join-Path $output 'README.md')
-    Copy-Item -LiteralPath (Join-Path $root 'docs\HOTFIX-ALPHA6.md') -Destination $output
+    Copy-Item -LiteralPath (Join-Path $root 'docs\COMMUNITY-PREVIEW.md') -Destination $output
     $hashes = Get-ChildItem -LiteralPath $output -File | ForEach-Object { "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" }
     $hashes | Set-Content -LiteralPath (Join-Path $output 'SHA256SUMS.txt') -Encoding ascii
     Write-Output $output
     Write-Output $hashes
 } finally {
     foreach ($key in $variables) { [Environment]::SetEnvironmentVariable($key, $saved[$key]) }
+    $env:CARGO_TARGET_DIR = $savedTarget
 }

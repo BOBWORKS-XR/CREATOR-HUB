@@ -1,5 +1,23 @@
 # Creator Hub Windows Preview
 
+## Alpha.8 Plugin Candidate
+
+This package adds Creator Plugins, including MCP-tool and AI-skill categories,
+verified downloads, and experimental project integration. Select a project,
+add the Editor-only Unity menu while that project is closed, then send an
+eligible package for review in Unity. Unity's Import Package window is still
+required; review scripts and replacements before importing. Selected graphs
+and prefabs can be organized from the Creator Plugins menu with GUIDs retained.
+No automatic scene saving or AI-client configuration is performed.
+
+The installer upgrades Hub only. Existing MCP alpha.1 and Setup alpha.6 remain
+the accepted hosted apps. Plugin import does not prove a contribution's SDK
+compatibility or gameplay; Start Location includes extra scene/C# assets, so
+review its file selection carefully. See COMMUNITY-PREVIEW.md and the exact
+candidate acceptance report supplied with the release.
+
+## Previous Public Release
+
 The current public Windows prerelease is
 [0.1.0-alpha.6](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0-alpha.6),
 not a stable release.

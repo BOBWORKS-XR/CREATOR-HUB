@@ -4,6 +4,10 @@
   "windows": ["main"],
   "permissions": ["core:event:allow-listen", "core:event:allow-unlisten",
     "allow-open-resource", "allow-app-inventory", "allow-download-app", "allow-install-app",
+    "allow-hub-update-status", "allow-download-hub-update", "allow-install-hub-update",
+    "allow-community-catalogue", "allow-open-community-link", "allow-download-community-package",
+    "allow-community-projects", "allow-choose-community-project", "allow-install-community-menu",
+    "allow-queue-community-import", "allow-community-import-status",
     "allow-open-app", "allow-cancel-download", "allow-use-existing-app", "allow-get-launch-request", "allow-start-hosted-app",
     "allow-hosted-app-call", "allow-stop-hosted-app", "allow-abort-hosted-app",
     "allow-project-inventory", "allow-add-project-folder", "allow-remove-project-folder", "allow-open-unity-project"]

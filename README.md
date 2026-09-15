@@ -4,6 +4,26 @@ Lightweight Windows app manager for Creator Works MCP and Creator Project Setup.
 Windows prerelease `0.1.0-alpha.6`; not a stable release.
 Both tools remain usable independently.
 
+## Alpha.8 Candidate
+
+This branch adds **Creator Plugins** inside Hub and both standalone apps: search,
+type filters, creator credits and incorporation instructions for each contribution
+type. Downloads are checksum-checked. The development Unity helper adds reviewed
+imports and selected graph/prefab organization without automatic scene saving.
+**Experimental project integration** requires explicit project selection and
+Unity import review. The Windows helper-publication failure now has a bounded,
+revalidated retry, covered by regression tests and 1,000 stress installs.
+
+**Not published yet.** Hub `0.1.0-alpha.8` retains the accepted hosted Project
+Setup `0.3.0-alpha.6` and MCP `2.7.0-alpha.1` pins. New standalone Plugins
+candidates are being prepared separately; their hashes are not automatically
+trusted. This does not bundle duplicate MCP installations.
+See the [local upgrade test](docs/LOCAL-UPGRADE-TEST-20260915.md) and
+[Plugins scope and limits](docs/COMMUNITY-PREVIEW.md).
+The [current acceptance report](docs/PLUGIN-ACCEPTANCE-20260915.md) records passing
+Unity 2022/6 import and reload tests. The [Windows publication follow-up](docs/WINDOWS-HELPER-PUBLICATION-20260915.md)
+records the final retry tests separately from packaged upgrade acceptance.
+
 ## New in Alpha.6
 
 - Project Setup's requirement checks and download progress now appear inside Hub.
