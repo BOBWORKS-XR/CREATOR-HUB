@@ -3,10 +3,10 @@
 **Unity tools in one window.** Open Creator SDK / Altspace and Banter projects,
 manage Creator Works MCP and Creator Project Setup, and browse community plugins.
 
-## Windows 0.1.0
+## Windows 0.1.1
 
-[Download Creator Hub](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0)
-and choose `Creator-Hub-0.1.0-Windows-setup.exe`.
+[Download Creator Hub](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.1)
+and choose `Creator-Hub-0.1.1-Windows-setup.exe`.
 
 The matching companion versions are **Project Setup 0.3.0** and **MCP 2.7.0**.
 Hub installs these apps separately and opens compatible versions inside Hub.
@@ -16,12 +16,12 @@ Earlier published acceptance remains in the
 
 - **Projects first:** detected Creator SDK / Altspace and Banter projects, search,
   sorting and opening in the matching installed Unity Editor.
-- **Apps:** verified downloads, approved installation and updates, with guidance
+- **Apps:** direct Update app buttons, verified downloads and approved installation, with guidance
   for running-app blockers. Work is not forcibly closed to install an update.
-- **Creator Plugins:** type filters, images, contributor credits, descriptions
-  and incorporation instructions.
+- **Creator Plugins:** remembered Grid/List views, type filters, images, contributor
+  credits and incorporation instructions. Its icon/menu stays visible while scrolling.
 - **Unity menu:** add the Editor-only catalogue to a selected project. Compact
-  cards offer Import into project, keeping Unity's normal file selection.
+  Grid/List cards offer Import into project, keeping Unity's normal file selection.
   Cancel allows another attempt without reopening the window.
 - **Helper updates:** recognized old versions receive a retained backup and keep
   Unity metadata. Unknown or edited files are protected. Close that Editor first.
@@ -31,6 +31,8 @@ Earlier published acceptance remains in the
 Existing users: **update Hub first**, then the companion apps. A stable version
 can update an older prerelease. Channel settings do not authorize downgrades or
 silent installation. Your project folders and app settings stay put.
+Older previews reporting an intermediate-version requirement can use the 0.1.1
+installer directly. See the [hotfix notes and acceptance](docs/RELEASE-0.1.1.md).
 
 ## Companion Apps
 

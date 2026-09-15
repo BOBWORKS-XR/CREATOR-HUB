@@ -23,6 +23,16 @@ from this page. Public 0.1.0 assets and tags have not been replaced.
 
 ## Acceptance
 
-Candidate build and disposable Windows installation/upgrade acceptance are
-pending. Do not publish until their exact artifact hashes and results have been
-reviewed and recorded here.
+The [Windows acceptance run](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35017516816)
+passed all four routes: clean installation, older companion apps, MCP-only, and
+Hub 0.1.0 upgrade. Apps-row updates passed native Cancel/retry and preserved
+settings. Actual packaged Unity menu updates preserved backups and project files.
+137 UI tests, 104 Rust tests and 13 script tests passed; strict lint passed.
+
+Installer SHA-256:
+`b00a1db327cfaf17689f81a2eec5bc2b9c1e837c067a20039a86c45f139180a3`.
+
+Release assets include the exact acceptance reports and signed update metadata.
+Installer upgrades and signatures were verified; the full in-app Hub self-update
+restart remains a separate, untested path. This is Windows acceptance, not a
+claim that arbitrary community packages or all Unity projects have been tested.

@@ -4,7 +4,33 @@
 This supersedes older alpha.8 publication holds. Hub 0.1.0, Setup 0.3.0 and MCP
 2.7.0 are now public stable releases. Published binaries are frozen.
 
-## Latest checkpoint
+## Hub 0.1.1 Hotfix: Public
+
+Published 2026-09-15: https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.1.
+Exact source/tag: `37f393bf42ec22bd424c4d6d701dfecb1cd43570`.
+Run 35017516816 passed 137 UI tests, 104 Rust tests (nine opt-in ignored), 13
+script tests, strict lint, packaging and all four native suite jobs. The tested
+installer upgraded Hub 0.1.0 and alpha.3/alpha.5, with same-version/clean checks.
+Actual MCP/Setup Apps-row Cancel/retry, protected configuration, native hosting
+and alpha.8/stable helper backup/update passed. No user project was changed.
+
+- Installer: 5,991,379 bytes; SHA-256
+  `b00a1db327cfaf17689f81a2eec5bc2b9c1e837c067a20039a86c45f139180a3`.
+- Installed executable: 13,457,920 bytes; SHA-256
+  `0a852411d81c36fa81eb1a06678509a48f7006f940e2eb432f59307e02c48d9e`.
+- All 17 draft/public asset digests matched, five assets were anonymously
+  downloaded again, and the application trust-key/signature verifier passed
+  installer/EXE binding, updater signature and changed-descriptor rejection.
+- Public 0.1.0 assets, standalone Setup 0.3.0 and MCP 2.7.0 are unchanged.
+  The newer opaque-background logo drafts were not shipped; the existing clean
+  Plugins cube appears enlarged in the active-page menu trigger.
+- Full in-app Hub self-update/restart remains untested. The signed 0.1.1 feed
+  requires Hub 0.1.0; older previews can use the versioned installer directly.
+
+Evidence: `artifacts/hotfix-0.1.1-ci`, `hotfix-0.1.1-release`,
+`hotfix-0.1.1-public-check` and `hotfix-0.1.1-public-verification.json`.
+
+## Previous 0.1.0 Checkpoint
 
 Hub 0.1.0 is public/latest at
 https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.0.

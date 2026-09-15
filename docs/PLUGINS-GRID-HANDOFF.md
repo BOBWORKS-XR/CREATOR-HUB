@@ -1,11 +1,11 @@
 # Creator Plugins List/Grid Follow-Up
 
-Status: local post-release implementation, 2026-09-15. Public Hub 0.1.0,
-Setup 0.3.0 and MCP 2.7.0 binaries and tags are unchanged.
+Status: Hub 0.1.1 published 2026-09-15. Earlier Hub 0.1.0, Setup 0.3.0 and MCP
+2.7.0 binaries and tags are unchanged. Standalone grid updates remain local.
 
-## Hub 0.1.1 Hotfix Candidate
+## Hub 0.1.1 Hotfix
 
-The Hub-only candidate now includes the grid, stable-helper migration and direct
+The Hub-only release includes the grid, stable-helper migration and direct
 Apps-row update controls below. The Plugins menu stays fixed while scrolling,
 with a reserved content gutter. The heading, drawer brand and enlarged 40px
 trigger mark switch to Creator Plugins on that page and restore Hub elsewhere.
@@ -16,8 +16,10 @@ the new tests preserve its viewport position in Grid/List at 940px and 320px.
 All 137 Hub UI tests, 104 Rust tests (nine opt-in diagnostics ignored), 13 script
 tests and strict release Clippy pass locally. Disposable native acceptance now
 covers the published stable Hub 0.1.0 baseline, Apps-row update Cancel/retry and
-both alpha.8 and stable Unity helper backup/update. Its candidate run is pending.
-No installed app or public release asset has changed. Standalone Setup and MCP
+both alpha.8 and stable Unity helper backup/update. Run 35017516816 passed all
+four native routes. The exact installer, 17 release assets and five anonymous
+re-downloads passed hash/signature verification. No local installed app or old
+release asset changed. Standalone Setup and MCP
 remain on their local feature branches; this hotfix does not publish them.
 
 ## Changes
@@ -59,8 +61,8 @@ are per web origin/app, not a claimed cross-app synchronization service.
   was reopened with the new helper. Its observed three-column row has aligned
   button baselines, contained long text and equal card borders. Imports are
   deliberately disabled in this visual-only fixture. No real user project changed.
-- This follow-up did not repeat real package imports, installed-artifact acceptance
-  or platform acceptance. Earlier stable release evidence is separate.
+- The 0.1.1 hotfix repeated packaged Windows installation acceptance, as recorded
+  above. Real Unity package imports and non-Windows acceptance were not repeated.
 
 Helper SHA-256 after alignment:
 `506799fb7c9a3868d212c635217ba853084e20fc6b22c772b7565fb54ac8ab07`.
@@ -88,7 +90,8 @@ the existing Lucide licence is retained.
   hidden close/reopen options from another app's details. Desktop UI tests cover
   both rows at 940/390/320, blocked/untrusted versions and close consent outcomes.
   A running hosted Setup workflow refuses both close and install, then completes
-  normally. These new update controls have not yet had packaged native acceptance.
+  normally. Run 35017516816 subsequently passed actual Apps-row native Cancel/retry
+  and installed updates for both companion apps.
 - The requested left-edge puzzle notch and larger/lower puzzle piece were
   generated, but the exports contain an opaque checkerboard (zero transparent
   pixels). Background cleanup with image-processing tools was requested from
