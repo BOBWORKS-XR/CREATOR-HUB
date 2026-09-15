@@ -1,10 +1,42 @@
 # Coordinated stable release status
 
 2026-09-15. The user explicitly authorized stable releases for all three apps.
-This supersedes older alpha.8 publication holds. No stable release has been
-published by this pass yet. Publishing remains conditional on exact-binary checks.
+This supersedes older alpha.8 publication holds. Setup 0.3.0 is now public;
+Hub and MCP publication remain conditional on their exact-binary checks.
 
 ## Latest checkpoint
+
+Setup 0.3.0 was published with all 13 GitHub asset digests verified and the
+public installer/metadata downloaded again and checked against Hub's trust key.
+Final candidate 35003479084/f8d5423 and installed acceptance 35004470795/600244a
+passed four upgrade baselines: 0.2.2, alpha.1, alpha.2 and alpha.6. The same actual
+installed app served the approved PNG, refused WM_CLOSE during its native folder
+chooser, returned null on Cancel and exited normally when idle. Signed receipt
+and all individual upgrade/lifecycle reports are public release assets.
+
+Setup's old tag auto-builder 35005022299 was cancelled with all four publish
+steps skipped and then disabled, preserving the exact public artifacts. See its
+`docs/STABLE-0.3.0-PUBLICATION.md`. Current master also has a formatting-only test
+assertion change and a canonical macOS CI temporary-path configuration; the
+cross-platform CI replay is pending. No Windows release binary changed.
+
+Final MCP installer `f403da14237a16d3e7a50620d484c60c0a3fbdbb6abfe1ccaf21e4ffb78e1da9`
+and EXE `0fc9f6023973378778a00b063c383f37f2973eec9d89a96b084391c89f2287cd`
+passed all three installed upgrades in 35003567089. The same executable passed
+native lifecycle and approved PNG checks in 35004965231. That replay as a whole
+failed: its historical alpha.2 clean baseline install returned 10 before invoking
+the candidate. The later old-guard probe took 15.578s and succeeded; a cold 15s
+preflight timeout is a hypothesis, not a captured root cause. The distinct exact
+passing receipts may be combined, but the failed replay must remain recorded.
+The MCP task is preparing publication with its old rebuild workflow excluded.
+
+Hub candidate 35005538731 is running from `7b491d9`, with accepted stable companion
+hashes and source revisions in `scripts/prerelease-apps.json`. It will test four
+native routes and actual fresh/known-old Unity helper menu installation, backup,
+metadata preservation and cancellation. Do not claim this candidate is accepted
+or the whole suite is public until those checks and public asset verification pass.
+
+## Earlier checkpoints
 
 The three-puzzle-face Plugins icon was approved on 2026-09-15 and is now in Hub,
 Setup and MCP source. Production PNG SHA-256:
