@@ -17,11 +17,13 @@
   const error = document.querySelector('#action-error');
   let current = 'hub';
   let inventory = null;
+  let inventoryError = '';
   let hubUpdate = null;
   let busy = false;
   let launchRevision = -1;
   const byId = id => document.getElementById(id);
   const invoke = (command, args) => window.CreatorHubNative.invoke(command, args);
+  if (typeof window.CreatorHubNative.version === 'string') document.querySelector('.footer-version').textContent = window.CreatorHubNative.version;
   for (const [id, key] of [['preview-channel', 'preview'], ['auto-download', 'auto-download']]) {
     byId(id).checked = true;
     try {
@@ -136,6 +138,7 @@
 
   function appState() { return inventory?.apps?.find(app => app.app === current); }
   function updateReason(state) {
+    if (inventoryError) return 'App discovery failed. Retry before updating; last-known versions are shown.';
     if (!inventory?.supported) return 'App updates require Windows x64 in this build.';
     if (state.issue) return state.issue;
     if (!state.trusted) return 'This installation must be verified before updating.';
@@ -147,6 +150,10 @@
   }
   function renderState() {
     byId('check-updates').disabled = busy;
+    byId('retry-inventory').disabled = busy;
+    byId('inventory-error').classList.toggle('hidden', !inventoryError);
+    byId('inventory-error-message').textContent = inventoryError ? `App discovery failed: ${inventoryError}${inventory ? ' Last-known versions are shown; retry before using app controls.' : ''}` : '';
+    if (!inventory) for (const app of ['mcp', 'setup']) byId(`status-${app}`).textContent = busy ? 'Checking' : 'Unavailable';
     byId('preview-channel').disabled = busy;
     byId('hub-update-button').disabled = busy || !hubUpdate?.availableVersion || Boolean(hubUpdate?.installBlocked);
     byId('hub-update-status').textContent = !hubUpdate ? 'Hub update check is unavailable. Try Check for updates.'
@@ -160,7 +167,7 @@
       const available = Boolean(app.installed && app.updateAvailable);
       const hosted = window.CreatorHosted.active(app.app);
       update.classList.toggle('hidden', !available);
-      update.disabled = busy || !inventory.supported || Boolean(app.issue) || !app.trusted
+      update.disabled = busy || Boolean(inventoryError) || !inventory.supported || Boolean(app.issue) || !app.trusted
         || (!app.requiredHubVersion && (Boolean(app.installBlocked) || (!hosted && Boolean(app.updateBlockers?.length))));
       update.querySelector('span:last-child').textContent = app.requiredHubVersion ? 'Update Hub first' : 'Update app';
       reason.textContent = available ? updateReason(app) : '';
@@ -172,21 +179,21 @@
     for (const app of ['setup', 'mcp']) {
       const button = byId(`host-${app}-button`);
       button.classList.toggle('hidden', current !== app || !state?.hostedPreview);
-      button.disabled = busy || !canHost;
+      button.disabled = busy || Boolean(inventoryError) || !canHost;
       button.textContent = state?.hostedPreview === 'read-only' ? 'Open in Hub (read-only)' : 'Open in Hub';
     }
-    const blocked = busy || !inventory?.supported || !state || Boolean(state.issue);
+    const blocked = busy || Boolean(inventoryError) || !inventory?.supported || !state || Boolean(state.issue);
     const opening = state?.installed && state.trusted && !state.updateAvailable;
     const blockers = state?.updateBlockers || [];
     const needsRelease = !opening && state?.installBlocked;
-    byId('release-button').disabled = needsRelease ? busy : blocked || (!opening && blockers.length > 0);
+    byId('release-button').disabled = needsRelease ? busy || Boolean(inventoryError) : blocked || (!opening && blockers.length > 0);
     byId('release-button').classList.toggle('hidden', Boolean(opening && canHost));
-    byId('download-button').disabled = busy || !inventory?.supported || !state || state.downloaded || Boolean(state.installBlocked);
-    byId('adopt-button').disabled = busy || !inventory?.supported;
+    byId('download-button').disabled = busy || Boolean(inventoryError) || !inventory?.supported || !state || state.downloaded || Boolean(state.installBlocked);
+    byId('adopt-button').disabled = busy || Boolean(inventoryError) || !inventory?.supported;
     byId('open-button').disabled = blocked || !state?.trusted;
     byId('open-button').classList.toggle('hidden', !state?.installed || (!state.updateAvailable && !canHost));
     byId('open-button').textContent = canHost ? 'Open separately' : 'Open app';
-    byId('primary-label').textContent = !state ? 'Unavailable' : opening ? 'Open app' : state.requiredHubVersion ? 'Update Hub first' : needsRelease ? 'Check for an update' : state.updateAvailable ? 'Update app' : 'Install app';
+    byId('primary-label').textContent = !state ? busy ? 'Checking' : 'Unavailable' : opening ? 'Open app' : state.requiredHubVersion ? 'Update Hub first' : needsRelease ? 'Check for an update' : state.updateAvailable ? 'Update app' : 'Install app';
     byId('install-options').classList.toggle('hidden', Boolean(opening || needsRelease) || !state || !inventory?.supported);
     byId('download-button').classList.toggle('hidden', Boolean(opening || needsRelease));
     if (state) {
@@ -195,7 +202,7 @@
         state.downloaded ? 'Download ready' : '', state.running ? 'Currently in use' : '',
         state.installerInteractive && !opening && !needsRelease ? 'This release uses its normal installer window. Keep the default folder.' : '', state.issue, state.checkWarning, state.installBlocked].filter(Boolean);
       byId('tool-state').replaceChildren(...lines.map(text => { const p = document.createElement('p'); p.textContent = text; return p; }));
-    } else byId('tool-state').textContent = inventory?.supported === false ? 'Windows x64 app management is available in this build. macOS and Linux are not supported yet.' : 'App inventory is unavailable. Retry the update check.';
+    } else byId('tool-state').textContent = inventory?.supported === false ? 'Windows x64 app management is available in this build. macOS and Linux are not supported yet.' : busy ? 'Checking installed apps and available updates...' : 'App inventory is unavailable. Use Retry app discovery above.';
     byId('update-blockers').classList.toggle('hidden', !state || (!state.issue && !blockers.length));
     byId('update-blockers-help').textContent = blockers.length
       ? `${blockers.some(b => b.kind !== 'otherCopy') ? 'Finish your work, then disconnect MCP in your AI app or close the listed app.' : 'Finish your work and close the other copy of this app.'} Check again when you are ready. If it is still listed after closing its app, save your work and restart Windows. Do not end unfamiliar tasks. Hub will not force-close your apps. Uninstalling is not needed to close these connections.`
@@ -212,12 +219,14 @@
       }
       return row;
     }));
-    byId('compatibility-status').textContent = hostedMismatch ? 'Update needed for Hub' : canHost ? 'Ready to open in Hub' : state?.trusted ? 'Your app is ready' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
-    byId('compatibility-detail').textContent = hostedMismatch
+    byId('compatibility-status').textContent = inventoryError ? 'App discovery needs attention' : !state ? 'Checking compatibility' : hostedMismatch ? 'Update needed for Hub' : canHost ? 'Ready to open in Hub' : state?.trusted ? 'Your app is ready' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
+    byId('compatibility-detail').textContent = inventoryError || !state
+      ? 'Hub needs a completed app check to show installation, update and Open in Hub options.'
+      : hostedMismatch
       ? `${state.requiredHubVersion ? 'Update Hub first, then check this app for updates.' : state.updateAvailable ? 'Update this app to open it inside Hub.' : 'Check for updates to get matching versions of Hub and this app.'} You can still use Open app for a separate window.`
       : state?.hostedPreview
       ? `Uses your installed app and existing settings${state.hostedPreview === 'read-only' ? '; changes are disabled' : ''}. This app version asks for permission when opening in Hub. Open separately remains available.`
-      : 'Apps open in their own window and keep your settings. Using them inside Hub needs a future update, which is not available here yet.';
+      : 'This app version opens in its own window and keeps your settings. Check for updates to find a Hub-compatible version.';
     const copies = byId('detected-copies');
     copies.replaceChildren();
     for (const copy of state?.detectedCopies || []) {
@@ -231,7 +240,7 @@
       detail.append(label, location);
       const choose = document.createElement('button');
       choose.type = 'button'; choose.className = 'text-button'; choose.textContent = 'Use this copy';
-      choose.disabled = busy || !copy.verified;
+      choose.disabled = busy || Boolean(inventoryError) || !copy.verified;
       choose.addEventListener('click', () => action('use_existing_app', current, undefined, { path: copy.path }));
       row.append(detail, choose); copies.append(row);
     }
@@ -253,28 +262,35 @@
   async function refresh(check = false) {
     if (busy) return;
     let succeeded = false;
+    let hubChecked = false;
     busy = true; renderState();
     byId('catalog-status').textContent = check ? 'Checking verified releases...' : 'Checking installed apps...';
     try {
-      inventory = await invoke('app_inventory', { check, preview: byId('preview-channel').checked });
-      if (!inventory || !Array.isArray(inventory.apps)) throw 'The app inventory response is unavailable.';
-      try {
-        const result = await invoke('hub_update_status', { online: check, preview: byId('preview-channel').checked });
-        hubUpdate = result && typeof result.currentVersion === 'string' ? result : null;
-      } catch (reason) { hubUpdate = { warning: String(reason) }; }
+      const result = await invoke('app_inventory', { check, preview: byId('preview-channel').checked });
+      if (!result || typeof result.supported !== 'boolean' || !Array.isArray(result.apps)
+        || result.apps.some(app => !app || !Object.hasOwn(tools, app.app))) throw 'The app inventory response is unavailable.';
+      inventory = result;
+      inventoryError = '';
       byId('catalog-status').textContent = !inventory.supported ? 'App management requires Windows x64 in this build.'
         : inventory.apps.some(app => app.checkWarning) ? 'Some update checks failed. Last verified releases remain available.'
         : check ? 'Update check complete. Installation always needs your approval.' : 'Installed apps checked.';
       succeeded = true;
-    } catch (reason) { byId('catalog-status').textContent = String(reason); }
+    } catch (reason) { inventoryError = String(reason); byId('catalog-status').textContent = inventoryError; }
+    // A broken companion scan must not hide a Hub update that can repair it.
+    try {
+      const result = await invoke('hub_update_status', { online: check, preview: byId('preview-channel').checked });
+      if (!result || typeof result.currentVersion !== 'string') throw 'Hub update response is unavailable.';
+      hubUpdate = result;
+      hubChecked = true;
+    } catch (reason) { hubUpdate = { warning: String(reason) }; }
     finally { busy = false; renderState(); }
-    if (check && byId('auto-download').checked && inventory?.supported) {
+    if (check && succeeded && byId('auto-download').checked && inventory?.supported) {
       for (const app of [...inventory.apps]) {
         if (!byId('auto-download').checked) break;
         if (app.updateAvailable && !app.downloaded && !app.issue && !app.installBlocked) await action('download_app', app.app, app.availableVersion);
       }
-      if (byId('auto-download').checked && hubUpdate?.availableVersion && !hubUpdate.downloaded && !hubUpdate.installBlocked) await hubAction('download_hub_update');
     }
+    if (check && hubChecked && byId('auto-download').checked && hubUpdate?.availableVersion && !hubUpdate.downloaded && !hubUpdate.installBlocked) await hubAction('download_hub_update');
     return succeeded;
   }
 
@@ -289,7 +305,7 @@
   }
 
   async function action(command, app = current, version = appState()?.availableVersion, extra = {}) {
-    if (busy || !Object.hasOwn(tools, app)) return;
+    if (busy || inventoryError || !Object.hasOwn(tools, app)) return;
     busy = true; renderState(); error.classList.add('hidden');
     byId('operation-progress').classList.add('hidden');
     try {
@@ -341,6 +357,7 @@
   byId('open-button').addEventListener('click', () => action('open_app'));
   byId('adopt-button').addEventListener('click', () => action('use_existing_app'));
   byId('check-updates').addEventListener('click', () => refresh(true));
+  byId('retry-inventory').addEventListener('click', () => refresh(false));
   byId('recheck-app').addEventListener('click', async () => {
     if (busy) return;
     const app = current;

@@ -188,6 +188,11 @@ async function closeHosted(app) {
   page.on('pageerror', error => errors.push(error.message));
   await page.waitForFunction(() => window.CreatorHubNative && !document.querySelector('#check-updates').disabled, null, { timeout: 120000 });
   assert.equal(await page.locator('#view-projects').isVisible(), true, 'Normal launch opens Projects');
+  assert.equal((await page.locator('.footer-version').innerText()).trim(), require('../package.json').version, 'Visible version matches the packaged release');
+  assert.equal(await page.locator('#inventory-error').isVisible(), false, 'Startup inventory succeeds without a manual retry');
+  assert.match(await page.locator('#catalog-status').innerText(), /Installed apps checked|Update check complete|Some update checks failed/);
+  for (const app of ['mcp', 'setup']) assert.match(await page.locator(`#status-${app}`).innerText(), /Installed |Available |Update available/);
+  report.checks.push('Startup discovers apps without a manual retry and displays the packaged version');
   await show('hub');
   assert.equal(await page.locator('#preview-channel').isChecked(), true);
   assert.match(await page.evaluate(() => window.__TAURI__.core.invoke('app_inventory', { check: false, preview: true }).then(() => 'ALLOWED', String)), /trusted shell/);

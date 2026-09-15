@@ -136,7 +136,7 @@ test('failed blocker recheck retains protection and does not report success', as
   await expect(page.locator('#update-blockers-status')).toHaveText('Could not check running apps. Try again.');
   await expect(page.locator('#release-button')).toBeDisabled();
   await expect(page.locator('#recheck-app')).toBeEnabled();
-  expect(await page.evaluate(() => window.calls.map(c => c.command))).toEqual(['app_inventory']);
+  expect(await page.evaluate(() => window.calls.map(c => c.command))).toEqual(['app_inventory', 'hub_update_status']);
   expect(await page.evaluate(() => window.injected)).toBeUndefined();
 });
 
@@ -489,7 +489,7 @@ test('standalone compatibility never invents a hosted update or hides the full a
   await page.locator('#check-updates').click();
   await page.getByRole('button', { name: 'View Creator Works MCP', exact: true }).click();
   await expect(page.locator('#compatibility-status')).toHaveText('Your app is ready');
-  await expect(page.locator('#compatibility-detail')).toContainText('future update');
+  await expect(page.locator('#compatibility-detail')).toContainText('This app version opens in its own window');
   await expect(page.locator('#host-mcp-button')).toBeHidden();
   await expect(page.locator('#tool-state')).toContainText('C:\\Apps\\MCP');
   await page.locator('#release-button').click();

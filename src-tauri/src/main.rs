@@ -243,6 +243,10 @@ fn open_resource(resource: String) -> Result<(), String> {
         .map_err(|error| format!("Could not open the browser: {error}"))
 }
 
+fn shell_initialization(shell_key: &str) -> String {
+    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); }}", shell_key, env!("CARGO_PKG_VERSION"))
+}
+
 fn main() {
     if let Some(wait) = installer_preflight::mode(std::env::args_os().skip(1)) {
         std::process::exit(installer_preflight::run(wait));
@@ -254,7 +258,7 @@ fn main() {
     let mut random = [0u8; 32];
     getrandom::fill(&mut random).expect("Cannot initialize Hub's private shell authority");
     let shell_key: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-    let initialize = format!("if(window === window.top) Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}});", shell_key);
+    let initialize = shell_initialization(&shell_key);
     let commands: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
         open_resource,
         community_catalogue,
@@ -329,6 +333,13 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_version_comes_from_the_executable() {
+        let script = shell_initialization("test-key");
+        assert!(script.starts_with("if(window === window.top)"));
+        assert!(script.contains(&format!("'__CREATOR_HUB_VERSION__', {{value: '{}'}}", env!("CARGO_PKG_VERSION"))));
+    }
 
     #[test]
     fn only_named_public_resources_are_accepted() {

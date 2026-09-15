@@ -39,6 +39,8 @@ main { padding-top: 20px; }
 .update-preferences label { display: flex; align-items: center; gap: 7px; line-height: 1.5; }
 input[type="checkbox"] { accent-color: var(--cyan); width: 15px; height: 15px; flex-shrink: 0; }
 .catalog-status { margin-top: 12px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.inventory-error { margin-bottom: 18px; padding: 12px 0 12px 12px; border-left: 2px solid var(--amber); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.inventory-error p { margin-bottom: 8px; }
 .tool-state { margin-top: 16px; font-size: 12px; color: var(--muted); line-height: 1.6; overflow-wrap: anywhere; }
 .update-blockers { margin-top: 18px; padding: 14px 0; border-top: 1px solid var(--line); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .update-blockers h3 { font-size: 15px; margin-bottom: 8px; }
