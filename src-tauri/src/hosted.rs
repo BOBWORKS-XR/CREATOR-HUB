@@ -707,12 +707,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let drained = temp.path().join("drained.txt");
         let release = temp.path().join("release.txt");
+        let stderr = temp.path().join("fixture.stderr");
         let mut fixture = Fixture(Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command",
                 "[Console]::Out.WriteLine('{not-json}'); [Console]::Out.Flush(); $null = [Console]::In.ReadToEnd(); [IO.File]::WriteAllText($env:CREATOR_TEST_DRAINED, 'accepted work finished'); while (-not [IO.File]::Exists($env:CREATOR_TEST_RELEASE)) { Start-Sleep -Milliseconds 20 }"])
             .env("CREATOR_TEST_DRAINED", &drained)
             .env("CREATOR_TEST_RELEASE", &release)
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .stdin(Stdio::piped()).stdout(Stdio::piped())
+            .stderr(Stdio::from(File::create(&stderr).unwrap()))
             .creation_flags(0x08000000).spawn().unwrap());
         let manager = crate::manager::Manager::default();
         let connection = Arc::new(SessionConnection {
@@ -784,11 +786,28 @@ mod tests {
         while fixture.0.try_wait().unwrap().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(fixture
-            .0
-            .try_wait()
+        let status = fixture.0.try_wait().unwrap();
+        // A failed deadline remains a failure; observe whether teardown later succeeds.
+        let observed = if status.is_none() {
+            let deadline = Instant::now() + Duration::from_secs(7);
+            while fixture.0.try_wait().unwrap().is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            fixture.0.try_wait().unwrap()
+        } else {
+            status
+        };
+        let mut diagnostics = String::new();
+        use std::io::Read;
+        File::open(&stderr)
             .unwrap()
-            .is_some_and(|status| status.success()));
+            .take(8192)
+            .read_to_string(&mut diagnostics)
+            .unwrap();
+        assert!(
+            status.is_some_and(|status| status.success()),
+            "Fixture exit at deadline: {status:?}; later observed: {observed:?}; stderr: {diagnostics}"
+        );
         connection.operation.lock().unwrap().backend_exited();
         assert!(!manager.busy());
         assert!(manager.allow_close());

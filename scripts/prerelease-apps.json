@@ -10,7 +10,7 @@
   },
   "mcp": {
     "version": "2.7.0",
-    "assetName": "Creator-Works-MCP-2.7.0-Windows-setup.exe",
+    "assetName": "Creator.Works.MCP_2.7.0_x64-setup.exe",
     "installerSha256": "f403da14237a16d3e7a50620d484c60c0a3fbdbb6abfe1ccaf21e4ffb78e1da9",
     "executableSha256": "0fc9f6023973378778a00b063c383f37f2973eec9d89a96b084391c89f2287cd",
     "acceptanceRun": "35003567089",
