@@ -79,7 +79,8 @@ foreach ($window in $windows) {
                 $id = [int]$Matches[1]
                 $dialog = [IntPtr]$window.Current.NativeWindowHandle
                 $titles = @{
-                    'Install' = @('Install Creator app'); 'Cancel' = @('Install Creator app')
+                    'Install' = @('Install Creator app'); 'Cancel' = @('Install Creator app', 'Add Unity menu', 'Update Unity menu')
+                    'Add menu' = @('Add Unity menu'); 'Update menu' = @('Update Unity menu')
                     'Enable MCP controls' = @('Open MCP in Creator Hub?'); 'Open read-only preview' = @('Open MCP in Creator Hub?')
                     'Open in Hub' = @('Open Setup in Creator Hub?'); 'Not now' = @('Open MCP in Creator Hub?', 'Open Setup in Creator Hub?')
                     'Close view' = @('Close hosted app?'); 'Keep open' = @('Close hosted app?')
