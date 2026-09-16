@@ -23,7 +23,7 @@ hosted views, so it did not cover this case.
 
 ## Evidence and Limits
 
-Local checks: 168 UI tests and 111 Rust tests passed, with nine opt-in Rust tests
+Local baseline: 168 UI tests and 111 Rust tests passed, with nine opt-in Rust tests
 excluded. Native Rust fixtures verify EOF-driven child exit and no forced kill
 on timeout. UI tests include cancel/form preservation, busy refusal, restart
 restoration of one/two views, failure/retry, and delayed close events.
@@ -31,7 +31,15 @@ restoration of one/two views, failure/retry, and delayed close events.
 The packaged CI suite additionally seeds a restoration record on disposable
 Windows runners and exercises the real installed MCP/Setup backends, all-accept
 and decline/retry paths. This tests the recovery half, not a signed installer
-handoff or automatic restart across two releases. Its first run is pending.
+handoff or automatic restart across two releases. Run 35094977239 caught a real
+startup race: transport-ready arrived before Setup's first requirements scan or
+MCP's initial workflow released the shared native operation lease. Starting the
+next view or inventory then failed. That candidate is not publishable.
+
+Restoration now waits for the pinned companion's initial probe/workflow completion
+before proceeding. A controlled-delay regression covers both apps and asserts
+that neither the next app nor inventory runs early. The original four failing
+native reports remain preserved; a rebuilt candidate must repeat acceptance.
 
 The signed public self-update gate must be repeated before any release is called
 ready. Older installed binaries do not gain this behavior retroactively: their

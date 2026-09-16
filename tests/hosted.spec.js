@@ -51,7 +51,9 @@ async function open(page, options = {}) {
           switch (args.command) {
             case 'begin_ui_operation': return 7;
             case 'finish_ui_operation': return null;
-            case 'load_config': return structuredClone(mcpConfig);
+            case 'load_config':
+              if (options.pendingStartup) await new Promise(resolve => { window.finishMcpStartup = resolve; });
+              return structuredClone(mcpConfig);
             case 'save_config': mcpConfig = structuredClone(args.args.config); return null;
             case 'discover_unity_projects': return channels.map(channel => ({name:channel.name,path:channel.unity_project_path}));
             case 'get_project_sdk_profile': return profile;
@@ -68,6 +70,7 @@ async function open(page, options = {}) {
         }
         if (args.command === 'get_hosted_snapshot') return { config: { channels: [{ id: 'demo', name: 'Read-only demo', unity_project_path: 'E:\\Demo' }], active_channel_id: 'demo', mcp_server_path: '', tool_groups: 'core' }, readOnly: true, source: 'current', resourceDir: 'E:\\Preview\\apps\\mcp' };
         if (args.command === 'pick_project_folder') return 'E:\\Not Saved';
+        if (args.command === 'probe_environment' && options.pendingStartup) await new Promise(resolve => { window.finishSetupStartup = resolve; });
         if (args.command === 'probe_environment') return {
           platform: 'windows', ready: true, hubInstalled: true, hubVersion: '3.21.1', hubAutoRegistration: true,
           suggestedProjectParent: 'E:\\UnityTest', blockers: [],
@@ -85,6 +88,7 @@ async function open(page, options = {}) {
     };
   }, { files, mcpFiles, options, setupVersion });
   await page.goto('http://127.0.0.1:4188/');
+  if (options.pendingStartup) return;
   await expect(page.locator('#catalog-status')).toContainText('Update check complete');
   if (options.onlyStartup) return;
   await page.locator('#hub-pages [data-view="hub"]').click();
@@ -141,6 +145,23 @@ for (const delayedCloseEvent of [false, true]) test(`installer handoff failure r
     await expect(page.frameLocator('#setup-host-frame').locator('#create-button')).toBeEnabled();
   }
   expect(await page.evaluate(() => window.hostCalls.filter(c => ['install_hub_update', 'restore_hosted_app', 'complete_hosted_restore', 'stop_hosted_app', 'open_app'].includes(c.command)).map(c => c.command))).toEqual(['install_hub_update', 'restore_hosted_app', 'complete_hosted_restore']);
+});
+
+test('restoration waits for each real app startup workflow before the next app and inventory', async ({ page }) => {
+  await open(page, { onlyStartup: true, restoreApps: ['setup', 'mcp'], writableMcp: true, pendingStartup: true });
+  await page.waitForFunction(() => typeof window.finishSetupStartup === 'function');
+  expect(await page.evaluate(() => window.hostCalls.filter(c => c.command === 'restore_hosted_app').map(c => c.args.app))).toEqual(['setup']);
+  expect(await page.evaluate(() => window.hostCalls.some(c => c.command === 'app_inventory'))).toBe(false);
+  await page.evaluate(() => window.finishSetupStartup());
+  await page.waitForFunction(() => typeof window.finishMcpStartup === 'function');
+  expect(await page.evaluate(() => window.hostCalls.filter(c => c.command === 'restore_hosted_app').map(c => c.args.app))).toEqual(['setup', 'mcp']);
+  expect(await page.evaluate(() => window.hostCalls.some(c => c.command === 'app_inventory'))).toBe(false);
+  await page.evaluate(() => window.finishMcpStartup());
+  await expect(page.locator('#hosted-restore-message')).toContainText('views have reopened');
+  await expect(page.locator('#catalog-status')).toContainText('Update check complete');
+  await expect(page.locator('#inventory-error')).toBeHidden();
+  const calls = await page.evaluate(() => window.hostCalls.map(c => c.args?.command || c.command));
+  expect(calls.indexOf('app_inventory')).toBeGreaterThan(calls.indexOf('finish_ui_operation'));
 });
 
 for (const width of [940, 390]) test(`update restart restores both hosted apps but keeps Apps selected at ${width}px`, async ({ page }, testInfo) => {

@@ -63,9 +63,10 @@
     state.failed = true;
     state.port?.postMessage({ type: 'disconnect' });
     state.status = reason;
+    state.finishInitialization?.();
     render();
   }
-  async function attach(app, state, result) {
+  async function attach(app, state, result, restoring) {
     if (!result?.session || result.appId !== apps[app].id || !result.files) throw new Error('Invalid hosted app response.');
     state.writable = app === 'mcp' && result.hostingRevision === 2 && result.effectiveMode === 'writable';
     state.session = result.session;
@@ -80,6 +81,12 @@
     const channel = new MessageChannel();
     const port = channel.port1;
     state.port = port;
+    // Transport-ready precedes the pinned apps' startup work. Restoration must
+    // finish Setup's probe / MCP's initial workflow before starting another app
+    // or discovery: all of those operations share the native Manager lease.
+    let initialized;
+    const initialization = new Promise(resolve => { initialized = resolve; });
+    state.finishInitialization = initialized;
     const loaded = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('App interface did not become ready. No operation was retried.')), 15000);
       let lastId = 0;
@@ -100,7 +107,13 @@
           if (data.command === 'finish_ui_operation') state.workflow = false;
           port.postMessage({ type: 'result', id: data.id, ok: true, result: value });
         } catch (error) { port.postMessage({ type: 'result', id: data.id, ok: false, error: String(error) }); }
-        finally { state.inFlight = false; render(); }
+        finally {
+          state.inFlight = false;
+          if ((app === 'setup' && data.command === 'probe_environment') ||
+              (app === 'mcp' && (data.command === 'finish_ui_operation' || data.command === 'get_hosted_snapshot' ||
+                (data.command === 'begin_ui_operation' && !state.workflow)))) initialized();
+          render();
+        }
       };
     });
     let connected = false;
@@ -114,6 +127,8 @@
     document.querySelector('#hosted-content').append(frame);
     render();
     await loaded;
+    if (restoring) await initialization;
+    if (state.failed) throw new Error(state.status);
     state.status = `${apps[app].label} ${result.version}`;
     render();
   }
@@ -134,7 +149,7 @@
       const state = { frame: null, port: null, session: null, ready: false, inFlight: false, failed: false, closing: false, status: 'Opening app' };
       sessions.set(app, state);
       try {
-        await attach(app, state, await invoke(restoring ? 'restore_hosted_app' : 'start_hosted_app', { app }));
+        await attach(app, state, await invoke(restoring ? 'restore_hosted_app' : 'start_hosted_app', { app }), restoring);
         if (restoring) await invoke('complete_hosted_restore', { app });
       }
       catch (error) {
