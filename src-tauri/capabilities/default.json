@@ -3,7 +3,7 @@
   "description": "Local Creator Hub window",
   "windows": ["main"],
   "permissions": ["core:event:allow-listen", "core:event:allow-unlisten",
-    "allow-open-resource", "allow-app-inventory", "allow-download-app", "allow-install-app",
+    "allow-open-resource", "allow-app-inventory", "allow-download-app", "allow-install-app", "allow-disconnect-mcp",
     "allow-hub-update-status", "allow-download-hub-update", "allow-install-hub-update",
     "allow-community-catalogue", "allow-open-community-link", "allow-download-community-package",
     "allow-community-projects", "allow-choose-community-project", "allow-install-community-menu",

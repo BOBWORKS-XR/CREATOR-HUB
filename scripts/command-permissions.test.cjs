@@ -16,3 +16,16 @@ test('Hub self-update commands are registered and allowed only in the main windo
     assert.ok(capability.permissions.includes(`allow-${command.replaceAll('_', '-')}`), `${command} blocked by main-window ACL`);
   }
 });
+
+test('MCP disconnect is registered and allowed only in the trusted main window', () => {
+  const root = path.join(__dirname, '..', 'src-tauri');
+  const build = fs.readFileSync(path.join(root, 'build.rs'), 'utf8');
+  const main = fs.readFileSync(path.join(root, 'src', 'main.rs'), 'utf8');
+  const capability = JSON.parse(fs.readFileSync(path.join(root, 'capabilities', 'default.json'), 'utf8'));
+  assert.deepEqual(capability.windows, ['main']);
+  assert.equal(capability.remote, undefined);
+  assert.ok(build.includes('"disconnect_mcp"'), 'disconnect_mcp missing from generated permissions');
+  assert.ok(main.includes('        disconnect_mcp,'), 'disconnect_mcp missing from invoke handler');
+  assert.ok(capability.permissions.includes('allow-disconnect-mcp'), 'disconnect_mcp blocked by main-window ACL');
+  assert.ok(main.includes('Hub commands are available only to its trusted shell.'));
+});

@@ -17,6 +17,7 @@ fn main() {
             "app_inventory",
             "download_app",
             "install_app",
+            "disconnect_mcp",
             "hub_update_status",
             "download_hub_update",
             "install_hub_update",
