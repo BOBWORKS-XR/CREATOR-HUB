@@ -1,5 +1,13 @@
 # Creator Hub 0.1.3
 
+2026-09-16 evidence packaging update: the eleven separate build, installed and
+native test-report JSON attachments are preserved byte-for-byte in
+[verification-reports.zip](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.3/verification-reports.zip).
+Its `CONTENTS.json` records original filenames, asset IDs, sizes and hashes.
+Individual report attachment URLs changed; installers, signatures, catalog and
+updater metadata, checksums and licence attachments are untouched. Consolidating
+diagnostics keeps the release-list response readable by older installed Hubs.
+
 - **Unblock MCP updates inside Hub.** If verified private MCP runtimes are still
   running, Apps and MCP details offer **Disconnect MCP for update**.
 - **Confirm once, then update.** Cancel changes nothing. Confirming stops only
