@@ -74,7 +74,7 @@ async function showApps() {
   assert.equal((await page.locator('.footer-version').innerText()).trim(), from.version);
   await showApps();
   await retry(async () => assert.equal(await page.locator('#hub-update-button').isEnabled(), true), 120);
-  assert.match(await page.locator('#hub-update-status').innerText(), /0\.1\.3/);
+  assert.ok((await page.locator('#hub-update-status').innerText()).includes(`Version ${to.version}`));
   assert.equal(await page.locator('#hub-update-warning').isVisible(), false);
   const state = await page.evaluate(() => window.CreatorHubNative.invoke('hub_update_status', { online: false, preview: true }));
   assert.equal(state.currentVersion, from.version);
@@ -84,7 +84,7 @@ async function showApps() {
   const preference = 'self-update-preserves-storage';
   await page.evaluate(value => localStorage.setItem('creator-hub.ci-self-update', value), preference);
   report.before = state;
-  report.checks.push('Unmodified installed Hub 0.1.2 discovers public signed 0.1.3 and enables its actual Update Hub button');
+  report.checks.push(`Unmodified installed Hub ${from.version} discovers public signed ${to.version} and enables its actual Update Hub button`);
   await page.screenshot({ path: path.join(out, 'before-update.png') });
   await page.locator('#hub-update-button').click();
   await retry(() => native(child.pid, 'button', 'Not now'));
@@ -92,7 +92,7 @@ async function showApps() {
   assert.equal(child.exitCode, null);
   assert.equal(hash(hub), from.exe);
   assert.equal(hash(sentinel), sentinelHash);
-  report.checks.push('Native Not now preserves the running 0.1.2 executable and settings');
+  report.checks.push(`Native Not now preserves the running ${from.version} executable and settings`);
   await page.locator('#hub-update-button').click();
   await retry(() => native(child.pid, 'button', 'Update Hub'));
   await retry(() => assert.equal(child.exitCode, 0), 180);
@@ -112,10 +112,10 @@ async function showApps() {
   assert.equal(await page.evaluate(() => localStorage.getItem('creator-hub.ci-self-update')), preference);
   assert.equal(hash(sentinel), sentinelHash);
   const registry = execFileSync('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Creator Hub', '/v', 'DisplayVersion'], { encoding: 'utf8', windowsHide: true });
-  assert.match(registry, /DisplayVersion\s+REG_SZ\s+0\.1\.3/);
+  assert.equal(registry.match(/DisplayVersion\s+REG_SZ\s+(\S+)/)?.[1], to.version);
   await page.screenshot({ path: path.join(out, 'after-restart.png') });
-  report.checks.push('Actual in-app consent downloads/verifies, exits 0.1.2, installs exact 0.1.3 and automatically restarts without a manual launch');
-  report.checks.push('Restarted footer and uninstall registry show 0.1.3; browser preference and unmanaged installation file survive');
+  report.checks.push(`Actual in-app consent downloads/verifies, exits ${from.version}, installs exact ${to.version} and automatically restarts without a manual launch`);
+  report.checks.push(`Restarted footer and uninstall registry show ${to.version}; browser preference and unmanaged installation file survive`);
   report.selfUpdateTested = true;
   report.passed = true;
 })().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; }).finally(async () => {

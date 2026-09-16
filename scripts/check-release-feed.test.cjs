@@ -30,6 +30,13 @@ test('self-update installation harness refuses non-disposable machines before do
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /restricted to a disposable GitHub-hosted Windows runner/);
 });
+
+test('self-update assertions and evidence derive versions from the installer pins', () => {
+  const source = require('node:fs').readFileSync(require.resolve('./native-self-update-smoke.cjs'), 'utf8');
+  const assertions = source.slice(source.indexOf('const hub ='));
+  // Ignore four-part loopback addresses, but reject literal versions and version regexes.
+  assert.doesNotMatch(assertions, /(?<![\d.])\d+(?:\\?\.\d+){2}(?![\d.])/, 'Only the from/to pins may hardcode release versions');
+});
 test('draft gate accounts for full asset metadata and release notes before publication', () => {
   const current = bytes([{ ...release(), tag_name: 'v0.1.2', body: 'x'.repeat(240000) }]);
   const draft = { ...release(), draft: true, body: 'x'.repeat(24000) };
