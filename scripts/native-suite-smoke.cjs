@@ -208,9 +208,10 @@ async function closeHosted(app) {
   assert.equal(await page.locator('#preview-channel').isChecked(), true);
   assert.match(await page.evaluate(() => window.__TAURI__.core.invoke('app_inventory', { check: false, preview: true }).then(() => 'ALLOWED', String)), /trusted shell/);
   const inventory = await page.evaluate(check => window.CreatorHubNative.invoke('app_inventory', { check, preview: true }), !stagedSetup);
+  report.initialInventory = inventory;
   for (const app of selectedApps) {
     const state = inventory.apps.find(item => item.app === app);
-    assert.equal(state.availableVersion, pins[app].version);
+    assert.equal(state.availableVersion, pins[app].version, JSON.stringify(state));
     assert.equal(state.installed, upgrade);
     if (upgrade) assert.equal(state.updateAvailable, true);
     assert.equal(state.installerInteractive, false);
