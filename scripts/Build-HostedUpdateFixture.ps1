@@ -40,7 +40,18 @@ try {
     & (Join-Path $PSScriptRoot 'Build-Installer.ps1') -OutputName 'Creator-Hub-hosted-update-fixture' -HostedPins (Join-Path $PSScriptRoot 'prerelease-apps.json')
     $dir = Join-Path $root 'dist/Creator-Hub-hosted-update-fixture'
     $installer = Join-Path $dir "Creator-Hub-$fixtureVersion-Windows-setup.exe"
-    $exe = Join-Path $dir 'creator-hub.exe'
+    # Bind installed bytes, not the pre-packaging executable. Match the main
+    # candidate gate, including the installer's exact preflight payload.
+    $extracted = Join-Path $dir 'extracted'
+    if (Test-Path -LiteralPath $extracted) { throw 'Fixture extraction output already exists.' }
+    $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+    if (-not $sevenZip) { $sevenZip = 'C:\Program Files\7-Zip\7z.exe' }
+    & $sevenZip x $installer ('-o' + $extracted) '-y' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Fixture installer extraction failed.' }
+    $exe = Join-Path $extracted 'creator-hub.exe'
+    if ((Get-FileHash -LiteralPath $exe).Hash -ne (Get-FileHash -LiteralPath (Join-Path $extracted '$PLUGINSDIR/creator-hub-preflight.exe')).Hash) {
+        throw 'Fixture preflight and installed payload differ.'
+    }
     $receipt = @{ testOnly = $true; scope = '0.1.6 runtime with version-only 0.1.5 fixture; not public stable'; sourceRevision = $revision;
         fromVersion = $fixtureVersion; toVersion = $targetVersion; changes = $changes;
         installerPath = $installer; executablePath = $exe;

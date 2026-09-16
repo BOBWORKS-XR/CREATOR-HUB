@@ -27,6 +27,13 @@ jobs:
         if: ${{ inputs.hosted_fixture }}
         shell: pwsh
         run: ./scripts/Build-HostedUpdateFixture.ps1
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.hosted_fixture }}
+        with:
+          name: TEST-ONLY-hosted-update-fixture
+          path: dist/Creator-Hub-hosted-update-fixture/
+          retention-days: 7
+          if-no-files-found: error
       - run: node --test scripts/check-release-feed.test.cjs
       - name: Check the exact public feed used by installed Hub versions
         run: node scripts/check-release-feed.cjs 0.1.6
