@@ -1,12 +1,17 @@
 name: Public Hub self-update acceptance
 on:
   workflow_dispatch:
+    inputs:
+      hosted_fixture:
+        description: Also test the new outgoing updater using a version-only runtime fixture, not public stable
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
   self-update:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
         with:
@@ -16,10 +21,18 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ inputs.hosted_fixture }}
+      - name: Build test-only version fixture from current runtime source
+        if: ${{ inputs.hosted_fixture }}
+        shell: pwsh
+        run: ./scripts/Build-HostedUpdateFixture.ps1
       - run: node --test scripts/check-release-feed.test.cjs
       - name: Check the exact public feed used by installed Hub versions
-        run: node scripts/check-release-feed.cjs 0.1.5
-      - name: Test public 0.1.4 in-app update and automatic restart into 0.1.5
+        run: node scripts/check-release-feed.cjs 0.1.6
+      - name: Test in-app update and automatic restart into exact public 0.1.6
+        env:
+          CREATOR_HOSTED_UPDATE_FIXTURE: ${{ inputs.hosted_fixture && 'dist/Creator-Hub-hosted-update-fixture/fixture.json' || '' }}
         run: node scripts/native-self-update-smoke.cjs
       - uses: actions/upload-artifact@v4
         if: always()
@@ -31,4 +44,5 @@ jobs:
             artifacts/native-suite-*/startup.json
             artifacts/native-suite-*/dialogs.json
             artifacts/native-suite-*/webview-policy.json
+            dist/Creator-Hub-hosted-update-fixture/fixture.json
           if-no-files-found: warn

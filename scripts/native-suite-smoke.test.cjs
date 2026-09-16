@@ -32,7 +32,7 @@ test('test browser policy refuses local and self-hosted machines before accessin
 });
 
 test('installed candidate acceptance refuses local machines for every Hub baseline', { skip: process.platform !== 'win32' }, () => {
-  for (const baseline of ['clean', 'alpha.3', 'alpha.4', 'alpha.5', 'alpha.6', 'stable-0.1.0', 'stable-0.1.1', 'stable-0.1.2', 'stable-0.1.3', 'stable-0.1.4']) {
+  for (const baseline of ['clean', 'alpha.3', 'alpha.4', 'alpha.5', 'alpha.6', 'stable-0.1.0', 'stable-0.1.1', 'stable-0.1.2', 'stable-0.1.3', 'stable-0.1.4', 'stable-0.1.5']) {
     const result = spawnSync('powershell.exe', ['-NoProfile', '-File', path.join(__dirname, 'Test-InstalledCandidate.ps1'), '-CandidateDirectory', 'not-a-candidate', '-HubBaseline', baseline], {
       encoding: 'utf8', windowsHide: true, timeout: 10000,
       env: { ...process.env, GITHUB_ACTIONS: 'false' },
@@ -41,5 +41,17 @@ test('installed candidate acceptance refuses local machines for every Hub baseli
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /restricted to a disposable GitHub-hosted Windows runner/);
     assert.doesNotMatch(result.stderr, /Cannot find path/);
+  }
+});
+
+test('version-only update fixture refuses local and self-hosted machines before rewriting manifests', { skip: process.platform !== 'win32' }, () => {
+  for (const env of [{ GITHUB_ACTIONS: 'false' }, { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'self-hosted', RUNNER_OS: 'Windows' }]) {
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-File', path.join(__dirname, 'Build-HostedUpdateFixture.ps1')], {
+      encoding: 'utf8', windowsHide: true, timeout: 10000, env: { ...process.env, ...env },
+    });
+    assert.ifError(result.error);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /restricted to disposable GitHub-hosted Windows runners/);
+    assert.doesNotMatch(result.stderr, /Cannot find path|Unexpected version/);
   }
 });
