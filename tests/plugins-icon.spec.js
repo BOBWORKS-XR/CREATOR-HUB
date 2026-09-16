@@ -5,6 +5,11 @@ const { verifyPluginsIcon } = require('../scripts/verify-plugins-icon.cjs');
 const expectedIconHash = createHash('sha256').update(readFileSync(require.resolve('../src/icons/creator-plugins.png'))).digest('hex');
 
 test.beforeEach(async ({ page }) => {
+  // Match native CSP: images decode normally while same-origin fetch is forbidden.
+  await page.route('http://127.0.0.1:4188/', async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, headers: { ...response.headers(), 'content-security-policy': "connect-src ipc: http://ipc.localhost; img-src 'self' data:" } });
+  });
   await page.addInitScript(() => {
     window.__TAURI__ = { event: { listen: async () => () => {} }, core: { invoke: async command => {
       if (command === 'get_launch_request') return { view: 'hub', revision: 0 };

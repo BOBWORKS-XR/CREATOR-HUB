@@ -26,6 +26,7 @@ and alpha while scaling the selected artwork.
 `tests/plugins-icon.spec.js` verifies actual image decoding, cyan/red/gray and
 transparent pixels, the 34px menu size, the active-page icon at desktop/mobile
 widths, and saves menu/detail screenshots. Packaged tests compare the actual
-installed icon hash with this source and check its alpha and transparent border.
+decoded pixels with the hash-pinned source and check alpha and the transparent
+border without weakening the production content-security policy.
 
 Earlier SVG proposals are not shipped. This mark is not a Unity or Lucide asset.
