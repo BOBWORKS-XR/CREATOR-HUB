@@ -83,7 +83,8 @@ foreach ($window in $windows) {
                     'Disconnect MCP' = @('Disconnect MCP for update')
                     'Add menu' = @('Add Unity menu'); 'Update menu' = @('Update Unity menu')
                     'Enable MCP controls' = @('Open MCP in Creator Hub?'); 'Open read-only preview' = @('Open MCP in Creator Hub?')
-                    'Open in Hub' = @('Open Setup in Creator Hub?'); 'Not now' = @('Open MCP in Creator Hub?', 'Open Setup in Creator Hub?')
+                    'Open in Hub' = @('Open Setup in Creator Hub?'); 'Not now' = @('Open MCP in Creator Hub?', 'Open Setup in Creator Hub?', 'Update Creator Hub')
+                    'Update Hub' = @('Update Creator Hub')
                     'Close view' = @('Close hosted app?'); 'Keep open' = @('Close hosted app?')
                 }
                 if (-not $titles.ContainsKey($Value) -or $window.Current.Name -cnotin $titles[$Value]) { throw 'Requested task dialog title does not match the expected action.' }
