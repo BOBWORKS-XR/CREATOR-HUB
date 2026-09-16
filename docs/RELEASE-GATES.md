@@ -6,6 +6,15 @@ installers and release tags still require the relevant acceptance gates and
 recorded package evidence. A preview must not be advertised as
 completed adoption. Runtime acceptance is distinct from source/unit tests.
 
+## Current Hub Publishing Requirements (2026-09-16)
+
+Follow [Required Hub Release Gates](HUB-PUBLICATION-CHECKLIST.md) for the new
+pre-publication legacy-feed size check, guarded draft publication, and actual
+previous-stable in-app update/restart acceptance. These requirements supplement
+the artifact, compatibility and protected-state gates below. The dated notes
+remain historical evidence; 0.1.2 to 0.1.3 self-update is now covered by
+[run 35079200231](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35079200231).
+
 ## Status
 
 2026-09-13 alpha.6 published prerelease: the user explicitly approved coordinated

@@ -39,7 +39,11 @@ An earlier legacy fixture also reported an unexpected older Setup release; its
 cause was not established. Diagnostic capture was added, not a speculative
 product workaround. The final receipt records what this candidate actually saw.
 
-Full in-app Hub self-update/restart and every AI client's automatic reconnect
-policy are not claimed tested. Installer upgrades and signature verification are
-separate checks. Native macOS/Linux, headset behavior and arbitrary package code
-were not retested for this Windows hotfix.
+After publication, excessive GitHub release-list metadata blocked older clients'
+discovery. Compact release-page text repaired the feed without replacing any
+assets. [Actual 0.1.2 to 0.1.3 in-app update/restart acceptance](RELEASE-FEED-0.1.3.md)
+now passes, including cancellation and preserved preferences. Earlier attached
+receipts retain their original, narrower scope.
+
+Every AI client's reconnect policy, native macOS/Linux, headset behavior and
+arbitrary package code were not retested for this Windows hotfix.

@@ -6,6 +6,14 @@ This supersedes older alpha.8 publication holds. Hub 0.1.0, Setup 0.3.0 and MCP
 
 ## Hub 0.1.3 and MCP 2.7.1 Hotfixes: Public
 
+**Later correction:** the initial 0.1.3 publication made the GitHub release list
+too large for installed 0.1.2. The release body text was compacted; all assets
+remain unchanged. Real in-app discovery, cancellation, update and automatic
+restart from unmodified 0.1.2 to 0.1.3 now pass in run 35079200231. See
+[the repair evidence](RELEASE-FEED-0.1.3.md) and
+[mandatory future gates](RELEASE-GATES.md). The older untested-self-update notes
+below describe the original publication checkpoint, before this new acceptance.
+
 Published 2026-09-16:
 
 - Hub: https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.3

@@ -11,6 +11,7 @@ const { chromium } = require('@playwright/test');
 const { checkLive } = require('./check-release-feed.cjs');
 const from = { version: '0.1.2', installer: 'a7da62fe16a99beead8872d0b1f185eb0db60ed6253d13f12ff190e89a9d4ef0', exe: 'efa17b33e2abca6a0f2de39996dabf81e98a41052e33b21a25b8b96ffa66b31e' };
 const to = { version: '0.1.3', installer: 'c373134d370aeeaca08e9408a581baa862f631c5bb8f3a87dc558e69c3506d0b', exe: '83a56c6f94f253d7155ac8f236479ce8f5c889ad34a2bf1776498103ee7b4728' };
+assert.equal(to.version, require('../package.json').version, 'Update acceptance pins for the intended release; testing an older update is not sufficient');
 const hub = path.join(process.env.LOCALAPPDATA, 'Creator Hub', 'creator-hub.exe');
 assert.equal(fs.existsSync(hub), false, 'Expected a fresh runner without Hub installed');
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
@@ -53,6 +54,7 @@ async function showApps() {
 }
 (async () => {
   report.feed = await checkLive(to.version);
+  assert.equal(report.feed.previousStable, from.version, 'Exercise the previous public stable Hub, not an arbitrary older baseline');
   const installer = path.join(out, `Creator-Hub-${from.version}-Windows-setup.exe`);
   execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '120', '--output', installer,
     `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v${from.version}/Creator-Hub-${from.version}-Windows-setup.exe`], { windowsHide: true, timeout: 130000 });
