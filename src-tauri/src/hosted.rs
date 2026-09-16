@@ -5,9 +5,12 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{BufRead, BufReader, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{ChildStdin, Command, Stdio},
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager as _};
@@ -169,6 +172,7 @@ fn lifecycle_sequence(
 pub struct Hosting(Mutex<Vec<Session>>);
 struct Session {
     app: AppId,
+    path: PathBuf,
     writable: bool,
     connection: Arc<SessionConnection>,
     replies: mpsc::Receiver<Result<Value, String>>,
@@ -178,6 +182,7 @@ struct Session {
 }
 #[derive(Default)]
 struct SessionConnection {
+    exited: AtomicBool,
     input: Mutex<Option<ChildStdin>>,
     operation: Mutex<crate::hosted_operation::SessionOperation<crate::manager::Operation>>,
 }
@@ -345,9 +350,45 @@ impl Session {
 }
 
 impl Hosting {
-    pub fn has_sessions(&self) -> bool {
-        self.0.lock().map_or(true, |sessions| !sessions.is_empty())
+    pub fn update_views(&self) -> Result<Vec<crate::hosted_restore::View>, String> {
+        let sessions = self.0.lock().map_err(|_| "Hosted state unavailable.")?;
+        sessions.iter().map(|session| {
+            if session.connection.operation.lock().map_err(|_| "Hosted operation state unavailable.")?.busy() {
+                return Err(format!("{} is still working. Finish its work before updating Hub; no views were closed.", session.app.name()));
+            }
+            Ok(crate::hosted_restore::View { app: session.app, path: session.path.clone() })
+        }).collect()
     }
+
+    // Caller holds Manager's operation lease: no new hosted command/start can race
+    // the all-session preflight. EOF closes only Hub-owned backends, never AI clients.
+    pub fn suspend_for_update(
+        &self,
+        timeout: Duration,
+        closed: impl FnOnce(Vec<String>),
+    ) -> Result<(), String> {
+        self.update_views()?;
+        let (connections, nonces): (Vec<_>, Vec<_>) = {
+            let mut sessions = self.0.lock().map_err(|_| "Hosted state unavailable.")?;
+            let connections = sessions.iter().map(|s| Arc::clone(&s.connection)).collect();
+            let nonces = sessions.iter().map(|s| s.nonce.clone()).collect();
+            sessions.clear();
+            (connections, nonces)
+        };
+        closed(nonces);
+        let deadline = Instant::now() + timeout;
+        while connections
+            .iter()
+            .any(|c| !c.exited.load(Ordering::Acquire))
+        {
+            if Instant::now() >= deadline {
+                return Err("A hosted app has not finished closing. Hub was not updated and no process was forced closed. Wait for it to exit, then retry.".into());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Ok(())
+    }
+
     pub fn start(
         &self,
         handle: &tauri::AppHandle,
@@ -408,6 +449,8 @@ impl Hosting {
                 if let Ok(mut operation) = process_connection.operation.lock() {
                     operation.backend_exited();
                 }
+                drop(process_image);
+                process_connection.exited.store(true, Ordering::Release);
             } else {
                 // An uninspectable child is not safe to replace. Quarantine the
                 // lease for this Hub process instead of pretending it is idle.
@@ -444,6 +487,7 @@ impl Hosting {
         });
         let mut backend = Session {
             app: kind,
+            path: path.to_path_buf(),
             writable,
             connection,
             replies: receiver,
@@ -681,6 +725,103 @@ pub async fn stop_hosted_app(handle: tauri::AppHandle, session: String) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn update_fixture(path: &Path, app: AppId, connection: Arc<SessionConnection>) -> Session {
+        Session {
+            app,
+            path: path.to_path_buf(),
+            writable: false,
+            connection,
+            replies: mpsc::sync_channel(1).1,
+            id: 0,
+            nonce: app.id().into(),
+            _verified_executable: Arc::new(File::open(path).unwrap()),
+        }
+    }
+
+    #[test]
+    fn updating_checks_every_view_before_closing_any_and_preserves_busy_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("fixture");
+        std::fs::write(&path, b"fixture").unwrap();
+        let idle = Arc::new(SessionConnection::default());
+        let busy = Arc::new(SessionConnection::default());
+        let manager = crate::manager::Manager::default();
+        busy.operation
+            .lock()
+            .unwrap()
+            .begin("begin_ui_operation", &json!({}), || {
+                Ok(manager.fixture_operation(File::create(temp.path().join("lease")).unwrap()))
+            })
+            .unwrap();
+        busy.operation
+            .lock()
+            .unwrap()
+            .complete(&Ok(json!(1)))
+            .unwrap();
+        let hosting = Hosting(Mutex::new(vec![
+            update_fixture(&path, AppId::Setup, idle),
+            update_fixture(&path, AppId::Mcp, Arc::clone(&busy)),
+        ]));
+        let result =
+            hosting.suspend_for_update(Duration::ZERO, |_| panic!("Must not close any view"));
+        assert!(result.unwrap_err().contains("still working"));
+        assert_eq!(hosting.0.lock().unwrap().len(), 2);
+        assert!(manager.busy());
+        busy.operation.lock().unwrap().backend_exited();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn updating_waits_for_real_owned_backend_exit_and_timeout_does_not_kill_it() {
+        use std::os::windows::process::CommandExt;
+        for timeout in [Duration::ZERO, Duration::from_secs(10)] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("fixture");
+            std::fs::write(&path, b"fixture").unwrap();
+            let release = temp.path().join("release");
+            let drained = temp.path().join("drained");
+            let mut child = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command",
+                "$null = [Console]::In.ReadToEnd(); [IO.File]::WriteAllText($env:RESTORE_DRAINED, 'EOF'); while (-not [IO.File]::Exists($env:RESTORE_RELEASE)) { Start-Sleep -Milliseconds 20 }"])
+                .env("RESTORE_DRAINED", &drained).env("RESTORE_RELEASE", &release)
+                .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
+                .creation_flags(0x08000000).spawn().unwrap();
+            let connection = Arc::new(SessionConnection {
+                input: Mutex::new(child.stdin.take()),
+                ..Default::default()
+            });
+            let monitor = Arc::clone(&connection);
+            let wait = std::thread::spawn(move || {
+                assert!(child.wait().unwrap().success());
+                monitor.exited.store(true, Ordering::Release);
+            });
+            let hosting = Hosting(Mutex::new(vec![update_fixture(
+                &path,
+                AppId::Setup,
+                Arc::clone(&connection),
+            )]));
+            let views = hosting.update_views().unwrap();
+            assert_eq!(views.len(), 1);
+            assert_eq!(views[0].path, path);
+            if !timeout.is_zero() {
+                std::fs::write(&release, b"exit after EOF").unwrap();
+            }
+            let result = hosting.suspend_for_update(timeout, |nonces| {
+                assert_eq!(nonces, vec![AppId::Setup.id()])
+            });
+            if timeout.is_zero() {
+                assert!(result.unwrap_err().contains("no process was forced closed"));
+                assert!(!connection.exited.load(Ordering::Acquire));
+                std::fs::write(&release, b"finish test").unwrap();
+            } else {
+                assert!(result.is_ok());
+                assert!(connection.exited.load(Ordering::Acquire));
+            }
+            wait.join().unwrap();
+            assert!(drained.exists());
+            assert!(hosting.0.lock().unwrap().is_empty());
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn broken_output_between_workflow_requests_drains_input_without_releasing_update_guard() {
@@ -743,6 +884,7 @@ mod tests {
         std::fs::write(&image, b"fixture").unwrap();
         let mut backend = Session {
             app: AppId::Mcp,
+            path: image.clone(),
             writable: true,
             connection: Arc::clone(&connection),
             replies: receiver,
@@ -973,6 +1115,7 @@ mod tests {
         std::fs::write(&path, b"test").unwrap();
         let fixture = |app, nonce: &str| Session {
             app,
+            path: path.clone(),
             writable: false,
             connection: Arc::new(SessionConnection::default()),
             replies: mpsc::sync_channel(1).1,

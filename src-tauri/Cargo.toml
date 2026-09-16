@@ -1,6 +1,6 @@
 [package]
 name = "creator-hub"
-version = "0.1.5"
+version = "0.1.6"
 description = "Creator Hub app manager"
 authors = ["Creator Works"]
 license = "MIT"

@@ -396,6 +396,56 @@ async function closeHosted(app) {
   }
   assert.deepEqual(errors, []);
   report.checks.push(`${mcpOnly ? 'MCP hosted view' : 'Both hosted views'} retain state; closing each drains only its own process; no JavaScript errors`);
+  // Exercise the post-update recovery half without publishing a synthetic release
+  // or weakening signature verification. This is not a self-update/restart claim.
+  for (const declineFirst of [false, true]) {
+  native(child.pid, hub, 'close');
+  await retry(() => assert.equal(child.exitCode, 0));
+  await browser.close(); browser = null;
+  const restoreFile = path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'hub-updates', 'hosted-restore.json');
+  assert.equal(fs.existsSync(restoreFile), false);
+  fs.writeFileSync(restoreFile, JSON.stringify({ schemaVersion: 1, fromVersion: '0.1.5', toVersion: require('../package.json').version,
+    created: Math.floor(Date.now() / 1000), views: selectedApps.map(app => ({ app, path: apps[app] })) }), { flag: 'wx' });
+  const configBeforeRestore = hash(configPath);
+  child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env,
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238', WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview') } });
+  browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'));
+  page = await retry(async () => {
+    const found = browser.contexts().flatMap(context => context.pages()).find(p => p.url().includes('tauri.localhost'));
+    assert.ok(found); return found;
+  });
+  page.setDefaultTimeout(30000);
+  for (const [index, app] of selectedApps.entries()) {
+    backends[app] = await backend(app);
+    await retry(() => native(backends[app], apps[app], 'button', declineFirst && index === 0 ? 'Not now' : app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'));
+  }
+  assert.equal(await page.locator('#view-hub').isVisible(), true);
+  assert.equal(fs.existsSync(restoreFile), false, 'Restoration ticket is consumed once before launch');
+  if (declineFirst) {
+  await page.locator('#retry-hosted-restore').waitFor({ state: 'visible' });
+  await page.waitForFunction(() => !document.querySelector('#check-updates').disabled);
+  await retry(() => { execFileSync('powershell.exe', ['-NoProfile', '-Command', `if (Get-Process -Id ${backends[selectedApps[0]]} -ErrorAction SilentlyContinue) { exit 1 }`], { windowsHide: true }); });
+  await page.locator('#retry-hosted-restore').click();
+  const first = selectedApps[0];
+  backends[first] = await backend(first);
+  await retry(() => native(backends[first], apps[first], 'button', first === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'));
+  }
+  await page.waitForFunction(() => document.querySelector('#hosted-restore-message').textContent.includes('views have reopened'));
+  await page.waitForFunction(() => !document.querySelector('#check-updates').disabled);
+  assert.equal(await page.locator('#inventory-error').isVisible(), false, 'Restored views do not race startup app discovery');
+  await page.screenshot({ path: path.join(out, `restored-apps-${declineFirst ? 'retry' : 'automatic'}.png`) });
+  assert.equal(hash(configPath), configBeforeRestore, 'Reopening views does not change MCP settings');
+  for (const app of selectedApps) {
+    await show(app);
+    const element = await page.locator(`#${app}-host-frame`).elementHandle();
+    frames[app] = await element.contentFrame();
+    if (app === 'setup') await frames[app].locator('#requirements .requirement').first().waitFor({ timeout: 90000 });
+    else await frames[app].waitForFunction(() => !document.querySelector('#workspaceControls').disabled);
+    await closeHosted(app);
+  }
+  }
+  report.checks.push('Native saved-update restoration reopens exact installed app views without EXE pickers; declined permission stays retryable, successful views are not duplicated, Apps remains default and MCP settings are unchanged. A seeded receipt tests recovery, not installer handoff.');
+  report.hostedRestoreTested = true;
   report.passed = true;
 })().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; }).finally(async () => {
   if (runtimeFixture && runtimeFixture.exitCode === null) {

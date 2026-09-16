@@ -433,7 +433,7 @@ test('native launch requests only navigate, and stale requests cannot roll the v
     window.events['hub-launch-view']({ payload: { view: 'install', revision: 3 } });
   });
   await expect(page.locator('#tool-title')).toHaveText('Creator Works MCP');
-  expect(await page.evaluate(() => window.calls.filter(c => !['app_inventory', 'get_launch_request', 'hub_update_status'].includes(c.command)))).toEqual([]);
+  expect(await page.evaluate(() => window.calls.filter(c => !['pending_hosted_restore', 'app_inventory', 'get_launch_request', 'hub_update_status'].includes(c.command)))).toEqual([]);
 });
 
 test('catalog navigation changes no external or project state', async ({ page }) => {
@@ -449,14 +449,14 @@ test('catalog navigation changes no external or project state', async ({ page })
   await expect(page.locator('#tool-title')).toHaveText('Creator Project Setup');
   await expect(page.locator('#tool-facts')).toContainText('Android and Windows');
   await expect(page.locator('#suite-menu')).toBeHidden();
-  expect(await page.evaluate(() => window.calls.filter(call => !['app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(call.command)))).toEqual([]);
+  expect(await page.evaluate(() => window.calls.filter(call => !['pending_hosted_restore', 'app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(call.command)))).toEqual([]);
 });
 
 test('installation uses native app IDs and reports failure without a browser detour', async ({ page }) => {
   await load(page);
   await page.getByRole('button', { name: 'View Creator Works MCP', exact: true }).click();
   await page.locator('#release-button').click();
-  expect(await page.evaluate(() => window.calls.filter(call => !['app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(call.command)))).toEqual([{ command: 'install_app', args: { app: 'mcp', version: '2.6.0', reopen: true, closeRunning: false } }]);
+  expect(await page.evaluate(() => window.calls.filter(call => !['pending_hosted_restore', 'app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(call.command)))).toEqual([{ command: 'install_app', args: { app: 'mcp', version: '2.6.0', reopen: true, closeRunning: false } }]);
   await page.evaluate(() => window.failOpen = true);
   await page.locator('#source-button').click();
   await expect(page.getByRole('alert')).toContainText('Browser is unavailable');
@@ -486,7 +486,7 @@ test('URL parameters cannot claim hosted or installed state', async ({ page }) =
   await page.goto('http://127.0.0.1:4188/?hosted=true&installed=true&path=C:/bad.exe');
   await expect(page.locator('#suite-trigger')).toBeVisible();
   await expect(page.locator('#status-mcp')).toContainText('Available');
-  expect(await page.evaluate(() => window.calls.filter(call => !['app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(call.command)))).toEqual([]);
+  expect(await page.evaluate(() => window.calls.filter(call => !['pending_hosted_restore', 'app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(call.command)))).toEqual([]);
 });
 
 for (const width of [940, 720, 560, 390]) {
@@ -550,7 +550,7 @@ test('Creator Plugins browses the catalogue without installation or account acti
   await expect(page.locator('#view-plugins')).toContainText('No contributions are listed yet');
   await expect(page.locator('#view-plugins')).toContainText('Editor tools');
   await expect(page.locator('#release-button')).toBeHidden();
-  expect(await page.evaluate(() => window.calls.filter(c => !['app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory', 'community_catalogue'].includes(c.command)))).toEqual([]);
+  expect(await page.evaluate(() => window.calls.filter(c => !['pending_hosted_restore', 'app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory', 'community_catalogue'].includes(c.command)))).toEqual([]);
 });
 
 test('download progress cancels, prevents duplicate actions and never auto-installs', async ({ page }) => {

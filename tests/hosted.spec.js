@@ -14,6 +14,8 @@ async function open(page, options = {}) {
     if (window !== window.parent) return;
     window.hostCalls = [];
     window.events = {};
+    window.restorePending = options.restoreApps || [];
+    window.restoreFailures = options.restoreFailure ? 1 : 0;
     const channels = Array.from({ length: 62 }, (_, index) => ({ id: String(index),
       name: index ? `Project ${index}` : 'Creator project with a deliberately long name for hosted layout verification',
       unity_project_path: `E:\\Fixtures\\Project ${index}`, enabled: true }));
@@ -24,13 +26,23 @@ async function open(page, options = {}) {
       core: { invoke: async (command, args) => {
         window.hostCalls.push({ command, args });
         if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
+        if (command === 'pending_hosted_restore') return [...window.restorePending];
+        if (command === 'complete_hosted_restore') { window.restorePending = window.restorePending.filter(app => app !== args.app); return; }
+        if (command === 'hub_update_status') return { currentVersion: '0.1.5', availableVersion: '0.1.6', downloaded: true };
+        if (command === 'install_hub_update') {
+          if (options.cancelHubUpdate) return 'Hub update cancelled. Nothing was installed.';
+          window.restorePending = ['setup'];
+          if (!options.delayedCloseEvent) window.events['hosted-apps-suspended']({ payload: ['a'.repeat(64)] });
+          throw 'Hub could not start its installer. Nothing was installed.';
+        }
         if (command === 'project_inventory') return { projects: [], warnings: [] };
         if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: true, trusted: true, hostedCompatible: true, updateAvailable: app === 'setup' && Boolean(window.setupUpdate), availableVersion: window.setupUpdate ? '0.3.0' : '0.3.0-alpha.1', installedVersion: '0.3.0-alpha.1', hostedPreview: app === 'mcp' && !options.writableMcp ? 'read-only' : 'writable' })) };
-        if (command === 'start_hosted_app') {
+        if (command === 'start_hosted_app' || command === 'restore_hosted_app') {
+          if (command === 'restore_hosted_app' && window.restoreFailures-- > 0) throw 'The app could not reopen.';
           if (options.decline) throw 'Opening Setup in Hub was declined. Standalone Setup is unchanged.';
           if (args.app === 'mcp') return { session: 'b'.repeat(64), appId: 'creator-works-mcp', version: '2.7.0-alpha.1', files: mcpFiles,
             ...(options.writableMcp ? { hostingRevision: 2, effectiveMode: 'writable' } : {}) };
-          return { session: 'a'.repeat(64), appId: 'creator-project-setup', version: setupVersion, files };
+          return { session: (command === 'restore_hosted_app' ? 'c' : 'a').repeat(64), appId: 'creator-project-setup', version: setupVersion, files };
         }
         if (command === 'stop_hosted_app') return !options.keepOpen;
         if (command !== 'hosted_app_call') return;
@@ -74,6 +86,7 @@ async function open(page, options = {}) {
   }, { files, mcpFiles, options, setupVersion });
   await page.goto('http://127.0.0.1:4188/');
   await expect(page.locator('#catalog-status')).toContainText('Update check complete');
+  if (options.onlyStartup) return;
   await page.locator('#hub-pages [data-view="hub"]').click();
   await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
   await page.locator('#host-setup-button').click();
@@ -85,6 +98,74 @@ async function switchTo(page, name) {
   await page.locator('#suite-trigger').click();
   await page.locator(`#suite-menu [data-view="${name}"]`).click();
 }
+
+test('cancelling a Hub update leaves hosted forms and backends intact', async ({ page }) => {
+  const setup = await open(page, { cancelHubUpdate: true });
+  await setup.locator('#project-name').fill('Unsaved form survives cancel');
+  await switchTo(page, 'hub');
+  await page.evaluate(() => window.hostCalls = []);
+  await page.locator('#hub-update-button').click();
+  await expect(page.locator('#progress-message')).toContainText('cancelled');
+  await expect(page.locator('#hub-update-button')).toBeEnabled();
+  await switchTo(page, 'setup');
+  await expect(setup.locator('#project-name')).toHaveValue('Unsaved form survives cancel');
+  expect(await page.evaluate(() => window.hostCalls.some(c => ['stop_hosted_app', 'restore_hosted_app', 'complete_hosted_restore'].includes(c.command)))).toBe(false);
+});
+
+test('Hub update refuses an active hosted workflow without closing any view', async ({ page }) => {
+  const setup = await open(page, { pending: true });
+  await setup.locator('#create-button').click();
+  await expect(page.locator('#hosted-stop')).toBeDisabled();
+  await switchTo(page, 'hub');
+  await page.evaluate(() => window.hostCalls = []);
+  await page.locator('#hub-update-button').click();
+  await expect(page.locator('#action-error')).toContainText('No views were closed');
+  expect(await page.evaluate(() => window.hostCalls.some(c => c.command === 'install_hub_update'))).toBe(false);
+  await page.evaluate(() => window.finishCreate());
+  await switchTo(page, 'setup');
+  await expect(setup.locator('#result')).toContainText('Ready');
+});
+
+for (const delayedCloseEvent of [false, true]) test(`installer handoff failure recreates closed views; delayed close event=${delayedCloseEvent}`, async ({ page }) => {
+  await open(page, { delayedCloseEvent });
+  await switchTo(page, 'hub');
+  await page.evaluate(() => window.hostCalls = []);
+  await page.locator('#hub-update-button').click();
+  await expect(page.locator('#hosted-restore-message')).toContainText('views have reopened');
+  await expect(page.locator('#action-error')).toContainText('could not start its installer');
+  await expect(page.locator('#view-hub')).toBeVisible();
+  await switchTo(page, 'setup');
+  await expect(page.frameLocator('#setup-host-frame').locator('#create-button')).toBeEnabled();
+  if (delayedCloseEvent) {
+    await page.evaluate(() => window.events['hosted-apps-suspended']({ payload: ['a'.repeat(64)] }));
+    await expect(page.frameLocator('#setup-host-frame').locator('#create-button')).toBeEnabled();
+  }
+  expect(await page.evaluate(() => window.hostCalls.filter(c => ['install_hub_update', 'restore_hosted_app', 'complete_hosted_restore', 'stop_hosted_app', 'open_app'].includes(c.command)).map(c => c.command))).toEqual(['install_hub_update', 'restore_hosted_app', 'complete_hosted_restore']);
+});
+
+for (const width of [940, 390]) test(`update restart restores both hosted apps but keeps Apps selected at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 720 });
+  await open(page, { onlyStartup: true, restoreApps: ['setup', 'mcp'] });
+  await expect(page.locator('#hosted-restore-message')).toContainText('views have reopened');
+  await expect(page.locator('#view-hub')).toBeVisible();
+  await expect(page.locator('#setup-host-frame')).toHaveCount(1);
+  await expect(page.locator('#mcp-host-frame')).toHaveCount(1);
+  expect(await page.evaluate(() => window.hostCalls.filter(c => c.command === 'restore_hosted_app').map(c => c.args.app))).toEqual(['setup', 'mcp']);
+  await switchTo(page, 'setup');
+  await expect(page.frameLocator('#setup-host-frame').locator('#create-button')).toBeEnabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('restored-views.png'), fullPage: true, animations: 'disabled' });
+});
+
+test('failed restoration shows an explicit retry and does not repeat successful views', async ({ page }) => {
+  await open(page, { onlyStartup: true, restoreApps: ['setup', 'mcp'], restoreFailure: true });
+  await expect(page.locator('#hosted-restore-message')).toContainText('Some app views could not reopen');
+  await expect(page.locator('#retry-hosted-restore')).toBeVisible();
+  await page.locator('#retry-hosted-restore').click();
+  await expect(page.locator('#hosted-restore-message')).toContainText('views have reopened');
+  await expect(page.locator('#retry-hosted-restore')).toBeHidden();
+  expect(await page.evaluate(() => window.hostCalls.filter(c => c.command === 'restore_hosted_app').map(c => c.args.app))).toEqual(['setup', 'mcp', 'setup']);
+});
 
 for (const decline of [false, true]) test(`Apps update asks to close an existing hosted view; declined=${decline}`, async ({ page }) => {
   const setup = await open(page, { keepOpen: decline });

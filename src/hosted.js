@@ -18,6 +18,7 @@
   const sessions = new Map();
   const starting = new Set();
   let selected = null;
+  let updating = false;
   const stop = document.querySelector('#hosted-stop');
   function render() {
     const state = sessions.get(selected);
@@ -25,10 +26,10 @@
     panel.inert = !state?.frame;
     for (const [app, session] of sessions) {
       session.frame?.classList.toggle('hidden', app !== selected);
-      if (session.frame) session.frame.inert = app !== selected;
+      if (session.frame) session.frame.inert = updating || app !== selected;
     }
     document.querySelector('#hosted-status').textContent = state?.status || '';
-    stop.disabled = !state || state.inFlight || state.workflow || state.closing;
+    stop.disabled = updating || !state || state.inFlight || state.workflow || state.closing;
     stop.textContent = state ? `Close ${apps[selected].label}` : 'Close view';
   }
   const decode = encoded => new TextDecoder().decode(Uint8Array.from(atob(encoded), c => c.charCodeAt(0)));
@@ -118,15 +119,24 @@
   }
   window.CreatorHosted = {
     close: closeApp,
+    discard(app) {
+      const state = sessions.get(app);
+      state?.port?.close(); state?.frame?.remove(); sessions.delete(app); render();
+    },
+    busy: () => starting.size > 0 || [...sessions.values()].some(state => state.inFlight || state.workflow || state.closing),
+    updating(value) { updating = value; render(); },
     active: app => Boolean(sessions.get(app)?.ready),
     writable: app => Boolean(sessions.get(app)?.writable),
-    async start(app) {
+    async start(app, restoring = false) {
       if (!Object.hasOwn(apps, app)) throw new Error('Unsupported hosted app.');
       if (sessions.has(app) || starting.has(app)) return;
       starting.add(app);
       const state = { frame: null, port: null, session: null, ready: false, inFlight: false, failed: false, closing: false, status: 'Opening app' };
       sessions.set(app, state);
-      try { await attach(app, state, await invoke('start_hosted_app', { app })); }
+      try {
+        await attach(app, state, await invoke(restoring ? 'restore_hosted_app' : 'start_hosted_app', { app }));
+        if (restoring) await invoke('complete_hosted_restore', { app });
+      }
       catch (error) {
         if (state.session) { try { await invoke('abort_hosted_app', { session: state.session }); } catch { /* Native busy guard owns any running work. */ } }
         state.frame?.remove(); state.port?.close(); sessions.delete(app); render();
@@ -143,6 +153,13 @@
   });
   window.__TAURI__.event.listen('hosted-app-disconnected', ({ payload }) => {
     for (const state of sessions.values()) if (payload.session === state.session) disconnect(state, payload.error);
+  });
+  window.__TAURI__.event.listen('hosted-apps-suspended', ({ payload }) => {
+    if (!Array.isArray(payload)) return;
+    let closed = false;
+    for (const [app, state] of sessions) if (payload.includes(state.session)) { window.CreatorHosted.discard(app); closed = true; }
+    render();
+    if (closed) window.dispatchEvent(new Event('creator-host-closed'));
   });
   async function closeApp(app) {
     const state = sessions.get(app);

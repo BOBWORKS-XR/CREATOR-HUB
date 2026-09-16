@@ -5,6 +5,7 @@ mod community;
 mod community_project;
 mod hosted;
 mod hosted_operation;
+mod hosted_restore;
 mod installer_preflight;
 mod launch;
 mod manager;
@@ -291,6 +292,9 @@ fn main() {
         self_update::hub_update_status,
         self_update::download_hub_update,
         self_update::install_hub_update,
+        hosted_restore::pending_hosted_restore,
+        hosted_restore::restore_hosted_app,
+        hosted_restore::complete_hosted_restore,
         projects::project_inventory,
         projects::add_project_folder,
         projects::remove_project_folder,
@@ -314,6 +318,7 @@ fn main() {
         .manage(self_update::SelfUpdate::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(hosted::Hosting::default())
+        .manage(hosted_restore::Restore::default())
         .manage(projects::Projects::default())
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
@@ -351,7 +356,10 @@ mod tests {
     fn shell_version_comes_from_the_executable() {
         let script = shell_initialization("test-key");
         assert!(script.starts_with("if(window === window.top)"));
-        assert!(script.contains(&format!("'__CREATOR_HUB_VERSION__', {{value: '{}'}}", env!("CARGO_PKG_VERSION"))));
+        assert!(script.contains(&format!(
+            "'__CREATOR_HUB_VERSION__', {{value: '{}'}}",
+            env!("CARGO_PKG_VERSION")
+        )));
     }
 
     #[test]

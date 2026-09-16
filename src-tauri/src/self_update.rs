@@ -270,10 +270,11 @@ pub async fn install_hub_update(
         let _operation = handle.state::<Manager>().begin()?;
         let release = selected(&handle, &version)?;
         let installed = installed_location()?;
-        if handle.state::<crate::hosted::Hosting>().has_sessions() {
-            return Err("Close the app views inside Hub before updating Hub. Your standalone apps can stay open.".into());
-        }
-        let approved = handle.dialog().message(format!("Update Creator Hub to {}?\n\nHub will close and reopen. Your projects, apps and settings will stay in place.", release.version))
+        let views = handle.state::<crate::hosted::Hosting>().update_views()?;
+        let view_notice = if views.is_empty() { String::new() } else {
+            format!("\n\nHub will close and reopen these idle views: {}. Unsaved form entries will be discarded. The apps may ask for permission when reopening. Standalone apps and MCP connections will stay open.", views.iter().map(|v| v.app.name()).collect::<Vec<_>>().join(", "))
+        };
+        let approved = handle.dialog().message(format!("Update Creator Hub to {}?\n\nHub will close and reopen. Your projects, apps and settings will stay in place.{}", release.version, view_notice))
             .title("Update Creator Hub").buttons(MessageDialogButtons::OkCancelCustom("Update Hub".into(), "Not now".into())).blocking_show();
         if !approved { return Ok("Hub update cancelled. Nothing was installed.".into()); }
         let installer = download(&handle, &release)?;
@@ -288,7 +289,7 @@ pub async fn install_hub_update(
         let endpoint = catalog::release_url(REPO, &release.version, "latest.json");
         let updater = handle.updater_builder()
             // The default callback destroys the UI before ShellExecute succeeds.
-            // There are no hosted sessions here; let the plugin exit only after
+            // Hosted sessions are drained below; let the plugin exit only after
             // a successful launch so a refused launch can still show an error.
             .on_before_exit(|| {})
             .endpoints(vec![endpoint.parse().map_err(|_| "Invalid Hub update endpoint.")?])
@@ -314,6 +315,13 @@ pub async fn install_hub_update(
         key.verify(&bytes, &signature, false).map_err(|_| "Hub installer signature verification failed.")?;
         installed_location()?;
         if handle.state::<Manager>().cancellation().load(Ordering::SeqCst) { return Err("Hub update cancelled.".into()); }
+        if !views.is_empty() {
+            handle.state::<crate::hosted_restore::Restore>().remember(views, &release.version)?;
+            let _ = handle.emit("app-progress", Progress { message: "Closing app views for the update. They will reopen when Hub restarts...".into(), received: 0, total: 0, cancellable: false });
+            handle.state::<crate::hosted::Hosting>().suspend_for_update(Duration::from_secs(30), |sessions| {
+                let _ = handle.emit("hosted-apps-suspended", sessions);
+            })?;
+        }
         let _ = handle.emit("app-progress", Progress { message: "Restarting Hub to install the update...".into(), received: 0, total: 0, cancellable: false });
         update.install(bytes).map_err(|_| "Hub could not start its installer. Nothing was installed.")?;
         Ok("Hub update started.".into())

@@ -10,9 +10,9 @@ test('Hub self-update commands are registered and allowed only in the main windo
   const capability = JSON.parse(fs.readFileSync(path.join(root, 'capabilities', 'default.json'), 'utf8'));
   assert.deepEqual(capability.windows, ['main']);
   assert.equal(capability.remote, undefined);
-  for (const command of ['hub_update_status', 'download_hub_update', 'install_hub_update']) {
+  for (const command of ['hub_update_status', 'download_hub_update', 'install_hub_update', 'pending_hosted_restore', 'restore_hosted_app', 'complete_hosted_restore']) {
     assert.ok(build.includes(`"${command}"`), `${command} missing from generated permissions`);
-    assert.ok(main.includes(`self_update::${command},`), `${command} missing from invoke handler`);
+    assert.ok(main.includes(`${command.includes('restore') ? 'hosted_restore' : 'self_update'}::${command},`), `${command} missing from invoke handler`);
     assert.ok(capability.permissions.includes(`allow-${command.replaceAll('_', '-')}`), `${command} blocked by main-window ACL`);
   }
 });

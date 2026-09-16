@@ -40,11 +40,11 @@
     trigger.setAttribute('aria-expanded', 'false');
     trigger.setAttribute('aria-label', 'Open Creator apps');
   }
-  function show(view) {
+  function show(view, preserveError = false) {
     if (!['hub', 'plugins', 'projects'].includes(view) && !Object.hasOwn(tools, view)) return;
     current = view;
     close();
-    error.classList.add('hidden');
+    if (!preserveError) error.classList.add('hidden');
     document.querySelector('#view-hub').classList.toggle('hidden', view !== 'hub');
     byId('hub-pages').classList.toggle('hidden', !['hub', 'projects'].includes(view));
     byId('view-projects').classList.toggle('hidden', view !== 'projects');
@@ -134,7 +134,7 @@
     catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
     finally { busy = false; byId(`host-${app}-button`).disabled = false; renderState(); }
   });
-  window.addEventListener('creator-host-closed', () => show(current));
+  window.addEventListener('creator-host-closed', () => show(current, true));
 
   function appState() { return inventory?.apps?.find(app => app.app === current); }
   function canDisconnectForUpdate(state) {
@@ -316,13 +316,56 @@
 
   async function hubAction(command) {
     if (busy || !hubUpdate?.availableVersion || hubUpdate.installBlocked) return;
+    if (command === 'install_hub_update' && window.CreatorHosted.busy()) {
+      error.textContent = 'An app view is still working. Wait for it to finish, then update Hub. No views were closed.';
+      error.classList.remove('hidden'); return;
+    }
     busy = true; renderState(); error.classList.add('hidden');
+    if (command === 'install_hub_update') window.CreatorHosted.updating(true);
     try {
       const message = await invoke(command, { version: hubUpdate.availableVersion });
       setProgress({ message, total: 0, cancellable: false });
     } catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
-    finally { byId('cancel-download').classList.add('hidden'); busy = false; await refresh(false); }
+    finally {
+      byId('cancel-download').classList.add('hidden');
+      if (command === 'install_hub_update') await restoreHostedViews();
+      window.CreatorHosted.updating(false);
+      busy = false; await refresh(false);
+    }
   }
+
+  async function restoreHostedViews() {
+    const status = byId('hosted-restore'), message = byId('hosted-restore-message'), retry = byId('retry-hosted-restore');
+    retry.disabled = true; retry.classList.add('hidden');
+    try {
+      const pending = await invoke('pending_hosted_restore');
+      if (!pending?.length) return;
+      if (!Array.isArray(pending) || pending.length > 2 || pending.some(app => !Object.hasOwn(tools, app)) || new Set(pending).size !== pending.length) throw 'Saved app views are invalid. Open the apps from Hub.';
+      status.classList.remove('hidden');
+      const failures = [];
+      for (const app of pending) {
+        message.textContent = `Reopening ${tools[app].title} after the Hub update... Check for the app's permission window.`;
+        try {
+          // Native recovery records are authoritative even if the close event is delayed.
+          window.CreatorHosted.discard(app);
+          await window.CreatorHosted.start(app, true);
+        } catch (reason) { failures.push(`${tools[app].title}: ${String(reason)}`); }
+      }
+      message.textContent = failures.length ? `Some app views could not reopen. ${failures.join(' ')}` : 'Your app views have reopened. Select an app from the menu.';
+      retry.classList.toggle('hidden', !failures.length);
+      // Reopening backends must not navigate away from Apps or interrupt a user's selection.
+      show(current, true);
+    } catch (reason) {
+      status.classList.remove('hidden'); message.textContent = `Could not restore app views: ${String(reason)}`;
+      retry.classList.remove('hidden');
+    } finally { retry.disabled = false; }
+  }
+  byId('retry-hosted-restore').addEventListener('click', async () => {
+    if (busy) return;
+    busy = true; renderState(); window.CreatorHosted.updating(true);
+    try { await restoreHostedViews(); }
+    finally { window.CreatorHosted.updating(false); busy = false; renderState(); }
+  });
 
   async function action(command, app = current, version = appState()?.availableVersion, extra = {}) {
     if (busy || inventoryError || !Object.hasOwn(tools, app)) return;
@@ -429,6 +472,9 @@
       await window.__TAURI__.event.listen('hub-launch-view', event => applyLaunch(event.payload));
       applyLaunch(await invoke('get_launch_request'));
     } catch (reason) { error.textContent = `Progress reporting unavailable: ${String(reason)}`; error.classList.remove('hidden'); }
+    busy = true; renderState(); window.CreatorHosted.updating(true);
+    await restoreHostedViews();
+    window.CreatorHosted.updating(false); busy = false;
     await refresh(false);
     await refresh(true);
   }
