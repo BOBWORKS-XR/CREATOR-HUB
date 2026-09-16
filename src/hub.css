@@ -1,6 +1,7 @@
 .icon-arrow { --icon: url("icons/arrow-up-right.svg"); }
 .icon-back { --icon: url("icons/arrow-up-right.svg"); transform: rotate(-135deg); }
 .icon-clock { --icon: url("icons/clock-3.svg"); }
+.icon-disconnect { --icon: url("icons/unplug.svg"); }
 main { padding-top: 20px; }
 .hub-pages { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
 .hub-pages .text-button { min-height: 34px; border-radius: 0; border-bottom: 2px solid transparent; }
@@ -65,6 +66,8 @@ button.app-row:hover { background: #181d21; }
 .row-update { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 136px; margin-right: 12px; }
 .row-update-reason { grid-column: 1 / -1; color: var(--amber); margin: 0 12px 12px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .row-runtime { grid-column: 1 / -1; justify-self: start; margin: 0 12px 12px; }
+.runtime-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; max-width: 100%; padding: 8px 12px; background: #181d21; border: 1px solid #55616a; color: #edf1f3; }
+.runtime-button:hover:not(:disabled) { background: #242c31; border-color: var(--cyan); }
 #disconnect-mcp-detail { margin-right: 12px; }
 .app-row-copy { flex: 1; min-width: 0; }
 .app-row-copy strong { display: block; font-size: 14px; font-weight: 600; }

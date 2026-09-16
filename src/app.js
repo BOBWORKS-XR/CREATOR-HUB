@@ -137,6 +137,17 @@
   window.addEventListener('creator-host-closed', () => show(current));
 
   function appState() { return inventory?.apps?.find(app => app.app === current); }
+  function canDisconnectForUpdate(state) {
+    return state?.app === 'mcp' && state.installed && state.trusted && !state.issue && state.updateAvailable
+      && !state.installBlocked && !state.requiredHubVersion && state.updateBlockers?.length > 0
+      && state.updateBlockers.every(blocker => blocker.kind === 'connection');
+  }
+  function acceptInventory(result) {
+    if (!result || typeof result.supported !== 'boolean' || !Array.isArray(result.apps)
+      || result.apps.some(app => !app || !Object.hasOwn(tools, app.app))) throw 'The app inventory response is unavailable.';
+    inventory = result;
+    inventoryError = '';
+  }
   function updateReason(state) {
     if (inventoryError) return 'App discovery failed. Retry before updating; last-known versions are shown.';
     if (!inventory?.supported) return 'App updates require Windows x64 in this build.';
@@ -145,8 +156,9 @@
     if (state.installBlocked) return state.installBlocked;
     if (state.requiredHubVersion) return `Update Creator Hub to ${state.requiredHubVersion} first.`;
     if (window.CreatorHosted.active(state.app)) return 'Updating asks to close this app\'s Hub view first. Unsaved work is not closed automatically.';
+    if (canDisconnectForUpdate(state)) return 'MCP connections are running. Disconnect and update asks permission to stop only MCP\'s private runtime, then continues to installation.';
     if (state.updateBlockers?.length) return state.updateBlockers.some(b => b.kind === 'connection')
-      ? 'Finish active AI work, then Disconnect MCP for update. Only the private MCP runtime is stopped, after your confirmation.'
+      ? 'Other processes are also blocking this update. Disconnect MCP only can stop the private MCP runtime after confirmation; other blockers must be resolved separately.'
       : 'Close the listed app or disconnect its MCP connection, then Check for updates. Unrecognised processes will not be closed.';
     return '';
   }
@@ -170,8 +182,10 @@
       const hosted = window.CreatorHosted.active(app.app);
       update.classList.toggle('hidden', !available);
       update.disabled = busy || Boolean(inventoryError) || !inventory.supported || Boolean(app.issue) || !app.trusted
-        || (!app.requiredHubVersion && (Boolean(app.installBlocked) || (!hosted && Boolean(app.updateBlockers?.length))));
-      update.querySelector('span:last-child').textContent = app.requiredHubVersion ? 'Update Hub first' : 'Update app';
+        || (!app.requiredHubVersion && (Boolean(app.installBlocked) || (!hosted && Boolean(app.updateBlockers?.length) && !canDisconnectForUpdate(app))));
+      const updateLabel = app.requiredHubVersion ? 'Update Hub first' : canDisconnectForUpdate(app) ? 'Disconnect and update' : 'Update app';
+      update.querySelector('span:last-child').textContent = updateLabel;
+      update.setAttribute('aria-label', `${updateLabel}: ${tools[app.app].title}`);
       reason.textContent = available ? updateReason(app) : '';
       reason.classList.toggle('hidden', !reason.textContent);
     }
@@ -194,14 +208,14 @@
     const opening = state?.installed && state.trusted && !state.updateAvailable;
     const blockers = state?.updateBlockers || [];
     const needsRelease = !opening && state?.installBlocked;
-    byId('release-button').disabled = needsRelease ? busy || Boolean(inventoryError) : blocked || (!opening && blockers.length > 0);
+    byId('release-button').disabled = needsRelease ? busy || Boolean(inventoryError) : blocked || (!opening && blockers.length > 0 && !canDisconnectForUpdate(state));
     byId('release-button').classList.toggle('hidden', Boolean(opening && canHost));
     byId('download-button').disabled = busy || Boolean(inventoryError) || !inventory?.supported || !state || state.downloaded || Boolean(state.installBlocked);
     byId('adopt-button').disabled = busy || Boolean(inventoryError) || !inventory?.supported;
     byId('open-button').disabled = blocked || !state?.trusted;
     byId('open-button').classList.toggle('hidden', !state?.installed || (!state.updateAvailable && !canHost));
     byId('open-button').textContent = canHost ? 'Open separately' : 'Open app';
-    byId('primary-label').textContent = !state ? busy ? 'Checking' : 'Unavailable' : opening ? 'Open app' : state.requiredHubVersion ? 'Update Hub first' : needsRelease ? 'Check for an update' : state.updateAvailable ? 'Update app' : 'Install app';
+    byId('primary-label').textContent = !state ? busy ? 'Checking' : 'Unavailable' : opening ? 'Open app' : state.requiredHubVersion ? 'Update Hub first' : needsRelease ? 'Check for an update' : canDisconnectForUpdate(state) ? 'Disconnect and update' : state.updateAvailable ? 'Update app' : 'Install app';
     byId('install-options').classList.toggle('hidden', Boolean(opening || needsRelease) || !state || !inventory?.supported);
     byId('download-button').classList.toggle('hidden', Boolean(opening || needsRelease));
     if (state) {
@@ -212,8 +226,9 @@
       byId('tool-state').replaceChildren(...lines.map(text => { const p = document.createElement('p'); p.textContent = text; return p; }));
     } else byId('tool-state').textContent = inventory?.supported === false ? 'Windows x64 app management is available in this build. macOS and Linux are not supported yet.' : busy ? 'Checking installed apps and available updates...' : 'App inventory is unavailable. Use Retry app discovery above.';
     byId('update-blockers').classList.toggle('hidden', !state || (!state.issue && !blockers.length));
-    byId('update-blockers-help').textContent = blockers.length
-      ? `${blockers.some(b => b.kind === 'connection') ? 'Finish active AI work, then use Disconnect MCP for update to stop its private runtime, including stuck connections. You will be asked to confirm. If your client reconnects automatically, pause or disable this MCP in that client first.' : 'Finish your work, then disconnect MCP in your AI app or close the listed app.'} Check again when ready. Hub will not force-close AI apps, Unity or unrelated Node processes. Do not end unfamiliar tasks. Uninstalling is not needed.`
+    byId('update-blockers-help').textContent = canDisconnectForUpdate(state)
+      ? 'Disconnect and update asks permission to stop only MCP\'s private runtime before installation. Finish active AI work first. AI apps, Unity and unrelated Node processes stay open.' : blockers.length
+      ? `${blockers.some(b => b.kind === 'connection') ? 'Finish active AI work, then use Disconnect MCP only to stop its private runtime, including stuck connections. You will be asked to confirm. If your client reconnects automatically, pause or disable this MCP in that client first.' : 'Finish your work, then disconnect MCP in your AI app or close the listed app.'} Check again when ready. Hub will not force-close AI apps, Unity or unrelated Node processes. Do not end unfamiliar tasks. Uninstalling is not needed.`
       : 'Resolve the issue above, then check again. Nothing will be installed by this check.';
     byId('recheck-app').disabled = busy;
     byId('update-blockers-details').classList.toggle('hidden', !blockers.length);
@@ -275,10 +290,7 @@
     byId('catalog-status').textContent = check ? 'Checking verified releases...' : 'Checking installed apps...';
     try {
       const result = await invoke('app_inventory', { check, preview: byId('preview-channel').checked });
-      if (!result || typeof result.supported !== 'boolean' || !Array.isArray(result.apps)
-        || result.apps.some(app => !app || !Object.hasOwn(tools, app.app))) throw 'The app inventory response is unavailable.';
-      inventory = result;
-      inventoryError = '';
+      acceptInventory(result);
       byId('catalog-status').textContent = !inventory.supported ? 'App management requires Windows x64 in this build.'
         : inventory.apps.some(app => app.checkWarning) ? 'Some update checks failed. Last verified releases remain available.'
         : check ? 'Update check complete. Installation always needs your approval.' : 'Installed apps checked.';
@@ -320,9 +332,23 @@
       const args = { app, ...extra };
       if (['download_app', 'install_app'].includes(command)) args.version = version;
       if (command === 'install_app') { args.reopen = extra.reopen ?? byId('reopen-app').checked; args.closeRunning = extra.closeRunning ?? byId('close-running').checked; }
+      if (command === 'install_app' && canDisconnectForUpdate(inventory?.apps?.find(item => item.app === app))) {
+        setProgress({ message: 'Waiting for permission to disconnect MCP...', total: 0, cancellable: false });
+        await invoke('disconnect_mcp', { app });
+        // Keep controls locked across confirmation and recheck. Never install from
+        // the pre-disconnect snapshot or keep stopping a reconnecting client.
+        setProgress({ message: 'Checking MCP connections before installation...', total: 0, cancellable: false });
+        acceptInventory(await invoke('app_inventory', { check: false, preview: byId('preview-channel').checked }));
+        const updated = inventory.apps.find(item => item.app === app);
+        if (!inventory.supported || !updated?.installed || !updated.trusted || updated.issue
+          || !updated.updateAvailable || updated.availableVersion !== version || updated.installBlocked || updated.requiredHubVersion) {
+          throw 'Update not started. The app or available release changed; review its current status and try again.';
+        }
+        if (updated.updateBlockers?.length) throw 'Update not started. MCP is still in use or a client reconnected. Pause this MCP in your AI client, then try again. No new connections were stopped.';
+      }
       const message = await invoke(command, args);
       setProgress({ message, total: 0, cancellable: false });
-    } catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
+    } catch (reason) { byId('operation-progress').classList.add('hidden'); error.textContent = String(reason); error.classList.remove('hidden'); }
     finally {
       byId('cancel-download').classList.add('hidden');
       busy = false;
@@ -348,7 +374,8 @@
       if (!await refresh(false)) return;
       state = inventory?.apps?.find(item => item.app === app);
     }
-    if (!state?.installed || !state.updateAvailable || state.issue || !state.trusted || state.installBlocked || state.requiredHubVersion || state.updateBlockers?.length) return;
+    if (!state?.installed || !state.updateAvailable || state.issue || !state.trusted || state.installBlocked || state.requiredHubVersion
+      || (state.updateBlockers?.length && !canDisconnectForUpdate(state))) return;
     // Row updates stay on Apps and never inherit another app's hidden close/reopen choices.
     await action('install_app', app, state.availableVersion, { reopen: false, closeRunning: false });
   });

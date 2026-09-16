@@ -239,13 +239,14 @@ async function closeHosted(app) {
       await show('mcp');
       await page.locator('#update-blockers').waitFor();
       await retry(async () => assert.equal(await page.locator('#recheck-app').isEnabled(), true));
-      assert.equal(await page.locator('#release-button').isDisabled(), true);
+      assert.equal(await page.locator('#release-button').isEnabled(), true);
+      assert.match(await page.locator('#release-button').innerText(), /Disconnect and update/);
       await page.locator('#update-blockers-details summary').click();
       assert.match(await page.locator('#update-blockers-list').innerText(), new RegExp(`PID ${runtimeFixture.pid}\\b`));
-      assert.match(await page.locator('#update-blockers-help').innerText(), /Disconnect MCP for update/);
+      assert.match(await page.locator('#update-blockers-help').innerText(), /Disconnect and update/);
       await page.locator('#recheck-app').click();
       await retry(async () => assert.equal(await page.locator('#recheck-app').isEnabled(), true));
-      assert.equal(await page.locator('#release-button').isDisabled(), true);
+      assert.equal(await page.locator('#release-button').isEnabled(), true);
       const beforeApp = hash(apps.mcp);
       const refused = page.evaluate(version => window.CreatorHubNative.invoke('install_app', { app: 'mcp', version, reopen: false, closeRunning: false }).then(() => 'UNEXPECTED INSTALL', String), pins.mcp.version);
       await retry(() => native(child.pid, hub, 'button', 'Install'));
@@ -254,7 +255,7 @@ async function closeHosted(app) {
       assert.equal(hash(apps.mcp), beforeApp);
       assert.equal(hash(configPath), originalConfigHash);
       await page.screenshot({ path: path.join(out, 'runtime-blocker.png'), animations: 'disabled' });
-      await page.locator('#disconnect-mcp-detail').click();
+      await page.locator('#release-button').click();
       await retry(() => native(child.pid, hub, 'button', 'Cancel'));
       await retry(async () => assert.equal(await page.locator('#disconnect-mcp-detail').isEnabled(), true));
       assert.equal(runtimeFixture.exitCode, null);
@@ -263,14 +264,15 @@ async function closeHosted(app) {
       assert.equal(hash(apps.mcp), beforeApp);
       assert.equal(hash(configPath), originalConfigHash);
       await show('hub');
-      await page.locator('#disconnect-mcp-row').click();
+      await page.locator('#update-mcp').click();
       await retry(() => native(child.pid, hub, 'button', 'Disconnect MCP'));
       await retry(() => { assert.equal(runtimeFixture.exitCode, 0); assert.equal(secondRuntime.exitCode, 0); });
+      await retry(() => native(child.pid, hub, 'button', 'Cancel'));
       await retry(async () => assert.equal(await page.locator('#update-mcp').isEnabled(), true));
       assert.equal(unrelatedRuntime.exitCode, null);
       assert.equal(hash(apps.mcp), beforeApp);
       assert.equal(hash(configPath), originalConfigHash);
-      report.checks.push('Packaged Hub native disconnect Cancel preserves both legacy private runtimes; Apps-row confirmed disconnect stops both, preserves unrelated Node/files/settings, and enables a separately approved update');
+      report.checks.push('Primary MCP update asks to disconnect; Cancel preserves both runtimes. Confirmed disconnect stops only the two private runtimes and proceeds to installation approval; cancelling installation preserves unrelated Node/files/settings and permits retry');
     }
     if (upgrade) {
       await show('hub');
