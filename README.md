@@ -3,16 +3,17 @@
 **Unity tools in one window.** Open Creator SDK / Altspace and Banter projects,
 manage Creator Works MCP and Creator Project Setup, and browse community plugins.
 
-## Windows 0.1.2
+## Windows 0.1.3
 
-[Download Creator Hub](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.2)
-and choose `Creator-Hub-0.1.2-Windows-setup.exe`.
+[Download Creator Hub](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.3)
+and choose `Creator-Hub-0.1.3-Windows-setup.exe`.
 
-This hotfix resolves the startup project/app discovery conflict and displays the
-correct Hub version. Failed discovery now has a visible retry action and no
-longer prevents Hub's own update check.
+This hotfix adds **Disconnect MCP for update** when verified private MCP runtimes
+block an upgrade. Confirming stops only that installation's connections, then
+you can retry Update app. Cancel leaves them running. Unrelated Node processes,
+AI applications, Unity projects and saved settings are preserved.
 
-The matching companion versions are **Project Setup 0.3.0** and **MCP 2.7.0**.
+The matching companion versions are **Project Setup 0.3.0** and **MCP 2.7.1**.
 Hub installs these apps separately and opens compatible versions inside Hub.
 Both also work standalone; Hub does not create duplicate MCP servers.
 Earlier published acceptance remains in the
@@ -21,7 +22,8 @@ Earlier published acceptance remains in the
 - **Projects first:** detected Creator SDK / Altspace and Banter projects, search,
   sorting and opening in the matching installed Unity Editor.
 - **Apps:** direct Update app buttons, verified downloads and approved installation, with guidance
-  for running-app blockers. Work is not forcibly closed to install an update.
+  for running-app blockers. Disconnecting private MCP connections needs separate
+  confirmation; installation does not automatically close them.
 - **Creator Plugins:** remembered Grid/List views, type filters, images, contributor
   credits and incorporation instructions. Its icon/menu stays visible while scrolling.
 - **Unity menu:** add the Editor-only catalogue to a selected project. Compact
@@ -35,10 +37,10 @@ Earlier published acceptance remains in the
 Existing users: **update Hub first**, then the companion apps. A stable version
 can update an older prerelease. Channel settings do not authorize downgrades or
 silent installation. Your project folders and app settings stay put.
-Older previews reporting an intermediate-version requirement can use the 0.1.2
+Older previews reporting an intermediate-version requirement can use the 0.1.3
 installer directly. If 0.1.1 shows unavailable apps, use Apps > Check for updates
 after the project scan finishes. Its old footer says 0.1.0 incorrectly; reinstalling
-0.1.1 does not correct that label. See the [hotfix notes and acceptance](docs/RELEASE-0.1.2.md).
+0.1.1 does not correct that label. See the [hotfix notes and acceptance](docs/RELEASE-0.1.3.md).
 
 ## Companion Apps
 
