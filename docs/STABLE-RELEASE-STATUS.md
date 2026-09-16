@@ -4,7 +4,59 @@
 This supersedes older alpha.8 publication holds. Hub 0.1.0, Setup 0.3.0 and MCP
 2.7.0 are now public stable releases. Published binaries are frozen.
 
-## Hub 0.1.2 Hotfix: Public
+## Hub 0.1.3 and MCP 2.7.1 Hotfixes: Public
+
+Published 2026-09-16:
+
+- Hub: https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.3
+- MCP: https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/tag/v2.7.1
+- Project Setup remains 0.3.0 with unchanged installer bytes. Update Hub first.
+
+Hub source/tag is `ea905d90820c7ba721fb68fdf497858292d514cc`. Run 35040103489
+passed 144 UI tests, 107 Rust tests (nine opt-in ignored), 17 script tests,
+strict lint, packaging and all four native routes. All 26 candidate checksums
+matched locally. The accepted installer is 5,998,067 bytes, SHA-256
+`c373134d370aeeaca08e9408a581baa862f631c5bb8f3a87dc558e69c3506d0b`;
+installed EXE is 13,415,424 bytes, SHA-256
+`83a56c6f94f253d7155ac8f236479ce8f5c889ad34a2bf1776498103ee7b4728`.
+
+Native clean, alpha.3, alpha.5 and stable 0.1.2 Hub routes passed. Legacy and
+MCP-only routes exercised two private Node connections, Cancel, confirmed scoped
+disconnect, unrelated-process preservation and a separately approved update.
+Each route discovered public MCP 2.7.1 and Setup 0.3.0 without warnings. Saved
+settings, native hosted views and the packaged Unity menu checks passed.
+
+MCP exact installer `4782b6ab04e09a8d24c5fd67d8c75fde8b508d09c04cb1391d953cd51d3aaa66`
+is built from `cd0e5c0344955323e34ee12cee452b871002c566`; installed EXE is
+`6e1ba9d8d4eee99b35b60c9093efd1b3c19183d2cc184266a0696b8a57b0376d`.
+Run 35037253293 passed four historical baselines; replay 35040188482 passed
+native Yes/No/Cancel and lifecycle on unchanged bytes. Local Node suite: 250.
+Installer interaction and guarded silent installation were tested separately.
+
+All 20 Hub and 16 MCP public asset digests/sizes matched staged files. Anonymous
+downloads (five Hub, four MCP) passed application-key verification, installer/EXE
+binding and tamper rejection. Hub updater signature and latest-download feed
+passed. All 17 old Hub 0.1.2 assets and the MCP 2.7.0 installer remain unchanged.
+Hub descriptor minimum is 0.1.0; MCP 2.7.1 requires Hub 0.1.3 for its new binding.
+
+No personal app installation, AI setting or real Unity project was changed.
+Full in-app Hub self-update/restart, every AI reconnect policy and physical
+macOS/Linux acceptance remain outside these checks. Installers are not
+Authenticode signed. Earlier rejected candidates and unexplained Setup discovery
+failure remain documented in `MCP-RUNTIME-HOTFIX.md`, not relabelled as passes.
+
+MCP post-push CI found a formatting-only test assertion failure. Commit e5d0ce7
+corrects line wrapping and adds the early candidate format gate; no published
+bytes changed. Follow-up CI 35041250085 has passed all Node jobs and the Windows
+format check; broader source/build jobs were still running at this checkpoint.
+They run on GitHub independently of the user PC. Accepted Windows release tests
+above are complete. The user requested sleep after publication verification.
+
+Evidence: `artifacts/node-runtime-hotfix/ci-35040103489`, `reviewed-0.1.3.json`,
+`release-0.1.3`, `public-0.1.3-verification.json`; corresponding MCP worktree
+`ci-35037253293`, `ci-35040188482` and `public-2.7.1-verification.json`.
+
+## Previous Hub 0.1.2 Hotfix
 
 Published 2026-09-16 (local): https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.2.
 Exact source/tag: `108b016322262eaa5d8b6f2c3177bdb7b8363661`.

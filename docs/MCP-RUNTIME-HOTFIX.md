@@ -91,7 +91,10 @@ different bytes. Final disposable installer acceptance passed for both apps.
   downloads passed the application's signature, installer/EXE binding and tamper
   rejection checks. Its minHubVersion is 0.1.3. Public 2.7.0 bytes are unchanged.
 - User authorized completing publication and then sleeping the PC. Sleep remains
-  conditional on both published releases passing final verification.
+  conditional on both published releases passing final verification. Both are
+  now public stable: Hub v0.1.3 and MCP v2.7.1. All 20 Hub and 16 MCP public asset
+  hashes/sizes match. Anonymous downloads, application trust-key checks and the
+  Hub updater signature/latest-feed check passed. See STABLE-RELEASE-STATUS.md.
 
 Companion edits are in `creator-works-mcp-community`. BANTWORKS MCP task handoff
 succeeded this turn after the earlier transport failure. No peer response was
