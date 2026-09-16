@@ -1,6 +1,7 @@
 # Hosted Views Across Hub Updates
 
-Candidate 0.1.6; not published. User report: installed 0.1.4 refuses a Hub update
+0.1.6 assets are published; final signed-update acceptance is in progress before
+latest promotion. User report: installed 0.1.4 refuses a Hub update
 while idle MCP/Setup views are open. The earlier public self-update test had no
 hosted views, so it did not cover this case.
 
@@ -23,7 +24,7 @@ hosted views, so it did not cover this case.
 
 ## Evidence and Limits
 
-Local baseline: 168 UI tests and 111 Rust tests passed, with nine opt-in Rust tests
+Current source: 169 UI tests and 111 Rust tests passed, with nine opt-in Rust tests
 excluded. Native Rust fixtures verify EOF-driven child exit and no forced kill
 on timeout. UI tests include cancel/form preservation, busy refusal, restart
 restoration of one/two views, failure/retry, and delayed close events.
@@ -44,7 +45,20 @@ Background hosted status reads and native restoration now also use the existing
 discovery queue. A failing-then-passing regression proves they cannot contend for
 the shared lease; mutations and workflow release are not queued behind reads.
 
+The rebuilt installer passed all four native lanes in
+[35097259476](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35097259476):
+clean installation and upgrades from alpha.3, alpha.5 and stable 0.1.5, real
+MCP/Setup views, seeded-record reopening, decline/retry, scoped backend exit and
+settings preservation. The exact six public files were anonymously downloaded,
+byte-matched and signature-verified. The public release-list response is 234,895
+bytes, 27,249 below the old-client ceiling.
+
+Separate final gates are running: unmodified public 0.1.5 -> 0.1.6, and the new
+outgoing updater with both views open. The latter uses current runtime source
+with version-only 0.1.5 metadata on a disposable runner, never published; it
+updates to the exact signed public 0.1.6. It is not labelled public 0.1.5 evidence.
+
 The signed public self-update gate must be repeated before any release is called
 ready. Older installed binaries do not gain this behavior retroactively: their
-current update still uses their own close-view requirement. No released bytes,
+current update still uses their own close-view requirement. No old release bytes,
 user installations, AI settings or Unity projects were changed by this work.
