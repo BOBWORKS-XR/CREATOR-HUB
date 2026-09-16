@@ -91,7 +91,7 @@
     target.focus();
     renderState();
   }
-  for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => show(button.dataset.view === 'hub' && menu.contains(button) ? 'projects' : button.dataset.view));
+  for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => show(button.dataset.view));
   trigger.addEventListener('click', () => {
     if (trigger.getAttribute('aria-expanded') === 'true') return close(true);
     shell.classList.add('suite-expanded');
@@ -421,7 +421,7 @@
       if (!request || !['hub', 'mcp', 'setup'].includes(request.view) || !Number.isSafeInteger(request.revision) || request.revision <= launchRevision) return;
       launchRevision = request.revision;
       // Navigation keeps existing hosted views intact; it never starts an installation.
-      show(request.view === 'hub' ? 'projects' : request.view);
+      show(request.view);
     }
     try {
       await window.__TAURI__.event.listen('app-progress', event => setProgress(event.payload));

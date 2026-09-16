@@ -92,10 +92,8 @@ the existing Lucide licence is retained.
   A running hosted Setup workflow refuses both close and install, then completes
   normally. Run 35017516816 subsequently passed actual Apps-row native Cancel/retry
   and installed updates for both companion apps.
-- The requested left-edge puzzle notch and larger/lower puzzle piece were
-  generated, but the exports contain an opaque checkerboard (zero transparent
-  pixels). Background cleanup with image-processing tools was requested from
-  the user on 2026-09-15; await that response. Keep the released
-  transparent Plugins PNG unchanged until a valid transparent export is available.
+- The left-edge puzzle notch and larger/lower piece now have a valid transparent
+  export for Hub 0.1.5; see `PLUGINS-ICON.md`. Earlier opaque drafts and the
+  released 0.1.4 asset are preserved. Published MCP/Setup assets remain unchanged.
 - Two copy-ready stable-release Discord posts are in
   `DISCORD-STABLE-2026-09-15.md`. They do not advertise the unreleased grid view.

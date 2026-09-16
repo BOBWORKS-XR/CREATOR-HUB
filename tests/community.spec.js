@@ -71,7 +71,7 @@ for (const width of [940, 320]) for (const layout of ['grid', 'list']) test(`Plu
   expect(await page.evaluate(() => window.calls.length)).toBe(calls);
   await trigger.click();
   await page.locator('#suite-menu [data-view="hub"]').click();
-  await expect(page.locator('#view-projects')).toBeVisible();
+  await expect(page.locator('#view-hub')).toBeVisible();
   await expect(page.locator('#view-plugins')).toBeHidden();
 });
 

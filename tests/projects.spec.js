@@ -1,6 +1,6 @@
 const { test, expect } = require('@playwright/test');
 
-async function load(page) {
+async function load(page, { openProjects = true } = {}) {
   await page.addInitScript(() => {
     window.calls = [];
     window.projects = { projects: [
@@ -28,6 +28,9 @@ async function load(page) {
   });
   await page.goto('http://127.0.0.1:4188');
   await expect(page.locator('#catalog-status')).toContainText('Update check complete');
+  await expect(page.locator('#view-hub')).toBeVisible();
+  if (!openProjects) return;
+  await page.locator('#hub-pages [data-view="projects"]').click();
   await expect(page.locator('#view-projects')).toBeVisible();
   await expect(page.locator('#view-hub')).toBeHidden();
   await expect(page.locator('#project-status')).toContainText('4 known projects');
@@ -35,14 +38,15 @@ async function load(page) {
 
 const projectNames = page => page.locator('.project-info > strong');
 
-test('Hub opens Projects by default without opening or modifying a project', async ({ page }) => {
-  await load(page);
-  await expect(page.locator('#hub-pages [data-view="projects"]')).toHaveAttribute('aria-current', 'page');
-  await expect(page.locator('#projects-title')).toBeFocused();
-  expect(await page.evaluate(() => window.calls.filter(c => /project/.test(c.command)))).toEqual([{ command: 'project_inventory', args: {} }]);
+test('Hub opens Apps by default without scanning, opening or modifying a project', async ({ page }) => {
+  await load(page, { openProjects: false });
+  await expect(page.locator('#hub-pages [data-view="hub"]')).toHaveAttribute('aria-current', 'page');
+  await expect(page.locator('#view-projects')).toBeHidden();
+  await expect(page.locator('#page-title')).toBeFocused();
+  expect(await page.evaluate(() => window.calls.filter(c => /project/.test(c.command)))).toEqual([]);
 });
 
-test('Creator Hub menu returns to Projects and retains filters from Apps or another app', async ({ page }) => {
+test('Creator Hub menu returns to Apps and keeps Projects filters for the next visit', async ({ page }) => {
   await load(page);
   await page.locator('#project-search').fill('Forest');
   await page.locator('#project-sort').selectOption('name');
@@ -55,6 +59,10 @@ test('Creator Hub menu returns to Projects and retains filters from Apps or anot
     await expect(page.locator('#view-projects')).toBeHidden();
     await page.locator('#suite-trigger').click();
     await page.locator('#suite-menu [data-view="hub"]').click();
+    await expect(page.locator('#view-hub')).toBeVisible();
+    await expect(page.locator('#view-projects')).toBeHidden();
+    await expect(page.locator('#page-title')).toBeFocused();
+    await page.locator('#hub-pages [data-view="projects"]').click();
     await expect(page.locator('#view-projects')).toBeVisible();
     await expect(page.locator('#project-search')).toHaveValue('Forest');
     await expect(page.locator('#project-sort')).toHaveValue('name');

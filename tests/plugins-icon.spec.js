@@ -1,4 +1,19 @@
 const { test, expect } = require('@playwright/test');
+const { createHash } = require('node:crypto');
+const { readFileSync } = require('node:fs');
+const { verifyPluginsIcon } = require('../scripts/verify-plugins-icon.cjs');
+const expectedIconHash = createHash('sha256').update(readFileSync(require.resolve('../src/icons/creator-plugins.png'))).digest('hex');
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__TAURI__ = { event: { listen: async () => () => {} }, core: { invoke: async command => {
+      if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
+      if (command === 'app_inventory') return { supported: true, apps: [] };
+      if (command === 'community_catalogue') return { entries: [], warnings: [], stale: false };
+      return null;
+    } } };
+  });
+});
 
 test('Plugins mark renders the approved three-piece cube at menu size', async ({ page }, testInfo) => {
   await page.goto('http://127.0.0.1:4188');
@@ -6,6 +21,7 @@ test('Plugins mark renders the approved three-piece cube at menu size', async ({
   const mark = page.locator('.app-row .plugins-mark');
   await expect(mark.locator('img')).toHaveAttribute('src', 'icons/creator-plugins.png');
   await mark.locator('img').evaluate(image => image.decode());
+  await verifyPluginsIcon(page, '.app-row .plugins-mark img', expectedIconHash);
   const colors = await mark.locator('img').evaluate(image => {
     const canvas = document.createElement('canvas');
     canvas.width = canvas.height = 64;
@@ -35,3 +51,20 @@ test('Plugins mark renders the approved three-piece cube at menu size', async ({
   await page.setViewportSize({ width: 240, height: 240 });
   await page.screenshot({ path: testInfo.outputPath('plugins-icon.png') });
 });
+
+for (const width of [940, 390]) {
+  test(`Plugins uses the same transparent artwork in its menu and active-page button at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 740 });
+    await page.goto('http://127.0.0.1:4188');
+    await expect(page.locator('#catalog-status')).toContainText('Update check complete');
+    await page.locator('#suite-trigger').click();
+    await verifyPluginsIcon(page, '#suite-menu .plugins-mark img', expectedIconHash);
+    await page.locator('#suite-menu [data-view="plugins"]').click();
+    await expect(page.locator('#page-title')).toHaveText('CREATOR PLUGINS');
+    await verifyPluginsIcon(page, '#suite-trigger .plugins-mark img', expectedIconHash);
+    await expect(page.locator('#suite-trigger .plugins-mark img')).toHaveCSS('width', '40px');
+    await expect(page.locator('#suite-menu')).toBeHidden();
+    await expect(page.locator('#suite-shell')).toHaveCSS('width', '55px');
+    await page.screenshot({ path: testInfo.outputPath(`plugins-page-${width}.png`) });
+  });
+}

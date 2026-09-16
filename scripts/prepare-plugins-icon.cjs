@@ -13,6 +13,14 @@ const path = require('node:path');
     await page.locator('img').evaluate(async (img, data) => {
       img.src = `data:image/png;base64,${data}`;
       await img.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 256;
+      const context = canvas.getContext('2d');
+      context.drawImage(img, 0, 0, 256, 256);
+      const pixels = context.getImageData(0, 0, 256, 256).data;
+      let transparent = 0;
+      for (let i = 3; i < pixels.length; i += 4) if (pixels[i] === 0) transparent++;
+      if (transparent < 6554) throw new Error('Source must have real transparency, not a painted checkerboard. Existing icon was not changed.');
     }, png.toString('base64'));
     await page.screenshot({ path: path.resolve(__dirname, '../src/icons/creator-plugins.png'), omitBackground: true });
   } finally { await browser.close(); }

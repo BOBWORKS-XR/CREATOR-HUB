@@ -38,10 +38,14 @@ async function boot(page, { failInventory = null, version = '0.1.1', view = 'hub
   await page.goto('http://127.0.0.1:4188');
 }
 
-test('slow Projects startup does not lose app inventory or Hub update checks', async ({ page }) => {
+test('slow Projects scan does not lose app inventory or Hub update checks', async ({ page }) => {
   await boot(page);
+  await expect(page.locator('#catalog-status')).toContainText('Update check complete');
+  await page.locator('#hub-pages [data-view="projects"]').click();
   await expect.poll(() => page.evaluate(() => typeof window.finishProjectScan)).toBe('function');
   await expect(page.locator('#view-projects')).toBeVisible();
+  await page.locator('#hub-pages [data-view="hub"]').click();
+  await page.locator('#check-updates').click();
   await expect(page.locator('#check-updates')).toBeDisabled();
   expect(await page.evaluate(() => window.failures)).toEqual([]);
   await page.evaluate(() => window.finishProjectScan());

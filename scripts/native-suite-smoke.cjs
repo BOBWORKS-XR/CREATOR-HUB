@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
+const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
   throw Error('Native suite installation is restricted to a disposable GitHub-hosted Windows runner.');
 }
@@ -198,12 +199,19 @@ async function closeHosted(app) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.waitForFunction(() => window.CreatorHubNative && !document.querySelector('#check-updates').disabled, null, { timeout: 120000 });
-  assert.equal(await page.locator('#view-projects').isVisible(), true, 'Normal launch opens Projects');
+  assert.equal(await page.locator('#view-hub').isVisible(), true, 'Normal launch opens Apps');
+  assert.equal(await page.locator('#view-projects').isVisible(), false);
   assert.equal((await page.locator('.footer-version').innerText()).trim(), require('../package.json').version, 'Visible version matches the packaged release');
   assert.equal(await page.locator('#inventory-error').isVisible(), false, 'Startup inventory succeeds without a manual retry');
   assert.match(await page.locator('#catalog-status').innerText(), /Installed apps checked|Update check complete|Some update checks failed/);
   for (const app of ['mcp', 'setup']) assert.match(await page.locator(`#status-${app}`).innerText(), /Installed |Available |Update available/);
   report.checks.push('Startup discovers apps without a manual retry and displays the packaged version');
+  await show('plugins');
+  report.pluginsIcon = await verifyPluginsIcon(page, '#suite-trigger .plugins-mark img', hash('src/icons/creator-plugins.png'));
+  assert.equal((await page.locator('#page-title').innerText()).trim(), 'CREATOR PLUGINS');
+  await page.locator('#suite-menu').waitFor({ state: 'hidden' });
+  await page.screenshot({ path: path.join(out, 'packaged-plugins-icon.png') });
+  report.checks.push('Installed Plugins page uses the accepted transparent icon and Plugins heading');
   await show('hub');
   assert.equal(await page.locator('#preview-channel').isChecked(), true);
   assert.match(await page.evaluate(() => window.__TAURI__.core.invoke('app_inventory', { check: false, preview: true }).then(() => 'ALLOWED', String)), /trusted shell/);
