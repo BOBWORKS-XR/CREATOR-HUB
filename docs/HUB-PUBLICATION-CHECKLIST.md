@@ -33,9 +33,11 @@ Not marking a release latest does **not** hide it from clients that enumerate
 releases. The pre-publication budget check is essential; the post-publication
 native test validates the final public route before claiming completion.
 
-After the 0.1.4 publication, the feed is 255,193 bytes, 6,951 below the legacy
-ceiling. Six historical release bodies were archived and shortened; all 148
-older assets are unchanged. This is a snapshot, not a permanent budget: the
-next draft must pass its own projected-response check before publishing. Do not
-increase a new binary's limit and assume already-installed older versions are
-repaired. See [0.1.4 acceptance and original failures](RELEASE-0.1.4.md).
+After the 0.1.5 publication, the feed is 251,681 bytes, 10,463 below the legacy
+ceiling. Eleven 0.1.3 diagnostic attachments were consolidated into one
+byte-verified ZIP before publishing; installers, signatures and updater metadata
+remain unchanged. All 144 retained historical assets matched the pre-publication
+snapshot. This is not a permanent budget: the next draft must pass its own
+projected-response check before publishing. Do not increase a new binary's limit
+and assume already-installed older versions are repaired. See
+[0.1.5 acceptance and original failures](RELEASE-0.1.5.md).

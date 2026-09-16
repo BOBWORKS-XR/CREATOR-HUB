@@ -4,7 +4,28 @@
 This supersedes older alpha.8 publication holds. Hub 0.1.0, Setup 0.3.0 and MCP
 2.7.0 are now public stable releases. Published binaries are frozen.
 
-## Hub 0.1.4: Public and Latest
+## Hub 0.1.5: Public and Latest
+
+Published 2026-09-16 with explicit user approval. MCP remains 2.7.1 and Setup
+remains 0.3.0. [Release and full audit](RELEASE-0.1.5.md).
+
+- Revised transparent Plugins icon with larger, lower puzzle corner and indented
+  outer edge. Apps opens by default, including the Creator Hub menu entry.
+- Build 35090029622 passed 161 UI, 107 Rust and 28 script tests, strict Clippy,
+  packaging and clean installed acceptance. Nine opt-in Rust tests were skipped.
+- Native replay 35091512400 passed all four installation/upgrade lanes using
+  unchanged installer bytes. Its test-only icon correction respected production
+  CSP; the first run's failed test reports are preserved, not labelled passed.
+- Public self-update 35092200617 passed unmodified 0.1.4 discovery, native Cancel,
+  approved update, automatic restart into exact 0.1.5, footer/registry versions,
+  retained preference/content, Apps default and exact transparent icon pixels.
+- All six public downloads and signatures verified. Latest was promoted only
+  after that run; anonymous latest-download metadata matches the accepted file.
+- Eleven 0.1.3 diagnostic attachments were consolidated into a byte-verified ZIP.
+  Historical installers/updater files are untouched. Current feed is 251,681
+  bytes, 10,463 below the legacy cap; no user apps or projects were changed.
+
+## Hub 0.1.4: Previous Stable
 
 Published 2026-09-16 with explicit user approval. MCP remains 2.7.1 and Setup
 remains 0.3.0. [Release and full audit](RELEASE-0.1.4.md).
