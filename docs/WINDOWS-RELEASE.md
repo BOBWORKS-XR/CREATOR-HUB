@@ -1,15 +1,20 @@
-# Creator Hub 0.1.2 for Windows
+# Creator Hub 0.1.3 for Windows
 
 Install Hub, then choose Creator Works MCP or Creator Project Setup from its
 app menu. Hub downloads verified official installers and asks before installing.
 Compatible apps can open inside Hub or in their own windows, using their existing
-settings. This release supports MCP 2.7.0 and Project Setup 0.3.0.
+settings. This release supports MCP 2.7.1 and Project Setup 0.3.0.
 
-The 0.1.2 hotfix prevents startup project scanning from blocking app discovery,
-shows the executable's actual version and provides visible discovery errors with
-a retry action. Hub's own update check remains independent of companion errors.
-From 0.1.1, use Apps > Check for updates after its project scan has finished, or
-close Hub and run the 0.1.2 installer. No uninstallation is needed.
+The 0.1.3 hotfix adds Disconnect MCP for update to Apps and MCP details. Finish
+active AI work, then confirm the native prompt to stop only this installation's
+private MCP runtimes. Cancel leaves them running. Other Node processes, AI apps,
+Unity, settings and projects are not closed or changed. Installation remains a
+separate approval. If an AI client reconnects automatically, pause this MCP in
+that client first, then reconnect after updating.
+
+Use Apps > Check for updates, or close Hub and run the 0.1.3 installer. No
+uninstallation is needed. Startup discovery retry and the executable-derived
+version display from 0.1.2 remain included.
 
 Projects opens first, with Creator SDK/Altspace and Banter projects together.
 Creator Plugins offers remembered Grid/List views, community contributions, category filters and a Unity
@@ -25,8 +30,8 @@ the plugin manager. Package checksums establish integrity, not code safety or
 SDK compatibility; selected imported C# code runs in Unity.
 
 Save work before updating. Hub does not force-close Unity or AI clients. Close
-the app or disconnect the listed MCP connection if an update is blocked, then
-use Check again. Keep the default installation folder for managed updates.
+the app or use the confirmed MCP disconnect if an update is blocked, then use
+Check again. Keep the default installation folder for managed updates.
 Custom, duplicate, MSI and unrecognized installations may require manual review.
 
 Windows x64 is the supported release platform. Windows may show an unsigned

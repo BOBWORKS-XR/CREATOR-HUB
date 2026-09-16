@@ -9,12 +9,12 @@
     "sourceRevision": "f8d5423df9a477ceb65ec62a00358c7900703b66"
   },
   "mcp": {
-    "version": "2.7.0",
-    "assetName": "Creator.Works.MCP_2.7.0_x64-setup.exe",
-    "installerSha256": "f403da14237a16d3e7a50620d484c60c0a3fbdbb6abfe1ccaf21e4ffb78e1da9",
-    "executableSha256": "0fc9f6023973378778a00b063c383f37f2973eec9d89a96b084391c89f2287cd",
-    "acceptanceRun": "35003567089",
-    "lifecycleAcceptanceRun": "35004965231",
-    "sourceRevision": "5b65478f126a9cf89c07b6136309d57f7782e40d"
+    "version": "2.7.1",
+    "assetName": "Creator.Works.MCP_2.7.1_x64-setup.exe",
+    "installerSha256": "4782b6ab04e09a8d24c5fd67d8c75fde8b508d09c04cb1391d953cd51d3aaa66",
+    "executableSha256": "6e1ba9d8d4eee99b35b60c9093efd1b3c19183d2cc184266a0696b8a57b0376d",
+    "acceptanceRun": "35037253293",
+    "lifecycleAcceptanceRun": "35040036068",
+    "sourceRevision": "cd0e5c0344955323e34ee12cee452b871002c566"
   }
 }
