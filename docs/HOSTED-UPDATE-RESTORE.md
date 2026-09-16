@@ -1,7 +1,7 @@
 # Hosted Views Across Hub Updates
 
-0.1.6 assets are published; final signed-update acceptance is in progress before
-latest promotion. User report: installed 0.1.4 refuses a Hub update
+0.1.6 is published as stable/latest after signed-update acceptance. User report:
+installed 0.1.4 refuses a Hub update
 while idle MCP/Setup views are open. The earlier public self-update test had no
 hosted views, so it did not cover this case.
 
@@ -53,12 +53,16 @@ settings preservation. The exact six public files were anonymously downloaded,
 byte-matched and signature-verified. The public release-list response is 234,895
 bytes, 27,249 below the old-client ceiling.
 
-Separate final gates are running: unmodified public 0.1.5 -> 0.1.6, and the new
-outgoing updater with both views open. The latter uses current runtime source
-with version-only 0.1.5 metadata on a disposable runner, never published; it
-updates to the exact signed public 0.1.6. It is not labelled public 0.1.5 evidence.
+Separate final gates passed: [unmodified public 0.1.5 -> 0.1.6](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35099272105),
+and [the new outgoing updater with both views open](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35100145403).
+The latter uses current runtime source with version-only 0.1.5 metadata on a
+disposable runner, never published; it updates to the exact signed public 0.1.6.
+It is not labelled public 0.1.5 evidence. Native Cancel preserved both backends
+and the unsaved form; approval drained old backends, automatically restarted
+Hub, and reopened both real app views after permission. MCP configuration and
+an unrelated Node runtime survived. Latest promotion followed both passes.
 
-The signed public self-update gate must be repeated before any release is called
-ready. Older installed binaries do not gain this behavior retroactively: their
+These gates must be repeated for future relevant releases. Older installed
+binaries do not gain this behavior retroactively: their
 current update still uses their own close-view requirement. No old release bytes,
 user installations, AI settings or Unity projects were changed by this work.

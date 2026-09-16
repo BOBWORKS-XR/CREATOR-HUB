@@ -3,15 +3,19 @@
 **Unity tools in one window.** Open Creator SDK / Altspace and Banter projects,
 manage Creator Works MCP and Creator Project Setup, and browse community plugins.
 
-## Windows 0.1.3
+## Windows 0.1.6
 
-[Download Creator Hub](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.3)
-and choose `Creator-Hub-0.1.3-Windows-setup.exe`.
+[Download Creator Hub](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.6)
+and choose `Creator-Hub-0.1.6-Windows-setup.exe`.
 
-This hotfix adds **Disconnect MCP for update** when verified private MCP runtimes
-block an upgrade. Confirming stops only that installation's connections, then
-you can retry Update app. Cancel leaves them running. Unrelated Node processes,
-AI applications, Unity projects and saved settings are preserved.
+This hotfix lets **Hub close its idle app views for an update and reopen them
+after restart**. Cancel preserves the views and unsaved forms. Active work is
+protected; saved app settings, Unity projects and unrelated processes stay put.
+Existing app-native permission prompts still apply when views reopen.
+
+**One-time upgrade:** when updating from 0.1.5 or older, close the hosted views
+first. Those versions still use their old updater. The automatic flow applies
+to future Hub updates from 0.1.6. See [checks and limits](docs/RELEASE-0.1.6.md).
 
 The matching companion versions are **Project Setup 0.3.0** and **MCP 2.7.1**.
 Hub installs these apps separately and opens compatible versions inside Hub.
@@ -19,11 +23,12 @@ Both also work standalone; Hub does not create duplicate MCP servers.
 Earlier published acceptance remains in the
 [alpha.6 release history](docs/README-ALPHA6-RELEASE-HISTORY.md).
 
-- **Projects first:** detected Creator SDK / Altspace and Banter projects, search,
+- **Projects:** detected Creator SDK / Altspace and Banter projects, search,
   sorting and opening in the matching installed Unity Editor.
-- **Apps:** direct Update app buttons, verified downloads and approved installation, with guidance
-  for running-app blockers. Disconnecting private MCP connections needs separate
-  confirmation; installation does not automatically close them.
+- **Apps opens by default:** direct Update app buttons, verified downloads and
+  approved installation, with guidance for running-app blockers. Private MCP
+  connections are disconnected only after confirmation; unrelated Node processes
+  are not stopped.
 - **Creator Plugins:** remembered Grid/List views, type filters, images, contributor
   credits and incorporation instructions. Its icon/menu stays visible while scrolling.
 - **Unity menu:** add the Editor-only catalogue to a selected project. Compact
@@ -37,10 +42,10 @@ Earlier published acceptance remains in the
 Existing users: **update Hub first**, then the companion apps. A stable version
 can update an older prerelease. Channel settings do not authorize downgrades or
 silent installation. Your project folders and app settings stay put.
-Older previews reporting an intermediate-version requirement can use the 0.1.3
+Older previews reporting an intermediate-version requirement can use the 0.1.6
 installer directly. If 0.1.1 shows unavailable apps, use Apps > Check for updates
 after the project scan finishes. Its old footer says 0.1.0 incorrectly; reinstalling
-0.1.1 does not correct that label. See the [hotfix notes and acceptance](docs/RELEASE-0.1.3.md).
+0.1.1 does not correct that label. See the [earlier hotfix notes](docs/RELEASE-0.1.3.md).
 
 ## Companion Apps
 
