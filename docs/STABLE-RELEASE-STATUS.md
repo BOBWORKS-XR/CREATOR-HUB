@@ -4,6 +4,29 @@
 This supersedes older alpha.8 publication holds. Hub 0.1.0, Setup 0.3.0 and MCP
 2.7.0 are now public stable releases. Published binaries are frozen.
 
+## Hub 0.1.4: Public and Latest
+
+Published 2026-09-16 with explicit user approval. MCP remains 2.7.1 and Setup
+remains 0.3.0. [Release and full audit](RELEASE-0.1.4.md).
+
+- Primary **Disconnect and update** makes the guarded MCP update flow visible;
+  standalone disconnect is a bordered button. Existing native permission and
+  process-ownership checks remain in place.
+- Exact candidate 35085595417 passed four native installation/upgrade lanes,
+  including disconnect Cancel, approved scoped cleanup, install Cancel/retry,
+  unrelated Node survival and retained settings/project selection.
+- Public native run 35088525701 passed unchanged installed 0.1.3 discovery,
+  native cancellation, approved update, automatic restart into exact 0.1.4,
+  correct footer/registry and retained preference/unmanaged content.
+- All six anonymous public downloads matched the accepted signed files. Latest
+  was promoted only after the native test; its download feed matches 0.1.4.
+- Six historical release bodies were archived and shortened, not discarded.
+  All 148 previous assets are unchanged. The public response is 255,193 bytes,
+  below the legacy 262,144-byte cap by 6,951 bytes.
+- Initial post-publication feed-read failure and the cancelled stale-assertion
+  harness run are retained in the audit, not relabelled as successful tests.
+  No user installation, AI setting or Unity project was changed.
+
 ## Hub 0.1.3 and MCP 2.7.1 Hotfixes: Public
 
 **Later correction:** the initial 0.1.3 publication made the GitHub release list

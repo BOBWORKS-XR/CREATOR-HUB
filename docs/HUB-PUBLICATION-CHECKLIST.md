@@ -33,8 +33,9 @@ Not marking a release latest does **not** hide it from clients that enumerate
 releases. The pre-publication budget check is essential; the post-publication
 native test validates the final public route before claiming completion.
 
-As of the 0.1.3 metadata repair, the current feed is 260,138 bytes, only 2,006
-below the legacy ceiling. That repairs the installed updater but deliberately
-does not satisfy the stricter future-publication headroom rule. The next draft
-must reduce the projected response before publishing. Do not increase a new
-binary's limit and assume already-installed older versions are repaired.
+After the 0.1.4 publication, the feed is 255,193 bytes, 6,951 below the legacy
+ceiling. Six historical release bodies were archived and shortened; all 148
+older assets are unchanged. This is a snapshot, not a permanent budget: the
+next draft must pass its own projected-response check before publishing. Do not
+increase a new binary's limit and assume already-installed older versions are
+repaired. See [0.1.4 acceptance and original failures](RELEASE-0.1.4.md).

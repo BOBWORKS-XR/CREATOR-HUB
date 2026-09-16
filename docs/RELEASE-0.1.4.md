@@ -1,5 +1,8 @@
 # Creator Hub 0.1.4
 
+Published stable and marked latest on 2026-09-16 after public self-update
+acceptance. [Download](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.4).
+
 - **Disconnect and update:** the main MCP update button now asks permission to
   stop MCP's own private runtimes, rechecks them, and continues to installation
   confirmation. No separate text link to hunt for.
@@ -33,8 +36,35 @@ Installer size: 5,997,095 bytes. SHA-256:
 Installed executable SHA-256:
 `68aa863c53798d03e4ac9eab75b6f6e22ca13f7517e976e9a04e2cf176e17cfa`.
 
-Public 0.1.3-to-0.1.4 self-update/restart acceptance is pending. Do not treat the
-installer-upgrade test as proof of the final public update route or mark this
-release latest until that check passes. Older release-page notes are archived
-verbatim so the release-list response stays within older clients' limits; all
-previous downloadable assets remain unchanged.
+[Public self-update run 35088525701](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35088525701)
+passed on a disposable Windows runner using the unchanged public installers:
+0.1.3 discovered 0.1.4, native Not now preserved the old installation, and
+approved Update Hub installed the exact hash above and restarted automatically.
+Footer and uninstall registry reported 0.1.4. The browser preference and
+unmanaged installation file survived; the test-only browser policy was restored.
+
+All six public assets were independently downloaded and byte-matched. The
+application trust key verified catalog/updater signatures and installer/EXE
+binding, including tamper rejection. After latest promotion, the anonymous
+latest-download feed matched the same signed 0.1.4 feed. The legacy release-list
+response is 255,193 bytes, leaving 6,951 bytes below the shipped 256 KiB ceiling.
+Six older release-page bodies were archived in the repository and replaced with
+short links; all 148 previous downloadable assets remain unchanged.
+
+## Publication Audit
+
+- Guarded draft publication passed its projected feed-size check. Its immediate
+  public read did not yet contain the expected signed files and correctly
+  withheld readiness. Release state was inspected before any retry; subsequent
+  anonymous reads passed. No installer or metadata was replaced. The cause of
+  that initial missing-feed response was not established.
+- Run 35088239465 hit a stale test assertion expecting 0.1.3 even though the
+  actual UI correctly displayed "Version 0.1.4 is ready to install." The run was
+  cancelled; its original failure report is retained. Harness-only commit
+  ebfd622 derives assertions and report text from the release pins and adds a
+  regression check. All 15 focused publication tests passed before the successful
+  rerun. Product source, tag and accepted bytes did not change.
+- Latest promotion followed the successful public native test, not just the
+  installer test. No user installation, AI session or Unity project was changed.
+  These checks do not establish every historical migration, every AI client's
+  reconnect behavior, or native macOS/Linux acceptance.

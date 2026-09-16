@@ -1,7 +1,8 @@
 # MCP Update Controls
 
-Status: Hub 0.1.4 candidate passed packaged Windows acceptance; not released
-(2026-09-16).
+Status: Hub 0.1.4 is public stable and latest (2026-09-16), after packaged
+acceptance and the exact public 0.1.3-to-0.1.4 self-update/restart test. See
+[release verification and audit](RELEASE-0.1.4.md).
 
 The user did not recognise the text-only disconnect link as a button. Hub 0.1.3
 disabled Update app when private MCP runtimes were running, requiring this
@@ -30,7 +31,8 @@ real AI clients and Unity projects were not modified or terminated.
 [Windows candidate run 35085595417](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35085595417)
 passed all four native lanes against product source
 `3e24d87a513305f4b93339754c8ef67a4c53d9cd` on the test branch
-`test/mcp-disconnect-update-0.1.4`. Nothing was published to the release feed.
+`test/mcp-disconnect-update-0.1.4`. Nothing was published at that candidate
+checkpoint; the same accepted bytes were subsequently released.
 
 - Clean Hub, MCP 2.7.1 and Setup 0.3.0 installation with real hosted interfaces.
 - Hub alpha.5 plus legacy MCP 2.6.0 and Setup 0.2.2 upgrades.
@@ -57,7 +59,8 @@ hashed and its executable version checked locally without installing it.
 Local receipts and the exact installer are under
 `artifacts/mcp-update-ux-0.1.4/`; they are not committed. No user installation,
 AI session or Unity project was changed. This does not claim all historical
-MCP versions, other platforms, or public Hub self-update acceptance. Publishing
-still requires approval, the release-feed budget gate and the actual signed
-0.1.3-to-0.1.4 self-update/restart check in the publication checklist. Preserve
-these accepted candidate bytes; do not substitute a rebuild's hashes.
+MCP versions or other platforms. Publication was explicitly approved and the
+release-feed budget gate passed. Public self-update run 35088525701 then passed
+native cancellation, exact 0.1.3-to-0.1.4 update, automatic restart and state
+preservation before latest promotion. Preserve these released bytes; do not
+substitute a rebuild's hashes. MCP remains 2.7.1 and Setup remains 0.3.0.
