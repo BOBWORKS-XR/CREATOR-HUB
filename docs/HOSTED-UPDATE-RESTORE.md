@@ -40,6 +40,9 @@ Restoration now waits for the pinned companion's initial probe/workflow completi
 before proceeding. A controlled-delay regression covers both apps and asserts
 that neither the next app nor inventory runs early. The original four failing
 native reports remain preserved; a rebuilt candidate must repeat acceptance.
+Background hosted status reads and native restoration now also use the existing
+discovery queue. A failing-then-passing regression proves they cannot contend for
+the shared lease; mutations and workflow release are not queued behind reads.
 
 The signed public self-update gate must be repeated before any release is called
 ready. Older installed binaries do not gain this behavior retroactively: their

@@ -46,6 +46,26 @@ test('failed and synchronously throwing scans do not poison subsequent discovery
   assert.equal(await hub, 'Hub status');
 });
 
+test('restoration and inventory wait behind hosted background reads sharing the native lease', async () => {
+  const calls = [], finish = [];
+  const window = bridge((command, args) => {
+    calls.push(args?.command || command);
+    return new Promise(resolve => finish.push(resolve));
+  });
+  const operations = [
+    ['hosted_app_call', { command: 'get_project_sdk_profile' }],
+    ['restore_hosted_app', { app: 'setup' }],
+    ['hosted_app_call', { command: 'probe_environment' }],
+    ['app_inventory', {}],
+  ];
+  const pending = operations.map(([command, args]) => window.CreatorHubNative.invoke(command, args));
+  for (let index = 0; index < operations.length; index++) {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls, operations.slice(0, index + 1).map(([command, args]) => args.command || command));
+    finish[index](); await pending[index];
+  }
+});
+
 test('user actions and cancellation are not deferred behind pending discovery', async () => {
   const calls = [];
   let finish;
@@ -60,6 +80,9 @@ test('user actions and cancellation are not deferred behind pending discovery', 
     assert.equal(await window.CreatorHubNative.invoke(command), 'Native guard handles the action');
   }
   assert.deepEqual(calls, ['project_inventory', 'cancel_download', 'install_app', 'open_app', 'stop_hosted_app']);
+  for (const command of ['begin_ui_operation', 'finish_ui_operation', 'save_config']) {
+    assert.equal(await window.CreatorHubNative.invoke('hosted_app_call', { command }), 'Native guard handles the action');
+  }
   finish();
   await scan;
 });
