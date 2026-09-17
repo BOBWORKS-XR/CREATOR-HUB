@@ -62,9 +62,33 @@ This note records source and local test evidence, not publication approval.
   released hash in clean checkouts. No checksum check was weakened. The concurrent
   MCP candidate was cancelled because its fixture had the identical index issue.
 
+## Companion Installer Evidence
+
+- Setup 0.3.1 candidate [35283526299](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/actions/runs/35283526299)
+  passed package checks. [35284656904](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/actions/runs/35284656904)
+  passed installed upgrades from 0.2.2, 0.3.0-alpha.1, alpha.2, alpha.6 and 0.3.0,
+  exact payload/sentinel preservation, and native busy-close refusal, chooser
+  cancellation and idle close. Installer SHA-256:
+  `8bb8aeecb18973f52cb9afe41c251a913b4e30dfbcfdc927edb785c5afd6f664`.
+- MCP 2.7.2 [35283535011 attempt 2](https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/actions/runs/35283535011)
+  passed the build and five installed upgrade baselines. Attempt 1 stopped on
+  the PowerShell refusal-test process's 10-second startup timeout; the same source
+  passed on rerun, without changing assertions or product code.
+  [35285385998](https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/actions/runs/35285385998)
+  replayed the exact installer from 2.6.0, 2.7.0-alpha.1, alpha.2, 2.7.0 and 2.7.1,
+  including native installer No/Cancel/Yes on 2.7.1, scoped private-runtime
+  cleanup, unrelated Node preservation and native busy/idle lifecycle.
+  Installer SHA-256:
+  `13f0e14bf321227f59788f13ec9253dff092891bb3144607e37263d5ee16e2ca`.
+- Both signed catalogue descriptors require Hub 0.1.7 because its hosted apps
+  are pinned to exact reviewed executable hashes. Descriptor signatures, payload
+  hashes and tamper rejection passed locally. These are not Authenticode claims.
+
 ## Release Gates Still Required
 
-Exact Windows candidate builds, installed upgrades from current stable and
-historical baselines, packaged UI checks, signed artifact verification, legacy
-release-feed budget and previous-stable Hub in-app update/restart acceptance.
+The combined Hub build and staged native suite are running in
+[35285728517](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35285728517).
+Hub packaged UI/upgrade acceptance, signed artifact verification, legacy release
+feed budget and previous-stable Hub in-app update/restart acceptance remain.
+Companion drafts are unpublished until combined acceptance passes.
 Do not change an existing published installer to ship these changes.
