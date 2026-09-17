@@ -1,6 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const entry = require('./fixtures/community/start-location.json');
 const path = require('node:path');
+const { verifyCommunityMedia } = require('../scripts/verify-community-media.cjs');
 async function load(page, options = {}) {
   await page.addInitScript(({ entry, options }) => {
     window.calls = [];
@@ -42,6 +43,15 @@ async function load(page, options = {}) {
   await page.getByRole('button', { name: 'View Creator Plugins' }).click();
   await expect(page.locator('.community-count')).toHaveText('1 contribution');
 }
+test('packaged media acceptance waits for close-event cleanup and restores the catalogue', async ({ page }, testInfo) => {
+  await load(page);
+  const report = await verifyCommunityMedia(page, testInfo.outputPath('packaged-media'));
+  expect(report).toEqual({ passed: true, staticImages: 6, gif: true, webm: true, fixture: true, importsStarted: false });
+  await expect(page.getByRole('dialog', { name: 'Contribution preview' })).toBeHidden();
+  await expect(page.locator('.community-media-stage video')).toHaveCount(0);
+  await expect(page.locator('.community-count')).toHaveText('1 contribution');
+});
+
 test('returning after closing Unity refreshes the selected project and enables Add menu', async ({ page }) => {
   await load(page, { projectOpen: true });
   await page.getByRole('button', { name: 'Add Unity menu', exact: true }).click();

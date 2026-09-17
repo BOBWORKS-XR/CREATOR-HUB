@@ -1,4 +1,3 @@
-const assert = require('node:assert/strict');
 const path = require('node:path');
 const { expect } = require('@playwright/test');
 
@@ -37,7 +36,8 @@ async function verifyCommunityMedia(page, out) {
     await expect.poll(() => page.locator('.community-media-stage video').evaluate(video => video.currentTime)).toBeGreaterThan(0);
     await page.screenshot({ path: path.join(out, 'packaged-gallery-video.png') });
     await page.getByRole('button', { name: 'Close preview', exact: true }).click();
-    assert.equal(await page.locator('.community-media-stage video').count(), 0);
+    // Dialog close dispatches its cleanup event in a later browser task.
+    await expect(page.locator('.community-media-stage video')).toHaveCount(0);
     return { passed: true, staticImages: 6, gif: true, webm: true, fixture: true, importsStarted: false };
   } finally {
     await page.evaluate(() => { window.CreatorCommunity.closePreview(); window.CreatorCommunityInvoke = window.__mediaTestPrevious; delete window.__mediaTestPrevious; });

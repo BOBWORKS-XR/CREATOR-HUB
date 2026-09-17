@@ -86,8 +86,13 @@ This note records source and local test evidence, not publication approval.
 
 ## Release Gates Still Required
 
-The combined Hub build and staged native suite are running in
+The combined Hub build passed in
 [35285728517](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35285728517).
+Its initial native suite stopped on the gallery harness checking the video count
+immediately after `dialog.close()`, before the queued close-event cleanup. The
+harness now waits for the same zero-video condition with a bounded Playwright
+assertion, matching the browser lifecycle. The exact harness also has a local
+browser regression test. No product code or candidate installer changed.
 Hub packaged UI/upgrade acceptance, signed artifact verification, legacy release
 feed budget and previous-stable Hub in-app update/restart acceptance remain.
 Companion drafts are unpublished until combined acceptance passes.
