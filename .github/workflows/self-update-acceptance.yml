@@ -36,8 +36,8 @@ jobs:
           if-no-files-found: error
       - run: node --test scripts/check-release-feed.test.cjs
       - name: Check the exact public feed used by installed Hub versions
-        run: node scripts/check-release-feed.cjs 0.1.6
-      - name: Test in-app update and automatic restart into exact public 0.1.6
+        run: node scripts/check-release-feed.cjs 0.1.7
+      - name: Test in-app update and automatic restart into exact public 0.1.7
         env:
           CREATOR_HOSTED_UPDATE_FIXTURE: ${{ inputs.hosted_fixture && 'dist/Creator-Hub-hosted-update-fixture/fixture.json' || '' }}
         run: node scripts/native-self-update-smoke.cjs
