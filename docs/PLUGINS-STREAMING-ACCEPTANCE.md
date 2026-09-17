@@ -34,6 +34,10 @@ This note records source and local test evidence, not publication approval.
 - Setup: 61 browser tests passed on the complete rerun. The earlier failure was
   Chromium `ERR_NO_BUFFER_SPACE` while opening the local test server, before any
   app assertion. No product change was made for that environment failure.
+- Setup native tests: 116 unit and two integration checks passed locally. MCP:
+  117 Rust and 250 Node tests passed. Strict Setup Clippy passed; MCP strict
+  all-target Clippy reports a pre-existing eight-argument `one_click_setup`
+  command warning, outside this change. Its existing CI uses tests and fmt.
 - Real Unity 2022.3.39f1 and 6000.3.21f1 each passed 63 presentation/protocol
   checks. While each Editor was running, its lock denied the exclusive probe.
   Reports: `artifacts/plugins-media-2022.3.39f1-9f86f0ea` and
@@ -45,9 +49,18 @@ This note records source and local test evidence, not publication approval.
   Unity 6000.3.21f1 import, compilation/reload and persisted `imported` receipt.
   The scene and protected content were not opened or saved. This was batch import,
   not a native import-dialog click or scene/runtime acceptance.
+- The same marked disposable fixture then downloaded the exact 93,245,650-byte
+  package through Unity's real `UnityWebRequest` and file-backed handler. SHA-256,
+  final size and temporary-file cleanup passed. `large-download-result.json`
+  records this download-only check; no extra import was started.
 - Preserve the first failed fixture `artifacts/plugins-large-5HzFiI`: its minimal
   manifest omitted UIElements, causing three CS1069 errors in the supplied Readme.
   Adding that declared dependency to the second disposable fixture resolved them.
+- First Setup CI run 35282736581 stopped on the old-helper fixture's LICENSE.md
+  hash: its working copy had the released CRLF bytes but Git's older index had LF.
+  Renormalizing that fixture under the existing `-text` rule preserves the exact
+  released hash in clean checkouts. No checksum check was weakened. The concurrent
+  MCP candidate was cancelled because its fixture had the identical index issue.
 
 ## Release Gates Still Required
 

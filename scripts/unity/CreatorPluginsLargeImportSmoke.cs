@@ -5,6 +5,7 @@ using System.Text;
 using CreatorWorks.Plugins;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Networking;
 
 // Opt-in batch API acceptance, not proof of clicking Unity's import dialog.
 [InitializeOnLoad]
@@ -13,6 +14,9 @@ public static class CreatorPluginsLargeImportSmoke
     private static string Project => Path.GetDirectoryName(Application.dataPath);
     private static bool Fixture => File.Exists(Path.Combine(Project, ".large-package-test-fixture"));
     [Serializable] private sealed class Report { public bool passed; public string error, receipt, sha256, unity; public long byteLength; public int prefabs, scenes; }
+    private static UnityWebRequest network;
+    private static CreatorPluginsWindow.DiskDownload disk;
+    private static double downloadDeadline;
     static CreatorPluginsLargeImportSmoke()
     {
         if (!Fixture) return;
@@ -41,6 +45,34 @@ public static class CreatorPluginsLargeImportSmoke
             }
         }
         catch (Exception error) { Finish(false, error.ToString(), null); }
+    }
+    public static void Download()
+    {
+        if (!Fixture || File.Exists(Path.Combine(Project, "large-download-result.json"))) throw new InvalidOperationException("Use a marked disposable fixture without an existing download result.");
+        disk = new CreatorPluginsWindow.DiskDownload(93_245_650, "b9a99519a74bdbd5d75d997bed87118896c39a4d712b9ff708e63520ea4fdf94");
+        network = new UnityWebRequest("https://cdn.sidequestvr.com/file/4601616/optics-warehouse-loft-unity-urp-ver-6000321f1-prefab.unitypackage", UnityWebRequest.kHttpVerbGET) { downloadHandler = disk, timeout = 180, redirectLimit = 0 };
+        downloadDeadline = EditorApplication.timeSinceStartup + 185;
+        network.SendWebRequest();
+        EditorApplication.update += DownloadTick;
+    }
+    private static void DownloadTick()
+    {
+        if (!network.isDone && EditorApplication.timeSinceStartup < downloadDeadline) return;
+        string error = null;
+        long bytes = 0;
+        try
+        {
+            if (!network.isDone || network.result != UnityWebRequest.Result.Success) throw new Exception(network.error ?? "Download timed out.");
+            bytes = disk.Finish().Length;
+        }
+        catch (Exception failure) { error = failure.ToString(); }
+        finally { network.Abort(); network.Dispose(); network = null; disk.Cleanup(); EditorApplication.update -= DownloadTick; }
+        if (File.Exists(disk.Temporary)) error = "Temporary download was not removed.";
+        var report = new Report { passed = error == null, error = error, receipt = "download-only-no-import", byteLength = bytes, unity = Application.unityVersion,
+            sha256 = error == null ? "b9a99519a74bdbd5d75d997bed87118896c39a4d712b9ff708e63520ea4fdf94" : null };
+        using (var file = new FileStream(Path.Combine(Project, "large-download-result.json"), FileMode.CreateNew))
+        using (var writer = new StreamWriter(file)) writer.Write(JsonUtility.ToJson(report, true));
+        EditorApplication.Exit(error == null ? 0 : 1);
     }
     private static void Poll()
     {
