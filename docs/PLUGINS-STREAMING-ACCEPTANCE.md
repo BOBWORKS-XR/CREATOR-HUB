@@ -1,7 +1,8 @@
 # Plugins Streaming And Editor Detection
 
 Candidate scope: Hub 0.1.7, Setup 0.3.1, MCP 2.7.2 and Unity helper 0.1.1.
-This note records source and local test evidence, not publication approval.
+Published and marked latest after exact installed/public acceptance. See
+[0.1.7 release evidence](RELEASE-0.1.7.md) for final runs, hashes and limitations.
 
 ## Confirmed Defects
 
@@ -84,7 +85,7 @@ This note records source and local test evidence, not publication approval.
   are pinned to exact reviewed executable hashes. Descriptor signatures, payload
   hashes and tamper rejection passed locally. These are not Authenticode claims.
 
-## Release Gates Still Required
+## Final Hub Acceptance
 
 The combined Hub build passed in
 [35285728517](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35285728517).
@@ -93,7 +94,11 @@ immediately after `dialog.close()`, before the queued close-event cleanup. The
 harness now waits for the same zero-video condition with a bounded Playwright
 assertion, matching the browser lifecycle. The exact harness also has a local
 browser regression test. No product code or candidate installer changed.
-Hub packaged UI/upgrade acceptance, signed artifact verification, legacy release
-feed budget and previous-stable Hub in-app update/restart acceptance remain.
-Companion drafts are unpublished until combined acceptance passes.
-Do not change an existing published installer to ship these changes.
+The same installer passed all four staged native lanes in
+[35287133940](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35287133940),
+then all four public native lanes in
+[35287544498](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35287544498).
+The real unmodified public 0.1.6 to 0.1.7 update and automatic restart passed
+[35287542182](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35287542182).
+All 15 public assets matched their accepted bytes and signed metadata. Hub0.1.7,
+Setup0.3.1 and MCP2.7.2 are public/latest. Previous published bytes are unchanged.

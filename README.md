@@ -3,12 +3,17 @@
 **Unity tools in one window.** Open Creator SDK / Altspace and Banter projects,
 manage Creator Works MCP and Creator Project Setup, and browse community plugins.
 
-## Windows 0.1.6
+## Windows 0.1.7
 
-[Download Creator Hub](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.6)
-and choose `Creator-Hub-0.1.6-Windows-setup.exe`.
+[Download Creator Hub](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.7)
+and choose `Creator-Hub-0.1.7-Windows-setup.exe`.
 
-This hotfix lets **Hub close its idle app views for an update and reopen them
+**Add Unity menu now recognizes when Unity has closed**, even if an unlocked
+lock file remains. Plugins also gains preview galleries, streamed large-package
+downloads, progress and cancellation. [Release checks](docs/RELEASE-0.1.7.md)
+include the actual public 0.1.6 to 0.1.7 update and automatic restart.
+
+Hub can **close its idle app views for an update and reopen them
 after restart**. Cancel preserves the views and unsaved forms. Active work is
 protected; saved app settings, Unity projects and unrelated processes stay put.
 Existing app-native permission prompts still apply when views reopen.
@@ -17,7 +22,7 @@ Existing app-native permission prompts still apply when views reopen.
 first. Those versions still use their old updater. The automatic flow applies
 to future Hub updates from 0.1.6. See [checks and limits](docs/RELEASE-0.1.6.md).
 
-The matching companion versions are **Project Setup 0.3.0** and **MCP 2.7.1**.
+The matching companion versions are **Project Setup 0.3.1** and **MCP 2.7.2**.
 Hub installs these apps separately and opens compatible versions inside Hub.
 Both also work standalone; Hub does not create duplicate MCP servers.
 Earlier published acceptance remains in the
@@ -42,7 +47,7 @@ Earlier published acceptance remains in the
 Existing users: **update Hub first**, then the companion apps. A stable version
 can update an older prerelease. Channel settings do not authorize downgrades or
 silent installation. Your project folders and app settings stay put.
-Older previews reporting an intermediate-version requirement can use the 0.1.6
+Older previews reporting an intermediate-version requirement can use the 0.1.7
 installer directly. If 0.1.1 shows unavailable apps, use Apps > Check for updates
 after the project scan finishes. Its old footer says 0.1.0 incorrectly; reinstalling
 0.1.1 does not correct that label. See the [earlier hotfix notes](docs/RELEASE-0.1.3.md).
