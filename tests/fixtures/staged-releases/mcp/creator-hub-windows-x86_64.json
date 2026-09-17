@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "appId": "creator-works-mcp",
+  "version": "2.7.2",
+  "platform": "windows",
+  "architecture": "x86_64",
+  "packageType": "nsis",
+  "assetName": "Creator.Works.MCP_2.7.2_x64-setup.exe",
+  "byteLength": 27126276,
+  "sha256": "13f0e14bf321227f59788f13ec9253dff092891bb3144607e37263d5ee16e2ca",
+  "executableSha256": "815147c99d04fa496c2d6d0d6d984aa99dee7c91b7cd880fefa2488eb089f610",
+  "identityProtocol": 1,
+  "lifecycleProtocol": 1,
+  "installerProtocol": 1,
+  "minHubVersion": "0.1.7"
+}

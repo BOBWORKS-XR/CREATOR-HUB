@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
 const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
+const { verifyCommunityMedia } = require('./verify-community-media.cjs');
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
   throw Error('Native suite installation is restricted to a disposable GitHub-hosted Windows runner.');
 }
@@ -19,11 +20,13 @@ const mcpOnly = process.env.CREATOR_SUITE_BASELINE === 'mcp-only';
 const upgrade = mcpOnly || process.env.CREATOR_SUITE_BASELINE === 'legacy';
 const selectedApps = mcpOnly ? ['mcp'] : ['setup', 'mcp'];
 const stagedSetup = process.env.CREATOR_STAGED_SETUP === '1';
+const stagedMcp = process.env.CREATOR_STAGED_MCP === '1';
 for (const exe of Object.values(apps)) assert.equal(fs.existsSync(exe), false, 'Expected a clean app installation target');
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out, { recursive: true });
 const report = { passed: false, flow: mcpOnly ? 'mcp-only-upgrade' : upgrade ? 'upgrade' : 'clean-install', hubSha256: hash(hub), checks: [], userMachineUsed: false, unityProjectCreated: false, selfUpdateTested: false };
 report.setupReleaseSource = mcpOnly ? 'not-tested' : stagedSetup ? 'signed-staged-cache' : 'public-release';
+report.mcpReleaseSource = stagedMcp ? 'signed-staged-cache' : 'public-release';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function hash(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); }
 function native(pid, exe, action, value = '') {
@@ -83,15 +86,18 @@ async function verifyPackagedHelper() {
   const helper = path.resolve('unity/com.creatorworks.plugins');
   const legacy = path.resolve('tests/fixtures/helper-alpha8/unity/com.creatorworks.plugins');
   const stable = path.resolve('tests/fixtures/helper-stable-0.1.0/unity/com.creatorworks.plugins');
+  const grid = path.resolve('tests/fixtures/helper-stable-0.1.6/unity/com.creatorworks.plugins');
   const names = ['package.json', 'LICENSE.md', 'Editor/CreatorWorks.Plugins.Editor.asmdef', 'Editor/CreatorPluginsWindow.cs'];
-  const fixtures = ['missing', 'outdated', 'stable'].map(kind => {
+  const fixtures = ['missing', 'outdated', 'stable', 'grid'].map(kind => {
     const root = path.join(out, `Unity-menu-${kind}`);
     for (const folder of ['Assets', 'Packages', 'ProjectSettings']) fs.mkdirSync(path.join(root, folder), { recursive: true });
     fs.writeFileSync(path.join(root, 'ProjectSettings/ProjectVersion.txt'), 'm_EditorVersion: 6000.3.21f1\n', { flag: 'wx' });
     fs.writeFileSync(path.join(root, 'Packages/manifest.json'), '{"dependencies":{}}\n', { flag: 'wx' });
     fs.writeFileSync(path.join(root, 'Assets/scene-sentinel.unity'), 'Preserve user content exactly.\n', { flag: 'wx' });
+    fs.mkdirSync(path.join(root, 'Temp'));
+    fs.writeFileSync(path.join(root, 'Temp/UnityLockfile'), 'unlocked stale Editor file', { flag: 'wx' });
     const destination = path.join(root, 'Packages/com.creatorworks.plugins');
-    const baseline = kind === 'stable' ? stable : legacy;
+    const baseline = kind === 'grid' ? grid : kind === 'stable' ? stable : legacy;
     if (kind !== 'missing') {
       fs.cpSync(baseline, destination, { recursive: true, errorOnExist: true, force: false });
       fs.writeFileSync(path.join(destination, 'Editor/CreatorPluginsWindow.cs.meta'), 'fileFormatVersion: 2\nguid: 11111111111111111111111111111111\n', { flag: 'wx' });
@@ -105,6 +111,7 @@ async function verifyPackagedHelper() {
     for (const fixture of fixtures) {
       const target = targets.projects.find(p => p.path.toLowerCase() === fixture.root.toLowerCase());
       assert.ok(target, 'Disposable helper target must be discovered');
+      assert.equal(target.open, false, 'An unlocked stale UnityLockfile must not block menu installation');
       assert.equal(target.helper, fixture.kind === 'missing' ? 'missing' : 'outdated');
       const invoke = () => page.evaluate(projectId => window.CreatorHubNative.invoke('install_community_menu', { projectId }), target.id);
       const cancelled = invoke();
@@ -117,6 +124,7 @@ async function verifyPackagedHelper() {
       for (const name of names) assert.equal(hash(path.join(fixture.destination, name)), hash(path.join(helper, name)));
       assert.equal(fs.readFileSync(path.join(fixture.root, 'Assets/scene-sentinel.unity'), 'utf8'), 'Preserve user content exactly.\n');
       assert.equal(fs.readFileSync(path.join(fixture.root, 'Packages/manifest.json'), 'utf8'), '{"dependencies":{}}\n');
+      assert.equal(fs.readFileSync(path.join(fixture.root, 'Temp/UnityLockfile'), 'utf8'), 'unlocked stale Editor file');
       if (fixture.kind !== 'missing') {
         const backups = fs.readdirSync(path.join(fixture.root, '.creator-plugins/helper-backups'));
         assert.equal(backups.length, 1);
@@ -212,10 +220,11 @@ async function closeHosted(app) {
   await page.locator('#suite-menu').waitFor({ state: 'hidden' });
   await page.screenshot({ path: path.join(out, 'packaged-plugins-icon.png') });
   report.checks.push('Installed Plugins page uses the accepted transparent icon and Plugins heading');
+  report.communityMedia = await verifyCommunityMedia(page, out);
   await show('hub');
   assert.equal(await page.locator('#preview-channel').isChecked(), true);
   assert.match(await page.evaluate(() => window.__TAURI__.core.invoke('app_inventory', { check: false, preview: true }).then(() => 'ALLOWED', String)), /trusted shell/);
-  const inventory = await page.evaluate(check => window.CreatorHubNative.invoke('app_inventory', { check, preview: true }), !stagedSetup);
+  const inventory = await page.evaluate(check => window.CreatorHubNative.invoke('app_inventory', { check, preview: true }), !stagedSetup && !stagedMcp);
   report.initialInventory = inventory;
   for (const app of selectedApps) {
     const state = inventory.apps.find(item => item.app === app);
@@ -312,7 +321,7 @@ async function closeHosted(app) {
     assert.equal(refreshed.apps.find(item => item.app === app).hostedCompatible, true);
     if (upgrade) assert.equal(fs.readFileSync(path.join(path.dirname(apps[app]), 'ci-unmanaged-sentinel.txt'), 'utf8'), 'preserve suite test content');
     for (const name of ['LICENSE.txt', 'THIRD_PARTY_NOTICES.txt', 'rust-dependencies.json']) assert.ok(fs.statSync(path.join(path.dirname(apps[app]), 'licenses', name)).size > 0);
-    report.checks.push(`${app}: ${app === 'setup' && stagedSetup ? 'native signed staged-catalog/cache validation (public feed not tested)' : 'public signed release and verified download'}, native Install consent, ${upgrade ? 'upgrade preserving unmanaged content' : 'clean install'}, exact installed hash, hosted compatibility and licenses`);
+    report.checks.push(`${app}: (staged ${app === 'setup' ? stagedSetup : stagedMcp}) ${((app === 'setup' && stagedSetup) || (app === 'mcp' && stagedMcp)) ? 'native signed staged-catalog/cache validation (public feed not tested)' : 'public signed release and verified download'}, native Install consent, ${upgrade ? 'upgrade preserving unmanaged content' : 'clean install'}, exact installed hash, hosted compatibility and licenses`);
   }
   if (upgrade) assert.equal(hash(configPath), originalConfigHash);
   else seedConfig();

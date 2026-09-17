@@ -7,6 +7,7 @@
     "allow-hub-update-status", "allow-download-hub-update", "allow-install-hub-update",
     "allow-pending-hosted-restore", "allow-restore-hosted-app", "allow-complete-hosted-restore",
     "allow-community-catalogue", "allow-open-community-link", "allow-download-community-package",
+    "allow-community-transfer-status", "allow-cancel-community-transfer",
     "allow-community-projects", "allow-choose-community-project", "allow-install-community-menu",
     "allow-queue-community-import", "allow-community-import-status",
     "allow-open-app", "allow-cancel-download", "allow-use-existing-app", "allow-get-launch-request", "allow-start-hosted-app",

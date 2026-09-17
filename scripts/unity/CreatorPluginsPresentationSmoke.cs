@@ -51,6 +51,24 @@ public static class CreatorPluginsPresentationSmoke
             window = ScriptableObject.CreateInstance<CreatorPluginsWindow>();
             Check(Get<bool>(window, "gridView"), "fresh window defaults to grid");
             Call(window, "StopDownload");
+            var mediaBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":1,\"galleries\":[{\"id\":\"" + entry.id + "\",\"items\":[" + string.Join(",", Enumerable.Range(0, 6).Select(i => "{\"type\":\"image\",\"url\":\"assets/example/" + i + ".png\"}")) + "]}]}");
+            var media = PluginProtocol.ParseMedia(mediaBytes);
+            Check(media.Length == 1 && media[0].items.Length == 6, "six-image sidecar parsed");
+            var galleries = Get<Dictionary<string, PreviewMedia[]>>(window, "galleries");
+            entry.previewImage = media[0].items[0].url;
+            galleries.Add(entry.id, media[0].items);
+            Check(window.GalleryItems(entry).Length == 6, "cover is not duplicated in gallery");
+            var animation = new PreviewMedia { type = "webm", url = "assets/example/demo.webm", poster = entry.previewImage };
+            Check(PluginProtocol.StaticPreview(animation) == entry.previewImage, "Unity selects WebM static poster");
+            animation.type = "gif"; animation.url = "assets/example/demo.gif";
+            Check(PluginProtocol.StaticPreview(animation) == entry.previewImage, "Unity selects GIF static poster");
+            foreach (string bad in new[] { Encoding.UTF8.GetString(mediaBytes).Replace("assets/example/0.png", "https://evil.test/a.png"), Encoding.UTF8.GetString(mediaBytes).Replace("\"image\"", "\"gif\"") })
+            {
+                bool rejected = false; try { PluginProtocol.ParseMedia(Encoding.UTF8.GetBytes(bad)); } catch { rejected = true; }
+                Check(rejected, "unapproved URL or missing poster refused");
+            }
+            galleries.Clear();
+            Check(window.GalleryItems(entry).Length == 1, "legacy cover works without sidecar");
             Check(CreatorPluginsWindow.GridColumns(330) == 1, "narrow grid has one column");
             Check(CreatorPluginsWindow.GridColumns(540) == 2, "medium grid has two columns");
             Check(CreatorPluginsWindow.GridColumns(810) == 3, "wide grid has three columns");
@@ -90,7 +108,7 @@ public static class CreatorPluginsPresentationSmoke
             Get<List<Listing>>(window, "listings").Add(changed);
             Set(window, "pendingListings", Array.Empty<string>()); Set(window, "pendingImport", entry);
             Set(window, "catalogueDeadline", EditorApplication.timeSinceStartup + 30);
-            Call(window, "NextListing");
+            Call(window, "FinishCatalogue");
             Check(Get<Listing>(window, "pendingImport") == null && Get<string>(window, "message").Contains("No import started"), "withdrawal during revalidation does not import");
 
             byte[] bytes = Encoding.UTF8.GetBytes("Harmless state-machine test bytes; not an importable archive.");
@@ -128,9 +146,10 @@ public static class CreatorPluginsPresentationSmoke
             File.WriteAllBytes(PluginProtocol.Area(project, "packages/" + file), new byte[] { 1, 2, 3 });
             Set(window, "catalogueFresh", true); Set(window, "catalogueLoadedAt", EditorApplication.timeSinceStartup);
             Call(window, "Download", entry);
-            Check(Get<string>(window, "message").Contains("checksum"), "corrupted cache rejected before import");
+            Check(Get<string>(window, "message").Contains("did not match"), "corrupted cache rejected before import");
             Check(Directory.GetFiles(PluginProtocol.Area(project, "inbox"), "*.json").Length == 1, "corrupted cache produces no extra request");
             Check(ImportReview.Active == null, "no import or scene operation was started");
+            CheckLargeTransfer(entry, project);
             report.passed = true;
         }
         catch (Exception error) { report.error = error.ToString(); Debug.LogException(error); }
@@ -142,5 +161,61 @@ public static class CreatorPluginsPresentationSmoke
             File.WriteAllText(Path.Combine(project, "presentation-result.json"), JsonUtility.ToJson(report, true));
             EditorApplication.Exit(report.passed ? 0 : 1);
         }
+    }
+
+    private static void CheckLargeTransfer(Listing source, string project)
+    {
+        var entry = JsonUtility.FromJson<Listing>(JsonUtility.ToJson(source));
+        entry.download = null;
+        var listings = new List<Listing> { entry };
+        var download = new PackageDownload { url = "https://cdn.sidequestvr.com/file/1/test.unitypackage", byteLength = 93_245_650, sha256 = new string('a', 64) };
+        var sidecar = new DownloadIndex { schemaVersion = 1, downloads = new[] { new SupplementalDownload { id = entry.id, version = entry.version, download = download } } };
+        PluginProtocol.ApplyDownloads(listings, Encoding.UTF8.GetBytes(JsonUtility.ToJson(sidecar)));
+        Check(entry.download.byteLength == 93_245_650 && PluginProtocol.CanImport(entry), "large sidecar enables exact-version Unity import");
+        sidecar.downloads[0].download.sha256 = new string('b', 64);
+        PluginProtocol.ApplyDownloads(listings, Encoding.UTF8.GetBytes(JsonUtility.ToJson(sidecar)));
+        Check(entry.download.sha256 == new string('a', 64), "sidecar cannot overwrite a listed checksum");
+        entry.download = null; sidecar.downloads[0].version = "99.0.0";
+        PluginProtocol.ApplyDownloads(listings, Encoding.UTF8.GetBytes(JsonUtility.ToJson(sidecar)));
+        Check(entry.download == null, "stale sidecar version is not applied");
+
+        const long length = 33L * 1024 * 1024;
+        var buffer = new byte[64 * 1024];
+        for (int i = 0; i < buffer.Length; i++) buffer[i] = (byte)(i % 251);
+        string hash;
+        using (var sha = System.Security.Cryptography.SHA256.Create())
+        {
+            for (long count = 0; count < length; count += buffer.Length) sha.TransformBlock(buffer, 0, buffer.Length, null, 0);
+            sha.TransformFinalBlock(new byte[0], 0, 0);
+            hash = BitConverter.ToString(sha.Hash).Replace("-", "").ToLowerInvariant();
+        }
+        var cancelled = new CreatorPluginsWindow.DiskDownload(length, hash);
+        Check(cancelled.WriteChunk(buffer, buffer.Length), "partial package streams to disk");
+        string partial = cancelled.Temporary;
+        cancelled.Cleanup(); cancelled.Dispose();
+        Check(!File.Exists(partial), "cancel deletes partial package");
+        var disk = new CreatorPluginsWindow.DiskDownload(length, hash);
+        string temporary = disk.Temporary;
+        try
+        {
+            for (long count = 0; count < length; count += buffer.Length) if (!disk.WriteChunk(buffer, buffer.Length)) throw new Exception("stream chunk rejected");
+            Check(true, "33 MiB streamed in bounded chunks");
+            var stream = disk.Finish();
+            var request = new ImportRequest { requestId = Guid.NewGuid().ToString("N"), projectPath = project, packageId = "fixture.large", version = "1.0.0", name = "Large streaming fixture", byteLength = length, sha256 = hash, packageFile = hash + ".unitypackage" };
+            PluginQueue.EnqueueStream(project, request, stream);
+            using (PluginProtocol.LockPackage(request, project)) Check(true, "large queued package passes locked streaming verification");
+            Check(!Directory.EnumerateFiles(Path.Combine(project, "Assets"), hash + "*", SearchOption.AllDirectories).Any(), "queued package is outside Assets");
+            Check(!disk.WriteChunk(buffer, 1), "extra payload byte rejected before write");
+        }
+        finally { disk.Cleanup(); disk.Dispose(); }
+        Check(!File.Exists(temporary), "verified download temporary file removed");
+        var bad = new CreatorPluginsWindow.DiskDownload(3, new string('0',64));
+        try
+        {
+            bad.WriteChunk(new byte[] {1,2,3}, 3);
+            bool rejected = false; try { bad.Finish(); } catch (InvalidDataException) { rejected = true; }
+            Check(rejected, "wrong checksum cannot become an import request");
+        }
+        finally { bad.Cleanup(); bad.Dispose(); }
     }
 }

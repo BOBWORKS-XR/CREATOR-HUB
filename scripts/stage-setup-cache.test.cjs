@@ -32,3 +32,19 @@ test('staging binds exact bytes, both hashes, identity, version and Hub minimum'
   assert.throws(() => validateStagedSetup(pin, descriptor, Buffer.from('changed bytes'), '0.1.0-alpha.5'));
   assert.throws(() => validateStagedSetup({ ...pin, version: '../../outside' }, { ...descriptor, version: '../../outside' }, installer, '0.1.0-alpha.5'));
 });
+
+test('MCP staging binds its own identity and rejects the Setup descriptor', () => {
+  const installer = Buffer.from('MCP fixture only');
+  const pin = { version: '2.7.2', assetName: 'Creator.Works.MCP_2.7.2_x64-setup.exe',
+    installerSha256: crypto.createHash('sha256').update(installer).digest('hex'), executableSha256: 'b'.repeat(64) };
+  const descriptor = { schemaVersion: 1, appId: 'creator-works-mcp', version: pin.version, assetName: pin.assetName,
+    sha256: pin.installerSha256, executableSha256: pin.executableSha256, byteLength: installer.length,
+    minHubVersion: '0.1.7', installerProtocol: 1 };
+  const validate = value => validateStagedSetup(pin, value, installer, '0.1.7', 'mcp');
+  assert.equal(validate(descriptor).publicFeedTested, false);
+  for (const key of ['schemaVersion', 'appId', 'version', 'assetName', 'sha256', 'executableSha256', 'byteLength', 'minHubVersion', 'installerProtocol']) {
+    assert.throws(() => validate({ ...descriptor, [key]: 'different' }), key);
+  }
+  assert.throws(() => validateStagedSetup(pin, descriptor, Buffer.from('changed bytes'), '0.1.7', 'mcp'));
+  assert.throws(() => validateStagedSetup(pin, descriptor, installer, '0.1.7', '../outside'));
+});

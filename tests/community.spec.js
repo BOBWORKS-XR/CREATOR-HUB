@@ -1,10 +1,11 @@
 const { test, expect } = require('@playwright/test');
 const entry = require('./fixtures/community/start-location.json');
 const path = require('node:path');
+const { verifyCommunityMedia } = require('../scripts/verify-community-media.cjs');
 async function load(page, options = {}) {
   await page.addInitScript(({ entry, options }) => {
     window.calls = [];
-    window.snapshot = { entries: [{ ...entry, reviewStatus: options.listed ? 'listed' : 'pending' }], warnings: [], stale: false, projectImportEnabled: options.projectImportEnabled ?? true };
+    window.snapshot = { entries: [{ ...entry, reviewStatus: options.listed ? 'listed' : 'pending' }], media: options.media || [], warnings: [], stale: false, projectImportEnabled: options.projectImportEnabled ?? true };
     window.projects = [{ id: 'chosen-project', name: 'Example Space', path: 'E:\\UnityTest\\Example Space', unityVersion: '6000.3.21f1', sdk: 'Creator SDK / Altspace', helper: options.helper || 'missing', open: Boolean(options.projectOpen) }];
     window.__TAURI__ = { event: { listen: async () => () => {} }, core: { invoke: async (command, args) => {
       window.calls.push({ command, args });
@@ -17,11 +18,13 @@ async function load(page, options = {}) {
         if (window.failRefresh) throw 'Offline. Try again.'; return structuredClone(window.snapshot);
       }
       if (command === 'download_community_package') {
-        if (window.holdDownload) return new Promise(resolve => { window.finishDownload = resolve; });
+        if (window.holdDownload) { window.transfer = { id: args.operationId, received: 1024 * 1024, total: 93_245_650, phase: 'downloading', cancellable: true }; return new Promise(resolve => { window.finishDownload = resolve; }); }
         if (window.failDownload) throw 'Package checksum did not match. Nothing saved.';
         return 'Saved. Checksum matched; no files were imported into Unity.';
       }
       if (command === 'open_community_link') return;
+      if (command === 'community_transfer_status') return window.transfer || null;
+      if (command === 'cancel_community_transfer') { if (window.transfer?.id === args.operationId) { window.transfer = null; window.finishDownload('Download cancelled. No import was queued.'); } return; }
       if (command === 'community_projects') { if (window.holdProjects) await new Promise(resolve => { window.finishProjects = resolve; }); if (window.projectsOffline) throw 'Projects are unavailable.'; return { projects: structuredClone(window.projects), warnings: [] }; }
       if (command === 'choose_community_project') return null;
       if (command === 'install_community_menu') {
@@ -33,13 +36,125 @@ async function load(page, options = {}) {
       throw Error(`Unexpected action ${command}`);
     } } };
   }, { entry, options });
-  await page.route('https://cdn.sidequestvr.com/file/4591279/image.png', route => options.badImage ? route.abort() : route.fulfill({ path: path.join(__dirname, 'fixtures/community/preview.png'), contentType: 'image/png' }));
+  await page.route('https://cdn.sidequestvr.com/file/4591279/image.png', route => options.badImage ? route.abort() : route.fulfill({ path: path.join(__dirname, 'fixtures/community/preview.png'), contentType: 'image/png', headers: { 'access-control-allow-origin': '*' } }));
   await page.goto('http://127.0.0.1:4188');
   await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === 'get_launch_request'))).toBe(true);
   await page.locator('#hub-pages [data-view="hub"]').click();
   await page.getByRole('button', { name: 'View Creator Plugins' }).click();
   await expect(page.locator('.community-count')).toHaveText('1 contribution');
 }
+test('packaged media acceptance waits for close-event cleanup and restores the catalogue', async ({ page }, testInfo) => {
+  await load(page);
+  const report = await verifyCommunityMedia(page, testInfo.outputPath('packaged-media'));
+  expect(report).toEqual({ passed: true, staticImages: 6, gif: true, webm: true, fixture: true, importsStarted: false });
+  await expect(page.getByRole('dialog', { name: 'Contribution preview' })).toBeHidden();
+  await expect(page.locator('.community-media-stage video')).toHaveCount(0);
+  await expect(page.locator('.community-count')).toHaveText('1 contribution');
+});
+
+test('returning after closing Unity refreshes the selected project and enables Add menu', async ({ page }) => {
+  await load(page, { projectOpen: true });
+  await page.getByRole('button', { name: 'Add Unity menu', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add Unity menu' });
+  await dialog.getByLabel('Unity project', { exact: true }).selectOption('chosen-project');
+  await expect(dialog.getByRole('button', { name: 'Add menu to project', exact: true })).toBeDisabled();
+  await page.evaluate(() => { window.projects[0].open = false; window.dispatchEvent(new Event('focus')); });
+  await expect(dialog.getByRole('button', { name: 'Add menu to project', exact: true })).toBeEnabled();
+  await expect(dialog.getByLabel('Unity project', { exact: true })).toHaveValue('chosen-project');
+  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'install_community_menu'))).toHaveLength(0);
+});
+test('download shows size and speed, cancels its own transfer, then retries without reopening', async ({ page }) => {
+  await load(page, { listed: true });
+  await page.evaluate(() => { window.holdDownload = true; });
+  const save = page.getByRole('button', { name: 'Download package', exact: true });
+  await save.click();
+  await expect(page.locator('.community-transfer')).toContainText('MB');
+  await expect(page.locator('.community-transfer')).toContainText('/s');
+  await page.getByRole('button', { name: 'Cancel download', exact: true }).click();
+  await expect(save).toBeEnabled();
+  await expect(page.locator('.community-transfer')).toBeHidden();
+  await expect(page.locator('.community-message').first()).toContainText('cancelled');
+  const calls = await page.evaluate(() => window.calls);
+  const started = calls.find(c => c.command === 'download_community_package');
+  expect(calls.find(c => c.command === 'cancel_community_transfer').args.operationId).toBe(started.args.operationId);
+  await page.evaluate(() => { window.holdDownload = false; });
+  await save.click();
+  await expect(page.locator('.community-message').first()).toContainText('Saved');
+  const retries = await page.evaluate(() => window.calls.filter(c => c.command === 'download_community_package'));
+  expect(retries).toHaveLength(2);
+  expect(retries[1].args.operationId).not.toBe(retries[0].args.operationId);
+});
+for (const width of [940, 320]) test(`six-image gallery navigation and cleanup at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 760 });
+  const items = Array.from({ length: 6 }, (_, i) => ({ type: 'image', url: i ? `https://cdn.sidequestvr.com/file/1/photo${i}.png` : entry.previewImage }));
+  await page.route('https://cdn.sidequestvr.com/file/1/**', route => route.fulfill({ path: path.join(__dirname, 'fixtures/community/preview.png'), contentType: 'image/png', headers: { 'access-control-allow-origin': '*' } }));
+  await load(page, { listed: true, media: [{ id: entry.id, items }] });
+  await expect(page.locator('.community-media-badge')).toHaveText('6 previews');
+  await page.getByRole('button', { name: 'Enlarge Start Location preview' }).click();
+  for (let i = 0; i < 6; i++) {
+    await expect(page.locator('.community-media-count')).toHaveText(`${i + 1} / 6`);
+    await expect.poll(() => page.locator('.community-media-stage img').evaluateAll(images => images.length === 1 && images[0].naturalWidth > 0)).toBe(true);
+    if (i < 5) await page.getByRole('button', { name: 'Next preview' }).click();
+  }
+  await page.screenshot({ path: testInfo.outputPath('six-image-gallery.png') });
+  expect(await page.locator('.community-zoom').evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
+  await page.keyboard.press('ArrowRight'); await expect(page.locator('.community-media-count')).toHaveText('1 / 6');
+  await page.keyboard.press('ArrowLeft'); await expect(page.locator('.community-media-count')).toHaveText('6 / 6');
+  await page.keyboard.press('Escape'); await expect(page.locator('.community-zoom')).not.toBeVisible();
+  await expect(page.locator('.community-media-stage img')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Download package', exact: true })).toBeEnabled();
+});
+
+test('single image remains usable without a media sidecar', async ({ page }) => {
+  await load(page); await expect(page.locator('.community-media-badge')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Enlarge Start Location preview' }).click();
+  await expect(page.locator('.community-media-count')).toHaveText('1 / 1');
+  await expect(page.getByRole('button', { name: 'Next preview' })).toBeHidden();
+  await expect.poll(() => page.locator('.community-media-stage img').evaluateAll(images => images[0]?.naturalWidth > 0)).toBe(true);
+});
+
+for (const type of ['gif', 'webm']) test(`${type} uses an opt-in animation and a static poster`, async ({ page }) => {
+  let requested = 0;
+  const url = `https://cdn.sidequestvr.com/file/1/demo.${type}`;
+  await page.route(url, route => { requested++; return route.fulfill({ path: path.join(__dirname, `fixtures/community/demo.${type}`), contentType: type === 'gif' ? 'image/gif' : 'video/webm', headers: { 'access-control-allow-origin': '*' } }); });
+  await load(page, { media: [{ id: entry.id, items: [{ type, url, poster: entry.previewImage }] }] });
+  await page.getByRole('button', { name: 'Enlarge Start Location preview' }).click();
+  await page.getByRole('button', { name: 'Next preview' }).click();
+  await expect(page.locator('.community-media-status')).toContainText('Static poster');
+  expect(requested).toBe(0);
+  await page.getByRole('button', { name: type === 'gif' ? 'Load animation' : 'Load video', exact: true }).click();
+  await expect.poll(() => requested).toBe(1);
+  const selector = type === 'gif' ? 'img' : 'video';
+  await expect.poll(() => page.locator(`.community-media-stage ${selector}`).evaluateAll(elements => elements.length === 1 && (elements[0].naturalWidth || elements[0].videoWidth) === 64)).toBe(true);
+  if (type === 'webm') {
+    await page.locator('.community-media-stage video').evaluate(video => video.play());
+    await expect.poll(() => page.locator('.community-media-stage video').evaluate(video => video.currentTime)).toBeGreaterThan(0);
+  }
+  await page.getByRole('button', { name: 'Show poster' }).click();
+  await expect(page.locator('.community-media-status')).toContainText('Static poster');
+  await expect(page.locator('.community-media-stage video')).toHaveCount(0);
+});
+
+test('oversized or unavailable media can be retried without affecting imports', async ({ page }) => {
+  let fail = true;
+  const url = 'https://cdn.sidequestvr.com/file/1/large.png';
+  await page.route(url, route => fail ? route.fulfill({ body: Buffer.alloc(2 * 1024 * 1024 + 1), headers: { 'access-control-allow-origin': '*' } }) : route.fulfill({ path: path.join(__dirname, 'fixtures/community/preview.png'), headers: { 'access-control-allow-origin': '*' }, contentType: 'image/png' }));
+  await load(page, { listed: true, media: [{ id: entry.id, items: [{ type: 'image', url }] }] });
+  await page.getByRole('button', { name: 'Enlarge Start Location preview' }).click();
+  await page.getByRole('button', { name: 'Next preview' }).click();
+  await expect(page.locator('.community-media-status')).toContainText('size limit');
+  fail = false; await page.getByRole('button', { name: 'Retry preview' }).click();
+  await expect.poll(() => page.locator('.community-media-stage img').evaluateAll(images => images[0]?.naturalWidth > 0)).toBe(true);
+  await page.keyboard.press('Escape'); await expect(page.getByRole('button', { name: 'Download package', exact: true })).toBeEnabled();
+});
+
+test('unapproved gallery URLs and missing posters never become requests', async ({ page }) => {
+  const requested = []; page.on('request', request => requested.push(request.url()));
+  await load(page, { media: [{ id: entry.id, items: [{ type: 'image', url: 'https://evil.test/a.png' }, { type: 'webm', url: 'https://cdn.sidequestvr.com/file/1/a.webm' }] }] });
+  await page.getByRole('button', { name: 'Enlarge Start Location preview' }).click();
+  await expect(page.locator('.community-media-count')).toHaveText('1 / 1');
+  expect(requested.some(url => url.includes('evil.test') || url.endsWith('.webm'))).toBe(false);
+});
 for (const width of [940, 320]) for (const layout of ['grid', 'list']) test(`Plugins menu stays reachable while scrolling ${layout} at ${width}px`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: 720 });
   await load(page, { listed: true });
@@ -241,7 +356,7 @@ for (const [category, label, hasDownload] of [['mcp-tool', 'MCP tools', true], [
   if (hasDownload) {
     await expect(page.locator('.community-code')).toHaveText('Includes code');
     await page.getByRole('button', { name: 'Download package' }).click();
-    expect(await page.evaluate(() => window.calls.at(-1))).toEqual({ command: 'download_community_package', args: { id: `test.${category}` } });
+    expect(await page.evaluate(() => window.calls.filter(c => c.command === 'download_community_package').at(-1))).toEqual({ command: 'download_community_package', args: { id: `test.${category}`, operationId: expect.stringMatching(/^[0-9a-f-]{36}$/) } });
   } else {
     await expect(page.getByRole('button', { name: 'Download package' })).toHaveCount(0);
     await expect(page.locator('.community-review')).toHaveText('Instructions only');
@@ -255,7 +370,7 @@ test('first-load downloads enabled and duplicate save blocked even after filteri
   await page.evaluate(() => { window.holdDownload = true; }); await save.click(); await expect(save).toBeDisabled();
   await page.getByRole('button', { name: 'Visual Scripting', exact: true }).click(); await expect(save).toBeDisabled();
   await page.evaluate(() => window.finishDownload('Saved. No import.')); await expect(save).toBeEnabled();
-  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'download_community_package'))).toEqual([{ command: 'download_community_package', args: { id: entry.id } }]);
+  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'download_community_package'))).toEqual([{ command: 'download_community_package', args: { id: entry.id, operationId: expect.stringMatching(/^[0-9a-f-]{36}$/) } }]);
 });
 test('refresh visibly disables existing downloads before its response arrives', async ({ page }) => {
   await load(page, { listed: true }); await page.evaluate(() => { window.holdRefresh = true; });
@@ -362,7 +477,7 @@ test('adding a package queues once and receipt checks distinguish review from im
   await dialog.getByRole('button', { name: 'Check Unity status' }).click(); await expect(dialog).toContainText('Waiting for the Unity import outcome');
   await page.evaluate(() => { window.receiptStatus = 'imported'; });
   await dialog.getByRole('button', { name: 'Check Unity status' }).click(); await expect(dialog).toContainText('Project validation is still needed');
-  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'queue_community_import'))).toEqual([{ command: 'queue_community_import', args: { id: entry.id, projectId: 'chosen-project' } }]);
+  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'queue_community_import'))).toEqual([{ command: 'queue_community_import', args: { id: entry.id, projectId: 'chosen-project', operationId: expect.stringMatching(/^[0-9a-f-]{36}$/) } }]);
 });
 
 test('pending listing stays unimportable and project read failure is actionable', async ({ page }) => {

@@ -10,8 +10,8 @@ const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
 const { checkLive } = require('./check-release-feed.cjs');
 const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
-const from = { version: '0.1.5', installer: '79f3a6a2851ec25d1d533eff85c0bc09764a3f1175c1928662c6915697495f5b', exe: '4c350035598e596dfcd351d83bd406e88b864c6e8485b914254fb57324b00594' };
-const to = { version: '0.1.6', installer: '96e0059f0cbcc4ce1dc66ed86d05ad0274e9e63b108db5febe1e61120fd28adb', exe: 'ea6df01fd6200b28125cb5302db6ca6dcc24a70279a729adb35cd572a08a4ea9' };
+const from = { version: '0.1.6', installer: '96e0059f0cbcc4ce1dc66ed86d05ad0274e9e63b108db5febe1e61120fd28adb', exe: 'ea6df01fd6200b28125cb5302db6ca6dcc24a70279a729adb35cd572a08a4ea9' };
+const to = { version: '0.1.7', installer: '64c5c5848bbcadb217f8e87a73a2e5055f13a2fe72cc5fb10b19470f1eb9252c', exe: '853bcf82d7be4b4fb4188cf19d99f3d08fcf70636cc52bec3199fa76a2f85ab5' };
 assert.equal(to.version, require('../package.json').version, 'Update acceptance pins for the intended release; testing an older update is not sufficient');
 const fixture = process.env.CREATOR_HOSTED_UPDATE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.CREATOR_HOSTED_UPDATE_FIXTURE, 'utf8')) : null;
 if (fixture) {

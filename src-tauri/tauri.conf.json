@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Creator Hub",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "identifier": "com.creatorworks.hub",
   "build": { "frontendDist": "../src" },
   "plugins": {
@@ -13,7 +13,7 @@
   "app": {
     "withGlobalTauri": true,
     "windows": [{ "title": "Creator Hub - Development Preview", "width": 940, "height": 580, "minWidth": 560, "minHeight": 480, "center": true }],
-    "security": { "csp": "default-src 'self'; frame-src 'self' about:; img-src 'self' data: https://cdn.sidequestvr.com https://raw.githubusercontent.com; style-src 'self' data:; script-src 'self' data:; connect-src ipc: http://ipc.localhost" }
+    "security": { "csp": "default-src 'self'; frame-src 'self' about:; img-src 'self' data: blob: https://cdn.sidequestvr.com https://raw.githubusercontent.com; media-src blob:; style-src 'self' data:; script-src 'self' data:; connect-src ipc: http://ipc.localhost https://cdn.sidequestvr.com/file/ https://raw.githubusercontent.com/SideQuestVR/Creator-Community/main/" }
   },
   "bundle": {
     "active": true,

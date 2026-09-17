@@ -9,6 +9,8 @@ fn main() {
             "community_catalogue",
             "open_community_link",
             "download_community_package",
+            "community_transfer_status",
+            "cancel_community_transfer",
             "community_projects",
             "choose_community_project",
             "install_community_menu",
