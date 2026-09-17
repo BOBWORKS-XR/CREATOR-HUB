@@ -92,6 +92,8 @@ async function verifyPackagedHelper() {
     fs.writeFileSync(path.join(root, 'ProjectSettings/ProjectVersion.txt'), 'm_EditorVersion: 6000.3.21f1\n', { flag: 'wx' });
     fs.writeFileSync(path.join(root, 'Packages/manifest.json'), '{"dependencies":{}}\n', { flag: 'wx' });
     fs.writeFileSync(path.join(root, 'Assets/scene-sentinel.unity'), 'Preserve user content exactly.\n', { flag: 'wx' });
+    fs.mkdirSync(path.join(root, 'Temp'));
+    fs.writeFileSync(path.join(root, 'Temp/UnityLockfile'), 'unlocked stale Editor file', { flag: 'wx' });
     const destination = path.join(root, 'Packages/com.creatorworks.plugins');
     const baseline = kind === 'grid' ? grid : kind === 'stable' ? stable : legacy;
     if (kind !== 'missing') {
@@ -107,6 +109,7 @@ async function verifyPackagedHelper() {
     for (const fixture of fixtures) {
       const target = targets.projects.find(p => p.path.toLowerCase() === fixture.root.toLowerCase());
       assert.ok(target, 'Disposable helper target must be discovered');
+      assert.equal(target.open, false, 'An unlocked stale UnityLockfile must not block menu installation');
       assert.equal(target.helper, fixture.kind === 'missing' ? 'missing' : 'outdated');
       const invoke = () => page.evaluate(projectId => window.CreatorHubNative.invoke('install_community_menu', { projectId }), target.id);
       const cancelled = invoke();
@@ -119,6 +122,7 @@ async function verifyPackagedHelper() {
       for (const name of names) assert.equal(hash(path.join(fixture.destination, name)), hash(path.join(helper, name)));
       assert.equal(fs.readFileSync(path.join(fixture.root, 'Assets/scene-sentinel.unity'), 'utf8'), 'Preserve user content exactly.\n');
       assert.equal(fs.readFileSync(path.join(fixture.root, 'Packages/manifest.json'), 'utf8'), '{"dependencies":{}}\n');
+      assert.equal(fs.readFileSync(path.join(fixture.root, 'Temp/UnityLockfile'), 'utf8'), 'unlocked stale Editor file');
       if (fixture.kind !== 'missing') {
         const backups = fs.readdirSync(path.join(fixture.root, '.creator-plugins/helper-backups'));
         assert.equal(backups.length, 1);
