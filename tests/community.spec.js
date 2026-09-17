@@ -4,7 +4,7 @@ const path = require('node:path');
 async function load(page, options = {}) {
   await page.addInitScript(({ entry, options }) => {
     window.calls = [];
-    window.snapshot = { entries: [{ ...entry, reviewStatus: options.listed ? 'listed' : 'pending' }], warnings: [], stale: false, projectImportEnabled: options.projectImportEnabled ?? true };
+    window.snapshot = { entries: [{ ...entry, reviewStatus: options.listed ? 'listed' : 'pending' }], media: options.media || [], warnings: [], stale: false, projectImportEnabled: options.projectImportEnabled ?? true };
     window.projects = [{ id: 'chosen-project', name: 'Example Space', path: 'E:\\UnityTest\\Example Space', unityVersion: '6000.3.21f1', sdk: 'Creator SDK / Altspace', helper: options.helper || 'missing', open: Boolean(options.projectOpen) }];
     window.__TAURI__ = { event: { listen: async () => () => {} }, core: { invoke: async (command, args) => {
       window.calls.push({ command, args });
@@ -33,13 +33,84 @@ async function load(page, options = {}) {
       throw Error(`Unexpected action ${command}`);
     } } };
   }, { entry, options });
-  await page.route('https://cdn.sidequestvr.com/file/4591279/image.png', route => options.badImage ? route.abort() : route.fulfill({ path: path.join(__dirname, 'fixtures/community/preview.png'), contentType: 'image/png' }));
+  await page.route('https://cdn.sidequestvr.com/file/4591279/image.png', route => options.badImage ? route.abort() : route.fulfill({ path: path.join(__dirname, 'fixtures/community/preview.png'), contentType: 'image/png', headers: { 'access-control-allow-origin': '*' } }));
   await page.goto('http://127.0.0.1:4188');
   await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === 'get_launch_request'))).toBe(true);
   await page.locator('#hub-pages [data-view="hub"]').click();
   await page.getByRole('button', { name: 'View Creator Plugins' }).click();
   await expect(page.locator('.community-count')).toHaveText('1 contribution');
 }
+for (const width of [940, 320]) test(`six-image gallery navigation and cleanup at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 760 });
+  const items = Array.from({ length: 6 }, (_, i) => ({ type: 'image', url: i ? `https://cdn.sidequestvr.com/file/1/photo${i}.png` : entry.previewImage }));
+  await page.route('https://cdn.sidequestvr.com/file/1/**', route => route.fulfill({ path: path.join(__dirname, 'fixtures/community/preview.png'), contentType: 'image/png', headers: { 'access-control-allow-origin': '*' } }));
+  await load(page, { listed: true, media: [{ id: entry.id, items }] });
+  await expect(page.locator('.community-media-badge')).toHaveText('6 previews');
+  await page.getByRole('button', { name: 'Enlarge Start Location preview' }).click();
+  for (let i = 0; i < 6; i++) {
+    await expect(page.locator('.community-media-count')).toHaveText(`${i + 1} / 6`);
+    await expect.poll(() => page.locator('.community-media-stage img').evaluateAll(images => images.length === 1 && images[0].naturalWidth > 0)).toBe(true);
+    if (i < 5) await page.getByRole('button', { name: 'Next preview' }).click();
+  }
+  await page.screenshot({ path: testInfo.outputPath('six-image-gallery.png') });
+  expect(await page.locator('.community-zoom').evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
+  await page.keyboard.press('ArrowRight'); await expect(page.locator('.community-media-count')).toHaveText('1 / 6');
+  await page.keyboard.press('ArrowLeft'); await expect(page.locator('.community-media-count')).toHaveText('6 / 6');
+  await page.keyboard.press('Escape'); await expect(page.locator('.community-zoom')).not.toBeVisible();
+  await expect(page.locator('.community-media-stage img')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Download package', exact: true })).toBeEnabled();
+});
+
+test('single image remains usable without a media sidecar', async ({ page }) => {
+  await load(page); await expect(page.locator('.community-media-badge')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Enlarge Start Location preview' }).click();
+  await expect(page.locator('.community-media-count')).toHaveText('1 / 1');
+  await expect(page.getByRole('button', { name: 'Next preview' })).toBeHidden();
+  await expect.poll(() => page.locator('.community-media-stage img').evaluateAll(images => images[0]?.naturalWidth > 0)).toBe(true);
+});
+
+for (const type of ['gif', 'webm']) test(`${type} uses an opt-in animation and a static poster`, async ({ page }) => {
+  let requested = 0;
+  const url = `https://cdn.sidequestvr.com/file/1/demo.${type}`;
+  await page.route(url, route => { requested++; return route.fulfill({ path: path.join(__dirname, `fixtures/community/demo.${type}`), contentType: type === 'gif' ? 'image/gif' : 'video/webm', headers: { 'access-control-allow-origin': '*' } }); });
+  await load(page, { media: [{ id: entry.id, items: [{ type, url, poster: entry.previewImage }] }] });
+  await page.getByRole('button', { name: 'Enlarge Start Location preview' }).click();
+  await page.getByRole('button', { name: 'Next preview' }).click();
+  await expect(page.locator('.community-media-status')).toContainText('Static poster');
+  expect(requested).toBe(0);
+  await page.getByRole('button', { name: type === 'gif' ? 'Load animation' : 'Load video', exact: true }).click();
+  await expect.poll(() => requested).toBe(1);
+  const selector = type === 'gif' ? 'img' : 'video';
+  await expect.poll(() => page.locator(`.community-media-stage ${selector}`).evaluateAll(elements => elements.length === 1 && (elements[0].naturalWidth || elements[0].videoWidth) === 64)).toBe(true);
+  if (type === 'webm') {
+    await page.locator('.community-media-stage video').evaluate(video => video.play());
+    await expect.poll(() => page.locator('.community-media-stage video').evaluate(video => video.currentTime)).toBeGreaterThan(0);
+  }
+  await page.getByRole('button', { name: 'Show poster' }).click();
+  await expect(page.locator('.community-media-status')).toContainText('Static poster');
+  await expect(page.locator('.community-media-stage video')).toHaveCount(0);
+});
+
+test('oversized or unavailable media can be retried without affecting imports', async ({ page }) => {
+  let fail = true;
+  const url = 'https://cdn.sidequestvr.com/file/1/large.png';
+  await page.route(url, route => fail ? route.fulfill({ body: Buffer.alloc(2 * 1024 * 1024 + 1), headers: { 'access-control-allow-origin': '*' } }) : route.fulfill({ path: path.join(__dirname, 'fixtures/community/preview.png'), headers: { 'access-control-allow-origin': '*' }, contentType: 'image/png' }));
+  await load(page, { listed: true, media: [{ id: entry.id, items: [{ type: 'image', url }] }] });
+  await page.getByRole('button', { name: 'Enlarge Start Location preview' }).click();
+  await page.getByRole('button', { name: 'Next preview' }).click();
+  await expect(page.locator('.community-media-status')).toContainText('size limit');
+  fail = false; await page.getByRole('button', { name: 'Retry preview' }).click();
+  await expect.poll(() => page.locator('.community-media-stage img').evaluateAll(images => images[0]?.naturalWidth > 0)).toBe(true);
+  await page.keyboard.press('Escape'); await expect(page.getByRole('button', { name: 'Download package', exact: true })).toBeEnabled();
+});
+
+test('unapproved gallery URLs and missing posters never become requests', async ({ page }) => {
+  const requested = []; page.on('request', request => requested.push(request.url()));
+  await load(page, { media: [{ id: entry.id, items: [{ type: 'image', url: 'https://evil.test/a.png' }, { type: 'webm', url: 'https://cdn.sidequestvr.com/file/1/a.webm' }] }] });
+  await page.getByRole('button', { name: 'Enlarge Start Location preview' }).click();
+  await expect(page.locator('.community-media-count')).toHaveText('1 / 1');
+  expect(requested.some(url => url.includes('evil.test') || url.endsWith('.webm'))).toBe(false);
+});
 for (const width of [940, 320]) for (const layout of ['grid', 'list']) test(`Plugins menu stays reachable while scrolling ${layout} at ${width}px`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: 720 });
   await load(page, { listed: true });

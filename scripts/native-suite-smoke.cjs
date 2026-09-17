@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
 const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
+const { verifyCommunityMedia } = require('./verify-community-media.cjs');
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
   throw Error('Native suite installation is restricted to a disposable GitHub-hosted Windows runner.');
 }
@@ -83,15 +84,16 @@ async function verifyPackagedHelper() {
   const helper = path.resolve('unity/com.creatorworks.plugins');
   const legacy = path.resolve('tests/fixtures/helper-alpha8/unity/com.creatorworks.plugins');
   const stable = path.resolve('tests/fixtures/helper-stable-0.1.0/unity/com.creatorworks.plugins');
+  const grid = path.resolve('tests/fixtures/helper-stable-0.1.6/unity/com.creatorworks.plugins');
   const names = ['package.json', 'LICENSE.md', 'Editor/CreatorWorks.Plugins.Editor.asmdef', 'Editor/CreatorPluginsWindow.cs'];
-  const fixtures = ['missing', 'outdated', 'stable'].map(kind => {
+  const fixtures = ['missing', 'outdated', 'stable', 'grid'].map(kind => {
     const root = path.join(out, `Unity-menu-${kind}`);
     for (const folder of ['Assets', 'Packages', 'ProjectSettings']) fs.mkdirSync(path.join(root, folder), { recursive: true });
     fs.writeFileSync(path.join(root, 'ProjectSettings/ProjectVersion.txt'), 'm_EditorVersion: 6000.3.21f1\n', { flag: 'wx' });
     fs.writeFileSync(path.join(root, 'Packages/manifest.json'), '{"dependencies":{}}\n', { flag: 'wx' });
     fs.writeFileSync(path.join(root, 'Assets/scene-sentinel.unity'), 'Preserve user content exactly.\n', { flag: 'wx' });
     const destination = path.join(root, 'Packages/com.creatorworks.plugins');
-    const baseline = kind === 'stable' ? stable : legacy;
+    const baseline = kind === 'grid' ? grid : kind === 'stable' ? stable : legacy;
     if (kind !== 'missing') {
       fs.cpSync(baseline, destination, { recursive: true, errorOnExist: true, force: false });
       fs.writeFileSync(path.join(destination, 'Editor/CreatorPluginsWindow.cs.meta'), 'fileFormatVersion: 2\nguid: 11111111111111111111111111111111\n', { flag: 'wx' });
@@ -212,6 +214,7 @@ async function closeHosted(app) {
   await page.locator('#suite-menu').waitFor({ state: 'hidden' });
   await page.screenshot({ path: path.join(out, 'packaged-plugins-icon.png') });
   report.checks.push('Installed Plugins page uses the accepted transparent icon and Plugins heading');
+  report.communityMedia = await verifyCommunityMedia(page, out);
   await show('hub');
   assert.equal(await page.locator('#preview-channel').isChecked(), true);
   assert.match(await page.evaluate(() => window.__TAURI__.core.invoke('app_inventory', { check: false, preview: true }).then(() => 'ALLOWED', String)), /trusted shell/);

@@ -51,6 +51,24 @@ public static class CreatorPluginsPresentationSmoke
             window = ScriptableObject.CreateInstance<CreatorPluginsWindow>();
             Check(Get<bool>(window, "gridView"), "fresh window defaults to grid");
             Call(window, "StopDownload");
+            var mediaBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":1,\"galleries\":[{\"id\":\"" + entry.id + "\",\"items\":[" + string.Join(",", Enumerable.Range(0, 6).Select(i => "{\"type\":\"image\",\"url\":\"assets/example/" + i + ".png\"}")) + "]}]}");
+            var media = PluginProtocol.ParseMedia(mediaBytes);
+            Check(media.Length == 1 && media[0].items.Length == 6, "six-image sidecar parsed");
+            var galleries = Get<Dictionary<string, PreviewMedia[]>>(window, "galleries");
+            entry.previewImage = media[0].items[0].url;
+            galleries.Add(entry.id, media[0].items);
+            Check(window.GalleryItems(entry).Length == 6, "cover is not duplicated in gallery");
+            var animation = new PreviewMedia { type = "webm", url = "assets/example/demo.webm", poster = entry.previewImage };
+            Check(PluginProtocol.StaticPreview(animation) == entry.previewImage, "Unity selects WebM static poster");
+            animation.type = "gif"; animation.url = "assets/example/demo.gif";
+            Check(PluginProtocol.StaticPreview(animation) == entry.previewImage, "Unity selects GIF static poster");
+            foreach (string bad in new[] { Encoding.UTF8.GetString(mediaBytes).Replace("assets/example/0.png", "https://evil.test/a.png"), Encoding.UTF8.GetString(mediaBytes).Replace("\"image\"", "\"gif\"") })
+            {
+                bool rejected = false; try { PluginProtocol.ParseMedia(Encoding.UTF8.GetBytes(bad)); } catch { rejected = true; }
+                Check(rejected, "unapproved URL or missing poster refused");
+            }
+            galleries.Clear();
+            Check(window.GalleryItems(entry).Length == 1, "legacy cover works without sidecar");
             Check(CreatorPluginsWindow.GridColumns(330) == 1, "narrow grid has one column");
             Check(CreatorPluginsWindow.GridColumns(540) == 2, "medium grid has two columns");
             Check(CreatorPluginsWindow.GridColumns(810) == 3, "wide grid has three columns");
