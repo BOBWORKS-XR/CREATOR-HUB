@@ -1,7 +1,7 @@
 ; Preserve active Hub workflows; never use Tauri's default force-close path.
 ; Tauri includes hooks before defining MAINBINARYSRCPATH, including GUI-init code.
 !ifndef CREATOR_HUB_PREFLIGHT_EXE
-  !if "$%CARGO_TARGET_DIR%" != ""
+  !iffileexists "$%CARGO_TARGET_DIR%\release\creator-hub.exe"
     !define CREATOR_HUB_PREFLIGHT_EXE "$%CARGO_TARGET_DIR%\release\creator-hub.exe"
   !else
     !define CREATOR_HUB_PREFLIGHT_EXE "${__FILEDIR__}\..\target\release\creator-hub.exe"
