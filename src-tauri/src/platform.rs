@@ -8,7 +8,8 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 pub fn supported() -> bool {
     cfg!(any(
         all(windows, target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "x86_64")
+        all(target_os = "linux", target_arch = "x86_64"),
+        target_os = "macos"
     ))
 }
 
@@ -329,12 +330,9 @@ fn gui_name(app: AppId, name: &str) -> bool {
             .iter()
             .any(|legacy| name.eq_ignore_ascii_case(legacy)))
         || (app == AppId::Setup
-            && [
-                "creator-project-setup.exe",
-                "creator-project-setup",
-            ]
-            .iter()
-            .any(|alt| name.eq_ignore_ascii_case(alt)))
+            && ["creator-project-setup.exe", "creator-project-setup"]
+                .iter()
+                .any(|alt| name.eq_ignore_ascii_case(alt)))
 }
 
 pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {

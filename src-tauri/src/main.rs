@@ -220,8 +220,7 @@ async fn use_existing_app(
         {
             file_picker = file_picker.add_filter("Creator app", &["exe"]);
         }
-        let Some(path) = file_picker.blocking_pick_file()
-        else {
+        let Some(path) = file_picker.blocking_pick_file() else {
             return Ok("No app selected.".into());
         };
         let path = path.into_path().map_err(|_| "Choose a local executable.")?;

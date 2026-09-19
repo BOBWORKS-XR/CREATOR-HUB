@@ -123,7 +123,9 @@ mod unix_native {
             while let Some(entry) = self.entries.next() {
                 let Ok(entry) = entry else { continue };
                 let file_name = entry.file_name();
-                let Some(s) = file_name.to_str() else { continue };
+                let Some(s) = file_name.to_str() else {
+                    continue;
+                };
                 let Ok(pid) = s.parse::<u32>() else { continue };
                 if let Ok(comm) = fs::read_to_string(entry.path().join("comm")) {
                     return Ok(Some((pid, comm.trim().to_string())));

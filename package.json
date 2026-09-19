@@ -7,6 +7,7 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "test:ui": "playwright test",
+    "test:scripts": "node --test scripts/*.test.cjs scripts/release-checksums.test.mjs",
     "check": "cargo test --release --manifest-path src-tauri/Cargo.toml"
   },
   "devDependencies": {
