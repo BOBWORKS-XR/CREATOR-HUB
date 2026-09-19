@@ -50,6 +50,8 @@ jobs:
   hub-windows:
     name: Hub (Windows)
     runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
