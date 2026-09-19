@@ -41,6 +41,13 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
 
 pub fn reject_links(path: &Path) -> Result<(), String> {
     for ancestor in path.ancestors() {
+        #[cfg(target_os = "macos")]
+        if ancestor == Path::new("/var")
+            || ancestor == Path::new("/tmp")
+            || ancestor == Path::new("/etc")
+        {
+            continue;
+        }
         if let Ok(meta) = std::fs::symlink_metadata(ancestor) {
             #[allow(unused_mut)]
             let mut link = meta.file_type().is_symlink();
