@@ -9,19 +9,22 @@ pub fn mode(arguments: impl IntoIterator<Item = OsString>) -> Option<bool> {
     }
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, unix, test))]
 trait Processes {
     fn next(&mut self) -> Result<Option<(u32, String)>, ()>;
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, unix, test))]
 fn scan<P: Processes>(open: impl FnOnce() -> Result<P, ()>, own_pid: u32) -> Result<bool, ()> {
     let mut processes = open()?;
     for _ in 0..100_000 {
         let Some((pid, name)) = processes.next()? else {
             return Ok(false);
         };
-        if pid != own_pid && name.eq_ignore_ascii_case("creator-hub.exe") {
+        if pid != own_pid
+            && (name.eq_ignore_ascii_case("creator-hub.exe")
+                || name.eq_ignore_ascii_case("creator-hub"))
+        {
             return Ok(true);
         }
     }
@@ -99,6 +102,38 @@ mod native {
     }
 }
 
+#[cfg(unix)]
+mod unix_native {
+    use super::Processes;
+    use std::fs;
+
+    pub struct Snapshot {
+        entries: fs::ReadDir,
+    }
+
+    impl Snapshot {
+        pub fn open() -> Result<Self, ()> {
+            let entries = fs::read_dir("/proc").map_err(|_| ())?;
+            Ok(Self { entries })
+        }
+    }
+
+    impl Processes for Snapshot {
+        fn next(&mut self) -> Result<Option<(u32, String)>, ()> {
+            while let Some(entry) = self.entries.next() {
+                let Ok(entry) = entry else { continue };
+                let file_name = entry.file_name();
+                let Some(s) = file_name.to_str() else { continue };
+                let Ok(pid) = s.parse::<u32>() else { continue };
+                if let Ok(comm) = fs::read_to_string(entry.path().join("comm")) {
+                    return Ok(Some((pid, comm.trim().to_string())));
+                }
+            }
+            Ok(None)
+        }
+    }
+}
+
 pub fn run(wait: bool) -> i32 {
     #[cfg(windows)]
     {
@@ -112,7 +147,19 @@ pub fn run(wait: bool) -> i32 {
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            match scan(unix_native::Snapshot::open, std::process::id()) {
+                Ok(false) => return 0,
+                Err(()) => return 11,
+                Ok(true) if !wait || std::time::Instant::now() >= deadline => return 10,
+                Ok(true) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            }
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = wait;
         11
@@ -162,6 +209,10 @@ mod tests {
     fn checks_first_entry_and_all_users_without_terminating_anything() {
         assert_eq!(
             scan(|| Ok(Fixture([row(1, "CREATOR-HUB.EXE")].into())), 99),
+            Ok(true)
+        );
+        assert_eq!(
+            scan(|| Ok(Fixture([row(1, "creator-hub")].into())), 99),
             Ok(true)
         );
         assert_eq!(

@@ -38,8 +38,20 @@ impl AppId {
     }
     pub fn exe(self) -> &'static str {
         match self {
-            Self::Mcp => "creator-works-mcp-launcher.exe",
-            Self::Setup => "creator-project-setup.exe",
+            Self::Mcp => {
+                if cfg!(windows) {
+                    "creator-works-mcp-launcher.exe"
+                } else {
+                    "creator-works-mcp-launcher"
+                }
+            }
+            Self::Setup => {
+                if cfg!(windows) {
+                    "creator-project-setup.exe"
+                } else {
+                    "creator-project-setup"
+                }
+            }
         }
     }
     pub fn download_url(self, version: &str, asset: &str) -> String {
