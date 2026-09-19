@@ -17,10 +17,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": "all",
     "category": "DeveloperTool",
     "publisher": "Creator Works",
-    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
     "windows": {
       "allowDowngrades": false,
       "webviewInstallMode": { "type": "downloadBootstrapper", "silent": false },

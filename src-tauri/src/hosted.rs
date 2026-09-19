@@ -395,8 +395,8 @@ impl Hosting {
         kind: AppId,
         path: &Path,
     ) -> Result<Value, String> {
-        if !cfg!(windows) {
-            return Err("Hosted native apps are currently Windows-only.".into());
+        if !crate::platform::supported() {
+            return Err("Hosted native apps are currently not supported on this platform.".into());
         }
         let mut state = self.0.lock().map_err(|_| "Hosted state unavailable.")?;
         if state.iter().any(|session| session.app == kind) {
@@ -680,10 +680,13 @@ pub async fn start_hosted_app(handle: tauri::AppHandle, app: AppId) -> Result<Va
         } else if adjacent.is_file() {
             adjacent
         } else {
-            handle
-                .dialog()
-                .file()
-                .add_filter("Verified Creator app preview", &["exe"])
+            #[allow(unused_mut)]
+            let mut file_picker = handle.dialog().file();
+            #[cfg(windows)]
+            {
+                file_picker = file_picker.add_filter("Verified Creator app preview", &["exe"]);
+            }
+            file_picker
                 .blocking_pick_file()
                 .ok_or("No app selected. Nothing changed.")?
                 .into_path()
