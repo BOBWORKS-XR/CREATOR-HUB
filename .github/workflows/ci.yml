@@ -13,12 +13,35 @@ jobs:
   frontend:
     name: Frontend & script tests
     runs-on: ubuntu-22.04
+    env:
+      CREATOR_SETUP_SOURCE: ${{ github.workspace }}/.test-fixtures/setup/src
+      CREATOR_MCP_SOURCE: ${{ github.workspace }}/.test-fixtures/mcp/launcher/src
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
+      - name: Read accepted app source revisions
+        id: apps
+        run: |
+          node -e '
+            const pins = JSON.parse(require("fs").readFileSync("scripts/prerelease-apps.json", "utf8"));
+            console.log(`setup=${pins.setup.sourceRevision}`);
+            console.log(`mcp=${pins.mcp.sourceRevision}`);
+          ' >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v6
+        with:
+          repository: BOBWORKS-XR/CREATOR-PROJECT-SETUP
+          ref: ${{ steps.apps.outputs.setup }}
+          path: .test-fixtures/setup
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          repository: BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP
+          ref: ${{ steps.apps.outputs.mcp }}
+          path: .test-fixtures/mcp
+          persist-credentials: false
       - run: npm ci
       - run: npm run test:scripts
       - run: npx playwright install --with-deps chromium
