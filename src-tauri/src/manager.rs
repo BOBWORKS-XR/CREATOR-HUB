@@ -670,7 +670,10 @@ impl Manager {
         ))
     }
 
-    pub fn hosted_candidate(&self, app: AppId) -> Result<Option<(PathBuf, catalog::Release)>, String> {
+    pub fn hosted_candidate(
+        &self,
+        app: AppId,
+    ) -> Result<Option<(PathBuf, catalog::Release)>, String> {
         match installed(app)? {
             Some((path, Some(release))) => Ok(Some((path, release))),
             Some((_, None)) => Err(

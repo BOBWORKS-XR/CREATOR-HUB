@@ -156,12 +156,18 @@ pub async fn restore_hosted_app(
             .ok_or("This app has no pending update restoration.")?;
         // Saved paths confer no authority. The current signed catalog selection
         // must still identify the same executable before it can be reopened.
-        let (path, release) = handle.state::<manager::Manager>().hosted_candidate(app)?
+        let (path, release) = handle
+            .state::<manager::Manager>()
+            .hosted_candidate(app)?
             .ok_or("The saved app is no longer a verified installed release.")?;
         if !platform::same_path(&path, &view.path) {
-            return Err("The saved app path changed. Open it from Hub to confirm the new selection.".into());
+            return Err(
+                "The saved app path changed. Open it from Hub to confirm the new selection.".into(),
+            );
         }
-        handle.state::<Hosting>().start(&handle, app, &path, &release.executable_sha256)
+        handle
+            .state::<Hosting>()
+            .start(&handle, app, &path, &release.executable_sha256)
     })
     .await
     .map_err(|_| "Could not reopen the saved app view.")?

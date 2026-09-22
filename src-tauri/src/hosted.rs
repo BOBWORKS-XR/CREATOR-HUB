@@ -655,9 +655,12 @@ pub async fn start_hosted_app(handle: tauri::AppHandle, app: AppId) -> Result<Va
     tauri::async_runtime::spawn_blocking(move || {
         let manager = handle.state::<crate::manager::Manager>();
         let _operation = manager.begin()?;
-        let (path, release) = manager.hosted_candidate(app)?
-            .ok_or("Choose Use existing app or install a verified release before opening it in Hub.")?;
-        handle.state::<Hosting>().start(&handle, app, &path, &release.executable_sha256)
+        let (path, release) = manager.hosted_candidate(app)?.ok_or(
+            "Choose Use existing app or install a verified release before opening it in Hub.",
+        )?;
+        handle
+            .state::<Hosting>()
+            .start(&handle, app, &path, &release.executable_sha256)
     })
     .await
     .map_err(|_| "Hosted startup worker failed.")?
