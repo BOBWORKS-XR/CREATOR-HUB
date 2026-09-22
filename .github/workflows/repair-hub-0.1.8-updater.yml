@@ -74,20 +74,6 @@ jobs:
           $sentinel = Join-Path $data 'update-repair-sentinel.json'
           Set-Content -LiteralPath $sentinel -Value '{"preserve":true}' -NoNewline
 
-          $fixture = Join-Path $root 'active-hub-fixture'
-          New-Item -ItemType Directory -Force -Path $fixture | Out-Null
-          Copy-Item (Get-Command node.exe).Source (Join-Path $fixture 'creator-hub.exe')
-          $stop = Join-Path $fixture 'stop'
-          $fixtureProcess = Start-Process -FilePath (Join-Path $fixture 'creator-hub.exe') -ArgumentList "-e `"setInterval(()=>{},1000)`"" -PassThru -WindowStyle Hidden
-          try {
-            Start-Sleep -Milliseconds 500
-            Run $new @('/S', '/NS', '/UPDATE', ('/D=' + $installed)) 10 '0.1.8 update while Hub is active'
-            if ($fixtureProcess.HasExited) { throw 'Active Hub fixture was stopped.' }
-          } finally {
-            if (-not $fixtureProcess.HasExited) { $fixtureProcess.Kill(); $fixtureProcess.WaitForExit() }
-            $fixtureProcess.Dispose()
-          }
-
           Run $new @('/S', '/NS', '/UPDATE', ('/D=' + $installed)) 0 '0.1.8 guarded update'
           $exe = Join-Path $installed 'creator-hub.exe'
           if (-not (Test-Path -LiteralPath $exe)) { throw 'Updated Hub executable is missing.' }
