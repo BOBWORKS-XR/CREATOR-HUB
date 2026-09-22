@@ -226,3 +226,29 @@ each Setup host. It downloads only the verified helper, checks actual module IDs
 and total size, accepts no licences and installs no Editor. CI retains development
 packages for seven days; those are not signed/public-release acceptance evidence.
 MCP's Mac lane now includes Intel as well as Apple silicon.
+
+## Native installation acceptance checkpoint (2026-09-22)
+
+- Hub CI 35753495416 passed Windows, Linux, Apple silicon and Intel Mac builds
+  and tests; development packages are retained for seven days.
+- Setup CI 35753369419 passed all four hosts, including the actual pinned CLI
+  dry-run module plan. This is not proof of installation.
+- MCP CI 35753592909 passed Windows, Linux, Apple silicon and Node 20/22/24;
+  Intel Mac was still running at this checkpoint.
+- With explicit user licence approval, Setup run 35754363854 performs real
+  install, reuse, missing-JDK repair and executable checks on disposable native
+  runners, without a Unity account or project creation.
+- Linux failed before Editor installation: `Unity Hub did not appear after
+  installation`. The CLI exited successfully with empty stdout/stderr for the
+  Hub installation command. Root cause is not established. Evidence is under
+  Setup's `artifacts/native-install-first-linux/` locally and the run artifact.
+- Both Mac installation jobs were still running. No success is inferred.
+- Linux-only diagnostic run 35755656122 repeats the approved test and, on failure,
+  captures a bounded JSON Hub-install invocation and narrowly scoped installation
+  paths. Setup review head is dd19424; app behavior is unchanged by this diagnostic.
+
+Runs: https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/actions/runs/35754363854
+and https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/actions/runs/35755656122.
+Native managed Hub updates/hosted controls, signed distribution, Unity activation,
+native GUI and end-to-end project creation remain unaccepted. Nothing was released
+or installed on the user's PC during these tests.
