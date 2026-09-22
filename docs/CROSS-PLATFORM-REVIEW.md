@@ -184,3 +184,45 @@ No application version bump, commit, push, PR merge, installation or release was
 performed. This work does not resolve the native-platform acceptance gaps above.
 The optional metadata must be published separately before public clients can
 display these new product details.
+
+## Native integration continuation
+
+User approved continuing on 2026-09-22. Review branches have now been committed
+and pushed in all three repositories, preserving FireRat's commits as ancestors.
+No PR was merged, tag created, release published or installed app changed.
+
+Confirmed and corrected in Setup:
+
+- Unity's pinned release API lists windows-mono for Linux x64 and both Mac
+  architectures. Fresh installation now requests it alongside Android on those
+  hosts; repair adds it when missing. Windows retains its built-in module path.
+- Registered Mac Editor paths end in Unity.app/Contents/MacOS/Unity, not
+  Editor/Unity. Root detection now validates and removes the appropriate suffix.
+- Linux and macOS module installation use read-only native executable inspection
+  through sysinfo. Unavailable inventory or unidentified Unity processes refuse
+  installation. A native child-process test verifies selected/unrelated/closed
+  cases and never signals discovered user processes.
+- Linux's PID-only SIGTERM restart was removed. Unix Unity Hub restart remains
+  explicitly manual until a verified cooperative shutdown contract is available.
+
+Primary module evidence:
+https://services.api.unity.com/unity/editor/release/v1/releases?version=6000.3.21f1
+and https://unity.com/releases/editor/whats-new/6000.3.21f1
+The OpenJDK id is android-open-jdk-17.0.18+8 on these hosts. This manifest check
+does not prove extraction, licence activation or project creation.
+
+Initial CI runs:
+- Hub: https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/35752483707
+- Setup: https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/actions/runs/35752490527
+- MCP: https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/actions/runs/35752496028
+
+Setup's first Apple-silicon run exposed a Windows-only expected module list and
+Git-normalized historical LICENSE bytes. Corrected the fixture and re-added its
+exact released bytes with -text attributes; accepted hashes were not relaxed.
+The native selected-process protection test passed on Apple silicon in that run.
+
+Follow-up CI also runs the pinned Unity CLI's dry-run installation planner on
+each Setup host. It downloads only the verified helper, checks actual module IDs
+and total size, accepts no licences and installs no Editor. CI retains development
+packages for seven days; those are not signed/public-release acceptance evidence.
+MCP's Mac lane now includes Intel as well as Apple silicon.
