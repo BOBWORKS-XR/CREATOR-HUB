@@ -62,8 +62,14 @@ jobs:
             if ($process.ExitCode -ne $expected) { throw "$name exited $($process.ExitCode), expected $expected." }
           }
 
-          Run $old @('/S', '/NS') 0 '0.1.7 installation'
-          if ((Hash (Join-Path $installed 'creator-hub.exe')) -ne '853bcf82d7be4b4fb4188cf19d99f3d08fcf70636cc52bec3199fa76a2f85ab5') { throw 'Installed 0.1.7 executable hash differs.' }
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path -LiteralPath $sevenZip)) { throw '7-Zip is unavailable on the Windows runner.' }
+          $oldPayload = Join-Path $root '0.1.7-payload'
+          & $sevenZip x $old ('-o' + $oldPayload) creator-hub.exe | Out-Null
+          $oldExecutable = Join-Path $oldPayload 'creator-hub.exe'
+          if ((Hash $oldExecutable) -ne '853bcf82d7be4b4fb4188cf19d99f3d08fcf70636cc52bec3199fa76a2f85ab5') { throw 'Released 0.1.7 executable hash differs.' }
+          New-Item -ItemType Directory -Force -Path $installed | Out-Null
+          Copy-Item -LiteralPath $oldExecutable -Destination (Join-Path $installed 'creator-hub.exe')
           New-Item -ItemType Directory -Force -Path $data | Out-Null
           $sentinel = Join-Path $data 'update-repair-sentinel.json'
           Set-Content -LiteralPath $sentinel -Value '{"preserve":true}' -NoNewline
