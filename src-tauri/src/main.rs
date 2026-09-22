@@ -214,12 +214,13 @@ async fn use_existing_app(
                     .into(),
             );
         }
-        let Some(path) = handle
-            .dialog()
-            .file()
-            .add_filter("Creator app", &["exe"])
-            .blocking_pick_file()
-        else {
+        #[allow(unused_mut)]
+        let mut file_picker = handle.dialog().file();
+        #[cfg(windows)]
+        {
+            file_picker = file_picker.add_filter("Creator app", &["exe"]);
+        }
+        let Some(path) = file_picker.blocking_pick_file() else {
             return Ok("No app selected.".into());
         };
         let path = path.into_path().map_err(|_| "Choose a local executable.")?;
@@ -277,6 +278,10 @@ fn shell_initialization(shell_key: &str) -> String {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     if let Some(wait) = installer_preflight::mode(std::env::args_os().skip(1)) {
         std::process::exit(installer_preflight::run(wait));
     }

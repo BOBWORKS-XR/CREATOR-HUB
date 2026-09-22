@@ -36,6 +36,21 @@ public static class CreatorPluginsPresentationSmoke
             entry.reviewStatus = "listed";
             PluginProtocol.ValidateListing(entry);
             Check(PluginProtocol.CanImport(entry), "listed graph remains importable");
+            var paid = JsonUtility.FromJson<Listing>(JsonUtility.ToJson(entry));
+            paid.download = null; paid.scope = "instructions-only";
+            var productIndex = new ProductIndex { schemaVersion = 1, products = new[] { new ProductDetails {
+                id = paid.id, version = paid.version, purchaseUrl = "https://www.patreon.com/cw/FireRat", websiteUrl = "https://shader.firer.at/",
+                claims = new[] { new ProductClaim { dimension = "render-pipeline", value = "URP", evidence = "author-reported", notes = "Not independently tested." } }
+            } } };
+            var productBytes = Encoding.UTF8.GetBytes(JsonUtility.ToJson(productIndex));
+            Check(ProductMetadata.Parse(productBytes, new[] { paid }).Length == 1, "paid exact-version metadata accepted");
+            Check(!PluginProtocol.CanImport(paid), "paid external product cannot import");
+            Check(ProductMetadata.Parse(productBytes, new[] { entry }).Length == 0, "paid metadata never attaches to package downloads");
+            paid.version = "999.0.0";
+            Check(ProductMetadata.Parse(productBytes, new[] { paid }).Length == 0, "product version mismatch remains unjoined");
+            foreach (string bad in new[] { "http://shader.firer.at/", "https://shader.firer.at.evil.test/", "https://user@shader.firer.at/", "https://127.0.0.1/", "https://shader.firer.at/?redirect=x" })
+                Check(!ProductMetadata.ExternalUrl(bad), "external purchase URL refused: " + bad);
+            Check(!PluginProtocol.WebUrl("https://shader.firer.at/test.unitypackage"), "purchase hosts do not become download hosts");
             var changed = JsonUtility.FromJson<Listing>(JsonUtility.ToJson(entry));
             Check(CreatorPluginsWindow.SameDownload(entry, changed), "unchanged identity matches");
             changed.download.sha256 = new string('a', 64);

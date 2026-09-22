@@ -52,6 +52,41 @@ test('packaged media acceptance waits for close-event cleanup and restores the c
   await expect(page.locator('.community-count')).toHaveText('1 contribution');
 });
 
+test('paid products show external actions and evidence without offering import', async ({ page }) => {
+  await load(page, { listed: true });
+  await page.evaluate(() => {
+    const entry = window.snapshot.entries[0];
+    entry.scope = 'instructions-only'; delete entry.download;
+    entry.compatibility.unity = ['2022.3 LTS (author reported)'];
+    window.snapshot.products = [{ id: entry.id, version: entry.version, claims: [
+      { dimension: 'render-pipeline', value: 'URP', evidence: 'author-reported', notes: 'Not independently tested.' },
+      { dimension: 'build-target', value: 'Android', evidence: 'maintainer-tested', notes: 'Compile only; headset runtime untested.' }
+    ] }];
+  });
+  await page.getByRole('button', { name: 'Refresh catalogue', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Purchase', exact: true })).toBeVisible();
+  await expect(page.locator('.community-meta')).toContainText('Paid');
+  await expect(page.getByRole('button', { name: 'Add to project', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Download package', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Purchase', exact: true }).click();
+  expect(await page.evaluate(() => window.calls.at(-1))).toEqual({ command: 'open_community_link', args: { id: entry.id, kind: 'purchase' } });
+  await page.locator('.community-details summary').click();
+  await expect(page.locator('.community-specs')).toContainText('Author reported: Not independently tested.');
+  await expect(page.locator('.community-specs')).toContainText('Maintainer tested: Compile only; headset runtime untested.');
+  await expect(page.locator('.community-specs')).not.toContainText('Unity tested');
+});
+
+test('product metadata never joins a different listing version', async ({ page }) => {
+  await load(page, { listed: true });
+  await page.evaluate(() => {
+    const entry = window.snapshot.entries[0]; entry.scope = 'instructions-only'; delete entry.download;
+    window.snapshot.products = [{ id: entry.id, version: '999.0.0', claims: [] }];
+  });
+  await page.getByRole('button', { name: 'Refresh catalogue', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Purchase', exact: true })).toHaveCount(0);
+  await expect(page.locator('.community-item-actions')).toContainText('Instructions only');
+});
+
 test('returning after closing Unity refreshes the selected project and enables Add menu', async ({ page }) => {
   await load(page, { projectOpen: true });
   await page.getByRole('button', { name: 'Add Unity menu', exact: true }).click();
@@ -277,7 +312,7 @@ for (const width of [1100, 680, 390, 320]) test(`community is readable and the a
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('plugins.png'), fullPage: true });
   await page.locator('.community-details summary').click();
-  await expect(page.locator('.community-details')).toContainText('Not yet verified');
+  await expect(page.locator('.community-details')).toContainText('Not specified');
   await expect(page.locator('.community-details')).toContainText('ReadmeEditor.cs');
   await expect(page.locator('.community-incorporation')).toContainText('Visual Scripting/VS');
   await expect(page.locator('.community-incorporation')).toContainText('Script Machine or State Machine');

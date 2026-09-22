@@ -6,6 +6,15 @@ use std::{
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 pub fn supported() -> bool {
+    cfg!(any(
+        all(windows, target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        target_os = "macos"
+    ))
+}
+
+pub fn managed_installs_supported() -> bool {
+    // The accepted descriptors and installer handoff still describe NSIS payloads.
     cfg!(all(windows, target_arch = "x86_64"))
 }
 
@@ -17,6 +26,7 @@ pub fn default_exe(app: AppId) -> Result<PathBuf, String> {
 }
 
 pub fn command(path: &Path) -> Command {
+    #[allow(unused_mut)]
     let mut command = Command::new(path);
     #[cfg(windows)]
     {
@@ -28,16 +38,29 @@ pub fn command(path: &Path) -> Command {
 
 pub fn same_path(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&b.to_string_lossy()),
+        (Ok(a), Ok(b)) => {
+            if cfg!(windows) {
+                a.to_string_lossy()
+                    .eq_ignore_ascii_case(&b.to_string_lossy())
+            } else {
+                a == b
+            }
+        }
         _ => false,
     }
 }
 
 pub fn reject_links(path: &Path) -> Result<(), String> {
     for ancestor in path.ancestors() {
+        #[cfg(target_os = "macos")]
+        if ancestor == Path::new("/var")
+            || ancestor == Path::new("/tmp")
+            || ancestor == Path::new("/etc")
+        {
+            continue;
+        }
         if let Ok(meta) = std::fs::symlink_metadata(ancestor) {
+            #[allow(unused_mut)]
             let mut link = meta.file_type().is_symlink();
             #[cfg(windows)]
             {
@@ -306,9 +329,20 @@ pub fn verify_nsis_update_target(product: &str, exe: &Path) -> Result<(), String
 fn gui_name(app: AppId, name: &str) -> bool {
     name.eq_ignore_ascii_case(app.exe())
         || (app == AppId::Mcp
-            && ["bantworks-mcp-launcher.exe", "banter-mcp-launcher.exe"]
+            && [
+                "creator-works-mcp-launcher.exe",
+                "creator-works-mcp-launcher",
+                "bantworks-mcp-launcher.exe",
+                "banter-mcp-launcher.exe",
+                "bantworks-mcp-launcher",
+                "banter-mcp-launcher",
+            ]
+            .iter()
+            .any(|legacy| name.eq_ignore_ascii_case(legacy)))
+        || (app == AppId::Setup
+            && ["creator-project-setup.exe", "creator-project-setup"]
                 .iter()
-                .any(|legacy| name.eq_ignore_ascii_case(legacy)))
+                .any(|alt| name.eq_ignore_ascii_case(alt)))
 }
 
 pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
@@ -334,8 +368,8 @@ pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
         let name = process.name().to_string_lossy().to_ascii_lowercase();
         let portable_setup = app == AppId::Setup
             && name.starts_with("creator-project-setup-")
-            && name.ends_with(".exe")
-            && !name.ends_with("-setup.exe");
+            && ((name.ends_with(".exe") && !name.ends_with("-setup.exe"))
+                || (!name.contains('.') && !name.ends_with("-setup")));
         let is_gui = gui_name(app, &name) || portable_setup;
         if is_gui {
             match process.exe() {
@@ -443,13 +477,41 @@ pub fn window_action(pids: &[u32], executable: &Path, close: bool) -> Result<(),
     #[cfg(not(windows))]
     {
         let _ = (pids, executable, close);
-        Err("Native app lifecycle is not supported on this platform yet.".into())
+        Err("Automatic app activation and safe closing are not available on this platform yet. Save your work and close the app manually.".into())
     }
 }
 
 #[cfg(test)]
 mod legacy_name_tests {
     use super::*;
+    #[test]
+    fn managed_installs_require_the_windows_installer_contract() {
+        assert_eq!(
+            managed_installs_supported(),
+            cfg!(all(windows, target_arch = "x86_64"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_window_actions_do_not_claim_success_or_signal_processes() {
+        let executable = std::env::current_exe().unwrap();
+        for close in [false, true] {
+            assert!(window_action(&[std::process::id()], &executable, close).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn differently_cased_unix_files_are_not_the_same_executable() {
+        let root = tempfile::tempdir().unwrap();
+        let lower = root.path().join("creator-hub");
+        let upper = root.path().join("Creator-Hub");
+        std::fs::write(&lower, b"first").unwrap();
+        std::fs::write(&upper, b"second").unwrap();
+        assert!(!same_path(&lower, &upper));
+        assert!(same_path(&lower, &lower));
+    }
     #[test]
     fn unreadable_commands_stay_blocked_and_heuristic_matches_are_not_called_proven() {
         let root = Path::new("fixture/mcp");
@@ -633,6 +695,8 @@ mod legacy_name_tests {
             "BANTWORKS-MCP-LAUNCHER.EXE",
             "banter-mcp-launcher.exe",
             "creator-works-mcp-launcher.exe",
+            "creator-works-mcp-launcher",
+            "bantworks-mcp-launcher",
         ] {
             assert!(gui_name(AppId::Mcp, name));
             assert!(!gui_name(AppId::Setup, name));
@@ -641,8 +705,11 @@ mod legacy_name_tests {
             "bantworks-mcp-launcher.exe.bak",
             "other.exe",
             "creator-project-setup.exe",
+            "creator-project-setup",
         ] {
             assert!(!gui_name(AppId::Mcp, name));
         }
+        assert!(gui_name(AppId::Setup, "creator-project-setup"));
+        assert!(gui_name(AppId::Setup, "creator-project-setup.exe"));
     }
 }

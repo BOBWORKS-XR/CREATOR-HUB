@@ -157,6 +157,7 @@ fn modified_at(root: &Path, remaining: &mut usize, deadline: Instant) -> Option<
             return None;
         }
         *remaining = remaining.checked_sub(1)?;
+        #[allow(unused_mut)]
         let mut linked = metadata.file_type().is_symlink();
         #[cfg(windows)]
         {

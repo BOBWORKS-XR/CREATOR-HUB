@@ -1,12 +1,13 @@
 {
   "name": "creator-hub",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "description": "Creator Hub interface preview",
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
     "test:ui": "playwright test",
+    "test:scripts": "node --test scripts/*.test.cjs scripts/release-checksums.test.mjs",
     "check": "cargo test --release --manifest-path src-tauri/Cargo.toml"
   },
   "devDependencies": {
