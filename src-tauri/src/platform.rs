@@ -13,6 +13,11 @@ pub fn supported() -> bool {
     ))
 }
 
+pub fn managed_installs_supported() -> bool {
+    // The accepted descriptors and installer handoff still describe NSIS payloads.
+    cfg!(all(windows, target_arch = "x86_64"))
+}
+
 pub fn default_exe(app: AppId) -> Result<PathBuf, String> {
     Ok(dirs::data_local_dir()
         .ok_or("Local app data is unavailable.")?
@@ -33,9 +38,14 @@ pub fn command(path: &Path) -> Command {
 
 pub fn same_path(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&b.to_string_lossy()),
+        (Ok(a), Ok(b)) => {
+            if cfg!(windows) {
+                a.to_string_lossy()
+                    .eq_ignore_ascii_case(&b.to_string_lossy())
+            } else {
+                a == b
+            }
+        }
         _ => false,
     }
 }
@@ -464,40 +474,44 @@ pub fn window_action(pids: &[u32], executable: &Path, close: bool) -> Result<(),
             Err("The app is starting or has no available window. Try again shortly.".into())
         }
     }
-    #[cfg(unix)]
-    {
-        let mut found = false;
-        for &pid in pids {
-            let proc_exe = PathBuf::from(format!("/proc/{pid}/exe"));
-            let is_match = match std::fs::read_link(&proc_exe) {
-                Ok(target) => same_path(&target, executable),
-                Err(_) => unsafe { libc::kill(pid as i32, 0) == 0 },
-            };
-            if is_match {
-                found = true;
-                if close {
-                    unsafe {
-                        libc::kill(pid as i32, libc::SIGTERM);
-                    }
-                }
-            }
-        }
-        if found {
-            Ok(())
-        } else {
-            Err("The app is starting or has no available window. Try again shortly.".into())
-        }
-    }
-    #[cfg(not(any(windows, unix)))]
+    #[cfg(not(windows))]
     {
         let _ = (pids, executable, close);
-        Err("Native app lifecycle is not supported on this platform yet.".into())
+        Err("Automatic app activation and safe closing are not available on this platform yet. Save your work and close the app manually.".into())
     }
 }
 
 #[cfg(test)]
 mod legacy_name_tests {
     use super::*;
+    #[test]
+    fn managed_installs_require_the_windows_installer_contract() {
+        assert_eq!(
+            managed_installs_supported(),
+            cfg!(all(windows, target_arch = "x86_64"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_window_actions_do_not_claim_success_or_signal_processes() {
+        let executable = std::env::current_exe().unwrap();
+        for close in [false, true] {
+            assert!(window_action(&[std::process::id()], &executable, close).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn differently_cased_unix_files_are_not_the_same_executable() {
+        let root = tempfile::tempdir().unwrap();
+        let lower = root.path().join("creator-hub");
+        let upper = root.path().join("Creator-Hub");
+        std::fs::write(&lower, b"first").unwrap();
+        std::fs::write(&upper, b"second").unwrap();
+        assert!(!same_path(&lower, &upper));
+        assert!(same_path(&lower, &lower));
+    }
     #[test]
     fn unreadable_commands_stay_blocked_and_heuristic_matches_are_not_called_proven() {
         let root = Path::new("fixture/mcp");

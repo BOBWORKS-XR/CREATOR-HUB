@@ -70,7 +70,7 @@ fn validate(release: &Release, preview: bool) -> Result<(), String> {
 }
 
 fn installed_location() -> Result<PathBuf, String> {
-    if !platform::supported() {
+    if !platform::managed_installs_supported() {
         return Err("Hub updates currently support Windows x64.".into());
     }
     let exe = std::env::current_exe().map_err(|_| "Cannot check this Hub copy.")?;

@@ -343,7 +343,7 @@ impl Manager {
     }
 
     pub fn snapshot(&self, check: bool, preview: bool) -> Result<Snapshot, String> {
-        if !platform::supported() {
+        if !platform::managed_installs_supported() {
             return Ok(Snapshot {
                 supported: false,
                 apps: Vec::new(),
@@ -554,7 +554,7 @@ impl Manager {
         progress: impl Fn(Progress),
     ) -> Result<String, String> {
         let _operation = self.begin()?;
-        if !platform::supported() {
+        if !platform::managed_installs_supported() {
             return Err("App installation is available on Windows x64 only in this build.".into());
         }
         let release = self.selected(app, &version)?;
