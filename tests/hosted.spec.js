@@ -254,7 +254,7 @@ test('switching keeps the same frame, form and backend', async ({ page }) => {
   await setup.locator('#browse-button').click();
   await expect(setup.locator('#parent-folder')).toHaveValue('E:\\Hosted Test');
   await switchTo(page, 'mcp');
-  await expect(page.locator('#view-hosted')).toBeHidden();
+  await expect(page.locator('#mcp-host-frame')).toBeAttached();
   await switchTo(page, 'setup');
   await expect(setup.locator('#project-name')).toHaveValue('Do not reset this');
   await expect(setup.locator('#parent-folder')).toHaveValue('E:\\Hosted Test');
