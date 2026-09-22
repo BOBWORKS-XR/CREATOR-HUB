@@ -11,6 +11,19 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
+      - name: Install the WebView runtime required by Hub 0.1.7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          winget install --id Microsoft.EdgeWebView2Runtime --exact --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
+          $webView = Get-ChildItem 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients' -ErrorAction SilentlyContinue |
+            Get-ItemProperty | Where-Object { $_.name -eq 'Microsoft Edge WebView2 Runtime' } |
+            Select-Object -First 1
+          if (-not $webView -or [string]::IsNullOrWhiteSpace($webView.pv)) {
+            throw 'Microsoft Edge WebView2 Runtime is not installed.'
+          }
+          Write-Host "WebView2 Runtime: $($webView.pv)"
+
       - name: Download the exact public installers
         shell: pwsh
         run: |
