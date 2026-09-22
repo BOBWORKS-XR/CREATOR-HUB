@@ -32,7 +32,16 @@ jobs:
           function Hash([string]$path) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
           function Run([string]$path, [string]$args, [int]$expected, [string]$name) {
             $process = Start-Process -FilePath $path -ArgumentList $args -PassThru -WindowStyle Hidden
-            if (-not $process.WaitForExit(180000)) { throw "$name timed out." }
+            if (-not $process.WaitForExit(60000)) {
+              Write-Host "--- $name timed out: process tree ---"
+              Get-CimInstance Win32_Process | Where-Object {
+                $_.ProcessId -eq $process.Id -or $_.ParentProcessId -eq $process.Id -or $_.Name -match 'creator-hub|webview|nsis'
+              } | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-List
+              Write-Host "--- installer destination ---"
+              Get-ChildItem -LiteralPath $installed -Force -Recurse -ErrorAction SilentlyContinue | Select-Object -First 40 FullName,Length
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              throw "$name timed out."
+            }
             if ($process.ExitCode -ne $expected) { throw "$name exited $($process.ExitCode), expected $expected." }
           }
 
