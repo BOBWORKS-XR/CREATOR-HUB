@@ -45,7 +45,18 @@ try {
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Expected versioned NSIS artifact was not produced.' }
     if ($HostedPins) { Copy-Item -LiteralPath $HostedPins -Destination (Join-Path $output 'hosted-pins.json') }
     Copy-Item -LiteralPath $installer -Destination (Join-Path $output "Creator-Hub-${version}-Windows-setup.exe")
-    Copy-Item -LiteralPath (Join-Path $target 'release\creator-hub.exe') -Destination $output
+    $launcher = Join-Path $target 'release\creator-hub.exe'
+    Copy-Item -LiteralPath $launcher -Destination $output
+    if ($pins) {
+        # Prove this exact built binary received both reviewed pins. A release must
+        # never advertise hosted apps while shipping an unpinned Hub again.
+        $binary = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($launcher))
+        foreach ($app in @('setup', 'mcp')) {
+            if (-not $binary.Contains($pins.$app.executableSha256)) {
+                throw "Packaged Hub is missing the approved $app hosting pin."
+            }
+        }
+    }
     Copy-Item -LiteralPath (Join-Path $root 'docs\WINDOWS-RELEASE.md') -Destination (Join-Path $output 'README.md')
     Copy-Item -LiteralPath (Join-Path $root 'docs\COMMUNITY-PREVIEW.md') -Destination $output
     $hashes = Get-ChildItem -LiteralPath $output -File | ForEach-Object { "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" }

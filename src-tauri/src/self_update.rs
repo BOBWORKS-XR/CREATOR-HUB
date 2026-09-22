@@ -265,6 +265,7 @@ pub async fn download_hub_update(
 pub async fn install_hub_update(
     handle: tauri::AppHandle,
     version: String,
+    restore_views: bool,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _operation = handle.state::<Manager>().begin()?;
@@ -316,8 +317,11 @@ pub async fn install_hub_update(
         installed_location()?;
         if handle.state::<Manager>().cancellation().load(Ordering::SeqCst) { return Err("Hub update cancelled.".into()); }
         if !views.is_empty() {
-            handle.state::<crate::hosted_restore::Restore>().remember(views, &release.version)?;
-            let _ = handle.emit("app-progress", Progress { message: "Closing app views for the update. They will reopen when Hub restarts...".into(), received: 0, total: 0, cancellable: false });
+            if restore_views {
+                handle.state::<crate::hosted_restore::Restore>().remember(views, &release.version)?;
+            }
+            let message = if restore_views { "Closing app views for the update. They will reopen when Hub restarts..." } else { "Closing app views for the update..." };
+            let _ = handle.emit("app-progress", Progress { message: message.into(), received: 0, total: 0, cancellable: false });
             handle.state::<crate::hosted::Hosting>().suspend_for_update(Duration::from_secs(30), |sessions| {
                 let _ = handle.emit("hosted-apps-suspended", sessions);
             })?;

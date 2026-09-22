@@ -24,7 +24,7 @@
   const byId = id => document.getElementById(id);
   const invoke = (command, args) => window.CreatorHubNative.invoke(command, args);
   if (typeof window.CreatorHubNative.version === 'string') document.querySelector('.footer-version').textContent = window.CreatorHubNative.version;
-  for (const [id, key] of [['preview-channel', 'preview'], ['auto-download', 'auto-download']]) {
+  for (const [id, key] of [['preview-channel', 'preview'], ['auto-download', 'auto-download'], ['restore-hosted-views', 'restore-hosted-views']]) {
     byId(id).checked = true;
     try {
       const saved = localStorage.getItem(`creator-hub.${key}`);
@@ -91,7 +91,31 @@
     target.focus();
     renderState();
   }
-  for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => show(button.dataset.view));
+  const hostAttempts = new Set();
+  async function openHostedWhenReady(app) {
+    const state = inventory?.apps?.find(item => item.app === app);
+    if (busy || hostAttempts.has(app) || window.CreatorHosted.active(app)
+      || !(state?.installed && state.trusted && state.hostedPreview && state.hostedCompatible === true && !state.issue)) return;
+    hostAttempts.add(app);
+    busy = true; renderState();
+    try {
+      await window.CreatorHosted.start(app);
+      if (current === app) show(app, true);
+    } catch (reason) {
+      // Hub does not close standalone apps. Its normal fallback stays available.
+      error.textContent = String(reason);
+      error.classList.remove('hidden');
+    } finally {
+      busy = false;
+      renderState();
+    }
+  }
+  function selectView(view) {
+    hostAttempts.delete(view);
+    show(view);
+    if (Object.hasOwn(tools, view)) void openHostedWhenReady(view);
+  }
+  for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => selectView(button.dataset.view));
   trigger.addEventListener('click', () => {
     if (trigger.getAttribute('aria-expanded') === 'true') return close(true);
     shell.classList.add('suite-expanded');
@@ -311,6 +335,7 @@
       }
     }
     if (check && hubChecked && byId('auto-download').checked && hubUpdate?.availableVersion && !hubUpdate.downloaded && !hubUpdate.installBlocked) await hubAction('download_hub_update');
+    if (succeeded && Object.hasOwn(tools, current)) void openHostedWhenReady(current);
     return succeeded;
   }
 
@@ -323,7 +348,7 @@
     busy = true; renderState(); error.classList.add('hidden');
     if (command === 'install_hub_update') window.CreatorHosted.updating(true);
     try {
-      const message = await invoke(command, { version: hubUpdate.availableVersion });
+      const message = await invoke(command, { version: hubUpdate.availableVersion, restoreViews: byId('restore-hosted-views').checked });
       setProgress({ message, total: 0, cancellable: false });
     } catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
     finally {
@@ -453,7 +478,7 @@
     byId('cancel-download').disabled = true;
     try { await invoke('cancel_download'); } catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
   });
-  for (const [id, key] of [['preview-channel', 'preview'], ['auto-download', 'auto-download']]) {
+  for (const [id, key] of [['preview-channel', 'preview'], ['auto-download', 'auto-download'], ['restore-hosted-views', 'restore-hosted-views']]) {
     byId(id).addEventListener('change', () => {
       try { localStorage.setItem(`creator-hub.${key}`, String(byId(id).checked)); } catch { /* Session preference still applies. */ }
       if (id === 'preview-channel') refresh(true);
@@ -464,7 +489,7 @@
       if (!request || !['hub', 'mcp', 'setup'].includes(request.view) || !Number.isSafeInteger(request.revision) || request.revision <= launchRevision) return;
       launchRevision = request.revision;
       // Navigation keeps existing hosted views intact; it never starts an installation.
-      show(request.view);
+      selectView(request.view);
     }
     try {
       await window.__TAURI__.event.listen('app-progress', event => setProgress(event.payload));
