@@ -66,7 +66,7 @@ jobs:
         if: matrix.hosted
         shell: pwsh
         run: |
-          .\scripts\Build-Installer.ps1 -OutputName "Creator-Hub-${{ github.ref_name }}-Windows" -HostedPins scripts\prerelease-apps.json
+          .\scripts\Build-Installer.ps1 -OutputName "Creator-Hub-${{ github.ref_name }}-Windows"
       - name: Upload the verified Windows installer to the draft release
         if: matrix.hosted
         shell: pwsh
