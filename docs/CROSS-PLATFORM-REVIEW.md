@@ -252,3 +252,40 @@ and https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/actions/runs/3575565612
 Native managed Hub updates/hosted controls, signed distribution, Unity activation,
 native GUI and end-to-end project creation remain unaccepted. Nothing was released
 or installed on the user's PC during these tests.
+
+## Completed prerequisite acceptance (2026-09-22)
+
+The earlier installation failures above are superseded by these verified results:
+
+| Host | Setup commit | Run | Result |
+| --- | --- | --- | --- |
+| Linux x64 | 6bb08ae | 35760810023 | Passed |
+| macOS Apple silicon | 592c73a | 35761917555 | Passed |
+| macOS Intel | 592c73a | 35761917555 | Passed |
+
+Each downloaded acceptance report records completed=true, cancellationVerified=true,
+prerequisitesVerified=true, existingInstallReused=true, missingJdkRepaired=true and
+activationHandoffRequired=true. Java, javac, ADB and NDK clang executed successfully.
+No Unity account was used and no project was created. Reports are in Setup's local
+artifacts/native-accepted-linux, artifacts/native-accepted-arm64 and
+artifacts/native-accepted-intel directories and the corresponding Actions artifacts.
+
+Confirmed corrections:
+- macOS modules are beside Unity.app under PlaybackEngines, not inside its bundle.
+  Official module destinations and the installed-requirements report agree.
+- Linux CLI installed Hub at ~/Applications/UnityHub.AppImage. Detection now includes
+  that exact path; the diagnostic CLI report confirmed alreadyInstalled=true there.
+- macOS CLI inventory reports a Unity.app bundle, not the inner executable. Setup
+  normalizes that known bundle layout before validating and repairing modules.
+
+Local focused checks: 14 logic tests and 19 bootstrap tests passed; the additional
+registered-bundle regression also passed. Native workflows run the focused suites
+before installation. They do not replace full-suite release acceptance: the earlier
+Linux full-suite run 35755656122 had a transient plugin-queue lock failure in
+repeated_terminal_imports_archive_without_losing_receipts_or_status. Its cause is
+still unproven; do not mark it resolved or suppress it in the normal CI suite.
+MCP CI 35753592909 subsequently completed successfully on all four hosts.
+
+Native project creation/licence activation, GUI workflows, managed Hub updates and
+hosted companion controls remain separate gates. These changes are review-branch
+only: no version bump, merge or public release was performed.
