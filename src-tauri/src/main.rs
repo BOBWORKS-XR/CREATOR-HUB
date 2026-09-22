@@ -277,11 +277,29 @@ fn shell_initialization(shell_key: &str) -> String {
     format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); }}", shell_key, env!("CARGO_PKG_VERSION"))
 }
 
-fn main() {
-    #[cfg(target_os = "linux")]
+#[cfg(target_os = "linux")]
+fn configure_linux_webkit() {
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
+
+    // SteamOS ships a newer Wayland client library than the Ubuntu-built AppImage.
+    // WebKitGTK's renderer can abort at EGL initialization when it loads the bundled
+    // library against SteamOS Mesa. Keep an explicit user preload intact.
+    let steamos = std::fs::read_to_string("/etc/os-release")
+        .is_ok_and(|release| release.lines().any(|line| line == "ID=steamos"));
+    let host_wayland = "/usr/lib/libwayland-client.so.0";
+    if steamos
+        && std::path::Path::new(host_wayland).is_file()
+        && std::env::var_os("LD_PRELOAD").is_none()
+    {
+        std::env::set_var("LD_PRELOAD", host_wayland);
+    }
+}
+
+fn main() {
+    #[cfg(target_os = "linux")]
+    configure_linux_webkit();
     if let Some(wait) = installer_preflight::mode(std::env::args_os().skip(1)) {
         std::process::exit(installer_preflight::run(wait));
     }
