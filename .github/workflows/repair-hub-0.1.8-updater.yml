@@ -74,7 +74,8 @@ jobs:
           $sentinel = Join-Path $data 'update-repair-sentinel.json'
           Set-Content -LiteralPath $sentinel -Value '{"preserve":true}' -NoNewline
 
-          Run $new @('/S', '/NS', '/UPDATE', ('/D=' + $installed)) 0 '0.1.8 guarded update'
+          # Match Tauri's Windows updater handoff for Hub's configured passive mode.
+          Run $new @('/P', '/UPDATE', '/R', '/ARGS', '/NS', ('/D=' + $installed)) 0 '0.1.8 guarded update'
           $exe = Join-Path $installed 'creator-hub.exe'
           if (-not (Test-Path -LiteralPath $exe)) { throw 'Updated Hub executable is missing.' }
           if ((Get-Content -LiteralPath $sentinel -Raw) -ne '{"preserve":true}') { throw 'Hub settings were not preserved.' }
