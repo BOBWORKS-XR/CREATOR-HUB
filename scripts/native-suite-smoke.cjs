@@ -253,6 +253,12 @@ async function closeHosted(app) {
       await page.locator('#check-updates').click();
       await retry(async () => assert.equal(await page.locator('#check-updates').isEnabled(), true), 120);
       await show('mcp');
+      if (!(await page.evaluate(() => window.CreatorHosted.active('mcp')))) {
+        backends.mcp = await backend('mcp');
+        await retry(() => native(backends.mcp, apps.mcp, 'button', 'Enable MCP controls'), 180);
+        await retry(async () => assert.equal(await page.locator('#mcp-host-frame').isVisible(), true), 180);
+        await closeHosted('mcp');
+      }
       await page.locator('#update-blockers').waitFor();
       await retry(async () => assert.equal(await page.locator('#recheck-app').isEnabled(), true));
       assert.equal(await page.locator('#release-button').isEnabled(), true);
