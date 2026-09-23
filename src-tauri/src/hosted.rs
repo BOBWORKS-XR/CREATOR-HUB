@@ -895,7 +895,9 @@ mod tests {
             "Draining is not a forced kill"
         );
         std::fs::write(&release, b"exit normally").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // Windows CI can be heavily scheduled while the full test suite runs;
+        // allow the fixture time to exit normally after stdin has drained.
+        let deadline = Instant::now() + Duration::from_secs(10);
         while fixture.0.try_wait().unwrap().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
