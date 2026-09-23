@@ -236,7 +236,7 @@ async function closeHosted(app) {
     await show(app);
     if (upgrade) {
       const hostButton = page.locator(`#host-${app}-button`);
-      assert.equal(await hostButton.isDisabled(), state.hostedCompatible !== true);
+      await retry(async () => assert.equal(await hostButton.isDisabled(), state.hostedCompatible !== true));
       if (state.hostedCompatible === true) {
         assert.match(await page.locator('#compatibility-status').innerText(), /Ready to open in Hub/);
       } else {
