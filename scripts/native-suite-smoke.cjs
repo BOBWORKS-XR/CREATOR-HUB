@@ -233,15 +233,10 @@ async function closeHosted(app) {
     if (upgrade) assert.equal(state.updateAvailable, true);
     assert.equal(state.installerInteractive, false);
     assert.ok(!state.issue && !state.installBlocked && !state.checkWarning, JSON.stringify(state));
-    await show(app);
+    if (!upgrade) await show(app);
     if (upgrade) {
-      const hostButton = page.locator(`#host-${app}-button`);
-      await retry(async () => assert.equal(await hostButton.isDisabled(), state.hostedCompatible !== true));
-      if (state.hostedCompatible === true) {
-        assert.match(await page.locator('#compatibility-status').innerText(), /Ready to open in Hub/);
-      } else {
-        assert.match(await page.locator('#compatibility-detail').innerText(), /Update this app/);
-      }
+      assert.equal(state.hostedCompatible, true, `${app} is not compatible with the accepted Hub payload`);
+      report.checks.push(`${app}: installed release is compatible with the Hub hosted interface`);
     }
     if (upgrade && app === 'mcp') {
       const runtime = path.join(path.dirname(apps.mcp), 'server', 'runtime', 'node.exe');
@@ -318,10 +313,9 @@ async function closeHosted(app) {
       assert.equal(await page.locator('#view-hub').isVisible(), true);
       report.checks.push(`${app}: Apps-row Update app cancellation preserves files/settings; retry installs with native consent without opening app details`);
     } else {
-      await page.waitForFunction(app => {
-        const button = document.querySelector(`#host-${app}-button`);
-        return button && !button.disabled && button.getClientRects().length > 0;
-      }, app, { timeout: 180000 });
+      backends[app] = await backend(app);
+      await retry(() => native(backends[app], apps[app], 'button', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'), 180);
+      await retry(async () => assert.equal(await page.locator(`#${app}-host-frame`).isVisible(), true), 180);
     }
     assert.equal(hash(apps[app]), pins[app].executableSha256);
     const refreshed = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
@@ -337,9 +331,10 @@ async function closeHosted(app) {
 
   for (const app of selectedApps) {
     await show(app);
-    await page.locator(`#host-${app}-button`).click();
-    backends[app] = await backend(app);
-    await retry(() => native(backends[app], apps[app], 'button', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'));
+    if (!backends[app]) backends[app] = await backend(app);
+    if (!(await page.evaluate(app => window.CreatorHosted.active(app), app))) {
+      await retry(() => native(backends[app], apps[app], 'button', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'), 180);
+    }
     frames[app] = await retry(async () => {
       const element = await page.locator(`#${app}-host-frame`).elementHandle();
       const frame = element && await element.contentFrame();
