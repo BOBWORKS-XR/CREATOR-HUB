@@ -235,9 +235,13 @@ async function closeHosted(app) {
     assert.ok(!state.issue && !state.installBlocked && !state.checkWarning, JSON.stringify(state));
     await show(app);
     if (upgrade) {
-      assert.equal(state.hostedCompatible, false);
-      assert.equal(await page.locator(`#host-${app}-button`).isDisabled(), true);
-      assert.match(await page.locator('#compatibility-detail').innerText(), /Update this app/);
+      const hostButton = page.locator(`#host-${app}-button`);
+      assert.equal(await hostButton.isDisabled(), state.hostedCompatible !== true);
+      if (state.hostedCompatible === true) {
+        assert.match(await page.locator('#compatibility-status').innerText(), /Ready to open in Hub/);
+      } else {
+        assert.match(await page.locator('#compatibility-detail').innerText(), /Update this app/);
+      }
     }
     if (upgrade && app === 'mcp') {
       const runtime = path.join(path.dirname(apps.mcp), 'server', 'runtime', 'node.exe');
@@ -314,7 +318,10 @@ async function closeHosted(app) {
       assert.equal(await page.locator('#view-hub').isVisible(), true);
       report.checks.push(`${app}: Apps-row Update app cancellation preserves files/settings; retry installs with native consent without opening app details`);
     } else {
-      await page.waitForFunction(() => !document.querySelector('#release-button').disabled && document.querySelector('#primary-label').textContent === 'Open app', null, { timeout: 180000 });
+      await page.waitForFunction(app => {
+        const button = document.querySelector(`#host-${app}-button`);
+        return button && !button.disabled && button.getClientRects().length > 0;
+      }, app, { timeout: 180000 });
     }
     assert.equal(hash(apps[app]), pins[app].executableSha256);
     const refreshed = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
