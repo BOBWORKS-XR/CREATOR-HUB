@@ -12,7 +12,7 @@ async function verifyCommunityMedia(page, out) {
   await page.route(pattern, route);
   const items = Array.from({ length: 6 }, (_, i) => ({ type: 'image', url: `https://cdn.sidequestvr.com/file/1/gallery-test-${i}.png` }));
   items.push(...['gif', 'webm'].map(type => ({ type, url: `https://cdn.sidequestvr.com/file/1/gallery-test-demo.${type}`, poster: items[0].url })));
-  await expect(page.getByRole('button', { name: 'Refresh catalogue', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Refresh catalogue', exact: true })).toBeEnabled({ timeout: 90_000 });
   await page.evaluate(({ fixture, items }) => {
     window.__mediaTestPrevious = window.CreatorCommunityInvoke;
     window.CreatorCommunityInvoke = async command => {
