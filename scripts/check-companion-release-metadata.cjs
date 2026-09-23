@@ -49,11 +49,28 @@ async function checkApp(app, pin, token, fetchImpl = fetch) {
     if (descriptor[field] !== expected) throw Error(`${app}: latest signed descriptor does not match reviewed pin field ${field}.`);
   }
   process.stdout.write(`${app}: latest public descriptor matches reviewed ${pin.version} hashes.\n`);
+  return { app, version: pin.version, matched: true };
+}
+
+function writeReport(report) {
+  if (process.env.GITHUB_ACTIONS !== 'true' || !process.env.GITHUB_WORKSPACE) return;
+  const directory = path.join(process.env.GITHUB_WORKSPACE, 'artifacts');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'companion-release-preflight.json'), `${JSON.stringify(report, null, 2)}\n`, { flag: 'w' });
 }
 
 async function main() {
   const pins = JSON.parse(fs.readFileSync(path.join(__dirname, 'prerelease-apps.json'), 'utf8'));
-  for (const app of ['setup', 'mcp']) await checkApp(app, pins[app], process.env.GH_TOKEN);
+  const report = { schemaVersion: 1, passed: false, apps: [] };
+  try {
+    for (const app of ['setup', 'mcp']) report.apps.push(await checkApp(app, pins[app], process.env.GH_TOKEN));
+    report.passed = true;
+    writeReport(report);
+  } catch (error) {
+    report.error = String(error?.message || error);
+    writeReport(report);
+    throw error;
+  }
 }
 
 if (require.main === module) main().catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
