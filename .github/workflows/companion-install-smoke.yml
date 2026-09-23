@@ -100,7 +100,8 @@ jobs:
 
             $installedEntries = @(& $findInstallEntries)
             if ($installedEntries.Count -ne 1 -or -not $installedEntries[0].InstallLocation) { throw 'Expected one registered installation with an explicit install location.' }
-            $installedPath = Join-Path $installedEntries[0].InstallLocation $app.exe
+            $installLocation = ([string]$installedEntries[0].InstallLocation).Trim().Trim('"')
+            $installedPath = Join-Path $installLocation $app.exe
             if (-not (Test-Path -LiteralPath $installedPath -PathType Leaf)) { throw 'Installed launcher was not found at its registered path.' }
             $installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($installedHash -cne $payloadHash) { throw 'Installed launcher hash differs from the verified installer payload.' }

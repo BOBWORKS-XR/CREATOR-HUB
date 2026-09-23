@@ -24,6 +24,7 @@ test('newest companion installers are tested on disposable Windows before catalo
   assert.match(workflow, /asset\.digest/);
   assert.equal((workflow.match(/probe-companion-identity\.mjs/g) ?? []).length, 2);
   assert.match(workflow, /Start-Process -FilePath \$installer -ArgumentList '\/S' -PassThru -Wait/);
+  assert.match(workflow, /InstallLocation\)\.Trim\(\)\.Trim\('\"'\)/);
   assert.match(workflow, /installedHash -cne \$payloadHash/);
   const probe = fs.readFileSync(path.join(__dirname, 'probe-companion-identity.mjs'), 'utf8');
   assert.match(probe, /spawnSync\(binary, \['--creator-hub-info'\]/);
