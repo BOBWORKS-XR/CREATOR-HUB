@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$CandidateDirectory,
-    [ValidateSet('clean', 'alpha.3', 'alpha.4', 'alpha.5', 'alpha.6', 'stable-0.1.0', 'stable-0.1.1', 'stable-0.1.2', 'stable-0.1.3', 'stable-0.1.4', 'stable-0.1.5', 'stable-0.1.6')][string]$HubBaseline = 'clean'
+    [ValidateSet('clean', 'alpha.3', 'alpha.4', 'alpha.5', 'alpha.6', 'stable-0.1.0', 'stable-0.1.1', 'stable-0.1.2', 'stable-0.1.3', 'stable-0.1.4', 'stable-0.1.5', 'stable-0.1.6', 'stable-0.1.8')][string]$HubBaseline = 'clean'
 )
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
@@ -68,7 +68,9 @@ try {
     $report.installerSha256 = Hash $installer
     $report.expectedExecutableSha256 = Hash $expectedExe
     if ($HubBaseline -ne 'clean') {
-        $baseline = if ($HubBaseline -eq 'stable-0.1.6') {
+        $baseline = if ($HubBaseline -eq 'stable-0.1.8') {
+            @{ Version = '0.1.8'; Installer = '785bfae6b33396421e74f405808eefce078ac5b0ecdfe1d8cc1c1dd10b048154'; Exe = '5ea968b425ac99f7508e844478abb6725012325038443b0dfdf39c1750f9a169'; Asset = 'Creator.Hub_0.1.8_x64-setup.exe' }
+        } elseif ($HubBaseline -eq 'stable-0.1.6') {
             @{ Version = '0.1.6'; Installer = '96e0059f0cbcc4ce1dc66ed86d05ad0274e9e63b108db5febe1e61120fd28adb'; Exe = 'ea6df01fd6200b28125cb5302db6ca6dcc24a70279a729adb35cd572a08a4ea9' }
         } elseif ($HubBaseline -eq 'stable-0.1.5') {
             @{ Version = '0.1.5'; Installer = '79f3a6a2851ec25d1d533eff85c0bc09764a3f1175c1928662c6915697495f5b'; Exe = '4c350035598e596dfcd351d83bd406e88b864c6e8485b914254fb57324b00594' }
@@ -93,7 +95,8 @@ try {
         }
         $baselineInstaller = Join-Path $output "Creator-Hub-$($baseline.Version)-Windows-setup.exe"
         Require (-not (Test-Path -LiteralPath $baselineInstaller)) 'Baseline installer path already exists.'
-        Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v$($baseline.Version)/Creator-Hub-$($baseline.Version)-Windows-setup.exe" -OutFile $baselineInstaller -TimeoutSec 120
+        $assetName = if ($baseline.Asset) { $baseline.Asset } else { "Creator-Hub-$($baseline.Version)-Windows-setup.exe" }
+        Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v$($baseline.Version)/$assetName" -OutFile $baselineInstaller -TimeoutSec 120
         Require ((Hash $baselineInstaller) -eq $baseline.Installer) 'Public baseline installer hash differs.'
         Run-Installer '/S /NS' 0 "Install verified public Hub $HubBaseline baseline" $baselineInstaller
         Require ((Hash (Join-Path $installed 'creator-hub.exe')) -eq $baseline.Exe) 'Public baseline installed executable differs.'

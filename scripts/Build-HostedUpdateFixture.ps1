@@ -5,8 +5,10 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hoste
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $targetVersion = (Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw | ConvertFrom-Json).version
-if ($targetVersion -ne '0.1.6') { throw 'Review the test-only version fixture before reusing it for another release.' }
-$fixtureVersion = '0.1.5'
+if ($targetVersion -notmatch '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$' -or [int]$Matches.patch -lt 1) {
+    throw 'The hosted update fixture requires a stable x.y.z release version with a previous patch.'
+}
+$fixtureVersion = "$($Matches.major).$($Matches.minor).$([int]$Matches.patch - 1)"
 $files = @('package.json', 'package-lock.json', 'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock')
 $originals = @{}
 $changes = @()
@@ -24,13 +26,13 @@ try {
             if ($file -eq 'package-lock.json') { $json.packages[''].version = $fixtureVersion }
             $content = $json | ConvertTo-Json -Depth 100
         } elseif ($file.EndsWith('Cargo.toml')) {
-            $pattern = '(?m)^version = "0\.1\.6"\r?$'
+            $pattern = '(?m)^version = "' + [regex]::Escape($targetVersion) + '"\r?$'
             if ([regex]::Matches($content, $pattern).Count -ne 1) { throw 'Ambiguous Cargo package version.' }
-            $content = [regex]::Replace($content, $pattern, 'version = "0.1.5"')
+            $content = [regex]::Replace($content, $pattern, "version = `"$fixtureVersion`"")
         } else {
-            $pattern = '(name = "creator-hub"\r?\nversion = ")0\.1\.6(")'
+            $pattern = '(name = "creator-hub"\r?\nversion = ")' + [regex]::Escape($targetVersion) + '(")'
             if ([regex]::Matches($content, $pattern).Count -ne 1) { throw 'Ambiguous Cargo lock package.' }
-            $content = [regex]::Replace($content, $pattern, '${1}0.1.5${2}')
+            $content = [regex]::Replace($content, $pattern, '${1}' + $fixtureVersion + '${2}')
         }
         [IO.File]::WriteAllText($full, $content, $utf8)
         $changes += @{ path = $file; fixtureSha256 = (Get-FileHash -LiteralPath $full).Hash.ToLowerInvariant() }
@@ -52,7 +54,7 @@ try {
     if ((Get-FileHash -LiteralPath $exe).Hash -ne (Get-FileHash -LiteralPath (Join-Path $extracted '$PLUGINSDIR/creator-hub-preflight.exe')).Hash) {
         throw 'Fixture preflight and installed payload differ.'
     }
-    $receipt = @{ testOnly = $true; scope = '0.1.6 runtime with version-only 0.1.5 fixture; not public stable'; sourceRevision = $revision;
+    $receipt = @{ testOnly = $true; scope = "$targetVersion runtime with version-only $fixtureVersion fixture; not public stable"; sourceRevision = $revision;
         fromVersion = $fixtureVersion; toVersion = $targetVersion; changes = $changes;
         installerPath = $installer; executablePath = $exe;
         installerSha256 = (Get-FileHash -LiteralPath $installer).Hash.ToLowerInvariant();

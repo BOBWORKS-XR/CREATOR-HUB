@@ -152,7 +152,7 @@ jobs:
         shell: powershell
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $baseline = if ('${{ matrix.baseline }}' -eq 'clean') { 'clean' } elseif ('${{ matrix.baseline }}' -eq 'legacy') { 'alpha.5' } elseif ('${{ matrix.baseline }}' -eq 'latest-hub') { 'stable-0.1.6' } else { 'alpha.3' }
+          $baseline = if ('${{ matrix.baseline }}' -eq 'clean') { 'clean' } elseif ('${{ matrix.baseline }}' -eq 'legacy') { 'alpha.5' } elseif ('${{ matrix.baseline }}' -eq 'latest-hub') { 'stable-0.1.8' } else { 'alpha.3' }
           .\scripts\Test-InstalledCandidate.ps1 -CandidateDirectory "dist\Creator-Hub-$version-Windows-Candidate" -HubBaseline $baseline
       - name: Download the verified staged app fixtures from this test run
         if: ${{ inputs.staged_setup || inputs.staged_mcp }}

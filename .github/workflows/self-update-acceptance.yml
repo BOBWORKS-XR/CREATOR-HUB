@@ -35,9 +35,15 @@ jobs:
           retention-days: 7
           if-no-files-found: error
       - run: node --test scripts/check-release-feed.test.cjs
+      - name: Read the packaged target version
+        id: target
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          "version=$version" >> $env:GITHUB_OUTPUT
       - name: Check the exact public feed used by installed Hub versions
-        run: node scripts/check-release-feed.cjs 0.1.7
-      - name: Test in-app update and automatic restart into exact public 0.1.7
+        run: node scripts/check-release-feed.cjs ${{ steps.target.outputs.version }}
+      - name: Test in-app update and automatic restart into the exact public build
         env:
           CREATOR_HOSTED_UPDATE_FIXTURE: ${{ inputs.hosted_fixture && 'dist/Creator-Hub-hosted-update-fixture/fixture.json' || '' }}
         run: node scripts/native-self-update-smoke.cjs
