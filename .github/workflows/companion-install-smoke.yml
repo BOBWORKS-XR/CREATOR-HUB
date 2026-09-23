@@ -122,5 +122,7 @@ jobs:
         if: always()
         with:
           name: companion-install-smoke-${{ matrix.app }}
-          path: artifacts/companion-install-${{ matrix.app }}/report.json
+          path: |
+            artifacts/companion-install-${{ matrix.app }}/report.json
+            artifacts/companion-install-${{ matrix.app }}/payload/*.exe
           if-no-files-found: error
