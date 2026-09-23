@@ -75,9 +75,33 @@ pub fn preview_mode(app: AppId) -> Option<&'static str> {
         },
     )
 }
-pub fn preview_compatibility(release: &crate::catalog::Release) -> Option<bool> {
-    crate::catalog::hash_valid(&release.executable_sha256)
-        .then_some(release.required_hub_version().is_none())
+fn preview_compatibility_for(
+    app: crate::catalog::AppId,
+    release: &crate::catalog::Release,
+    approved_hash: Option<&str>,
+) -> Option<bool> {
+    if !crate::catalog::hash_valid(&release.executable_sha256) {
+        return None;
+    }
+    let approved_hash = approved_hash.filter(|hash| crate::catalog::hash_valid(hash))?;
+    Some(
+        release.app_id == app.id()
+            && release
+                .executable_sha256
+                .eq_ignore_ascii_case(approved_hash)
+            && release.required_hub_version().is_none(),
+    )
+}
+
+pub fn preview_compatibility(
+    app: crate::catalog::AppId,
+    release: &crate::catalog::Release,
+) -> Option<bool> {
+    let approved_hash = match app {
+        crate::catalog::AppId::Setup => option_env!("CREATOR_SETUP_HOST_SHA256"),
+        crate::catalog::AppId::Mcp => option_env!("CREATOR_MCP_HOST_SHA256"),
+    };
+    preview_compatibility_for(app, release, approved_hash)
 }
 const MAX_FRAME: usize = 2 * 1024 * 1024;
 const MAX_REQUEST: usize = 64 * 1024;
@@ -1075,13 +1099,34 @@ mod tests {
     #[test]
     fn hosted_compatibility_requires_a_valid_signed_release_and_supported_hub() {
         let release = crate::catalog::bootstrap(AppId::Setup);
-        assert_eq!(preview_compatibility(&release), Some(true));
+        assert_eq!(
+            preview_compatibility_for(AppId::Setup, &release, Some(&release.executable_sha256)),
+            Some(true)
+        );
+        assert_eq!(
+            preview_compatibility_for(AppId::Setup, &release, Some(&"a".repeat(64))),
+            Some(false)
+        );
+        assert_eq!(
+            preview_compatibility_for(AppId::Mcp, &release, Some(&release.executable_sha256)),
+            Some(false)
+        );
+        assert_eq!(
+            preview_compatibility_for(AppId::Setup, &release, None),
+            None
+        );
         let mut invalid = release.clone();
         invalid.executable_sha256 = "invalid".into();
-        assert_eq!(preview_compatibility(&invalid), None);
+        assert_eq!(
+            preview_compatibility_for(AppId::Setup, &invalid, Some(&release.executable_sha256)),
+            None
+        );
         let mut future = release;
         future.min_hub_version = "999.0.0".into();
-        assert_eq!(preview_compatibility(&future), Some(false));
+        assert_eq!(
+            preview_compatibility_for(AppId::Setup, &future, Some(&future.executable_sha256)),
+            Some(false)
+        );
     }
     #[test]
     fn stored_session_identity_controls_authority_and_close_is_scoped() {

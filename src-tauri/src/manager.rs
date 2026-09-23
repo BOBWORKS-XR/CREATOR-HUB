@@ -409,7 +409,7 @@ impl Manager {
                     state.installed_path = Some(path.clone());
                     state.trusted = known.is_some();
                     if let Some(known) = known {
-                        state.hosted_compatible = crate::hosted::preview_compatibility(&known);
+                        state.hosted_compatible = crate::hosted::preview_compatibility(app, &known);
                         state.update_available = Version::parse(&release.version).unwrap()
                             > Version::parse(&known.version).unwrap();
                         state.installed_version = Some(known.version);
