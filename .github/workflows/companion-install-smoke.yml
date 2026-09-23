@@ -51,6 +51,8 @@ jobs:
             $tagMatch = [regex]::Match([string]$release.tag_name, '^v(?<version>[0-9]+\.[0-9]+\.[0-9]+)$')
             if (-not $tagMatch.Success) { throw 'Newest stable release is not canonical SemVer.' }
             $version = $tagMatch.Groups['version'].Value
+            $report.version = $version
+            $report.releaseTag = $release.tag_name
             $assetName = if ($env:APP -ceq 'setup') { "Creator.Project.Setup_${version}_x64-setup.exe" } else { "Creator.Works.MCP_${version}_x64-setup.exe" }
             $asset = @($release.assets | Where-Object { $_.name -ceq $assetName } | Select-Object -First 1)[0]
             if (-not $asset) { throw "Release does not contain the expected $env:APP Windows installer." }
@@ -60,7 +62,6 @@ jobs:
             Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $installer
             $installerHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($installerHash -cne $Matches.digest) { throw 'Downloaded installer differs from GitHub release digest.' }
-            $report.version = $version
             $report.installerSha256 = $installerHash
             $report.installerBytes = (Get-Item -LiteralPath $installer).Length
             $report.checks += 'github-release-digest'
@@ -74,10 +75,11 @@ jobs:
             $identityText = & $payloadExe --creator-hub-info 2>&1
             if ($LASTEXITCODE -ne 0) { throw 'Extracted launcher rejected the read-only Hub identity query.' }
             $identity = ($identityText -join "`n") | ConvertFrom-Json
-            if ($identity.appId -cne $app.id -or $identity.version -cne $version -or $identity.platform -cne 'windows' -or $identity.architecture -cne 'x86_64') {
-              throw 'Packaged launcher identity does not match the release.'
-            }
+            $report.packagedIdentity = $identity
             $report.executableSha256 = $payloadHash
+            if ($identity.appId -cne $app.id -or $identity.version -cne $version -or $identity.platform -cne 'windows' -or $identity.architecture -cne 'x86_64') {
+              throw "Packaged launcher identity mismatch: id=$($identity.appId); version=$($identity.version); platform=$($identity.platform); architecture=$($identity.architecture)."
+            }
             $report.checks += 'packaged-launcher-identity'
 
             $uninstallRoots = @(
