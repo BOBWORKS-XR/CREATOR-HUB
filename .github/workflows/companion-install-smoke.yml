@@ -72,14 +72,11 @@ jobs:
             $payloadExe = Join-Path $payloadDir $app.exe
             if (-not (Test-Path -LiteralPath $payloadExe -PathType Leaf)) { throw 'The installer does not contain the expected launcher.' }
             $payloadHash = (Get-FileHash -LiteralPath $payloadExe -Algorithm SHA256).Hash.ToLowerInvariant()
-            $identityText = & $payloadExe --creator-hub-info 2>&1
-            if ($LASTEXITCODE -ne 0) { throw 'Extracted launcher rejected the read-only Hub identity query.' }
-            $identity = ($identityText -join "`n") | ConvertFrom-Json
-            $report.packagedIdentity = $identity
+            $identityText = & node scripts/probe-companion-identity.mjs $payloadExe $app.id $version $payloadHash
+            if ($LASTEXITCODE -ne 0) { throw 'Extracted launcher failed the read-only Hub identity query.' }
+            $identity = ($identityText | Select-Object -Last 1) | ConvertFrom-Json
+            $report.packagedIdentity = $identity.identity
             $report.executableSha256 = $payloadHash
-            if ($identity.appId -cne $app.id -or $identity.version -cne $version -or $identity.platform -cne 'windows' -or $identity.architecture -cne 'x86_64') {
-              throw "Packaged launcher identity mismatch: id=$($identity.appId); version=$($identity.version); platform=$($identity.platform); architecture=$($identity.architecture)."
-            }
             $report.checks += 'packaged-launcher-identity'
 
             $uninstallRoots = @(
@@ -107,10 +104,10 @@ jobs:
             if (-not (Test-Path -LiteralPath $installedPath -PathType Leaf)) { throw 'Installed launcher was not found at its registered path.' }
             $installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($installedHash -cne $payloadHash) { throw 'Installed launcher hash differs from the verified installer payload.' }
-            $installedIdentityText = & $installedPath --creator-hub-info 2>&1
-            if ($LASTEXITCODE -ne 0) { throw 'Installed launcher rejected the read-only Hub identity query.' }
-            $installedIdentity = ($installedIdentityText -join "`n") | ConvertFrom-Json
-            if ($installedIdentity.appId -cne $app.id -or $installedIdentity.version -cne $version) { throw 'Installed launcher identity differs from the release.' }
+            $installedIdentityText = & node scripts/probe-companion-identity.mjs $installedPath $app.id $version $payloadHash
+            if ($LASTEXITCODE -ne 0) { throw 'Installed launcher failed the read-only Hub identity query.' }
+            $installedIdentity = ($installedIdentityText | Select-Object -Last 1) | ConvertFrom-Json
+            $report.installedIdentity = $installedIdentity.identity
             $report.installedPath = $installedPath
             $report.checks += 'installed-launcher-hash-and-identity'
             $report.passed = $true

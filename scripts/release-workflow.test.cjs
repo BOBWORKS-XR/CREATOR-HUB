@@ -22,7 +22,10 @@ test('newest companion installers are tested on disposable Windows before catalo
   assert.match(workflow, /RUNNER_ENVIRONMENT -ne 'github-hosted'/);
   assert.match(workflow, /RUNNER_OS -ne 'Windows'/);
   assert.match(workflow, /asset\.digest/);
-  assert.match(workflow, /--creator-hub-info/);
+  assert.equal((workflow.match(/probe-companion-identity\.mjs/g) ?? []).length, 2);
   assert.match(workflow, /Start-Process -FilePath \$installer -ArgumentList '\/S' -PassThru -Wait/);
   assert.match(workflow, /installedHash -cne \$payloadHash/);
+  const probe = fs.readFileSync(path.join(__dirname, 'probe-companion-identity.mjs'), 'utf8');
+  assert.match(probe, /spawnSync\(binary, \['--creator-hub-info'\]/);
+  assert.match(probe, /isolatedProbe: true/);
 });
