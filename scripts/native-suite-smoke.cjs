@@ -316,6 +316,7 @@ async function closeHosted(app) {
       backends[app] = await backend(app);
       await retry(() => native(backends[app], apps[app], 'button', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'), 180);
       await retry(async () => assert.equal(await page.locator(`#${app}-host-frame`).isVisible(), true), 180);
+      await page.waitForFunction(app => window.CreatorHosted.active(app) && !window.CreatorHosted.busy(), app, { timeout: 90000 });
     }
     assert.equal(hash(apps[app]), pins[app].executableSha256);
     const refreshed = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
