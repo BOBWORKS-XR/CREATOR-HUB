@@ -1,6 +1,11 @@
 name: Companion release install smoke
 
 on:
+  push:
+    branches: [ui-preview, fix/steamos-webkit]
+    paths:
+      - .github/workflows/companion-install-smoke.yml
+      - scripts/release-workflow.test.cjs
   workflow_dispatch:
 
 permissions:
