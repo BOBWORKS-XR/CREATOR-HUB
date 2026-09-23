@@ -64,6 +64,10 @@ jobs:
         with:
           components: clippy
       - run: npm ci
+      - name: Require the latest companion releases to match reviewed signed descriptors
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/check-companion-release-metadata.cjs
       - run: node --test scripts/*.test.cjs
       - run: npx playwright install chromium
       - name: Hub interface tests
