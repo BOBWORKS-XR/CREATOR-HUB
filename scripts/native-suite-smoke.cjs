@@ -458,7 +458,23 @@ async function closeHosted(app) {
   report.checks.push('Native saved-update restoration reopens exact installed app views without EXE pickers; declined permission stays retryable, successful views are not duplicated, Apps remains default and MCP settings are unchanged. A seeded receipt tests recovery, not installer handoff.');
   report.hostedRestoreTested = true;
   report.passed = true;
-})().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; }).finally(async () => {
+})().catch(async error => {
+  report.error = String(error.stack || error);
+  if (page) {
+    try {
+      report.uiFailureState = await page.evaluate(() => ({
+        compatibility: document.querySelector('#compatibility-status')?.textContent,
+        detail: document.querySelector('#compatibility-detail')?.textContent,
+        error: document.querySelector('#action-error')?.textContent,
+        operation: document.querySelector('#operation-progress')?.textContent,
+        buttons: Object.fromEntries(['host-mcp-button', 'host-setup-button', 'release-button', 'check-updates']
+          .map(id => { const button = document.getElementById(id); return [id, button && { disabled: button.disabled, hidden: button.classList.contains('hidden'), text: button.textContent }]; })),
+        hosted: { mcp: window.CreatorHosted.active('mcp'), setup: window.CreatorHosted.active('setup') },
+      }));
+    } catch (diagnosticError) { report.uiFailureStateError = String(diagnosticError); }
+  }
+  process.exitCode = 1;
+}).finally(async () => {
   if (runtimeFixture && runtimeFixture.exitCode === null) {
     if (!fs.existsSync(runtimeStop)) fs.writeFileSync(runtimeStop, 'exit', { flag: 'wx' });
     try { await retry(() => assert.equal(runtimeFixture.exitCode, 0), 10); }
