@@ -15,3 +15,14 @@ test('Windows candidate checks current signed companion releases before compilin
   assert.ok(preflight >= 0 && build > preflight);
   assert.match(workflow, /GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
 });
+
+test('newest companion installers are tested on disposable Windows before catalog signing', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'companion-install-smoke.yml'), 'utf8');
+  assert.match(workflow, /workflow_dispatch/);
+  assert.match(workflow, /RUNNER_ENVIRONMENT -ne 'github-hosted'/);
+  assert.match(workflow, /RUNNER_OS -ne 'Windows'/);
+  assert.match(workflow, /asset\.digest/);
+  assert.match(workflow, /--creator-hub-info/);
+  assert.match(workflow, /Start-Process -FilePath \$installer -ArgumentList '\/S' -PassThru -Wait/);
+  assert.match(workflow, /installedHash -cne \$payloadHash/);
+});
