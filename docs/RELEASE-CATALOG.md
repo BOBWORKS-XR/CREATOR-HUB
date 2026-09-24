@@ -16,6 +16,13 @@ The catalog key is separate from Windows Authenticode and macOS notarization.
 Minisign verification uses Frank Denis's MIT-licensed `minisign-verify` crate;
 signing uses Tauri's official CLI, Apache-2.0 OR MIT. No custom cryptography.
 
+macOS CI builds use an ad-hoc code signature so Apple Silicon does not mistake
+the downloaded app for a damaged bundle. This is not a Developer ID signature
+or notarization; users may still need to approve the app in Privacy & Security.
+For normal direct distribution, configure a Developer ID Application
+certificate and Apple notarization credentials, then verify notarization and
+stapling before publishing.
+
 ## Publishing
 
 Use `scripts/release-descriptor.cjs` with a release installer and its extracted
