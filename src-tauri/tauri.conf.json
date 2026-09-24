@@ -32,6 +32,9 @@
       "allowDowngrades": false,
       "webviewInstallMode": { "type": "downloadBootstrapper", "silent": false },
       "nsis": { "installMode": "currentUser", "installerHooks": "windows/installer-hooks.nsh" }
+    },
+    "macOS": {
+      "signingIdentity": "-"
     }
   }
 }

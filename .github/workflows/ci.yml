@@ -147,6 +147,26 @@ jobs:
       - run: cargo test --release --manifest-path src-tauri/Cargo.toml
       - name: Build macOS DMG bundle
         run: npm run build -- --bundles dmg
+      - name: Verify ad-hoc signed app inside macOS DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          images=(src-tauri/target/release/bundle/dmg/*.dmg)
+          test "${#images[@]}" -eq 1
+          mountpoint="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mountpoint" -quiet || true
+            rmdir "$mountpoint" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          hdiutil attach "${images[0]}" -readonly -nobrowse -quiet -mountpoint "$mountpoint"
+          app="$(find "$mountpoint" -maxdepth 2 -type d -name '*.app' -print -quit)"
+          test -n "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          details="$(codesign --display --verbose=4 "$app" 2>&1)"
+          printf '%s\n' "$details"
+          grep -Fq 'Signature=adhoc' <<< "$details"
       - name: Retain development packages (not a release)
         uses: actions/upload-artifact@v4
         with:
