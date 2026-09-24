@@ -13,7 +13,7 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     window.__TAURI__ = { event: { listen: async () => () => {} }, core: { invoke: async command => {
       if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
-      if (command === 'app_inventory') return { supported: true, apps: [] };
+      if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: false, availableVersion: '1.0.0', updateAvailable: false })) };
       if (command === 'community_catalogue') return { entries: [], warnings: [], stale: false };
       return null;
     } } };

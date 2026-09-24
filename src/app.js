@@ -1,11 +1,11 @@
 (() => {
   const tools = Object.freeze({
     mcp: {
-      title: 'Creator Works MCP', letter: 'M', summary: 'Connect your AI client to a real Unity project.',
+      title: 'Creator Works MCP', letter: 'M', summary: 'Connect AI assistants to Unity with scene, prefab, component and asset tools.',
       facts: [['Clients', 'Codex, Claude Code and compatible MCP clients'], ['Tools', 'Scene, prefab, component and asset operations'], ['SDK support', 'Creator SDK, Banter and Unity Visual Scripting']],
     },
     setup: {
-      title: 'Creator Project Setup', letter: 'P', summary: 'Create and validate a Unity project for the Creator SDK.',
+      title: 'Creator Project Setup', letter: 'P', summary: 'Install Unity modules and create or validate Creator SDK projects.',
       facts: [['Project setup', 'Pinned Unity, URP and Creator SDK recipe'], ['Build platforms', 'Android and Windows requirements'], ['Existing projects', 'Read-only inspection, reviewed repairs and settings backup']],
     },
   });
@@ -23,6 +23,14 @@
   let launchRevision = -1;
   const byId = id => document.getElementById(id);
   const invoke = (command, args) => window.CreatorHubNative.invoke(command, args);
+  const platformLabel = () => {
+    const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent;
+    if (/mac/i.test(platform)) return 'macOS';
+    if (/win/i.test(platform)) return 'Windows';
+    if (/linux/i.test(platform)) return 'Linux';
+    return 'Desktop';
+  };
+  byId('platform-status').textContent = platformLabel();
   if (typeof window.CreatorHubNative.version === 'string') document.querySelector('.footer-version').textContent = window.CreatorHubNative.version;
   for (const [id, key] of [['preview-channel', 'preview'], ['auto-download', 'auto-download'], ['restore-hosted-views', 'restore-hosted-views']]) {
     byId(id).checked = true;
@@ -48,6 +56,8 @@
     document.querySelector('#view-hub').classList.toggle('hidden', view !== 'hub');
     byId('hub-pages').classList.toggle('hidden', !['hub', 'projects'].includes(view));
     byId('view-projects').classList.toggle('hidden', view !== 'projects');
+    byId('check-updates').classList.toggle('hidden', view !== 'hub');
+    document.querySelector('#hub-pages .project-actions').classList.toggle('hidden', view !== 'projects');
     for (const item of byId('hub-pages').querySelectorAll('[data-view]')) {
       item.classList.toggle('current', item.dataset.view === view);
       if (item.dataset.view === view) item.setAttribute('aria-current', 'page');
@@ -86,7 +96,7 @@
         dt.textContent = label; dd.textContent = value; row.append(dt, dd); return row;
       }));
     }
-    const target = view === 'hub' || hosted ? title : document.querySelector(view === 'projects' ? '#projects-title' : view === 'plugins' ? '#plugins-title' : '#tool-title');
+    const target = view === 'hub' || hosted ? title : document.querySelector(view === 'projects' ? '#hub-tab-projects' : view === 'plugins' ? '#plugins-title' : '#tool-title');
     target.tabIndex = -1;
     target.focus();
     renderState();
@@ -135,8 +145,9 @@
   });
   menu.addEventListener('keydown', event => {
     if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+    if (!event.target.closest('button[data-view]')) return;
     event.preventDefault();
-    const buttons = [...menu.querySelectorAll('button')];
+    const buttons = [...menu.querySelectorAll('button[data-view]')];
     const index = buttons.indexOf(document.activeElement);
     const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
       : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length;
@@ -169,12 +180,23 @@
   function acceptInventory(result) {
     if (!result || typeof result.supported !== 'boolean' || !Array.isArray(result.apps)
       || result.apps.some(app => !app || !Object.hasOwn(tools, app.app))) throw 'The app inventory response is unavailable.';
+    if (result.supported && (result.apps.length !== Object.keys(tools).length
+      || Object.keys(tools).some(id => result.apps.filter(app => app.app === id).length !== 1))) {
+      throw 'The app inventory is incomplete. Retry app discovery; one or more app statuses are missing.';
+    }
     inventory = result;
     inventoryError = '';
   }
+  function appStatus(state) {
+    if (!state) return 'Status unavailable';
+    if (state.issue) return 'Needs attention';
+    if (state.updateAvailable) return state.downloaded ? 'Update ready' : 'Update available';
+    if (state.installed) return `Installed ${state.installedVersion || ''}`;
+    return state.downloaded ? 'Not installed · Download ready' : `Not installed · ${state.availableVersion} available`;
+  }
   function updateReason(state) {
     if (inventoryError) return 'App discovery failed. Retry before updating; last-known versions are shown.';
-    if (!inventory?.supported) return 'App updates require Windows x64 in this build.';
+    if (!inventory?.supported) return `App updates are not supported on ${platformLabel()} in this build.`;
     if (state.issue) return state.issue;
     if (!state.trusted) return 'This installation must be verified before updating.';
     if (state.installBlocked) return state.installBlocked;
@@ -191,7 +213,30 @@
     byId('retry-inventory').disabled = busy;
     byId('inventory-error').classList.toggle('hidden', !inventoryError);
     byId('inventory-error-message').textContent = inventoryError ? `App discovery failed: ${inventoryError}${inventory ? ' Last-known versions are shown; retry before using app controls.' : ''}` : '';
-    if (!inventory) for (const app of ['mcp', 'setup']) byId(`status-${app}`).textContent = busy ? 'Checking' : 'Unavailable';
+    for (const id of Object.keys(tools)) {
+      const state = inventory?.apps?.find(app => app.app === id);
+      const label = inventory?.supported === false ? 'Not supported' : !inventory && busy ? 'Checking' : appStatus(state);
+      const status = byId(`status-${id}`);
+      status.replaceChildren();
+      if (label.startsWith('Installed')) {
+        const check = document.createElement('span');
+        check.className = 'icon icon-check status-indicator';
+        check.setAttribute('aria-hidden', 'true');
+        status.append(check);
+      }
+      status.append(document.createTextNode(label));
+      status.classList.toggle('not-installed', label.startsWith('Not installed'));
+      status.classList.toggle('installed', label.startsWith('Installed'));
+      byId(`menu-status-${id}`).textContent = inventory?.supported === false ? 'Not supported'
+        : inventoryError ? 'Check failed' : !inventory && busy ? 'Checking' : appStatus(state);
+      const menuDownload = byId(`menu-download-${id}`);
+      const canDownload = Boolean(inventory?.supported && !inventoryError && state
+        && (!state.installed || state.updateAvailable) && !state.downloaded && !state.issue && !state.installBlocked);
+      menuDownload.classList.toggle('hidden', !canDownload);
+      menuDownload.disabled = busy;
+      menuDownload.title = state?.installed ? `Download latest ${tools[id].title} update` : `Download latest ${tools[id].title}`;
+      menuDownload.setAttribute('aria-label', menuDownload.title);
+    }
     byId('preview-channel').disabled = busy;
     byId('hub-update-button').disabled = busy || !hubUpdate?.availableVersion || Boolean(hubUpdate?.installBlocked);
     byId('hub-update-status').textContent = !hubUpdate ? 'Hub update check is unavailable. Try Check for updates.'
@@ -200,7 +245,6 @@
     byId('hub-update-warning').textContent = hubUpdate?.installBlocked || hubUpdate?.warning || '';
     byId('hub-update-warning').classList.toggle('hidden', !byId('hub-update-warning').textContent);
     for (const app of inventory?.apps || []) {
-      byId(`status-${app.app}`).textContent = app.issue ? 'Needs attention' : app.updateAvailable ? 'Update available' : app.installed ? `Installed ${app.installedVersion || ''}` : `Available ${app.availableVersion}`;
       const update = byId(`update-${app.app}`), reason = byId(`update-reason-${app.app}`);
       const available = Boolean(app.installed && app.updateAvailable);
       const hosted = window.CreatorHosted.active(app.app);
@@ -248,7 +292,7 @@
         state.downloaded ? 'Download ready' : '', state.running ? 'Currently in use' : '',
         state.installerInteractive && !opening && !needsRelease ? 'This release uses its normal installer window. Keep the default folder.' : '', state.issue, state.checkWarning, state.installBlocked].filter(Boolean);
       byId('tool-state').replaceChildren(...lines.map(text => { const p = document.createElement('p'); p.textContent = text; return p; }));
-    } else byId('tool-state').textContent = inventory?.supported === false ? 'Windows x64 app management is available in this build. macOS and Linux are not supported yet.' : busy ? 'Checking installed apps and available updates...' : 'App inventory is unavailable. Use Retry app discovery above.';
+    } else byId('tool-state').textContent = inventory?.supported === false ? `App management is not supported on ${platformLabel()} in this build.` : busy ? 'Checking installed apps and available updates...' : 'App inventory is unavailable. Use Retry app discovery above.';
     byId('update-blockers').classList.toggle('hidden', !state || (!state.issue && !blockers.length));
     byId('update-blockers-help').textContent = canDisconnectForUpdate(state)
       ? 'Disconnect and update asks permission to stop only MCP\'s private runtime before installation. Finish active AI work first. AI apps, Unity and unrelated Node processes stay open.' : blockers.length
@@ -315,7 +359,7 @@
     try {
       const result = await invoke('app_inventory', { check, preview: byId('preview-channel').checked });
       acceptInventory(result);
-      byId('catalog-status').textContent = !inventory.supported ? 'App management requires Windows x64 in this build.'
+      byId('catalog-status').textContent = !inventory.supported ? `App management is not supported on ${platformLabel()} in this build.`
         : inventory.apps.some(app => app.checkWarning) ? 'Some update checks failed. Last verified releases remain available.'
         : check ? 'Update check complete. Installation always needs your approval.' : 'Installed apps checked.';
       succeeded = true;
@@ -457,6 +501,12 @@
     if (state) action(state.installed && state.trusted && !state.updateAvailable ? 'open_app' : 'install_app');
   });
   byId('download-button').addEventListener('click', () => action('download_app'));
+  for (const app of ['mcp', 'setup']) byId(`menu-download-${app}`).addEventListener('click', () => {
+    const state = inventory?.apps?.find(item => item.app === app);
+    if (!state || busy || inventoryError || !inventory?.supported || state.downloaded || state.issue || state.installBlocked
+      || (state.installed && !state.updateAvailable)) return;
+    void action('download_app', app, state.availableVersion);
+  });
   byId('open-button').addEventListener('click', () => action('open_app'));
   byId('adopt-button').addEventListener('click', () => action('use_existing_app'));
   for (const id of ['disconnect-mcp-row', 'disconnect-mcp-detail']) byId(id).addEventListener('click', () => action('disconnect_mcp', 'mcp'));
