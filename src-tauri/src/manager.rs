@@ -409,8 +409,7 @@ impl Manager {
                     state.installed_path = Some(path.clone());
                     state.trusted = known.is_some();
                     if let Some(known) = known {
-                        state.hosted_compatible =
-                            crate::hosted::preview_compatibility(app, &known.executable_sha256);
+                        state.hosted_compatible = crate::hosted::preview_compatibility(app, &known);
                         state.update_available = Version::parse(&release.version).unwrap()
                             > Version::parse(&known.version).unwrap();
                         state.installed_version = Some(known.version);
@@ -671,9 +670,12 @@ impl Manager {
         ))
     }
 
-    pub fn hosted_candidate(&self, app: AppId) -> Result<Option<PathBuf>, String> {
+    pub fn hosted_candidate(
+        &self,
+        app: AppId,
+    ) -> Result<Option<(PathBuf, catalog::Release)>, String> {
         match installed(app)? {
-            Some((path, Some(_))) => Ok(Some(path)),
+            Some((path, Some(release))) => Ok(Some((path, release))),
             Some((_, None)) => Err(
                 "This app is not a verified release. Choose a verified copy or update it first."
                     .into(),

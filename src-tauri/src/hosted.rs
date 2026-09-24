@@ -1,4 +1,4 @@
-//! Per-app hosting preview. Only a build-pinned executable can supply UI or commands.
+//! Per-app hosting preview. Only a signed-catalog executable can supply UI or commands.
 use crate::catalog::AppId;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -66,17 +66,7 @@ fn commands(app: AppId) -> &'static [&'static str] {
         AppId::Mcp => MCP_COMMANDS,
     }
 }
-fn expected_hash(app: AppId) -> &'static str {
-    match app {
-        AppId::Setup => option_env!("CREATOR_SETUP_HOST_SHA256").unwrap_or(""),
-        AppId::Mcp => option_env!("CREATOR_MCP_HOST_SHA256").unwrap_or(""),
-    }
-}
 pub fn preview_mode(app: AppId) -> Option<&'static str> {
-    // Build pins are preview authority, not capabilities of an installed app.
-    if !crate::catalog::hash_valid(expected_hash(app)) {
-        return None;
-    }
     Some(
         if app == AppId::Mcp && option_env!("CREATOR_MCP_HOST_WRITABLE") != Some("1") {
             "read-only"
@@ -85,12 +75,33 @@ pub fn preview_mode(app: AppId) -> Option<&'static str> {
         },
     )
 }
-pub fn preview_compatibility(app: AppId, installed_hash: &str) -> Option<bool> {
-    compatible_hash(expected_hash(app), installed_hash)
+fn preview_compatibility_for(
+    app: crate::catalog::AppId,
+    release: &crate::catalog::Release,
+    approved_hash: Option<&str>,
+) -> Option<bool> {
+    if !crate::catalog::hash_valid(&release.executable_sha256) {
+        return None;
+    }
+    let approved_hash = approved_hash.filter(|hash| crate::catalog::hash_valid(hash))?;
+    Some(
+        release.app_id == app.id()
+            && release
+                .executable_sha256
+                .eq_ignore_ascii_case(approved_hash)
+            && release.required_hub_version().is_none(),
+    )
 }
-fn compatible_hash(expected: &str, installed: &str) -> Option<bool> {
-    // Inventory guidance only. Startup still locks and re-verifies the actual file.
-    crate::catalog::hash_valid(expected).then_some(expected == installed)
+
+pub fn preview_compatibility(
+    app: crate::catalog::AppId,
+    release: &crate::catalog::Release,
+) -> Option<bool> {
+    let approved_hash = match app {
+        crate::catalog::AppId::Setup => option_env!("CREATOR_SETUP_HOST_SHA256"),
+        crate::catalog::AppId::Mcp => option_env!("CREATOR_MCP_HOST_SHA256"),
+    };
+    preview_compatibility_for(app, release, approved_hash)
 }
 const MAX_FRAME: usize = 2 * 1024 * 1024;
 const MAX_REQUEST: usize = 64 * 1024;
@@ -394,6 +405,7 @@ impl Hosting {
         handle: &tauri::AppHandle,
         kind: AppId,
         path: &Path,
+        expected_hash: &str,
     ) -> Result<Value, String> {
         if !crate::platform::supported() {
             return Err("Hosted native apps are currently not supported on this platform.".into());
@@ -402,7 +414,7 @@ impl Hosting {
         if state.iter().any(|session| session.app == kind) {
             return Err("This app is already open in Hub. Use its existing view.".into());
         }
-        let verified = Arc::new(verify_executable(path, expected_hash(kind))?);
+        let verified = Arc::new(verify_executable(path, expected_hash)?);
         // Neither a renderer argument nor installed presence can authorize hosting.
         let writable = kind == AppId::Mcp && option_env!("CREATOR_MCP_HOST_WRITABLE") == Some("1");
         let read_only_events = kind == AppId::Mcp
@@ -667,32 +679,12 @@ pub async fn start_hosted_app(handle: tauri::AppHandle, app: AppId) -> Result<Va
     tauri::async_runtime::spawn_blocking(move || {
         let manager = handle.state::<crate::manager::Manager>();
         let _operation = manager.begin()?;
-        use tauri_plugin_dialog::DialogExt;
-        let hub = std::env::current_exe().map_err(|_| "Cannot locate Hub.")?;
-        let directory = hub.parent().ok_or("Invalid Hub location.")?;
-        let adjacent = match app {
-            AppId::Setup => directory.join(app.exe()),
-            AppId::Mcp => directory.join("apps").join("mcp").join(app.exe()),
-        };
-        // Reuse the user's verified selection. Hosting still requires the exact build pin.
-        let path = if let Some(installed) = manager.hosted_candidate(app)? {
-            installed
-        } else if adjacent.is_file() {
-            adjacent
-        } else {
-            #[allow(unused_mut)]
-            let mut file_picker = handle.dialog().file();
-            #[cfg(windows)]
-            {
-                file_picker = file_picker.add_filter("Verified Creator app preview", &["exe"]);
-            }
-            file_picker
-                .blocking_pick_file()
-                .ok_or("No app selected. Nothing changed.")?
-                .into_path()
-                .map_err(|_| "Choose a local Creator app executable.")?
-        };
-        handle.state::<Hosting>().start(&handle, app, &path)
+        let (path, release) = manager.hosted_candidate(app)?.ok_or(
+            "Choose Use existing app or install a verified release before opening it in Hub.",
+        )?;
+        handle
+            .state::<Hosting>()
+            .start(&handle, app, &path, &release.executable_sha256)
     })
     .await
     .map_err(|_| "Hosted startup worker failed.")?
@@ -927,7 +919,9 @@ mod tests {
             "Draining is not a forced kill"
         );
         std::fs::write(&release, b"exit normally").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // Windows CI can be heavily scheduled while the full test suite runs;
+        // allow the fixture time to exit normally after stdin has drained.
+        let deadline = Instant::now() + Duration::from_secs(10);
         while fixture.0.try_wait().unwrap().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -1103,13 +1097,36 @@ mod tests {
     }
 
     #[test]
-    fn hosted_compatibility_requires_an_approved_matching_hash() {
-        let expected = "a".repeat(64);
-        assert_eq!(compatible_hash(&expected, &expected), Some(true));
-        assert_eq!(compatible_hash(&expected, &"b".repeat(64)), Some(false));
-        assert_eq!(compatible_hash(&expected, ""), Some(false));
-        assert_eq!(compatible_hash("", ""), None);
-        assert_eq!(compatible_hash("invalid", "invalid"), None);
+    fn hosted_compatibility_requires_a_valid_signed_release_and_supported_hub() {
+        let release = crate::catalog::bootstrap(AppId::Setup);
+        assert_eq!(
+            preview_compatibility_for(AppId::Setup, &release, Some(&release.executable_sha256)),
+            Some(true)
+        );
+        assert_eq!(
+            preview_compatibility_for(AppId::Setup, &release, Some(&"a".repeat(64))),
+            Some(false)
+        );
+        assert_eq!(
+            preview_compatibility_for(AppId::Mcp, &release, Some(&release.executable_sha256)),
+            Some(false)
+        );
+        assert_eq!(
+            preview_compatibility_for(AppId::Setup, &release, None),
+            None
+        );
+        let mut invalid = release.clone();
+        invalid.executable_sha256 = "invalid".into();
+        assert_eq!(
+            preview_compatibility_for(AppId::Setup, &invalid, Some(&release.executable_sha256)),
+            None
+        );
+        let mut future = release;
+        future.min_hub_version = "999.0.0".into();
+        assert_eq!(
+            preview_compatibility_for(AppId::Setup, &future, Some(&future.executable_sha256)),
+            Some(false)
+        );
     }
     #[test]
     fn stored_session_identity_controls_authority_and_close_is_scoped() {

@@ -93,7 +93,9 @@ async function open(page, options = {}) {
   if (options.onlyStartup) return;
   await page.locator('#hub-pages [data-view="hub"]').click();
   await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
-  await page.locator('#host-setup-button').click();
+  // Compatible companion apps open in Hub as soon as their page is selected.
+  if (options.decline) return page.frameLocator('#setup-host-frame');
+  await expect(page.locator('#setup-host-frame')).toBeAttached();
   if (!options.decline) await expect(page.frameLocator('#setup-host-frame').locator('#create-button')).toBeEnabled();
   return page.frameLocator('#setup-host-frame');
 }
@@ -252,11 +254,11 @@ test('switching keeps the same frame, form and backend', async ({ page }) => {
   await setup.locator('#browse-button').click();
   await expect(setup.locator('#parent-folder')).toHaveValue('E:\\Hosted Test');
   await switchTo(page, 'mcp');
-  await expect(page.locator('#view-hosted')).toBeHidden();
+  await expect(page.locator('#mcp-host-frame')).toBeAttached();
   await switchTo(page, 'setup');
   await expect(setup.locator('#project-name')).toHaveValue('Do not reset this');
   await expect(setup.locator('#parent-folder')).toHaveValue('E:\\Hosted Test');
-  expect(await page.evaluate(() => window.hostCalls.filter(call => call.command === 'start_hosted_app').length)).toBe(1);
+  expect(await page.evaluate(() => window.hostCalls.filter(call => call.command === 'start_hosted_app' && call.args.app === 'setup').length)).toBe(1);
   expect(await page.evaluate(() => window.hostCalls.filter(call => call.args?.command === 'probe_environment').length)).toBe(1);
 });
 
@@ -429,7 +431,7 @@ test('cancel closing preserves form entries', async ({ page }) => {
 
 async function openMcp(page, writable = false) {
   await switchTo(page, 'mcp');
-  await page.locator('#host-mcp-button').click();
+  await expect(page.locator('#mcp-host-frame')).toBeAttached();
   const mcp = page.frameLocator('#mcp-host-frame');
   if (writable) await expect(mcp.locator('#workspaceControls')).toHaveJSProperty('disabled', false);
   else await expect(mcp.locator('#hostedPreviewStatus')).toContainText('Saved configuration loaded');

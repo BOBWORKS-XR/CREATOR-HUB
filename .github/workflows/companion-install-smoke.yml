@@ -1,0 +1,128 @@
+name: Companion release install smoke
+
+on:
+  push:
+    branches: [ui-preview, fix/steamos-webkit]
+    paths:
+      - .github/workflows/companion-install-smoke.yml
+      - scripts/release-workflow.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [setup, mcp]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify and install the newest stable public companion release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP: ${{ matrix.app }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
+            throw 'This release smoke is restricted to a disposable GitHub-hosted Windows runner.'
+          }
+
+          $settings = @{
+            setup = @{ repo = 'BOBWORKS-XR/CREATOR-PROJECT-SETUP'; id = 'creator-project-setup'; display = 'Creator Project Setup'; exe = 'creator-project-setup.exe' }
+            mcp = @{ repo = 'BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP'; id = 'creator-works-mcp'; display = 'Creator Works MCP'; exe = 'creator-works-mcp-launcher.exe' }
+          }
+          $app = $settings[$env:APP]
+          if (-not $app) { throw 'Unknown companion app.' }
+          $reportDir = Join-Path $env:GITHUB_WORKSPACE "artifacts/companion-install-$env:APP"
+          New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
+          $report = [ordered]@{ schemaVersion = 1; appId = $app.id; passed = $false; checks = @() }
+          try {
+            $releases = gh api "repos/$($app.repo)/releases?per_page=10" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'GitHub release lookup failed.' }
+            $release = @($releases | Where-Object { -not $_.draft -and -not $_.prerelease } | Select-Object -First 1)[0]
+            if (-not $release) { throw 'No newest stable release was found.' }
+            $tagMatch = [regex]::Match([string]$release.tag_name, '^v(?<version>[0-9]+\.[0-9]+\.[0-9]+)$')
+            if (-not $tagMatch.Success) { throw 'Newest stable release is not canonical SemVer.' }
+            $version = $tagMatch.Groups['version'].Value
+            $report.version = $version
+            $report.releaseTag = $release.tag_name
+            $assetName = if ($env:APP -ceq 'setup') { "Creator.Project.Setup_${version}_x64-setup.exe" } else { "Creator.Works.MCP_${version}_x64-setup.exe" }
+            $asset = @($release.assets | Where-Object { $_.name -ceq $assetName } | Select-Object -First 1)[0]
+            if (-not $asset) { throw "Release does not contain the expected $env:APP Windows installer." }
+            if ($asset.digest -notmatch '^sha256:(?<digest>[0-9a-f]{64})$') { throw 'GitHub did not provide a SHA-256 asset digest.' }
+
+            $installer = Join-Path $reportDir $asset.name
+            Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $installer
+            $installerHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($installerHash -cne $Matches.digest) { throw 'Downloaded installer differs from GitHub release digest.' }
+            $report.installerSha256 = $installerHash
+            $report.installerBytes = (Get-Item -LiteralPath $installer).Length
+            $report.checks += 'github-release-digest'
+
+            $payloadDir = Join-Path $reportDir 'payload'
+            & 7z.exe x $installer "-o$payloadDir" $app.exe '-y' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Could not extract the packaged launcher from the verified installer.' }
+            $payloadExe = Join-Path $payloadDir $app.exe
+            if (-not (Test-Path -LiteralPath $payloadExe -PathType Leaf)) { throw 'The installer does not contain the expected launcher.' }
+            $payloadHash = (Get-FileHash -LiteralPath $payloadExe -Algorithm SHA256).Hash.ToLowerInvariant()
+            $identityText = & node scripts/probe-companion-identity.mjs $payloadExe $app.id $version $payloadHash
+            if ($LASTEXITCODE -ne 0) { throw 'Extracted launcher failed the read-only Hub identity query.' }
+            $identity = ($identityText | Select-Object -Last 1) | ConvertFrom-Json
+            $report.packagedIdentity = $identity.identity
+            $report.executableSha256 = $payloadHash
+            $report.checks += 'packaged-launcher-identity'
+
+            $uninstallRoots = @(
+              'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+              'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+              'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+            )
+            $findInstallEntries = {
+              foreach ($root in $uninstallRoots) {
+                Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object {
+                  $entry = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
+                  if ($entry.DisplayName -and $entry.DisplayName.Contains($app.display)) { $entry }
+                }
+              }
+            }
+            $priorEntries = @(& $findInstallEntries)
+            if ($priorEntries.Count -ne 0) { throw 'A companion app was already registered on this supposedly clean runner.' }
+            $installerProcess = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait
+            if ($installerProcess.ExitCode -ne 0) { throw "Silent clean install failed with exit code $($installerProcess.ExitCode)." }
+            $report.checks += 'fresh-silent-install'
+
+            $installedEntries = @(& $findInstallEntries)
+            if ($installedEntries.Count -ne 1 -or -not $installedEntries[0].InstallLocation) { throw 'Expected one registered installation with an explicit install location.' }
+            $installLocation = ([string]$installedEntries[0].InstallLocation).Trim().Trim('"')
+            $installedPath = Join-Path $installLocation $app.exe
+            if (-not (Test-Path -LiteralPath $installedPath -PathType Leaf)) { throw 'Installed launcher was not found at its registered path.' }
+            $installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($installedHash -cne $payloadHash) { throw 'Installed launcher hash differs from the verified installer payload.' }
+            $installedIdentityText = & node scripts/probe-companion-identity.mjs $installedPath $app.id $version $payloadHash
+            if ($LASTEXITCODE -ne 0) { throw 'Installed launcher failed the read-only Hub identity query.' }
+            $installedIdentity = ($installedIdentityText | Select-Object -Last 1) | ConvertFrom-Json
+            $report.installedIdentity = $installedIdentity.identity
+            $report.installedPath = $installedPath
+            $report.checks += 'installed-launcher-hash-and-identity'
+            $report.passed = $true
+          } catch {
+            $report.error = $_.Exception.Message
+            throw
+          } finally {
+            $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $reportDir 'report.json') -Encoding utf8
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: companion-install-smoke-${{ matrix.app }}
+          path: |
+            artifacts/companion-install-${{ matrix.app }}/report.json
+            artifacts/companion-install-${{ matrix.app }}/payload/*.exe
+          if-no-files-found: error

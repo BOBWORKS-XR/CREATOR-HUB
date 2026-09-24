@@ -21,6 +21,7 @@ jobs:
           - os: windows-latest
             label: Windows
             args: --bundles nsis
+            hosted: true
           - os: ubuntu-22.04
             label: Linux
             args: --bundles appimage,deb,rpm
@@ -61,7 +62,29 @@ jobs:
         shell: bash
         run: echo "TMPDIR=$(node -p "require('fs').realpathSync(require('os').tmpdir())")" >> "$GITHUB_ENV"
       - run: cargo test --release --manifest-path src-tauri/Cargo.toml
+      - name: Build Windows Hub with approved hosted-app pins
+        if: matrix.hosted
+        shell: pwsh
+        run: |
+          .\scripts\Build-Installer.ps1 -OutputName "Creator-Hub-${{ github.ref_name }}-Windows" -HostedPins scripts/prerelease-apps.json
+      - name: Upload the verified Windows installer to the draft release
+        if: matrix.hosted
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $installer = "src-tauri\target\release\bundle\nsis\Creator Hub_${version}_x64-setup.exe"
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Expected signed Windows installer was not produced.' }
+          gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --draft --title "Creator Hub $version" --notes "Creator Hub desktop application." 2>$null
+            if ($LASTEXITCODE -ne 0) { gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" | Out-Null }
+          }
+          gh release upload "${{ github.ref_name }}" $installer --clobber --repo "${{ github.repository }}"
+          if (Test-Path -LiteralPath "$installer.sig") { gh release upload "${{ github.ref_name }}" "$installer.sig" --clobber --repo "${{ github.repository }}" }
       - uses: tauri-apps/tauri-action@v1
+        if: ${{ !matrix.hosted }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NO_STRIP: 1

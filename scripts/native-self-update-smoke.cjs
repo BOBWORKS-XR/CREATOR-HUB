@@ -10,8 +10,8 @@ const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
 const { checkLive } = require('./check-release-feed.cjs');
 const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
-const from = { version: '0.1.6', installer: '96e0059f0cbcc4ce1dc66ed86d05ad0274e9e63b108db5febe1e61120fd28adb', exe: 'ea6df01fd6200b28125cb5302db6ca6dcc24a70279a729adb35cd572a08a4ea9' };
-const to = { version: '0.1.7', installer: '64c5c5848bbcadb217f8e87a73a2e5055f13a2fe72cc5fb10b19470f1eb9252c', exe: '853bcf82d7be4b4fb4188cf19d99f3d08fcf70636cc52bec3199fa76a2f85ab5' };
+const from = { version: '0.1.8', asset: 'Creator.Hub_0.1.8_x64-setup.exe', installer: '785bfae6b33396421e74f405808eefce078ac5b0ecdfe1d8cc1c1dd10b048154', exe: '5ea968b425ac99f7508e844478abb6725012325038443b0dfdf39c1750f9a169' };
+const to = { version: '0.1.9', installer: 'TO_BE_PINNED_FROM_ACCEPTED_CANDIDATE', exe: 'TO_BE_PINNED_FROM_ACCEPTED_CANDIDATE' };
 assert.equal(to.version, require('../package.json').version, 'Update acceptance pins for the intended release; testing an older update is not sufficient');
 const fixture = process.env.CREATOR_HOSTED_UPDATE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.CREATOR_HOSTED_UPDATE_FIXTURE, 'utf8')) : null;
 if (fixture) {
@@ -126,7 +126,7 @@ async function installCompanions() {
   assert.equal(report.feed.previousStable, from.version, 'Exercise the previous public stable Hub, not an arbitrary older baseline');
   const installer = fixture ? fixture.installerPath : path.join(out, `Creator-Hub-${from.version}-Windows-setup.exe`);
   if (!fixture) execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '120', '--output', installer,
-    `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v${from.version}/Creator-Hub-${from.version}-Windows-setup.exe`], { windowsHide: true, timeout: 130000 });
+    `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v${from.version}/${from.asset}`], { windowsHide: true, timeout: 130000 });
   assert.equal(hash(installer), from.installer);
   const setup = spawn(installer, ['/S', '/NS'], { windowsHide: true, stdio: 'ignore' });
   await retry(() => assert.equal(setup.exitCode, 0), 120);

@@ -233,11 +233,10 @@ async function closeHosted(app) {
     if (upgrade) assert.equal(state.updateAvailable, true);
     assert.equal(state.installerInteractive, false);
     assert.ok(!state.issue && !state.installBlocked && !state.checkWarning, JSON.stringify(state));
-    await show(app);
+    if (!upgrade) await show(app);
     if (upgrade) {
-      assert.equal(state.hostedCompatible, false);
-      assert.equal(await page.locator(`#host-${app}-button`).isDisabled(), true);
-      assert.match(await page.locator('#compatibility-detail').innerText(), /Update this app/);
+      assert.equal(state.hostedCompatible, false, `${app} baseline unexpectedly matches the reviewed hosted payload`);
+      report.checks.push(`${app}: older installed release is correctly withheld from hosted mode until updated`);
     }
     if (upgrade && app === 'mcp') {
       const runtime = path.join(path.dirname(apps.mcp), 'server', 'runtime', 'node.exe');
@@ -314,7 +313,10 @@ async function closeHosted(app) {
       assert.equal(await page.locator('#view-hub').isVisible(), true);
       report.checks.push(`${app}: Apps-row Update app cancellation preserves files/settings; retry installs with native consent without opening app details`);
     } else {
-      await page.waitForFunction(() => !document.querySelector('#release-button').disabled && document.querySelector('#primary-label').textContent === 'Open app', null, { timeout: 180000 });
+      backends[app] = await backend(app);
+      await retry(() => native(backends[app], apps[app], 'button', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'), 180);
+      await retry(async () => assert.equal(await page.locator(`#${app}-host-frame`).isVisible(), true), 180);
+      await page.waitForFunction(app => window.CreatorHosted.active(app) && !window.CreatorHosted.busy(), app, { timeout: 90000 });
     }
     assert.equal(hash(apps[app]), pins[app].executableSha256);
     const refreshed = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
@@ -330,9 +332,10 @@ async function closeHosted(app) {
 
   for (const app of selectedApps) {
     await show(app);
-    await page.locator(`#host-${app}-button`).click();
-    backends[app] = await backend(app);
-    await retry(() => native(backends[app], apps[app], 'button', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'));
+    if (!backends[app]) backends[app] = await backend(app);
+    if (!(await page.evaluate(app => window.CreatorHosted.active(app), app))) {
+      await retry(() => native(backends[app], apps[app], 'button', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'), 180);
+    }
     frames[app] = await retry(async () => {
       const element = await page.locator(`#${app}-host-frame`).elementHandle();
       const frame = element && await element.contentFrame();
@@ -456,7 +459,23 @@ async function closeHosted(app) {
   report.checks.push('Native saved-update restoration reopens exact installed app views without EXE pickers; declined permission stays retryable, successful views are not duplicated, Apps remains default and MCP settings are unchanged. A seeded receipt tests recovery, not installer handoff.');
   report.hostedRestoreTested = true;
   report.passed = true;
-})().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; }).finally(async () => {
+})().catch(async error => {
+  report.error = String(error.stack || error);
+  if (page) {
+    try {
+      report.uiFailureState = await page.evaluate(() => ({
+        compatibility: document.querySelector('#compatibility-status')?.textContent,
+        detail: document.querySelector('#compatibility-detail')?.textContent,
+        error: document.querySelector('#action-error')?.textContent,
+        operation: document.querySelector('#operation-progress')?.textContent,
+        buttons: Object.fromEntries(['host-mcp-button', 'host-setup-button', 'release-button', 'check-updates']
+          .map(id => { const button = document.getElementById(id); return [id, button && { disabled: button.disabled, hidden: button.classList.contains('hidden'), text: button.textContent }]; })),
+        hosted: { mcp: window.CreatorHosted.active('mcp'), setup: window.CreatorHosted.active('setup') },
+      }));
+    } catch (diagnosticError) { report.uiFailureStateError = String(diagnosticError); }
+  }
+  process.exitCode = 1;
+}).finally(async () => {
   if (runtimeFixture && runtimeFixture.exitCode === null) {
     if (!fs.existsSync(runtimeStop)) fs.writeFileSync(runtimeStop, 'exit', { flag: 'wx' });
     try { await retry(() => assert.equal(runtimeFixture.exitCode, 0), 10); }

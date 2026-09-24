@@ -283,7 +283,7 @@ test('Hub test updates download in-app but only install after the Update Hub cli
   expect(await page.evaluate(() => window.calls.some(c => c.command === 'install_hub_update'))).toBe(false);
   expect(await page.evaluate(() => window.calls.filter(c => c.command === 'hub_update_status').every(c => c.args.preview))).toBe(true);
   await page.locator('#hub-update-button').click();
-  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'install_hub_update'))).toEqual([{ command: 'install_hub_update', args: { version: '0.1.0-alpha.4' } }]);
+  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'install_hub_update'))).toEqual([{ command: 'install_hub_update', args: { version: '0.1.0-alpha.4', restoreViews: true } }]);
   expect(await page.evaluate(() => window.calls.some(c => c.command === 'open_resource'))).toBe(false);
 });
 
@@ -347,7 +347,8 @@ test('matching hosted Setup remains available after inventory refresh', async ({
   await expect(page.locator('#release-button')).toBeHidden();
   await expect(page.locator('#open-button')).toHaveText('Open separately');
   await expect(page.locator('#compatibility-status')).toHaveText('Ready to open in Hub');
-  expect(await page.evaluate(() => window.calls.some(c => ['start_hosted_app', 'install_app', 'use_existing_app'].includes(c.command)))).toBe(false);
+  expect(await page.evaluate(() => window.calls.some(c => c.command === 'start_hosted_app'))).toBe(true);
+  expect(await page.evaluate(() => window.calls.some(c => ['install_app', 'use_existing_app'].includes(c.command)))).toBe(false);
 });
 
 test('Setup requiring newer Hub explains the order and refresh clears a resolved mismatch', async ({ page }) => {
@@ -372,7 +373,8 @@ test('Setup requiring newer Hub explains the order and refresh clears a resolved
   await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
   await expect(page.locator('#host-setup-button')).toBeEnabled();
   await expect(page.locator('#compatibility-status')).toHaveText('Ready to open in Hub');
-  expect(await page.evaluate(() => window.calls.some(c => ['install_app', 'install_hub_update', 'start_hosted_app', 'open_resource'].includes(c.command)))).toBe(false);
+  expect(await page.evaluate(() => window.calls.some(c => c.command === 'start_hosted_app'))).toBe(true);
+  expect(await page.evaluate(() => window.calls.some(c => ['install_app', 'install_hub_update', 'open_resource'].includes(c.command)))).toBe(false);
 });
 
 test('saved off preferences survive startup and suppress automatic downloads', async ({ page }) => {

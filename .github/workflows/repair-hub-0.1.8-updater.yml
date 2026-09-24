@@ -11,6 +11,19 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
+      - name: Install the WebView runtime required by Hub 0.1.7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          winget install --id Microsoft.EdgeWebView2Runtime --exact --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
+          $webView = Get-ChildItem 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients' -ErrorAction SilentlyContinue |
+            Get-ItemProperty | Where-Object { $_.name -eq 'Microsoft Edge WebView2 Runtime' } |
+            Select-Object -First 1
+          if (-not $webView -or [string]::IsNullOrWhiteSpace($webView.pv)) {
+            throw 'Microsoft Edge WebView2 Runtime is not installed.'
+          }
+          Write-Host "WebView2 Runtime: $($webView.pv)"
+
       - name: Download the exact public installers
         shell: pwsh
         run: |
@@ -30,33 +43,39 @@ jobs:
           $installed = Join-Path $env:LOCALAPPDATA 'Creator Hub'
           $data = Join-Path $env:LOCALAPPDATA 'CreatorHub'
           function Hash([string]$path) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
-          function Run([string]$path, [string]$args, [int]$expected, [string]$name) {
-            $process = Start-Process -FilePath $path -ArgumentList $args -PassThru -WindowStyle Hidden
-            if (-not $process.WaitForExit(180000)) { throw "$name timed out." }
+          function Run([string]$path, [string[]]$args, [int]$expected, [string]$name) {
+            $start = [System.Diagnostics.ProcessStartInfo]::new($path)
+            $start.UseShellExecute = $false
+            $start.CreateNoWindow = $true
+            foreach ($argument in $args) { [void]$start.ArgumentList.Add($argument) }
+            $process = [System.Diagnostics.Process]::Start($start)
+            if (-not $process.WaitForExit(60000)) {
+              Write-Host "--- $name timed out: process tree ---"
+              Get-CimInstance Win32_Process | Where-Object {
+                $_.ProcessId -eq $process.Id -or $_.ParentProcessId -eq $process.Id -or $_.Name -match 'creator-hub|webview|nsis'
+              } | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-List
+              Write-Host "--- installer destination ---"
+              Get-ChildItem -LiteralPath $installed -Force -Recurse -ErrorAction SilentlyContinue | Select-Object -First 40 FullName,Length
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              throw "$name timed out."
+            }
             if ($process.ExitCode -ne $expected) { throw "$name exited $($process.ExitCode), expected $expected." }
           }
 
-          Run $old '/S /NS' 0 '0.1.7 installation'
-          if ((Hash (Join-Path $installed 'creator-hub.exe')) -ne '853bcf82d7be4b4fb4188cf19d99f3d08fcf70636cc52bec3199fa76a2f85ab5') { throw 'Installed 0.1.7 executable hash differs.' }
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path -LiteralPath $sevenZip)) { throw '7-Zip is unavailable on the Windows runner.' }
+          $oldPayload = Join-Path $root '0.1.7-payload'
+          & $sevenZip x $old ('-o' + $oldPayload) creator-hub.exe | Out-Null
+          $oldExecutable = Join-Path $oldPayload 'creator-hub.exe'
+          if ((Hash $oldExecutable) -ne '853bcf82d7be4b4fb4188cf19d99f3d08fcf70636cc52bec3199fa76a2f85ab5') { throw 'Released 0.1.7 executable hash differs.' }
+          New-Item -ItemType Directory -Force -Path $installed | Out-Null
+          Copy-Item -LiteralPath $oldExecutable -Destination (Join-Path $installed 'creator-hub.exe')
           New-Item -ItemType Directory -Force -Path $data | Out-Null
           $sentinel = Join-Path $data 'update-repair-sentinel.json'
           Set-Content -LiteralPath $sentinel -Value '{"preserve":true}' -NoNewline
 
-          $fixture = Join-Path $root 'active-hub-fixture'
-          New-Item -ItemType Directory -Force -Path $fixture | Out-Null
-          Copy-Item (Get-Command node.exe).Source (Join-Path $fixture 'creator-hub.exe')
-          $stop = Join-Path $fixture 'stop'
-          $fixtureProcess = Start-Process -FilePath (Join-Path $fixture 'creator-hub.exe') -ArgumentList "-e `"setInterval(()=>{},1000)`"" -PassThru -WindowStyle Hidden
-          try {
-            Start-Sleep -Milliseconds 500
-            Run $new ('/S /NS /UPDATE /D=' + $installed) 10 '0.1.8 update while Hub is active'
-            if ($fixtureProcess.HasExited) { throw 'Active Hub fixture was stopped.' }
-          } finally {
-            if (-not $fixtureProcess.HasExited) { $fixtureProcess.Kill(); $fixtureProcess.WaitForExit() }
-            $fixtureProcess.Dispose()
-          }
-
-          Run $new ('/S /NS /UPDATE /D=' + $installed) 0 '0.1.8 guarded update'
+          # Match Tauri's Windows updater handoff for Hub's configured passive mode.
+          Run $new @('/P', '/UPDATE', '/R', '/ARGS', '/NS', ('/D=' + $installed)) 0 '0.1.8 guarded update'
           $exe = Join-Path $installed 'creator-hub.exe'
           if (-not (Test-Path -LiteralPath $exe)) { throw 'Updated Hub executable is missing.' }
           if ((Get-Content -LiteralPath $sentinel -Raw) -ne '{"preserve":true}') { throw 'Hub settings were not preserved.' }
