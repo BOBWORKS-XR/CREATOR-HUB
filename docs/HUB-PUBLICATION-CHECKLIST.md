@@ -15,6 +15,9 @@ those checks can pass while the installed 0.1.2 updater cannot discover it.
    enforces the installed clients' 256 KiB limit, and requires 4 KiB spare room.
    Do not proceed on failure. Existing published clients cannot receive a fix
    through an update they are unable to discover.
+   The tagged-release workflow now runs this same check after packaging and
+   checksum assembly, so a green package matrix cannot be mistaken for a
+   discoverable in-app update.
 4. Publish with `node scripts/publish-hub-draft.cjs VERSION`, not an unguarded
    `gh release edit --draft=false`. The command repeats that preflight before
    writing, verifies the public feed afterwards, and does not mark latest or

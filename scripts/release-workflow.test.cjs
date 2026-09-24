@@ -31,3 +31,14 @@ test('newest companion installers are tested on disposable Windows before catalo
   assert.match(probe, /spawnSync\(binary, \['--creator-hub-info'\]/);
   assert.match(probe, /isolatedProbe: true/);
 });
+
+test('release workflow gates readiness on signed update discovery after assets and checksums exist', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'release.yml'), 'utf8');
+  const checksums = workflow.indexOf('  checksums:');
+  const feedGate = workflow.indexOf('  release-feed-preflight:');
+  assert.ok(checksums >= 0 && feedGate > checksums);
+  const gate = workflow.slice(feedGate);
+  assert.match(gate, /needs: \[checksums\]/);
+  assert.match(gate, /node scripts\/check-release-feed\.cjs "\$version" --draft/);
+  assert.match(gate, /GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
+});
