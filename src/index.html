@@ -16,29 +16,30 @@
   <button class="suite-trigger" id="suite-trigger" type="button" aria-expanded="false" aria-controls="suite-menu" aria-label="Open Creator apps" title="Creator apps"><span class="suite-mark hub-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span></button>
   <nav id="suite-menu" class="suite-menu" aria-label="Creator apps" aria-hidden="true" inert>
     <button class="suite-item current" data-view="hub" type="button" aria-current="page"><span class="suite-mark hub-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span><span class="suite-item-copy"><strong>Creator Hub</strong><small>Apps and projects</small></span></button>
-    <button class="suite-item" data-view="mcp" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">M</span></span><span class="suite-item-copy"><strong>Creator Works MCP</strong><small>Unity integration</small></span></button>
-    <button class="suite-item" data-view="setup" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span><span class="suite-item-copy"><strong>Project Setup</strong><small>Unity + Creator SDK</small></span></button>
+    <div class="suite-entry"><button class="suite-item" data-view="mcp" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">M</span></span><span class="suite-item-copy"><strong>Creator Works MCP</strong><small>AI tools for Unity</small></span><span id="menu-status-mcp" class="suite-item-status">Checking</span></button><button id="menu-download-mcp" class="suite-download hidden" type="button" title="Download latest Creator Works MCP" aria-label="Download latest Creator Works MCP"><span class="icon icon-download" aria-hidden="true"></span></button></div>
+    <div class="suite-entry"><button class="suite-item" data-view="setup" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span><span class="suite-item-copy"><strong>Project Setup</strong><small>Unity + Creator SDK projects</small></span><span id="menu-status-setup" class="suite-item-status">Checking</span></button><button id="menu-download-setup" class="suite-download hidden" type="button" title="Download latest Project Setup" aria-label="Download latest Project Setup"><span class="icon icon-download" aria-hidden="true"></span></button></div>
     <div class="suite-item unavailable"><span class="suite-mark converter-mark"><img src="sidequest-mark-white.svg" alt=""><span class="suite-letter">C</span></span><span class="suite-item-copy"><strong>Creator Converter</strong><small>SideQuest / Coming soon</small></span></div>
     <button class="suite-item" data-view="plugins" type="button"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.png" alt=""></span><span class="suite-item-copy"><strong>Creator Plugins</strong><small>Community contributions</small></span></button>
   </nav>
   </div>
   <header class="app-header">
     <div class="title-block"><h1 id="page-title" class="brand-name"><span>CREATOR</span> <strong>HUB</strong></h1><p id="mode-description">Unity tools. One place.</p></div>
-    <span class="preview-status">Windows</span>
+    <span id="platform-status" class="preview-status">Desktop</span>
   </header>
   <main>
     <div id="inventory-error" class="inventory-error hidden" role="alert"><p id="inventory-error-message"></p><button id="retry-inventory" class="text-button" type="button"><span class="icon icon-refresh" aria-hidden="true"></span>Retry app discovery</button></div>
     <nav id="hub-pages" class="hub-pages" aria-label="Hub pages">
-      <button class="text-button current" data-view="hub" type="button" aria-current="page">Apps</button>
-      <button class="text-button" data-view="projects" type="button">Projects</button>
+      <button id="hub-tab-apps" class="text-button current" data-view="hub" type="button" aria-current="page" aria-controls="view-hub">Apps</button>
+      <button id="hub-tab-projects" class="text-button" data-view="projects" type="button" aria-controls="view-projects">Projects</button>
+      <button id="check-updates" class="text-button hub-page-action" type="button"><span class="icon icon-refresh" aria-hidden="true"></span>Check for updates</button>
+      <div class="project-actions hub-page-action hidden"><button id="refresh-projects" class="icon-button" type="button" title="Refresh projects" aria-label="Refresh projects"><span class="icon icon-refresh" aria-hidden="true"></span></button><button id="add-project" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span>Add project</button><button class="text-button" data-view="setup" type="button">New project</button></div>
     </nav>
-    <section id="view-hub" aria-labelledby="apps-title">
-      <div class="page-heading"><h2 id="apps-title">Apps</h2><button id="check-updates" class="text-button" type="button"><span class="icon icon-refresh" aria-hidden="true"></span>Check for updates</button></div>
+    <section id="view-hub" aria-labelledby="hub-tab-apps">
       <div class="app-list">
         <div class="app-entry" id="entry-mcp">
         <button class="app-row" type="button" data-view="mcp" aria-label="View Creator Works MCP">
           <span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">M</span></span>
-          <span class="app-row-copy"><strong>Creator Works MCP</strong><small>AI tools for Unity, Visual Scripting and Creator SDK.</small></span>
+          <span class="app-row-copy"><strong>Creator Works MCP</strong><small>Connect AI assistants to Unity with scene, prefab, component and asset tools.</small></span>
           <span id="status-mcp" class="row-status">Checking</span><span class="icon icon-arrow" aria-hidden="true"></span>
         </button>
         <button id="update-mcp" class="primary-button row-update hidden" type="button" aria-label="Update Creator Works MCP" aria-describedby="update-reason-mcp"><span class="icon icon-download" aria-hidden="true"></span><span>Update app</span></button>
@@ -48,7 +49,7 @@
         <div class="app-entry" id="entry-setup">
         <button class="app-row" type="button" data-view="setup" aria-label="View Creator Project Setup">
           <span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span>
-          <span class="app-row-copy"><strong>Creator Project Setup</strong><small>New projects, SDK setup and existing-project checks.</small></span>
+          <span class="app-row-copy"><strong>Creator Project Setup</strong><small>Install Unity modules and create or validate Creator SDK projects.</small></span>
           <span id="status-setup" class="row-status">Checking</span><span class="icon icon-arrow" aria-hidden="true"></span>
         </button>
         <button id="update-setup" class="primary-button row-update hidden" type="button" aria-label="Update Creator Project Setup" aria-describedby="update-reason-setup"><span class="icon icon-download" aria-hidden="true"></span><span>Update app</span></button>
@@ -65,8 +66,7 @@
       </section>
       <p id="catalog-status" class="catalog-status" role="status">Checking installed apps...</p>
     </section>
-    <section id="view-projects" class="hidden" aria-labelledby="projects-title">
-      <div class="page-heading"><h2 id="projects-title" tabindex="-1">Projects</h2><div class="project-actions"><button id="refresh-projects" class="icon-button" type="button" title="Refresh projects" aria-label="Refresh projects"><span class="icon icon-refresh" aria-hidden="true"></span></button><button id="add-project" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span>Add project</button><button class="text-button" data-view="setup" type="button">New project</button></div></div>
+    <section id="view-projects" class="hidden" aria-labelledby="hub-tab-projects">
       <div class="project-filters"><input id="project-search" type="search" aria-label="Search projects" placeholder="Search projects"><select id="project-sdk" aria-label="Filter by SDK"><option value="sdk">Creator SDK + Banter</option><option value="creator">Creator SDK / Altspace</option><option value="banter">Banter SDK</option><option value="all">All known projects</option></select><select id="project-sort" aria-label="Sort projects"><option value="modified">Recently modified</option><option value="name">Name A-Z</option></select></div>
       <p id="project-status" class="catalog-status" role="status"></p>
       <p id="project-warnings" class="catalog-status"></p>

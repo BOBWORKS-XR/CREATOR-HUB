@@ -11,7 +11,7 @@ const { chromium } = require('@playwright/test');
 const { checkLive } = require('./check-release-feed.cjs');
 const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
 const from = { version: '0.1.8', asset: 'Creator.Hub_0.1.8_x64-setup.exe', installer: '785bfae6b33396421e74f405808eefce078ac5b0ecdfe1d8cc1c1dd10b048154', exe: '5ea968b425ac99f7508e844478abb6725012325038443b0dfdf39c1750f9a169' };
-const to = { version: '0.1.9', installer: 'TO_BE_PINNED_FROM_ACCEPTED_CANDIDATE', exe: 'TO_BE_PINNED_FROM_ACCEPTED_CANDIDATE' };
+const to = { version: '0.1.10-rc.1', installer: 'TO_BE_PINNED_FROM_ACCEPTED_CANDIDATE', exe: 'TO_BE_PINNED_FROM_ACCEPTED_CANDIDATE' };
 assert.equal(to.version, require('../package.json').version, 'Update acceptance pins for the intended release; testing an older update is not sufficient');
 const fixture = process.env.CREATOR_HOSTED_UPDATE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.CREATOR_HOSTED_UPDATE_FIXTURE, 'utf8')) : null;
 if (fixture) {

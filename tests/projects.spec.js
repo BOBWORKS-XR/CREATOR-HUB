@@ -14,7 +14,7 @@ async function load(page, { openProjects = true } = {}) {
       core: { invoke: async (command, args) => {
         window.calls.push({ command, args });
         if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
-        if (command === 'app_inventory') return { supported: true, apps: [] };
+        if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: false, availableVersion: '1.0.0', updateAvailable: false })) };
         if (window.failure) throw window.failure;
         if (command === 'project_inventory') return window.projects;
         if (command === 'add_project_folder') return null;
@@ -67,7 +67,7 @@ test('Creator Hub menu returns to Apps and keeps Projects filters for the next v
     await expect(page.locator('#project-search')).toHaveValue('Forest');
     await expect(page.locator('#project-sort')).toHaveValue('name');
     await expect(page.locator('#suite-menu')).toBeHidden();
-    await expect(page.locator('#projects-title')).toBeFocused();
+    await expect(page.locator('#hub-tab-projects')).toBeFocused();
   }
   expect(await page.evaluate(() => window.calls.filter(c => /project/.test(c.command)))).toEqual([{ command: 'project_inventory', args: {} }]);
 });

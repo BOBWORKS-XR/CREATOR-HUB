@@ -35,13 +35,18 @@ body.suite-open .app-header .title-block { opacity: 0; pointer-events: none; }
 .converter-mark img { width: 22px; height: 22px; }
 .suite-menu { position: absolute; top: 48px; left: 0; width: 223px; height: calc(100% - 48px); overflow-y: auto; overflow-x: hidden; padding: 6px; background: transparent; opacity: 0; visibility: hidden; transform: translateX(-12px); transition: opacity 100ms ease, transform 180ms ease, visibility 0s linear 220ms; }
 .suite-expanded .suite-menu { opacity: 1; visibility: visible; transform: none; transition: opacity 140ms ease 60ms, transform 200ms ease, visibility 0s; }
-.suite-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 58px; padding: 10px 8px; border: 0; border-radius: 4px; background: transparent; text-align: left; color: #edf1f3; }
+.suite-entry { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.suite-item { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; min-height: 58px; padding: 8px 6px; border: 0; border-radius: 4px; background: transparent; text-align: left; color: #edf1f3; }
 button.suite-item:hover { background: #20272c; }
 .suite-item.current { background: #181d21; }
 .suite-item-copy { min-width: 0; flex: 1; }
 .suite-item-copy strong { display: block; font-size: 12px; line-height: 1.35; font-weight: 600; }
 .suite-item-copy small { display: block; margin-top: 3px; color: #9ba7af; font-size: 10px; }
-.suite-item > .icon { width: 12px; height: 12px; color: #9ba7af; }
+.suite-item-status { max-width: 72px; color: #9ba7af; font-size: 9px; line-height: 1.25; text-align: right; }
+.suite-download { display: grid; place-items: center; flex: 0 0 30px; width: 30px; height: 30px; padding: 0; border: 1px solid #39464e; border-radius: 4px; background: #171d21; color: #c6d0d6; }
+.suite-download:hover:not(:disabled) { border-color: #00cce8; color: #00cce8; }
+.suite-download:disabled { opacity: .45; }
+.suite-download .icon { width: 15px; height: 15px; }
 .suite-current-dot { width: 5px; height: 5px; flex: 0 0 5px; background: #00cce8; border-radius: 50%; }
 .suite-item.unavailable { color: #9ba7af; }
 .suite-future-mark { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; color: #9ba7af; font-size: 15px; font-weight: 600; }

@@ -11,7 +11,7 @@ async function load(page, options = {}) {
       window.calls.push({ command, args });
       if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
       if (command === 'project_inventory') return { projects: [], warnings: [] };
-      if (command === 'app_inventory') return { supported: true, apps: [] };
+      if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: false, availableVersion: '1.0.0', updateAvailable: false })) };
       if (command === 'hub_update_status') return { currentVersion: '0.1.0-alpha.6' };
       if (command === 'community_catalogue') {
         if (window.holdRefresh) return new Promise(resolve => { window.finishRefresh = () => resolve(structuredClone(window.snapshot)); });

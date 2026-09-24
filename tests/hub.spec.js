@@ -32,6 +32,10 @@ async function load(page, launchView = 'hub', options = {}) {
         if (window.failAfterDisconnect) window.failInventory = 'Process inventory unavailable.';
       }
       if (window.holdAction && ['download_app', 'install_app'].includes(command)) return new Promise(resolve => { window.finishAction = resolve; });
+      if (command === 'download_app') {
+        Object.assign(window.inventory.apps.find(item => item.app === args.app), { downloaded: true });
+        return 'Verified download ready. Installation has not started.';
+      }
       return 'Operation complete.';
     } } };
   }, { launchView, options });
@@ -483,11 +487,25 @@ test('switcher keyboard and outside dismissal preserve navigation', async ({ pag
   await expect(page.locator('#suite-menu')).toBeHidden();
 });
 
+test('app switcher downloads the selected verified version without installing it', async ({ page }) => {
+  await load(page);
+  await page.locator('#suite-trigger').click();
+  const download = page.locator('#menu-download-mcp');
+  await expect(download).toBeVisible();
+  await expect(page.locator('#menu-status-mcp')).toContainText('Not installed');
+  await download.click();
+  await expect(download).toBeHidden();
+  await expect(page.locator('#menu-status-mcp')).toHaveText('Not installed · Download ready');
+  expect(await page.evaluate(() => window.calls.filter(call => ['download_app', 'install_app'].includes(call.command)))).toEqual([
+    { command: 'download_app', args: { app: 'mcp', version: '2.6.0' } },
+  ]);
+});
+
 test('URL parameters cannot claim hosted or installed state', async ({ page }) => {
   await load(page);
   await page.goto('http://127.0.0.1:4188/?hosted=true&installed=true&path=C:/bad.exe');
   await expect(page.locator('#suite-trigger')).toBeVisible();
-  await expect(page.locator('#status-mcp')).toContainText('Available');
+  await expect(page.locator('#status-mcp')).toContainText('Not installed');
   expect(await page.evaluate(() => window.calls.filter(call => !['pending_hosted_restore', 'app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(call.command)))).toEqual([]);
 });
 
