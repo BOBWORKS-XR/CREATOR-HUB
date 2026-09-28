@@ -530,6 +530,46 @@ test('switcher keyboard and outside dismissal preserve navigation', async ({ pag
   await expect(page.locator('#suite-menu')).toBeHidden();
 });
 
+test('unlisted installed builds explain why Hub hosting and updates are unavailable', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => {
+    for (const [index, executable] of ['creator-works-mcp-launcher.exe', 'creator-project-setup.exe'].entries()) {
+      Object.assign(window.inventory.apps[index], {
+        installed: true, trusted: false, installedVersion: null,
+        issue: "Hub couldn't verify this app. Choose an official copy. Nothing was changed.",
+        installedPath: `C:\\Apps\\${executable}`, hostedPreview: 'read-only',
+      });
+    }
+  });
+  await page.locator('#check-updates').click();
+  for (const app of ['mcp', 'setup']) {
+    if (app === 'setup') await page.getByRole('button', { name: 'All apps', exact: true }).click();
+    const status = page.locator(`#status-${app}`);
+    await expect(status).toHaveText('Installed · not in Hub catalogue');
+    await expect(status).toHaveClass(/unverified/);
+    await expect(status.locator('.status-indicator')).toHaveCount(0);
+    await page.getByRole('button', { name: `View ${app === 'mcp' ? 'Creator Works MCP' : 'Creator Project Setup'}`, exact: true }).click();
+    await expect(page.locator(`#host-${app}-button`)).toBeDisabled();
+    await expect(page.locator('#compatibility-status')).toHaveText('Installed outside Hub catalogue');
+    await expect(page.locator('#compatibility-detail')).toContainText('exact build has a signed release entry');
+    await expect(page.locator('#tool-state')).toContainText('Hub couldn\'t verify this app');
+  }
+  expect(await page.evaluate(() => window.calls.some(c => ['open_app', 'start_hosted_app', 'install_app'].includes(c.command)))).toBe(false);
+});
+
+test('top-level switcher highlights span the full menu row', async ({ page }) => {
+  await load(page);
+  await page.locator('#suite-trigger').click();
+  const menu = page.locator('#suite-menu');
+  const hub = menu.locator('[data-view="hub"]');
+  const plugins = menu.locator('[data-view="plugins"]');
+  const menuBox = await menu.boundingBox();
+  const hubBox = await hub.boundingBox();
+  const pluginsBox = await plugins.boundingBox();
+  expect(hubBox.width).toBeCloseTo(pluginsBox.width, 0);
+  expect(hubBox.width).toBeGreaterThan(menuBox.width - 20);
+});
+
 test('app switcher downloads the selected verified version without installing it', async ({ page }) => {
   await load(page);
   await page.locator('#suite-trigger').click();
