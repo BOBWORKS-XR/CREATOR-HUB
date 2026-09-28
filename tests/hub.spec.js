@@ -4,8 +4,8 @@ const path = require('node:path');
 
 async function load(page, launchView = 'hub', options = {}) {
   await page.addInitScript(({ launchView, options }) => {
+    if (!options.freshTerms) localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     for (const [key, value] of Object.entries(options.preferences || {})) localStorage.setItem(key, value);
-    if (options.storageUnavailable) Object.defineProperty(window, 'localStorage', { get() { throw new DOMException('Storage disabled', 'SecurityError'); } });
     window.calls = [];
     window.events = {};
     window.hubUpdate = { currentVersion: '0.1.0-alpha.3', availableVersion: null, downloaded: false };
@@ -40,10 +40,38 @@ async function load(page, launchView = 'hub', options = {}) {
     } } };
   }, { launchView, options });
   await page.goto('http://127.0.0.1:4188');
+  if (options.freshTerms) return;
   await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === 'app_inventory' && c.args.check))).toBe(true);
   await expect(page.locator('#catalog-status')).toHaveText(/^(Update check complete\. Installation always needs your approval\.|Installed apps checked\.)$/);
   if (launchView === 'hub') await page.locator('#hub-pages [data-view="hub"]').click();
 }
+
+test('first launch requires saved terms acceptance before app discovery', async ({ page }) => {
+  await load(page, 'hub', { freshTerms: true });
+  const dialog = page.locator('#usage-terms-dialog');
+  await expect(dialog).toBeVisible();
+  expect(await page.locator('#view-hub').evaluate(node => node.closest('main').inert)).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.calls.some(call => call.command === 'app_inventory'))).toBe(false);
+  await expect(page.locator('#usage-terms-continue')).toBeDisabled();
+  await page.locator('#usage-terms-checkbox').check();
+  await page.locator('#usage-terms-continue').click();
+  await expect(dialog).toBeHidden();
+  await expect.poll(() => page.evaluate(() => window.calls.some(call => call.command === 'app_inventory'))).toBe(true);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('creator-usage-terms.hub')).policyVersion)).toBe('2026-09-28-v1');
+  await page.reload();
+  await expect(dialog).toBeHidden();
+});
+
+test('fixed Hub help opens with app roles and practical troubleshooting', async ({ page }) => {
+  await load(page);
+  const help = page.locator('#context-help-dialog');
+  await page.locator('#context-help-open').click();
+  await expect(help).toBeVisible();
+  await expect(help).toContainText('Setup is not the MCP');
+  await expect(help).toContainText('Claude Desktop is not currently supported');
+  await page.locator('#context-help-close').click();
+  await expect(help).toBeHidden();
+});
 
 for (const app of ['mcp', 'setup']) for (const width of [940, 390, 320]) test(`Apps row updates ${app} without opening its view at ${width}px`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: 780 });
@@ -404,7 +432,8 @@ test('saved preferences are independent and changing them persists across reload
 test('unavailable preference storage keeps defaults and does not break startup', async ({ page }) => {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  await load(page, 'hub', { storageUnavailable: true });
+  await load(page, 'hub');
+  await page.evaluate(() => Object.defineProperty(window, 'localStorage', { get() { throw new DOMException('Storage disabled', 'SecurityError'); } }));
   await expect(page.locator('#preview-channel')).toBeChecked();
   await expect(page.locator('#auto-download')).toBeChecked();
   await page.locator('#auto-download').uncheck();

@@ -553,5 +553,5 @@
     await refresh(false);
     await refresh(true);
   }
-  start();
+  window.CreatorUsageTerms.requireAcceptance().then(start);
 })();

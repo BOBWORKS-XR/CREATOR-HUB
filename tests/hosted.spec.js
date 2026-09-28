@@ -12,6 +12,7 @@ const mcpFiles = Object.fromEntries(fs.readdirSync(mcpSource, { recursive: true 
 async function open(page, options = {}) {
   await page.addInitScript(({ files, mcpFiles, options, setupVersion }) => {
     if (window !== window.parent) return;
+    localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     window.hostCalls = [];
     window.events = {};
     window.restorePending = options.restoreApps || [];

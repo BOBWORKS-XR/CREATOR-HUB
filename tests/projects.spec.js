@@ -2,6 +2,7 @@ const { test, expect } = require('@playwright/test');
 
 async function load(page, { openProjects = true } = {}) {
   await page.addInitScript(() => {
+    localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     window.calls = [];
     window.projects = { projects: [
       { id: 'creator', name: 'Creator Forest', path: 'E:\\UnityTest\\Creator Forest', sdk: 'creator', sdkLabel: 'Creator SDK / Altspace', unityVersion: '6000.3.21f1', source: 'Unity Hub', added: false, modifiedAtMs: Date.UTC(2026, 8, 11, 12) },

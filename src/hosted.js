@@ -55,7 +55,12 @@
     const csp = doc.createElement('meta');
     csp.httpEquiv = 'Content-Security-Policy';
     csp.content = "default-src 'none'; script-src data:; style-src data:; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'";
+    const acceptedTerms = doc.createElement('script');
+    const acceptanceSource = "window.__CREATOR_HOSTED_TERMS_ACCEPTED__ = '2026-09-28-v1';";
+    const acceptanceBytes = new TextEncoder().encode(acceptanceSource);
+    acceptedTerms.src = `data:text/javascript;base64,${btoa(String.fromCharCode(...acceptanceBytes))}`;
     doc.head.prepend(csp);
+    doc.head.insertBefore(acceptedTerms, doc.head.children[1] || null);
     return '<!doctype html>' + doc.documentElement.outerHTML;
   }
 
