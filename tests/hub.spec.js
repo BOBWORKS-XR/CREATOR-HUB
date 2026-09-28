@@ -487,6 +487,18 @@ test('switcher keyboard and outside dismissal preserve navigation', async ({ pag
   await expect(page.locator('#suite-menu')).toBeHidden();
 });
 
+test('active Hub menu highlight spans the full available row width', async ({ page }) => {
+  await load(page);
+  await page.locator('#suite-trigger').click();
+  const item = page.locator('#suite-menu > [data-view="hub"]');
+  await expect(item).toHaveClass(/current/);
+  const widthDifference = await item.evaluate(element => {
+    const menu = element.parentElement;
+    return Math.round(element.getBoundingClientRect().width - (menu.clientWidth - 12));
+  });
+  expect(widthDifference).toBe(0);
+});
+
 test('app switcher downloads the selected verified version without installing it', async ({ page }) => {
   await load(page);
   await page.locator('#suite-trigger').click();
