@@ -50,6 +50,13 @@ test('first launch requires saved terms acceptance before app discovery', async 
   await load(page, 'hub', { freshTerms: true });
   const dialog = page.locator('#usage-terms-dialog');
   await expect(dialog).toBeVisible();
+  const layout = await dialog.evaluate(node => {
+    const rect = node.getBoundingClientRect();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, background: getComputedStyle(node).backgroundColor, viewport: { x: innerWidth / 2, y: innerHeight / 2 } };
+  });
+  expect(Math.abs(layout.x - layout.viewport.x)).toBeLessThan(2);
+  expect(Math.abs(layout.y - layout.viewport.y)).toBeLessThan(2);
+  expect(layout.background).toBe('rgb(17, 21, 24)');
   expect(await page.locator('#view-hub').evaluate(node => node.closest('main').inert)).toBe(true);
   await expect.poll(() => page.evaluate(() => window.calls.some(call => call.command === 'app_inventory'))).toBe(false);
   await expect(page.locator('#usage-terms-continue')).toBeDisabled();
@@ -67,6 +74,13 @@ test('fixed Hub help opens with app roles and practical troubleshooting', async 
   const help = page.locator('#context-help-dialog');
   await page.locator('#context-help-open').click();
   await expect(help).toBeVisible();
+  const rect = await help.evaluate(node => {
+    const bounds = node.getBoundingClientRect();
+    return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2, background: getComputedStyle(node).backgroundColor, viewport: { x: innerWidth / 2, y: innerHeight / 2 } };
+  });
+  expect(Math.abs(rect.x - rect.viewport.x)).toBeLessThan(2);
+  expect(Math.abs(rect.y - rect.viewport.y)).toBeLessThan(2);
+  expect(rect.background).toBe('rgb(17, 21, 24)');
   await expect(help).toContainText('Setup is not the MCP');
   await expect(help).toContainText('Claude Desktop is not currently supported');
   await page.locator('#context-help-close').click();
