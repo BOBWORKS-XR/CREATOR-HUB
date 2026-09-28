@@ -57,6 +57,11 @@ jobs:
             file \
             rpm
       - run: npm ci
+      - name: Require the newest companion releases to be signed and pinned
+        if: matrix.hosted
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/check-companion-release-metadata.cjs
       - name: Use a canonical temporary path for macOS test fixtures
         if: runner.os == 'macOS'
         shell: bash

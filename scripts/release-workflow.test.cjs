@@ -6,6 +6,11 @@ const path = require('node:path');
 test('Windows release build uses the reviewed companion acceptance receipt', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'release.yml'), 'utf8');
   assert.match(workflow, /Build-Installer\.ps1[^\r\n]*-HostedPins scripts\/prerelease-apps\.json/);
+  const preflight = workflow.indexOf('node scripts/check-companion-release-metadata.cjs');
+  const build = workflow.indexOf('Build-Installer.ps1 -OutputName');
+  const upload = workflow.indexOf('Upload the verified Windows installer to the draft release');
+  assert.ok(preflight >= 0 && build > preflight && upload > preflight);
+  assert.match(workflow.slice(preflight - 100, preflight + 220), /GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
 });
 
 test('Windows candidate checks current signed companion releases before compiling the installer', () => {
