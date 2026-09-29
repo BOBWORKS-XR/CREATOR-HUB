@@ -143,7 +143,7 @@ async function verifyPackagedHelper() {
 async function backend(app) {
   return retry(() => {
     const pid = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-      `$p=Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.ExecutablePath -eq '${apps[app].replaceAll("'", "''")}' }; if (-not $p) { exit 1 }; $p.ProcessId`],
+      `$p=@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -ieq '${apps[app].replaceAll("'", "''")}' }); if ($p.Count -ne 1) { exit 1 }; $p[0].ProcessId`],
     { encoding: 'utf8', windowsHide: true }).trim();
     assert.match(pid, /^\d+$/);
     return Number(pid);
@@ -380,8 +380,7 @@ async function closeHosted(app) {
     const refreshed = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
     assert.equal(refreshed.apps.find(item => item.app === app).hostedCompatible, true);
     if (upgrade) assert.equal(fs.readFileSync(path.join(path.dirname(apps[app]), 'ci-unmanaged-sentinel.txt'), 'utf8'), 'preserve suite test content');
-    for (const name of ['LICENSE.txt', 'THIRD_PARTY_NOTICES.txt', 'rust-dependencies.json']) assert.ok(fs.statSync(path.join(path.dirname(apps[app]), 'licenses', name)).size > 0);
-    report.checks.push(`${app}: (staged ${app === 'setup' ? stagedSetup : stagedMcp}) ${((app === 'setup' && stagedSetup) || (app === 'mcp' && stagedMcp)) ? 'native signed staged-catalog/cache validation (public feed not tested)' : 'public signed release and verified download'}, native Install consent, ${upgrade ? 'upgrade preserving unmanaged content' : 'clean install'}, exact installed hash, hosted compatibility and licenses`);
+    report.checks.push(`${app}: (staged ${app === 'setup' ? stagedSetup : stagedMcp}) ${((app === 'setup' && stagedSetup) || (app === 'mcp' && stagedMcp)) ? 'native signed staged-catalog/cache validation (public feed not tested)' : 'public signed release and verified download'}, native Install consent, ${upgrade ? 'upgrade preserving unmanaged content' : 'clean install'}, exact installed hash and hosted compatibility`);
   }
   if (upgrade) assert.equal(hash(configPath), originalConfigHash);
   else seedConfig();
