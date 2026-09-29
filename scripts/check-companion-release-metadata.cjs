@@ -45,7 +45,7 @@ async function checkApp(app, pin, token, fetchImpl = fetch) {
   const descriptor = JSON.parse(descriptorText);
   const expectedId = app === 'setup' ? 'creator-project-setup' : 'creator-works-mcp';
   for (const [field, expected] of Object.entries({ appId: expectedId, version: pin.version, assetName: pin.assetName,
-    sha256: pin.installerSha256, executableSha256: pin.executableSha256 })) {
+    sha256: pin.installerSha256, executableSha256: pin.executableSha256, installerProtocol: pin.installerProtocol })) {
     if (descriptor[field] !== expected) throw Error(`${app}: latest signed descriptor does not match reviewed pin field ${field}.`);
   }
   process.stdout.write(`${app}: latest public descriptor matches reviewed ${pin.version} hashes.\n`);

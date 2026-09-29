@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "setup": {
     "version": "0.3.4",
+    "installerProtocol": 0,
     "assetName": "Creator.Project.Setup_0.3.4_x64-setup.exe",
     "installerSha256": "056731b57c95be527d55acd10546980e93fb0dbbf1d13da55827ecdcd805fe5a",
     "executableSha256": "a22300312af85bfcb5dbd9feb09fd3507b3047477bf1b1257961708bf5684fb8",
@@ -10,6 +11,7 @@
   },
   "mcp": {
     "version": "2.7.4",
+    "installerProtocol": 0,
     "assetName": "Creator.Works.MCP_2.7.4_x64-setup.exe",
     "installerSha256": "3b086f04808d3eadee30ada7aa7d72fdebb6edf7a5a88c3ca14388b1f49873d6",
     "executableSha256": "118021097b6d31971d41acea58434a3d07f18d4650786eaaf18dd95aa7e330fa",

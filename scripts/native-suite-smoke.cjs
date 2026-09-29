@@ -229,7 +229,7 @@ async function closeHosted(app) {
   assert.equal((await page.locator('.footer-version').innerText()).trim(), require('../package.json').version, 'Visible version matches the packaged release');
   assert.equal(await page.locator('#inventory-error').isVisible(), false, 'Startup inventory succeeds without a manual retry');
   assert.match(await page.locator('#catalog-status').innerText(), /Installed apps checked|Update check complete|Some update checks failed/);
-  for (const app of ['mcp', 'setup']) assert.match(await page.locator(`#status-${app}`).innerText(), /Installed |Not installed |Update available/);
+  for (const app of ['mcp', 'setup']) assert.match(await page.locator(`#status-${app}`).innerText(), /^(Installed|Not installed|Update available|Update ready|Needs attention)/);
   report.checks.push('Startup discovers apps without a manual retry and displays the packaged version');
   await show('plugins');
   report.pluginsIcon = await verifyPluginsIcon(page, '#suite-trigger .plugins-mark img', hash('src/icons/creator-plugins.png'));
@@ -248,7 +248,7 @@ async function closeHosted(app) {
     assert.equal(state.availableVersion, pins[app].version, JSON.stringify(state));
     assert.equal(state.installed, upgrade);
     if (upgrade) assert.equal(state.updateAvailable, true);
-    assert.equal(state.installerInteractive, false);
+    assert.equal(state.installerInteractive, pins[app].installerProtocol === 0);
     assert.ok(!state.issue && !state.installBlocked && !state.checkWarning, JSON.stringify(state));
     if (!upgrade) await show(app);
     if (upgrade) {
