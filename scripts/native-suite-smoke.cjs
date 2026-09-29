@@ -149,6 +149,32 @@ async function backend(app) {
     return Number(pid);
   });
 }
+async function finishInteractiveInstaller(app) {
+  const installer = path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'downloads', `${pins[app].installerSha256}.exe`);
+  const escaped = installer.replaceAll("'", "''");
+  const pid = await retry(() => {
+    const value = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      `$p=Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq '${escaped}' }; if (-not $p) { exit 1 }; $p[0].ProcessId`],
+    { encoding: 'utf8', windowsHide: true }).trim();
+    assert.match(value, /^\d+$/);
+    return Number(value);
+  }, 30);
+  const running = () => {
+    try { execFileSync('powershell.exe', ['-NoProfile', '-Command', `Get-Process -Id ${pid} -ErrorAction Stop | Out-Null`], { windowsHide: true }); return true; }
+    catch { return false; }
+  };
+  for (let step = 0; step < 8 && running(); step++) {
+    const windows = JSON.parse(native(pid, installer, 'snapshot'));
+    const buttons = windows.flatMap(window => window.controls || [])
+      .filter(control => control.type === 'ControlType.Button')
+      .map(control => control.name);
+    const button = ['Next', 'Install', 'Finish'].find(name => buttons.includes(name));
+    if (!button) throw Error(`Unexpected companion installer page; no approved navigation button found. Controls: ${buttons.join(', ')}`);
+    native(pid, installer, 'button', button);
+    await delay(400);
+  }
+  await retry(() => assert.equal(running(), false, 'The verified companion installer did not close after its final page.'), 120);
+}
 async function closeHosted(app) {
   await show(app);
   await page.locator('#hosted-stop').click();
@@ -318,10 +344,10 @@ async function closeHosted(app) {
       assert.equal(await page.locator('#view-hub').isVisible(), true);
       await page.locator(`#update-${app}`).click();
     } else {
-      await page.locator('#reopen-app').uncheck();
       await page.locator('#release-button').click();
     }
     await retry(() => native(child.pid, hub, 'button', 'Install'));
+    await finishInteractiveInstaller(app);
     if (upgrade) {
       await retry(async () => {
         assert.equal(await page.locator(`#update-${app}`).isVisible(), false);
