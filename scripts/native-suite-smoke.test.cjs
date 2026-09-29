@@ -1,7 +1,15 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
+
+test('native acceptance uses the real terms prompt without replacing app globals', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-suite-smoke.cjs'), 'utf8');
+  assert.match(source, /#usage-terms-checkbox'\)\.check\(\)/);
+  assert.match(source, /#usage-terms-continue'\)\.click\(\)/);
+  assert.doesNotMatch(source, /Object\.defineProperty\(window, ['"]CreatorUsageTerms['"]/);
+});
 
 test('real suite install test refuses local and self-hosted machines before reading pins or paths', () => {
   for (const env of [{ GITHUB_ACTIONS: 'false' }, { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'self-hosted', RUNNER_OS: 'Windows' }]) {

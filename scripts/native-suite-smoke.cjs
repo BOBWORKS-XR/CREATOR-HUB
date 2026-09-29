@@ -40,19 +40,12 @@ async function retry(fn, seconds = 30) {
   }
   throw last;
 }
-async function bypassTermsWithoutSavingForTest(targetPage) {
-  await targetPage.addInitScript(() => {
-    Object.defineProperty(window, 'CreatorUsageTerms', {
-      configurable: true,
-      set() {
-        Object.defineProperty(window, 'CreatorUsageTerms', {
-          configurable: true,
-          value: Object.freeze({ requireAcceptance: () => Promise.resolve(true) }),
-        });
-      },
-    });
-  });
-  await targetPage.reload();
+async function acceptTermsForTest(targetPage) {
+  const dialog = targetPage.locator('#usage-terms-dialog');
+  await dialog.waitFor({ state: 'visible' });
+  await targetPage.locator('#usage-terms-checkbox').check();
+  await targetPage.locator('#usage-terms-continue').click();
+  await dialog.waitFor({ state: 'hidden' });
 }
 let child;
 let browser;
@@ -180,7 +173,8 @@ async function finishInteractiveInstaller(app) {
     return result ? [].concat(JSON.parse(result)) : [];
   };
   await retry(() => assert.ok(processTree().some(process => process.ExecutablePath && path.resolve(process.ExecutablePath).toLowerCase() === installer.toLowerCase())), 30);
-  for (let step = 0; step < 12; step++) {
+  let missingAttempts = 0;
+  for (let step = 0; step < 30; step++) {
     const processes = processTree();
     if (!processes.some(process => process.ExecutablePath && path.resolve(process.ExecutablePath).toLowerCase() === installer.toLowerCase())) return;
     let clicked = false;
@@ -193,12 +187,15 @@ async function finishInteractiveInstaller(app) {
       const controls = windows.flatMap(window => window.controls || []);
       const button = ['Next', 'Next >', 'Install', 'Finish'].find(name => controls.some(control => control.name === name));
       if (button) {
-        native(process.ProcessId, executable, 'button', button);
-        clicked = true;
-        break;
+        try {
+          native(process.ProcessId, executable, 'button', button);
+          clicked = true;
+          break;
+        } catch { /* The installer may have advanced between snapshot and click. */ }
       }
     }
     if (!clicked) {
+      if (++missingAttempts < 10) { await delay(400); continue; }
       const active = processes.map(({ ProcessId, ExecutablePath }) => {
         let windows = [];
         if (ExecutablePath) {
@@ -208,6 +205,7 @@ async function finishInteractiveInstaller(app) {
       });
       throw Error(`Unexpected companion installer page; only explicit Next/Install/Finish controls are allowed. Process UI: ${JSON.stringify(active)}`);
     }
+    missingAttempts = 0;
     await delay(400);
   }
   await retry(() => assert.equal(processTree().some(process => process.ExecutablePath && path.resolve(process.ExecutablePath).toLowerCase() === installer.toLowerCase()), false, 'The verified companion installer did not close after its final page.'), 120);
@@ -267,9 +265,9 @@ async function closeHosted(app) {
     assert.ok(found); return found;
   });
   page.setDefaultTimeout(30000);
-  await bypassTermsWithoutSavingForTest(page);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
+  await acceptTermsForTest(page);
   await page.waitForFunction(() => {
     const text = selector => document.querySelector(selector)?.innerText.trim() || '';
     const catalogReady = /^(Installed apps checked\.|Update check complete\. Installation always needs your approval\.|Some update checks failed\. Last verified releases remain available\.)$/.test(text('#catalog-status'));
@@ -419,7 +417,31 @@ async function closeHosted(app) {
       await frames.setup.locator('#requirements .requirement').first().waitFor({ timeout: 90000 });
       await frames.setup.locator('#project-name').fill('Unsaved test draft');
     } else {
-      await frames.mcp.waitForFunction(() => window.CreatorRuntime?.hosted && !window.CreatorRuntime.readOnly && !document.querySelector('#workspaceControls').disabled);
+      try {
+        await frames.mcp.waitForFunction(() => window.CreatorRuntime?.hosted && !window.CreatorRuntime.readOnly && !document.querySelector('#workspaceControls').disabled);
+      } catch (error) {
+        report.mcpHostedReadiness = await frames.mcp.evaluate(() => ({
+          documentReady: document.readyState,
+          appModuleLoaded: Boolean(window.CreatorMcpOperations),
+          hosted: window.CreatorRuntime?.hosted,
+          readOnly: window.CreatorRuntime?.readOnly,
+          disconnected: window.CreatorRuntime?.disconnected,
+          hostedTermsAccepted: window.__CREATOR_HOSTED_TERMS_ACCEPTED__,
+          termsDialogOpen: document.querySelector('#usage-terms-dialog')?.open,
+          workspaceDisabled: document.querySelector('#workspaceControls')?.disabled,
+          workspaceBusy: document.querySelector('#workspaceControls')?.getAttribute('aria-busy'),
+          status: document.querySelector('#status')?.textContent?.slice(0, 300),
+          runtimeBadge: document.querySelector('#runtimeBadge')?.textContent?.slice(0, 100),
+          visibleDialogs: [...document.querySelectorAll('[role="dialog"]')].filter(dialog => !dialog.hidden).map(dialog => dialog.textContent?.slice(0, 200)),
+        }));
+        report.hubHostedReadiness = await page.evaluate(() => ({
+          busy: window.CreatorHosted?.busy(),
+          mcp: window.CreatorHosted?.active('mcp'),
+          setup: window.CreatorHosted?.active('setup'),
+        }));
+        report.pageErrors = errors.slice(-10);
+        throw error;
+      }
       assert.equal(await frames.mcp.locator('#browseProjectBtn').isEnabled(), true);
       if (upgrade) {
         assert.match(await frames.mcp.locator('#projectsList').innerText(), new RegExp(savedProjectName));
@@ -501,7 +523,7 @@ async function closeHosted(app) {
     assert.ok(found); return found;
   });
   page.setDefaultTimeout(30000);
-  await bypassTermsWithoutSavingForTest(page);
+  await page.waitForFunction(() => document.readyState === 'complete' && !document.querySelector('#usage-terms-dialog')?.open);
   for (const [index, app] of selectedApps.entries()) {
     backends[app] = await backend(app);
     await retry(() => native(backends[app], apps[app], 'button', declineFirst && index === 0 ? 'Not now' : app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'));
