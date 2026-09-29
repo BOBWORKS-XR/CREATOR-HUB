@@ -428,9 +428,13 @@ async function closeHosted(app) {
         await frames.mcp.waitForFunction(() => window.CreatorRuntime?.hosted && !window.CreatorRuntime.readOnly && !document.querySelector('#workspaceControls').disabled);
       } catch (error) {
         report.mcpHostedReadiness = await frames.mcp.evaluate(() => ({
+          documentReady: document.readyState,
+          appModuleLoaded: Boolean(window.CreatorMcpOperations),
           hosted: window.CreatorRuntime?.hosted,
           readOnly: window.CreatorRuntime?.readOnly,
           disconnected: window.CreatorRuntime?.disconnected,
+          hostedTermsAccepted: window.__CREATOR_HOSTED_TERMS_ACCEPTED__,
+          termsDialogOpen: document.querySelector('#usage-terms-dialog')?.open,
           workspaceDisabled: document.querySelector('#workspaceControls')?.disabled,
           workspaceBusy: document.querySelector('#workspaceControls')?.getAttribute('aria-busy'),
           status: document.querySelector('#status')?.textContent?.slice(0, 300),
@@ -442,6 +446,7 @@ async function closeHosted(app) {
           mcp: window.CreatorHosted?.active('mcp'),
           setup: window.CreatorHosted?.active('setup'),
         }));
+        report.pageErrors = errors.slice(-10);
         throw error;
       }
       assert.equal(await frames.mcp.locator('#browseProjectBtn').isEnabled(), true);
