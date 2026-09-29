@@ -40,6 +40,20 @@ async function retry(fn, seconds = 30) {
   }
   throw last;
 }
+async function bypassTermsWithoutSavingForTest(targetPage) {
+  await targetPage.addInitScript(() => {
+    Object.defineProperty(window, 'CreatorUsageTerms', {
+      configurable: true,
+      set() {
+        Object.defineProperty(window, 'CreatorUsageTerms', {
+          configurable: true,
+          value: Object.freeze({ requireAcceptance: () => Promise.resolve(true) }),
+        });
+      },
+    });
+  });
+  await targetPage.reload();
+}
 let child;
 let browser;
 let page;
@@ -253,18 +267,7 @@ async function closeHosted(app) {
     assert.ok(found); return found;
   });
   page.setDefaultTimeout(30000);
-  await page.addInitScript(() => {
-    Object.defineProperty(window, 'CreatorUsageTerms', {
-      configurable: true,
-      set() {
-        Object.defineProperty(window, 'CreatorUsageTerms', {
-          configurable: true,
-          value: Object.freeze({ requireAcceptance: () => Promise.resolve(true) }),
-        });
-      },
-    });
-  });
-  await page.reload();
+  await bypassTermsWithoutSavingForTest(page);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.waitForFunction(() => {
@@ -498,6 +501,7 @@ async function closeHosted(app) {
     assert.ok(found); return found;
   });
   page.setDefaultTimeout(30000);
+  await bypassTermsWithoutSavingForTest(page);
   for (const [index, app] of selectedApps.entries()) {
     backends[app] = await backend(app);
     await retry(() => native(backends[app], apps[app], 'button', declineFirst && index === 0 ? 'Not now' : app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'));
