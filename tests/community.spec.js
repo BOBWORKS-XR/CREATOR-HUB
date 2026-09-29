@@ -212,11 +212,12 @@ for (const width of [940, 320]) for (const layout of ['grid', 'list']) test(`Plu
   const scrollY = await page.evaluate(() => window.scrollY);
   await trigger.click();
   await expect(page.locator('#suite-menu')).toBeVisible();
-  await expect(page.locator('#suite-shell')).toHaveCSS('width', '224px');
+  await expect(page.locator('#suite-shell')).toHaveCSS('width', '304px');
   expect(await page.evaluate(() => window.scrollY)).toBe(scrollY);
   await page.screenshot({ path: testInfo.outputPath('plugins-menu-scrolled.png') });
   const calls = await page.evaluate(() => window.calls.length);
-  await page.locator('#suite-dismiss').click({ position: { x: width - 20, y: 400 } });
+  const drawer = await page.locator('#suite-shell').boundingBox();
+  await page.locator('#suite-dismiss').click({ position: { x: width / 2, y: drawer.y + drawer.height + 16 } });
   await expect(page.locator('#suite-menu')).toBeHidden();
   expect(await page.evaluate(() => window.scrollY)).toBe(scrollY);
   expect(await page.evaluate(() => window.calls.length)).toBe(calls);

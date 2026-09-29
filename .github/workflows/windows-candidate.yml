@@ -200,7 +200,7 @@ jobs:
         shell: powershell
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $baseline = if ('${{ matrix.baseline }}' -eq 'clean') { 'clean' } elseif ('${{ matrix.baseline }}' -eq 'legacy') { 'alpha.5' } elseif ('${{ matrix.baseline }}' -eq 'latest-hub') { 'stable-0.1.8' } else { 'alpha.3' }
+          $baseline = if ('${{ matrix.baseline }}' -eq 'clean') { 'clean' } elseif ('${{ matrix.baseline }}' -eq 'legacy') { 'alpha.5' } elseif ('${{ matrix.baseline }}' -eq 'latest-hub') { 'stable-0.1.10' } else { 'alpha.3' }
           $releaseInstaller = if ($env:CREATOR_RELEASE_VERSION -eq $version) { 'artifacts\release-installer\Creator.Hub_' + $version + '_x64-setup.exe' } else { '' }
           .\scripts\Test-InstalledCandidate.ps1 -CandidateDirectory "dist\Creator-Hub-$version-Windows-Candidate" -HubBaseline $baseline -ExternalInstallerPath $releaseInstaller
       - name: Stage signed Setup cache for native verification

@@ -34,7 +34,7 @@ jobs:
       - name: Build test-only version fixture from current runtime source
         if: ${{ inputs.hosted_fixture && inputs.fixture_run == '' }}
         shell: pwsh
-        run: ./scripts/Build-HostedUpdateFixture.ps1 -FromVersion 0.1.8
+        run: ./scripts/Build-HostedUpdateFixture.ps1 -FromVersion 0.1.10
       - uses: actions/upload-artifact@v4
         if: ${{ inputs.hosted_fixture && inputs.fixture_run == '' }}
         with:
@@ -57,7 +57,7 @@ jobs:
           REQUESTED_TARGET_VERSION: ${{ inputs.target_version }}
         run: |
           $fixture = Get-Content dist/Creator-Hub-hosted-update-fixture/fixture.json -Raw | ConvertFrom-Json
-          if ($fixture.testOnly -ne $true -or $fixture.fromVersion -ne '0.1.8' -or $fixture.toVersion -ne $env:REQUESTED_TARGET_VERSION) { throw 'Reused fixture has the wrong scope.' }
+          if ($fixture.testOnly -ne $true -or $fixture.fromVersion -ne '0.1.10' -or $fixture.toVersion -ne $env:REQUESTED_TARGET_VERSION) { throw 'Reused fixture has the wrong scope.' }
           if ($fixture.sourceRevision -notmatch '^[a-f0-9]{40}$') { throw 'Reused fixture has no source revision.' }
           git fetch --no-tags origin $fixture.sourceRevision
           if ($LASTEXITCODE -ne 0) { throw 'Fixture source revision is unavailable.' }

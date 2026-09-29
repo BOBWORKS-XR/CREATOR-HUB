@@ -10,7 +10,7 @@ const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
 const { checkLive } = require('./check-release-feed.cjs');
 const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
-const from = { version: '0.1.8', asset: 'Creator.Hub_0.1.8_x64-setup.exe', installer: '785bfae6b33396421e74f405808eefce078ac5b0ecdfe1d8cc1c1dd10b048154', exe: '5ea968b425ac99f7508e844478abb6725012325038443b0dfdf39c1750f9a169' };
+const from = { version: '0.1.10', asset: 'Creator.Hub_0.1.10_x64-setup.exe', installer: 'f65616e41ddf6dfabf4b2d89aa3379da5a8c42cf6d283219017800d772764943', exe: '8587ecf5316cf5eb6fdadbd3d97d91a13db73d43429f25ea73f2fb840a1fa6a2' };
 const to = {
   version: process.env.CREATOR_SELF_UPDATE_TARGET_VERSION || require('../package.json').version,
   installer: process.env.CREATOR_SELF_UPDATE_INSTALLER_SHA256,
@@ -239,6 +239,18 @@ async function installCompanions() {
   assert.equal(await page.locator('#view-hub').isVisible(), true, 'Restart opens Apps by default');
   await page.screenshot({ path: path.join(out, 'after-restart.png') });
   await page.locator('#suite-trigger').click();
+  await page.waitForFunction(() => document.querySelector('#suite-shell').getBoundingClientRect().width >= 303);
+  const menuLayout = await page.evaluate(() => ['mcp', 'setup'].map(app => {
+    const row = document.querySelector(`#suite-menu [data-view="${app}"]`);
+    const title = row.querySelector('strong'), description = row.querySelector('small');
+    const status = document.querySelector(`#menu-status-${app}`);
+    return { app, titleFits: title.getBoundingClientRect().height <= parseFloat(getComputedStyle(title).lineHeight) + 1,
+      statusBelow: status.getBoundingClientRect().top >= description.getBoundingClientRect().bottom,
+      fits: row.scrollWidth <= row.clientWidth };
+  }));
+  assert.ok(menuLayout.every(row => row.titleFits && row.statusBelow && row.fits));
+  await page.locator('#suite-shell').screenshot({ path: path.join(out, 'updated-app-menu.png') });
+  report.checks.push('Restarted installed build shows the wider menu with single-line app names and status beneath each description');
   await page.locator('#suite-menu [data-view="plugins"]').click();
   report.pluginsIcon = await verifyPluginsIcon(page, '#suite-trigger .plugins-mark img', hash('src/icons/creator-plugins.png'));
   await page.locator('#suite-menu').waitFor({ state: 'hidden' });

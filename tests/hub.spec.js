@@ -560,6 +560,7 @@ test('unlisted installed builds explain why Hub hosting and updates are unavaila
 test('top-level switcher highlights span the full menu row', async ({ page }) => {
   await load(page);
   await page.locator('#suite-trigger').click();
+  await expect(page.locator('#suite-shell')).toHaveCSS('width', '304px');
   const menu = page.locator('#suite-menu');
   const hub = menu.locator('[data-view="hub"]');
   const plugins = menu.locator('[data-view="plugins"]');
@@ -602,14 +603,26 @@ for (const width of [940, 720, 560, 390]) {
     for (const img of await page.locator('.app-row img').all()) expect(await img.evaluate(item => item.naturalWidth)).toBeGreaterThan(0);
     await page.screenshot({ path: testInfo.outputPath('hub.png'), fullPage: true });
     await page.locator('#suite-trigger').click();
-    await expect(page.locator('#suite-shell')).toHaveCSS('width', '224px');
-    await expect(page.locator('#suite-shell')).toHaveCSS('height', '352px');
+    await expect(page.locator('#suite-shell')).toHaveCSS('width', '304px');
+    await expect(page.locator('#suite-shell')).toHaveCSS('height', '416px');
+    for (const app of ['mcp', 'setup']) {
+      const name = page.locator(`#suite-menu [data-view="${app}"] strong`);
+      expect(await name.evaluate(el => el.getBoundingClientRect().height <= parseFloat(getComputedStyle(el).lineHeight) + 1)).toBe(true);
+      const description = await page.locator(`#suite-menu [data-view="${app}"] small`).boundingBox();
+      const status = await page.locator(`#menu-status-${app}`).boundingBox();
+      expect(status.y).toBeGreaterThanOrEqual(description.y + description.height);
+    }
     await expect(page.locator('.app-header .title-block')).toHaveCSS('opacity', '0');
     await expect(page.locator('.suite-brand')).toHaveCSS('opacity', '1');
     await expect(page.locator('.suite-brand')).toHaveCSS('visibility', 'visible');
     expect(await page.locator('.suite-brand').evaluate(el => el.getBoundingClientRect().x)).toBe(15);
     expect(await page.locator('#suite-shell').evaluate(el => el.scrollLeft)).toBe(0);
     await page.screenshot({ path: testInfo.outputPath('menu.png'), fullPage: true });
+    await page.evaluate(() => {
+      for (const app of ['mcp', 'setup']) document.querySelector(`#menu-status-${app}`).textContent = 'Installed · not in Hub catalogue';
+    });
+    expect(await page.locator('#suite-menu').evaluate(el => el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight)).toBe(true);
+    await page.locator('#suite-shell').screenshot({ path: testInfo.outputPath('menu-long-status.png') });
     if (width === 940) {
       await page.waitForTimeout(500);
       await page.screenshot({ path: testInfo.outputPath('drawer-settled.png'), fullPage: true });
@@ -629,9 +642,9 @@ test('morphing drawer reverses, restores focus and honors reduced motion', async
   const before = await page.locator('.app-list').boundingBox();
   const closed = await page.locator('#suite-trigger').boundingBox();
   await page.locator('#suite-trigger').click();
-  await expect(page.locator('#suite-shell')).toHaveCSS('width', '224px');
-  await expect(page.locator('#suite-shell')).toHaveCSS('height', '352px');
-  expect((await page.locator('#suite-trigger').boundingBox()).x - closed.x).toBe(169);
+  await expect(page.locator('#suite-shell')).toHaveCSS('width', '304px');
+  await expect(page.locator('#suite-shell')).toHaveCSS('height', '416px');
+  expect((await page.locator('#suite-trigger').boundingBox()).x - closed.x).toBe(249);
   expect(await page.locator('.app-list').boundingBox()).toEqual(before);
   await expect(page.locator('#suite-close')).toHaveCount(0);
   await page.locator('#suite-trigger').click();
@@ -641,7 +654,7 @@ test('morphing drawer reverses, restores focus and honors reduced motion', async
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.locator('#suite-trigger').click();
   await expect(page.locator('#suite-shell')).toHaveCSS('transition-duration', '0s');
-  await expect(page.locator('#suite-shell')).toHaveCSS('width', '224px');
+  await expect(page.locator('#suite-shell')).toHaveCSS('width', '304px');
   await page.keyboard.press('Escape');
   await expect(page.locator('.app-header .title-block')).toHaveCSS('opacity', '1');
 });
