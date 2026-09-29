@@ -621,7 +621,7 @@ impl Manager {
         // refused. Silent mode still requires a signed, guarded new installer.
         let safe_silent = release.installer_protocol == 1;
         progress(Progress { app, phase: "installing".into(), message: if safe_silent { "Installing the verified app..." } else { "Complete the app installer window. Hub will verify the result and reopen the app when it finishes." }.into(), received: 0, total: 0, cancellable: false });
-        let mut command = platform::command(&installer);
+        let mut command = platform::installer_command(&installer);
         if current.is_some() {
             platform::verify_nsis_update_target(app.name(), &target)?;
             let expected = current

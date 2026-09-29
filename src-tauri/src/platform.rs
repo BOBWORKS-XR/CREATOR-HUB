@@ -36,6 +36,12 @@ pub fn command(path: &Path) -> Command {
     command
 }
 
+pub fn installer_command(path: &Path) -> Command {
+    // Interactive installers must own a visible desktop window; do not use
+    // the no-console launch flags used for background/app processes.
+    Command::new(path)
+}
+
 pub fn same_path(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => {
