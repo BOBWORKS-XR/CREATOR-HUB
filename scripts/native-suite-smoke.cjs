@@ -204,12 +204,24 @@ async function closeHosted(app) {
     assert.ok(found); return found;
   });
   page.setDefaultTimeout(30000);
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'CreatorUsageTerms', {
+      configurable: true,
+      set() {
+        Object.defineProperty(window, 'CreatorUsageTerms', {
+          configurable: true,
+          value: Object.freeze({ requireAcceptance: () => Promise.resolve(true) }),
+        });
+      },
+    });
+  });
+  await page.reload();
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.waitForFunction(() => {
     const text = selector => document.querySelector(selector)?.innerText.trim() || '';
-    const catalogReady = /^(Installed apps checked|Update check complete\. Installation always needs your approval\.|Some update checks failed\. Last verified releases remain available\.)$/.test(text('#catalog-status'));
-    const appsReady = ['mcp', 'setup'].every(app => /^(Installed|Not installed|Update available|Needs attention)/.test(text(`#status-${app}`)));
+    const catalogReady = /^(Installed apps checked\.|Update check complete\. Installation always needs your approval\.|Some update checks failed\. Last verified releases remain available\.)$/.test(text('#catalog-status'));
+    const appsReady = ['mcp', 'setup'].every(app => /^(Installed|Not installed|Update available|Update ready|Needs attention)/.test(text(`#status-${app}`)));
     return window.CreatorHubNative && !document.querySelector('#check-updates').disabled && catalogReady && appsReady;
   }, null, { timeout: 120000 });
   assert.equal(await page.locator('#view-hub').isVisible(), true, 'Normal launch opens Apps');
