@@ -96,7 +96,7 @@ jobs:
 
   stage_setup:
     needs: build
-    if: ${{ always() && (inputs.staged_setup || inputs.staged_mcp) && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.candidate_run != '')) }}
+    if: ${{ always() && (inputs.staged_setup || inputs.staged_mcp || inputs.release_version != '') && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.candidate_run != '')) }}
     runs-on: windows-latest
     timeout-minutes: 5
     # Draft visibility needs push access. Keep this token out of jobs that run apps.
@@ -124,17 +124,35 @@ jobs:
             $file = Join-Path $folder $pin.assetName
             if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $pin.installerSha256) { throw 'Staged installer hash differs.' }
           }
+      - name: Fetch the tagged draft installer without executing it
+        if: ${{ inputs.release_version != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RELEASE_VERSION: ${{ inputs.release_version }}
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:REQUESTED_RELEASE_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$' -or $env:REQUESTED_RELEASE_VERSION -ne $version) { throw 'Release version must match this checkout.' }
+          $folder = 'artifacts/release-installer'
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          gh release download "v$version" --repo BOBWORKS-XR/CREATOR-HUB --pattern "Creator.Hub_${version}_x64-setup.exe" --pattern SHA256SUMS.txt --dir $folder
+          if ($LASTEXITCODE -ne 0) { throw 'Tagged release installer download failed.' }
+          $assetName = "Creator.Hub_${version}_x64-setup.exe"
+          $expected = (Get-Content (Join-Path $folder 'SHA256SUMS.txt') | Where-Object { $_ -match ("  " + [regex]::Escape($assetName) + '$') } | ForEach-Object { ($_ -split '\s+')[0] })
+          if (@($expected).Count -ne 1 -or (Get-FileHash (Join-Path $folder $assetName) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Tagged release installer differs from its checksum.' }
       - uses: actions/upload-artifact@v4
         with:
           name: accepted-staged-app-installers
           path: |
             artifacts/staged-setup/*.exe
             artifacts/staged-mcp/*.exe
+            artifacts/release-installer/*.exe
+            artifacts/release-installer/SHA256SUMS.txt
           if-no-files-found: error
 
   native-suite:
     needs: [build, stage_setup]
-    if: ${{ always() && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.candidate_run != '')) && (!(inputs.staged_setup || inputs.staged_mcp) || needs.stage_setup.result == 'success') }}
+    if: ${{ always() && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.candidate_run != '')) && (!(inputs.staged_setup || inputs.staged_mcp || inputs.release_version != '') || needs.stage_setup.result == 'success') }}
     name: Native suite (${{ matrix.baseline }})
     runs-on: windows-latest
     timeout-minutes: 25
@@ -157,19 +175,21 @@ jobs:
           path: .
           github-token: ${{ github.token }}
           run-id: ${{ inputs.candidate_run || github.run_id }}
+      - name: Download isolated draft artifacts
+        if: ${{ inputs.staged_setup || inputs.staged_mcp || inputs.release_version != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: accepted-staged-app-installers
+          path: artifacts
       - name: Download and verify the exact tagged release installer
         if: ${{ inputs.release_version != '' }}
         env:
-          GH_TOKEN: ${{ github.token }}
           REQUESTED_RELEASE_VERSION: ${{ inputs.release_version }}
         shell: pwsh
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($env:REQUESTED_RELEASE_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$' -or $env:REQUESTED_RELEASE_VERSION -ne $version) { throw 'Release version must match this checkout.' }
           $folder = 'artifacts/release-installer'
-          New-Item -ItemType Directory -Force -Path $folder | Out-Null
-          gh release download "v$version" --repo BOBWORKS-XR/CREATOR-HUB --pattern "Creator.Hub_${version}_x64-setup.exe" --pattern SHA256SUMS.txt --dir $folder
-          if ($LASTEXITCODE -ne 0) { throw 'Tagged release installer download failed.' }
           $assetName = "Creator.Hub_${version}_x64-setup.exe"
           $expected = (Get-Content (Join-Path $folder 'SHA256SUMS.txt') | Where-Object { $_ -match ("  " + [regex]::Escape($assetName) + '$') } | ForEach-Object { ($_ -split '\s+')[0] })
           if (@($expected).Count -ne 1) { throw 'Release checksum entry is missing or ambiguous.' }
@@ -183,12 +203,6 @@ jobs:
           $baseline = if ('${{ matrix.baseline }}' -eq 'clean') { 'clean' } elseif ('${{ matrix.baseline }}' -eq 'legacy') { 'alpha.5' } elseif ('${{ matrix.baseline }}' -eq 'latest-hub') { 'stable-0.1.8' } else { 'alpha.3' }
           $releaseInstaller = if ($env:CREATOR_RELEASE_VERSION -eq $version) { 'artifacts\release-installer\Creator.Hub_' + $version + '_x64-setup.exe' } else { '' }
           .\scripts\Test-InstalledCandidate.ps1 -CandidateDirectory "dist\Creator-Hub-$version-Windows-Candidate" -HubBaseline $baseline -ExternalInstallerPath $releaseInstaller
-      - name: Download the verified staged app fixtures from this test run
-        if: ${{ inputs.staged_setup || inputs.staged_mcp }}
-        uses: actions/download-artifact@v4
-        with:
-          name: accepted-staged-app-installers
-          path: artifacts
       - name: Stage signed Setup cache for native verification
         if: ${{ inputs.staged_setup }}
         run: node scripts/stage-setup-cache.cjs
