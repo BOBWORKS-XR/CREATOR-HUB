@@ -267,6 +267,14 @@ async function installCompanions() {
       setupDetail: document.querySelector('#compatibility-detail')?.textContent,
       toolState: document.querySelector('#tool-state')?.textContent,
       checkUpdatesDisabled: document.querySelector('#check-updates')?.disabled,
+      autoDownload: document.querySelector('#auto-download')?.checked,
+      catalogStatus: document.querySelector('#catalog-status')?.textContent,
+      hubUpdateStatus: document.querySelector('#hub-update-status')?.textContent,
+      progressVisible: !document.querySelector('#operation-progress')?.classList.contains('hidden'),
+      progressMessage: document.querySelector('#progress-message')?.textContent,
+      progressBytes: document.querySelector('#progress-bytes')?.textContent,
+      cancelDownloadVisible: !document.querySelector('#cancel-download')?.classList.contains('hidden'),
+      actionError: document.querySelector('#action-error')?.textContent,
     })); } catch (error) { report.pageStateError = String(error); }
     try { fs.writeFileSync(path.join(out, 'startup.json'), JSON.stringify(diagnostics(), null, 2)); } catch (error) { report.diagnosticError = String(error); }
     try { if (ownedPid) fs.writeFileSync(path.join(out, 'dialogs.json'), native(ownedPid, 'snapshot')); } catch (error) { report.dialogError = String(error); }
