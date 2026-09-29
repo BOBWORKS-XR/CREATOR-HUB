@@ -109,6 +109,28 @@ footer { display: flex; justify-content: space-between; align-items: center; fle
 .footer-version { margin-left: 5px; color: #7f8c95; }
 .footer-links { display: flex; gap: 18px; flex-wrap: wrap; }
 footer .text-button { font-size: 11px; }
+.usage-terms-dialog, .context-help-dialog { position: fixed; inset: 0; margin: auto; }
+.usage-terms-dialog { width: min(620px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 22px; border: 1px solid #3e4951; border-radius: 6px; background: #111518; color: #edf1f3; }
+.usage-terms-dialog::backdrop { background: #000b; }
+.usage-terms-dialog h2 { font-size: 18px; }
+.terms-version { margin-top: 5px; color: var(--muted); font-size: 12px; }
+.usage-terms-copy { max-height: min(42dvh, 340px); overflow: auto; margin-top: 16px; padding: 12px; border: 1px solid #293137; background: #0c1012; }
+.usage-terms-copy p + p { margin-top: 10px; }
+.usage-terms-accept { display: flex; align-items: flex-start; gap: 9px; margin-top: 16px; line-height: 1.5; }
+.usage-terms-accept input { flex: 0 0 auto; margin-top: 3px; accent-color: var(--cyan); }
+.usage-terms-error { margin-top: 10px; color: var(--red); }
+.usage-terms-dialog .primary-button { width: 100%; margin-top: 14px; }
+.context-help-open { position: fixed; right: 18px; bottom: 18px; z-index: 20; min-width: 52px; height: 44px; padding: 0 13px; border: 1px solid var(--line); border-radius: 24px; background: var(--surface); color: #edf1f3; box-shadow: 0 5px 18px #0008; font-weight: 700; }
+.context-help-open:hover { border-color: var(--cyan); color: var(--cyan); }
+.context-help-dialog { width: min(620px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: #edf1f3; }
+.context-help-dialog::backdrop { background: #000b; }
+.context-help-heading { position: sticky; top: 0; display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 16px 18px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.context-help-heading p { margin-top: 3px; color: var(--muted); font-size: 12px; }
+.context-help-content { display: grid; gap: 8px; padding: 14px 18px 18px; overflow: auto; }
+.context-help-content details { border-bottom: 1px solid var(--line); padding: 8px 0 12px; }
+.context-help-content summary { cursor: pointer; font-weight: 600; }
+.context-help-content details p { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.context-help-content strong { color: #edf1f3; }
 .hidden { display: none !important; }
 .creator-hosted #suite-shell, .creator-hosted #suite-dismiss, .creator-hosted .title-block { display: none; }
 .creator-hosted .app-header { min-height: 28px; padding: 0 24px 4px; justify-content: flex-end; }

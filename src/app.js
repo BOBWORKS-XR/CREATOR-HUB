@@ -313,7 +313,10 @@ elements.createAnother.addEventListener('click', () => {
   elements.projectName.focus();
 });
 
-refresh();
+window.CreatorUsageTerms.requireAcceptance().then(() => {
+  document.querySelector('main').inert = false;
+  refresh();
+});
 
 function renderHubResult(result) {
   hubResult = result;

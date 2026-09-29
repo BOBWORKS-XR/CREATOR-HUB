@@ -137,10 +137,41 @@
   </main>
 
   <footer>
-    <span>Creator Project Setup <span class="footer-version">0.3.4</span></span>
+    <span>Creator Project Setup <span class="footer-version">0.3.5</span></span>
     <div class="footer-links"><button id="github-button" class="text-button" type="button">GitHub <span class="icon icon-external" aria-hidden="true"></span></button><button id="sdk-source-button" class="text-button" type="button">Creator SDK source <span class="icon icon-external" aria-hidden="true"></span></button></div>
   </footer>
+  <button id="context-help-open" class="context-help-open" type="button" aria-haspopup="dialog" aria-controls="context-help-dialog" title="Help and troubleshooting">Help</button>
+  <dialog id="context-help-dialog" class="context-help-dialog" aria-labelledby="context-help-title">
+    <div class="context-help-heading"><div><h2 id="context-help-title">Project Setup help</h2><p>This app creates and validates Unity projects for the Creator SDK.</p></div><button id="context-help-close" class="icon-button" type="button" aria-label="Close help" title="Close help">×</button></div>
+    <div class="context-help-content">
+      <details open><summary>What does each Creator app do?</summary><p><strong>Project Setup</strong> installs/checks supported prerequisites and creates or validates projects. It is not the AI tool. <strong>Creator Works MCP</strong> connects a compatible AI client to Unity. <strong>Creator Hub</strong> manages the apps and your projects. The Creator Plugins catalogue is available in Hub and its Unity Editor window.</p></details>
+      <details><summary>Why does setup ask for Unity or Android components?</summary><p>The approved project recipe requires a matching Unity Editor and selected build modules. Setup can download supported components after you approve, but Unity account sign-in/licensing and any operating-system administrator prompts remain yours to complete.</p></details>
+      <details><summary>Unity setup failed or is taking a long time</summary><p>Check the current activity and error first. Editor and Android tool downloads can be large; slow network or disk activity may extend setup. Retry only after checking available disk space and that Unity Hub/Unity are not actively changing the same installation. The app preserves the project and provides a local log when setup stops.</p></details>
+      <details><summary>Can I use an existing project?</summary><p>Use the Existing project view to inspect first. Repairs require a separate approval and a safety backup. Close the project in Unity when requested, review the proposed changes, and keep another backup outside the project folder.</p></details>
+      <details><summary>Where do community plugins go?</summary><p>Plugin formats differ: graphs, prefabs, scripts, editor extensions and scenes have different import steps and dependencies. Read the listing instructions and verify Unity/SDK compatibility. Do not assume adding a package is the same as setting up the Creator SDK project.</p></details>
+      <details><summary>What should I include in a support report?</summary><p>Include this app’s version, the exact stage/message, and the local setup log. Remove account details, access tokens and private project information before sharing. Support is not guaranteed; keep independent backups of important projects.</p></details>
+    </div>
+  </dialog>
   <script src="runtime.js"></script>
+  <dialog id="usage-terms-dialog" class="usage-terms-dialog" aria-labelledby="usage-terms-title">
+    <div id="usage-terms-form">
+      <h2 id="usage-terms-title">Terms of use and risk acknowledgement</h2>
+      <p class="terms-version">Creator Suite Terms v2026-09-28. This acknowledgement is saved on this device.</p>
+      <div class="usage-terms-copy" tabindex="0">
+        <p>Creator Hub and its companion tools are provided “as is” and “as available”, without warranties, to the maximum extent permitted by applicable law.</p>
+        <p>The tools can change Unity projects, files, settings, packages and installed components. Errors or incompatibilities may cause project corruption, data loss, failed setup or builds, or other damage. Keep independent backups and review changes before relying on them.</p>
+        <p>Basic Unity knowledge is recommended. Support is not guaranteed.</p>
+        <p>AI-generated output and tool actions can be unpredictable. Token use and charges depend on your AI provider, client, model, prompts and settings. The apps' developers do not control, estimate or cap that usage. Check your provider's billing and usage limits.</p>
+        <p>To the maximum extent permitted by law, you assume the risks of using the software and release its authors, maintainers and contributors from claims arising from that use. They are not liable for project corruption, data loss, setup or build problems, indirect or consequential losses, or AI-provider usage and charges.</p>
+        <p>Nothing in this notice excludes or limits rights or liability that cannot legally be excluded or limited.</p>
+      </div>
+      <label class="usage-terms-accept"><input id="usage-terms-checkbox" type="checkbox"><span>I have read and agree to these terms, including the risk assumption and liability limitations above.</span></label>
+      <p id="usage-terms-error" class="usage-terms-error" role="alert" hidden></p>
+      <button id="usage-terms-continue" class="primary-button" type="button" disabled>Accept and continue</button>
+    </div>
+  </dialog>
+  <script src="usage-terms.js"></script>
+  <script src="help.js"></script>
   <script src="suite.js"></script>
   <script src="community.js"></script>
   <script src="app.js"></script>

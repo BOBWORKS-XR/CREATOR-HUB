@@ -80,7 +80,6 @@ test('native requirements snapshot replaces stale missing state before import fi
   await expect(page.locator('#hub-button')).toBeHidden();
   await expect(page.locator('#activity-title')).toHaveText('Import and compile');
   await expect(page.locator('#overall-status')).toHaveText('Creating project');
-  await expect(page.locator('#create-button')).toBeDisabled();
   await expect(page.locator('#refresh-button')).toBeDisabled();
   await expect(page.locator('#open-project-button')).toBeHidden();
   expect(await page.evaluate(() => window.calls.filter(call => call.command === 'probe_environment').length)).toBe(probes);
@@ -272,6 +271,7 @@ test('CLI-only ready installations keep Unity terms accessible for an activation
 
 async function setup(page, options = {}) {
   await page.addInitScript(options => {
+    if (!options.freshTerms) localStorage.setItem('creator-usage-terms.setup', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     window.calls = [];
     window.options = options;
     window.eventCallbacks = {};
@@ -315,9 +315,53 @@ async function setup(page, options = {}) {
     } } };
   }, options);
   await page.goto('http://127.0.0.1:4187');
+  if (options.freshTerms) return;
   if (options.missingUnity && options.platform && options.platform !== 'windows') await expect(page.locator('#create-button')).toBeDisabled();
   else await expect(page.locator('#create-button')).toBeEnabled();
 }
+
+test('first launch requires saved terms acceptance before environment checks', async ({ page }) => {
+  await setup(page, { freshTerms: true });
+  const dialog = page.locator('#usage-terms-dialog');
+  await expect(dialog).toBeVisible();
+  const layout = await dialog.evaluate(node => {
+    const rect = node.getBoundingClientRect();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, background: getComputedStyle(node).backgroundColor, viewport: { x: innerWidth / 2, y: innerHeight / 2 } };
+  });
+  expect(Math.abs(layout.x - layout.viewport.x)).toBeLessThan(2);
+  expect(Math.abs(layout.y - layout.viewport.y)).toBeLessThan(2);
+  expect(layout.background).toBe('rgb(17, 21, 24)');
+  await expect(page.locator('#create-button')).toBeDisabled();
+  expect(await page.locator('#create-button').evaluate(node => node.closest('main').inert)).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.calls.some(call => call.command === 'probe_environment'))).toBe(false);
+  await expect(page.locator('#usage-terms-continue')).toBeDisabled();
+  await page.locator('#usage-terms-checkbox').check();
+  await page.locator('#usage-terms-continue').click();
+  await expect(dialog).toBeHidden();
+  await expect.poll(() => page.evaluate(() => window.calls.some(call => call.command === 'probe_environment'))).toBe(true);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('creator-usage-terms.setup')).policyVersion)).toBe('2026-09-28-v1');
+  await page.reload();
+  await expect(dialog).toBeHidden();
+});
+
+test('fixed Setup help identifies this app and explains common setup issues', async ({ page }) => {
+  await setup(page);
+  const help = page.locator('#context-help-dialog');
+  await page.locator('#context-help-open').click();
+  await expect(help).toBeVisible();
+  const rect = await help.evaluate(node => {
+    const bounds = node.getBoundingClientRect();
+    return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2, background: getComputedStyle(node).backgroundColor, viewport: { x: innerWidth / 2, y: innerHeight / 2 } };
+  });
+  expect(Math.abs(rect.x - rect.viewport.x)).toBeLessThan(2);
+  expect(Math.abs(rect.y - rect.viewport.y)).toBeLessThan(2);
+  expect(rect.background).toBe('rgb(17, 21, 24)');
+  await expect(help).toContainText('This app creates and validates Unity projects');
+  await expect(help).toContainText('Creator Works MCP');
+  await expect(help).toContainText('The app preserves the project');
+  await page.locator('#context-help-close').click();
+  await expect(help).toBeHidden();
+});
 
 test('Hub failure preserves completed project and retry does not recreate it', async ({ page }) => {
   await setup(page, { failHub: true });
