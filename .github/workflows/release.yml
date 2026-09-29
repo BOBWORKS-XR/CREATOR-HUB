@@ -27,10 +27,12 @@ jobs:
           - os: macos-latest
             label: macOS Apple silicon
             args: --bundles dmg
+            asset_arch: aarch64
             binary_arch: arm64
           - os: macos-15-intel
             label: macOS Intel
             args: --bundles dmg
+            asset_arch: x64
             binary_arch: x86_64
     runs-on: ${{ matrix.os }}
     steps:
@@ -80,10 +82,18 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         env:
+          ASSET_ARCH: ${{ matrix.asset_arch }}
           EXPECTED_ARCH: ${{ matrix.binary_arch }}
         run: |
           set -euo pipefail
-          app="src-tauri/target/release/bundle/macos/Creator Project Setup.app"
+          version=$(node -p "require('./package.json').version")
+          dmg="src-tauri/target/release/bundle/dmg/Creator Project Setup_${version}_${ASSET_ARCH}.dmg"
+          test -f "$dmg"
+          mount="$RUNNER_TEMP/setup-release-dmg"
+          mkdir -p "$mount"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$dmg"
+          trap 'hdiutil detach "$mount"' EXIT
+          app="$mount/Creator Project Setup.app"
           test -d "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           executable=$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")
