@@ -36,6 +36,7 @@ test('self-update acceptance accepts explicit target hashes and derives the targ
   assert.match(source, /CREATOR_SELF_UPDATE_TARGET_VERSION/);
   assert.match(source, /CREATOR_SELF_UPDATE_INSTALLER_SHA256/);
   assert.match(source, /CREATOR_SELF_UPDATE_EXECUTABLE_SHA256/);
+  assert.match(source, /usage-terms-checkbox/);
   assert.doesNotMatch(source, /0\.1\.10-rc\.1|TO_BE_PINNED/);
   const workflow = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', '.github', 'workflows', 'self-update-acceptance.yml'), 'utf8');
   assert.match(workflow, /gh release download/);
