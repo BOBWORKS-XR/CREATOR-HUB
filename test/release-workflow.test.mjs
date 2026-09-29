@@ -50,14 +50,19 @@ test("release publishes Linux AppImage, DEB, and RPM bundles", () => {
   assert.match(releaseWorkflow, /args:\s*"--bundles appimage,deb,rpm"/);
 });
 
-test("release publishes macOS DMG bundle", () => {
+test("release publishes Apple silicon and Intel macOS DMG bundles", () => {
+  assert.equal(JSON.parse(tauriConfig).bundle.macOS.signingIdentity, "-");
   assert.match(releaseWorkflow, /name:\s*macOS DMG bundle/);
-  assert.match(releaseWorkflow, /runs-on:\s*macos-latest/);
+  assert.match(releaseWorkflow, /- os:\s*macos-latest\s+label:\s*Apple silicon/);
+  assert.match(releaseWorkflow, /- os:\s*macos-15-intel\s+label:\s*Intel/);
+  assert.match(releaseWorkflow, /runs-on:\s*\$\{\{ matrix\.os \}\}/);
   assert.match(releaseWorkflow, /args:\s*"--bundles dmg"/);
+  assert.match(releaseWorkflow, /name:\s*Verify macOS DMG/);
+  assert.match(releaseWorkflow, /codesign --verify --deep --strict/);
 });
 
 test("release consolidates multi-platform checksums across all artifacts", () => {
-  assert.match(releaseWorkflow, /needs:\s*\[windows,\s*linux,\s*macos\]/);
+  assert.match(releaseWorkflow, /needs:\s*\[windows,\s*linux,\s*macos,\s*verify-macos\]/);
   assert.match(releaseWorkflow, /node scripts\/release-checksums.mjs release-assets.json > SHA256SUMS.txt/);
   assert.match(releaseWorkflow, /gh release upload "\${{ github\.ref_name }}" SHA256SUMS\.txt/);
 });

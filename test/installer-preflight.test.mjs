@@ -59,12 +59,12 @@ test('candidate replay pins the original build and never rebuilds or publishes i
 
 test('reviewed stable hotfixes promote accepted Windows bytes without a tag rebuild or checksum overwrite', () => {
   const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
-  for (const job of ['windows', 'linux', 'macos', 'checksums']) {
+  for (const job of ['windows', 'linux', 'macos', 'verify-macos', 'checksums']) {
     const body = workflow.split(`\n  ${job}:\r\n`)[1] ?? workflow.split(`\n  ${job}:\n`)[1];
     assert.ok(body, job);
-    assert.match(body.split(/\r?\n  [a-z]+:/)[0], /if: \$\{\{ [^\r\n]*github\.ref_name != 'v2\.7\.0' && github\.ref_name != 'v2\.7\.1' && github\.ref_name != 'v2\.7\.2' \}\}/);
+    assert.match(body.split(/\r?\n  [a-z-]+:/)[0], /if: \$\{\{ [^\r\n]*github\.ref_name != 'v2\.7\.0' && github\.ref_name != 'v2\.7\.1' && github\.ref_name != 'v2\.7\.2' \}\}/);
   }
-  assert.equal((workflow.match(/!contains\(github\.ref_name, '-'\)/g) || []).length, 3);
+  assert.equal((workflow.match(/!contains\(github\.ref_name, '-'\)/g) || []).length, 4);
 });
 
 test('native installer prompt helper refuses local execution before inspecting windows', { skip: process.platform !== 'win32' }, () => {

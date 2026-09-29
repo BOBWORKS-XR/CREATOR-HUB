@@ -1,6 +1,6 @@
 [package]
 name = "creator-works-mcp-launcher"
-version = "2.7.5"
+version = "2.7.6"
 description = "Creator Works MCP Configuration Launcher"
 authors = ["Creator Works"]
 license = "MIT"

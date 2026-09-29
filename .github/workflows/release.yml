@@ -125,8 +125,16 @@ jobs:
 
   macos:
     if: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && (!contains(github.ref_name, '-') || github.event_name == 'workflow_dispatch') && github.ref_name != 'v2.7.0' && github.ref_name != 'v2.7.1' && github.ref_name != 'v2.7.2' }}
-    name: macOS DMG bundle
-    runs-on: macos-latest
+    name: macOS DMG bundle (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: Apple silicon
+          - os: macos-15-intel
+            label: Intel
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -155,11 +163,58 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: "--bundles dmg"
 
+  verify-macos:
+    if: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && (!contains(github.ref_name, '-') || github.event_name == 'workflow_dispatch') && github.ref_name != 'v2.7.0' && github.ref_name != 'v2.7.1' && github.ref_name != 'v2.7.2' }}
+    name: Verify macOS DMG (${{ matrix.label }})
+    needs: macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: Apple silicon
+            asset_arch: aarch64
+            binary_arch: arm64
+          - os: macos-15-intel
+            label: Intel
+            asset_arch: x64
+            binary_arch: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Verify exact draft DMG signature and architecture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_ARCH: ${{ matrix.asset_arch }}
+          BINARY_ARCH: ${{ matrix.binary_arch }}
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#v}
+          asset="Creator.Works.MCP_${version}_${ASSET_ARCH}.dmg"
+          release=$(gh release view "$GITHUB_REF_NAME" --json tagName,isDraft,assets)
+          [[ $(jq -r '.isDraft' <<<"$release") == true ]] || { echo 'Expected a draft release' >&2; exit 1; }
+          digest=$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .digest' <<<"$release")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'Missing DMG digest' >&2; exit 1; }
+          folder="$RUNNER_TEMP/mcp-release-dmg"
+          mkdir -p "$folder" "$folder/mounted"
+          gh release download "$GITHUB_REF_NAME" --pattern "$asset" --dir "$folder"
+          actual=$(shasum -a 256 "$folder/$asset" | awk '{print $1}')
+          [[ "$actual" == "${digest#sha256:}" ]] || { echo 'DMG digest mismatch' >&2; exit 1; }
+          hdiutil attach -readonly -nobrowse -mountpoint "$folder/mounted" "$folder/$asset"
+          trap 'hdiutil detach "$folder/mounted"' EXIT
+          app=$(find "$folder/mounted" -maxdepth 1 -type d -name '*.app' -print -quit)
+          [[ -n "$app" ]] || { echo 'DMG has no app bundle' >&2; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$app"
+          executable=$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")
+          architectures=$(lipo -archs "$app/Contents/MacOS/$executable")
+          [[ " $architectures " == *" $BINARY_ARCH "* ]] || { echo "Unexpected executable architecture: $architectures" >&2; exit 1; }
+          printf 'Verified %s: %s, %s, code signature valid\n' "$asset" "$actual" "$architectures"
+
   checksums:
     if: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && github.ref_name != 'v2.7.0' && github.ref_name != 'v2.7.1' && github.ref_name != 'v2.7.2' }}
     name: Consolidate SHA256 checksums
     runs-on: ubuntu-latest
-    needs: [windows, linux, macos]
+    needs: [windows, linux, macos, verify-macos]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
