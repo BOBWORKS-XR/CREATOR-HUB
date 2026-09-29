@@ -10,7 +10,7 @@ const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
 const { checkLive } = require('./check-release-feed.cjs');
 const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
-const from = { version: '0.1.8', asset: 'Creator.Hub_0.1.8_x64-setup.exe', installer: '785bfae6b33396421e74f405808eefce078ac5b0ecdfe1d8cc1c1dd10b048154', exe: '5ea968b425ac99f7508e844478abb6725012325038443b0dfdf39c1750f9a169' };
+const from = { version: '0.1.10', asset: 'Creator.Hub_0.1.10_x64-setup.exe', installer: 'f65616e41ddf6dfabf4b2d89aa3379da5a8c42cf6d283219017800d772764943', exe: '8587ecf5316cf5eb6fdadbd3d97d91a13db73d43429f25ea73f2fb840a1fa6a2' };
 const to = {
   version: process.env.CREATOR_SELF_UPDATE_TARGET_VERSION || require('../package.json').version,
   installer: process.env.CREATOR_SELF_UPDATE_INSTALLER_SHA256,
