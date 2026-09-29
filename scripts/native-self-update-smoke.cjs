@@ -159,11 +159,10 @@ async function installCompanions() {
   if (fixture) {
     for (const app of Object.keys(apps)) {
       await showApp(app);
-      await retry(async () => assert.equal(await page.locator(`#host-${app}-button`).isEnabled(), true), 120);
-      await page.locator(`#host-${app}-button`).click();
       await approveHosted(app);
       await readyFrame(app);
     }
+    report.checks.push('Navigating to installed apps automatically opens each Hub view after its native permission prompt');
     await showApp('setup');
     await frames.setup.locator('#project-name').fill('Keep this draft when update is cancelled');
     report.beforeBackendPids = { ...backends };
