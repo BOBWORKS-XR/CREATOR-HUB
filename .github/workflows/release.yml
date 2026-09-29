@@ -125,8 +125,16 @@ jobs:
 
   macos:
     if: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && (!contains(github.ref_name, '-') || github.event_name == 'workflow_dispatch') && github.ref_name != 'v2.7.0' && github.ref_name != 'v2.7.1' && github.ref_name != 'v2.7.2' }}
-    name: macOS DMG bundle
-    runs-on: macos-latest
+    name: macOS DMG bundle (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: Apple silicon
+          - os: macos-15-intel
+            label: Intel
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
