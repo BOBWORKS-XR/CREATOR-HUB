@@ -33,7 +33,7 @@ body.suite-open .app-header .title-block { opacity: 0; pointer-events: none; }
 .suite-trigger .plugins-mark, .suite-trigger .plugins-mark img { width: 40px; height: 40px; }
 .converter-mark { background: #000; border-radius: 5px; }
 .converter-mark img { width: 22px; height: 22px; }
-.suite-menu { position: absolute; top: 48px; left: 0; width: 100%; height: calc(100% - 48px); overflow-y: auto; overflow-x: hidden; padding: 6px; background: transparent; opacity: 0; visibility: hidden; transform: translateX(-12px); transition: opacity 100ms ease, transform 180ms ease, visibility 0s linear 220ms; }
+.suite-menu { position: absolute; top: 48px; left: 0; width: min(303px, calc(100vw - 17px)); height: calc(100% - 48px); overflow-y: auto; overflow-x: hidden; padding: 6px; background: transparent; opacity: 0; visibility: hidden; transform: translateX(-12px); transition: opacity 100ms ease, transform 180ms ease, visibility 0s linear 220ms; }
 .suite-expanded .suite-menu { opacity: 1; visibility: visible; transform: none; transition: opacity 140ms ease 60ms, transform 200ms ease, visibility 0s; }
 .suite-entry { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .suite-item { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; min-height: 58px; padding: 8px 6px; border: 0; border-radius: 4px; background: transparent; text-align: left; color: #edf1f3; }

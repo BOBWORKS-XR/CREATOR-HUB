@@ -560,6 +560,7 @@ test('unlisted installed builds explain why Hub hosting and updates are unavaila
 test('top-level switcher highlights span the full menu row', async ({ page }) => {
   await load(page);
   await page.locator('#suite-trigger').click();
+  await expect(page.locator('#suite-shell')).toHaveCSS('width', '304px');
   const menu = page.locator('#suite-menu');
   const hub = menu.locator('[data-view="hub"]');
   const plugins = menu.locator('[data-view="plugins"]');
