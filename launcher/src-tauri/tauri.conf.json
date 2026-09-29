@@ -52,6 +52,9 @@
     "longDescription": "Configure and manage Creator Works MCP for Codex, Claude Code, and Unity integration",
     "shortDescription": "Creator Works MCP Launcher",
     "targets": "all",
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "windows": {
       "certificateThumbprint": null,
       "digestAlgorithm": "sha256",

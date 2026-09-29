@@ -51,6 +51,7 @@ test("release publishes Linux AppImage, DEB, and RPM bundles", () => {
 });
 
 test("release publishes Apple silicon and Intel macOS DMG bundles", () => {
+  assert.equal(JSON.parse(tauriConfig).bundle.macOS.signingIdentity, "-");
   assert.match(releaseWorkflow, /name:\s*macOS DMG bundle/);
   assert.match(releaseWorkflow, /- os:\s*macos-latest\s+label:\s*Apple silicon/);
   assert.match(releaseWorkflow, /- os:\s*macos-15-intel\s+label:\s*Intel/);
