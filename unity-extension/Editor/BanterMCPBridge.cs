@@ -1558,11 +1558,17 @@ namespace BantworksMCP
                     {
                         result.missingElementCount++;
                     }
+                    if (typeName.IndexOf("InvalidConnection", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        result.invalidConnectionCount++;
+                    }
                 }
 
                 result.elementTypes = elementTypes.OrderBy(name => name, StringComparer.Ordinal).Take(200).ToList();
                 if (result.missingElementCount > 0)
                     result.warnings.Add($"Unity exposed {result.missingElementCount} missing or unknown graph elements");
+                if (result.invalidConnectionCount > 0)
+                    result.warnings.Add($"Unity exposed {result.invalidConnectionCount} invalid graph connections");
 
                 if (result.unboundValueInputCount > 0)
                 {
@@ -1572,6 +1578,7 @@ namespace BantworksMCP
                 }
 
                 result.success = result.missingElementCount == 0 &&
+                    result.invalidConnectionCount == 0 &&
                     result.failedUnitDefinitionCount == 0 &&
                     result.valuePortInspectionErrorCount == 0 &&
                     (cmd.allowUnboundValueInputs || result.unboundValueInputCount == 0);
@@ -1579,6 +1586,8 @@ namespace BantworksMCP
                 {
                     if (result.missingElementCount > 0)
                         result.error = "The graph imported, but one or more elements could not be resolved";
+                    else if (result.invalidConnectionCount > 0)
+                        result.error = "The graph imported, but one or more connections are invalid";
                     else if (result.failedUnitDefinitionCount > 0)
                         result.error = "The graph imported, but one or more units failed to define their ports";
                     else if (result.valuePortInspectionErrorCount > 0)
@@ -6975,6 +6984,7 @@ namespace BantworksMCP
             public int valueConnectionCount;
             public int groupCount;
             public int missingElementCount;
+            public int invalidConnectionCount;
             public int failedUnitDefinitionCount;
             public bool valuePortInspectionAvailable;
             public int valueInputCount;

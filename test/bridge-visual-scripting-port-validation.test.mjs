@@ -29,3 +29,10 @@ test("unbound port diagnostics retain the unit and input identity", () => {
   assert.match(bridge, /unboundValueInputs = new List<VSValueInputDiagnostic>\(\)/);
   assert.match(bridge, /result\.unboundValueInputs\.Count >= 200/);
 });
+
+test("Unity graph validation rejects InvalidConnection elements", () => {
+  assert.match(bridge, /typeName\.IndexOf\("InvalidConnection", StringComparison\.OrdinalIgnoreCase\) >= 0/);
+  assert.match(bridge, /result\.invalidConnectionCount\+\+/);
+  assert.match(bridge, /result\.invalidConnectionCount == 0/);
+  assert.match(bridge, /public int invalidConnectionCount;/);
+});
