@@ -21,6 +21,15 @@ test('Windows candidate checks current signed companion releases before compilin
   assert.match(workflow, /GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
 });
 
+test('Windows native acceptance can target the checksum-verified installer from the tagged release', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'windows-candidate.yml'), 'utf8');
+  const smoke = fs.readFileSync(path.join(__dirname, 'Test-InstalledCandidate.ps1'), 'utf8');
+  assert.match(workflow, /release_version/);
+  assert.match(workflow, /SHA256SUMS\.txt/);
+  assert.match(workflow, /ExternalInstallerPath \$releaseInstaller/);
+  assert.match(smoke, /Release installer preflight payload differs from its installed executable/);
+});
+
 test('newest companion installers are tested on disposable Windows before catalog signing', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'companion-install-smoke.yml'), 'utf8');
   assert.match(workflow, /workflow_dispatch/);

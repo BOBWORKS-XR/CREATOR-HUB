@@ -19,6 +19,10 @@ on:
         required: false
         type: boolean
         default: false
+      release_version:
+        description: Test the exact Windows installer asset from a tagged draft release
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -153,12 +157,32 @@ jobs:
           path: .
           github-token: ${{ github.token }}
           run-id: ${{ inputs.candidate_run || github.run_id }}
+      - name: Download and verify the exact tagged release installer
+        if: ${{ inputs.release_version != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RELEASE_VERSION: ${{ inputs.release_version }}
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:REQUESTED_RELEASE_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$' -or $env:REQUESTED_RELEASE_VERSION -ne $version) { throw 'Release version must match this checkout.' }
+          $folder = 'artifacts/release-installer'
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          gh release download "v$version" --repo BOBWORKS-XR/CREATOR-HUB --pattern "Creator.Hub_${version}_x64-setup.exe" --pattern SHA256SUMS.txt --dir $folder
+          if ($LASTEXITCODE -ne 0) { throw 'Tagged release installer download failed.' }
+          $assetName = "Creator.Hub_${version}_x64-setup.exe"
+          $expected = (Get-Content (Join-Path $folder 'SHA256SUMS.txt') | Where-Object { $_ -match ("  " + [regex]::Escape($assetName) + '$') } | ForEach-Object { ($_ -split '\s+')[0] })
+          if (@($expected).Count -ne 1) { throw 'Release checksum entry is missing or ambiguous.' }
+          $installer = Join-Path $folder $assetName
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Release installer differs from its published checksum.' }
+          "CREATOR_RELEASE_VERSION=$version" >> $env:GITHUB_ENV
       - name: Install the exact tested Hub package
         shell: powershell
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $baseline = if ('${{ matrix.baseline }}' -eq 'clean') { 'clean' } elseif ('${{ matrix.baseline }}' -eq 'legacy') { 'alpha.5' } elseif ('${{ matrix.baseline }}' -eq 'latest-hub') { 'stable-0.1.8' } else { 'alpha.3' }
-          .\scripts\Test-InstalledCandidate.ps1 -CandidateDirectory "dist\Creator-Hub-$version-Windows-Candidate" -HubBaseline $baseline
+          $releaseInstaller = if ($env:CREATOR_RELEASE_VERSION -eq $version) { 'artifacts\release-installer\Creator.Hub_' + $version + '_x64-setup.exe' } else { '' }
+          .\scripts\Test-InstalledCandidate.ps1 -CandidateDirectory "dist\Creator-Hub-$version-Windows-Candidate" -HubBaseline $baseline -ExternalInstallerPath $releaseInstaller
       - name: Download the verified staged app fixtures from this test run
         if: ${{ inputs.staged_setup || inputs.staged_mcp }}
         uses: actions/download-artifact@v4

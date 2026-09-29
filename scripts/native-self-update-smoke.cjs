@@ -11,8 +11,14 @@ const { chromium } = require('@playwright/test');
 const { checkLive } = require('./check-release-feed.cjs');
 const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
 const from = { version: '0.1.8', asset: 'Creator.Hub_0.1.8_x64-setup.exe', installer: '785bfae6b33396421e74f405808eefce078ac5b0ecdfe1d8cc1c1dd10b048154', exe: '5ea968b425ac99f7508e844478abb6725012325038443b0dfdf39c1750f9a169' };
-const to = { version: '0.1.10-rc.1', installer: 'TO_BE_PINNED_FROM_ACCEPTED_CANDIDATE', exe: 'TO_BE_PINNED_FROM_ACCEPTED_CANDIDATE' };
+const to = {
+  version: process.env.CREATOR_SELF_UPDATE_TARGET_VERSION || require('../package.json').version,
+  installer: process.env.CREATOR_SELF_UPDATE_INSTALLER_SHA256,
+  exe: process.env.CREATOR_SELF_UPDATE_EXECUTABLE_SHA256,
+};
 assert.equal(to.version, require('../package.json').version, 'Update acceptance pins for the intended release; testing an older update is not sufficient');
+assert.match(to.installer || '', /^[a-f0-9]{64}$/, 'Supply the exact published target installer SHA-256');
+assert.match(to.exe || '', /^[a-f0-9]{64}$/, 'Supply the exact packaged target executable SHA-256');
 const fixture = process.env.CREATOR_HOSTED_UPDATE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.CREATOR_HOSTED_UPDATE_FIXTURE, 'utf8')) : null;
 if (fixture) {
   assert.equal(fixture.testOnly, true);
