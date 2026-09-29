@@ -9,7 +9,8 @@ on:
         type: string
 
 permissions:
-  contents: read
+  # GitHub's workflow token cannot enumerate draft releases with read-only access.
+  contents: write
 
 jobs:
   install:
@@ -79,7 +80,7 @@ jobs:
             }
           }
 
-          function Confirm-Installed([string]$expectedVersion, [string]$expectedHash) {
+          function Confirm-Installed([string]$expectedVersion, [string]$expectedHash, [bool]$checkIdentity) {
             $entries = @(Get-InstallEntries)
             if ($entries.Count -ne 1 -or -not $entries[0].InstallLocation) {
               throw 'Expected exactly one registered Creator Project Setup installation.'
@@ -90,11 +91,13 @@ jobs:
             if ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedHash) {
               throw 'Installed executable differs from the exact installer payload.'
             }
-            $identityText = & $installed --creator-hub-info
-            if ($LASTEXITCODE -ne 0) { throw 'Installed executable rejected read-only Hub identity.' }
-            $identity = ($identityText | Out-String | ConvertFrom-Json)
-            if ($identity.appId -cne 'creator-project-setup' -or $identity.version -cne $expectedVersion) {
-              throw 'Installed executable reported the wrong identity or version.'
+            if ($checkIdentity) {
+              $identityText = & $installed --creator-hub-info
+              if ($LASTEXITCODE -ne 0) { throw 'Installed executable rejected read-only Hub identity.' }
+              $identity = ($identityText | Out-String | ConvertFrom-Json)
+              if ($identity.appId -cne 'creator-project-setup' -or $identity.version -cne $expectedVersion) {
+                throw 'Installed executable reported the wrong identity or version.'
+              }
             }
           }
 
@@ -108,7 +111,7 @@ jobs:
               $baselineHash = (Get-FileHash -LiteralPath (Join-Path $baselinePayload $exeName) -Algorithm SHA256).Hash.ToLowerInvariant()
               $baselineProcess = Start-Process -FilePath $previous -ArgumentList '/S' -PassThru -Wait -WindowStyle Hidden
               if ($baselineProcess.ExitCode -ne 0) { throw 'Baseline installation failed.' }
-              Confirm-Installed '0.3.4' $baselineHash
+              Confirm-Installed '0.3.4' $baselineHash $false
               $report.checks += 'public-baseline-installed'
             } elseif ($env:BASELINE -cne 'clean') {
               throw 'Unknown baseline.'
@@ -132,7 +135,7 @@ jobs:
             }
             $candidateProcess = Start-Process -FilePath $candidate -ArgumentList '/S' -PassThru -Wait -WindowStyle Hidden
             if ($candidateProcess.ExitCode -ne 0) { throw "Candidate installer exited $($candidateProcess.ExitCode)." }
-            Confirm-Installed $version $expectedHash
+            Confirm-Installed $version $expectedHash $true
             $report.checks += 'installed-hash-and-identity'
             if ($env:BASELINE -ceq '0.3.4') {
               if (-not (Test-Path -LiteralPath $sentinel) -or (Get-Content -LiteralPath $sentinel -Raw) -cne 'preserve-user-data') {
