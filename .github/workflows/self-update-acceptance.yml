@@ -2,6 +2,10 @@ name: Public Hub self-update acceptance
 on:
   workflow_dispatch:
     inputs:
+      target_version:
+        description: Exact public release version to test from the previous stable
+        required: true
+        type: string
       hosted_fixture:
         description: Also test the new outgoing updater using a version-only runtime fixture, not public stable
         type: boolean
@@ -38,14 +42,44 @@ jobs:
       - name: Read the packaged target version
         id: target
         shell: pwsh
+        env:
+          REQUESTED_TARGET_VERSION: ${{ inputs.target_version }}
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:REQUESTED_TARGET_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$' -or $env:REQUESTED_TARGET_VERSION -ne $version) { throw 'Target version must match the checked-out app version.' }
           "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Download and pin the exact published Windows update target
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TARGET_VERSION: ${{ inputs.target_version }}
+        run: |
+          $version = $env:REQUESTED_TARGET_VERSION
+          $folder = 'artifacts/self-update-target'
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          gh release download "v$version" --repo BOBWORKS-XR/CREATOR-HUB --pattern "Creator.Hub_${version}_x64-setup.exe" --pattern SHA256SUMS.txt --dir $folder
+          if ($LASTEXITCODE -ne 0) { throw 'Published update target download failed.' }
+          $assetName = "Creator.Hub_${version}_x64-setup.exe"
+          $expected = (Get-Content (Join-Path $folder 'SHA256SUMS.txt') | Where-Object { $_ -match ("  " + [regex]::Escape($assetName) + '$') } | ForEach-Object { ($_ -split '\s+')[0] })
+          if (@($expected).Count -ne 1) { throw 'Published checksum entry is missing or ambiguous.' }
+          $installer = Join-Path $folder $assetName
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Published installer differs from its checksum.' }
+          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) { $sevenZip = 'C:\Program Files\7-Zip\7z.exe' }
+          & $sevenZip x $installer ("-o$folder/extracted") '-y' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Published installer extraction failed.' }
+          $exe = Join-Path $folder 'extracted/creator-hub.exe'
+          $preflight = Join-Path $folder 'extracted/$PLUGINSDIR/creator-hub-preflight.exe'
+          if ((Get-FileHash $exe).Hash -ne (Get-FileHash $preflight).Hash) { throw 'Published preflight and installed executables differ.' }
+          "CREATOR_SELF_UPDATE_TARGET_VERSION=$version" >> $env:GITHUB_ENV
+          "CREATOR_SELF_UPDATE_INSTALLER_SHA256=$((Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant())" >> $env:GITHUB_ENV
+          "CREATOR_SELF_UPDATE_EXECUTABLE_SHA256=$((Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant())" >> $env:GITHUB_ENV
       - name: Check the exact public feed used by installed Hub versions
-        run: node scripts/check-release-feed.cjs ${{ steps.target.outputs.version }}
+        run: node scripts/check-release-feed.cjs ${{ inputs.target_version }}
       - name: Test in-app update and automatic restart into the exact public build
         env:
           CREATOR_HOSTED_UPDATE_FIXTURE: ${{ inputs.hosted_fixture && 'dist/Creator-Hub-hosted-update-fixture/fixture.json' || '' }}
+          CREATOR_SELF_UPDATE_TARGET_VERSION: ${{ inputs.target_version }}
         run: node scripts/native-self-update-smoke.cjs
       - uses: actions/upload-artifact@v4
         if: always()

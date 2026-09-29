@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$CandidateDirectory,
-    [ValidateSet('clean', 'alpha.3', 'alpha.4', 'alpha.5', 'alpha.6', 'stable-0.1.0', 'stable-0.1.1', 'stable-0.1.2', 'stable-0.1.3', 'stable-0.1.4', 'stable-0.1.5', 'stable-0.1.6', 'stable-0.1.8')][string]$HubBaseline = 'clean'
+    [ValidateSet('clean', 'alpha.3', 'alpha.4', 'alpha.5', 'alpha.6', 'stable-0.1.0', 'stable-0.1.1', 'stable-0.1.2', 'stable-0.1.3', 'stable-0.1.4', 'stable-0.1.5', 'stable-0.1.6', 'stable-0.1.8')][string]$HubBaseline = 'clean',
+    [string]$ExternalInstallerPath = ''
 )
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
@@ -13,6 +14,25 @@ if (-not $output.StartsWith($allowed, [StringComparison]::OrdinalIgnoreCase)) { 
 $version = (Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json).version
 $installer = Join-Path $output "Creator-Hub-$version-Windows-setup.exe"
 $expectedExe = Join-Path $output 'extracted\creator-hub.exe'
+if ($ExternalInstallerPath) {
+    $externalInstaller = (Resolve-Path -LiteralPath $ExternalInstallerPath).Path
+    $extractedRelease = Join-Path $output 'release-extracted'
+    if (Test-Path -LiteralPath $extractedRelease) { throw 'Release installer extraction output already exists.' }
+    Copy-Item -LiteralPath $externalInstaller -Destination $installer -Force
+    $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+    if (-not $sevenZip) { $sevenZip = 'C:\Program Files\7-Zip\7z.exe' }
+    & $sevenZip x $installer ('-o' + $extractedRelease) '-y' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Release installer extraction failed.' }
+    $expectedExe = Join-Path $extractedRelease 'creator-hub.exe'
+    $preflightExe = Join-Path $extractedRelease '$PLUGINSDIR\creator-hub-preflight.exe'
+    if ((Get-FileHash -LiteralPath $expectedExe).Hash -ne (Get-FileHash -LiteralPath $preflightExe).Hash) {
+        throw 'Release installer preflight payload differs from its installed executable.'
+    }
+    foreach ($name in @('LICENSE.txt', 'THIRD_PARTY_NOTICES.txt', 'rust-dependencies.json')) {
+        if ((Get-FileHash -LiteralPath (Join-Path $output ('licenses\' + $name))).Hash -ne
+            (Get-FileHash -LiteralPath (Join-Path $extractedRelease ('licenses\' + $name))).Hash) { throw "Release installer notice differs: $name" }
+    }
+}
 $installed = Join-Path $env:LOCALAPPDATA 'Creator Hub'
 $data = Join-Path $env:LOCALAPPDATA 'CreatorHub'
 $productKey = 'HKCU:\Software\Creator Works\Creator Hub'
