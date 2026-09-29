@@ -27,9 +27,11 @@ jobs:
           - os: macos-latest
             label: macOS Apple silicon
             args: --bundles dmg
+            binary_arch: arm64
           - os: macos-15-intel
             label: macOS Intel
             args: --bundles dmg
+            binary_arch: x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -73,6 +75,20 @@ jobs:
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.args }}
+
+      - name: Verify packaged macOS signature and architecture
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.binary_arch }}
+        run: |
+          set -euo pipefail
+          app="src-tauri/target/release/bundle/macos/Creator Project Setup.app"
+          test -d "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          executable=$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")
+          architectures=$(lipo -archs "$app/Contents/MacOS/$executable")
+          [[ " $architectures " == *" $EXPECTED_ARCH "* ]] || { echo "Unexpected architecture: $architectures" >&2; exit 1; }
 
   checksums:
     if: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && github.ref_name != 'v0.3.0' && github.ref_name != 'v0.3.1' }}
