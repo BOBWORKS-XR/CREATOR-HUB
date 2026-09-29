@@ -239,6 +239,18 @@ async function installCompanions() {
   assert.equal(await page.locator('#view-hub').isVisible(), true, 'Restart opens Apps by default');
   await page.screenshot({ path: path.join(out, 'after-restart.png') });
   await page.locator('#suite-trigger').click();
+  await page.waitForFunction(() => document.querySelector('#suite-shell').getBoundingClientRect().width >= 303);
+  const menuLayout = await page.evaluate(() => ['mcp', 'setup'].map(app => {
+    const row = document.querySelector(`#suite-menu [data-view="${app}"]`);
+    const title = row.querySelector('strong'), description = row.querySelector('small');
+    const status = document.querySelector(`#menu-status-${app}`);
+    return { app, titleFits: title.getBoundingClientRect().height <= parseFloat(getComputedStyle(title).lineHeight) + 1,
+      statusBelow: status.getBoundingClientRect().top >= description.getBoundingClientRect().bottom,
+      fits: row.scrollWidth <= row.clientWidth };
+  }));
+  assert.ok(menuLayout.every(row => row.titleFits && row.statusBelow && row.fits));
+  await page.locator('#suite-shell').screenshot({ path: path.join(out, 'updated-app-menu.png') });
+  report.checks.push('Restarted installed build shows the wider menu with single-line app names and status beneath each description');
   await page.locator('#suite-menu [data-view="plugins"]').click();
   report.pluginsIcon = await verifyPluginsIcon(page, '#suite-trigger .plugins-mark img', hash('src/icons/creator-plugins.png'));
   await page.locator('#suite-menu').waitFor({ state: 'hidden' });
