@@ -4,8 +4,8 @@ const path = require('node:path');
 
 async function load(page, launchView = 'hub', options = {}) {
   await page.addInitScript(({ launchView, options }) => {
+    if (!options.freshTerms) localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     for (const [key, value] of Object.entries(options.preferences || {})) localStorage.setItem(key, value);
-    if (options.storageUnavailable) Object.defineProperty(window, 'localStorage', { get() { throw new DOMException('Storage disabled', 'SecurityError'); } });
     window.calls = [];
     window.events = {};
     window.hubUpdate = { currentVersion: '0.1.0-alpha.3', availableVersion: null, downloaded: false };
@@ -40,10 +40,52 @@ async function load(page, launchView = 'hub', options = {}) {
     } } };
   }, { launchView, options });
   await page.goto('http://127.0.0.1:4188');
+  if (options.freshTerms) return;
   await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === 'app_inventory' && c.args.check))).toBe(true);
   await expect(page.locator('#catalog-status')).toHaveText(/^(Update check complete\. Installation always needs your approval\.|Installed apps checked\.)$/);
   if (launchView === 'hub') await page.locator('#hub-pages [data-view="hub"]').click();
 }
+
+test('first launch requires saved terms acceptance before app discovery', async ({ page }) => {
+  await load(page, 'hub', { freshTerms: true });
+  const dialog = page.locator('#usage-terms-dialog');
+  await expect(dialog).toBeVisible();
+  const layout = await dialog.evaluate(node => {
+    const rect = node.getBoundingClientRect();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, background: getComputedStyle(node).backgroundColor, viewport: { x: innerWidth / 2, y: innerHeight / 2 } };
+  });
+  expect(Math.abs(layout.x - layout.viewport.x)).toBeLessThan(2);
+  expect(Math.abs(layout.y - layout.viewport.y)).toBeLessThan(2);
+  expect(layout.background).toBe('rgb(17, 21, 24)');
+  expect(await page.locator('#view-hub').evaluate(node => node.closest('main').inert)).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.calls.some(call => call.command === 'app_inventory'))).toBe(false);
+  await expect(page.locator('#usage-terms-continue')).toBeDisabled();
+  await page.locator('#usage-terms-checkbox').check();
+  await page.locator('#usage-terms-continue').click();
+  await expect(dialog).toBeHidden();
+  await expect.poll(() => page.evaluate(() => window.calls.some(call => call.command === 'app_inventory'))).toBe(true);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('creator-usage-terms.hub')).policyVersion)).toBe('2026-09-28-v1');
+  await page.reload();
+  await expect(dialog).toBeHidden();
+});
+
+test('fixed Hub help opens with app roles and practical troubleshooting', async ({ page }) => {
+  await load(page);
+  const help = page.locator('#context-help-dialog');
+  await page.locator('#context-help-open').click();
+  await expect(help).toBeVisible();
+  const rect = await help.evaluate(node => {
+    const bounds = node.getBoundingClientRect();
+    return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2, background: getComputedStyle(node).backgroundColor, viewport: { x: innerWidth / 2, y: innerHeight / 2 } };
+  });
+  expect(Math.abs(rect.x - rect.viewport.x)).toBeLessThan(2);
+  expect(Math.abs(rect.y - rect.viewport.y)).toBeLessThan(2);
+  expect(rect.background).toBe('rgb(17, 21, 24)');
+  await expect(help).toContainText('Setup is not the MCP');
+  await expect(help).toContainText('Claude Desktop is not currently supported');
+  await page.locator('#context-help-close').click();
+  await expect(help).toBeHidden();
+});
 
 for (const app of ['mcp', 'setup']) for (const width of [940, 390, 320]) test(`Apps row updates ${app} without opening its view at ${width}px`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: 780 });
@@ -404,7 +446,8 @@ test('saved preferences are independent and changing them persists across reload
 test('unavailable preference storage keeps defaults and does not break startup', async ({ page }) => {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  await load(page, 'hub', { storageUnavailable: true });
+  await load(page, 'hub');
+  await page.evaluate(() => Object.defineProperty(window, 'localStorage', { get() { throw new DOMException('Storage disabled', 'SecurityError'); } }));
   await expect(page.locator('#preview-channel')).toBeChecked();
   await expect(page.locator('#auto-download')).toBeChecked();
   await page.locator('#auto-download').uncheck();
@@ -485,6 +528,46 @@ test('switcher keyboard and outside dismissal preserve navigation', async ({ pag
   await page.locator('#suite-trigger').click();
   await page.locator('#suite-dismiss').click({ position: { x: 500, y: 25 } });
   await expect(page.locator('#suite-menu')).toBeHidden();
+});
+
+test('unlisted installed builds explain why Hub hosting and updates are unavailable', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => {
+    for (const [index, executable] of ['creator-works-mcp-launcher.exe', 'creator-project-setup.exe'].entries()) {
+      Object.assign(window.inventory.apps[index], {
+        installed: true, trusted: false, installedVersion: null,
+        issue: "Hub couldn't verify this app. Choose an official copy. Nothing was changed.",
+        installedPath: `C:\\Apps\\${executable}`, hostedPreview: 'read-only',
+      });
+    }
+  });
+  await page.locator('#check-updates').click();
+  for (const app of ['mcp', 'setup']) {
+    if (app === 'setup') await page.getByRole('button', { name: 'All apps', exact: true }).click();
+    const status = page.locator(`#status-${app}`);
+    await expect(status).toHaveText('Installed · not in Hub catalogue');
+    await expect(status).toHaveClass(/unverified/);
+    await expect(status.locator('.status-indicator')).toHaveCount(0);
+    await page.getByRole('button', { name: `View ${app === 'mcp' ? 'Creator Works MCP' : 'Creator Project Setup'}`, exact: true }).click();
+    await expect(page.locator(`#host-${app}-button`)).toBeDisabled();
+    await expect(page.locator('#compatibility-status')).toHaveText('Installed outside Hub catalogue');
+    await expect(page.locator('#compatibility-detail')).toContainText('exact build has a signed release entry');
+    await expect(page.locator('#tool-state')).toContainText('Hub couldn\'t verify this app');
+  }
+  expect(await page.evaluate(() => window.calls.some(c => ['open_app', 'start_hosted_app', 'install_app'].includes(c.command)))).toBe(false);
+});
+
+test('top-level switcher highlights span the full menu row', async ({ page }) => {
+  await load(page);
+  await page.locator('#suite-trigger').click();
+  const menu = page.locator('#suite-menu');
+  const hub = menu.locator('[data-view="hub"]');
+  const plugins = menu.locator('[data-view="plugins"]');
+  const menuBox = await menu.boundingBox();
+  const hubBox = await hub.boundingBox();
+  const pluginsBox = await plugins.boundingBox();
+  expect(hubBox.width).toBeCloseTo(pluginsBox.width, 0);
+  expect(hubBox.width).toBeGreaterThan(menuBox.width - 20);
 });
 
 test('app switcher downloads the selected verified version without installing it', async ({ page }) => {

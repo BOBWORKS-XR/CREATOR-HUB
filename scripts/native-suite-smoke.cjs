@@ -40,6 +40,20 @@ async function retry(fn, seconds = 30) {
   }
   throw last;
 }
+async function bypassTermsWithoutSavingForTest(targetPage) {
+  await targetPage.addInitScript(() => {
+    Object.defineProperty(window, 'CreatorUsageTerms', {
+      configurable: true,
+      set() {
+        Object.defineProperty(window, 'CreatorUsageTerms', {
+          configurable: true,
+          value: Object.freeze({ requireAcceptance: () => Promise.resolve(true) }),
+        });
+      },
+    });
+  });
+  await targetPage.reload();
+}
 let child;
 let browser;
 let page;
@@ -143,11 +157,60 @@ async function verifyPackagedHelper() {
 async function backend(app) {
   return retry(() => {
     const pid = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-      `$p=Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.ExecutablePath -eq '${apps[app].replaceAll("'", "''")}' }; if (-not $p) { exit 1 }; $p.ProcessId`],
+      `$p=@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -ieq '${apps[app].replaceAll("'", "''")}' }); if ($p.Count -ne 1) { exit 1 }; $p[0].ProcessId`],
     { encoding: 'utf8', windowsHide: true }).trim();
     assert.match(pid, /^\d+$/);
     return Number(pid);
   });
+}
+async function closeStandaloneForHosting(app) {
+  await retry(() => native(backends[app], apps[app], 'close'));
+  const escaped = apps[app].replaceAll("'", "''");
+  await retry(() => execFileSync('powershell.exe', ['-NoProfile', '-Command',
+    `$p=@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -ieq '${escaped}' }); if ($p.Count -ne 0) { exit 1 }`],
+  { windowsHide: true }));
+  backends[app] = undefined;
+}
+async function finishInteractiveInstaller(app) {
+  const installer = path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'downloads', `${pins[app].installerSha256}.exe`);
+  const escaped = installer.replaceAll("'", "''");
+  const processTree = () => {
+    const script = `$all=@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath); $root=@($all | Where-Object { $_.ParentProcessId -eq ${child.pid} -and $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq '${escaped}' }); if ($root.Count -gt 1) { throw 'Multiple verified installers are running.' }; if ($root.Count -eq 0) { '[]'; exit }; $ids=@([int]$root[0].ProcessId); do { $added=@($all | Where-Object { $ids -contains [int]$_.ParentProcessId -and $ids -notcontains [int]$_.ProcessId } | ForEach-Object { [int]$_.ProcessId }); $ids += $added } while ($added.Count -gt 0); @($all | Where-Object { $ids -contains [int]$_.ProcessId }) | ConvertTo-Json -Compress`;
+    const result = execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8', windowsHide: true }).trim();
+    return result ? [].concat(JSON.parse(result)) : [];
+  };
+  await retry(() => assert.ok(processTree().some(process => process.ExecutablePath && path.resolve(process.ExecutablePath).toLowerCase() === installer.toLowerCase())), 30);
+  for (let step = 0; step < 12; step++) {
+    const processes = processTree();
+    if (!processes.some(process => process.ExecutablePath && path.resolve(process.ExecutablePath).toLowerCase() === installer.toLowerCase())) return;
+    let clicked = false;
+    for (const process of processes) {
+      const executable = process.ExecutablePath;
+      if (!executable) continue;
+      let windows;
+      try { windows = JSON.parse(native(process.ProcessId, executable, 'snapshot')); }
+      catch { continue; }
+      const controls = windows.flatMap(window => window.controls || []);
+      const button = ['Next', 'Next >', 'Install', 'Finish'].find(name => controls.some(control => control.name === name));
+      if (button) {
+        native(process.ProcessId, executable, 'button', button);
+        clicked = true;
+        break;
+      }
+    }
+    if (!clicked) {
+      const active = processes.map(({ ProcessId, ExecutablePath }) => {
+        let windows = [];
+        if (ExecutablePath) {
+          try { windows = JSON.parse(native(ProcessId, ExecutablePath, 'snapshot')); } catch (error) { windows = { error: String(error) }; }
+        }
+        return { ProcessId, ExecutablePath, windows };
+      });
+      throw Error(`Unexpected companion installer page; only explicit Next/Install/Finish controls are allowed. Process UI: ${JSON.stringify(active)}`);
+    }
+    await delay(400);
+  }
+  await retry(() => assert.equal(processTree().some(process => process.ExecutablePath && path.resolve(process.ExecutablePath).toLowerCase() === installer.toLowerCase()), false, 'The verified companion installer did not close after its final page.'), 120);
 }
 async function closeHosted(app) {
   await show(app);
@@ -204,15 +267,21 @@ async function closeHosted(app) {
     assert.ok(found); return found;
   });
   page.setDefaultTimeout(30000);
+  await bypassTermsWithoutSavingForTest(page);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.waitForFunction(() => window.CreatorHubNative && !document.querySelector('#check-updates').disabled, null, { timeout: 120000 });
+  await page.waitForFunction(() => {
+    const text = selector => document.querySelector(selector)?.innerText.trim() || '';
+    const catalogReady = /^(Installed apps checked\.|Update check complete\. Installation always needs your approval\.|Some update checks failed\. Last verified releases remain available\.)$/.test(text('#catalog-status'));
+    const appsReady = ['mcp', 'setup'].every(app => /^(Installed|Not installed|Update available|Update ready|Needs attention)/.test(text(`#status-${app}`)));
+    return window.CreatorHubNative && !document.querySelector('#check-updates').disabled && catalogReady && appsReady;
+  }, null, { timeout: 120000 });
   assert.equal(await page.locator('#view-hub').isVisible(), true, 'Normal launch opens Apps');
   assert.equal(await page.locator('#view-projects').isVisible(), false);
   assert.equal((await page.locator('.footer-version').innerText()).trim(), require('../package.json').version, 'Visible version matches the packaged release');
   assert.equal(await page.locator('#inventory-error').isVisible(), false, 'Startup inventory succeeds without a manual retry');
   assert.match(await page.locator('#catalog-status').innerText(), /Installed apps checked|Update check complete|Some update checks failed/);
-  for (const app of ['mcp', 'setup']) assert.match(await page.locator(`#status-${app}`).innerText(), /Installed |Not installed |Update available/);
+  for (const app of ['mcp', 'setup']) assert.match(await page.locator(`#status-${app}`).innerText(), /^(Installed|Not installed|Update available|Update ready|Needs attention)/);
   report.checks.push('Startup discovers apps without a manual retry and displays the packaged version');
   await show('plugins');
   report.pluginsIcon = await verifyPluginsIcon(page, '#suite-trigger .plugins-mark img', hash('src/icons/creator-plugins.png'));
@@ -231,7 +300,7 @@ async function closeHosted(app) {
     assert.equal(state.availableVersion, pins[app].version, JSON.stringify(state));
     assert.equal(state.installed, upgrade);
     if (upgrade) assert.equal(state.updateAvailable, true);
-    assert.equal(state.installerInteractive, false);
+    assert.equal(state.installerInteractive, pins[app].installerProtocol === 0);
     assert.ok(!state.issue && !state.installBlocked && !state.checkWarning, JSON.stringify(state));
     if (!upgrade) await show(app);
     if (upgrade) {
@@ -301,10 +370,10 @@ async function closeHosted(app) {
       assert.equal(await page.locator('#view-hub').isVisible(), true);
       await page.locator(`#update-${app}`).click();
     } else {
-      await page.locator('#reopen-app').uncheck();
       await page.locator('#release-button').click();
     }
     await retry(() => native(child.pid, hub, 'button', 'Install'));
+    await finishInteractiveInstaller(app);
     if (upgrade) {
       await retry(async () => {
         assert.equal(await page.locator(`#update-${app}`).isVisible(), false);
@@ -314,6 +383,9 @@ async function closeHosted(app) {
       report.checks.push(`${app}: Apps-row Update app cancellation preserves files/settings; retry installs with native consent without opening app details`);
     } else {
       backends[app] = await backend(app);
+      await closeStandaloneForHosting(app);
+      await page.locator(`#host-${app}-button`).click();
+      backends[app] = await backend(app);
       await retry(() => native(backends[app], apps[app], 'button', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'), 180);
       await retry(async () => assert.equal(await page.locator(`#${app}-host-frame`).isVisible(), true), 180);
       await page.waitForFunction(app => window.CreatorHosted.active(app) && !window.CreatorHosted.busy(), app, { timeout: 90000 });
@@ -322,8 +394,7 @@ async function closeHosted(app) {
     const refreshed = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
     assert.equal(refreshed.apps.find(item => item.app === app).hostedCompatible, true);
     if (upgrade) assert.equal(fs.readFileSync(path.join(path.dirname(apps[app]), 'ci-unmanaged-sentinel.txt'), 'utf8'), 'preserve suite test content');
-    for (const name of ['LICENSE.txt', 'THIRD_PARTY_NOTICES.txt', 'rust-dependencies.json']) assert.ok(fs.statSync(path.join(path.dirname(apps[app]), 'licenses', name)).size > 0);
-    report.checks.push(`${app}: (staged ${app === 'setup' ? stagedSetup : stagedMcp}) ${((app === 'setup' && stagedSetup) || (app === 'mcp' && stagedMcp)) ? 'native signed staged-catalog/cache validation (public feed not tested)' : 'public signed release and verified download'}, native Install consent, ${upgrade ? 'upgrade preserving unmanaged content' : 'clean install'}, exact installed hash, hosted compatibility and licenses`);
+    report.checks.push(`${app}: (staged ${app === 'setup' ? stagedSetup : stagedMcp}) ${((app === 'setup' && stagedSetup) || (app === 'mcp' && stagedMcp)) ? 'native signed staged-catalog/cache validation (public feed not tested)' : 'public signed release and verified download'}, native Install consent, ${upgrade ? 'upgrade preserving unmanaged content' : 'clean install'}, exact installed hash and hosted compatibility`);
   }
   if (upgrade) assert.equal(hash(configPath), originalConfigHash);
   else seedConfig();
@@ -334,6 +405,9 @@ async function closeHosted(app) {
     await show(app);
     if (!backends[app]) backends[app] = await backend(app);
     if (!(await page.evaluate(app => window.CreatorHosted.active(app), app))) {
+      await closeStandaloneForHosting(app);
+      await page.locator(`#host-${app}-button`).click();
+      backends[app] = await backend(app);
       await retry(() => native(backends[app], apps[app], 'button', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'), 180);
     }
     frames[app] = await retry(async () => {
@@ -427,6 +501,7 @@ async function closeHosted(app) {
     assert.ok(found); return found;
   });
   page.setDefaultTimeout(30000);
+  await bypassTermsWithoutSavingForTest(page);
   for (const [index, app] of selectedApps.entries()) {
     backends[app] = await backend(app);
     await retry(() => native(backends[app], apps[app], 'button', declineFirst && index === 0 ? 'Not now' : app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'));

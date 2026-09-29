@@ -4,6 +4,7 @@ const path = require('node:path');
 const { verifyCommunityMedia } = require('../scripts/verify-community-media.cjs');
 async function load(page, options = {}) {
   await page.addInitScript(({ entry, options }) => {
+    localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     window.calls = [];
     window.snapshot = { entries: [{ ...entry, reviewStatus: options.listed ? 'listed' : 'pending' }], media: options.media || [], warnings: [], stale: false, projectImportEnabled: options.projectImportEnabled ?? true };
     window.projects = [{ id: 'chosen-project', name: 'Example Space', path: 'E:\\UnityTest\\Example Space', unityVersion: '6000.3.21f1', sdk: 'Creator SDK / Altspace', helper: options.helper || 'missing', open: Boolean(options.projectOpen) }];
@@ -285,8 +286,8 @@ for (const width of [1100, 680, 390, 320]) test(`grid view preserves cards, deta
 });
 
 test('layout controls work when preference storage is blocked', async ({ page }) => {
-  await page.addInitScript(() => { Object.defineProperty(window, 'localStorage', { get() { throw new Error('Storage unavailable'); } }); });
   await load(page);
+  await page.evaluate(() => { Object.defineProperty(window, 'localStorage', { get() { throw new Error('Storage unavailable'); } }); });
   await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'grid');
   await page.getByRole('button', { name: 'List view', exact: true }).click();
   await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'list');

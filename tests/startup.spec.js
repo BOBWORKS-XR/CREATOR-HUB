@@ -2,6 +2,7 @@ const { test, expect } = require('@playwright/test');
 
 async function boot(page, { failInventory = null, emptyInventory = false, unsupportedInventory = false, notInstalled = false, upToDate = false, platform = null, version = '0.1.1', view = 'hub' } = {}) {
   await page.addInitScript(({ failInventory, emptyInventory, unsupportedInventory, notInstalled, upToDate, platform, version, view }) => {
+    localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     if (platform) {
       Object.defineProperty(navigator, 'platform', { configurable: true, value: platform });
       Object.defineProperty(navigator, 'userAgentData', { configurable: true, value: undefined });

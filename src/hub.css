@@ -78,6 +78,7 @@ button.app-row:hover { background: #181d21; }
 .row-status { color: var(--muted); font-size: 11px; font-weight: 500; flex-shrink: 0; }
 .row-status.not-installed { color: var(--amber); }
 .row-status.installed { color: #70d9a4; }
+.row-status.unverified { color: var(--amber); }
 .status-indicator { width: 13px; height: 13px; margin-right: 4px; vertical-align: -2px; }
 .app-row > .icon { color: var(--muted); }
 .unavailable .app-row-copy strong { color: var(--muted); }

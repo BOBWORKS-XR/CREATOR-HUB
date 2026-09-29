@@ -189,6 +189,7 @@
   }
   function appStatus(state) {
     if (!state) return 'Status unavailable';
+    if (state.installed && !state.trusted && state.issue?.startsWith("Hub couldn't verify this app.")) return 'Installed · not in Hub catalogue';
     if (state.issue) return 'Needs attention';
     if (state.updateAvailable) return state.downloaded ? 'Update ready' : 'Update available';
     if (state.installed) return `Installed ${state.installedVersion || ''}`;
@@ -218,7 +219,7 @@
       const label = inventory?.supported === false ? 'Not supported' : !inventory && busy ? 'Checking' : appStatus(state);
       const status = byId(`status-${id}`);
       status.replaceChildren();
-      if (label.startsWith('Installed')) {
+      if (label.startsWith('Installed') && state?.trusted && !state.issue) {
         const check = document.createElement('span');
         check.className = 'icon icon-check status-indicator';
         check.setAttribute('aria-hidden', 'true');
@@ -226,7 +227,8 @@
       }
       status.append(document.createTextNode(label));
       status.classList.toggle('not-installed', label.startsWith('Not installed'));
-      status.classList.toggle('installed', label.startsWith('Installed'));
+      status.classList.toggle('installed', label.startsWith('Installed') && state?.trusted && !state.issue);
+      status.classList.toggle('unverified', label.startsWith('Installed') && !state?.trusted);
       byId(`menu-status-${id}`).textContent = inventory?.supported === false ? 'Not supported'
         : inventoryError ? 'Check failed' : !inventory && busy ? 'Checking' : appStatus(state);
       const menuDownload = byId(`menu-download-${id}`);
@@ -310,11 +312,14 @@
       }
       return row;
     }));
-    byId('compatibility-status').textContent = inventoryError ? 'App discovery needs attention' : !state ? 'Checking compatibility' : hostedMismatch ? 'Update needed for Hub' : canHost ? 'Ready to open in Hub' : state?.trusted ? 'Your app is ready' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
+    const unlistedBuild = state?.installed && !state.trusted && state.issue?.startsWith("Hub couldn't verify this app.");
+    byId('compatibility-status').textContent = inventoryError ? 'App discovery needs attention' : !state ? 'Checking compatibility' : hostedMismatch ? 'Update needed for Hub' : canHost ? 'Ready to open in Hub' : state?.trusted ? 'Your app is ready' : unlistedBuild ? 'Installed outside Hub catalogue' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
     byId('compatibility-detail').textContent = inventoryError || !state
       ? 'Hub needs a completed app check to show installation, update and Open in Hub options.'
       : hostedMismatch
       ? `${state.requiredHubVersion ? 'Update Hub first, then check this app for updates.' : state.updateAvailable ? 'Update this app to open it inside Hub.' : 'Check for updates to get matching versions of Hub and this app.'} You can still use Open app for a separate window.`
+      : unlistedBuild
+      ? 'This installed build is not listed in Hub’s signed release catalogue. Hub will not open or update it until its exact build has a signed release entry. Keep using it separately for now.'
       : state?.hostedPreview
       ? `Uses your installed app and existing settings${state.hostedPreview === 'read-only' ? '; changes are disabled' : ''}. This app version asks for permission when opening in Hub. Open separately remains available.`
       : 'This app version opens in its own window and keeps your settings. Check for updates to find a Hub-compatible version.';
@@ -553,5 +558,5 @@
     await refresh(false);
     await refresh(true);
   }
-  start();
+  window.CreatorUsageTerms.requireAcceptance().then(start);
 })();

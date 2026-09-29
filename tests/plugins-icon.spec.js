@@ -11,6 +11,7 @@ test.beforeEach(async ({ page }) => {
     await route.fulfill({ response, headers: { ...response.headers(), 'content-security-policy': "connect-src ipc: http://ipc.localhost; img-src 'self' data:" } });
   });
   await page.addInitScript(() => {
+    localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     window.__TAURI__ = { event: { listen: async () => () => {} }, core: { invoke: async command => {
       if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
       if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: false, availableVersion: '1.0.0', updateAvailable: false })) };

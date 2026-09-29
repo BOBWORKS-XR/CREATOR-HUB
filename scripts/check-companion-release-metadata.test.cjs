@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { validateLatestRelease, checkApp, MAX_RELEASE_FEED } = require('./check-companion-release-metadata.cjs');
 
 const pin = { version: '0.3.4', assetName: 'Creator.Project.Setup_0.3.4_x64-setup.exe',
-  installerSha256: 'a'.repeat(64), executableSha256: 'b'.repeat(64) };
+  installerProtocol: 0, installerSha256: 'a'.repeat(64), executableSha256: 'b'.repeat(64) };
 const release = (tag, names) => ({ tag_name: `v${tag}`, draft: false, prerelease: false,
   assets: names.map(name => ({ name, browser_download_url: `https://github.com/example/${name}` })) });
 const descriptorAssets = ['creator-hub-windows-x86_64.json', 'creator-hub-windows-x86_64.json.minisig'];
@@ -22,8 +22,16 @@ test('drafts are ignored and stale versions or hashes fail before packaging', as
   const fetchImpl = async url => url.includes('/releases?')
     ? { ok: true, text: async () => JSON.stringify([release('0.3.4', descriptorAssets)]) }
     : { ok: true, text: async () => JSON.stringify({ appId: 'creator-project-setup', version: '0.3.4', assetName: pin.assetName,
-      sha256: pin.installerSha256, executableSha256: 'c'.repeat(64) }) };
+      sha256: pin.installerSha256, executableSha256: 'c'.repeat(64), installerProtocol: pin.installerProtocol }) };
   await assert.rejects(checkApp('setup', pin, undefined, fetchImpl), /does not match reviewed pin field executableSha256/);
+});
+
+test('latest release installer protocol must match its reviewed acceptance pin', async () => {
+  const fetchImpl = async url => url.includes('/releases?')
+    ? { ok: true, text: async () => JSON.stringify([release('0.3.4', descriptorAssets)]) }
+    : { ok: true, text: async () => JSON.stringify({ appId: 'creator-project-setup', version: pin.version,
+      assetName: pin.assetName, sha256: pin.installerSha256, executableSha256: pin.executableSha256, installerProtocol: 1 }) };
+  await assert.rejects(checkApp('setup', pin, undefined, fetchImpl), /does not match reviewed pin field installerProtocol/);
 });
 
 test('release feed response limit matches Hub catalog discovery', () => {
