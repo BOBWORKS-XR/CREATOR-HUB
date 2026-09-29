@@ -43,8 +43,11 @@ public static class NativeTestWindows {
 '@
 $handles = [NativeTestWindows]::ForProcess($TargetPid)
 if ($Action -eq 'close') {
-    $closeHandles = @($handles | Where-Object { [NativeTestWindows]::Text($_) -like 'Creator Hub*' })
-    if ($closeHandles.Count -ne 1) { throw 'Expected exactly one owned Creator Hub window to close.' }
+    $closeHandles = @($handles | Where-Object {
+        [NativeTestWindows]::Class($_) -eq 'Tauri Window' -and
+        [NativeTestWindows]::Text($_) -in @('Creator Hub - Development Preview', 'Creator Project Setup', 'Creator Works MCP')
+    })
+    if ($closeHandles.Count -ne 1) { throw 'Expected exactly one owned Creator Suite app window to close.' }
     if (-not [NativeTestWindows]::PostMessage($closeHandles[0], 0x10, [IntPtr]::Zero, [IntPtr]::Zero)) { throw "Could not post the owned close request: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())." }
     'WM_CLOSE posted to the exact owned Hub window.'
     exit

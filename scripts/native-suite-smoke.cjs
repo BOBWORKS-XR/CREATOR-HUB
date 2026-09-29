@@ -149,6 +149,14 @@ async function backend(app) {
     return Number(pid);
   });
 }
+async function closeStandaloneForHosting(app) {
+  await retry(() => native(backends[app], apps[app], 'close'));
+  const escaped = apps[app].replaceAll("'", "''");
+  await retry(() => execFileSync('powershell.exe', ['-NoProfile', '-Command',
+    `$p=@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -ieq '${escaped}' }); if ($p.Count -ne 0) { exit 1 }`],
+  { windowsHide: true }));
+  backends[app] = undefined;
+}
 async function finishInteractiveInstaller(app) {
   const installer = path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'downloads', `${pins[app].installerSha256}.exe`);
   const escaped = installer.replaceAll("'", "''");
@@ -372,7 +380,9 @@ async function closeHosted(app) {
       report.checks.push(`${app}: Apps-row Update app cancellation preserves files/settings; retry installs with native consent without opening app details`);
     } else {
       backends[app] = await backend(app);
+      await closeStandaloneForHosting(app);
       await page.locator(`#host-${app}-button`).click();
+      backends[app] = await backend(app);
       await retry(() => native(backends[app], apps[app], 'button', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'), 180);
       await retry(async () => assert.equal(await page.locator(`#${app}-host-frame`).isVisible(), true), 180);
       await page.waitForFunction(app => window.CreatorHosted.active(app) && !window.CreatorHosted.busy(), app, { timeout: 90000 });
@@ -392,7 +402,9 @@ async function closeHosted(app) {
     await show(app);
     if (!backends[app]) backends[app] = await backend(app);
     if (!(await page.evaluate(app => window.CreatorHosted.active(app), app))) {
+      await closeStandaloneForHosting(app);
       await page.locator(`#host-${app}-button`).click();
+      backends[app] = await backend(app);
       await retry(() => native(backends[app], apps[app], 'button', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub'), 180);
     }
     frames[app] = await retry(async () => {
