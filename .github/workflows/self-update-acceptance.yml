@@ -10,8 +10,12 @@ on:
         description: Also test the new outgoing updater using a version-only runtime fixture, not public stable
         type: boolean
         default: false
+      fixture_run:
+        description: Reuse a test-only hosted fixture from an earlier run with identical runtime source
+        type: string
 permissions:
   contents: read
+  actions: read
 jobs:
   self-update:
     runs-on: windows-latest
@@ -19,6 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v6
         with:
@@ -28,16 +33,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: ${{ inputs.hosted_fixture }}
       - name: Build test-only version fixture from current runtime source
-        if: ${{ inputs.hosted_fixture }}
+        if: ${{ inputs.hosted_fixture && inputs.fixture_run == '' }}
         shell: pwsh
         run: ./scripts/Build-HostedUpdateFixture.ps1 -FromVersion 0.1.8
       - uses: actions/upload-artifact@v4
-        if: ${{ inputs.hosted_fixture }}
+        if: ${{ inputs.hosted_fixture && inputs.fixture_run == '' }}
         with:
           name: TEST-ONLY-hosted-update-fixture
           path: dist/Creator-Hub-hosted-update-fixture/
           retention-days: 7
           if-no-files-found: error
+      - name: Reuse the exact test-only hosted fixture
+        if: ${{ inputs.hosted_fixture && inputs.fixture_run != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: TEST-ONLY-hosted-update-fixture
+          path: dist/Creator-Hub-hosted-update-fixture/
+          run-id: ${{ inputs.fixture_run }}
+          github-token: ${{ github.token }}
+      - name: Verify reused fixture matches the runtime source
+        if: ${{ inputs.hosted_fixture && inputs.fixture_run != '' }}
+        shell: pwsh
+        env:
+          REQUESTED_TARGET_VERSION: ${{ inputs.target_version }}
+        run: |
+          $fixture = Get-Content dist/Creator-Hub-hosted-update-fixture/fixture.json -Raw | ConvertFrom-Json
+          if ($fixture.testOnly -ne $true -or $fixture.fromVersion -ne '0.1.8' -or $fixture.toVersion -ne $env:REQUESTED_TARGET_VERSION) { throw 'Reused fixture has the wrong scope.' }
+          git diff --quiet $fixture.sourceRevision HEAD -- package.json package-lock.json src src-tauri
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime source changed since the fixture was built.' }
       - run: node --test scripts/check-release-feed.test.cjs
       - name: Read the packaged target version
         id: target

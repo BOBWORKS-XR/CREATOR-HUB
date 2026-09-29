@@ -67,6 +67,7 @@ async function connect(waitReady = true) {
     assert.ok(found); return found;
   });
   page.setDefaultTimeout(30000);
+  page.on('pageerror', error => { (report.pageErrors ||= []).push(String(error)); });
   await page.waitForFunction(() => window.CreatorHubNative);
   const terms = page.locator('#usage-terms-dialog');
   if (await terms.isVisible()) {
@@ -258,6 +259,15 @@ async function installCompanions() {
   report.passed = true;
 })().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; }).finally(async () => {
   if (!report.passed) {
+    try { if (page) report.pageState = await page.evaluate(() => ({
+      view: document.querySelector('.tool-detail:not(.hidden)')?.id || null,
+      hostSetupDisabled: document.querySelector('#host-setup-button')?.disabled,
+      hostMcpDisabled: document.querySelector('#host-mcp-button')?.disabled,
+      setupStatus: document.querySelector('#compatibility-status')?.textContent,
+      setupDetail: document.querySelector('#compatibility-detail')?.textContent,
+      toolState: document.querySelector('#tool-state')?.textContent,
+      checkUpdatesDisabled: document.querySelector('#check-updates')?.disabled,
+    })); } catch (error) { report.pageStateError = String(error); }
     try { fs.writeFileSync(path.join(out, 'startup.json'), JSON.stringify(diagnostics(), null, 2)); } catch (error) { report.diagnosticError = String(error); }
     try { if (ownedPid) fs.writeFileSync(path.join(out, 'dialogs.json'), native(ownedPid, 'snapshot')); } catch (error) { report.dialogError = String(error); }
     try { if (page) await page.screenshot({ path: path.join(out, 'failure.png') }); } catch {}
