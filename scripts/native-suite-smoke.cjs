@@ -152,28 +152,39 @@ async function backend(app) {
 async function finishInteractiveInstaller(app) {
   const installer = path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'downloads', `${pins[app].installerSha256}.exe`);
   const escaped = installer.replaceAll("'", "''");
-  const pid = await retry(() => {
-    const value = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-      `$p=Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq '${escaped}' }; if (-not $p) { exit 1 }; $p[0].ProcessId`],
-    { encoding: 'utf8', windowsHide: true }).trim();
-    assert.match(value, /^\d+$/);
-    return Number(value);
-  }, 30);
-  const running = () => {
-    try { execFileSync('powershell.exe', ['-NoProfile', '-Command', `Get-Process -Id ${pid} -ErrorAction Stop | Out-Null`], { windowsHide: true }); return true; }
-    catch { return false; }
+  const processTree = () => {
+    const script = `$all=@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath); $root=@($all | Where-Object { $_.ParentProcessId -eq ${child.pid} -and $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq '${escaped}' }); if ($root.Count -gt 1) { throw 'Multiple verified installers are running.' }; if ($root.Count -eq 0) { '[]'; exit }; $ids=@([int]$root[0].ProcessId); do { $added=@($all | Where-Object { $ids -contains [int]$_.ParentProcessId -and $ids -notcontains [int]$_.ProcessId } | ForEach-Object { [int]$_.ProcessId }); $ids += $added } while ($added.Count -gt 0); @($all | Where-Object { $ids -contains [int]$_.ProcessId }) | ConvertTo-Json -Compress`;
+    const result = execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8', windowsHide: true }).trim();
+    return result ? [].concat(JSON.parse(result)) : [];
   };
-  for (let step = 0; step < 8 && running(); step++) {
-    const windows = JSON.parse(native(pid, installer, 'snapshot'));
-    const buttons = windows.flatMap(window => window.controls || [])
-      .filter(control => control.type === 'ControlType.Button')
-      .map(control => control.name);
-    const button = ['Next', 'Install', 'Finish'].find(name => buttons.includes(name));
-    if (!button) throw Error(`Unexpected companion installer page; no approved navigation button found. Controls: ${buttons.join(', ')}`);
-    native(pid, installer, 'button', button);
+  await retry(() => assert.ok(processTree().some(process => process.ExecutablePath && path.resolve(process.ExecutablePath).toLowerCase() === installer.toLowerCase())), 30);
+  for (let step = 0; step < 12; step++) {
+    const processes = processTree();
+    if (!processes.some(process => process.ExecutablePath && path.resolve(process.ExecutablePath).toLowerCase() === installer.toLowerCase())) return;
+    let clicked = false;
+    for (const process of processes) {
+      const executable = process.ExecutablePath;
+      if (!executable) continue;
+      let windows;
+      try { windows = JSON.parse(native(process.ProcessId, executable, 'snapshot')); }
+      catch { continue; }
+      const controls = windows.flatMap(window => window.controls || [])
+        .filter(control => control.type === 'ControlType.Button')
+        .map(control => control.name);
+      const button = ['Next', 'Install', 'Finish'].find(name => controls.includes(name));
+      if (button) {
+        native(process.ProcessId, executable, 'button', button);
+        clicked = true;
+        break;
+      }
+    }
+    if (!clicked) {
+      const active = processes.map(({ ProcessId, ExecutablePath }) => ({ ProcessId, ExecutablePath }));
+      throw Error(`Unexpected companion installer page; only explicit Next/Install/Finish controls are allowed. Process tree: ${JSON.stringify(active)}`);
+    }
     await delay(400);
   }
-  await retry(() => assert.equal(running(), false, 'The verified companion installer did not close after its final page.'), 120);
+  await retry(() => assert.equal(processTree().some(process => process.ExecutablePath && path.resolve(process.ExecutablePath).toLowerCase() === installer.toLowerCase()), false, 'The verified companion installer did not close after its final page.'), 120);
 }
 async function closeHosted(app) {
   await show(app);
