@@ -30,7 +30,7 @@ jobs:
       - name: Build test-only version fixture from current runtime source
         if: ${{ inputs.hosted_fixture }}
         shell: pwsh
-        run: ./scripts/Build-HostedUpdateFixture.ps1
+        run: ./scripts/Build-HostedUpdateFixture.ps1 -FromVersion 0.1.8
       - uses: actions/upload-artifact@v4
         if: ${{ inputs.hosted_fixture }}
         with:
