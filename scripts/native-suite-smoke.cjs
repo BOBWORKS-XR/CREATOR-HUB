@@ -179,8 +179,14 @@ async function finishInteractiveInstaller(app) {
       }
     }
     if (!clicked) {
-      const active = processes.map(({ ProcessId, ExecutablePath }) => ({ ProcessId, ExecutablePath }));
-      throw Error(`Unexpected companion installer page; only explicit Next/Install/Finish controls are allowed. Process tree: ${JSON.stringify(active)}`);
+      const active = processes.map(({ ProcessId, ExecutablePath }) => {
+        let windows = [];
+        if (ExecutablePath) {
+          try { windows = JSON.parse(native(ProcessId, ExecutablePath, 'snapshot')); } catch (error) { windows = { error: String(error) }; }
+        }
+        return { ProcessId, ExecutablePath, windows };
+      });
+      throw Error(`Unexpected companion installer page; only explicit Next/Install/Finish controls are allowed. Process UI: ${JSON.stringify(active)}`);
     }
     await delay(400);
   }
