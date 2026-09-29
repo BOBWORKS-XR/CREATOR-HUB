@@ -11,3 +11,12 @@ test('release packaging cannot use a dispatched branch name as a release tag', (
     assert.ok(condition.includes("github.ref_type == 'tag' && startsWith(github.ref_name, 'v') &&"));
   }
 });
+
+test('macOS packages use ad-hoc signing and verify the built app before checksums', () => {
+  const config = JSON.parse(fs.readFileSync(path.join(__dirname, '../src-tauri/tauri.conf.json'), 'utf8'));
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/release.yml'), 'utf8');
+  assert.equal(config.bundle.macOS.signingIdentity, '-');
+  assert.match(workflow, /codesign --verify --deep --strict/);
+  assert.match(workflow, /architectures=\$\(lipo -archs/);
+  assert.match(workflow, /needs: \[package\]/);
+});
