@@ -158,6 +158,7 @@ async function installCompanions() {
   if (fixture) {
     for (const app of Object.keys(apps)) {
       await showApp(app);
+      await retry(async () => assert.equal(await page.locator(`#host-${app}-button`).isEnabled(), true), 120);
       await page.locator(`#host-${app}-button`).click();
       await approveHosted(app);
       await readyFrame(app);

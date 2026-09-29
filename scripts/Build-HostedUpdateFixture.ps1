@@ -1,14 +1,22 @@
 # Test-only version fixture. Never publish these installer bytes.
+param([string]$FromVersion = '')
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
     throw 'Hosted update fixture builds are restricted to disposable GitHub-hosted Windows runners.'
 }
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $targetVersion = (Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw | ConvertFrom-Json).version
-if ($targetVersion -notmatch '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$' -or [int]$Matches.patch -lt 1) {
+$targetMatch = [regex]::Match($targetVersion, '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$')
+if (-not $targetMatch.Success -or [int]$targetMatch.Groups['patch'].Value -lt 1) {
     throw 'The hosted update fixture requires a stable x.y.z release version with a previous patch.'
 }
-$fixtureVersion = "$($Matches.major).$($Matches.minor).$([int]$Matches.patch - 1)"
+$fixtureVersion = if ($FromVersion) { $FromVersion } else { "$($targetMatch.Groups['major'].Value).$($targetMatch.Groups['minor'].Value).$([int]$targetMatch.Groups['patch'].Value - 1)" }
+$fixtureMatch = [regex]::Match($fixtureVersion, '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$')
+if (-not $fixtureMatch.Success -or $fixtureMatch.Groups['major'].Value -ne $targetMatch.Groups['major'].Value -or
+    $fixtureMatch.Groups['minor'].Value -ne $targetMatch.Groups['minor'].Value -or
+    [int]$fixtureMatch.Groups['patch'].Value -ge [int]$targetMatch.Groups['patch'].Value) {
+    throw 'Fixture version must be an earlier stable patch in the target release series.'
+}
 $files = @('package.json', 'package-lock.json', 'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock')
 $originals = @{}
 $changes = @()
