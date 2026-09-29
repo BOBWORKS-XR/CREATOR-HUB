@@ -168,10 +168,8 @@ async function finishInteractiveInstaller(app) {
       let windows;
       try { windows = JSON.parse(native(process.ProcessId, executable, 'snapshot')); }
       catch { continue; }
-      const controls = windows.flatMap(window => window.controls || [])
-        .filter(control => control.type === 'ControlType.Button')
-        .map(control => control.name);
-      const button = ['Next', 'Install', 'Finish'].find(name => controls.includes(name));
+      const controls = windows.flatMap(window => window.controls || []);
+      const button = ['Next', 'Next >', 'Install', 'Finish'].find(name => controls.some(control => control.name === name));
       if (button) {
         native(process.ProcessId, executable, 'button', button);
         clicked = true;
