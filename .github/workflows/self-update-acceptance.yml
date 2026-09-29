@@ -23,7 +23,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v6
         with:
@@ -59,6 +58,9 @@ jobs:
         run: |
           $fixture = Get-Content dist/Creator-Hub-hosted-update-fixture/fixture.json -Raw | ConvertFrom-Json
           if ($fixture.testOnly -ne $true -or $fixture.fromVersion -ne '0.1.8' -or $fixture.toVersion -ne $env:REQUESTED_TARGET_VERSION) { throw 'Reused fixture has the wrong scope.' }
+          if ($fixture.sourceRevision -notmatch '^[a-f0-9]{40}$') { throw 'Reused fixture has no source revision.' }
+          git fetch --no-tags origin $fixture.sourceRevision
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture source revision is unavailable.' }
           git diff --quiet $fixture.sourceRevision HEAD -- package.json package-lock.json src src-tauri
           if ($LASTEXITCODE -ne 0) { throw 'Runtime source changed since the fixture was built.' }
       - run: node --test scripts/check-release-feed.test.cjs
