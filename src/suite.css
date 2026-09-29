@@ -9,7 +9,7 @@
 .suite-dismiss { position: fixed; z-index: 35; inset: 0; background: #090b0d66; opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 120ms ease, visibility 0s linear 120ms; }
 body.suite-open .suite-dismiss { opacity: 1; visibility: visible; pointer-events: auto; transition-delay: 0s; }
 .suite-shell { position: fixed; z-index: 40; top: 12px; left: -1px; width: 55px; height: 48px; max-height: calc(100dvh - 24px); overflow: hidden; border: 1px solid #374149; border-left: 0; border-radius: 0 6px 6px 0; background: #111518; transition: width 220ms cubic-bezier(.2,.75,.25,1), height 220ms cubic-bezier(.2,.75,.25,1); }
-.suite-shell.suite-expanded { width: 224px; height: 352px; }
+.suite-shell.suite-expanded { width: min(304px, calc(100vw - 16px)); height: 416px; }
 .suite-shell:has(.suite-trigger:hover) { border-color: #687780; }
 .suite-trigger { position: absolute; z-index: 2; top: 0; right: 0; display: grid; place-items: center; width: 54px; height: 46px; padding: 0; border: 0; border-radius: 0 5px 5px 0; background: transparent; color: #edf1f3; }
 .suite-trigger:hover { background: #252c32; }
@@ -33,7 +33,7 @@ body.suite-open .app-header .title-block { opacity: 0; pointer-events: none; }
 .suite-trigger .plugins-mark, .suite-trigger .plugins-mark img { width: 40px; height: 40px; }
 .converter-mark { background: #000; border-radius: 5px; }
 .converter-mark img { width: 22px; height: 22px; }
-.suite-menu { position: absolute; top: 48px; left: 0; width: 223px; height: calc(100% - 48px); overflow-y: auto; overflow-x: hidden; padding: 6px; background: transparent; opacity: 0; visibility: hidden; transform: translateX(-12px); transition: opacity 100ms ease, transform 180ms ease, visibility 0s linear 220ms; }
+.suite-menu { position: absolute; top: 48px; left: 0; width: 100%; height: calc(100% - 48px); overflow-y: auto; overflow-x: hidden; padding: 6px; background: transparent; opacity: 0; visibility: hidden; transform: translateX(-12px); transition: opacity 100ms ease, transform 180ms ease, visibility 0s linear 220ms; }
 .suite-expanded .suite-menu { opacity: 1; visibility: visible; transform: none; transition: opacity 140ms ease 60ms, transform 200ms ease, visibility 0s; }
 .suite-entry { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .suite-item { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; min-height: 58px; padding: 8px 6px; border: 0; border-radius: 4px; background: transparent; text-align: left; color: #edf1f3; }
@@ -43,7 +43,7 @@ button.suite-item:hover { background: #20272c; }
 .suite-item-copy { min-width: 0; flex: 1; }
 .suite-item-copy strong { display: block; font-size: 12px; line-height: 1.35; font-weight: 600; }
 .suite-item-copy small { display: block; margin-top: 3px; color: #9ba7af; font-size: 10px; }
-.suite-item-status { max-width: 72px; color: #9ba7af; font-size: 9px; line-height: 1.25; text-align: right; }
+.suite-item-status { display: block; margin-top: 4px; color: #9ba7af; font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
 .suite-download { display: grid; place-items: center; flex: 0 0 30px; width: 30px; height: 30px; padding: 0; border: 1px solid #39464e; border-radius: 4px; background: #171d21; color: #c6d0d6; }
 .suite-download:hover:not(:disabled) { border-color: #00cce8; color: #00cce8; }
 .suite-download:disabled { opacity: .45; }
