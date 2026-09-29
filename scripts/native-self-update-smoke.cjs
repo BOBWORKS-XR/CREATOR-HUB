@@ -68,6 +68,13 @@ async function connect(waitReady = true) {
   });
   page.setDefaultTimeout(30000);
   await page.waitForFunction(() => window.CreatorHubNative);
+  const terms = page.locator('#usage-terms-dialog');
+  if (await terms.isVisible()) {
+    await page.locator('#usage-terms-checkbox').check();
+    await page.locator('#usage-terms-continue').click();
+    await page.waitForFunction(() => !document.querySelector('#usage-terms-dialog')?.open);
+    report.checks.push('Accepted the required usage terms through the visible dialog on the disposable runner');
+  }
   if (waitReady) await page.waitForFunction(() => !document.querySelector('#check-updates').disabled, null, { timeout: 180000 });
   const state = diagnostics();
   assert.ok(state.listeners.length);
