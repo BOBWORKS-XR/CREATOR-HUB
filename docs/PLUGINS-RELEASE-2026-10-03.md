@@ -6,6 +6,6 @@
 - Unity helper 0.1.3 preserves absent download fields so supplemental listings, including OptiC's Warehouse Loft, are visible.
 - Upgrade exact known older helpers with backups. Refuse to overwrite user-modified helpers.
 
-Local shared regressions: 66 Plugins browser tests and 60 native Plugins tests passed. Unity metadata checks loaded all 13 current entries on Unity 2022.3.39f1 and 6000.3.21f1. Cancellation/retry and queue checks are fixture tests, not a claim of physical end-user import acceptance.
+Local shared regressions: 66 Plugins browser tests and 60 native Plugins tests passed. Unity metadata checks loaded all 13 current entries on Unity 2022.3.39f1 and 6000.3.21f1. Both editors also passed a real native package cancel/retry test using a disposable text-asset archive: the cancelled import restored no asset, and the retried import restored the exact bytes with durable receipts. Native wizard actions were automated; this is not physical end-user acceptance or proof of every community package's compatibility.
 
 Release candidates require exact installer, signed catalogue and installed update acceptance before publication. No user projects or live installations are release fixtures.
