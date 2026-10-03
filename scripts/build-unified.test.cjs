@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { relativeFile, verifyStage } = require('./build-unified.cjs');
+const { relativeFile, moduleFiles, verifyStage } = require('./build-unified.cjs');
 
 test('native built-in acceptance refuses the user PC before inspecting apps', () => {
   const result = require('node:child_process').spawnSync(process.execPath, [path.join(__dirname, 'native-builtin-smoke.cjs')], {
@@ -23,12 +23,27 @@ test('both internal backends must exist and match their build hashes', () => {
   try {
     const manifest = { schemaVersion: 1, platform: 'windows', arch: 'x86_64', modules: {} };
     for (const id of ['mcp', 'setup']) {
-      fs.mkdirSync(path.join(dir, id));
-      const executable = `${id}/backend.exe`;
-      fs.writeFileSync(path.join(dir, executable), id);
-      manifest.modules[id] = { executable, version: '1.0.0', files: { [executable]: crypto.createHash('sha256').update(id).digest('hex') } };
+      const names = moduleFiles(id, manifest.platform);
+      const files = {};
+      for (const name of names) {
+        fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+        fs.writeFileSync(path.join(dir, name), id);
+        files[name] = crypto.createHash('sha256').update(id).digest('hex');
+      }
+      manifest.modules[id] = { executable: names[0], version: '1.0.0', files };
     }
     verifyStage(dir, manifest);
+    const original = manifest.modules.mcp.files;
+    manifest.modules.mcp.files = { [manifest.modules.mcp.executable]: original[manifest.modules.mcp.executable] };
+    assert.throws(() => verifyStage(dir, manifest), /incomplete/);
+    manifest.modules.mcp.files = original;
+    manifest.modules.mcp.version = 'invalid';
+    assert.throws(() => verifyStage(dir, manifest), /module payload/);
+    manifest.modules.mcp.version = '1.0.0';
+    const runtime = moduleFiles('mcp', 'windows').find(name => name.endsWith('/runtime/node.exe'));
+    fs.unlinkSync(path.join(dir, runtime));
+    assert.throws(() => verifyStage(dir, manifest));
+    fs.writeFileSync(path.join(dir, runtime), 'mcp');
     fs.writeFileSync(path.join(dir, manifest.modules.mcp.executable), 'changed');
     assert.throws(() => verifyStage(dir, manifest), /changed/);
     fs.unlinkSync(path.join(dir, manifest.modules.mcp.executable));

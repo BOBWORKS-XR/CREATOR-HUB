@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
+const semver = require('semver');
 
 const root = path.resolve(__dirname, '..');
 const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -9,13 +10,26 @@ function relativeFile(name) {
   return typeof name === 'string' && /^[a-zA-Z0-9_./-]+$/.test(name)
     && !name.startsWith('/') && !name.split('/').some(part => ['', '.', '..'].includes(part));
 }
+function moduleFiles(id, platform) {
+  const extension = platform === 'windows' ? '.exe' : '';
+  return id === 'setup' ? [`setup/creator-project-setup${extension}`] : [
+    `mcp/creator-works-mcp-launcher${extension}`, 'mcp/server/creator-works-mcp.mjs',
+    `mcp/server/runtime/node${extension}`, 'mcp/server/runtime/LICENSE', 'mcp/server/runtime/VERSION',
+    'mcp/server/unity-extension/Editor/BanterMCPBridge.cs',
+    'mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png',
+    'mcp/server/LICENSE', 'mcp/server/THIRD_PARTY_NOTICES.md',
+  ];
+}
 function verifyStage(directory, manifest) {
   if (manifest.schemaVersion !== 1 || !['windows', 'linux', 'macos'].includes(manifest.platform)
     || !['x86_64', 'aarch64'].includes(manifest.arch)
     || Object.keys(manifest.modules || {}).sort().join(',') !== 'mcp,setup') throw Error('Invalid built-in manifest.');
   for (const [id, entry] of Object.entries(manifest.modules)) {
-    if (!relativeFile(entry.executable) || !entry.executable.startsWith(`${id}/`)
-      || !Object.hasOwn(entry.files, entry.executable)) throw Error('Invalid module executable.');
+    const expected = moduleFiles(id, manifest.platform);
+    if (!entry || entry.executable !== expected[0] || semver.valid(entry.version) !== entry.version
+      || !entry.files || Object.keys(entry.files).sort().join(',') !== expected.sort().join(',')) {
+      throw Error(`Invalid or incomplete ${id} module payload.`);
+    }
     for (const [name, hash] of Object.entries(entry.files)) {
       if (!relativeFile(name) || !name.startsWith(`${id}/`) || !/^[a-f0-9]{64}$/.test(hash)) throw Error('Invalid module file.');
       const file = path.join(directory, name);
@@ -89,7 +103,7 @@ function build(label) {
   console.log(`Local unified candidate: ${output}. Not a release or migration acceptance.`);
   return output;
 }
-module.exports = { relativeFile, verifyStage, build };
+module.exports = { relativeFile, moduleFiles, verifyStage, build };
 if (require.main === module) {
   try { if (process.argv.length !== 3) throw Error('Provide one build name.'); build(process.argv[2]); }
   catch (error) { console.error(error.message); process.exitCode = 1; }

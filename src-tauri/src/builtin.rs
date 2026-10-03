@@ -27,6 +27,7 @@ struct Module {
     version: String,
     files: BTreeMap<String, String>,
 }
+#[derive(Debug)]
 pub struct Candidate {
     pub path: PathBuf,
     pub hash: String,
@@ -75,12 +76,28 @@ fn verify(root: &Path, id: &str, entry: Module) -> Result<Candidate, String> {
         "creator-project-setup"
     };
     let expected = format!("{id}/{binary}{}", if cfg!(windows) { ".exe" } else { "" });
+    let mut required = vec![expected.clone()];
+    if id == "mcp" {
+        required.extend([
+            "mcp/server/creator-works-mcp.mjs".to_owned(),
+            format!(
+                "mcp/server/runtime/node{}",
+                if cfg!(windows) { ".exe" } else { "" }
+            ),
+            "mcp/server/runtime/LICENSE".to_owned(),
+            "mcp/server/runtime/VERSION".to_owned(),
+            "mcp/server/unity-extension/Editor/BanterMCPBridge.cs".to_owned(),
+            "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png".to_owned(),
+            "mcp/server/LICENSE".to_owned(),
+            "mcp/server/THIRD_PARTY_NOTICES.md".to_owned(),
+        ]);
+    }
+    required.sort();
     if entry.executable != expected
         || semver::Version::parse(&entry.version).is_err()
-        || !entry.files.contains_key(&entry.executable)
-        || entry.files.len() > 32
+        || entry.files.keys().cloned().collect::<Vec<_>>() != required
     {
-        return Err("Invalid built-in module identity.".into());
+        return Err("Invalid or incomplete built-in module identity.".into());
     }
     for (name, hash) in &entry.files {
         if !relative_file(name)
@@ -206,6 +223,69 @@ mod tests {
         let mut module = entry();
         module.version = "invalid".into();
         assert!(verify(root, "setup", module).is_err());
+    }
+
+    #[test]
+    fn mcp_cannot_be_ready_without_the_server_runtime_and_bridge() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("mcp")).unwrap();
+        let executable = format!(
+            "mcp/creator-works-mcp-launcher{}",
+            if cfg!(windows) { ".exe" } else { "" }
+        );
+        std::fs::write(root.join(&executable), b"fixture").unwrap();
+        let module = Module {
+            executable: executable.clone(),
+            version: "2.7.7".into(),
+            files: BTreeMap::from([(executable, format!("{:x}", Sha256::digest(b"fixture")))]),
+        };
+        assert!(verify(&root, "mcp", module)
+            .unwrap_err()
+            .contains("incomplete"));
+    }
+
+    #[test]
+    fn complete_mcp_payload_is_accepted_and_every_component_is_verified() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let extension = if cfg!(windows) { ".exe" } else { "" };
+        let executable = format!("mcp/creator-works-mcp-launcher{extension}");
+        let names = [
+            executable.clone(),
+            "mcp/server/creator-works-mcp.mjs".into(),
+            format!("mcp/server/runtime/node{extension}"),
+            "mcp/server/runtime/LICENSE".into(),
+            "mcp/server/runtime/VERSION".into(),
+            "mcp/server/unity-extension/Editor/BanterMCPBridge.cs".into(),
+            "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png".into(),
+            "mcp/server/LICENSE".into(),
+            "mcp/server/THIRD_PARTY_NOTICES.md".into(),
+        ];
+        let files = names
+            .iter()
+            .map(|name| {
+                let file = root.join(name);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, b"fixture").unwrap();
+                (name.clone(), format!("{:x}", Sha256::digest(b"fixture")))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let entry = || Module {
+            executable: executable.clone(),
+            version: "2.7.7".into(),
+            files: files.clone(),
+        };
+        assert!(verify(&root, "mcp", entry()).is_ok());
+        for name in names {
+            let file = root.join(&name);
+            std::fs::write(&file, b"tampered").unwrap();
+            assert!(verify(&root, "mcp", entry()).is_err(), "{name}");
+            std::fs::remove_file(&file).unwrap();
+            assert!(verify(&root, "mcp", entry()).is_err(), "{name}");
+            std::fs::write(file, b"fixture").unwrap();
+        }
+        assert!(verify(&root, "mcp", entry()).is_ok());
     }
 
     #[cfg(windows)]

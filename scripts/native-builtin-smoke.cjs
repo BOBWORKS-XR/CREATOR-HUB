@@ -15,6 +15,16 @@ const hub = path.join(directory, 'creator-hub.exe');
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out);
 const report = { checks: [], passed: false };
+const backendPids = new Map();
+const watchdog = setTimeout(() => {
+  report.passed = false;
+  report.error = 'Native acceptance exceeded its 5-minute deadline; no successful outcome is assumed.';
+  try { if (fs.existsSync(policy)) webviewPolicy('Restore'); }
+  catch (error) { report.policyCleanupError = String(error); }
+  fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
+  process.exit(1);
+}, 5 * 60 * 1000);
+watchdog.unref();
 const policy = path.join(out, 'webview-policy.json');
 function webviewPolicy(action) {
   execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts/native-webview-policy.ps1'), '-Action', action, '-StateFile', policy], { windowsHide: true, timeout: 30000 });
@@ -77,6 +87,7 @@ let child, browser, page;
         `$p=Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.ExecutablePath -eq '${executable.replaceAll("'", "''")}' }; $p.ProcessId`], { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
       assert.match(value, /^\d+$/); return Number(value);
     });
+    backendPids.set(app, { pid, executable });
     await retry(() => native(pid, executable, 'button', app === 'setup' ? 'Open in Hub' : 'Enable MCP controls'));
     await page.locator(`#${app}-host-frame`).waitFor();
     const frame = page.frameLocator(`#${app}-host-frame`);
@@ -101,7 +112,15 @@ let child, browser, page;
   for (const app of ['setup', 'mcp']) {
     if (app === 'mcp') { await page.locator('#suite-trigger').click(); await page.locator('#suite-menu [data-view="mcp"]').click(); }
     await page.locator('#hosted-stop').click();
+    await retry(() => native(child.pid, hub, 'button', 'Close view'));
     await page.locator(`#${app}-host-frame`).waitFor({ state: 'detached' });
+    const backend = backendPids.get(app);
+    await retry(() => {
+      const running = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+        `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${backend.pid}"; if($p -and $p.ExecutablePath -eq '${backend.executable.replaceAll("'", "''")}') { 'running' }`],
+      { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
+      assert.equal(running, '', `${app} backend must exit after its view closes`);
+    }, 15);
   }
   registrations();
   report.checks.push('Graceful module close; no separate product registrations created');
@@ -110,11 +129,24 @@ let child, browser, page;
   .finally(async () => {
     fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
     if (child && child.exitCode === null) {
-      try { native(child.pid, hub, 'close'); await retry(() => assert.notEqual(child.exitCode, null), 15); }
-      catch (error) { report.cleanupError = String(error); report.passed = false; process.exitCode = 1; }
+      try {
+        // An unanswered view-close prompt blocks normal window close. Cancel only
+        // that known test-owned prompt before requesting a graceful Hub exit.
+        try { native(child.pid, hub, 'button', 'Keep open'); } catch { /* No pending close prompt. */ }
+        native(child.pid, hub, 'close'); await retry(() => assert.notEqual(child.exitCode, null), 15);
+      } catch (error) { report.cleanupError = String(error); report.passed = false; process.exitCode = 1; }
+      finally { child.unref(); }
     }
-    await browser?.close();
-    if (fs.existsSync(policy)) webviewPolicy('Restore');
+    try {
+      if (browser) await Promise.race([browser.close(), new Promise((_, reject) => {
+        const timer = setTimeout(() => reject(Error('Browser transport cleanup exceeded 10 seconds.')), 10000);
+        timer.unref();
+      })]);
+    } catch (error) { report.browserCleanupError = String(error); report.passed = false; process.exitCode = 1; }
+    try { if (fs.existsSync(policy)) webviewPolicy('Restore'); }
+    catch (error) { report.policyCleanupError = String(error); report.passed = false; process.exitCode = 1; }
     fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report));
+    clearTimeout(watchdog);
+    process.exit(process.exitCode || 0);
   });

@@ -77,12 +77,14 @@ jobs:
             src-tauri
             modules/mcp/launcher/src-tauri
             modules/project-setup/src-tauri
+          cache-on-failure: true
       - run: npm ci
       - run: npm --prefix modules/mcp ci
       - run: npm --prefix modules/project-setup ci
       - run: npm run build:unified -- ci-windows
       - run: npx playwright install chromium
       - name: Open both bundled modules without companion installations
+        timeout-minutes: 8
         run: node scripts/native-builtin-smoke.cjs artifacts/unified/ci-windows
       - name: Retain native acceptance evidence
         if: always()
