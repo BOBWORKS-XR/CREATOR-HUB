@@ -37,8 +37,10 @@ test('both internal backends must exist and match their build hashes', () => {
     manifest.modules.mcp.files = { [manifest.modules.mcp.executable]: original[manifest.modules.mcp.executable] };
     assert.throws(() => verifyStage(dir, manifest), /incomplete/);
     manifest.modules.mcp.files = original;
-    manifest.modules.mcp.version = 'invalid';
-    assert.throws(() => verifyStage(dir, manifest), /module payload/);
+    for (const version of ['invalid', null, undefined, 277, '', 'v2.7.7', '02.7.7']) {
+      manifest.modules.mcp.version = version;
+      assert.throws(() => verifyStage(dir, manifest), /module payload/);
+    }
     manifest.modules.mcp.version = '1.0.0';
     const runtime = moduleFiles('mcp', 'windows').find(name => name.endsWith('/runtime/node.exe'));
     fs.unlinkSync(path.join(dir, runtime));

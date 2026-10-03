@@ -26,7 +26,8 @@ function verifyStage(directory, manifest) {
     || Object.keys(manifest.modules || {}).sort().join(',') !== 'mcp,setup') throw Error('Invalid built-in manifest.');
   for (const [id, entry] of Object.entries(manifest.modules)) {
     const expected = moduleFiles(id, manifest.platform);
-    if (!entry || entry.executable !== expected[0] || semver.valid(entry.version) !== entry.version
+    if (!entry || entry.executable !== expected[0] || typeof entry.version !== 'string'
+      || semver.valid(entry.version) !== entry.version
       || !entry.files || Object.keys(entry.files).sort().join(',') !== expected.sort().join(',')) {
       throw Error(`Invalid or incomplete ${id} module payload.`);
     }
