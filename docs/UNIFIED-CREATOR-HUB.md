@@ -19,8 +19,32 @@ directions in PROJECT-SETUP-IN-HUB.md and SHARED-MCP-DIRECTION.md.
 
 ## Current State
 
-Source consolidation only. Current Hub 0.1.12 still installs and hosts separate
-MCP/Setup applications. Importing their source does not change that behavior.
+Published Hub 0.1.12 still installs and hosts separate MCP/Setup applications.
+The consolidation branch now has an opt-in Windows built-in candidate builder.
+It compiles private backends (no installers or app registrations), packages MCP's
+server/runtime/bridge, and binds their hashes into the Hub executable. Native
+inventory and startup use these payloads instead of companion discovery. The
+separate-app controls and MCP's standalone update check are hidden for built-ins.
+Legacy builds remain unchanged when no built-in descriptor is supplied.
+
+The existing consent and exclusive settings ownership checks remain in place.
+This is not migration acceptance: the current modules still use their existing
+settings locations, and no legacy client entries are repointed by this phase.
+The bundled restore marker can reopen the current build-bound module after an
+update; saved paths do not authorize an arbitrary executable.
+
+`npm run build:unified -- unique-build-name` creates a new immutable local
+candidate under `artifacts/unified/`. It does not install it or publish a release.
+The dedicated clean Windows CI check launches both real backends without
+companion installations. The native acceptance script refuses non-disposable
+machines before inspecting settings or registrations.
+
+Confirmed platform blockers: both modules' native parent-host check currently
+supports Windows/Linux, not macOS; writable MCP hosting is Windows-only. The
+unified builder therefore refuses non-Windows candidates until those contracts
+and their native acceptance are implemented. Existing standalone platform builds
+are not being removed or relabeled as unified builds.
+
 Root source CI and browser fixtures now use the local modules instead of fetching
 other repositories. Initial subtree contents must match their accepted source
 trees exactly. This branch's release workflow is blocked until distribution and

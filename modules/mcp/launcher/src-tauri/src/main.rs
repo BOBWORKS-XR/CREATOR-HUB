@@ -2133,6 +2133,11 @@ fn main() {
         return;
     }
 
+    if option_env!("CREATOR_HUB_INTERNAL_MODULE") == Some("1") {
+        eprintln!("This is an internal Creator Hub module. Open MCP from Creator Hub.");
+        std::process::exit(2);
+    }
+
     // Reserve settings ownership before a writable UI can load/migrate config.
     // Metadata and the read-only hosted entry above do not create lock files.
     #[cfg(windows)]

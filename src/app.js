@@ -188,6 +188,7 @@
     inventoryError = '';
   }
   function appStatus(state) {
+    if (state?.builtIn) return state.issue ? 'Built-in module unavailable' : 'Included in Hub';
     if (!state) return 'Status unavailable';
     if (state.installed && !state.trusted && state.issue?.startsWith("Hub couldn't verify this app.")) return 'Installed · not in Hub catalogue';
     if (state.issue) return 'Needs attention';
@@ -219,7 +220,7 @@
       const label = inventory?.supported === false ? 'Not supported' : !inventory && busy ? 'Checking' : appStatus(state);
       const status = byId(`status-${id}`);
       status.replaceChildren();
-      if (label.startsWith('Installed') && state?.trusted && !state.issue) {
+      if ((label.startsWith('Installed') || state?.builtIn) && state?.trusted && !state.issue) {
         const check = document.createElement('span');
         check.className = 'icon icon-check status-indicator';
         check.setAttribute('aria-hidden', 'true');
@@ -227,12 +228,12 @@
       }
       status.append(document.createTextNode(label));
       status.classList.toggle('not-installed', label.startsWith('Not installed'));
-      status.classList.toggle('installed', label.startsWith('Installed') && state?.trusted && !state.issue);
+      status.classList.toggle('installed', (label.startsWith('Installed') || state?.builtIn) && state?.trusted && !state.issue);
       status.classList.toggle('unverified', label.startsWith('Installed') && !state?.trusted);
       byId(`menu-status-${id}`).textContent = inventory?.supported === false ? 'Not supported'
         : inventoryError ? 'Check failed' : !inventory && busy ? 'Checking' : appStatus(state);
       const menuDownload = byId(`menu-download-${id}`);
-      const canDownload = Boolean(inventory?.supported && !inventoryError && state
+      const canDownload = Boolean(inventory?.supported && !inventoryError && state && !state.builtIn
         && (!state.installed || state.updateAvailable) && !state.downloaded && !state.issue && !state.installBlocked);
       menuDownload.classList.toggle('hidden', !canDownload);
       menuDownload.disabled = busy;
@@ -281,15 +282,17 @@
     byId('release-button').disabled = needsRelease ? busy || Boolean(inventoryError) : blocked || (!opening && blockers.length > 0 && !canDisconnectForUpdate(state));
     byId('release-button').classList.toggle('hidden', Boolean(opening && canHost));
     byId('download-button').disabled = busy || Boolean(inventoryError) || !inventory?.supported || !state || state.downloaded || Boolean(state.installBlocked);
-    byId('adopt-button').disabled = busy || Boolean(inventoryError) || !inventory?.supported;
+    byId('adopt-button').disabled = busy || Boolean(inventoryError) || !inventory?.supported || Boolean(state?.builtIn);
+    byId('adopt-button').classList.toggle('hidden', Boolean(state?.builtIn));
     byId('open-button').disabled = blocked || !state?.trusted;
-    byId('open-button').classList.toggle('hidden', !state?.installed || (!state.updateAvailable && !canHost));
+    byId('open-button').classList.toggle('hidden', Boolean(state?.builtIn) || !state?.installed || (!state.updateAvailable && !canHost));
     byId('open-button').textContent = canHost ? 'Open separately' : 'Open app';
     byId('primary-label').textContent = !state ? busy ? 'Checking' : 'Unavailable' : opening ? 'Open app' : state.requiredHubVersion ? 'Update Hub first' : needsRelease ? 'Check for an update' : canDisconnectForUpdate(state) ? 'Disconnect and update' : state.updateAvailable ? 'Update app' : 'Install app';
     byId('install-options').classList.toggle('hidden', Boolean(opening || needsRelease) || !state || !inventory?.supported);
-    byId('download-button').classList.toggle('hidden', Boolean(opening || needsRelease));
+    byId('download-button').classList.toggle('hidden', Boolean(state?.builtIn || opening || needsRelease));
+    if (state?.builtIn) byId('release-button').classList.add('hidden');
     if (state) {
-      const lines = [`Available version: ${state.availableVersion}`, state.installed ? `Your version: ${state.installedVersion || 'not verified'}` : state.issue ? 'App needs attention' : 'Not installed',
+      const lines = [state.builtIn ? 'Included in this Creator Hub build. Updates are delivered with Hub.' : `Available version: ${state.availableVersion}`, state.builtIn ? '' : state.installed ? `Your version: ${state.installedVersion || 'not verified'}` : state.issue ? 'App needs attention' : 'Not installed',
         state.installedPath ? `Location: ${state.installedPath}` : '',
         state.downloaded ? 'Download ready' : '', state.running ? 'Currently in use' : '',
         state.installerInteractive && !opening && !needsRelease ? 'This release uses its normal installer window. Keep the default folder.' : '', state.issue, state.checkWarning, state.installBlocked].filter(Boolean);
@@ -316,6 +319,8 @@
     byId('compatibility-status').textContent = inventoryError ? 'App discovery needs attention' : !state ? 'Checking compatibility' : hostedMismatch ? 'Update needed for Hub' : canHost ? 'Ready to open in Hub' : state?.trusted ? 'Your app is ready' : unlistedBuild ? 'Installed outside Hub catalogue' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
     byId('compatibility-detail').textContent = inventoryError || !state
       ? 'Hub needs a completed app check to show installation, update and Open in Hub options.'
+      : state.builtIn
+      ? state.issue || `Included in Hub${state.hostedPreview === 'read-only' ? '; MCP controls on this platform are currently read-only' : ''}. No separate installation is needed.`
       : hostedMismatch
       ? `${state.requiredHubVersion ? 'Update Hub first, then check this app for updates.' : state.updateAvailable ? 'Update this app to open it inside Hub.' : 'Check for updates to get matching versions of Hub and this app.'} You can still use Open app for a separate window.`
       : unlistedBuild

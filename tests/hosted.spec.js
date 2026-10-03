@@ -37,11 +37,12 @@ async function open(page, options = {}) {
           throw 'Hub could not start its installer. Nothing was installed.';
         }
         if (command === 'project_inventory') return { projects: [], warnings: [] };
-        if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: true, trusted: true, hostedCompatible: true, updateAvailable: app === 'setup' && Boolean(window.setupUpdate), availableVersion: window.setupUpdate ? '0.3.0' : '0.3.0-alpha.1', installedVersion: '0.3.0-alpha.1', hostedPreview: app === 'mcp' && !options.writableMcp ? 'read-only' : 'writable' })) };
+        if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, builtIn: Boolean(options.builtIn), installed: true, trusted: true, hostedCompatible: true, updateAvailable: !options.builtIn && app === 'setup' && Boolean(window.setupUpdate), availableVersion: window.setupUpdate ? '0.3.0' : '0.3.0-alpha.1', installedVersion: '0.3.0-alpha.1', hostedPreview: app === 'mcp' && !options.writableMcp ? 'read-only' : 'writable' })) };
         if (command === 'start_hosted_app' || command === 'restore_hosted_app') {
           if (command === 'restore_hosted_app' && window.restoreFailures-- > 0) throw 'The app could not reopen.';
           if (options.decline) throw 'Opening Setup in Hub was declined. Standalone Setup is unchanged.';
           if (args.app === 'mcp') return { session: 'b'.repeat(64), appId: 'creator-works-mcp', version: '2.7.0-alpha.1', files: mcpFiles,
+            builtIn: Boolean(options.builtIn),
             ...(options.writableMcp ? { hostingRevision: 2, effectiveMode: 'writable' } : {}) };
           return { session: (command === 'restore_hosted_app' ? 'c' : 'a').repeat(64), appId: 'creator-project-setup', version: setupVersion, files };
         }
@@ -105,6 +106,25 @@ async function switchTo(page, name) {
   await page.locator('#suite-trigger').click();
   await page.locator(`#suite-menu [data-view="${name}"]`).click();
 }
+
+test('built-in features open automatically and expose no separate install or update controls', async ({ page }) => {
+  const setup = await open(page, { builtIn: true, writableMcp: true });
+  await expect(setup.locator('#create-button')).toBeEnabled();
+  await switchTo(page, 'hub');
+  for (const app of ['mcp', 'setup']) {
+    await expect(page.locator(`#status-${app}`)).toHaveText('Included in Hub');
+    await expect(page.locator(`#update-${app}`)).toBeHidden();
+    await expect(page.locator(`#menu-download-${app}`)).toBeHidden();
+  }
+  await switchTo(page, 'mcp');
+  await expect(page.frameLocator('#mcp-host-frame').locator('#setupBtn')).toBeVisible();
+  await expect(page.frameLocator('#mcp-host-frame').locator('#checkUpdatesBtn')).toBeHidden();
+  await expect(page.frameLocator('#mcp-host-frame').locator('#updateStatus')).toContainText('included with Creator Hub');
+  await expect(page.locator('#adopt-button')).toBeHidden();
+  await expect(page.locator('#download-button')).toBeHidden();
+  await expect(page.locator('#open-button')).toBeHidden();
+  expect(await page.evaluate(() => window.hostCalls.some(call => ['install_app', 'download_app', 'open_app', 'use_existing_app'].includes(call.command)))).toBe(false);
+});
 
 test('cancelling a Hub update leaves hosted forms and backends intact', async ({ page }) => {
   const setup = await open(page, { cancelHubUpdate: true });

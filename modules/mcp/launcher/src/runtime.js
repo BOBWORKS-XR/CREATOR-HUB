@@ -2,7 +2,7 @@
   const standalone = window === window.parent;
   if (standalone) {
     window.CreatorRuntime = Object.freeze({
-      ready: Promise.resolve(), hosted: false, readOnly: false,
+      ready: Promise.resolve(), hosted: false, readOnly: false, builtIn: false,
       invoke: (command, args) => window.__TAURI__.core.invoke(command, args),
       listen: (name, callback) => window.__TAURI__.event?.listen(name, callback) ?? Promise.resolve(() => {}),
       openDialog: options => window.__TAURI__.dialog.open(options),
@@ -24,6 +24,7 @@
     'set_project_feedback_settings', 'get_stable_release',
   ];
   let readOnly = true;
+  let builtIn = false;
   const listeners = new Map();
   const queue = [];
   let active;
@@ -82,6 +83,7 @@
     if (event.data.effectiveMode !== undefined && !['read-only', 'writable'].includes(event.data.effectiveMode)) return;
     if (event.data.effectiveMode === 'writable' && event.data.hostingRevision !== 2) return;
     readOnly = event.data.effectiveMode !== 'writable';
+    builtIn = event.data.builtIn === true;
     if (!readOnly) for (const command of writableCommands) commands.add(command);
     port = event.ports[0];
     port.onmessageerror = () => disconnect('Hub sent an unreadable response. No command was retried.');
@@ -110,6 +112,7 @@
     ready,
     get hosted() { return Boolean(port); },
     get readOnly() { return readOnly; },
+    get builtIn() { return builtIn; },
     get disconnected() { return Boolean(failed); },
     invoke,
     async listen(name, callback) {

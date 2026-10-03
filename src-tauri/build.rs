@@ -1,4 +1,23 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=CREATOR_BUILTIN_MANIFEST");
+    let manifest = match std::env::var_os("CREATOR_BUILTIN_MANIFEST") {
+        Some(path) => {
+            let path = std::path::PathBuf::from(path);
+            assert!(
+                path.is_absolute(),
+                "Built-in descriptor must have an absolute path"
+            );
+            println!("cargo:rerun-if-changed={}", path.display());
+            std::fs::read(path).expect("Cannot read built-in descriptor")
+        }
+        None => b"null".to_vec(),
+    };
+    std::fs::write(
+        std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
+            .join("builtin-manifest.json"),
+        manifest,
+    )
+    .expect("Cannot bind built-in descriptor to Hub");
     println!("cargo:rerun-if-env-changed=CREATOR_SETUP_HOST_SHA256");
     println!("cargo:rerun-if-env-changed=CREATOR_MCP_HOST_SHA256");
     println!("cargo:rerun-if-env-changed=CREATOR_MCP_HOST_READONLY_EVENTS");

@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=CREATOR_HUB_INTERNAL_MODULE");
     use sha2::{Digest, Sha256};
     use std::io::{Read, Write};
     let manifest =

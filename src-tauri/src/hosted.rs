@@ -184,6 +184,7 @@ pub struct Hosting(Mutex<Vec<Session>>);
 struct Session {
     app: AppId,
     path: PathBuf,
+    bundled: bool,
     writable: bool,
     connection: Arc<SessionConnection>,
     replies: mpsc::Receiver<Result<Value, String>>,
@@ -367,7 +368,7 @@ impl Hosting {
             if session.connection.operation.lock().map_err(|_| "Hosted operation state unavailable.")?.busy() {
                 return Err(format!("{} is still working. Finish its work before updating Hub; no views were closed.", session.app.name()));
             }
-            Ok(crate::hosted_restore::View { app: session.app, path: session.path.clone() })
+            Ok(crate::hosted_restore::View { app: session.app, path: session.path.clone(), bundled: session.bundled })
         }).collect()
     }
 
@@ -406,6 +407,17 @@ impl Hosting {
         kind: AppId,
         path: &Path,
         expected_hash: &str,
+    ) -> Result<Value, String> {
+        self.start_verified(handle, kind, path, expected_hash, false)
+    }
+
+    pub(crate) fn start_verified(
+        &self,
+        handle: &tauri::AppHandle,
+        kind: AppId,
+        path: &Path,
+        expected_hash: &str,
+        bundled: bool,
     ) -> Result<Value, String> {
         if !crate::platform::supported() {
             return Err("Hosted native apps are currently not supported on this platform.".into());
@@ -500,6 +512,7 @@ impl Hosting {
         let mut backend = Session {
             app: kind,
             path: path.to_path_buf(),
+            bundled,
             writable,
             connection,
             replies: receiver,
@@ -530,6 +543,7 @@ impl Hosting {
             return Err("MCP did not confirm the requested hosting mode.".into());
         }
         let mut result = json!({"session":backend.nonce,"appId":result["appId"],"version":result["version"],"files":result["files"]});
+        result["builtIn"] = json!(bundled);
         if read_only_events {
             result["hostingRevision"] = json!(2);
             result["effectiveMode"] = json!(if writable { "writable" } else { "read-only" });
@@ -679,6 +693,15 @@ pub async fn start_hosted_app(handle: tauri::AppHandle, app: AppId) -> Result<Va
     tauri::async_runtime::spawn_blocking(move || {
         let manager = handle.state::<crate::manager::Manager>();
         let _operation = manager.begin()?;
+        if let Some(candidate) = crate::builtin::candidate(&handle, app)? {
+            return handle.state::<Hosting>().start_verified(
+                &handle,
+                app,
+                &candidate.path,
+                &candidate.hash,
+                true,
+            );
+        }
         let (path, release) = manager.hosted_candidate(app)?.ok_or(
             "Choose Use existing app or install a verified release before opening it in Hub.",
         )?;
@@ -725,6 +748,7 @@ mod tests {
             app,
             path: path.to_path_buf(),
             writable: false,
+            bundled: false,
             connection,
             replies: mpsc::sync_channel(1).1,
             id: 0,
@@ -881,6 +905,7 @@ mod tests {
             app: AppId::Mcp,
             path: image.clone(),
             writable: true,
+            bundled: false,
             connection: Arc::clone(&connection),
             replies: receiver,
             id: 1,
@@ -1137,6 +1162,7 @@ mod tests {
             app,
             path: path.clone(),
             writable: false,
+            bundled: false,
             connection: Arc::new(SessionConnection::default()),
             replies: mpsc::sync_channel(1).1,
             id: 0,

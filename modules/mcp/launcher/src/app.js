@@ -44,6 +44,12 @@ document.addEventListener('DOMContentLoaded', async function() {
   window.CreatorAiUsageNotice.initialize();
   try { await window.CreatorRuntime.ready; }
   catch (error) { showToast(String(error), 'error'); return; }
+  if (window.CreatorRuntime.builtIn) {
+    elements.automaticUpdates.closest('.setting-row').hidden = true;
+    elements.checkUpdatesBtn.closest('.action-buttons').hidden = true;
+    elements.updateStatus.textContent = 'MCP updates are included with Creator Hub updates.';
+    document.getElementById('feedbackHeading').textContent = 'Feedback';
+  }
   if (window.CreatorRuntime.hosted && window.CreatorRuntime.readOnly) {
     await initializeHostedPreview();
     return;
@@ -911,6 +917,7 @@ async function saveFeedbackSettings() {
 
 function scheduleUpdateChecks() {
   clearInterval(updateTimer);
+  if (window.CreatorRuntime.builtIn) return;
   if (config.automatic_update_checks === true) {
     void checkForUpdates();
     updateTimer = setInterval(() => void checkForUpdates(), 6 * 60 * 60 * 1000);
@@ -918,6 +925,7 @@ function scheduleUpdateChecks() {
 }
 
 async function checkForUpdates() {
+  if (window.CreatorRuntime.builtIn) return;
   if (elements.checkUpdatesBtn.disabled) return;
   elements.checkUpdatesBtn.disabled = true;
   elements.openReleaseBtn.hidden = true;

@@ -1,0 +1,120 @@
+// Clean-machine hosting acceptance. Never runs against the user's installed apps.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn, execFileSync } = require('node:child_process');
+const { chromium } = require('@playwright/test');
+const { verifyStage } = require('./build-unified.cjs');
+if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
+  throw Error('Built-in native acceptance is restricted to a disposable GitHub-hosted Windows runner.');
+}
+const directory = path.resolve(process.argv[2]);
+const descriptor = JSON.parse(fs.readFileSync(path.join(directory, 'builtin-manifest.json')));
+verifyStage(path.join(directory, 'modules'), descriptor);
+const hub = path.join(directory, 'creator-hub.exe');
+const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
+fs.mkdirSync(out);
+const report = { checks: [], passed: false };
+const policy = path.join(out, 'webview-policy.json');
+function webviewPolicy(action) {
+  execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts/native-webview-policy.ps1'), '-Action', action, '-StateFile', policy], { windowsHide: true, timeout: 30000 });
+}
+function native(pid, executable, action, value = '') {
+  return execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts/native-window.ps1'),
+    '-TargetPid', String(pid), '-ExpectedExecutable', executable, '-Action', action, '-Value', value], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+}
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function retry(action, seconds = 45) {
+  let last;
+  for (const deadline = Date.now() + seconds * 1000; Date.now() < deadline;) {
+    try { return await action(); } catch (error) { last = error; await delay(250); }
+  }
+  throw last;
+}
+function registrations() {
+  return execFileSync('powershell.exe', ['-NoProfile', '-Command',
+    "$names=@('Creator Hub','Creator Works MCP','Creator Project Setup','BANTWORKS MCP'); foreach ($h in @('HKCU:','HKLM:')) { foreach ($n in $names) { if(Test-Path -LiteralPath ($h+'\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'+$n)) { throw ('Unexpected app registration: '+$n) } } }"], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+}
+let child, browser, page;
+(async () => {
+  registrations();
+  for (const app of ['Creator Works MCP', 'Creator Project Setup']) assert.equal(fs.existsSync(path.join(process.env.LOCALAPPDATA, app)), false);
+  for (const module of Object.values(descriptor.modules)) {
+    const file = path.join(directory, 'modules', module.executable);
+    const result = require('node:child_process').spawnSync(file, [], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    assert.equal(result.status, 2, 'Private backend must not launch a standalone app');
+  }
+  report.checks.push('No companion installations; private modules reject standalone launch');
+  webviewPolicy('Enable');
+  child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env,
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238', WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview') } });
+  browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'));
+  page = await retry(() => {
+    const result = browser.contexts().flatMap(context => context.pages()).find(p => p.url().includes('tauri.localhost'));
+    if (!result) throw Error('Hub webview is not ready'); return result;
+  });
+  page.setDefaultTimeout(60000);
+  await page.locator('#usage-terms-checkbox').check();
+  await page.locator('#usage-terms-continue').click();
+  const inventory = await retry(() => page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: true, preview: true })));
+  assert.equal(inventory.supported, true);
+  for (const app of inventory.apps) {
+    assert.equal(app.builtIn, true); assert.equal(app.trusted, true); assert.equal(app.issue, null);
+    assert.equal(app.updateAvailable, false); assert.equal(app.detectedCopies.length, 0);
+    assert.equal(app.availableVersion, descriptor.modules[app.app].version);
+  }
+  report.checks.push('Native inventory trusts packaged modules without companion catalogue or registration');
+  const denied = await page.evaluate(() => window.CreatorHubNative.invoke('download_app', { app: 'mcp', version: '2.7.7' }).then(() => 'unexpected allow', String));
+  assert.match(denied, /built into this Hub/);
+  report.checks.push('Separate module installation is rejected natively');
+  await page.locator('#hub-pages [data-view="hub"]').click();
+  for (const app of ['setup', 'mcp']) {
+    await page.locator('#suite-trigger').click();
+    await page.locator(`#suite-menu [data-view="${app}"]`).click();
+    const executable = path.join(directory, 'modules', descriptor.modules[app].executable);
+    const pid = await retry(() => {
+      const value = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+        `$p=Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.ExecutablePath -eq '${executable.replaceAll("'", "''")}' }; $p.ProcessId`], { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
+      assert.match(value, /^\d+$/); return Number(value);
+    });
+    await retry(() => native(pid, executable, 'button', app === 'setup' ? 'Open in Hub' : 'Enable MCP controls'));
+    await page.locator(`#${app}-host-frame`).waitFor();
+    const frame = page.frameLocator(`#${app}-host-frame`);
+    if (app === 'setup') {
+      await frame.locator('#requirements .requirement').first().waitFor();
+      await frame.locator('#project-name').fill('Retained built-in form');
+    } else {
+      await frame.locator('#setupBtn').waitFor();
+      await frame.locator('#checkUpdatesBtn').waitFor({ state: 'hidden' });
+      assert.match(await frame.locator('#updateStatus').innerText(), /included with Creator Hub/);
+    }
+    await retry(async () => assert.equal(await page.locator('#hosted-stop').isEnabled(), true));
+    await page.screenshot({ path: path.join(out, `${app}.png`) });
+    const windows = JSON.parse(native(pid, executable, 'snapshot'));
+    assert.equal(windows.filter(w => w.title === (app === 'setup' ? 'Creator Project Setup' : 'Creator Works MCP')).length, 0);
+    report.checks.push(`${app}: actual private backend and embedded interface; no standalone window`);
+  }
+  await page.locator('#suite-trigger').click();
+  await page.locator('#suite-menu [data-view="setup"]').click();
+  assert.equal(await page.frameLocator('#setup-host-frame').locator('#project-name').inputValue(), 'Retained built-in form');
+  report.checks.push('View switching retains the actual Setup form');
+  for (const app of ['setup', 'mcp']) {
+    if (app === 'mcp') { await page.locator('#suite-trigger').click(); await page.locator('#suite-menu [data-view="mcp"]').click(); }
+    await page.locator('#hosted-stop').click();
+    await page.locator(`#${app}-host-frame`).waitFor({ state: 'detached' });
+  }
+  registrations();
+  report.checks.push('Graceful module close; no separate product registrations created');
+  report.passed = true;
+})().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; })
+  .finally(async () => {
+    fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
+    if (child && child.exitCode === null) {
+      try { native(child.pid, hub, 'close'); await retry(() => assert.notEqual(child.exitCode, null), 15); }
+      catch (error) { report.cleanupError = String(error); report.passed = false; process.exitCode = 1; }
+    }
+    await browser?.close();
+    if (fs.existsSync(policy)) webviewPolicy('Restore');
+    fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
+    console.log(JSON.stringify(report));
+  });

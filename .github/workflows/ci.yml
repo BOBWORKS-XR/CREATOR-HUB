@@ -60,6 +60,41 @@ jobs:
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
 
+  builtin-windows:
+    name: Built-in modules (clean Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            modules/mcp/launcher/src-tauri
+            modules/project-setup/src-tauri
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - run: npm --prefix modules/project-setup ci
+      - run: npm run build:unified -- ci-windows
+      - run: npx playwright install chromium
+      - name: Open both bundled modules without companion installations
+        run: node scripts/native-builtin-smoke.cjs artifacts/unified/ci-windows
+      - name: Retain native acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: builtin-windows-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/native-suite-*/report.json
+            artifacts/native-suite-*/*.png
+
   hub-linux:
     name: Hub (Linux)
     runs-on: ubuntu-22.04

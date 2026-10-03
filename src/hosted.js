@@ -126,6 +126,7 @@
       if (connected) return disconnect(state, 'App navigated unexpectedly. The existing connection was disabled.');
       connected = true;
       frame.contentWindow.postMessage({ type: 'creator-host-connect', protocol: 1,
+        builtIn: result.builtIn === true,
         ...(app === 'mcp' ? { hostingRevision: result.hostingRevision, effectiveMode: state.writable ? 'writable' : 'read-only' } : {}) }, '*', [channel.port2]);
     });
     frame.srcdoc = html;
