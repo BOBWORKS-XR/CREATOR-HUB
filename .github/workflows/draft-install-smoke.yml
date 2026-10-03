@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        baseline: [clean, '2.7.4']
+        baseline: [clean, '2.7.6']
     steps:
       - uses: actions/checkout@v6
         with:
@@ -98,12 +98,12 @@ jobs:
             $report.executableSha256 = $expectedHash
             $report.checks += 'exact-draft-digest-and-payload'
 
-            if ($env:BASELINE -ceq '2.7.4') {
-              $baseline = Get-Installer 'v2.7.4' '2.7.4' $false (Join-Path $root 'baseline')
+            if ($env:BASELINE -ceq '2.7.6') {
+              $baseline = Get-Installer 'v2.7.6' '2.7.6' $false (Join-Path $root 'baseline')
               $baselinePayload = Extract-Launcher $baseline (Join-Path $root 'baseline-payload')
               Run-Installer $baseline '/S /NS' 0
               if ((Hash (Join-Path $installRoot $launcher)) -cne (Hash $baselinePayload)) { throw 'Baseline installation does not match its payload.' }
-              if ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -cne '2.7.4') { throw 'Wrong baseline registry version.' }
+              if ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -cne '2.7.6') { throw 'Wrong baseline registry version.' }
               New-Item -ItemType Directory -Force -Path $configRoot | Out-Null
               $settings = Join-Path $configRoot 'launcher-config.json'
               $sentinel = Join-Path $installRoot 'user-content-sentinel.txt'
