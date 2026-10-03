@@ -517,6 +517,10 @@ for (const width of [940, 560, 390, 320]) test(`both actual app interfaces persi
   await setup.locator('#project-name').fill('Keep my Setup draft');
   const mcp = await openMcp(page);
   await expect(page.locator('#page-title')).toContainText('WORKS');
+  await expect(page.locator('#context-help-open')).toBeHidden();
+  await mcp.locator('#context-help-open').click();
+  await expect(mcp.locator('#context-help-title')).toContainText('Creator Works MCP');
+  await mcp.locator('#context-help-close').click();
   await expect(mcp.locator('#workspaceControls')).toHaveJSProperty('disabled', true);
   await expect(mcp.locator('#setupBtn')).toBeDisabled();
   await expect(mcp.locator('#updateBridgesBtn')).toBeDisabled();
@@ -534,6 +538,29 @@ for (const width of [940, 560, 390, 320]) test(`both actual app interfaces persi
   const counts = await page.evaluate(() => window.hostCalls.filter(c => c.command === 'start_hosted_app').map(c => c.args.app));
   expect(counts).toEqual(['setup', 'mcp']);
   expect(errors).toEqual([]);
+});
+
+for (const width of [940, 390]) for (const builtIn of [false, true]) test(`visible app owns Help without overlapping Hub at ${width}px, built-in=${builtIn}`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const setup = await open(page, { builtIn, writableMcp: true });
+  await expect(page.locator('#context-help-open')).toBeHidden();
+  await expect(setup.locator('#context-help-open')).toBeVisible();
+  await setup.locator('#context-help-open').click();
+  await expect(setup.locator('#context-help-dialog')).toBeVisible();
+  await expect(setup.locator('#context-help-title')).toContainText('Project Setup');
+  await setup.locator('#context-help-close').click();
+  const mcp = await openMcp(page, true);
+  await expect(page.locator('#context-help-open')).toBeHidden();
+  await expect(mcp.locator('#context-help-open')).toBeVisible();
+  await mcp.locator('#context-help-open').click();
+  await expect(mcp.locator('#context-help-title')).toContainText('Creator Works MCP');
+  await mcp.locator('#context-help-close').click();
+  await switchTo(page, 'hub');
+  await expect(page.locator('#context-help-open')).toBeVisible();
+  await switchTo(page, 'mcp');
+  await expect(page.locator('#context-help-open')).toBeHidden();
+  await page.locator('#hosted-stop').click();
+  await expect(page.locator('#context-help-open')).toBeVisible();
 });
 
 test('closing MCP preserves Setup and each backend has its own authority', async ({ page }) => {

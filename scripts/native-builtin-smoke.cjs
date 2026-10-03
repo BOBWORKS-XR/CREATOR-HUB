@@ -91,6 +91,8 @@ let child, browser, page;
     await retry(() => native(pid, executable, 'button', app === 'setup' ? 'Open in Hub' : 'Enable MCP controls'));
     await page.locator(`#${app}-host-frame`).waitFor();
     const frame = page.frameLocator(`#${app}-host-frame`);
+    assert.equal(await page.locator('#context-help-open').isVisible(), false, 'Hub Help must not overlap the module Help');
+    await frame.locator('#context-help-open').waitFor({ state: 'visible' });
     if (app === 'setup') {
       await frame.locator('#requirements .requirement').first().waitFor();
       await frame.locator('#project-name').fill('Retained built-in form');
