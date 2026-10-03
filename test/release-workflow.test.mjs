@@ -9,6 +9,10 @@ const releaseWorkflow = fs.readFileSync(
   path.join(root, ".github", "workflows", "release.yml"),
   "utf8"
 );
+const draftSmokeWorkflow = fs.readFileSync(
+  path.join(root, ".github", "workflows", "draft-install-smoke.yml"),
+  "utf8"
+);
 const tauriConfig = fs.readFileSync(
   path.join(root, "launcher", "src-tauri", "tauri.conf.json"),
   "utf8"
@@ -24,6 +28,12 @@ test("release checksums use GitHub-normalized asset names", () => {
     /\$releaseAssetName = \$artifact\.Name\.Replace\(" ", "\."\)/
   );
   assert.match(releaseWorkflow, /"\$hash  \$releaseAssetName"/);
+});
+
+test("draft install smoke does not reuse PowerShell's automatic Matches variable", () => {
+  assert.match(draftSmokeWorkflow, /\$assets = @\(\$release\.assets/);
+  assert.doesNotMatch(draftSmokeWorkflow, /\$matches\s*=/i);
+  assert.doesNotMatch(draftSmokeWorkflow, /\$matches\[/i);
 });
 
 test("release metadata states the enforced standalone Node requirement", () => {
@@ -58,6 +68,8 @@ test("release publishes Apple silicon and Intel macOS DMG bundles", () => {
   assert.match(releaseWorkflow, /runs-on:\s*\$\{\{ matrix\.os \}\}/);
   assert.match(releaseWorkflow, /args:\s*"--bundles dmg"/);
   assert.match(releaseWorkflow, /name:\s*Verify macOS DMG/);
+  assert.match(releaseWorkflow, /gh release view "\$GITHUB_REF_NAME" --repo "\$GITHUB_REPOSITORY"/);
+  assert.match(releaseWorkflow, /gh release download "\$GITHUB_REF_NAME" --repo "\$GITHUB_REPOSITORY"/);
   assert.match(releaseWorkflow, /codesign --verify --deep --strict/);
 });
 
@@ -72,6 +84,8 @@ test("release labels resolve draft-safe asset URLs", () => {
   assert.match(releaseWorkflow, /gh release view .*--json assets --jq.*apiUrl/);
   assert.match(releaseWorkflow, /while read -r asset_api_url asset_name/);
   assert.match(releaseWorkflow, /gh api -X PATCH "\$asset_api_url"/);
+  assert.match(releaseWorkflow, /\*aarch64\.dmg\)\s+label="Creator-Works-MCP-\$\{VERSION\}-macos-arm64\.dmg"/);
+  assert.match(releaseWorkflow, /\*x64\.dmg\)\s+label="Creator-Works-MCP-\$\{VERSION\}-macos-x64\.dmg"/);
   assert.doesNotMatch(releaseWorkflow, /releases\/tags\//);
   assert.doesNotMatch(releaseWorkflow, /-f label=.*\|\| true/);
 });
