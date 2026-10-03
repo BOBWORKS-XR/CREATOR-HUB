@@ -139,27 +139,6 @@ namespace CreatorWorks.Plugins
             if (entry.author.discord != null && !Text(entry.author.discord, 120)) throw new InvalidDataException("Invalid contributor name.");
             if (entry.download != null) DownloadUrl(entry.download);
         }
-        internal static Listing ParseListing(string json)
-        {
-            // Unity materializes an empty download even when JSON omits it. Read
-            // property presence with the standard JSON reader, not a text search.
-            bool hasDownload = false, seenDownload = false;
-            using (var reader = System.Runtime.Serialization.Json.JsonReaderWriterFactory.CreateJsonReader(
-                Encoding.UTF8.GetBytes(json), new System.Xml.XmlDictionaryReaderQuotas()))
-            {
-                while (reader.Read())
-                {
-                    if (reader.NodeType != System.Xml.XmlNodeType.Element || reader.Depth != 1 || reader.LocalName != "download") continue;
-                    if (seenDownload) throw new InvalidDataException("Duplicate package download.");
-                    seenDownload = true;
-                    hasDownload = reader.GetAttribute("type") != "null";
-                }
-            }
-            var entry = JsonUtility.FromJson<Listing>(json);
-            if (entry != null && !hasDownload) entry.download = null;
-            ValidateListing(entry);
-            return entry;
-        }
         internal static bool CanImport(Listing entry)
         {
             if (entry == null || entry.reviewStatus != "listed" ||
@@ -914,13 +893,13 @@ namespace CreatorWorks.Plugins
                 {
                     try
                     {
-                        var entry = PluginProtocol.ParseListing(Encoding.UTF8.GetString(bytes));
+                        var entry = JsonUtility.FromJson<Listing>(Encoding.UTF8.GetString(bytes)); PluginProtocol.ValidateListing(entry);
                         if (listings.Any(e => e.id == entry.id)) throw new InvalidDataException("Duplicate listing.");
                         listings.Add(entry);
                     }
-                    catch (Exception error) { warnings++; Debug.LogWarning("Creator Plugins rejected " + path + ": " + error.Message); }
+                    catch { warnings++; }
                     NextListing();
-                }, error => { warnings++; Debug.LogWarning("Creator Plugins could not load " + path + ": " + error); NextListing(); });
+                }, error => { warnings++; NextListing(); });
             }
             catch { warnings++; NextListing(); }
         }

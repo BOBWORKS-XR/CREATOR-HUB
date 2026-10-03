@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        baseline: [clean, '0.3.4']
+        baseline: [clean, '0.3.6']
     steps:
       - uses: actions/checkout@v6
         with:
@@ -106,15 +106,15 @@ jobs:
 
           try {
             if (@(Get-InstallEntries).Count -ne 0) { throw 'Runner was not clean before testing.' }
-            if ($env:BASELINE -ceq '0.3.4') {
-              $previous = Get-ReleaseInstaller 'v0.3.4' '0.3.4' (Join-Path $root 'baseline') $false
+            if ($env:BASELINE -ceq '0.3.6') {
+              $previous = Get-ReleaseInstaller 'v0.3.6' '0.3.6' (Join-Path $root 'baseline') $false
               $baselinePayload = Join-Path $root 'baseline-payload'
               & 7z.exe x $previous "-o$baselinePayload" $exeName '-y' | Out-Null
               if ($LASTEXITCODE -ne 0) { throw 'Could not extract the baseline executable.' }
               $baselineHash = (Get-FileHash -LiteralPath (Join-Path $baselinePayload $exeName) -Algorithm SHA256).Hash.ToLowerInvariant()
               $baselineProcess = Start-Process -FilePath $previous -ArgumentList '/S' -PassThru -Wait -WindowStyle Hidden
               if ($baselineProcess.ExitCode -ne 0) { throw 'Baseline installation failed.' }
-              Confirm-Installed '0.3.4' $baselineHash $false
+              Confirm-Installed '0.3.6' $baselineHash $false
               $report.checks += 'public-baseline-installed'
             } elseif ($env:BASELINE -cne 'clean') {
               throw 'Unknown baseline.'
@@ -132,7 +132,7 @@ jobs:
             $report.checks += 'draft-digest-and-payload'
 
             $sentinel = Join-Path $env:APPDATA 'com.creatorworks.projectsetup\release-smoke-sentinel.txt'
-            if ($env:BASELINE -ceq '0.3.4') {
+            if ($env:BASELINE -ceq '0.3.6') {
               New-Item -ItemType Directory -Force -Path (Split-Path -Parent $sentinel) | Out-Null
               [System.IO.File]::WriteAllText($sentinel, 'preserve-user-data')
             }
@@ -140,7 +140,7 @@ jobs:
             if ($candidateProcess.ExitCode -ne 0) { throw "Candidate installer exited $($candidateProcess.ExitCode)." }
             Confirm-Installed $version $expectedHash $true
             $report.checks += 'installed-hash-and-identity'
-            if ($env:BASELINE -ceq '0.3.4') {
+            if ($env:BASELINE -ceq '0.3.6') {
               if (-not (Test-Path -LiteralPath $sentinel) -or (Get-Content -LiteralPath $sentinel -Raw) -cne 'preserve-user-data') {
                 throw 'Unrelated user data was not preserved through the upgrade.'
               }

@@ -43,6 +43,13 @@ const GALLERY_HASHES: &[&str] = &[
     "4af0449cdb8f192a2a0ec8498db78790cf9f185e08fb9bac95c237ad7e152a5d",
     "192254c2c3fbd02c4df00e2fafa1f26c90dd911e62cc3cc7451d440240a4c206",
 ];
+// Exact product-aware helper in Hub 0.1.11, preserved for the catalogue parsing upgrade.
+const PRODUCT_HASHES: &[&str] = &[
+    "41d5713a52cb09251ae6144b757be022ada4415c6dbe128371b6f029490993f0",
+    "7e1bc8fb937a3324de67fb2439b8e943dda3efc6b62684da2697e1bfcfe7414e",
+    "4af0449cdb8f192a2a0ec8498db78790cf9f185e08fb9bac95c237ad7e152a5d",
+    "f7b407cc7cbe282aaf730329ceff7bb6f970640376d31a227ce6616440082604",
+];
 const FILES: &[(&str, &[u8])] = &[
     (
         "package.json",
@@ -209,6 +216,7 @@ fn helper_contents(destination: &Path, allow_unity_metadata: bool) -> Result<&'s
     let mut stable = true;
     let mut grid = true;
     let mut gallery = true;
+    let mut product = true;
     for (index, (name, expected)) in FILES.iter().enumerate() {
         let Ok(bytes) = read(&destination.join(name), 256 * 1024) else {
             return Ok("different");
@@ -219,8 +227,9 @@ fn helper_contents(destination: &Path, allow_unity_metadata: bool) -> Result<&'s
         stable &= hash == STABLE_HASHES[index];
         grid &= hash == GRID_HASHES[index];
         gallery &= hash == GALLERY_HASHES[index];
+        product &= hash == PRODUCT_HASHES[index];
     }
-    if !current && !legacy && !stable && !grid && !gallery {
+    if !current && !legacy && !stable && !grid && !gallery && !product {
         return Ok("different");
     }
     let mut pending = vec![destination.to_path_buf()];
@@ -1177,6 +1186,55 @@ mod tests {
                         .join(PACKAGE)
                         .join("Editor/CreatorPluginsWindow.cs"),
                     b"user edits",
+                )
+                .unwrap();
+            }
+            let before = helper_snapshot(&temp.path().join(PACKAGE)).unwrap();
+            let target = inspect(temp.path()).unwrap();
+            assert_eq!(
+                target.helper,
+                if modified { "different" } else { "outdated" }
+            );
+            if modified {
+                assert!(install(&target).is_err());
+                assert_eq!(helper_snapshot(&temp.path().join(PACKAGE)).unwrap(), before);
+            } else {
+                install(&target).unwrap();
+                assert_eq!(helper_state(temp.path()).unwrap(), "installed");
+                let backup = fs::read_dir(area(temp.path(), "helper-backups").unwrap())
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                assert_eq!(
+                    helper_snapshot(&backup.join("com.creatorworks.plugins")).unwrap(),
+                    before
+                );
+            }
+        }
+    }
+    #[test]
+    fn product_helper_parsing_upgrade_preserves_backup_and_refuses_user_edits() {
+        let old: &[(&str, &[u8])] = &[
+            ("package.json", include_bytes!("../../tests/fixtures/helper-stable-0.1.11/unity/com.creatorworks.plugins/package.json")),
+            ("LICENSE.md", include_bytes!("../../tests/fixtures/helper-stable-0.1.11/unity/com.creatorworks.plugins/LICENSE.md")),
+            ("Editor/CreatorWorks.Plugins.Editor.asmdef", include_bytes!("../../tests/fixtures/helper-stable-0.1.11/unity/com.creatorworks.plugins/Editor/CreatorWorks.Plugins.Editor.asmdef")),
+            ("Editor/CreatorPluginsWindow.cs", include_bytes!("../../tests/fixtures/helper-stable-0.1.11/unity/com.creatorworks.plugins/Editor/CreatorPluginsWindow.cs")),
+        ];
+        for modified in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            project(temp.path());
+            for ((name, bytes), hash) in old.iter().zip(PRODUCT_HASHES) {
+                assert_eq!(digest(bytes), *hash);
+                save_new(&temp.path().join(PACKAGE).join(name), bytes).unwrap();
+            }
+            if modified {
+                fs::write(
+                    temp.path()
+                        .join(PACKAGE)
+                        .join("Editor/CreatorPluginsWindow.cs"),
+                    b"user changes",
                 )
                 .unwrap();
             }

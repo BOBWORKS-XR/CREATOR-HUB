@@ -92,7 +92,10 @@
     const target = await invoke('choose_community_project');
     if (target) { projectEntries = projectEntries.filter(p => p.id !== target.id).concat(target); fillProjects(target.id); projectError = false; outcome = null; projectMessage.textContent = ''; }
   }, 'Waiting for a project folder...'), 'folder');
-  const refreshProjects = button('', 'community-icon-button', () => projectAction(refreshTargets, 'Loading Unity projects... Please wait.'), 'refresh'); refreshProjects.title = 'Refresh projects'; refreshProjects.setAttribute('aria-label', 'Refresh projects');
+  const refreshProjects = button('', 'community-icon-button', () => projectAction(async () => {
+    if (importEntry) await verifyTransferEntry(importEntry);
+    await refreshTargets();
+  }, 'Refreshing catalogue and Unity projects... Please wait.'), 'refresh'); refreshProjects.title = 'Refresh projects'; refreshProjects.setAttribute('aria-label', 'Refresh projects');
   const projectPicker = el('div', 'community-project-picker'); projectPicker.append(projectSelect, browseProject, refreshProjects);
   const projectPath = el('p', 'community-project-path'); const projectInfo = el('p', 'community-project-info');
   const projectSafety = el('p', 'community-project-safety');
@@ -103,6 +106,7 @@
     await refreshTargets();
   }, 'Preparing the Unity menu... Please wait.'), 'plugins');
   const sendAction = button('Send to Unity for review', 'community-primary', () => projectAction(async () => {
+    await verifyTransferEntry(importEntry);
     outcome = await runTransfer('queue_community_import', { id: importEntry.id, projectId: projectSelect.value }, true);
     showOutcome();
   }, 'Preparing the package for Unity review... Please wait.'), 'download');
@@ -178,10 +182,12 @@
     const next = await invoke('community_projects');
     if (!next || !Array.isArray(next.projects) || !Array.isArray(next.warnings) || next.projects.length > 200) throw new Error('Invalid project list response.');
     projectEntries = next.projects; projectError = false; fillProjects();
-    if (next.warnings.length) projectMessage.textContent = next.warnings.join(' ');
+    if (outcome) showOutcome();
+    if (next.warnings.length) projectMessage.textContent = [projectMessage.textContent, ...next.warnings].filter(Boolean).join(' ');
   }
   async function projectAction(action, loadingMessage) {
     if (busy || projectBusy) return;
+    projectMessage.textContent = ''; projectMessage.classList.remove('warning');
     projectLoading.textContent = loadingMessage;
     busy = projectBusy = true; refresh.disabled = true; updateDownloads(); renderProject();
     window.dispatchEvent(new CustomEvent('creator-community-busy', { detail: true }));
@@ -305,7 +311,7 @@
     if (busy) return;
     busy = true; refresh.disabled = true; updateDownloads(); status('Choose a destination. The package will be checked before saving.');
     window.dispatchEvent(new CustomEvent('creator-community-busy', { detail: true }));
-    try { status(await runTransfer('download_community_package', { id: entry.id })); }
+    try { await verifyTransferEntry(entry); status(await runTransfer('download_community_package', { id: entry.id })); }
     catch (error) { status(String(error), true); }
     finally { busy = false; refresh.disabled = false; updateDownloads(); window.dispatchEvent(new CustomEvent('creator-community-busy', { detail: false })); }
   }
@@ -383,6 +389,16 @@
     addMenu.disabled = busy;
     for (const button of root.querySelectorAll('[data-community-download]')) button.disabled = busy || Boolean(snapshot?.stale);
     for (const button of root.querySelectorAll('[data-community-import]')) button.disabled = busy || Boolean(snapshot?.stale) || button.dataset.communityImport !== 'listed';
+  }
+  async function verifyTransferEntry(entry) {
+    // Project refresh does not renew the catalogue's short-lived native cache.
+    const next = await invoke('community_catalogue', { refresh: true });
+    if (!next || !Array.isArray(next.entries) || !Array.isArray(next.warnings) || next.entries.length > 50) throw new Error('Invalid community catalogue response.');
+    snapshot = next; lastRefresh = Date.now(); render();
+    status(next.warnings.join(' '), next.warnings.length > 0);
+    if (next.stale) throw new Error('The catalogue could not be verified. Check your connection and try again. Nothing was sent.');
+    const current = next.entries.find(candidate => candidate.id === entry.id);
+    if (!current || JSON.stringify(current) !== JSON.stringify(entry)) throw new Error('This listing changed. Close this dialog and review its updated catalogue entry before trying again. Nothing was sent.');
   }
   async function load(refreshRequested = false) {
     if (busy) return;
