@@ -1,5 +1,8 @@
 # Project Setup In Hub
 
+Superseded on 2026-10-03 by [Unified Creator Hub](UNIFIED-CREATOR-HUB.md).
+The text below records an earlier direction, not the current product plan.
+
 User direction, revised 2026-09-15. Next phase only; no packaging migration is
 implemented here. This supersedes the earlier proposal to retire Setup's repo.
 

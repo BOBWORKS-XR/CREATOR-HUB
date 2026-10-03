@@ -3,10 +3,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const semver = require('semver');
 
-const setupSource = process.env.CREATOR_SETUP_SOURCE || path.resolve('../CREATOR-PROJECT-SETUP/src');
+const setupSource = process.env.CREATOR_SETUP_SOURCE || path.resolve(__dirname, '../modules/project-setup/src');
 const setupVersion = JSON.parse(fs.readFileSync(path.resolve(setupSource, '../package.json'), 'utf8')).version;
 const files = Object.fromEntries(fs.readdirSync(setupSource, { recursive: true }).filter(name => fs.statSync(path.join(setupSource, name)).isFile()).map(name => [name.replaceAll('\\', '/'), fs.readFileSync(path.join(setupSource, name)).toString('base64')]));
-const mcpSource = process.env.CREATOR_MCP_SOURCE || path.resolve('../creator-works-hub-compatibility/launcher/src');
+const mcpSource = process.env.CREATOR_MCP_SOURCE || path.resolve(__dirname, '../modules/mcp/launcher/src');
 const mcpFiles = Object.fromEntries(fs.readdirSync(mcpSource, { recursive: true }).filter(name => fs.statSync(path.join(mcpSource, name)).isFile()).map(name => [name.replaceAll('\\', '/'), fs.readFileSync(path.join(mcpSource, name)).toString('base64')]));
 
 async function open(page, options = {}) {
@@ -37,11 +37,12 @@ async function open(page, options = {}) {
           throw 'Hub could not start its installer. Nothing was installed.';
         }
         if (command === 'project_inventory') return { projects: [], warnings: [] };
-        if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: true, trusted: true, hostedCompatible: true, updateAvailable: app === 'setup' && Boolean(window.setupUpdate), availableVersion: window.setupUpdate ? '0.3.0' : '0.3.0-alpha.1', installedVersion: '0.3.0-alpha.1', hostedPreview: app === 'mcp' && !options.writableMcp ? 'read-only' : 'writable' })) };
+        if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, builtIn: Boolean(options.builtIn), installed: true, trusted: true, hostedCompatible: true, updateAvailable: !options.builtIn && app === 'setup' && Boolean(window.setupUpdate), availableVersion: window.setupUpdate ? '0.3.0' : '0.3.0-alpha.1', installedVersion: '0.3.0-alpha.1', hostedPreview: app === 'mcp' && !options.writableMcp ? 'read-only' : 'writable' })) };
         if (command === 'start_hosted_app' || command === 'restore_hosted_app') {
           if (command === 'restore_hosted_app' && window.restoreFailures-- > 0) throw 'The app could not reopen.';
           if (options.decline) throw 'Opening Setup in Hub was declined. Standalone Setup is unchanged.';
           if (args.app === 'mcp') return { session: 'b'.repeat(64), appId: 'creator-works-mcp', version: '2.7.0-alpha.1', files: mcpFiles,
+            builtIn: Boolean(options.builtIn),
             ...(options.writableMcp ? { hostingRevision: 2, effectiveMode: 'writable' } : {}) };
           return { session: (command === 'restore_hosted_app' ? 'c' : 'a').repeat(64), appId: 'creator-project-setup', version: setupVersion, files };
         }
@@ -105,6 +106,25 @@ async function switchTo(page, name) {
   await page.locator('#suite-trigger').click();
   await page.locator(`#suite-menu [data-view="${name}"]`).click();
 }
+
+test('built-in features open automatically and expose no separate install or update controls', async ({ page }) => {
+  const setup = await open(page, { builtIn: true, writableMcp: true });
+  await expect(setup.locator('#create-button')).toBeEnabled();
+  await switchTo(page, 'hub');
+  for (const app of ['mcp', 'setup']) {
+    await expect(page.locator(`#status-${app}`)).toHaveText('Included in Hub');
+    await expect(page.locator(`#update-${app}`)).toBeHidden();
+    await expect(page.locator(`#menu-download-${app}`)).toBeHidden();
+  }
+  await switchTo(page, 'mcp');
+  await expect(page.frameLocator('#mcp-host-frame').locator('#setupBtn')).toBeVisible();
+  await expect(page.frameLocator('#mcp-host-frame').locator('#checkUpdatesBtn')).toBeHidden();
+  await expect(page.frameLocator('#mcp-host-frame').locator('#updateStatus')).toContainText('included with Creator Hub');
+  await expect(page.locator('#adopt-button')).toBeHidden();
+  await expect(page.locator('#download-button')).toBeHidden();
+  await expect(page.locator('#open-button')).toBeHidden();
+  expect(await page.evaluate(() => window.hostCalls.some(call => ['install_app', 'download_app', 'open_app', 'use_existing_app'].includes(call.command)))).toBe(false);
+});
 
 test('cancelling a Hub update leaves hosted forms and backends intact', async ({ page }) => {
   const setup = await open(page, { cancelHubUpdate: true });
@@ -497,6 +517,10 @@ for (const width of [940, 560, 390, 320]) test(`both actual app interfaces persi
   await setup.locator('#project-name').fill('Keep my Setup draft');
   const mcp = await openMcp(page);
   await expect(page.locator('#page-title')).toContainText('WORKS');
+  await expect(page.locator('#context-help-open')).toBeHidden();
+  await mcp.locator('#context-help-open').click();
+  await expect(mcp.locator('#context-help-title')).toContainText('Creator Works MCP');
+  await mcp.locator('#context-help-close').click();
   await expect(mcp.locator('#workspaceControls')).toHaveJSProperty('disabled', true);
   await expect(mcp.locator('#setupBtn')).toBeDisabled();
   await expect(mcp.locator('#updateBridgesBtn')).toBeDisabled();
@@ -514,6 +538,29 @@ for (const width of [940, 560, 390, 320]) test(`both actual app interfaces persi
   const counts = await page.evaluate(() => window.hostCalls.filter(c => c.command === 'start_hosted_app').map(c => c.args.app));
   expect(counts).toEqual(['setup', 'mcp']);
   expect(errors).toEqual([]);
+});
+
+for (const width of [940, 390]) for (const builtIn of [false, true]) test(`visible app owns Help without overlapping Hub at ${width}px, built-in=${builtIn}`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const setup = await open(page, { builtIn, writableMcp: true });
+  await expect(page.locator('#context-help-open')).toBeHidden();
+  await expect(setup.locator('#context-help-open')).toBeVisible();
+  await setup.locator('#context-help-open').click();
+  await expect(setup.locator('#context-help-dialog')).toBeVisible();
+  await expect(setup.locator('#context-help-title')).toContainText('Project Setup');
+  await setup.locator('#context-help-close').click();
+  const mcp = await openMcp(page, true);
+  await expect(page.locator('#context-help-open')).toBeHidden();
+  await expect(mcp.locator('#context-help-open')).toBeVisible();
+  await mcp.locator('#context-help-open').click();
+  await expect(mcp.locator('#context-help-title')).toContainText('Creator Works MCP');
+  await mcp.locator('#context-help-close').click();
+  await switchTo(page, 'hub');
+  await expect(page.locator('#context-help-open')).toBeVisible();
+  await switchTo(page, 'mcp');
+  await expect(page.locator('#context-help-open')).toBeHidden();
+  await page.locator('#hosted-stop').click();
+  await expect(page.locator('#context-help-open')).toBeVisible();
 });
 
 test('closing MCP preserves Setup and each backend has its own authority', async ({ page }) => {

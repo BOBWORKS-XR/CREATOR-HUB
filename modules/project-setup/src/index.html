@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Creator Project Setup</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="suite.css">
+  <link rel="stylesheet" href="community.css">
+</head>
+<body>
+  <div id="suite-dismiss" class="suite-dismiss" aria-hidden="true"></div>
+  <div id="suite-shell" class="suite-shell">
+  <div class="suite-brand" aria-hidden="true"><span>CREATOR</span> <strong>PROJECT</strong> SETUP</div>
+  <button class="suite-trigger" id="suite-trigger" type="button" aria-expanded="false" aria-controls="suite-menu" aria-label="Open Creator apps" title="Creator apps">
+    <span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span>
+  </button>
+  <nav id="suite-menu" class="suite-menu" aria-label="Creator apps" aria-hidden="true" inert>
+    <button class="suite-item" type="button" data-suite-link="hub">
+      <span class="suite-mark hub-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span>
+      <span class="suite-item-copy"><strong>Creator Hub</strong><small>Releases</small></span><span class="icon icon-external" aria-hidden="true"></span>
+    </button>
+    <button class="suite-item" type="button" data-suite-link="mcp">
+      <span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">M</span></span>
+      <span class="suite-item-copy"><strong>Creator Works MCP</strong><small>Releases</small></span><span class="icon icon-external" aria-hidden="true"></span>
+    </button>
+    <button class="suite-item current" type="button" aria-current="page" id="suite-current">
+      <span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span>
+      <span class="suite-item-copy"><strong>Project Setup</strong><small>Current app</small></span><span class="suite-current-dot" aria-hidden="true"></span>
+    </button>
+    <div class="suite-item unavailable"><span class="suite-mark converter-mark"><img src="sidequest-mark-white.svg" alt=""><span class="suite-letter">C</span></span><span class="suite-item-copy"><strong>Creator Converter</strong><small>SideQuest / Coming soon</small></span></div>
+    <button class="suite-item" type="button" id="suite-plugins"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.png" alt=""></span><span class="suite-item-copy"><strong>Creator Plugins</strong><small>Community contributions</small></span></button>
+    <p id="suite-error" class="suite-error hidden" role="status"></p>
+  </nav>
+  </div>
+  <header class="app-header">
+    <div class="title-block">
+      <h1 class="brand-name"><span>CREATOR</span> <strong>PROJECT</strong> SETUP</h1>
+      <p id="mode-description">Unity and Creator SDK. Android + Windows.</p>
+    </div>
+    <div id="overall-status" class="overall-status checking"><span></span>Checking</div>
+  </header>
+
+  <main>
+    <div id="setup-workspace">
+    <div class="workspace-toolbar">
+    <nav class="mode-tabs" role="tablist" aria-label="Project workflow">
+      <button type="button" id="new-mode" role="tab" aria-selected="true" aria-controls="new-project-pane">New project</button>
+      <button type="button" id="existing-mode" role="tab" aria-selected="false" aria-controls="existing-project-pane">Existing project</button>
+    </nav>
+    <button id="refresh-button" class="icon-button" type="button" title="Check requirements again" aria-label="Check requirements again"><span class="icon icon-refresh" aria-hidden="true"></span></button>
+    </div>
+
+    <div class="workspace">
+      <section id="new-project-pane" class="setup-pane" role="tabpanel" aria-labelledby="new-mode">
+        <div id="project-details">
+
+        <label for="project-name">Project name</label>
+        <input id="project-name" type="text" maxlength="64" value="My Creator Space" autocomplete="off">
+
+        <label for="parent-folder">Project location</label>
+        <div class="input-action">
+          <input id="parent-folder" type="text" autocomplete="off" spellcheck="false">
+          <button id="browse-button" class="secondary-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span>Browse</button>
+        </div>
+
+        <div class="recipe-line" id="recipe-line">Loading approved recipe…</div>
+
+        <button id="create-button" class="primary-button" type="button" disabled>Create and validate project</button>
+        <p id="requirements-consent" class="recipe-line hidden">Installation requires your approval. Licence terms: <button type="button" class="text-button" data-terms="unity">Unity</button>, <button type="button" class="text-button" data-terms="android">Android SDK/NDK</button>, <button type="button" class="text-button" data-terms="openjdk">OpenJDK</button>.</p>
+        </div>
+        <div id="project-summary" class="project-summary hidden">
+          <span class="summary-icon"><span class="icon icon-folder" aria-hidden="true"></span></span>
+          <div><h2 id="summary-name"></h2><p id="summary-path"></p></div>
+        </div>
+        <div id="activity" class="activity hidden" aria-live="polite">
+          <div class="activity-header"><span class="spinner"></span><strong id="activity-title">Preparing project</strong></div>
+          <p id="activity-message">Unity may take several minutes while packages resolve and compile.</p>
+          <progress id="stage-progress" max="7" value="0" aria-label="Completed setup stages"></progress>
+          <progress id="download-progress" class="hidden" max="100" aria-label="Unity reported progress"></progress>
+          <div id="download-metrics" class="download-metrics hidden" aria-live="off">
+            <span id="download-size"></span><span id="download-speed"></span>
+            <span id="download-plan" class="download-plan"></span>
+          </div>
+          <ol id="progress-steps" class="progress-steps" aria-label="Setup stages"></ol>
+          <span id="elapsed-time" class="elapsed-time"></span>
+        </div>
+        <div id="result" class="result hidden" aria-live="polite"></div>
+        <button id="open-project-button" class="primary-button hidden" type="button">Open project in Unity</button>
+        <button id="create-another-button" class="text-button full-width hidden" type="button">Create another project</button>
+        <div id="hub-result" class="hub-result hidden" aria-live="polite"></div>
+        <button id="retry-hub-button" class="secondary-button full-width hidden" type="button">Retry adding to Unity Hub</button>
+        <button id="restart-hub-button" class="secondary-button full-width hidden" type="button">Restart Unity Hub</button>
+        <button id="open-result-hub-button" class="text-button full-width hidden" type="button">Open Unity Hub</button>
+      </section>
+
+      <section id="existing-project-pane" class="setup-pane hidden" role="tabpanel" aria-labelledby="existing-mode">
+        <div class="section-heading"><h2>Inspect and repair</h2><span class="preview-label">Experimental</span></div>
+        <label for="existing-path">Unity project folder</label>
+        <div class="input-action">
+          <input id="existing-path" type="text" autocomplete="off" spellcheck="false">
+          <button id="existing-browse" class="secondary-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span>Browse</button>
+        </div>
+        <button id="inspect-button" class="secondary-button full-width" type="button">Inspect project</button>
+        <div id="inspection-results" class="hidden">
+          <h3>Inspection findings</h3>
+          <div id="inspection-findings" class="inspection-findings"></div>
+          <details id="repair-plan" class="hidden" open>
+            <summary>Proposed changes</summary>
+            <ul id="repair-changes"></ul>
+          </details>
+          <label class="approval-label" id="existing-approval-label"><input id="existing-approval" type="checkbox">Back up settings and allow Unity to import and validate this project.</label>
+          <p class="recipe-line">Backup covers package manifests, project settings and generated Visual Scripting data, not the whole project. Unity package callbacks may modify assets during import. Failed repairs retain the backup for manual recovery; no automatic rollback.</p>
+          <button id="repair-button" class="primary-button hidden" type="button" disabled>Back up and apply repairs</button>
+          <button id="validate-button" class="secondary-button full-width hidden" type="button" disabled>Back up and validate in Unity</button>
+        </div>
+        <div id="existing-activity" class="activity hidden" aria-live="polite"><div class="activity-header"><span class="spinner"></span><strong id="existing-stage">Inspecting</strong></div><p id="existing-detail"></p><span id="existing-elapsed" class="elapsed-time"></span></div>
+        <div id="existing-result" class="result hidden" aria-live="polite"></div>
+        <button id="open-existing-button" class="primary-button hidden" type="button">Open project in Unity</button>
+      </section>
+
+      <section class="requirements-pane" aria-labelledby="requirements-heading">
+        <div class="section-heading">
+          <h2 id="requirements-heading">Requirements</h2>
+          <span id="platform-label" class="platform-label">Detecting</span>
+        </div>
+        <div id="requirements" class="requirements"></div>
+        <div id="blockers" class="blockers hidden"></div>
+        <button id="hub-button" class="secondary-button full-width hidden" type="button">Open Unity Hub</button>
+        <button id="unity-download-button" class="text-button hidden" type="button">Download Unity Hub</button>
+      </section>
+    </div>
+    <div id="action-error" class="result hidden" role="alert"></div>
+
+    </div>
+    <section id="view-plugins" class="hidden" aria-labelledby="plugins-title"></section>
+  </main>
+
+  <footer>
+    <span>Creator Project Setup <span class="footer-version">0.3.7</span></span>
+    <div class="footer-links"><button id="github-button" class="text-button" type="button">GitHub <span class="icon icon-external" aria-hidden="true"></span></button><button id="sdk-source-button" class="text-button" type="button">Creator SDK source <span class="icon icon-external" aria-hidden="true"></span></button></div>
+  </footer>
+  <button id="context-help-open" class="context-help-open" type="button" aria-haspopup="dialog" aria-controls="context-help-dialog" title="Help and troubleshooting">Help</button>
+  <dialog id="context-help-dialog" class="context-help-dialog" aria-labelledby="context-help-title">
+    <div class="context-help-heading"><div><h2 id="context-help-title">Project Setup help</h2><p>This app creates and validates Unity projects for the Creator SDK.</p></div><button id="context-help-close" class="icon-button" type="button" aria-label="Close help" title="Close help">×</button></div>
+    <div class="context-help-content">
+      <details open><summary>What does each Creator app do?</summary><p><strong>Project Setup</strong> installs/checks supported prerequisites and creates or validates projects. It is not the AI tool. <strong>Creator Works MCP</strong> connects a compatible AI client to Unity. <strong>Creator Hub</strong> manages the apps and your projects. The Creator Plugins catalogue is available in Hub and its Unity Editor window.</p></details>
+      <details><summary>Why does setup ask for Unity or Android components?</summary><p>The approved project recipe requires a matching Unity Editor and selected build modules. Setup can download supported components after you approve, but Unity account sign-in/licensing and any operating-system administrator prompts remain yours to complete.</p></details>
+      <details><summary>Unity setup failed or is taking a long time</summary><p>Check the current activity and error first. Editor and Android tool downloads can be large; slow network or disk activity may extend setup. Retry only after checking available disk space and that Unity Hub/Unity are not actively changing the same installation. The app preserves the project and provides a local log when setup stops.</p></details>
+      <details><summary>Can I use an existing project?</summary><p>Use the Existing project view to inspect first. Repairs require a separate approval and a safety backup. Close the project in Unity when requested, review the proposed changes, and keep another backup outside the project folder.</p></details>
+      <details><summary>Where do community plugins go?</summary><p>Plugin formats differ: graphs, prefabs, scripts, editor extensions and scenes have different import steps and dependencies. Read the listing instructions and verify Unity/SDK compatibility. Do not assume adding a package is the same as setting up the Creator SDK project.</p></details>
+      <details><summary>What should I include in a support report?</summary><p>Include this app’s version, the exact stage/message, and the local setup log. Remove account details, access tokens and private project information before sharing. Support is not guaranteed; keep independent backups of important projects.</p></details>
+    </div>
+  </dialog>
+  <script src="runtime.js"></script>
+  <dialog id="usage-terms-dialog" class="usage-terms-dialog" aria-labelledby="usage-terms-title">
+    <div id="usage-terms-form">
+      <h2 id="usage-terms-title">Terms of use and risk acknowledgement</h2>
+      <p class="terms-version">Creator Suite Terms v2026-09-28. This acknowledgement is saved on this device.</p>
+      <div class="usage-terms-copy" tabindex="0">
+        <p>Creator Hub and its companion tools are provided “as is” and “as available”, without warranties, to the maximum extent permitted by applicable law.</p>
+        <p>The tools can change Unity projects, files, settings, packages and installed components. Errors or incompatibilities may cause project corruption, data loss, failed setup or builds, or other damage. Keep independent backups and review changes before relying on them.</p>
+        <p>Basic Unity knowledge is recommended. Support is not guaranteed.</p>
+        <p>AI-generated output and tool actions can be unpredictable. Token use and charges depend on your AI provider, client, model, prompts and settings. The apps' developers do not control, estimate or cap that usage. Check your provider's billing and usage limits.</p>
+        <p>To the maximum extent permitted by law, you assume the risks of using the software and release its authors, maintainers and contributors from claims arising from that use. They are not liable for project corruption, data loss, setup or build problems, indirect or consequential losses, or AI-provider usage and charges.</p>
+        <p>Nothing in this notice excludes or limits rights or liability that cannot legally be excluded or limited.</p>
+      </div>
+      <label class="usage-terms-accept"><input id="usage-terms-checkbox" type="checkbox"><span>I have read and agree to these terms, including the risk assumption and liability limitations above.</span></label>
+      <p id="usage-terms-error" class="usage-terms-error" role="alert" hidden></p>
+      <button id="usage-terms-continue" class="primary-button" type="button" disabled>Accept and continue</button>
+    </div>
+  </dialog>
+  <script src="usage-terms.js"></script>
+  <script src="help.js"></script>
+  <script src="suite.js"></script>
+  <script src="community.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

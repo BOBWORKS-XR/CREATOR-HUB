@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod builtin;
 mod catalog;
 mod community;
 mod community_project;
@@ -135,6 +136,9 @@ async fn app_inventory(
     preview: bool,
 ) -> Result<manager::Snapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        if let Some(snapshot) = builtin::inventory(&app)? {
+            return Ok(snapshot);
+        }
         app.state::<manager::Manager>().snapshot(check, preview)
     })
     .await
