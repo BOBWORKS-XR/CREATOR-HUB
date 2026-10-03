@@ -1,0 +1,110 @@
+# Unified Creator Hub
+
+Direction approved by the user on 2026-10-03. This supersedes the separate-product
+directions in PROJECT-SETUP-IN-HUB.md and SHARED-MCP-DIRECTION.md.
+
+## Product And Repository
+
+- Creator Hub is the one public desktop product, installer and update stream.
+- Projects, Project Setup, MCP and Plugins are sections of that product.
+- CREATOR-HUB is the canonical repository for future development.
+- MCP and Setup remain internal modules, not independently installed products.
+- modules/mcp and modules/project-setup retain the complete Git ancestry of their
+  accepted 2.7.7 and 0.3.7 sources. modules/suite.json records the import revisions.
+- Historical repositories, tags, download URLs, signed metadata and installer
+  bytes remain available. Do not archive them or redirect their updater feeds
+  before standalone migration is tested and available.
+- Update the old repository READMEs and release notices to point to Hub when the
+  migration release exists; do not claim that current downloads are unified.
+
+## Current State
+
+Source consolidation only. Current Hub 0.1.12 still installs and hosts separate
+MCP/Setup applications. Importing their source does not change that behavior.
+Root source CI and browser fixtures now use the local modules instead of fetching
+other repositories. Initial subtree contents must match their accepted source
+trees exactly. This branch's release workflow is blocked until distribution and
+migration are implemented and accepted; changing a readiness label is not enough.
+
+## Integration Boundary
+
+Reuse the working MCP/Setup command, progress, cancellation and lifecycle
+contracts. Avoid a simultaneous rewrite of the tooling logic and installer.
+Build module payloads from this repository and include them in the Hub package;
+features must work on a clean machine with neither standalone app installed.
+Do not use registry presence, a remote companion catalogue or a version label
+as authorization to open a built-in feature. Verify the packaged payload identity.
+
+One product does not require one process. Isolated internal backends are allowed
+where they preserve lifecycle and failure isolation, but they must not create
+separate app registrations, downloads, update buttons or end-user installations.
+Only start the MCP backend/runtime when required. Keep a stable managed MCP
+entry point so Hub upgrades do not strand AI-client configurations.
+
+Prefer immutable, versioned runtime payloads and an atomic activation receipt.
+Keep the previous verified payload while it is still referenced or running.
+Do not overwrite a live node executable, kill unrelated processes or point a
+client at a partially installed generation. Actual packaging determines the
+implementation; these are requirements, not claims of working code.
+
+## Standalone Migration
+
+The existing signed catalogue validates product identity. MCP 2.x and Setup
+0.3.x versions cannot be compared against Hub 0.x as if they were one product.
+The MCP launcher update check currently opens a release URL; it is not an
+automatic self-updater. Some older users will need a guided one-time installer.
+
+1. Detect the verified existing Hub and standalone installations without changing
+   them. Identify duplicate/custom installs and active operations explicitly.
+2. Obtain approval for a signed migration package and target Hub installation.
+   Respect an already-newer Hub; never downgrade it to the migration baseline.
+3. Preserve the old installation and create a retained backup of affected app
+   settings and product-owned AI-client entries. Leave Unity projects untouched.
+4. Install the verified unified Hub payload into its established product identity.
+5. Reuse/migrate settings only through an explicit schema adapter. If both Hub and
+   standalone settings exist, resolve conflicting values visibly; do not silently
+   replace the user's selected configuration with whichever file was read last.
+6. Repoint only recognized product-owned client entries after the target runtime
+   is verified. Preserve user-authored entries and retain referenced old runtimes
+   until reconnection and the new route have been verified.
+7. Open the corresponding Hub section. Preserve applicable notice preferences or
+   request new acknowledgement; never manufacture acceptance of new terms.
+8. Record success durably. Offer removal of legacy app registrations only after
+   verification, and only when no client still depends on their runtime.
+
+Cancellation and failure must leave a usable old installation. Repeated starts,
+interrupted migration, already-completed migration and update-after-migration
+need explicit tests. Keep diagnostics local and exclude secrets from reports.
+
+## Acceptance Before Rollout
+
+- Windows, macOS Intel, macOS Apple silicon and Linux packaged builds.
+- Clean machine: all built-in features work without companion installs or feeds.
+- MCP-only, Setup-only, Hub-only, MCP+Setup and all-three migration baselines.
+- Existing/custom/duplicate installs, conflicting settings and already-newer Hub.
+- Missing requirements, permission refusal, native cancellation and failed install.
+- Active Setup work, active MCP connections, stuck owned runtime and unrelated Node.
+- Existing client configurations, preferences, terms/notice choices and project
+  content are preserved; changed fields have exact backups and a recovery path.
+- A migrated user and a fresh user both update to the next exact signed Hub build,
+  restart automatically, reopen features and retain working MCP client connections.
+- Test the unmodified previous stable updater, not only a simulated release feed.
+
+Run these on disposable installations. Current source tests, the existing hosted
+acceptance and a successful monorepo build are not migration acceptance.
+
+## Development
+
+```powershell
+npm ci
+npm --prefix modules/mcp ci
+npm --prefix modules/project-setup ci
+npm run check:sources
+npm run test:modules
+npm run test:scripts
+npm run test:ui
+```
+
+`node scripts/check-unified-sources.cjs --verify-imports` verifies initial subtree
+trees and retained history. Once module code changes intentionally, that initial
+import check is historical evidence, not the normal source CI check.

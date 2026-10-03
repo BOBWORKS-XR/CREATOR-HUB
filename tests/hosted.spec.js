@@ -3,10 +3,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const semver = require('semver');
 
-const setupSource = process.env.CREATOR_SETUP_SOURCE || path.resolve('../CREATOR-PROJECT-SETUP/src');
+const setupSource = process.env.CREATOR_SETUP_SOURCE || path.resolve(__dirname, '../modules/project-setup/src');
 const setupVersion = JSON.parse(fs.readFileSync(path.resolve(setupSource, '../package.json'), 'utf8')).version;
 const files = Object.fromEntries(fs.readdirSync(setupSource, { recursive: true }).filter(name => fs.statSync(path.join(setupSource, name)).isFile()).map(name => [name.replaceAll('\\', '/'), fs.readFileSync(path.join(setupSource, name)).toString('base64')]));
-const mcpSource = process.env.CREATOR_MCP_SOURCE || path.resolve('../creator-works-hub-compatibility/launcher/src');
+const mcpSource = process.env.CREATOR_MCP_SOURCE || path.resolve(__dirname, '../modules/mcp/launcher/src');
 const mcpFiles = Object.fromEntries(fs.readdirSync(mcpSource, { recursive: true }).filter(name => fs.statSync(path.join(mcpSource, name)).isFile()).map(name => [name.replaceAll('\\', '/'), fs.readFileSync(path.join(mcpSource, name)).toString('base64')]));
 
 async function open(page, options = {}) {
