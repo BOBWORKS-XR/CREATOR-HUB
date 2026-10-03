@@ -15,10 +15,12 @@ async function load(page, options = {}) {
       if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: false, availableVersion: '1.0.0', updateAvailable: false })) };
       if (command === 'hub_update_status') return { currentVersion: '0.1.0-alpha.6' };
       if (command === 'community_catalogue') {
+        window.catalogueExpired = false;
         if (window.holdRefresh) return new Promise(resolve => { window.finishRefresh = () => resolve(structuredClone(window.snapshot)); });
         if (window.failRefresh) throw 'Offline. Try again.'; return structuredClone(window.snapshot);
       }
       if (command === 'download_community_package') {
+        if (window.catalogueExpired) throw 'Refresh the catalogue before downloading.';
         if (window.holdDownload) { window.transfer = { id: args.operationId, received: 1024 * 1024, total: 93_245_650, phase: 'downloading', cancellable: true }; return new Promise(resolve => { window.finishDownload = resolve; }); }
         if (window.failDownload) throw 'Package checksum did not match. Nothing saved.';
         return 'Saved. Checksum matched; no files were imported into Unity.';
@@ -32,7 +34,10 @@ async function load(page, options = {}) {
         if (window.holdInstall) await new Promise(resolve => { window.finishInstall = resolve; });
         window.projects[0].helper = 'installed'; return 'Creator Plugins menu added.';
       }
-      if (command === 'queue_community_import') return { projectId: args.projectId, requestId: 'a'.repeat(32), status: 'queued', message: 'Open Creator Plugins > Browse in Unity.' };
+      if (command === 'queue_community_import') {
+        if (window.catalogueExpired) throw 'Refresh the catalogue before downloading.';
+        return { projectId: args.projectId, requestId: 'a'.repeat(32), status: 'queued', message: 'Open Creator Plugins > Browse in Unity.' };
+      }
       if (command === 'community_import_status') return { projectId: args.projectId, requestId: args.requestId, status: window.receiptStatus || 'review', message: 'Editor receipt message.' };
       throw Error(`Unexpected action ${command}`);
     } } };
@@ -515,6 +520,74 @@ test('adding a package queues once and receipt checks distinguish review from im
   await page.evaluate(() => { window.receiptStatus = 'imported'; });
   await dialog.getByRole('button', { name: 'Check Unity status' }).click(); await expect(dialog).toContainText('Project validation is still needed');
   expect(await page.evaluate(() => window.calls.filter(c => c.command === 'queue_community_import'))).toEqual([{ command: 'queue_community_import', args: { id: entry.id, projectId: 'chosen-project', operationId: expect.stringMatching(/^[0-9a-f-]{36}$/) } }]);
+});
+
+test('an expired catalogue is refreshed before sending without losing the project', async ({ page }) => {
+  await load(page, { listed: true, helper: 'installed' });
+  await page.getByRole('button', { name: 'Add to project', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add Start Location' });
+  await dialog.locator('select').selectOption('chosen-project');
+  await page.evaluate(() => { window.catalogueExpired = true; window.calls = []; });
+  await dialog.getByRole('button', { name: 'Send to Unity for review' }).click();
+  await expect(dialog).toContainText('Queued, not imported');
+  await expect(dialog.locator('select')).toHaveValue('chosen-project');
+  const calls = await page.evaluate(() => window.calls.filter(c => ['community_catalogue', 'queue_community_import'].includes(c.command)));
+  expect(calls.map(c => c.command)).toEqual(['community_catalogue', 'queue_community_import']);
+  expect(calls[0].args.refresh).toBe(true);
+});
+
+test('returning from Unity preserves the pending import status and prevents duplicate sends', async ({ page }) => {
+  await load(page, { listed: true, helper: 'installed' });
+  await page.getByRole('button', { name: 'Add to project', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add Start Location' });
+  await dialog.locator('select').selectOption('chosen-project');
+  await dialog.getByRole('button', { name: 'Send to Unity for review' }).click();
+  await expect(dialog).toContainText('Queued, not imported');
+  await page.evaluate(() => { window.calls = []; window.dispatchEvent(new Event('focus')); });
+  await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === 'community_projects'))).toBe(true);
+  await expect(dialog).toContainText('Queued, not imported');
+  await expect(dialog.getByRole('button', { name: 'Send to Unity for review' })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'Check Unity status' })).toBeEnabled();
+});
+
+test('an expired catalogue is refreshed before a standalone download', async ({ page }) => {
+  await load(page, { listed: true });
+  await page.evaluate(() => { window.catalogueExpired = true; window.calls = []; });
+  await page.getByRole('button', { name: 'Download package', exact: true }).click();
+  await expect(page.locator('.community-message').first()).toContainText('Saved.');
+  expect(await page.evaluate(() => window.calls.filter(c => ['community_catalogue', 'download_community_package'].includes(c.command)).map(c => c.command))).toEqual(['community_catalogue', 'download_community_package']);
+});
+
+for (const change of ['offline', 'stale', 'removed', 'changed', 'pending']) test(`transfer refresh refuses ${change} listings without queueing`, async ({ page }) => {
+  await load(page, { listed: true, helper: 'installed' });
+  await page.getByRole('button', { name: 'Add to project', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add Start Location' });
+  await dialog.locator('select').selectOption('chosen-project');
+  await page.evaluate(change => {
+    if (change === 'offline') window.failRefresh = true;
+    if (change === 'stale') window.snapshot.stale = true;
+    if (change === 'removed') window.snapshot.entries = [];
+    if (change === 'changed') window.snapshot.entries[0].download.sha256 = 'f'.repeat(64);
+    if (change === 'pending') window.snapshot.entries[0].reviewStatus = 'pending';
+  }, change);
+  await dialog.getByRole('button', { name: 'Send to Unity for review' }).click();
+  await expect(dialog.locator('.community-message.warning')).toBeVisible();
+  expect(await page.evaluate(() => window.calls.some(c => c.command === 'queue_community_import'))).toBe(false);
+});
+
+test('project refresh recovers a stale catalogue and permits retry in the same dialog', async ({ page }) => {
+  await load(page, { listed: true, helper: 'installed' });
+  await page.getByRole('button', { name: 'Add to project', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add Start Location' });
+  await dialog.locator('select').selectOption('chosen-project');
+  await page.evaluate(() => { window.snapshot.stale = true; });
+  await dialog.getByRole('button', { name: 'Send to Unity for review' }).click();
+  await expect(dialog).toContainText('could not be verified');
+  await page.evaluate(() => { window.snapshot.stale = false; });
+  await dialog.getByRole('button', { name: 'Refresh projects' }).click();
+  await expect(dialog.getByRole('button', { name: 'Send to Unity for review' })).toBeEnabled();
+  await dialog.getByRole('button', { name: 'Send to Unity for review' }).click();
+  await expect(dialog).toContainText('Queued, not imported');
 });
 
 test('pending listing stays unimportable and project read failure is actionable', async ({ page }) => {

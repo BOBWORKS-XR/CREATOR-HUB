@@ -711,6 +711,23 @@ fn importable(entry: &Listing) -> Result<&Download, String> {
     }
     Ok(download)
 }
+fn check_refreshed_import(expected: &Listing, snapshot: &Snapshot) -> Result<(), String> {
+    if snapshot.stale {
+        return Err("The catalogue could not be verified. Check your connection and retry. No package was queued.".into());
+    }
+    let current = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.id == expected.id)
+        .ok_or("This contribution is no longer listed. No package was queued.")?;
+    importable(current)?;
+    if serde_json::to_value(current).map_err(|_| "Cannot compare the updated listing.")?
+        != serde_json::to_value(expected).map_err(|_| "Cannot compare the selected listing.")?
+    {
+        return Err("The listing changed. Review its updated details before sending. No package was queued.".into());
+    }
+    Ok(())
+}
 pub fn queue_import_worker(
     handle: tauri::AppHandle,
     id: String,
@@ -739,16 +756,7 @@ pub fn queue_import_worker(
     let review = package::inspect_file(&mut temporary, active.operation.cancelled())?;
     // Large transfers can outlive the catalogue TTL. Refresh automatically,
     // then compare the same package identity before asking for approval.
-    catalogue_worker(handle.clone(), true)?;
-    let refreshed = selected(&handle, &id, true)?;
-    let refreshed_download = importable(&refreshed)?;
-    if refreshed.version != entry.version
-        || refreshed_download.sha256 != download.sha256
-        || refreshed_download.byte_length != download.byte_length
-        || download_url(refreshed_download)? != download_url(download)?
-    {
-        return Err("The listing changed during download. No package was queued.".into());
-    }
+    check_refreshed_import(&entry, &catalogue_worker(handle.clone(), true)?)?;
     active.operation.phase("review")?;
     let approved = handle.dialog().message(format!("Send {} {} to {} for review?\n\n{}\nUnity {} / {}\n\n{}\n\nThe verified package will be queued outside Assets. In Unity, use Creator Plugins > Browse to review file selection and decide whether to import. Code may execute on import. No scene will be saved automatically.", entry.name, entry.version, target.name, target.path, target.unity_version, target.sdk, review.summary(std::path::Path::new(&target.path)))).title("Review package contents").kind(MessageDialogKind::Warning).buttons(MessageDialogButtons::OkCancelCustom("Send for review".into(), "Cancel".into())).blocking_show();
     if !approved {
@@ -759,15 +767,9 @@ pub fn queue_import_worker(
             message: "Cancelled. No package was queued or imported.".into(),
         });
     }
-    let current = selected(&handle, &id, true)?;
-    let current_download = importable(&current)?;
-    if current.version != entry.version
-        || current_download.sha256 != download.sha256
-        || current_download.byte_length != download.byte_length
-        || download_url(current_download)? != download_url(download)?
-    {
-        return Err("The listing changed. Refresh and review it again before sending.".into());
-    }
+    // Approval has no time limit. Renew metadata after the dialog closes instead
+    // of rejecting an otherwise unchanged package because the cache expired.
+    check_refreshed_import(&entry, &catalogue_worker(handle.clone(), true)?)?;
     active.operation.phase("queueing")?;
     crate::community_project::queue_stream(
         &target,
@@ -867,6 +869,56 @@ mod tests {
             .is_empty());
     }
     use super::*;
+    #[test]
+    fn refreshed_import_requires_current_metadata_after_download_and_approval() {
+        let mut expected: Listing = serde_json::from_str(include_str!(
+            "../../tests/fixtures/community/start-location.json"
+        ))
+        .unwrap();
+        expected.review_status = "listed".into();
+        let mut snapshot = Snapshot::default();
+        snapshot.entries.push(expected.clone());
+        assert!(check_refreshed_import(&expected, &snapshot).is_ok());
+        snapshot.stale = true;
+        assert!(check_refreshed_import(&expected, &snapshot).is_err());
+        snapshot.stale = false;
+        for field in [
+            "checksum",
+            "url",
+            "version",
+            "status",
+            "instructions",
+            "licence",
+            "scope",
+            "category",
+        ] {
+            let current = &mut snapshot.entries[0];
+            *current = expected.clone();
+            match field {
+                "checksum" => current.download.as_mut().unwrap().sha256 = "f".repeat(64),
+                "url" => {
+                    current.download.as_mut().unwrap().path = None;
+                    current.download.as_mut().unwrap().url =
+                        Some("https://cdn.sidequestvr.com/file/1/changed.unitypackage".into());
+                }
+                "version" => current.version = "9.9.9".into(),
+                "status" => current.review_status = "pending".into(),
+                "instructions" => current.usage = "Changed setup requirements".into(),
+                "licence" => current.license = "Changed licence".into(),
+                "scope" => current.scope = "instructions-only".into(),
+                "category" => current.category = "ai-skill".into(),
+                _ => unreachable!(),
+            }
+            assert!(
+                check_refreshed_import(&expected, &snapshot).is_err(),
+                "{field}"
+            );
+        }
+        snapshot.entries.clear();
+        assert!(check_refreshed_import(&expected, &snapshot).is_err());
+        snapshot.entries.push(expected.clone());
+        assert!(check_refreshed_import(&expected, &snapshot).is_ok());
+    }
     #[test]
     fn experimental_import_capability_matches_native_gate() {
         assert!(require_import_preview().is_ok());
