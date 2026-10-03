@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$CandidateDirectory,
-    [ValidateSet('clean', 'alpha.3', 'alpha.4', 'alpha.5', 'alpha.6', 'stable-0.1.0', 'stable-0.1.1', 'stable-0.1.2', 'stable-0.1.3', 'stable-0.1.4', 'stable-0.1.5', 'stable-0.1.6', 'stable-0.1.8', 'stable-0.1.10')][string]$HubBaseline = 'clean',
+    [ValidateSet('clean', 'alpha.3', 'alpha.4', 'alpha.5', 'alpha.6', 'stable-0.1.0', 'stable-0.1.1', 'stable-0.1.2', 'stable-0.1.3', 'stable-0.1.4', 'stable-0.1.5', 'stable-0.1.6', 'stable-0.1.8', 'stable-0.1.10', 'stable-0.1.11')][string]$HubBaseline = 'clean',
     [string]$ExternalInstallerPath = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -88,7 +88,9 @@ try {
     $report.installerSha256 = Hash $installer
     $report.expectedExecutableSha256 = Hash $expectedExe
     if ($HubBaseline -ne 'clean') {
-        $baseline = if ($HubBaseline -eq 'stable-0.1.10') {
+        $baseline = if ($HubBaseline -eq 'stable-0.1.11') {
+            @{ Version = '0.1.11'; Installer = '90018f10096a52ad9abb5e2f8634acd6f8dfcea39cffd7ca2e25b92a54a7f07e'; Exe = 'b1ed8b37debb0e9e650ccdd62b954bd68e054590d1821092b25e68f545600c21'; Asset = 'Creator.Hub_0.1.11_x64-setup.exe' }
+        } elseif ($HubBaseline -eq 'stable-0.1.10') {
             @{ Version = '0.1.10'; Installer = 'f65616e41ddf6dfabf4b2d89aa3379da5a8c42cf6d283219017800d772764943'; Exe = '8587ecf5316cf5eb6fdadbd3d97d91a13db73d43429f25ea73f2fb840a1fa6a2'; Asset = 'Creator.Hub_0.1.10_x64-setup.exe' }
         } elseif ($HubBaseline -eq 'stable-0.1.8') {
             @{ Version = '0.1.8'; Installer = '785bfae6b33396421e74f405808eefce078ac5b0ecdfe1d8cc1c1dd10b048154'; Exe = '5ea968b425ac99f7508e844478abb6725012325038443b0dfdf39c1750f9a169'; Asset = 'Creator.Hub_0.1.8_x64-setup.exe' }

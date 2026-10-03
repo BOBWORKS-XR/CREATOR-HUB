@@ -22,6 +22,7 @@
 - `cargo test --release --manifest-path src-tauri/Cargo.toml community_project::tests`: 35 passed, 3 intentionally ignored integration/stress tests.
 - Final native regression run: `cargo test --release --manifest-path src-tauri/Cargo.toml community`: 60 passed, 6 intentionally ignored acceptance/integration/stress tests.
 - Final targeted browser regression run: 10 passed, covering pending status after focus, catalogue refresh, changed/removed listings and retry. The earlier full 65-test run predates the additional focus regression.
+- Release preflight: all 200 Hub UI tests and 127 Hub native tests passed; companion native suites passed (MCP 124; Setup 128 plus 2 identity tests). MCP's 256 server tests passed and its Hono 4.13.7 lockfile audit reported zero vulnerabilities.
 - `scripts/Test-PluginsPresentation.ps1`: 73 checks passed on each of Unity 2022.3.39f1 and 6000.3.21f1, including cancellation/retry, receipt, streaming and path/checksum guards. These use disposable fixtures and callbacks, not a physically operated real-package import dialog.
 - Presentation results: `artifacts/plugins-media-2022.3.39f1-70a1dd5b/presentation-result.json` and `artifacts/plugins-media-6000.3.21f1-d68ccfca/presentation-result.json`.
 - `scripts/Test-UnityCatalogue.ps1`: Unity 6000.3.21f1 loaded all 13 listings with zero warnings; Loft was importable after loading supplemental metadata.
@@ -33,6 +34,10 @@
 
 ## Remaining scope
 
-Changes are local, not released or installed into real user projects. The desktop freshness test uses mocked native responses; no new end-to-end real package import or Windows installer acceptance was run. Real catalogue tests read metadata only and do not download/import Loft. Before release, propagate the shared changes to companion apps as appropriate, build and test the exact artifacts, and preserve explicit project consent for updating existing Unity helpers.
+Release source is committed; companion PRs are #47 (MCP) and #8 (Setup). Changes have not been released or installed into real user projects. The desktop freshness test uses mocked native responses. Real catalogue tests read metadata only and do not download/import Loft. Exact release installer acceptance remains a publication gate.
+
+The actual Unity 6 native import test passed in `artifacts/plugins-import-e51e6b5255774be38b956a07bec28c88/import-result.json`: export a harmless text asset, remove it, queue the real archive, invoke the native dialog's cancellation action, queue a fresh retry, invoke its import action, verify exact restored bytes and a durable imported receipt, and confirm no scene save. Native actions are automated through the editor's own wizard, not physically clicked. The first fixture run failed on Unity's normal ExitGUI exception; the harness now handles that signal only. Original evidence remains in `artifacts/plugins-import-1eee901d7e3342a7adfab163c6176f36`.
+
+Unity 2022.3.39f1 passed the same actual-package cancellation/retry checks in `artifacts/plugins-import-df3330938f134876bdbfa3fe34e4d0f0/import-result.json`. Its wizard uses DoNextStep rather than Unity 6's DoImportStep; the harness follows the published version-specific editor contract. The initial unsupported-method attempt is preserved in `artifacts/plugins-import-bc89143b7c894a4081eb0ae679ac4092`.
 
 The report's intermittent visual distortion and incomplete "Visual Scripting scene variables" comment remain unclassified without a screenshot or exact reproduction. Post-approval revalidation has automated coverage, but a physically operated approval lasting more than three minutes has not been tested. No published files, installed applications, or real Unity projects were changed.
