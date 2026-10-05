@@ -505,7 +505,16 @@ fn area(root: &Path, relative: &str) -> Result<PathBuf, String> {
     reject_links(&path)?;
     Ok(path)
 }
-fn operation(root: &Path) -> Result<fs::File, String> {
+struct OperationGuard(fs::File);
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        // Duplicated or fork-inherited handles can outlive this operation.
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
+fn operation(root: &Path) -> Result<OperationGuard, String> {
     let path = area(root, "desktop.lock")?;
     fs::create_dir_all(path.parent().unwrap())
         .map_err(|_| "Could not create the plugin workspace.")?;
@@ -520,7 +529,7 @@ fn operation(root: &Path) -> Result<fs::File, String> {
     fs2::FileExt::try_lock_exclusive(&lock).map_err(|_| {
         "Another Creator app is changing this project's plugin queue. Try again after it finishes."
     })?;
-    Ok(lock)
+    Ok(OperationGuard(lock))
 }
 fn save_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     reject_links(path)?;
@@ -2332,6 +2341,21 @@ mod tests {
             125
         );
         assert_eq!(status(&target, &first).unwrap().status, "cancelled");
+    }
+    #[test]
+    fn releasing_queue_operation_does_not_leave_a_duplicated_handle_locked() {
+        let temp = tempfile::tempdir().unwrap();
+        let guard = operation(temp.path()).unwrap();
+        let duplicate = guard.0.try_clone().unwrap();
+        assert!(operation(temp.path()).is_err());
+        drop(guard);
+        let next = operation(temp.path());
+        assert!(
+            next.is_ok(),
+            "A released queue operation must not remain busy through an inherited handle"
+        );
+        drop(next);
+        drop(duplicate);
     }
     #[test]
     fn archival_refuses_bad_receipts_and_collisions_before_moving_anything() {

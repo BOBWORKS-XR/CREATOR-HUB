@@ -509,8 +509,7 @@ struct OperationGuard(fs::File);
 
 impl Drop for OperationGuard {
     fn drop(&mut self) {
-        // Explicitly release advisory locks before the file handle closes. macOS can
-        // otherwise retain a just-closed lock long enough to reject the next queue action.
+        // Duplicated or fork-inherited handles can outlive this operation.
         let _ = fs2::FileExt::unlock(&self.0);
     }
 }
@@ -2342,6 +2341,21 @@ mod tests {
             125
         );
         assert_eq!(status(&target, &first).unwrap().status, "cancelled");
+    }
+    #[test]
+    fn releasing_queue_operation_does_not_leave_a_duplicated_handle_locked() {
+        let temp = tempfile::tempdir().unwrap();
+        let guard = operation(temp.path()).unwrap();
+        let duplicate = guard.0.try_clone().unwrap();
+        assert!(operation(temp.path()).is_err());
+        drop(guard);
+        let next = operation(temp.path());
+        assert!(
+            next.is_ok(),
+            "A released queue operation must not remain busy through an inherited handle"
+        );
+        drop(next);
+        drop(duplicate);
     }
     #[test]
     fn archival_refuses_bad_receipts_and_collisions_before_moving_anything() {

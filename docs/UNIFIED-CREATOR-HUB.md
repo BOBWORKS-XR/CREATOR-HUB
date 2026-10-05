@@ -88,6 +88,22 @@ used to repoint existing AI clients, and no legacy client configuration is edite
 by staging. Power-loss recovery and a real signed update with active runtime
 connections remain release acceptance requirements.
 
+### Queue Ownership Regression
+
+Run 37344015707 preserved the failure of the Apple silicon queue-history test:
+`repeated_terminal_imports_archive_without_losing_receipts_or_status` received a
+busy lock immediately after its previous operation. The new parent-identity
+tests passed; the failed run is not being relabeled successful.
+
+A deterministic duplicate-handle test reproduced retained queue ownership on
+Windows too: dropping the original file did not release its lock while a clone
+remained alive. Setup already explicitly unlocked its operation guard. Hub and
+MCP now use that same guard pattern, with duplicate-handle regression coverage in
+all three crates. Runtime preparation also explicitly unlocks its guard. A truly
+active operation still refuses another writer; no retry delay or forced process
+termination is used. This mechanism is consistent with the Mac failure, but is
+not proof of the cause of every previously reported intermittent import issue.
+
 Prefer immutable, versioned runtime payloads and an atomic activation receipt.
 Keep the previous verified payload while it is still referenced or running.
 Do not overwrite a live node executable, kill unrelated processes or point a

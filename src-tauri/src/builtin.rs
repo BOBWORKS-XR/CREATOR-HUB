@@ -173,6 +173,14 @@ fn generation_id(entry: &Module) -> Result<String, String> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+struct PreparationGuard(std::fs::File);
+
+impl Drop for PreparationGuard {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
 fn prepare_generation(
     source: &Path,
     generations: &Path,
@@ -198,6 +206,7 @@ fn prepare_generation(
         .map_err(|_| "Cannot open runtime preparation lock.")?;
     lock.try_lock_exclusive()
         .map_err(|_| "Another Hub is preparing its runtime. Retry after it finishes.")?;
+    let _guard = PreparationGuard(lock);
     let target = generations.join(generation_id(&entry)?);
     platform::reject_links(&target)?;
     if target.exists() {
@@ -467,12 +476,15 @@ mod tests {
             .open(storage.join("prepare.lock"))
             .unwrap();
         lock.lock_exclusive().unwrap();
+        let duplicate = lock.try_clone().unwrap();
+        let guard = PreparationGuard(lock);
         assert!(prepare_generation(&source, &storage, entry.clone())
             .unwrap_err()
             .contains("Another Hub"));
         assert!(!storage.join(generation_id(&entry).unwrap()).exists());
-        drop(lock);
+        drop(guard);
         assert!(prepare_generation(&source, &storage, entry).is_ok());
+        drop(duplicate);
     }
 
     #[cfg(windows)]
