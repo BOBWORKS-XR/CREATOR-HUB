@@ -4,7 +4,7 @@ use crate::{
     manager::{AppState, Snapshot},
     platform,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -20,7 +20,7 @@ struct Manifest {
     arch: String,
     modules: BTreeMap<String, Module>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Module {
     executable: String,
@@ -136,6 +136,97 @@ pub fn candidate(handle: &tauri::AppHandle, app: AppId) -> Result<Option<Candida
         .join("modules");
     verify(&root, id, entry).map(Some)
 }
+
+// Only startup stages payloads. Inventory remains read-only, and no generation
+// is repaired or deleted: an existing AI connection may still depend on it.
+pub fn hosting_candidate(
+    handle: &tauri::AppHandle,
+    app: AppId,
+) -> Result<Option<Candidate>, String> {
+    if !enabled() || app != AppId::Mcp {
+        return candidate(handle, app);
+    }
+    let entry = manifest()?
+        .modules
+        .remove("mcp")
+        .ok_or("Missing MCP module.")?;
+    let source = handle
+        .path()
+        .resource_dir()
+        .map_err(|_| "Cannot locate Hub resources.")?
+        .join("modules");
+    let generations = dirs::data_local_dir()
+        .ok_or("Local app data is unavailable.")?
+        .join("creator-hub")
+        .join("runtime-generations")
+        .join(format!(
+            "{}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
+    prepare_generation(&source, &generations, entry).map(Some)
+}
+
+fn generation_id(entry: &Module) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(entry).map_err(|_| "Cannot identify runtime generation.")?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn prepare_generation(
+    source: &Path,
+    generations: &Path,
+    entry: Module,
+) -> Result<Candidate, String> {
+    use fs2::FileExt;
+    use std::fs::{self, OpenOptions};
+    if !generations.is_absolute() {
+        return Err("Runtime storage must be an absolute path.".into());
+    }
+    verify(source, "mcp", entry.clone())?;
+    platform::reject_links(generations)?;
+    fs::create_dir_all(generations).map_err(|_| "Cannot create runtime storage.")?;
+    platform::reject_links(generations)?;
+    let lock_path = generations.join("prepare.lock");
+    platform::reject_links(&lock_path)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|_| "Cannot open runtime preparation lock.")?;
+    lock.try_lock_exclusive()
+        .map_err(|_| "Another Hub is preparing its runtime. Retry after it finishes.")?;
+    let target = generations.join(generation_id(&entry)?);
+    platform::reject_links(&target)?;
+    if target.exists() {
+        return verify(&target, "mcp", entry);
+    }
+    let staging = tempfile::Builder::new()
+        .prefix(".staging-")
+        .tempdir_in(generations)
+        .map_err(|_| "Cannot stage the runtime generation.")?;
+    for name in entry.files.keys() {
+        let from = source.join(name);
+        platform::reject_links(&from)?;
+        let to = staging.path().join(name);
+        fs::create_dir_all(to.parent().ok_or("Invalid runtime file path.")?)
+            .map_err(|_| "Cannot create staged runtime directory.")?;
+        fs::copy(&from, &to).map_err(|_| format!("Cannot stage runtime file: {name}"))?;
+        OpenOptions::new()
+            .write(true)
+            .open(&to)
+            .and_then(|f| f.sync_all())
+            .map_err(|_| "Cannot flush the staged runtime.")?;
+    }
+    verify(staging.path(), "mcp", entry.clone())?;
+    // A partial directory never becomes an executable candidate. Same-volume
+    // rename publishes only a complete, byte-verified generation.
+    platform::reject_links(&target)?;
+    fs::rename(staging.path(), &target).map_err(|_| "Cannot publish runtime generation.")?;
+    verify(&target, "mcp", entry)
+}
 pub fn inventory(handle: &tauri::AppHandle) -> Result<Option<Snapshot>, String> {
     if !enabled() {
         return Ok(None);
@@ -245,10 +336,7 @@ mod tests {
             .contains("incomplete"));
     }
 
-    #[test]
-    fn complete_mcp_payload_is_accepted_and_every_component_is_verified() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+    fn mcp_fixture(root: &Path, bytes: &[u8]) -> Module {
         let extension = if cfg!(windows) { ".exe" } else { "" };
         let executable = format!("mcp/creator-works-mcp-launcher{extension}");
         let names = [
@@ -267,25 +355,146 @@ mod tests {
             .map(|name| {
                 let file = root.join(name);
                 std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-                std::fs::write(file, b"fixture").unwrap();
-                (name.clone(), format!("{:x}", Sha256::digest(b"fixture")))
+                std::fs::write(file, bytes).unwrap();
+                (name.clone(), format!("{:x}", Sha256::digest(bytes)))
             })
             .collect::<BTreeMap<_, _>>();
-        let entry = || Module {
-            executable: executable.clone(),
+        Module {
+            executable,
             version: "2.7.7".into(),
-            files: files.clone(),
-        };
-        assert!(verify(&root, "mcp", entry()).is_ok());
-        for name in names {
+            files,
+        }
+    }
+
+    #[test]
+    fn complete_mcp_payload_is_accepted_and_every_component_is_verified() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let entry = mcp_fixture(&root, b"fixture");
+        assert!(verify(&root, "mcp", entry.clone()).is_ok());
+        for name in entry.files.keys() {
             let file = root.join(&name);
             std::fs::write(&file, b"tampered").unwrap();
-            assert!(verify(&root, "mcp", entry()).is_err(), "{name}");
+            assert!(verify(&root, "mcp", entry.clone()).is_err(), "{name}");
             std::fs::remove_file(&file).unwrap();
-            assert!(verify(&root, "mcp", entry()).is_err(), "{name}");
+            assert!(verify(&root, "mcp", entry.clone()).is_err(), "{name}");
             std::fs::write(file, b"fixture").unwrap();
         }
-        assert!(verify(&root, "mcp", entry()).is_ok());
+        assert!(verify(&root, "mcp", entry).is_ok());
+    }
+
+    #[test]
+    fn runtime_generations_survive_package_replacement_and_are_reused() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("package");
+        let storage = root.join("generations");
+        let first = mcp_fixture(&source, b"old runtime");
+        let candidate = prepare_generation(&source, &storage, first.clone()).unwrap();
+        let reused = prepare_generation(&source, &storage, first.clone()).unwrap();
+        assert_eq!(candidate.path, reused.path);
+        // Same displayed version, different bytes: never replace the old runtime.
+        let second = mcp_fixture(&source, b"new runtime");
+        let next = prepare_generation(&source, &storage, second.clone()).unwrap();
+        assert_ne!(candidate.path, next.path);
+        let old_root = candidate.path.parent().unwrap().parent().unwrap();
+        assert!(verify(old_root, "mcp", first).is_ok());
+        std::fs::remove_dir_all(&source).unwrap();
+        assert!(candidate.path.is_file());
+        assert!(next.path.is_file());
+        assert!(verify(next.path.parent().unwrap().parent().unwrap(), "mcp", second).is_ok());
+    }
+
+    #[test]
+    fn corrupt_existing_generation_is_not_repaired_or_launched() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("package");
+        let storage = root.join("generations");
+        let entry = mcp_fixture(&source, b"fixture");
+        let candidate = prepare_generation(&source, &storage, entry.clone()).unwrap();
+        std::fs::write(&candidate.path, b"changed").unwrap();
+        assert!(prepare_generation(&source, &storage, entry.clone()).is_err());
+        assert_eq!(std::fs::read(&candidate.path).unwrap(), b"changed");
+        std::fs::remove_file(&candidate.path).unwrap();
+        assert!(prepare_generation(&source, &storage, entry).is_err());
+        assert!(!candidate.path.exists());
+    }
+
+    #[test]
+    fn abandoned_staging_is_never_selected_and_a_retry_can_succeed() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("package");
+        let storage = root.join("generations");
+        let entry = mcp_fixture(&source, b"fixture");
+        let abandoned = storage.join(".staging-interrupted");
+        std::fs::create_dir_all(&abandoned).unwrap();
+        std::fs::write(abandoned.join("partial"), b"keep").unwrap();
+        let candidate = prepare_generation(&source, &storage, entry).unwrap();
+        assert!(!candidate.path.starts_with(&abandoned));
+        assert_eq!(std::fs::read(abandoned.join("partial")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn invalid_source_publishes_nothing_and_does_not_touch_previous_runtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("package");
+        let storage = root.join("generations");
+        let entry = mcp_fixture(&source, b"fixture");
+        let old = prepare_generation(&source, &storage, entry.clone()).unwrap();
+        let changed = mcp_fixture(&source, b"new");
+        std::fs::remove_file(source.join("mcp/server/creator-works-mcp.mjs")).unwrap();
+        assert!(prepare_generation(&source, &storage, changed.clone()).is_err());
+        assert!(!storage.join(generation_id(&changed).unwrap()).exists());
+        assert!(verify(old.path.parent().unwrap().parent().unwrap(), "mcp", entry).is_ok());
+    }
+
+    #[test]
+    fn concurrent_runtime_preparation_refuses_without_modifying_files() {
+        use fs2::FileExt;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("package");
+        let storage = root.join("generations");
+        let entry = mcp_fixture(&source, b"fixture");
+        std::fs::create_dir(&storage).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(storage.join("prepare.lock"))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+        assert!(prepare_generation(&source, &storage, entry.clone())
+            .unwrap_err()
+            .contains("Another Hub"));
+        assert!(!storage.join(generation_id(&entry).unwrap()).exists());
+        drop(lock);
+        assert!(prepare_generation(&source, &storage, entry).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn runtime_storage_junction_is_rejected_without_writing_through_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("package");
+        let entry = mcp_fixture(&source, b"fixture");
+        let real = root.join("outside");
+        std::fs::create_dir(&real).unwrap();
+        let link = root.join("generations");
+        let result = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert!(prepare_generation(&source, &link, entry).is_err());
+        assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
+        std::fs::remove_dir(&link).unwrap();
     }
 
     #[cfg(windows)]

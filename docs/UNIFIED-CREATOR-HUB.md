@@ -65,6 +65,23 @@ separate app registrations, downloads, update buttons or end-user installations.
 Only start the MCP backend/runtime when required. Keep a stable managed MCP
 entry point so Hub upgrades do not strand AI-client configurations.
 
+Built-in MCP startup now stages the complete verified backend/server/runtime into
+`creator-hub/runtime-generations/<platform-arch>/<descriptor-hash>` in local app
+data. Only a fully verified staging directory is renamed into the generation
+path. A preparation lock serializes concurrent Hub attempts; corrupt existing
+generations fail closed rather than being overwritten. Inventory remains
+read-only. Old generations are retained without automatic repair or deletion,
+so their configured paths do not disappear when Hub resources are replaced.
+Startup and post-update restoration both use this path. Unit tests cover same
+version/different bytes, retained older payloads, tampering, incomplete sources,
+abandoned staging and competing preparation. Native candidate acceptance must
+also prove the actual backend and Node run from the verified generation.
+
+This is not stable client routing or migration: no activation receipt is yet
+used to repoint existing AI clients, and no legacy client configuration is edited
+by staging. Power-loss recovery and a real signed update with active runtime
+connections remain release acceptance requirements.
+
 Prefer immutable, versioned runtime payloads and an atomic activation receipt.
 Keep the previous verified payload while it is still referenced or running.
 Do not overwrite a live node executable, kill unrelated processes or point a

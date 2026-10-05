@@ -693,7 +693,7 @@ pub async fn start_hosted_app(handle: tauri::AppHandle, app: AppId) -> Result<Va
     tauri::async_runtime::spawn_blocking(move || {
         let manager = handle.state::<crate::manager::Manager>();
         let _operation = manager.begin()?;
-        if let Some(candidate) = crate::builtin::candidate(&handle, app)? {
+        if let Some(candidate) = crate::builtin::hosting_candidate(&handle, app)? {
             return handle.state::<Hosting>().start_verified(
                 &handle,
                 app,

@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
 const { verifyStage } = require('./build-unified.cjs');
@@ -81,12 +82,39 @@ let child, browser, page;
   for (const app of ['setup', 'mcp']) {
     await page.locator('#suite-trigger').click();
     await page.locator(`#suite-menu [data-view="${app}"]`).click();
-    const executable = path.join(directory, 'modules', descriptor.modules[app].executable);
-    const pid = await retry(() => {
+    const backend = await retry(() => {
       const value = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-        `$p=Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.ExecutablePath -eq '${executable.replaceAll("'", "''")}' }; $p.ProcessId`], { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
-      assert.match(value, /^\d+$/); return Number(value);
+        `$p=@(Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.Name -eq '${path.basename(descriptor.modules[app].executable)}' }); if($p.Count -ne 1) { throw 'Expected one private backend' }; $p | Select-Object ProcessId,ExecutablePath | ConvertTo-Json -Compress`], { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
+      return JSON.parse(value);
     });
+    const { ProcessId: pid, ExecutablePath: executable } = backend;
+    assert.equal(Number.isInteger(pid), true);
+    if (app === 'setup') {
+      assert.equal(executable.toLowerCase(), path.join(directory, 'modules', descriptor.modules[app].executable).toLowerCase());
+    } else {
+      const generations = path.join(process.env.LOCALAPPDATA, 'creator-hub', 'runtime-generations', 'windows-x86_64');
+      const generation = path.dirname(path.dirname(executable));
+      assert.equal(path.dirname(generation).toLowerCase(), generations.toLowerCase());
+      assert.match(path.basename(generation), /^[a-f0-9]{64}$/);
+      for (const [name, expected] of Object.entries(descriptor.modules.mcp.files)) {
+        const hash = crypto.createHash('sha256').update(fs.readFileSync(path.join(generation, name))).digest('hex');
+        assert.equal(hash, expected, name);
+      }
+      const node = path.join(generation, 'mcp/server/runtime/node.exe');
+      assert.match(execFileSync(node, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 15000 }), /^v\d+\./);
+      const packagedServer = path.join(directory, 'modules/mcp/server');
+      const retainedServer = `${packagedServer}.acceptance-old`;
+      assert.equal(fs.existsSync(retainedServer), false);
+      // Only the disposable candidate's files are moved. This proves path
+      // independence, not a signed installer/update or AI-client reconnection.
+      fs.renameSync(packagedServer, retainedServer);
+      try {
+        assert.match(execFileSync(node, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 15000 }), /^v\d+\./);
+        assert.equal(fs.existsSync(executable), true);
+      } finally { fs.renameSync(retainedServer, packagedServer); }
+      report.runtimeGeneration = generation;
+      report.checks.push('Actual MCP backend and Node use a verified generation independent of the replaceable Hub package');
+    }
     backendPids.set(app, { pid, executable });
     await retry(() => native(pid, executable, 'button', app === 'setup' ? 'Open in Hub' : 'Enable MCP controls'));
     await page.locator(`#${app}-host-frame`).waitFor();

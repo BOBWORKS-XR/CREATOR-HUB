@@ -162,7 +162,7 @@ pub async fn restore_hosted_app(
         // Saved paths confer no authority. The current signed catalog selection
         // must still identify the same executable before it can be reopened.
         if view.bundled {
-            let candidate = crate::builtin::candidate(&handle, app)?
+            let candidate = crate::builtin::hosting_candidate(&handle, app)?
                 .ok_or("This Hub has no verified built-in module to restore.")?;
             return handle.state::<Hosting>().start_verified(
                 &handle,
