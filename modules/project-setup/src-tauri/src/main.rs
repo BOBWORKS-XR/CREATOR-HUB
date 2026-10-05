@@ -5,6 +5,9 @@ mod community;
 mod community_project;
 mod creator_hub;
 mod download_progress;
+#[cfg(target_os = "macos")]
+#[path = "../../../../native/host_parent_macos.rs"]
+mod host_parent_macos;
 mod hosted;
 mod hub;
 #[cfg(windows)]
@@ -338,8 +341,12 @@ fn main() {
             eprintln!("Use --creator-hub-info alone; no other Hub arguments are supported.");
             std::process::exit(2);
         }
-        creator_hub::StartupMode::Standalone if option_env!("CREATOR_HUB_INTERNAL_MODULE") == Some("1") => {
-            eprintln!("This is an internal Creator Hub module. Open Project Setup from Creator Hub.");
+        creator_hub::StartupMode::Standalone
+            if option_env!("CREATOR_HUB_INTERNAL_MODULE") == Some("1") =>
+        {
+            eprintln!(
+                "This is an internal Creator Hub module. Open Project Setup from Creator Hub."
+            );
             std::process::exit(2);
         }
         creator_hub::StartupMode::Standalone | creator_hub::StartupMode::Hosted => {}

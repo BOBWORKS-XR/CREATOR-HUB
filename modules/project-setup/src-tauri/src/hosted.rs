@@ -272,7 +272,12 @@ fn parent_host() -> Result<String, String> {
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn parent_host() -> Result<String, String> {
+    crate::host_parent_macos::verify()
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn parent_host() -> Result<String, String> {
     Err("Native hosted mode is not supported on this platform yet.".into())
 }

@@ -4,6 +4,10 @@ mod builtin;
 mod catalog;
 mod community;
 mod community_project;
+#[cfg(all(target_os = "macos", test))]
+#[allow(dead_code)]
+#[path = "../../native/host_parent_macos.rs"]
+mod host_parent_macos;
 mod hosted;
 mod hosted_operation;
 mod hosted_restore;

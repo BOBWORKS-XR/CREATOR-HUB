@@ -39,8 +39,11 @@ The dedicated clean Windows CI check launches both real backends without
 companion installations. The native acceptance script refuses non-disposable
 machines before inspecting settings or registrations.
 
-Confirmed platform blockers: both modules' native parent-host check currently
-supports Windows/Linux, not macOS; writable MCP hosting is Windows-only. The
+The modules now share a macOS parent-process check using Apple's `proc_pidpath`:
+private pipes, direct Hub parent and valid native executable path remain required.
+The Hub macOS test jobs exercise the shared native API on Intel and Apple silicon;
+this does not prove complete module hosting or native consent on either platform.
+Writable MCP hosting remains Windows-only. The
 unified builder therefore refuses non-Windows candidates until those contracts
 and their native acceptance are implemented. Existing standalone platform builds
 are not being removed or relabeled as unified builds.

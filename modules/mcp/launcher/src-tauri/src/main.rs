@@ -7,6 +7,9 @@ mod community_project;
 mod feedback;
 #[cfg(windows)]
 mod gui_owner;
+#[cfg(target_os = "macos")]
+#[path = "../../../../../native/host_parent_macos.rs"]
+mod host_parent_macos;
 mod hosted;
 mod hosted_commands;
 mod hosted_journal;
