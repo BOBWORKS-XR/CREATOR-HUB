@@ -30,6 +30,9 @@ Legacy builds remain unchanged when no built-in descriptor is supplied.
 The existing consent and exclusive settings ownership checks remain in place.
 This is not migration acceptance: the current modules still use their existing
 settings locations, and no legacy client entries are repointed by this phase.
+Private MCP startup reads existing settings without persisting the standalone
+loader's automatic path/schema migration. Explicit setup/save operations remain
+separate; a complete approved migration and backup adapter is still required.
 The bundled restore marker can reopen the current build-bound module after an
 update; saved paths do not authorize an arbitrary executable.
 

@@ -172,7 +172,7 @@ fn assets(context: &tauri::Context<tauri::Wry>) -> Result<BTreeMap<String, Strin
     Ok(files)
 }
 
-fn config_snapshot(
+pub(crate) fn config_snapshot(
     current: &Path,
     legacy: &Path,
 ) -> Result<(Option<crate::LauncherConfig>, &'static str), String> {

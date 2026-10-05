@@ -50,6 +50,13 @@ let child, browser, page;
 (async () => {
   registrations();
   for (const app of ['Creator Works MCP', 'Creator Project Setup']) assert.equal(fs.existsSync(path.join(process.env.LOCALAPPDATA, app)), false);
+  const settings = path.join(process.env.APPDATA, 'creator-works-mcp', 'launcher-config.json');
+  assert.equal(fs.existsSync(settings), false);
+  const oldConfig = Buffer.from(JSON.stringify({ channels: [], active_channel_id: null,
+    mcp_server_path: 'C:/old-install/banter-mcp.mjs', auto_start: false, tool_groups: 'full',
+    migrationGuard: 'Preserve unknown fields and exact bytes when opening the built-in view' }));
+  fs.mkdirSync(path.dirname(settings), { recursive: true });
+  fs.writeFileSync(settings, oldConfig, { flag: 'wx' });
   for (const module of Object.values(descriptor.modules)) {
     const file = path.join(directory, 'modules', module.executable);
     const result = require('node:child_process').spawnSync(file, [], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
@@ -128,6 +135,7 @@ let child, browser, page;
       await frame.locator('#setupBtn').waitFor();
       await frame.locator('#checkUpdatesBtn').waitFor({ state: 'hidden' });
       assert.match(await frame.locator('#updateStatus').innerText(), /included with Creator Hub/);
+      assert.deepEqual(fs.readFileSync(settings), oldConfig, 'Opening built-in MCP must not migrate the old config');
     }
     await retry(async () => assert.equal(await page.locator('#hosted-stop').isEnabled(), true));
     await page.screenshot({ path: path.join(out, `${app}.png`) });
@@ -153,6 +161,8 @@ let child, browser, page;
     }, 15);
   }
   registrations();
+  assert.deepEqual(fs.readFileSync(settings), oldConfig, 'Closing built-in MCP must preserve the old config');
+  report.checks.push('Built-in startup and close preserve legacy MCP settings byte-for-byte, including unknown fields');
   report.checks.push('Graceful module close; no separate product registrations created');
   report.passed = true;
 })().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; })

@@ -724,6 +724,16 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
 /// Load configuration from disk
 #[tauri::command]
 fn load_config(app: tauri::AppHandle) -> Result<LauncherConfig, String> {
+    if option_env!("CREATOR_HUB_INTERNAL_MODULE") == Some("1") {
+        let base = dirs::config_dir().ok_or("Cannot locate MCP configuration directory.")?;
+        return load_builtin_config(
+            &base.join(APP_CONFIG_DIR).join("launcher-config.json"),
+            &base
+                .join(LEGACY_APP_CONFIG_DIR)
+                .join("launcher-config.json"),
+            || default_mcp_server_path(&app),
+        );
+    }
     let config_path = get_config_path();
     let legacy_config_path = get_legacy_config_path();
     let source_path = if config_path.exists() {
@@ -758,16 +768,33 @@ fn load_config(app: tauri::AppHandle) -> Result<LauncherConfig, String> {
         }
         Ok(config)
     } else {
-        Ok(LauncherConfig {
-            channels: vec![],
-            active_channel_id: None,
-            mcp_server_path: default_mcp_server_path(&app)?.to_string_lossy().to_string(),
-            auto_start: false,
-            enable_custom_scripts: false,
-            allow_all_tests: true,
-            tool_groups: default_tool_groups(),
-            automatic_update_checks: false,
-        })
+        Ok(default_launcher_config(default_mcp_server_path(&app)?))
+    }
+}
+
+fn default_launcher_config(server: PathBuf) -> LauncherConfig {
+    LauncherConfig {
+        channels: vec![],
+        active_channel_id: None,
+        mcp_server_path: server.to_string_lossy().into_owned(),
+        auto_start: false,
+        enable_custom_scripts: false,
+        allow_all_tests: true,
+        tool_groups: default_tool_groups(),
+        automatic_update_checks: false,
+    }
+}
+
+fn load_builtin_config(
+    current: &Path,
+    legacy: &Path,
+    default_server: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<LauncherConfig, String> {
+    // Opening a built-in view is not approval to migrate or repair old settings.
+    let (config, _) = hosted::config_snapshot(current, legacy)?;
+    match config {
+        Some(config) => Ok(config),
+        None => Ok(default_launcher_config(default_server()?)),
     }
 }
 
@@ -2320,6 +2347,54 @@ fn set_project_feedback_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_config_reads_preserve_existing_and_legacy_files_without_migration() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("current/launcher-config.json");
+        let legacy = root.path().join("legacy/launcher-config.json");
+        let original = br#"{ "channels":[], "active_channel_id":null, "mcp_server_path":"C:/old/banter-mcp.mjs", "auto_start":false, "tool_groups":"full", "unknown":"retain" }"#;
+        std::fs::create_dir(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, original).unwrap();
+        let loaded = load_builtin_config(&current, &legacy, || {
+            panic!("Saved configuration must not resolve a replacement runtime")
+        })
+        .unwrap();
+        assert_eq!(loaded.mcp_server_path, "C:/old/banter-mcp.mjs");
+        assert_eq!(std::fs::read(&legacy).unwrap(), original);
+        assert!(!current.parent().unwrap().exists());
+        std::fs::create_dir(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, original).unwrap();
+        load_builtin_config(&current, &legacy, || panic!("No implicit migration")).unwrap();
+        assert_eq!(std::fs::read(&current).unwrap(), original);
+        assert_eq!(std::fs::read(&legacy).unwrap(), original);
+    }
+
+    #[test]
+    fn builtin_config_defaults_and_invalid_settings_never_create_or_repair_files() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("current/launcher-config.json");
+        let legacy = root.path().join("legacy/launcher-config.json");
+        let config = load_builtin_config(&current, &legacy, || {
+            Ok(PathBuf::from("/verified/server.mjs"))
+        })
+        .unwrap();
+        assert_eq!(config.mcp_server_path, "/verified/server.mjs");
+        assert!(!current.parent().unwrap().exists());
+        assert!(!legacy.parent().unwrap().exists());
+        assert!(
+            load_builtin_config(&current, &legacy, || Err("No verified runtime".into())).is_err()
+        );
+        std::fs::create_dir(current.parent().unwrap()).unwrap();
+        for bytes in [b"broken JSON".to_vec(), vec![b'x'; 256 * 1024 + 1]] {
+            std::fs::write(&current, &bytes).unwrap();
+            assert!(load_builtin_config(&current, &legacy, || panic!(
+                "Invalid config cannot select a new runtime"
+            ))
+            .is_err());
+            assert_eq!(std::fs::read(&current).unwrap(), bytes);
+        }
+    }
 
     fn temporary_root() -> PathBuf {
         std::env::temp_dir().join(format!(
