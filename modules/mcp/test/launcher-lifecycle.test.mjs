@@ -17,8 +17,31 @@ test('writable Windows UI reserves settings ownership after read-only entries an
 });
 
 test('every app command uses a completion-lifetime guard and async additions require an audit', () => {
-  assert.match(main, /\.invoke_handler\(\|invoke\| \{\s*let Ok\(_command\) = lifecycle::LIFECYCLE.command\(\)/);
-  assert.match(main, /handler\(invoke\)/);
+  const invoke = main.match(/\.invoke_handler\(\|invoke\| \{([\s\S]*?)\n\s*\}\)\s*\.build\(/)?.[1];
+  assert.ok(invoke, 'the app dispatch closure must be present');
+  const guards = new RegExp([
+    String.raw`^\s*#\[cfg\(unix\)\]`,
+    String.raw`if !invoke\s*\.message\s*\.webview_ref\(\)`,
+    String.raw`\.try_state::<gui_owner::GuiWriteOwner>\(\)`,
+    String.raw`\.is_some_and\(\|owner\|\s*owner\.ensure_current\(\)\.is_ok\(\)\)`,
+    String.raw`\{\s*invoke\.resolver\.reject\("[^"\r\n]+"\);`,
+    String.raw`return true;\s*\}`,
+    String.raw`let Ok\(_command\) = lifecycle::LIFECYCLE\.command\(\) else \{`,
+    String.raw`invoke\s*\.resolver\s*\.reject\("[^"\r\n]+"\);`,
+    String.raw`return true;\s*\};`,
+  ].join(String.raw`\s*`));
+  assert.match(invoke, guards, 'ownership and lifecycle failures must return before app dispatch');
+  for (const unsafeDispatch of [
+    invoke.replace('#[cfg(unix)]', '#[cfg(windows)]'),
+    invoke.replace('if !invoke', 'if invoke'),
+    invoke.replace('owner.ensure_current().is_ok()', 'true'),
+    invoke.replace('return true;', ''),
+    invoke.replace('lifecycle::LIFECYCLE.command()', 'Ok(())'),
+  ]) {
+    assert.doesNotMatch(unsafeDispatch, guards, 'the contract must reject a bypassed guard');
+  }
+  assert.match(invoke, /handler\(invoke\)\s*$/);
+  assert.doesNotMatch(invoke, /\bdrop\(_command\)/);
   assert.doesNotMatch(main, /#\[tauri::command[^\]]*async|#\[tauri::command[^\]]*\]\s*async fn/);
 });
 

@@ -70,6 +70,7 @@ let child, browser, page;
   const oldConfig = Buffer.from(JSON.stringify({ channels: [], active_channel_id: null,
     mcp_server_path: 'C:/old-install/banter-mcp.mjs', auto_start: false, tool_groups: 'full',
     migrationGuard: 'Preserve unknown fields and exact bytes when opening the built-in view' }));
+  let expectedConfig = oldConfig;
   fs.mkdirSync(path.dirname(settings), { recursive: true });
   fs.writeFileSync(settings, oldConfig, { flag: 'wx' });
   for (const module of Object.values(descriptor.modules)) {
@@ -167,6 +168,24 @@ let child, browser, page;
       await frame.locator('#checkUpdatesBtn').waitFor({ state: 'hidden' });
       assert.match(await frame.locator('#updateStatus').innerText(), /included with Creator Hub/);
       assert.deepEqual(fs.readFileSync(settings), oldConfig, 'Opening built-in MCP must not migrate the old config');
+      await frame.locator('body').evaluate(async server => {
+        const invoke = (command, args = {}) => window.CreatorRuntime.invoke(command, args);
+        const workflow = await invoke('begin_ui_operation');
+        try {
+          const config = await invoke('load_config');
+          config.mcp_server_path = server;
+          config.auto_start = true;
+          await invoke('save_config', { config });
+        } finally { await invoke('finish_ui_operation', { id: workflow }); }
+      }, path.join(report.runtimeGeneration, 'mcp/server/creator-works-mcp.mjs'));
+      expectedConfig = fs.readFileSync(settings);
+      assert.equal(JSON.parse(expectedConfig).migrationGuard, JSON.parse(oldConfig).migrationGuard);
+      assert.equal(JSON.parse(expectedConfig).auto_start, true);
+      const backups = path.join(path.dirname(settings), '.creator-hub-settings-backups');
+      const beforeImage = fs.readdirSync(backups).find(name => name.startsWith('launcher-config.json.') && name.endsWith('.bak'));
+      assert.ok(beforeImage, 'Explicit built-in save must retain a backup first');
+      assert.deepEqual(fs.readFileSync(path.join(backups, beforeImage)), oldConfig);
+      report.checks.push('Explicit built-in settings save preserves unknown fields and retains the exact original bytes');
     }
     await retry(async () => assert.equal(await page.locator('#hosted-stop').isEnabled(), true));
     await page.screenshot({ path: path.join(out, `${app}.png`) });
@@ -187,8 +206,8 @@ let child, browser, page;
     await backendExited(backend.pid, backend.executable);
   }
   registrations();
-  assert.deepEqual(fs.readFileSync(settings), oldConfig, 'Closing built-in MCP must preserve the old config');
-  report.checks.push('Built-in startup and close preserve legacy MCP settings byte-for-byte, including unknown fields');
+  assert.deepEqual(fs.readFileSync(settings), expectedConfig, 'Closing built-in MCP must preserve the explicitly saved config');
+  report.checks.push('Built-in startup preserves legacy settings; closing preserves the explicitly saved settings byte-for-byte');
   report.checks.push('Graceful module close; no separate product registrations created');
   report.passed = true;
 })().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; })

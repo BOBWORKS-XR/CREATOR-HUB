@@ -79,7 +79,7 @@ struct UrlArgs {
 struct Permission {
     writable: bool,
     journal: Option<crate::hosted_journal::Journal>,
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     _owner: Option<crate::gui_owner::GuiWriteOwner>,
     _payload: Vec<std::fs::File>,
 }
@@ -89,7 +89,7 @@ impl Permission {
         Self {
             writable: false,
             journal: None,
-            #[cfg(windows)]
+            #[cfg(any(windows, unix))]
             _owner: None,
             _payload: Vec::new(),
         }

@@ -82,6 +82,8 @@ jobs:
       - run: npm --prefix modules/mcp ci
       - run: npm --prefix modules/project-setup ci
       - run: npm run build:unified -- ci-windows
+      - name: Test native MCP settings and ownership guards
+        run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml
       - run: npx playwright install chromium
       - name: Open both bundled modules without companion installations
         timeout-minutes: 8
@@ -126,6 +128,10 @@ jobs:
       - run: npm ci
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo test --release --manifest-path src-tauri/Cargo.toml
+      - run: npm --prefix modules/mcp ci
+      - run: npm --prefix modules/mcp run release:launcher
+      - name: Test native MCP settings and Unix ownership guards
+        run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target
       - name: Build Linux AppImage, DEB, and RPM bundle
         run: NO_STRIP=1 npm run build -- --bundles appimage,deb,rpm
       - name: Retain development packages (not a release)
@@ -166,6 +172,10 @@ jobs:
         run: echo "TMPDIR=$(node -p "require('fs').realpathSync(require('os').tmpdir())")" >> "$GITHUB_ENV"
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo test --release --manifest-path src-tauri/Cargo.toml
+      - run: npm --prefix modules/mcp ci
+      - run: npm --prefix modules/mcp run release:launcher
+      - name: Test native MCP settings and Unix ownership guards
+        run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target
       - name: Build macOS DMG bundle
         run: npm run build -- --bundles dmg
       - name: Verify ad-hoc signed app inside macOS DMG

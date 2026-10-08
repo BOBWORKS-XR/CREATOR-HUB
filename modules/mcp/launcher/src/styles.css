@@ -29,6 +29,10 @@ body {
   min-height: 100%;
 }
 
+html:not(.creator-hosted) {
+  scroll-padding-top: 80px;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -68,18 +72,21 @@ label[for] {
   display: flex;
   min-height: 100vh;
   flex-direction: column;
+  /* Keep scrolling content clear of the fixed bottom-right Help button. */
+  padding-right: 76px;
 }
 
 .header {
   align-items: center;
-  background: transparent;
+  background: var(--bg);
   display: flex;
   justify-content: space-between;
   gap: 22px;
   min-height: 72px;
   padding: 12px 24px 12px 0;
-  position: relative;
-  z-index: 10;
+  position: sticky;
+  top: 0;
+  z-index: 30;
 }
 
 .app-switcher { align-self: center; flex: 0 0 54px; min-height: 48px; }
@@ -614,6 +621,10 @@ h2 {
   padding: 7px 12px;
 }
 
+.btn > svg {
+  flex-shrink: 0;
+}
+
 .btn:disabled {
   cursor: not-allowed;
   opacity: 0.42;
@@ -1070,6 +1081,11 @@ h2 {
 }
 
 @media (max-width: 520px) {
+  html:not(.creator-hosted) {
+    /* Clear the two-row header, including a wrapped brand title. */
+    scroll-padding-top: 120px;
+  }
+
   .header {
     display: grid;
     grid-template-columns: 54px minmax(0, 1fr);

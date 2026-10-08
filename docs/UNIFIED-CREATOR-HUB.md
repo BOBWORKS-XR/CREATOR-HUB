@@ -42,6 +42,12 @@ settings locations, and no legacy client entries are repointed by this phase.
 Private MCP startup reads existing settings without persisting the standalone
 loader's automatic path/schema migration. Explicit setup/save operations remain
 separate; a complete approved migration and backup adapter is still required.
+Explicit built-in MCP saves now retain verified, content-addressed before-images
+beside the settings file, and launcher/channel saves preserve unknown JSON fields.
+Codex configuration edits use a formatting-preserving TOML parser, including
+quoted, dotted and inline server entries. Invalid documents refuse rewriting.
+These protections are not an approved multi-file migration, activation receipt
+or power-loss recovery transaction.
 The bundled restore marker can reopen the current build-bound module after an
 update; saved paths do not authorize an arbitrary executable.
 
@@ -59,6 +65,13 @@ Writable MCP hosting remains Windows-only. The
 unified builder therefore refuses non-Windows candidates until those contracts
 and their native acceptance are implemented. Existing standalone platform builds
 are not being removed or relabeled as unified builds.
+
+Standalone Unix MCP now participates in exclusive GUI settings ownership through
+an advisory lock. Command admission checks the held marker identity and refuses
+changed, replaced or redirected paths. Native module tests run on Linux and both
+Mac architectures as well as Windows. Advisory ownership is not immutable payload
+protection; writable Unix hosting remains disabled until that separate contract
+and complete native acceptance are implemented.
 
 Root source CI and browser fixtures now use the local modules instead of fetching
 other repositories. Initial subtree contents must match their accepted source

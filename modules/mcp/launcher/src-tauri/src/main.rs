@@ -5,7 +5,7 @@ mod community;
 mod community_api;
 mod community_project;
 mod feedback;
-#[cfg(windows)]
+#[cfg(any(windows, unix))]
 mod gui_owner;
 #[cfg(target_os = "macos")]
 #[path = "../../../../../native/host_parent_macos.rs"]
@@ -20,6 +20,7 @@ mod jsonc;
 mod lifecycle;
 #[path = "../../../../../native/plugins_retirement.rs"]
 mod plugins_retirement;
+mod settings_backup;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -49,6 +50,8 @@ struct ProjectChannel {
     unity_project_path: String,
     scene_path: Option<String>,
     enabled: bool,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Full launcher configuration
@@ -67,6 +70,8 @@ struct LauncherConfig {
     tool_groups: String,
     #[serde(default)]
     automatic_update_checks: bool,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -280,6 +285,17 @@ fn is_ephemeral_path(path: &Path) -> bool {
 
 fn sync_ephemeral_bundle(source_root: &Path) -> Option<PathBuf> {
     let dest_root = get_persistent_server_dir()?;
+    let legacy = dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .map(|base| base.join("bantworks-mcp").join("server"));
+    sync_ephemeral_bundle_to(source_root, &dest_root, legacy.as_deref())
+}
+
+fn sync_ephemeral_bundle_to(
+    source_root: &Path,
+    dest_root: &Path,
+    legacy: Option<&Path>,
+) -> Option<PathBuf> {
     let _ = fs::create_dir_all(&dest_root);
     let _ = fs::create_dir_all(dest_root.join("runtime"));
     let _ = fs::create_dir_all(dest_root.join("unity-extension").join("Editor"));
@@ -315,13 +331,7 @@ fn sync_ephemeral_bundle(source_root: &Path) -> Option<PathBuf> {
     let src_node = source_root.join("runtime").join(binary_name);
     let dst_node = dest_root.join("runtime").join(binary_name);
     if src_node.is_file() {
-        let should_copy = if dst_node.is_file() {
-            let src_len = fs::metadata(&src_node).map(|m| m.len()).unwrap_or(0);
-            let dst_len = fs::metadata(&dst_node).map(|m| m.len()).unwrap_or(0);
-            src_len != dst_len || src_len == 0
-        } else {
-            true
-        };
+        let should_copy = !files_match(&src_node, &dst_node);
         if should_copy {
             let _ = fs::copy(&src_node, &dst_node);
         }
@@ -334,8 +344,7 @@ fn sync_ephemeral_bundle(source_root: &Path) -> Option<PathBuf> {
 
     // Also mirror to legacy bantworks-mcp/server so existing configurations
     // referencing the former directory remain functional.
-    if let Some(base) = dirs::data_local_dir().or_else(dirs::data_dir) {
-        let legacy_dir = base.join("bantworks-mcp").join("server");
+    if let Some(legacy_dir) = legacy {
         if legacy_dir.is_dir() {
             let _ = fs::create_dir_all(legacy_dir.join("runtime"));
             let _ = fs::create_dir_all(legacy_dir.join("unity-extension").join("Editor"));
@@ -359,7 +368,7 @@ fn sync_ephemeral_bundle(source_root: &Path) -> Option<PathBuf> {
     }
 
     if is_valid_mcp_root(&dest_root) {
-        Some(dest_root)
+        Some(dest_root.to_owned())
     } else {
         None
     }
@@ -694,6 +703,7 @@ fn publish_temporary_file(temporary_path: &Path, destination: &Path) -> std::io:
 }
 
 fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
+    use std::io::Write;
     let parent = path
         .parent()
         .ok_or_else(|| format!("Path has no parent directory: {}", path.display()))?;
@@ -706,7 +716,14 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
         .ok_or_else(|| format!("Path has no file name: {}", path.display()))?;
     let temporary_path = parent.join(format!(".{}.{}.tmp", file_name, uuid::Uuid::new_v4()));
 
-    fs::write(&temporary_path, content).map_err(|e| {
+    if option_env!("CREATOR_HUB_INTERNAL_MODULE") == Some("1") {
+        settings_backup::retain(path)?;
+    }
+    let staged = settings_backup::StagedFile::write(&temporary_path, |file| {
+        file.write_all(content.as_bytes())?;
+        file.sync_all()
+    })
+    .map_err(|e| {
         format!(
             "Failed to write temporary file {}: {}",
             temporary_path.display(),
@@ -714,13 +731,9 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
         )
     })?;
 
-    match publish_temporary_file(&temporary_path, path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = fs::remove_file(&temporary_path);
-            Err(format!("Failed to publish {}: {}", path.display(), error))
-        }
-    }
+    staged
+        .publish(|temporary| publish_temporary_file(temporary, path))
+        .map_err(|error| format!("Failed to publish {}: {}", path.display(), error))
 }
 
 /// Load configuration from disk
@@ -784,6 +797,7 @@ fn default_launcher_config(server: PathBuf) -> LauncherConfig {
         allow_all_tests: true,
         tool_groups: default_tool_groups(),
         automatic_update_checks: false,
+        extra: Default::default(),
     }
 }
 
@@ -851,6 +865,7 @@ fn add_channel(name: String, scene_path: String) -> Result<ProjectChannel, Strin
         unity_project_path,
         scene_path: Some(scene_path),
         enabled: true,
+        extra: Default::default(),
     };
 
     Ok(channel)
@@ -890,6 +905,7 @@ fn channel_for_project(project_path: &Path) -> Result<ProjectChannel, String> {
         unity_project_path: project_path.to_string_lossy().to_string(),
         scene_path: None,
         enabled: true,
+        extra: Default::default(),
     })
 }
 
@@ -1143,12 +1159,12 @@ fn build_codex_mcp_config(
     tool_groups: &str,
 ) -> Result<String, String> {
     let tool_groups = normalize_tool_groups(tool_groups)?;
-    let mut content = remove_client_mcp_tables(existing, MCP_CLIENT_ID);
-    content = remove_client_mcp_tables(&content, LEGACY_MCP_CLIENT_ID);
-
-    if !content.ends_with('\n') && !content.is_empty() {
-        content.push('\n');
-    }
+    let existing = remove_client_mcp_tables(existing, MCP_CLIENT_ID)?;
+    let existing = remove_client_mcp_tables(&existing, LEGACY_MCP_CLIENT_ID)?;
+    let mut document = existing
+        .parse::<toml_edit::Document>()
+        .map_err(|_| "Failed to parse Codex config; refusing to overwrite it.")?;
+    let mut content = String::new();
 
     content.push_str(&format!("\n[mcp_servers.{}]\n", MCP_CLIENT_ID));
     content.push_str(&format!(
@@ -1177,6 +1193,34 @@ fn build_codex_mcp_config(
             escape_toml_string(&scene.replace("\\", "/"))
         ));
     }
+    // Insert the parsed entry, not duplicate headers beside quoted or dotted keys.
+    let mut generated = content
+        .parse::<toml_edit::Document>()
+        .map_err(|_| "Failed to build valid Codex MCP settings.")?;
+    let mut entry = generated["mcp_servers"]
+        .as_table_mut()
+        .and_then(|servers| servers.remove(MCP_CLIENT_ID))
+        .ok_or("Failed to build the Codex MCP entry.")?;
+    // Imported positions belong to the temporary document. Append both tables;
+    // the serializer's stable ordering keeps the entry before its env table.
+    let entry_table = entry
+        .as_table_mut()
+        .ok_or("Failed to build the Codex MCP entry.")?;
+    entry_table.set_position(usize::MAX);
+    entry_table["env"]
+        .as_table_mut()
+        .ok_or("Failed to build the Codex MCP environment.")?
+        .set_position(usize::MAX);
+    document
+        .entry("mcp_servers")
+        .or_insert(toml_edit::table())
+        .as_table_like_mut()
+        .ok_or("Codex config mcp_servers must be a TOML table.")?
+        .insert(MCP_CLIENT_ID, entry);
+    let content = document.to_string();
+    content
+        .parse::<toml_edit::Document>()
+        .map_err(|_| "Failed to build valid Codex config; existing settings were preserved.")?;
     Ok(content)
 }
 
@@ -1257,9 +1301,9 @@ fn remove_codex_mcp_config() -> Result<(), String> {
     let existing = fs::read_to_string(&config_path)
         .map_err(|e| format!("Failed to read Codex config: {}", e))?;
     let content = remove_client_mcp_tables(
-        &remove_client_mcp_tables(&existing, MCP_CLIENT_ID),
+        &remove_client_mcp_tables(&existing, MCP_CLIENT_ID)?,
         LEGACY_MCP_CLIENT_ID,
-    );
+    )?;
 
     atomic_write(&config_path, &content)
 }
@@ -1506,37 +1550,32 @@ fn remove_opencode_mcp_config() -> Result<(), String> {
     atomic_write(&config_path, &content)
 }
 
-fn remove_toml_table_block(content: &str, table_name: &str) -> String {
-    let target = format!("[{}]", table_name);
-    let mut output = Vec::new();
-    let mut skipping = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == target {
-            skipping = true;
-            continue;
+fn remove_toml_table_block(content: &str, table_name: &str) -> Result<String, String> {
+    let mut document = content
+        .parse::<toml_edit::Document>()
+        .map_err(|_| "Failed to parse Codex config; refusing to overwrite it.")?;
+    let mut keys = table_name.split('.').peekable();
+    let mut table: &mut dyn toml_edit::TableLike = document.as_table_mut();
+    while let Some(key) = keys.next() {
+        if keys.peek().is_none() {
+            return if table.remove(key).is_some() {
+                Ok(document.to_string())
+            } else {
+                Ok(content.to_owned())
+            };
         }
-
-        if skipping && trimmed.starts_with('[') && trimmed.ends_with(']') {
-            skipping = false;
-        }
-
-        if !skipping {
-            output.push(line);
-        }
+        table = match table.get_mut(key) {
+            Some(item) => item
+                .as_table_like_mut()
+                .ok_or("Codex config mcp_servers must be a TOML table.")?,
+            None => return Ok(content.to_owned()),
+        };
     }
-
-    let mut result = output.join("\n");
-    if content.ends_with('\n') && !result.ends_with('\n') {
-        result.push('\n');
-    }
-    result
+    Ok(content.to_owned())
 }
 
-fn remove_client_mcp_tables(content: &str, client_id: &str) -> String {
-    let without_server = remove_toml_table_block(content, &format!("mcp_servers.{}", client_id));
-    remove_toml_table_block(&without_server, &format!("mcp_servers.{}.env", client_id))
+fn remove_client_mcp_tables(content: &str, client_id: &str) -> Result<String, String> {
+    remove_toml_table_block(content, &format!("mcp_servers.{}", client_id))
 }
 
 fn escape_toml_string(value: &str) -> String {
@@ -1721,14 +1760,22 @@ fn command_is_available(command: &str) -> bool {
 
 fn codex_is_configured() -> bool {
     fs::read_to_string(get_codex_config_path())
-        .map(|content| {
-            content.lines().any(|line| {
-                let line = line.trim();
-                line == format!("[mcp_servers.{}]", MCP_CLIENT_ID)
-                    || line == format!("[mcp_servers.{}]", LEGACY_MCP_CLIENT_ID)
-            })
-        })
+        .map(|content| codex_config_is_configured(&content))
         .unwrap_or(false)
+}
+
+fn codex_config_is_configured(content: &str) -> bool {
+    let Ok(document) = content.parse::<toml_edit::Document>() else {
+        return false;
+    };
+    document
+        .get("mcp_servers")
+        .and_then(toml_edit::Item::as_table_like)
+        .is_some_and(|servers| {
+            [MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID]
+                .iter()
+                .any(|id| servers.get(id).is_some_and(toml_edit::Item::is_table_like))
+        })
 }
 
 fn claude_is_configured() -> bool {
@@ -2185,6 +2232,8 @@ fn main() {
             std::process::exit(code);
         }
     };
+    #[cfg(unix)]
+    let gui_owner = gui_owner::GuiWriteOwner::current_user();
 
     // Linux-only: work around WebKitGTK failures on Wayland sessions and
     // certain GPU drivers where the DMA-BUF renderer can't allocate a
@@ -2208,7 +2257,24 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .setup(|app| {
+        .setup(move |app| {
+            #[cfg(unix)]
+            match gui_owner {
+                Ok(owner) => {
+                    if !app.manage(owner) {
+                        return Err(std::io::Error::other(
+                            "MCP settings ownership already exists.",
+                        )
+                        .into());
+                    }
+                }
+                Err(error) => {
+                    gui_owner::show_blocked(app.handle(), &error);
+                    return Err(
+                        std::io::Error::other(gui_owner::blocked_message(&error)).into()
+                    );
+                }
+            }
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {
                 lifecycle::LIFECYCLE.attach_window(window.hwnd()?.0 as usize);
@@ -2219,6 +2285,16 @@ fn main() {
         })
         .on_window_event(lifecycle::window_event)
         .invoke_handler(|invoke| {
+            #[cfg(unix)]
+            if !invoke
+                .message
+                .webview_ref()
+                .try_state::<gui_owner::GuiWriteOwner>()
+                .is_some_and(|owner| owner.ensure_current().is_ok())
+            {
+                invoke.resolver.reject("MCP settings ownership changed or is unavailable. Close this window before trying again. No new command was started.");
+                return true;
+            }
             let Ok(_command) = lifecycle::LIFECYCLE.command() else {
                 invoke
                     .resolver
@@ -2356,6 +2432,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn launcher_and_channel_settings_round_trip_unknown_fields() {
+        let original = serde_json::json!({
+            "channels": [{ "id": "one", "name": "Keep", "unity_project_path": "/fixture/project",
+                "scene_path": null, "enabled": true, "futureChannelSetting": { "keep": [1, 2] } }],
+            "active_channel_id": "one", "mcp_server_path": "/fixture/server.mjs", "auto_start": false,
+            "futureLauncherSetting": { "keep": [true, "value"] }
+        });
+        let mut config: LauncherConfig = serde_json::from_value(original.clone()).unwrap();
+        config.auto_start = true;
+        config.channels[0].name = "Changed intentionally".into();
+        let saved = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            saved["futureLauncherSetting"],
+            original["futureLauncherSetting"]
+        );
+        assert_eq!(
+            saved["channels"][0]["futureChannelSetting"],
+            original["channels"][0]["futureChannelSetting"]
+        );
+        assert_eq!(saved["auto_start"], true);
+        assert_eq!(saved["channels"][0]["name"], "Changed intentionally");
+    }
+
+    #[test]
     fn builtin_config_reads_preserve_existing_and_legacy_files_without_migration() {
         let root = tempfile::tempdir().unwrap();
         let current = root.path().join("current/launcher-config.json");
@@ -2457,6 +2557,7 @@ mod tests {
             allow_all_tests: true,
             tool_groups: " ShaderGraph, Read, read ".to_string(),
             automatic_update_checks: false,
+            extra: Default::default(),
         };
         let replacement = Path::new("D:/installed/server/creator-works-mcp.mjs");
 
@@ -2484,12 +2585,227 @@ mod tests {
     #[test]
     fn removes_only_the_target_codex_tables() {
         let input = "model = \"gpt\"\n\n[mcp_servers.creator-works]\ncommand = \"node\"\n\n[mcp_servers.creator-works.env]\nUNITY_PROJECT_PATH = \"X\"\n\n[other]\nkeep = true\n";
-        let result = remove_client_mcp_tables(input, MCP_CLIENT_ID);
+        let result = remove_client_mcp_tables(input, MCP_CLIENT_ID).unwrap();
 
         assert!(result.contains("model = \"gpt\""));
         assert!(result.contains("[other]"));
         assert!(!result.contains("mcp_servers.creator-works"));
         assert!(!result.contains("UNITY_PROJECT_PATH"));
+    }
+
+    #[test]
+    fn codex_removal_handles_quoted_commented_and_dotted_entries() {
+        for input in [
+            "[mcp_servers.creator-works] # current entry\ncommand = \"old-node\"\n",
+            "[mcp_servers.\"creator-works\"]\ncommand = \"old-node\"\n",
+            "[mcp_servers . 'creator-works'] # quoted entry\ncommand = \"old-node\"\n",
+            "[mcp_servers]\ncreator-works.command = \"old-node\"\n",
+            "mcp_servers.\"creator-works\".command = \"old-node\"\n",
+            "mcp_servers = { creator-works = { command = \"old-node\" } }\n",
+            "[mcp_servers]\ncreator-works = { command = \"old-node\" }\n",
+            "[mcp_servers.\"creator-works\".env] # implicit server\nOLD = \"old-node\"\n",
+        ] {
+            input.parse::<toml_edit::Document>().unwrap();
+            let result = remove_client_mcp_tables(input, MCP_CLIENT_ID).unwrap();
+            let parsed = result.parse::<toml_edit::Document>().unwrap();
+            assert!(
+                !result.contains("old-node"),
+                "Entry survived removal: {result}"
+            );
+            assert!(!codex_config_is_configured(&result));
+            assert!(parsed
+                .get("mcp_servers")
+                .and_then(|servers| servers.get(MCP_CLIENT_ID))
+                .is_none());
+        }
+    }
+
+    fn codex_fixture_channel() -> ProjectChannel {
+        ProjectChannel {
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            unity_project_path: "E:\\unity\\Fixture Project".into(),
+            scene_path: Some("E:\\unity\\Fixture Project\\Assets\\Main.unity".into()),
+            enabled: true,
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn codex_apply_replaces_parsed_entries_without_duplicate_tables() {
+        let unrelated = "[other] # keep this header\nvalue  = 'unchanged' # keep this value\n";
+        for entries in [
+            "[mcp_servers.\"creator-works\"] # current\ncommand = 'old-node'\n[mcp_servers . 'banter'] # legacy\ncommand = 'old-node'\n",
+            "[mcp_servers]\n\"creator-works\".command = 'old-node'\nbanter.command = 'old-node'\n",
+            "mcp_servers.\"creator-works\".command = 'old-node'\nmcp_servers.banter.command = 'old-node'\n",
+            "mcp_servers = { creator-works = { command = 'old-node' }, banter = { command = 'old-node' } }\n",
+            "[mcp_servers]\ncreator-works = { command = 'old-node' }\nbanter = { command = 'old-node' }\n",
+        ] {
+            let input = format!("# keep this comment\nmodel  = 'keep-model' # keep spacing\n{entries}\n{unrelated}");
+            input.parse::<toml_edit::Document>().unwrap();
+            let output = build_codex_mcp_config(
+                &input,
+                &codex_fixture_channel(),
+                "C:\\Creator Works\\runtime\\node.exe",
+                "C:\\Creator Works\\creator-works-mcp.mjs",
+                "read,banter",
+            )
+            .unwrap();
+            let parsed = output.parse::<toml_edit::Document>().unwrap();
+            assert!(output.contains("# keep this comment\nmodel  = 'keep-model' # keep spacing\n"));
+            assert!(output.contains(unrelated));
+            assert!(!output.contains("old-node"));
+            assert!(parsed["mcp_servers"].get(LEGACY_MCP_CLIENT_ID).is_none());
+            let entry = &parsed["mcp_servers"][MCP_CLIENT_ID];
+            assert_eq!(entry["command"].as_str(), Some("C:/Creator Works/runtime/node.exe"));
+            assert_eq!(entry["args"][0].as_str(), Some("C:\\Creator Works\\creator-works-mcp.mjs"));
+            assert_eq!(entry["startup_timeout_sec"].as_integer(), Some(20));
+            assert_eq!(entry["tool_timeout_sec"].as_integer(), Some(600));
+            assert_eq!(entry["env"]["UNITY_PROJECT_PATH"].as_str(), Some("E:/unity/Fixture Project"));
+            assert_eq!(entry["env"]["UNITY_SCENE_PATH"].as_str(), Some("E:/unity/Fixture Project/Assets/Main.unity"));
+            assert_eq!(entry["env"][TOOL_GROUPS_ENV].as_str(), Some("read,banter"));
+            assert!(codex_config_is_configured(&output));
+            let repeated = build_codex_mcp_config(
+                &output,
+                &codex_fixture_channel(),
+                "C:\\Creator Works\\runtime\\node.exe",
+                "C:\\Creator Works\\creator-works-mcp.mjs",
+                "read,banter",
+            )
+            .unwrap();
+            assert_eq!(repeated, output);
+        }
+    }
+
+    #[test]
+    fn codex_apply_preserves_existing_table_order_and_repeats_exactly() {
+        let unchanged = "model  = 'keep-model' # keep spacing\n\n[mcp_servers.other] # keep sibling\ncommand  = 'keep-node' # keep spacing\n\n[mcp_servers] # keep explicit parent after its child\n\n[[other.items]] # keep array table\nvalue = 'first'\n\n[[other.items]] # keep second array table\nvalue = 'second'\n";
+        let output = build_codex_mcp_config(
+            unchanged,
+            &codex_fixture_channel(),
+            "node",
+            "server.mjs",
+            "read",
+        )
+        .unwrap();
+        assert!(output.starts_with(unchanged));
+        output.parse::<toml_edit::Document>().unwrap();
+        let repeated = build_codex_mcp_config(
+            &output,
+            &codex_fixture_channel(),
+            "node",
+            "server.mjs",
+            "read",
+        )
+        .unwrap();
+        assert_eq!(repeated, output);
+    }
+
+    #[test]
+    fn codex_removal_preserves_unrelated_tables_and_header_text_in_strings() {
+        let prefix = "model  = 'keep-model' # keep spacing\nnote = '''\n[mcp_servers.creator-works]\nThis is not a table.\n'''\n\n";
+        let unrelated = "[mcp_servers.other] # keep this server\ncommand  = 'keep-node' # keep spacing\nargs = [ 'keep arg', ]\n\n[other] # keep this table\nvalue  = 'keep-value'\n";
+        let input = format!("{prefix}[mcp_servers.\"creator-works\"] # current\ncommand = 'old-node'\n[mcp_servers.\"creator-works\".env]\nOLD = 'old-node'\n[mcp_servers.'banter'.custom] # implicit legacy server\nOLD = 'old-node'\n\n{unrelated}");
+        let output = remove_client_mcp_tables(
+            &remove_client_mcp_tables(&input, MCP_CLIENT_ID).unwrap(),
+            LEGACY_MCP_CLIENT_ID,
+        )
+        .unwrap();
+        let parsed = output.parse::<toml_edit::Document>().unwrap();
+        assert!(output.starts_with(prefix));
+        assert!(output.contains(unrelated));
+        assert!(!output.contains("old-node"));
+        assert_eq!(
+            parsed["mcp_servers"]["other"]["command"].as_str(),
+            Some("keep-node")
+        );
+        assert!(!codex_config_is_configured(&output));
+    }
+
+    #[test]
+    fn codex_removal_preserves_inline_siblings_and_absent_targets_exactly() {
+        let input = "# keep\nmcp_servers = { other = { command = 'keep-node' }, creator-works = { command = 'old-node' } } # keep suffix\n";
+        let output = remove_client_mcp_tables(input, MCP_CLIENT_ID).unwrap();
+        let parsed = output.parse::<toml_edit::Document>().unwrap();
+        assert!(output.contains("other = { command = 'keep-node' }"));
+        assert!(output.contains("# keep suffix"));
+        assert_eq!(
+            parsed["mcp_servers"]["other"]["command"].as_str(),
+            Some("keep-node")
+        );
+        assert!(!codex_config_is_configured(&output));
+        for unchanged in [
+            "",
+            "# comments only, no final newline",
+            "model  = 'keep' # comment\r\n[mcp_servers.other]\r\ncommand = 'node'\r\n",
+            "mcp_servers = { other = { command = 'keep-node' } } # no final newline",
+        ] {
+            assert_eq!(
+                remove_client_mcp_tables(unchanged, MCP_CLIENT_ID).unwrap(),
+                unchanged
+            );
+            assert_eq!(
+                remove_client_mcp_tables(unchanged, LEGACY_MCP_CLIENT_ID).unwrap(),
+                unchanged
+            );
+        }
+    }
+
+    #[test]
+    fn codex_configured_detects_parsed_tables_not_text_matches() {
+        for id in [MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID] {
+            for input in [
+                format!("[mcp_servers.\"{id}\"] # comment\ncommand = 'node'\n"),
+                format!("[mcp_servers . '{id}']\ncommand = 'node'\n"),
+                format!("mcp_servers.\"{id}\".command = 'node'\n"),
+                format!("[mcp_servers]\n{id} = {{ command = 'node' }}\n"),
+                format!("mcp_servers = {{ '{id}' = {{ command = 'node' }} }}\n"),
+            ] {
+                assert!(
+                    codex_config_is_configured(&input),
+                    "Missed parsed entry: {input}"
+                );
+            }
+        }
+        for input in [
+            "note = '''\n[mcp_servers.creator-works]\n'''\n",
+            "note = \"\"\"\n[mcp_servers.banter]\n\"\"\"\n",
+            "# [mcp_servers.creator-works]\n",
+            "['mcp_servers.creator-works']\ncommand = 'node'\n",
+            "[profiles.example.mcp_servers.creator-works]\ncommand = 'node'\n",
+            "[mcp_servers.creator-works-other]\ncommand = 'node'\n",
+            "[mcp_servers]\ncreator-works = 'not a table'\n",
+            "[[mcp_servers.creator-works]]\ncommand = 'node'\n",
+            "[mcp_servers.creator-works]\ncommand = 'node'\n[broken\n",
+            "[mcp_servers.creator-works]\ncommand = 'node'\n[mcp_servers.'creator-works']\n",
+        ] {
+            assert!(
+                !codex_config_is_configured(input),
+                "False configured match: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_invalid_documents_and_non_table_roots_refuse_rewriting() {
+        for input in [
+            "[broken\n",
+            "[mcp_servers.creator-works]\ncommand = 'node'\n[mcp_servers.'creator-works']\n",
+            "mcp_servers = 'not a table'\n",
+            "mcp_servers = []\n",
+        ] {
+            assert!(remove_client_mcp_tables(input, MCP_CLIENT_ID).is_err());
+            assert!(remove_client_mcp_tables(input, LEGACY_MCP_CLIENT_ID).is_err());
+            assert!(build_codex_mcp_config(
+                input,
+                &codex_fixture_channel(),
+                "node",
+                "server.mjs",
+                "core"
+            )
+            .is_err());
+            assert!(!codex_config_is_configured(input));
+        }
     }
 
     #[test]
@@ -2623,6 +2939,7 @@ mod tests {
             unity_project_path: "E:\\unity\\Project".to_string(),
             scene_path: Some("E:\\unity\\Project\\Assets\\Main.unity".to_string()),
             enabled: true,
+            extra: Default::default(),
         };
 
         let claude = build_claude_mcp_config(
@@ -2834,6 +3151,7 @@ mod tests {
             unity_project_path: "/home/user/Unity/Project".to_string(),
             scene_path: Some("/home/user/Unity/Project/Assets/Main.unity".to_string()),
             enabled: true,
+            extra: Default::default(),
         };
 
         let antigravity = build_antigravity_mcp_config(
@@ -2944,7 +3262,10 @@ mod tests {
 
         assert!(is_valid_mcp_root(&source_root));
 
-        let synced = sync_ephemeral_bundle(&source_root);
+        let persistent = temp_dir.join("persistent/server");
+        let legacy = temp_dir.join("legacy/server");
+        fs::create_dir_all(&legacy).unwrap();
+        let synced = sync_ephemeral_bundle_to(&source_root, &persistent, Some(&legacy));
         assert!(synced.is_some(), "sync_ephemeral_bundle should succeed");
         let dest_root = synced.unwrap();
         assert!(is_valid_mcp_root(&dest_root));
@@ -2961,6 +3282,24 @@ mod tests {
             .join("Editor")
             .join(UNITY_BRIDGE_LOGO_FILE_NAME)
             .is_file());
+
+        assert_eq!(dest_root, persistent);
+        assert_eq!(
+            fs::read(legacy.join("creator-works-mcp.mjs")).unwrap(),
+            b"// server"
+        );
+        assert!(legacy.join("runtime").join(binary_name).is_file());
+
+        fs::write(source_root.join("runtime").join(binary_name), "#!/bin/xx").unwrap();
+        sync_ephemeral_bundle_to(&source_root, &persistent, Some(&legacy)).unwrap();
+        assert_eq!(
+            fs::read(persistent.join("runtime").join(binary_name)).unwrap(),
+            b"#!/bin/xx"
+        );
+        assert_eq!(
+            fs::read(legacy.join("runtime").join(binary_name)).unwrap(),
+            b"#!/bin/xx"
+        );
 
         let _ = fs::remove_dir_all(temp_dir);
     }

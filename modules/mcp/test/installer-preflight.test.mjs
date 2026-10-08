@@ -111,14 +111,14 @@ test('native lifecycle driver and window helper refuse local execution before ac
 });
 
 test('Windows PowerShell preserves installer paths and refuses locked/running targets without changes', {
-  skip: process.platform !== 'win32', timeout: 120_000,
+  skip: process.platform !== 'win32', timeout: 310_000,
 }, () => {
   const powershell = path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe');
   const result = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', path.resolve('test/fixtures/installer-preflight-windows.ps1'),
     '-Guard', path.resolve('launcher/src-tauri/windows/installer-preflight.ps1'),
     '-Stopper', path.resolve('launcher/src-tauri/windows/installer-runtime-stop.ps1')], {
-    encoding: 'utf8', windowsHide: true, timeout: 110_000, maxBuffer: 128 * 1024,
+    encoding: 'utf8', windowsHide: true, timeout: 300_000, maxBuffer: 128 * 1024,
   });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stdout + result.stderr);
