@@ -11,10 +11,11 @@ for (const failSave of [false, true]) {
       window: { CreatorRuntime: { invoke: async (command, args) => {
         calls.push({ command, args });
         if (command === 'begin_ui_operation') return 33;
-        if (command === 'load_config') return { mcp_server_path: 'old', auto_start: false, futureSetting: 'preserve' };
+        if (command === 'load_config') return { mcp_server_path: 'old', auto_start: false, tool_groups: 'full', futureSetting: 'preserve' };
         if (command === 'save_config') {
           assert.equal(args.config.mcp_server_path, server);
           assert.equal(args.config.auto_start, true);
+          assert.equal(args.config.tool_groups, 'core');
           assert.equal(args.config.futureSetting, 'preserve');
           if (failSave) throw Error('injected save failure');
           return null;

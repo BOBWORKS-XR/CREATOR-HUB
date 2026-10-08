@@ -6,6 +6,7 @@ async function saveBuiltinSettings(frame, server) {
       const config = await invoke('load_config');
       config.mcp_server_path = server;
       config.auto_start = true;
+      config.tool_groups = 'core';
       await invoke('save_config', { config });
     } finally { await invoke('finish_ui_operation', { id: workflow }); }
   }, server);

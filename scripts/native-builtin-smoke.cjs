@@ -173,6 +173,7 @@ let child, browser, page;
       expectedConfig = fs.readFileSync(settings);
       assert.equal(JSON.parse(expectedConfig).migrationGuard, JSON.parse(oldConfig).migrationGuard);
       assert.equal(JSON.parse(expectedConfig).auto_start, true);
+      assert.equal(JSON.parse(expectedConfig).tool_groups, 'core');
       const backups = path.join(path.dirname(settings), '.creator-hub-settings-backups');
       const beforeImage = fs.readdirSync(backups).find(name => name.startsWith('launcher-config.json.') && name.endsWith('.bak'));
       assert.ok(beforeImage, 'Explicit built-in save must retain a backup first');
