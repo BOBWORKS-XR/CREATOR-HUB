@@ -16,6 +16,22 @@ accepted unified migration release.
   successful AI tool call are separate checks. Restart changed clients and ask
   the AI to call `get_bridge_status`; saved settings do not prove a connection.
 
+## Existing Client Entries
+
+Claude Code, Codex, Antigravity and OpenCode do not treat the names
+`creator-works` or `banter` as proof that an entry belongs to Hub. Setup may
+replace an entry bearing Hub's ownership marker, or one whose command and server
+exactly match the explicitly selected runtime. Removing entries requires the
+ownership marker. A conflicting entry refuses the whole client edit, including
+when another entry is owned; unrelated servers are not removed. Explicit
+updates and removals retain exact before-images.
+
+An older unmarked entry pointing at a different runtime needs reviewed migration;
+setup does not silently adopt it. These checks do not implement that migration,
+and the marker is not a publisher signature. The older client writers are not
+exclusive transactions against external concurrent edits. Multi-file migration
+and conflict recovery remain release gates.
+
 ## Claude Desktop
 
 Desktop is separate from Claude Code and the Claude website. Local Desktop

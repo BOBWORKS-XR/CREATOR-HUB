@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod claude_desktop;
+mod client_ownership;
 mod community;
 mod community_api;
 mod community_project;
@@ -1085,6 +1086,11 @@ fn build_claude_mcp_config(
     mcp_server_path: &str,
     tool_groups: &str,
 ) -> Result<serde_json::Value, String> {
+    client_ownership::guard_json(
+        &config,
+        Some(&serde_json::json!({"command":node_command,"args":[mcp_server_path]})),
+        false,
+    )?;
     if !config.is_object() {
         return Err("Claude config root must be a JSON object".to_string());
     }
@@ -1101,7 +1107,8 @@ fn build_claude_mcp_config(
 
     let mut env = serde_json::json!({
         "UNITY_PROJECT_PATH": channel.unity_project_path,
-        TOOL_GROUPS_ENV: normalize_tool_groups(tool_groups)?
+        TOOL_GROUPS_ENV: normalize_tool_groups(tool_groups)?,
+        client_ownership::OWNER_KEY: client_ownership::OWNER
     });
     if let Some(scene) = &channel.scene_path {
         env["UNITY_SCENE_PATH"] = serde_json::json!(scene);
@@ -1219,6 +1226,10 @@ fn build_codex_mcp_config(
     mcp_server_path: &str,
     tool_groups: &str,
 ) -> Result<String, String> {
+    client_ownership::guard_toml(
+        existing,
+        Some((&node_command.replace('\\', "/"), mcp_server_path)),
+    )?;
     let tool_groups = normalize_tool_groups(tool_groups)?;
     let existing = remove_client_mcp_tables(existing, MCP_CLIENT_ID)?;
     let existing = remove_client_mcp_tables(&existing, LEGACY_MCP_CLIENT_ID)?;
@@ -1239,6 +1250,11 @@ fn build_codex_mcp_config(
     content.push_str("startup_timeout_sec = 20\n");
     content.push_str("tool_timeout_sec = 600\n");
     content.push_str(&format!("\n[mcp_servers.{}.env]\n", MCP_CLIENT_ID));
+    content.push_str(&format!(
+        "{} = \"{}\"\n",
+        client_ownership::OWNER_KEY,
+        client_ownership::OWNER
+    ));
     content.push_str(&format!(
         "UNITY_PROJECT_PATH = \"{}\"\n",
         escape_toml_string(&channel.unity_project_path.replace("\\", "/"))
@@ -1300,6 +1316,10 @@ fn remove_claude_mcp_config() -> Result<(), String> {
     let mut config: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse Claude config: {}", e))?;
 
+    if !client_ownership::guard_json(&config, None, false)? {
+        return Ok(());
+    }
+
     if let Some(servers) = config.get_mut("mcpServers") {
         if let Some(obj) = servers.as_object_mut() {
             obj.remove(MCP_CLIENT_ID);
@@ -1310,6 +1330,7 @@ fn remove_claude_mcp_config() -> Result<(), String> {
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Claude config: {}", e))?;
 
+    settings_backup::retain(&config_path)?;
     atomic_write(&config_path, &content)
 }
 
@@ -1363,11 +1384,15 @@ fn remove_codex_mcp_config() -> Result<(), String> {
 
     let existing = fs::read_to_string(&config_path)
         .map_err(|e| format!("Failed to read Codex config: {}", e))?;
+    if !client_ownership::guard_toml(&existing, None)? {
+        return Ok(());
+    }
     let content = remove_client_mcp_tables(
         &remove_client_mcp_tables(&existing, MCP_CLIENT_ID)?,
         LEGACY_MCP_CLIENT_ID,
     )?;
 
+    settings_backup::retain(&config_path)?;
     atomic_write(&config_path, &content)
 }
 
@@ -1396,6 +1421,11 @@ fn build_antigravity_mcp_config(
     mcp_server_path: &str,
     tool_groups: &str,
 ) -> Result<serde_json::Value, String> {
+    client_ownership::guard_json(
+        &config,
+        Some(&serde_json::json!({"command":node_command,"args":[mcp_server_path]})),
+        false,
+    )?;
     if !config.is_object() {
         return Err("Antigravity config root must be a JSON object".to_string());
     }
@@ -1407,7 +1437,8 @@ fn build_antigravity_mcp_config(
 
     let mut env = serde_json::json!({
         "UNITY_PROJECT_PATH": channel.unity_project_path,
-        TOOL_GROUPS_ENV: normalize_tool_groups(tool_groups)?
+        TOOL_GROUPS_ENV: normalize_tool_groups(tool_groups)?,
+        client_ownership::OWNER_KEY: client_ownership::OWNER
     });
     if let Some(scene) = &channel.scene_path {
         env["UNITY_SCENE_PATH"] = serde_json::json!(scene);
@@ -1492,6 +1523,10 @@ fn remove_antigravity_mcp_config() -> Result<(), String> {
     let mut config: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse Antigravity config: {}", e))?;
 
+    if !client_ownership::guard_json(&config, None, false)? {
+        return Ok(());
+    }
+
     if let Some(servers) = config.get_mut("mcpServers") {
         if let Some(obj) = servers.as_object_mut() {
             obj.remove(MCP_CLIENT_ID);
@@ -1502,6 +1537,7 @@ fn remove_antigravity_mcp_config() -> Result<(), String> {
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Antigravity config: {}", e))?;
 
+    settings_backup::retain(&config_path)?;
     atomic_write(&config_path, &content)
 }
 
@@ -1529,6 +1565,11 @@ fn build_opencode_mcp_config(
     mcp_server_path: &str,
     tool_groups: &str,
 ) -> Result<serde_json::Value, String> {
+    client_ownership::guard_json(
+        &config,
+        Some(&serde_json::json!({"command":[node_command,mcp_server_path]})),
+        true,
+    )?;
     if !config.is_object() {
         return Err("OpenCode config root must be a JSON object".to_string());
     }
@@ -1540,7 +1581,8 @@ fn build_opencode_mcp_config(
 
     let mut environment = serde_json::json!({
         "UNITY_PROJECT_PATH": channel.unity_project_path,
-        TOOL_GROUPS_ENV: normalize_tool_groups(tool_groups)?
+        TOOL_GROUPS_ENV: normalize_tool_groups(tool_groups)?,
+        client_ownership::OWNER_KEY: client_ownership::OWNER
     });
     if let Some(scene) = &channel.scene_path {
         environment["UNITY_SCENE_PATH"] = serde_json::json!(scene);
@@ -1594,6 +1636,7 @@ fn update_opencode_mcp_config(
         &tool_groups,
     )?;
     let entry = config["mcp"][MCP_CLIENT_ID].clone();
+    client_ownership::guard_json(&parse_opencode_config(&content)?, Some(&entry), true)?;
     let content =
         jsonc::update_managed_entry(&content, "mcp", MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID, &entry)
             .map_err(|e| format!("Failed to update OpenCode config: {}", e))?;
@@ -1634,9 +1677,13 @@ fn remove_opencode_mcp_config() -> Result<(), String> {
     }
     let content = fs::read_to_string(&config_path)
         .map_err(|e| format!("Failed to read OpenCode config: {}", e))?;
+    if !client_ownership::guard_json(&parse_opencode_config(&content)?, None, true)? {
+        return Ok(());
+    }
     let content =
         jsonc::remove_managed_entries(&content, "mcp", MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID)
             .map_err(|e| format!("Failed to update OpenCode config: {}", e))?;
+    settings_backup::retain(&config_path)?;
     atomic_write(&config_path, &content)
 }
 
@@ -2863,6 +2910,89 @@ mod tests {
     }
 
     #[test]
+    fn client_updates_refuse_name_collisions_with_user_authored_servers() {
+        let channel = codex_fixture_channel();
+        for id in [MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID] {
+            let custom = serde_json::json!({"mcpServers":{id:{"command":"my-custom-server", "args":["keep"]}}});
+            assert!(build_claude_mcp_config(
+                custom.clone(),
+                &channel,
+                "node",
+                "server.mjs",
+                "core"
+            )
+            .is_err());
+            assert!(
+                build_antigravity_mcp_config(custom, &channel, "node", "server.mjs", "core")
+                    .is_err()
+            );
+            let custom = serde_json::json!({"mcp":{id:{"type":"local", "command":["my-custom-server","keep"]}}});
+            assert!(
+                build_opencode_mcp_config(custom, &channel, "node", "server.mjs", "core").is_err()
+            );
+            let custom =
+                format!("[mcp_servers.'{id}']\ncommand='my-custom-server'\nargs=['keep']\n");
+            assert!(
+                build_codex_mcp_config(&custom, &channel, "node", "server.mjs", "core").is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn client_builders_mark_owned_entries_and_preserve_unrelated_servers_on_update() {
+        let channel = codex_fixture_channel();
+        let original = serde_json::json!({"preferences":{"keep":true}, "mcpServers":{"other":{"command":"keep"}}});
+        for build in [build_claude_mcp_config, build_antigravity_mcp_config] {
+            let first = build(original.clone(), &channel, "node", "server.mjs", "core").unwrap();
+            assert_eq!(client_ownership::guard_json(&first, None, false), Ok(true));
+            let updated = build(first, &channel, "new-node", "new-server.mjs", "read").unwrap();
+            assert_eq!(updated["preferences"], original["preferences"]);
+            assert_eq!(
+                updated["mcpServers"]["other"],
+                original["mcpServers"]["other"]
+            );
+            assert_eq!(updated["mcpServers"][MCP_CLIENT_ID]["command"], "new-node");
+            assert_eq!(
+                client_ownership::guard_json(&updated, None, false),
+                Ok(true)
+            );
+        }
+        let original =
+            serde_json::json!({"preferences":{"keep":true}, "mcp":{"other":{"command":["keep"]}}});
+        let first =
+            build_opencode_mcp_config(original.clone(), &channel, "node", "server.mjs", "core")
+                .unwrap();
+        assert_eq!(client_ownership::guard_json(&first, None, true), Ok(true));
+        let updated =
+            build_opencode_mcp_config(first, &channel, "new-node", "new-server.mjs", "read")
+                .unwrap();
+        assert_eq!(updated["preferences"], original["preferences"]);
+        assert_eq!(updated["mcp"]["other"], original["mcp"]["other"]);
+        assert_eq!(
+            updated["mcp"][MCP_CLIENT_ID]["command"],
+            serde_json::json!(["new-node", "new-server.mjs"])
+        );
+        assert_eq!(client_ownership::guard_json(&updated, None, true), Ok(true));
+        let original = "# keep this comment\nmodel='keep'\n[mcp_servers.other]\ncommand='keep'\n";
+        let first =
+            build_codex_mcp_config(original, &channel, "node", "server.mjs", "core").unwrap();
+        assert_eq!(client_ownership::guard_toml(&first, None), Ok(true));
+        let updated =
+            build_codex_mcp_config(&first, &channel, "new-node", "new-server.mjs", "read").unwrap();
+        assert!(updated.starts_with("# keep this comment\nmodel='keep'\n"));
+        let parsed = updated.parse::<toml_edit::Document>().unwrap();
+        assert_eq!(
+            parsed["mcp_servers"]["other"]["command"].as_str(),
+            Some("keep")
+        );
+        assert_eq!(
+            parsed["mcp_servers"][MCP_CLIENT_ID]["command"].as_str(),
+            Some("new-node")
+        );
+        assert_eq!(client_ownership::guard_toml(&updated, None), Ok(true));
+    }
+
+    #[test]
     fn codex_apply_replaces_parsed_entries_without_duplicate_tables() {
         let unrelated = "[other] # keep this header\nvalue  = 'unchanged' # keep this value\n";
         for entries in [
@@ -2873,7 +3003,17 @@ mod tests {
             "[mcp_servers]\ncreator-works = { command = 'old-node' }\nbanter = { command = 'old-node' }\n",
         ] {
             let input = format!("# keep this comment\nmodel  = 'keep-model' # keep spacing\n{entries}\n{unrelated}");
-            input.parse::<toml_edit::Document>().unwrap();
+            let mut owned = input.parse::<toml_edit::Document>().unwrap();
+            for id in [MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID] {
+                let entry = owned["mcp_servers"].get_mut(id).unwrap().as_table_like_mut().unwrap();
+                let mut args = toml_edit::Array::new();
+                args.push("old-server");
+                entry.insert("args", toml_edit::value(args));
+                let mut env = toml_edit::InlineTable::new();
+                env.insert(client_ownership::OWNER_KEY, client_ownership::OWNER.into());
+                entry.insert("env", toml_edit::value(env));
+            }
+            let input = owned.to_string();
             let output = build_codex_mcp_config(
                 &input,
                 &codex_fixture_channel(),
@@ -3178,8 +3318,8 @@ mod tests {
                 "keep": true,
                 "mcpServers": {
                     "other": {},
-                    "banter": { "command": "old" },
-                    "creator-works": { "command": "stale" }
+                    "banter": { "command": "old", "args":["old-server"], "env":{client_ownership::OWNER_KEY:client_ownership::OWNER} },
+                    "creator-works": { "command": "stale", "args":["old-server"], "env":{client_ownership::OWNER_KEY:client_ownership::OWNER} }
                 }
             }),
             &channel,
@@ -3197,7 +3337,7 @@ mod tests {
         );
 
         let codex = build_codex_mcp_config(
-            "model = \"gpt\"\n\n[mcp_servers.banter]\ncommand = \"old\"\n\n[mcp_servers.banter.env]\nOLD = \"true\"\n\n[other]\nkeep = true\n",
+            "model = \"gpt\"\n\n[mcp_servers.banter]\ncommand = \"old\"\nargs=[\"old-server\"]\n\n[mcp_servers.banter.env]\nOLD = \"true\"\nCREATOR_WORKS_CONFIG_OWNER=\"creator-hub-v1\"\n\n[other]\nkeep = true\n",
             &channel,
             "C:/CreatorWorks/runtime/node.exe",
             "C:/CreatorWorks/creator-works-mcp.mjs",
