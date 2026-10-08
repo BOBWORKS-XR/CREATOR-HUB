@@ -100,6 +100,7 @@ jobs:
           path: |
             artifacts/native-suite-*/report.json
             artifacts/native-suite-*/*.png
+            artifacts/native-suite-*/*.txt
 
   hub-linux:
     name: Hub (Linux)

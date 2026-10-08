@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -83,4 +83,34 @@ test("project router falls back to the launcher's active channel without an envi
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("invalid saved channel field types are ignored without repairing the user's settings", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "creator-router-invalid-"));
+  try {
+    const project = await createUnityProject(root, "Valid", Date.now());
+    const launcher = path.join(root, "launcher-config.json");
+    const valid = { id: "valid", unity_project_path: project };
+    for (const bad of [null, [], 7, "bad", { ...valid, unity_project_path: 7 },
+      { ...valid, id: {} }, { ...valid, name: [] }, { ...valid, enabled: "false" },
+      { ...valid, scene_path: 42 }]) {
+      const text = JSON.stringify({ active_channel_id: {}, channels: [bad, valid] });
+      await writeFile(launcher, text);
+      const router = new UnityProjectRouter(createConfigForProject(""), launcher);
+      const listing = router.listProjects();
+      assert.equal(listing.projects.length, 1);
+      assert.equal(listing.activeProjectPath, project);
+      assert.equal(listing.warnings.length, 2);
+      assert.equal(await readFile(launcher, "utf8"), text);
+    }
+    for (const invalid of [null, [], 27, "bad", { channels: {} }, { channels: null }]) {
+      const text = JSON.stringify(invalid);
+      await writeFile(launcher, text);
+      const router = new UnityProjectRouter(createConfigForProject(""), launcher);
+      const listing = router.listProjects();
+      assert.deepEqual(listing.projects, []);
+      assert.equal(listing.warnings.length, 1);
+      assert.equal(await readFile(launcher, "utf8"), text);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

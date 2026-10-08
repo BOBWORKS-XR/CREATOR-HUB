@@ -115,6 +115,18 @@ used to repoint existing AI clients, and no legacy client configuration is edite
 by staging. Power-loss recovery and a real signed update with active runtime
 connections remain release acceptance requirements.
 
+Packaged server smoke now also exercises the official SDK client over real stdio:
+fresh/unconfigured startup, saved project selection, session-local switching,
+reconnect, malformed saved settings and EOF shutdown during a pending Unity wait.
+The disposable Windows native lane repeats those tests using the retained
+generation's exact Node and server while the replaceable package server is
+unavailable. It also checks refusal of a damaged packaged candidate, preservation
+of an already-connected client and a successful embedded retry after restoring
+the original candidate bytes. This is a failure-recovery test, not an installer
+transaction, activation-receipt migration, signed update or live Editor/client
+acceptance. Invalid saved project channels are reported and ignored for routing;
+the server does not rewrite the user's settings while diagnosing them.
+
 ### Queue Ownership Regression
 
 Run 37344015707 preserved the failure of the Apple silicon queue-history test:

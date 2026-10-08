@@ -202,12 +202,38 @@ function canonicalPathKey(projectPath: string): string {
 function readLauncherConfig(configPath: string, warnings: string[]): LauncherConfigFile {
   if (!fs.existsSync(configPath)) return { channels: [] };
   try {
-    const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8")) as LauncherConfigFile;
-    return { channels: Array.isArray(parsed.channels) ? parsed.channels : [], active_channel_id: parsed.active_channel_id };
+    const parsed: unknown = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Expected a launcher configuration object.");
+    }
+    const saved = parsed as Record<string, unknown>;
+    if (saved.channels !== undefined && !Array.isArray(saved.channels)) {
+      throw new Error("Expected a project channels array.");
+    }
+    const raw = (saved.channels ?? []) as unknown[];
+    const channels = raw.filter(isLauncherProjectChannel);
+    if (channels.length !== raw.length) {
+      warnings.push(`Ignored ${raw.length - channels.length} invalid saved project channel(s). Review them in Creator Hub; the settings file was not changed.`);
+    }
+    const active = saved.active_channel_id;
+    if (active !== undefined && active !== null && typeof active !== "string") {
+      warnings.push("Ignored an invalid active project selection. The settings file was not changed.");
+    }
+    return { channels, active_channel_id: typeof active === "string" ? active : null };
   } catch (error) {
     warnings.push(`Could not parse launcher configuration: ${error instanceof Error ? error.message : "unknown error"}`);
     return { channels: [] };
   }
+}
+
+function isLauncherProjectChannel(value: unknown): value is LauncherProjectChannel {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const channel = value as Record<string, unknown>;
+  return typeof channel.unity_project_path === "string" &&
+    (channel.id === undefined || typeof channel.id === "string") &&
+    (channel.name === undefined || typeof channel.name === "string") &&
+    (channel.scene_path === undefined || channel.scene_path === null || typeof channel.scene_path === "string") &&
+    (channel.enabled === undefined || typeof channel.enabled === "boolean");
 }
 
 function launcherDefaultProjectPath(configPath: string): string {

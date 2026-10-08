@@ -26,6 +26,14 @@ try {
   assert.equal(result.status, 1, result.stderr || result.stdout);
   assert.match(result.stderr, /HTTP transport is not implemented/);
 
+  const protocol = spawnSync(process.execPath, ['--test', 'test/stdio-connection.test.mjs', 'test/server-shutdown.test.mjs'], {
+    encoding: 'utf8', windowsHide: true, timeout: 60_000,
+    env: { ...process.env, MCP_PROTOCOL_ENTRY: isolatedBundle, MCP_PROTOCOL_NODE: process.execPath,
+      MCP_SHUTDOWN_ENTRY: isolatedBundle, MCP_SHUTDOWN_NODE: process.execPath },
+  });
+  assert.equal(protocol.status, 0, protocol.error?.message || protocol.stderr || protocol.stdout);
+  console.log(protocol.stdout.trim());
+
   serverProcess = spawn(process.execPath, [isolatedBundle], {
     cwd: temporaryDirectory,
     stdio: ["pipe", "pipe", "pipe"],

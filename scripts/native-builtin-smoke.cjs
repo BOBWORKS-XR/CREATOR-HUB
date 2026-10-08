@@ -63,7 +63,7 @@ async function backendExited(pid, executable) {
     assert.equal(running, '', 'Private backend must exit after a declined start or closed view');
   }, 15);
 }
-let child, browser, page;
+let child, browser, page, protocolClient;
 (async () => {
   registrations();
   for (const app of ['Creator Works MCP', 'Creator Project Setup']) assert.equal(fs.existsSync(path.join(process.env.LOCALAPPDATA, app)), false);
@@ -131,9 +131,16 @@ let child, browser, page;
       try {
         assert.match(execFileSync(node, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 15000 }), /^v\d+\./);
         assert.equal(fs.existsSync(executable), true);
+        const protocol = execFileSync(process.execPath, ['--test', 'test/stdio-connection.test.mjs', 'test/server-shutdown.test.mjs'], {
+          cwd: path.resolve('modules/mcp'), encoding: 'utf8', windowsHide: true, timeout: 60000,
+          env: { ...process.env, MCP_PROTOCOL_NODE: node, MCP_PROTOCOL_ENTRY: path.join(generation, 'mcp/server/creator-works-mcp.mjs'),
+            MCP_SHUTDOWN_NODE: node, MCP_SHUTDOWN_ENTRY: path.join(generation, 'mcp/server/creator-works-mcp.mjs') },
+        });
+        fs.writeFileSync(path.join(out, 'retained-runtime-protocol.txt'), protocol);
       } finally { fs.renameSync(retainedServer, packagedServer); }
       report.runtimeGeneration = generation;
       report.checks.push('Actual MCP backend and Node use a verified generation independent of the replaceable Hub package');
+      report.checks.push('SDK stdio connection, tools, session selection, reconnect, malformed settings and EOF shutdown pass on retained Node/server with packaged server unavailable');
     }
     await page.locator('#view-builtin').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#view-detail').isVisible(), false);
@@ -210,9 +217,62 @@ let child, browser, page;
   assert.deepEqual(fs.readFileSync(settings), expectedConfig, 'Closing built-in MCP must preserve the explicitly saved config');
   report.checks.push('Built-in startup preserves legacy settings; closing preserves the explicitly saved settings byte-for-byte');
   report.checks.push('Graceful module close; no separate product registrations created');
+
+  const sdk = require('node:module').createRequire(path.resolve('modules/mcp/package.json'));
+  const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = sdk('@modelcontextprotocol/sdk/client/stdio.js');
+  const project = path.join(out, 'recovery-project');
+  fs.mkdirSync(path.join(project, 'Assets'), { recursive: true });
+  fs.mkdirSync(path.join(project, 'ProjectSettings'));
+  const generation = report.runtimeGeneration;
+  protocolClient = new Client({ name: 'native-retained-runtime-recovery', version: '1' });
+  const transport = new StdioClientTransport({ command: path.join(generation, 'mcp/server/runtime/node.exe'),
+    args: [path.join(generation, 'mcp/server/creator-works-mcp.mjs')], cwd: project, stderr: 'pipe',
+    env: { HOME: project, USERPROFILE: project, APPDATA: project, LOCALAPPDATA: project,
+      UNITY_PROJECT_PATH: project, CREATOR_WORKS_TOOL_GROUPS: 'none', CREATOR_WORKS_LAUNCHER_CONFIG: path.join(project, 'absent.json') } });
+  transport.stderr.on('data', () => {});
+  await protocolClient.connect(transport, { timeout: 10000 });
+  const packagedEntry = path.join(directory, 'modules/mcp/server/creator-works-mcp.mjs');
+  const originalEntry = fs.readFileSync(packagedEntry);
+  try {
+    fs.appendFileSync(packagedEntry, '\n// Disposable candidate corruption fixture\n');
+    const blocked = await page.evaluate(() => window.CreatorHubNative.invoke('start_hosted_app', { app: 'mcp' }).then(() => 'unexpected allow', String));
+    assert.match(blocked, /payload changed/);
+    const invalid = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
+    const mcp = invalid.apps.find(app => app.app === 'mcp');
+    assert.equal(mcp.trusted, false);
+    assert.match(mcp.issue, /payload changed/);
+    const running = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      `$p=@(Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.Name -eq 'creator-works-mcp-launcher.exe' }); $p.Count`],
+    { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
+    assert.equal(running, '0', 'Invalid candidate must not launch a backend');
+    await protocolClient.ping({ timeout: 10000 });
+    const result = await protocolClient.callTool({ name: 'get_bridge_status', arguments: {} }, undefined, { timeout: 10000 });
+    assert.equal(JSON.parse(result.content[0].text).project.path, project);
+    assert.deepEqual(fs.readFileSync(settings), expectedConfig);
+  } finally { fs.writeFileSync(packagedEntry, originalEntry); }
+  verifyStage(path.join(directory, 'modules'), descriptor);
+  await page.locator('#builtin-open').click();
+  const recovered = await backendFor('mcp');
+  assert.equal(recovered.ExecutablePath.toLowerCase(), backendPids.get('mcp').executable.toLowerCase());
+  await retry(() => native(recovered.ProcessId, recovered.ExecutablePath, 'button', 'Enable MCP controls'));
+  await page.locator('#mcp-host-frame').waitFor();
+  await retry(async () => assert.equal(await page.locator('#hosted-stop').isEnabled(), true));
+  await protocolClient.ping({ timeout: 10000 });
+  await page.locator('#hosted-stop').click();
+  await retry(() => native(child.pid, hub, 'button', 'Close view'));
+  await page.locator('#mcp-host-frame').waitFor({ state: 'detached' });
+  await backendExited(recovered.ProcessId, recovered.ExecutablePath);
+  await protocolClient.close();
+  protocolClient = null;
+  assert.deepEqual(fs.readFileSync(settings), expectedConfig);
+  report.checks.push('Corrupt packaged candidate refuses startup without changing settings or disrupting an active SDK stdio client on the retained generation');
+  report.checks.push('Restoring exact candidate bytes permits a successful embedded retry on the same retained generation; active stdio client remains usable. This is failure recovery, not signed-update acceptance');
   report.passed = true;
 })().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; })
   .finally(async () => {
+    try { await protocolClient?.close(); }
+    catch (error) { report.protocolCleanupError = String(error); report.passed = false; process.exitCode = 1; }
     fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
     if (child && child.exitCode === null) {
       try {
