@@ -22,7 +22,7 @@ async function openMcp(page, mode) {
     localStorage.setItem('creator-usage-terms.mcp', acceptance);
     const channels = [{ id: 'demo', name: 'Creator project', unity_project_path: 'E:\\Fixtures\\Creator project', enabled: true }];
     const config = { channels, active_channel_id: 'demo', mcp_server_path: 'E:\\Fixture\\server.mjs',
-      tool_groups: 'core', auto_start: true, enable_custom_scripts: false, allow_all_tests: true, automatic_update_checks: false };
+      tool_groups: 'core', auto_start: true, enable_custom_scripts: false, allow_all_tests: true, automatic_update_checks: false, connection_guide_version: 1 };
     const profile = { profile: 'creator', label: 'Creator SDK 4.0.14', packages: [] };
     const mcpCall = async command => {
       switch (command) {

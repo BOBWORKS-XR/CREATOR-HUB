@@ -47,6 +47,8 @@ const MCP_WRITABLE_COMMANDS: &[&str] = &[
     "update_configured_unity_extensions",
     "update_codex_mcp_config",
     "update_claude_mcp_config",
+    "update_claude_desktop_mcp_config",
+    "remove_claude_desktop_mcp_config",
     "update_antigravity_mcp_config",
     "update_opencode_mcp_config",
     "remove_codex_mcp_config",

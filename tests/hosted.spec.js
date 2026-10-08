@@ -23,7 +23,8 @@ async function open(page, options = {}) {
       name: index ? `Project ${index}` : 'Creator project with a deliberately long name for hosted layout verification',
       unity_project_path: `E:\\Fixtures\\Project ${index}`, enabled: true }));
     let mcpConfig = { channels, active_channel_id: '0', mcp_server_path: 'E:\\Fixture\\server.mjs',
-      tool_groups: 'core', auto_start: true, enable_custom_scripts: false, allow_all_tests: true, automatic_update_checks: false };
+      tool_groups: 'core', auto_start: true, enable_custom_scripts: false, allow_all_tests: true, automatic_update_checks: false,
+      connection_guide_version: options.showConnectionGuide ? 0 : 1 };
     window.__TAURI__ = {
       event: { listen: async (name, callback) => { window.events[name] = callback; return () => {}; } },
       core: { invoke: async (command, args) => {
@@ -562,6 +563,22 @@ async function openMcp(page, writable = false) {
   else await expect(mcp.locator('#hostedPreviewStatus')).toContainText('Saved configuration loaded');
   return mcp;
 }
+
+test('first-run guide in Hub is read-only until approval and closes after disconnect', async ({ page }) => {
+  await open(page, { builtIn: true, writableMcp: true, showConnectionGuide: true });
+  const mcp = await openMcp(page, true);
+  await expect(mcp.locator('#connection-guide-dialog')).toBeVisible();
+  await mcp.locator('#connection-guide-repair').click();
+  await mcp.locator('#connection-guide-check').click();
+  await expect(mcp.locator('#guideWorkspace')).toHaveJSProperty('disabled', false);
+  expect(await page.evaluate(() => hostCalls.filter(c => ['save_config', 'one_click_setup'].includes(c.args?.command)))).toEqual([]);
+  await page.evaluate(() => events['hosted-app-disconnected']({ payload: { session: 'b'.repeat(64), error: 'Fixture pipe loss' } }));
+  await expect(mcp.locator('#guideWorkspace')).toHaveJSProperty('disabled', true);
+  await mcp.locator('#connection-guide-close').click();
+  await expect(mcp.locator('#connection-guide-dialog')).toBeHidden();
+  await expect(mcp.locator('#workspaceControls')).toHaveJSProperty('disabled', true);
+  expect(await page.evaluate(() => hostCalls.filter(c => ['save_config', 'one_click_setup'].includes(c.args?.command)))).toEqual([]);
+});
 
 for (const width of [940, 560, 390, 320]) test(`writable MCP retains its full controls at ${width}px with 62 projects`, async ({ page }, testInfo) => {
   await page.setViewportSize({width, height:800});

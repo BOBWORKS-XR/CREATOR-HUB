@@ -9,6 +9,7 @@
     'discover_unity_projects', 'get_onboarding_status', 'add_project', 'one_click_setup',
     'get_project_sdk_profile', 'get_unity_extension_status', 'update_configured_unity_extensions',
     'update_codex_mcp_config', 'update_claude_mcp_config', 'update_antigravity_mcp_config',
+    'update_claude_desktop_mcp_config', 'remove_claude_desktop_mcp_config',
     'update_opencode_mcp_config', 'remove_codex_mcp_config', 'remove_claude_mcp_config',
     'remove_antigravity_mcp_config', 'remove_opencode_mcp_config', 'install_unity_extension',
     'set_unity_custom_scripts', 'set_unity_allow_all_tests', 'get_project_feedback_settings',

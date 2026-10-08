@@ -166,6 +166,10 @@ let child, browser, page;
       await frame.locator('#requirements .requirement').first().waitFor();
       await frame.locator('#project-name').fill('Retained built-in form');
     } else {
+      await frame.locator('#connection-guide-dialog').waitFor({ state: 'visible' });
+      assert.deepEqual(fs.readFileSync(settings), oldConfig, 'First-run connection guide must not change legacy settings');
+      await frame.locator('#connection-guide-close').click();
+      report.checks.push('MCP: upgrade connection guide opens and can be dismissed without changing legacy settings');
       await frame.locator('#setupBtn').waitFor();
       await frame.locator('#checkUpdatesBtn').waitFor({ state: 'hidden' });
       assert.match(await frame.locator('#updateStatus').innerText(), /included with Creator Hub/);

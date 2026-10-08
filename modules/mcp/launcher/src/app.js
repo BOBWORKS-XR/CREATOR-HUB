@@ -19,21 +19,25 @@ let onboardingRequest = 0;
 let operationActive = false;
 let pendingBadges = [];
 let badgeWorkerActive = false;
+let unityCliConsent = null;
+let unityCliTouched = false;
 
 const elements = {};
 
 document.addEventListener('DOMContentLoaded', async function() {
   for (const id of [
     'workspaceControls', 'status', 'runtimeBadge', 'projectPath', 'browseProjectBtn', 'discoveredProjects',
-    'connectCodex', 'connectClaude', 'connectAntigravity', 'connectOpenCode',
+    'connectCodex', 'connectClaude', 'connectClaudeDesktop', 'connectAntigravity', 'connectOpenCode',
     'codexDetection', 'claudeDetection', 'antigravityDetection', 'opencodeDetection',
     'codexState', 'claudeState', 'antigravityState', 'opencodeState',
+    'claudeDesktopDetection', 'claudeDesktopState', 'clientSetupIssue',
+    'useUnityCli', 'unityCliStatus', 'unityCliDocs', 'getClaudeDesktopBtn', 'guideWorkspace',
     'setupBtn', 'setupMessage', 'projectsList', 'emptyState', 'addProjectBtn',
     'updateBridgesBtn', 'localFeedback', 'usageCheckIns', 'feedbackStatus',
     'automaticUpdates', 'checkUpdatesBtn', 'openReleaseBtn', 'updateStatus',
     'mcpServerPath', 'toolGroups', 'autoConfig', 'customScripts', 'allowAllTests', 'applyConfigBtn',
-    'applyCodexBtn', 'applyAntigravityBtn', 'applyOpenCodeBtn',
-    'disconnectBtn', 'disconnectCodexBtn', 'disconnectAntigravityBtn', 'disconnectOpenCodeBtn',
+    'applyCodexBtn', 'applyClaudeDesktopBtn', 'applyAntigravityBtn', 'applyOpenCodeBtn',
+    'disconnectBtn', 'disconnectCodexBtn', 'disconnectClaudeDesktopBtn', 'disconnectAntigravityBtn', 'disconnectOpenCodeBtn',
     'installExtensionBtn',
     'openDocsBtn', 'githubLink'
   ]) {
@@ -58,6 +62,7 @@ document.addEventListener('DOMContentLoaded', async function() {
   if (window.CreatorRuntime.hosted) {
     await window.CreatorRuntime.listen('creator-runtime-disconnected', ({ payload }) => {
       elements.workspaceControls.disabled = true;
+      elements.guideWorkspace.disabled = true;
       clearTimeout(projectStatusTimer);
       clearTimeout(updateTimer);
       pendingBadges = [];
@@ -86,6 +91,21 @@ document.addEventListener('DOMContentLoaded', async function() {
     await refreshOnboardingStatus();
     updateUI();
     scheduleUpdateChecks();
+  });
+  if (onboarding) window.CreatorConnectionGuide.initialize({
+    suggest: config.connection_guide_version !== 1,
+    snapshot: () => onboarding,
+    busy: () => operationActive,
+    check: () => runUIOperation(async () => { await refreshOnboardingStatus(); updateSetupStatus(); }),
+    remember: () => runUIOperation(async () => {
+      const previous = config.connection_guide_version;
+      config.connection_guide_version = 1;
+      if (!await saveLauncherConfig('Could not save connection guide preference')) {
+        if (previous === undefined) delete config.connection_guide_version;
+        else config.connection_guide_version = previous;
+        throw new Error('Preference not saved');
+      }
+    }, true),
   });
 });
 
@@ -130,7 +150,7 @@ async function initializeHostedPreview() {
       row.className = 'check-row pending';
       row.querySelector('strong').textContent = 'Not checked';
     }
-    for (const client of ['codex', 'claude', 'antigravity', 'opencode']) {
+    for (const client of ['codex', 'claude', 'claudeDesktop', 'antigravity', 'opencode']) {
       elements[client + 'Detection'].textContent = 'Not checked';
       elements[client + 'State'].textContent = 'Not checked';
     }
@@ -155,6 +175,7 @@ async function runUIOperation(action, propagate = false) {
   }
   operationActive = true;
   elements.workspaceControls.disabled = true;
+  elements.guideWorkspace.disabled = true;
   elements.workspaceControls.setAttribute('aria-busy', 'true');
   let lease;
   try {
@@ -174,6 +195,7 @@ async function runUIOperation(action, propagate = false) {
     }
     operationActive = false;
     elements.workspaceControls.disabled = Boolean(window.CreatorRuntime.disconnected);
+    elements.guideWorkspace.disabled = Boolean(window.CreatorRuntime.disconnected);
     elements.workspaceControls.removeAttribute('aria-busy');
     updateSetupButton();
   }
@@ -230,6 +252,16 @@ function setupEventListeners() {
 
   elements.connectCodex.addEventListener('change', updateSetupButton);
   elements.connectClaude.addEventListener('change', updateSetupButton);
+  elements.connectClaudeDesktop.addEventListener('change', updateSetupButton);
+  onOperation(elements.useUnityCli, 'change', async () => {
+    unityCliTouched = true;
+    if (!elements.useUnityCli.checked) { unityCliConsent = null; return; }
+    const accepted = await window.CreatorConnectionGuide.cliConsent();
+    elements.useUnityCli.checked = accepted;
+    unityCliConsent = accepted ? 'unity-cli-experimental-v1' : null;
+  });
+  elements.unityCliDocs.addEventListener('click', () => openSetupLink('https://docs.unity.com/en-us/unity-cli/unity-pipeline/unity-pipeline-package'));
+  elements.getClaudeDesktopBtn.addEventListener('click', () => openSetupLink('https://claude.ai/download'));
   elements.connectAntigravity.addEventListener('change', updateSetupButton);
   elements.connectOpenCode.addEventListener('change', updateSetupButton);
   onOperation(elements.setupBtn, 'click', runQuickSetup);
@@ -290,10 +322,12 @@ function setupEventListeners() {
 
   onOperation(elements.applyConfigBtn, 'click', applyToClaudeCode);
   onOperation(elements.applyCodexBtn, 'click', applyToCodex);
+  onOperation(elements.applyClaudeDesktopBtn, 'click', applyToClaudeDesktop);
   onOperation(elements.applyAntigravityBtn, 'click', applyToAntigravity);
   onOperation(elements.applyOpenCodeBtn, 'click', applyToOpenCode);
   onOperation(elements.disconnectBtn, 'click', disconnectFromClaude);
   onOperation(elements.disconnectCodexBtn, 'click', disconnectFromCodex);
+  onOperation(elements.disconnectClaudeDesktopBtn, 'click', disconnectFromClaudeDesktop);
   onOperation(elements.disconnectAntigravityBtn, 'click', disconnectFromAntigravity);
   onOperation(elements.disconnectOpenCodeBtn, 'click', disconnectFromOpenCode);
   onOperation(elements.installExtensionBtn, 'click', installExtension);
@@ -392,14 +426,34 @@ async function refreshOnboardingStatus() {
   if (!clientSelectionInitialized) {
     const codex = getClientStatus('codex');
     const claude = getClientStatus('claude');
+    const desktop = getClientStatus('claudeDesktop');
     const antigravity = getClientStatus('antigravity');
     const opencode = getClientStatus('opencode');
     elements.connectCodex.checked = Boolean(codex && (codex.detected || codex.configured));
     elements.connectClaude.checked = Boolean(claude && (claude.detected || claude.configured));
+    elements.connectClaudeDesktop.checked = Boolean(desktop?.supported !== false && (desktop?.detected || desktop?.configured));
     elements.connectAntigravity.checked = Boolean(antigravity && (antigravity.detected || antigravity.configured));
     elements.connectOpenCode.checked = Boolean(opencode && (opencode.detected || opencode.configured));
     clientSelectionInitialized = true;
   }
+  const desktop = getClientStatus('claudeDesktop');
+  elements.connectClaudeDesktop.disabled = desktop?.supported === false;
+  elements.applyClaudeDesktopBtn.disabled = desktop?.supported === false;
+  elements.disconnectClaudeDesktopBtn.disabled = desktop?.supported === false || !desktop?.configured;
+  elements.getClaudeDesktopBtn.hidden = desktop?.supported === false || Boolean(desktop?.detected);
+  if (desktop?.supported === false) elements.connectClaudeDesktop.checked = false;
+  const cli = onboarding.unityCli;
+  elements.unityCliStatus.textContent = cli?.message || 'Optional Unity CLI is unavailable in this app version.';
+  elements.useUnityCli.disabled = !cli?.canEnable && !cli?.enabled;
+  if (!unityCliTouched) {
+    elements.useUnityCli.checked = cli?.enabled === true;
+    unityCliConsent = config.unity_cli_consent_version === 'unity-cli-experimental-v1' ? config.unity_cli_consent_version : null;
+  }
+}
+
+async function openSetupLink(url) {
+  try { await window.CreatorRuntime.openExternal(url); }
+  catch (error) { showToast('Could not open link: ' + String(error), 'error'); }
 }
 
 function updateUI() {
@@ -429,6 +483,7 @@ function updateSetupStatus() {
   const project = onboarding.project;
   const codex = getClientStatus('codex');
   const claude = getClientStatus('claude');
+  const desktop = getClientStatus('claudeDesktop');
   const antigravity = getClientStatus('antigravity');
   const opencode = getClientStatus('opencode');
 
@@ -464,14 +519,16 @@ function updateSetupStatus() {
   setCheck('bridge', bridgeState, bridgeText);
   updateClientStatus('codex', codex, elements.codexDetection, elements.codexState);
   updateClientStatus('claude', claude, elements.claudeDetection, elements.claudeState);
+  updateClientStatus('claudeDesktop', desktop, elements.claudeDesktopDetection, elements.claudeDesktopState);
+  elements.clientSetupIssue.textContent = desktop?.issue && desktop.supported !== false ? 'Claude Desktop: ' + desktop.issue : '';
   updateClientStatus('antigravity', antigravity, elements.antigravityDetection, elements.antigravityState);
   updateClientStatus('opencode', opencode, elements.opencodeDetection, elements.opencodeState);
 
   const connected = project?.bridgeCurrent && project.stateStatus === 'fresh';
   const configured = project?.bridgeCurrent &&
-    (codex?.configured || claude?.configured || antigravity?.configured || opencode?.configured);
+    (codex?.configured || claude?.configured || desktop?.configured || antigravity?.configured || opencode?.configured);
   if (connected) {
-    setHeaderStatus('active', 'Connected');
+    setHeaderStatus('active', 'Unity connected');
   } else if (configured) {
     setHeaderStatus('warning', 'Configured');
   } else if (selectedProjectPath) {
@@ -480,9 +537,16 @@ function updateSetupStatus() {
     setHeaderStatus('', 'Not configured');
   }
   updateSetupButton();
+  window.CreatorConnectionGuide.update(onboarding);
 }
 
 function updateClientStatus(id, status, detectionElement, stateElement) {
+  if (status?.supported === false) {
+    detectionElement.textContent = 'Not available on this OS';
+    stateElement.textContent = 'Unsupported';
+    setCheck(id, 'pending', 'Unsupported');
+    return;
+  }
   detectionElement.textContent = status?.detected ? 'Detected' : 'Not detected';
   stateElement.textContent = status?.configured ? 'Configured' : 'Not configured';
   stateElement.className = 'client-state ' + (status?.configured ? 'configured' : '');
@@ -507,12 +571,22 @@ function updateSetupButton() {
   const runtimeReady = Boolean(onboarding?.runtime?.ready);
   const hasClient = elements.connectCodex.checked
     || elements.connectClaude.checked
+    || elements.connectClaudeDesktop.checked
     || elements.connectAntigravity.checked
     || elements.connectOpenCode.checked;
   elements.setupBtn.disabled = operationActive || !projectValid || !runtimeReady || !hasClient;
 }
 
 async function runQuickSetup() {
+  const clients = [
+    ['Codex', elements.connectCodex], ['Claude Code', elements.connectClaude],
+    ['Claude Desktop', elements.connectClaudeDesktop], ['Antigravity', elements.connectAntigravity], ['OpenCode', elements.connectOpenCode]
+  ].filter(([, control]) => control.checked).map(([name]) => name);
+  if (!await window.CreatorConnectionGuide.review('Project: ' + selectedProjectPath + '\nClients: ' + clients.join(', ')
+    + '\nTools: ' + (config.tool_groups || 'core')
+    + '\nCustom scripts: ' + (config.enable_custom_scripts === true ? 'on' : 'off')
+    + '\nAll project tests: ' + (config.allow_all_tests === true ? 'allowed' : 'restricted')
+    + '\nUnity CLI: ' + (elements.useUnityCli.checked ? 'experimental; add a separate server' : 'off for selected clients'))) return;
   elements.setupBtn.disabled = true;
   elements.setupBtn.classList.add('working');
   elements.setupMessage.textContent = 'Installing bridge and configuring clients...';
@@ -522,20 +596,26 @@ async function runQuickSetup() {
       unityProjectPath: selectedProjectPath,
       configureCodex: elements.connectCodex.checked,
       configureClaude: elements.connectClaude.checked,
+      configureClaudeDesktop: elements.connectClaudeDesktop.checked,
       configureAntigravity: elements.connectAntigravity.checked,
       configureOpencode: elements.connectOpenCode.checked,
       toolGroups: config.tool_groups || 'core',
-      enableCustomScripts: config.enable_custom_scripts === true
+      enableCustomScripts: config.enable_custom_scripts === true,
+      configureUnityCli: unityCliTouched || config.unity_cli_enabled === true ? elements.useUnityCli.checked : null,
+      unityCliConsent: elements.useUnityCli.checked ? unityCliConsent : null
     });
     await refreshAll();
+    unityCliTouched = false;
+    config.connection_guide_version = 1;
+    await saveLauncherConfig('Setup saved, but the guide preference could not be saved');
     elements.setupMessage.textContent = 'Setup saved. Waiting for Unity bridge...';
     const connected = await waitForFreshBridge(30);
     elements.setupMessage.textContent = connected
-      ? 'Setup complete. Restart the configured MCP client if it was already open.'
-      : 'Setup complete. Open or return to Unity to finish the bridge connection.';
+      ? 'Settings saved and Unity bridge responding. Fully quit and reopen changed AI clients, then ask your AI to call get_bridge_status.'
+      : 'Settings saved. Open this project in Unity and resolve Console errors, then fully quit and reopen changed AI clients. Check again to verify.';
     showToast('Creator Works MCP setup completed', 'success');
   } catch (error) {
-    elements.setupMessage.textContent = String(error);
+    elements.setupMessage.textContent = 'Setup stopped: ' + String(error) + ' Earlier completed steps may remain. Check the connection before retrying.';
     showToast('Setup failed', 'error');
   } finally {
     elements.setupBtn.classList.remove('working');
@@ -689,6 +769,7 @@ async function updateConfiguredClients(channel) {
   await refreshOnboardingStatus();
   const codex = getClientStatus('codex');
   const claude = getClientStatus('claude');
+  const desktop = getClientStatus('claudeDesktop');
   const antigravity = getClientStatus('antigravity');
   const opencode = getClientStatus('opencode');
   if (codex?.configured) {
@@ -696,6 +777,11 @@ async function updateConfiguredClients(channel) {
   }
   if (claude?.configured) {
     await updateClaudeConfig(channel);
+  }
+  if (desktop?.configured) {
+    await window.CreatorRuntime.invoke('update_claude_desktop_mcp_config', {
+      channel, mcpServerPath: config.mcp_server_path, toolGroups: config.tool_groups || 'core'
+    });
   }
   if (antigravity?.configured) {
     await updateAntigravityConfig(channel);
@@ -761,6 +847,26 @@ async function applyToClaudeCode() {
   } catch (error) {
     showToast('Claude configuration failed: ' + String(error), 'error');
   }
+}
+
+async function applyToClaudeDesktop() {
+  const channel = getActiveChannel();
+  if (!channel) return showToast('No Unity project selected', 'error');
+  try {
+    await window.CreatorRuntime.invoke('update_claude_desktop_mcp_config', {
+      channel, mcpServerPath: config.mcp_server_path, toolGroups: config.tool_groups || 'core'
+    });
+    await refreshOnboardingStatus(); updateSetupStatus();
+    showToast('Desktop settings saved. Fully quit and reopen Claude Desktop.', 'success');
+  } catch (error) { showToast('Claude Desktop configuration failed: ' + String(error), 'error'); }
+}
+
+async function disconnectFromClaudeDesktop() {
+  try {
+    await window.CreatorRuntime.invoke('remove_claude_desktop_mcp_config');
+    await refreshOnboardingStatus(); updateSetupStatus();
+    showToast('Creator Works entry removed. Restart Claude Desktop. Optional Unity CLI is separate.', 'success');
+  } catch (error) { showToast('Could not disconnect Claude Desktop: ' + String(error), 'error'); }
 }
 
 async function disconnectFromCodex() {

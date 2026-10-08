@@ -107,8 +107,10 @@ function fixture() {
   vm.runInContext(source, context);
   vm.runInContext(`
     elements.workspaceControls = fieldset;
+    elements.guideWorkspace = {disabled:false};
     elements.setupBtn = {};
-    for (const name of ['connectCodex','connectClaude','connectAntigravity','connectOpenCode']) elements[name] = {checked:true};
+    for (const name of ['connectCodex','connectClaude','connectClaudeDesktop','connectAntigravity','connectOpenCode']) elements[name] = {checked:true};
+    for (const name of ['getClaudeDesktopBtn','applyClaudeDesktopBtn','disconnectClaudeDesktopBtn','useUnityCli','unityCliStatus']) elements[name] = {};
     onboarding = {project:{valid:true}, runtime:{ready:true}};
     showToast = message => messages.push(message);
   `, context);
@@ -123,6 +125,7 @@ test('one operation locks the workspace, rejects overlapping actions and unlocks
   f.context.second = () => { second = true; };
   const first = vm.runInContext('runUIOperation(action)', f.context);
   assert.equal(f.fieldset.disabled, true);
+  assert.equal(vm.runInContext('elements.guideWorkspace.disabled', f.context), true);
   assert.equal(f.fieldset.attrs['aria-busy'], 'true');
   vm.runInContext('updateSetupButton()', f.context);
   assert.equal(vm.runInContext('elements.setupBtn.disabled', f.context), true);
@@ -131,6 +134,7 @@ test('one operation locks the workspace, rejects overlapping actions and unlocks
   resolve();
   await first;
   assert.equal(f.fieldset.disabled, false);
+  assert.equal(vm.runInContext('elements.guideWorkspace.disabled', f.context), false);
   assert.equal(f.fieldset.attrs['aria-busy'], undefined);
   assert.equal(vm.runInContext('elements.setupBtn.disabled', f.context), false);
   assert.deepEqual(f.calls.map(c => c.name), ['begin_ui_operation','finish_ui_operation']);

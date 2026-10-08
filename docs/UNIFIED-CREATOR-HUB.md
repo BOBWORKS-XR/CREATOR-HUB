@@ -37,6 +37,11 @@ delayed native consent, failure and narrow layouts; they do not replace native
 consent, migration or signed update/restart acceptance.
 
 The existing consent and exclusive settings ownership checks remain in place.
+The MCP candidate also has a first-run/upgrade connection guide, a separate
+Claude Desktop adapter and consent-gated optional Unity CLI setup. Existing
+controls remain available. See [connection behaviour and two audit passes](MCP-CONNECTION-GUIDE.md)
+for tested scope and remaining live-client/Editor acceptance; these changes do
+not complete the migration or release gates below.
 This is not migration acceptance: the current modules still use their existing
 settings locations, and no legacy client entries are repointed by this phase.
 Private MCP startup reads existing settings without persisting the standalone

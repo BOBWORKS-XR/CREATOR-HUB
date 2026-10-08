@@ -82,7 +82,7 @@ test('AI usage warning only persists dismissal after a second checked confirmati
 test('MCP help covers client support, token controls and Plugins retirement', () => {
   assert.match(html, /id="context-help-open"/);
   assert.match(html, /id="context-help-dialog"/);
-  assert.match(html, /Claude Desktop is not currently supported/);
+  assert.match(html, /Claude Desktop is the separate desktop app/);
   assert.match(html, /disable fast or high-cost modes/);
   assert.match(html, /What happened to Creator Plugins\?/);
   assert.match(html, /Existing imported assets, Unity project files and import receipts are not removed/);

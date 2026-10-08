@@ -9,7 +9,7 @@ use std::{
 const DIRECTORY: &str = ".creator-hub-settings-backups";
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 
-fn reject_links(path: &Path) -> Result<(), String> {
+pub(crate) fn reject_links(path: &Path) -> Result<(), String> {
     for ancestor in path.ancestors() {
         match fs::symlink_metadata(ancestor) {
             Ok(metadata) => {
@@ -70,6 +70,15 @@ fn read(file: &mut File) -> Result<Vec<u8>, String> {
         return Err("Settings changed size during backup. Nothing was saved.".into());
     }
     Ok(bytes)
+}
+
+pub(crate) fn read_text(path: &Path) -> Result<Option<String>, String> {
+    let Some(mut file) = open_existing(path, false)? else {
+        return Ok(None);
+    };
+    String::from_utf8(read(&mut file)?)
+        .map(Some)
+        .map_err(|_| "Settings must contain UTF-8 text. Nothing was changed.".into())
 }
 
 pub fn retain(path: &Path) -> Result<(), String> {
@@ -221,6 +230,23 @@ impl Drop for StagedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_text_rejects_large_and_invalid_utf8_settings_without_changes() {
+        let root = std::env::temp_dir().join(format!("bounded-settings-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let path = root.join("settings.json");
+        assert!(read_text(&path).unwrap().is_none());
+        fs::write(&path, b"{}\n").unwrap();
+        assert_eq!(read_text(&path).unwrap().as_deref(), Some("{}\n"));
+        fs::write(&path, [0xff]).unwrap();
+        assert!(read_text(&path).is_err());
+        fs::write(&path, vec![b' '; MAX_BYTES as usize + 1]).unwrap();
+        assert!(read_text(&path).is_err());
+        assert_eq!(fs::metadata(&path).unwrap().len(), MAX_BYTES + 1);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn absent_settings_do_not_create_backups_and_relative_paths_are_rejected() {

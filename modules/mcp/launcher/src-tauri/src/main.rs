@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod claude_desktop;
 mod community;
 mod community_api;
 mod community_project;
@@ -21,6 +22,7 @@ mod lifecycle;
 #[path = "../../../../../native/plugins_retirement.rs"]
 mod plugins_retirement;
 mod settings_backup;
+mod unity_cli;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -92,6 +94,8 @@ struct ClientStatus {
     detected: bool,
     configured: bool,
     config_path: String,
+    supported: bool,
+    issue: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,6 +157,7 @@ struct OnboardingStatus {
     runtime: RuntimeStatus,
     clients: Vec<ClientStatus>,
     project: Option<ProjectSetupStatus>,
+    unity_cli: unity_cli::Status,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,6 +167,7 @@ struct SetupResult {
     bridge_installed: bool,
     codex_configured: bool,
     claude_configured: bool,
+    claude_desktop_configured: bool,
     antigravity_configured: bool,
     opencode_configured: bool,
     runtime_command: String,
@@ -1145,10 +1151,65 @@ fn update_claude_mcp_config(
         &tool_groups,
     )?;
 
+    let config = unity_cli::augment_json(config, &channel.unity_project_path, false)?;
+    settings_backup::retain(&config_path)?;
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Claude config: {}", e))?;
 
     atomic_write(&config_path, &content)
+}
+
+fn desktop_entry(
+    app: &tauri::AppHandle,
+    channel: &ProjectChannel,
+    server: &str,
+    groups: &str,
+) -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "command": resolve_node_command(app)?.0,
+        "args": [validate_mcp_server_path(server)?],
+        "env": {"UNITY_PROJECT_PATH": channel.unity_project_path,
+            TOOL_GROUPS_ENV: normalize_tool_groups(groups)?, "CREATOR_WORKS_CONFIG_OWNER": "creator-hub-v1"}
+    }))
+}
+
+#[tauri::command]
+fn update_claude_desktop_mcp_config(
+    app: tauri::AppHandle,
+    channel: ProjectChannel,
+    mcp_server_path: String,
+    tool_groups: String,
+) -> Result<(), String> {
+    let path = claude_desktop::path()?;
+    if !path.parent().is_some_and(Path::is_dir) {
+        return Err("Install and open Claude Desktop once, then retry. Claude Code and the Claude website are different clients.".into());
+    }
+    let (before, config) = claude_desktop::read(&path)?;
+    let config = claude_desktop::merge(
+        config,
+        desktop_entry(&app, &channel, &mcp_server_path, &tool_groups)?,
+    )?;
+    let config = unity_cli::augment_json(config, &channel.unity_project_path, false)?;
+    claude_desktop::write(&path, before.as_deref(), &config)
+}
+
+#[tauri::command]
+fn remove_claude_desktop_mcp_config() -> Result<(), String> {
+    let path = claude_desktop::path()?;
+    let (before, mut config) = claude_desktop::read(&path)?;
+    if let Some(entry) = config["mcpServers"].get(MCP_CLIENT_ID) {
+        if !claude_desktop::owned(entry) {
+            return Err(
+                "This Desktop entry was not created by guided setup. It was not removed.".into(),
+            );
+        }
+        config["mcpServers"]
+            .as_object_mut()
+            .ok_or("Invalid Desktop MCP settings.")?
+            .remove(MCP_CLIENT_ID);
+        claude_desktop::write(&path, before.as_deref(), &config)?;
+    }
+    Ok(())
 }
 
 fn build_codex_mcp_config(
@@ -1286,6 +1347,8 @@ fn update_codex_mcp_config(
         &tool_groups,
     )?;
 
+    let content = unity_cli::augment_toml(content, &channel.unity_project_path)?;
+    settings_backup::retain(&config_path)?;
     atomic_write(&config_path, &content)
 }
 
@@ -1405,6 +1468,8 @@ fn update_antigravity_mcp_config(
         &tool_groups,
     )?;
 
+    let config = unity_cli::augment_json(config, &channel.unity_project_path, false)?;
+    settings_backup::retain(&config_path)?;
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Antigravity config: {}", e))?;
 
@@ -1532,7 +1597,32 @@ fn update_opencode_mcp_config(
     let content =
         jsonc::update_managed_entry(&content, "mcp", MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID, &entry)
             .map_err(|e| format!("Failed to update OpenCode config: {}", e))?;
-
+    let content = if unity_cli::mode()?.is_some() {
+        let merged = unity_cli::augment_json(
+            parse_opencode_config(&content)?,
+            &channel.unity_project_path,
+            true,
+        )?;
+        if let Some(entry) = merged["mcp"].get("creator-unity-cli") {
+            jsonc::update_managed_entry(
+                &content,
+                "mcp",
+                "creator-unity-cli",
+                "creator-unity-cli",
+                entry,
+            )?
+        } else {
+            jsonc::remove_managed_entries(
+                &content,
+                "mcp",
+                "creator-unity-cli",
+                "creator-unity-cli",
+            )?
+        }
+    } else {
+        content
+    };
+    settings_backup::retain(&config_path)?;
     atomic_write(&config_path, &content)
 }
 
@@ -1834,6 +1924,8 @@ fn client_statuses() -> Vec<ClientStatus> {
             detected: home.join(".codex").is_dir() || command_is_available("codex"),
             configured: codex_is_configured(),
             config_path: get_codex_config_path().to_string_lossy().to_string(),
+            supported: true,
+            issue: None,
         },
         ClientStatus {
             id: "claude".to_string(),
@@ -1843,7 +1935,10 @@ fn client_statuses() -> Vec<ClientStatus> {
                 || command_is_available("claude"),
             configured: claude_is_configured(),
             config_path: get_claude_config_path().to_string_lossy().to_string(),
+            supported: true,
+            issue: None,
         },
+        desktop_status(),
         ClientStatus {
             id: "antigravity".to_string(),
             name: "Antigravity".to_string(),
@@ -1852,6 +1947,8 @@ fn client_statuses() -> Vec<ClientStatus> {
                 || command_is_available("antigravity"),
             configured: antigravity_is_configured(),
             config_path: get_antigravity_config_path().to_string_lossy().to_string(),
+            supported: true,
+            issue: None,
         },
         ClientStatus {
             id: "opencode".to_string(),
@@ -1859,8 +1956,38 @@ fn client_statuses() -> Vec<ClientStatus> {
             detected: get_opencode_config_path().is_file() || command_is_available("opencode"),
             configured: opencode_is_configured(),
             config_path: get_opencode_config_path().to_string_lossy().to_string(),
+            supported: true,
+            issue: None,
         },
     ]
+}
+
+fn desktop_status() -> ClientStatus {
+    let path = claude_desktop::path();
+    let supported = path.is_ok();
+    let detected = path
+        .as_ref()
+        .is_ok_and(|p| p.parent().is_some_and(Path::is_dir));
+    let snapshot = path
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|p| claude_desktop::read(p));
+    let configured = snapshot
+        .as_ref()
+        .is_ok_and(|(_, config)| claude_desktop::owned(&config["mcpServers"][MCP_CLIENT_ID]));
+    let issue = snapshot.err();
+    ClientStatus {
+        id: "claudeDesktop".into(),
+        name: "Claude Desktop".into(),
+        detected,
+        configured,
+        supported,
+        issue,
+        config_path: path
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    }
 }
 
 fn sdk_version_from_json(
@@ -2093,6 +2220,7 @@ fn get_onboarding_status(
     OnboardingStatus {
         runtime,
         clients: client_statuses(),
+        unity_cli: unity_cli::status(unity_project_path.as_deref()),
         project: unity_project_path
             .filter(|path| !path.trim().is_empty())
             .map(|path| project_setup_status(source_bridge.as_deref(), Path::new(&path))),
@@ -2109,20 +2237,101 @@ fn one_click_setup(
     configure_opencode: bool,
     tool_groups: String,
     enable_custom_scripts: bool,
+    configure_claude_desktop: Option<bool>,
+    configure_unity_cli: Option<bool>,
+    unity_cli_consent: Option<String>,
 ) -> Result<SetupResult, String> {
     let candidate = channel_for_project(Path::new(&unity_project_path))?;
     let mcp_server_path = default_mcp_server_path(&app)?.to_string_lossy().to_string();
     let runtime_command = resolve_node_command(&app)?.0.to_string_lossy().to_string();
     let tool_groups = normalize_tool_groups(&tool_groups)?;
 
+    let configure_desktop = configure_claude_desktop.unwrap_or(false);
+    if !(configure_codex
+        || configure_claude
+        || configure_antigravity
+        || configure_opencode
+        || configure_desktop)
+    {
+        return Err("Choose at least one AI client. Nothing was changed.".into());
+    }
+    let previous_cli = unity_cli::mode()?;
+    unity_cli::require_consent(configure_unity_cli, unity_cli_consent.as_deref())?;
+    let cli_mode = configure_unity_cli.or(previous_cli);
+    let cli_entry = if configure_unity_cli == Some(true) {
+        Some(unity_cli::entry(&candidate.unity_project_path)?)
+    } else if cli_mode == Some(true) {
+        unity_cli::optional_entry(&candidate.unity_project_path)
+    } else {
+        None
+    };
+    // Validate every selected client before saving settings or touching the project.
+    if configure_codex {
+        let path = get_codex_config_path();
+        let existing = settings_backup::read_text(&path)?.unwrap_or_default();
+        let built = build_codex_mcp_config(
+            &existing,
+            &candidate,
+            &runtime_command,
+            &mcp_server_path,
+            &tool_groups,
+        )?;
+        if cli_mode.is_some() {
+            unity_cli::merge_toml(&built, cli_entry.clone())?;
+        }
+    }
     if configure_claude {
-        get_claude_mcp_config()?;
+        settings_backup::read_text(&get_claude_config_path())?;
+        let built = build_claude_mcp_config(
+            get_claude_mcp_config()?,
+            &candidate,
+            &runtime_command,
+            &mcp_server_path,
+            &tool_groups,
+        )?;
+        if cli_mode.is_some() {
+            unity_cli::merge_json(built, cli_entry.clone(), false)?;
+        }
     }
     if configure_antigravity {
-        get_antigravity_mcp_config()?;
+        settings_backup::read_text(&get_antigravity_config_path())?;
+        let built = build_antigravity_mcp_config(
+            get_antigravity_mcp_config()?,
+            &candidate,
+            &runtime_command,
+            &mcp_server_path,
+            &tool_groups,
+        )?;
+        if cli_mode.is_some() {
+            unity_cli::merge_json(built, cli_entry.clone(), false)?;
+        }
+    }
+    if configure_desktop {
+        let path = claude_desktop::path()?;
+        if !path.parent().is_some_and(Path::is_dir) {
+            return Err("Install and open Claude Desktop once, then check again.".into());
+        }
+        let (_, existing) = claude_desktop::read(&path)?;
+        let built = claude_desktop::merge(
+            existing,
+            desktop_entry(&app, &candidate, &mcp_server_path, &tool_groups)?,
+        )?;
+        if cli_mode.is_some() {
+            unity_cli::merge_json(built, cli_entry.clone(), false)?;
+        }
     }
     if configure_opencode {
-        get_opencode_mcp_config()?;
+        let existing = get_opencode_mcp_config()?;
+        let built = build_opencode_mcp_config(
+            existing,
+            &candidate,
+            &runtime_command,
+            &mcp_server_path,
+            &tool_groups,
+        )?;
+        if cli_mode.is_some() {
+            unity_cli::merge_json(built, cli_entry, true)?;
+        }
     }
 
     let mut config = load_config(app.clone())?;
@@ -2144,6 +2353,17 @@ fn one_click_setup(
     config.auto_start = true;
     config.enable_custom_scripts = enable_custom_scripts;
     config.tool_groups = tool_groups.clone();
+    if let Some(enabled) = configure_unity_cli {
+        config
+            .extra
+            .insert("unity_cli_enabled".into(), serde_json::json!(enabled));
+        if enabled {
+            config.extra.insert(
+                "unity_cli_consent_version".into(),
+                serde_json::json!(unity_cli::CONSENT),
+            );
+        }
+    }
     let allow_all_tests = config.allow_all_tests;
     save_config(config)?;
 
@@ -2175,6 +2395,14 @@ fn one_click_setup(
             tool_groups.clone(),
         )?;
     }
+    if configure_desktop {
+        update_claude_desktop_mcp_config(
+            app.clone(),
+            channel.clone(),
+            mcp_server_path.clone(),
+            tool_groups.clone(),
+        )?;
+    }
     if configure_opencode {
         update_opencode_mcp_config(app, channel.clone(), mcp_server_path, tool_groups)?;
     }
@@ -2184,6 +2412,7 @@ fn one_click_setup(
         bridge_installed: true,
         codex_configured: configure_codex,
         claude_configured: configure_claude,
+        claude_desktop_configured: configure_desktop,
         antigravity_configured: configure_antigravity,
         opencode_configured: configure_opencode,
         runtime_command,
@@ -2329,6 +2558,8 @@ fn main() {
                 discover_unity_projects,
                 get_claude_mcp_config,
                 update_claude_mcp_config,
+                update_claude_desktop_mcp_config,
+                remove_claude_desktop_mcp_config,
                 remove_claude_mcp_config,
                 update_codex_mcp_config,
                 remove_codex_mcp_config,

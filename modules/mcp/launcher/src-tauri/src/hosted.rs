@@ -21,6 +21,8 @@ pub const COMMANDS: &[&str] = &[
     "open_official_url",
 ];
 const OFFICIAL_URLS: &[&str] = &[
+    "https://claude.ai/download",
+    "https://docs.unity.com/en-us/unity-cli/unity-pipeline/unity-pipeline-package",
     "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP",
     "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases",
     "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases",
