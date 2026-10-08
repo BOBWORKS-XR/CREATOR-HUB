@@ -15,7 +15,7 @@ verifyStage(path.join(directory, 'modules'), descriptor);
 const hub = path.join(directory, 'creator-hub.exe');
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out);
-const report = { checks: [], passed: false };
+const report = { sourceRevision: process.env.GITHUB_SHA, hubSha256: crypto.createHash('sha256').update(fs.readFileSync(hub)).digest('hex'), checks: [], passed: false };
 const backendPids = new Map();
 const watchdog = setTimeout(() => {
   report.passed = false;
@@ -45,6 +45,21 @@ async function retry(action, seconds = 45) {
 function registrations() {
   return execFileSync('powershell.exe', ['-NoProfile', '-Command',
     "$names=@('Creator Hub','Creator Works MCP','Creator Project Setup','BANTWORKS MCP'); foreach ($h in @('HKCU:','HKLM:')) { foreach ($n in $names) { if(Test-Path -LiteralPath ($h+'\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'+$n)) { throw ('Unexpected app registration: '+$n) } } }"], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+}
+async function backendFor(app) {
+  return retry(() => {
+    const value = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      `$p=@(Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.Name -eq '${path.basename(descriptor.modules[app].executable)}' }); if($p.Count -ne 1) { throw 'Expected one private backend' }; $p | Select-Object ProcessId,ExecutablePath | ConvertTo-Json -Compress`], { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
+    return JSON.parse(value);
+  });
+}
+async function backendExited(pid, executable) {
+  await retry(() => {
+    const running = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if($p -and $p.ExecutablePath -eq '${executable.replaceAll("'", "''")}') { 'running' }`],
+    { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
+    assert.equal(running, '', 'Private backend must exit after a declined start or closed view');
+  }, 15);
 }
 let child, browser, page;
 (async () => {
@@ -89,12 +104,7 @@ let child, browser, page;
   for (const app of ['setup', 'mcp']) {
     await page.locator('#suite-trigger').click();
     await page.locator(`#suite-menu [data-view="${app}"]`).click();
-    const backend = await retry(() => {
-      const value = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-        `$p=@(Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.Name -eq '${path.basename(descriptor.modules[app].executable)}' }); if($p.Count -ne 1) { throw 'Expected one private backend' }; $p | Select-Object ProcessId,ExecutablePath | ConvertTo-Json -Compress`], { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
-      return JSON.parse(value);
-    });
-    const { ProcessId: pid, ExecutablePath: executable } = backend;
+    let { ProcessId: pid, ExecutablePath: executable } = await backendFor(app);
     assert.equal(Number.isInteger(pid), true);
     if (app === 'setup') {
       assert.equal(executable.toLowerCase(), path.join(directory, 'modules', descriptor.modules[app].executable).toLowerCase());
@@ -122,6 +132,27 @@ let child, browser, page;
       report.runtimeGeneration = generation;
       report.checks.push('Actual MCP backend and Node use a verified generation independent of the replaceable Hub package');
     }
+    await page.locator('#view-builtin').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#view-detail').isVisible(), false);
+    assert.match(await page.locator('#builtin-status').innerText(), /^Opening /);
+    assert.match(await page.locator('#builtin-detail').innerText(), /permission prompt/);
+    await page.screenshot({ path: path.join(out, `${app}-opening.png`) });
+    await retry(() => native(pid, executable, 'button', 'Not now'));
+    await retry(async () => assert.equal(await page.locator('#builtin-open').isEnabled(), true));
+    assert.match(await page.locator('#builtin-status').innerText(), /^Could not open /);
+    assert.match(await page.locator('#builtin-detail').innerText(), /declined/i);
+    assert.equal(await page.locator('#view-detail').isVisible(), false);
+    assert.equal(await page.locator(`#${app}-host-frame`).count(), 0);
+    await backendExited(pid, executable);
+    assert.deepEqual(fs.readFileSync(settings), oldConfig, 'Declined startup must not change legacy MCP settings');
+    await page.screenshot({ path: path.join(out, `${app}-declined.png`) });
+    report.checks.push(`${app}: real native consent decline shows retry, exits the backend and preserves legacy settings`);
+    await page.locator('#builtin-open').click();
+    const previousExecutable = executable;
+    ({ ProcessId: pid, ExecutablePath: executable } = await backendFor(app));
+    assert.equal(executable.toLowerCase(), previousExecutable.toLowerCase(), 'Retry must use the same verified module, not an installed companion');
+    const expectedHash = descriptor.modules[app].files[descriptor.modules[app].executable];
+    assert.equal(crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex'), expectedHash);
     backendPids.set(app, { pid, executable });
     await retry(() => native(pid, executable, 'button', app === 'setup' ? 'Open in Hub' : 'Enable MCP controls'));
     await page.locator(`#${app}-host-frame`).waitFor();
@@ -141,7 +172,7 @@ let child, browser, page;
     await page.screenshot({ path: path.join(out, `${app}.png`) });
     const windows = JSON.parse(native(pid, executable, 'snapshot'));
     assert.equal(windows.filter(w => w.title === (app === 'setup' ? 'Creator Project Setup' : 'Creator Works MCP')).length, 0);
-    report.checks.push(`${app}: actual private backend and embedded interface; no standalone window`);
+    report.checks.push(`${app}: approved retry opens actual private backend and embedded interface; no standalone window`);
   }
   await page.locator('#suite-trigger').click();
   await page.locator('#suite-menu [data-view="setup"]').click();
@@ -153,12 +184,7 @@ let child, browser, page;
     await retry(() => native(child.pid, hub, 'button', 'Close view'));
     await page.locator(`#${app}-host-frame`).waitFor({ state: 'detached' });
     const backend = backendPids.get(app);
-    await retry(() => {
-      const running = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-        `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${backend.pid}"; if($p -and $p.ExecutablePath -eq '${backend.executable.replaceAll("'", "''")}') { 'running' }`],
-      { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
-      assert.equal(running, '', `${app} backend must exit after its view closes`);
-    }, 15);
+    await backendExited(backend.pid, backend.executable);
   }
   registrations();
   assert.deepEqual(fs.readFileSync(settings), oldConfig, 'Closing built-in MCP must preserve the old config');
