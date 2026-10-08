@@ -96,6 +96,11 @@ Contracts: [CLI reference](https://docs.unity.com/en-us/unity-cli/unity-cli-refe
   Desktop, unavailable CLI, and manual Desktop configure/disconnect controls.
 - Tested the actual frontend hosted in Hub, no-write checks and disconnect
   recovery. Inspected 1080px/320px screenshots for centering and containment.
+- The repeated browser pass exposed a test that expected a transient empty
+  hosted area while MCP was opening. Its durable-state replacement verifies
+  that shortcut navigation opens MCP without stopping hidden Setup work,
+  preserves the draft and creates the project only once. Twenty consecutive
+  focused runs passed; no navigation timing delay was added to the product.
 - Reviewed Hub PR 10: its full-width switcher rule and rendered-width regression
   are already present. No duplicate merge was performed.
 - Plugins retirement documentation is in

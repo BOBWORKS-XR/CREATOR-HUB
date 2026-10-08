@@ -718,9 +718,16 @@ test('shortcut view requests preserve a running hosted Setup operation', async (
   const setup = await open(page, { pending: true });
   await setup.locator('#project-name').fill('Retain this draft');
   await setup.locator('#create-button').click();
+  await page.waitForFunction(() => typeof window.finishCreate === 'function');
   await page.evaluate(() => window.events['hub-launch-view']({ payload: { view: 'mcp', revision: 1 } }));
-  await expect(page.locator('#view-hosted')).toBeHidden();
+  await expect(page.locator('#mcp-host-frame')).toBeVisible();
+  await expect(page.locator('#setup-host-frame')).toBeHidden();
+  await expect(page.locator('#setup-host-frame')).toHaveCount(1);
+  await expect(setup.locator('#project-name')).toHaveValue('Retain this draft');
+  expect(await page.evaluate(() => window.hostCalls.some(c => c.command === 'stop_hosted_app'))).toBe(false);
   await page.evaluate(() => window.events['hub-launch-view']({ payload: { view: 'setup', revision: 2 } }));
+  await expect(page.locator('#setup-host-frame')).toBeVisible();
+  await expect(page.locator('#mcp-host-frame')).toBeHidden();
   await expect(setup.locator('#project-name')).toHaveValue('Retain this draft');
   await expect(page.locator('#hosted-stop')).toBeDisabled();
   await page.evaluate(() => window.finishCreate());
