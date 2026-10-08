@@ -5,7 +5,31 @@ import path from "node:path";
 import test from "node:test";
 
 import { createConfigForProject } from "../dist/lib/config.js";
-import { projectIdForPath, UnityProjectRouter } from "../dist/lib/project-router.js";
+import { getLauncherConfigPath, projectIdForPath, UnityProjectRouter } from "../dist/lib/project-router.js";
+
+test("launcher settings lookup matches native platform directories and preserves explicit overrides", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "creator-settings-roots-"));
+  try {
+    const native = path.join(root, "Library", "Application Support");
+    const env = { XDG_CONFIG_HOME: path.join(root, "xdg"), APPDATA: path.join(root, "roaming") };
+    const current = path.join(native, "creator-works-mcp", "launcher-config.json");
+    const legacy = path.join(native, "banter-mcp", "launcher-config.json");
+    assert.equal(getLauncherConfigPath("darwin", env, root), current);
+    await mkdir(path.dirname(legacy), { recursive: true });
+    await writeFile(legacy, "{}");
+    assert.equal(getLauncherConfigPath("darwin", env, root), legacy);
+    await mkdir(path.dirname(current), { recursive: true });
+    await writeFile(current, "{}");
+    assert.equal(getLauncherConfigPath("darwin", env, root), current);
+    assert.equal(getLauncherConfigPath("linux", env, root), path.join(env.XDG_CONFIG_HOME, "creator-works-mcp", "launcher-config.json"));
+    assert.equal(getLauncherConfigPath("linux", {}, root), path.join(root, ".config", "creator-works-mcp", "launcher-config.json"));
+    assert.equal(getLauncherConfigPath("win32", env, root), path.join(env.APPDATA, "creator-works-mcp", "launcher-config.json"));
+    for (const platform of ["darwin", "win32", "linux"]) {
+      assert.equal(getLauncherConfigPath(platform, { ...env, CREATOR_WORKS_LAUNCHER_CONFIG: current, BANTWORKS_LAUNCHER_CONFIG: legacy }, root), current);
+      assert.equal(getLauncherConfigPath(platform, { ...env, BANTWORKS_LAUNCHER_CONFIG: legacy }, root), legacy);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 async function createUnityProject(root, name, updatedAt) {
   const projectPath = path.join(root, name);

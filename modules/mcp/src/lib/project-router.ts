@@ -163,17 +163,19 @@ export class UnityProjectRouter {
   }
 }
 
-export function getLauncherConfigPath(): string {
-  const configuredPath = process.env.CREATOR_WORKS_LAUNCHER_CONFIG ?? process.env.BANTWORKS_LAUNCHER_CONFIG;
+export function getLauncherConfigPath(platform = process.platform, env = process.env, home = os.homedir()): string {
+  const configuredPath = env.CREATOR_WORKS_LAUNCHER_CONFIG ?? env.BANTWORKS_LAUNCHER_CONFIG;
   if (configuredPath) {
     return path.resolve(configuredPath);
   }
-  if (process.platform === "win32" && process.env.APPDATA) {
-    const current = path.join(process.env.APPDATA, "creator-works-mcp", "launcher-config.json");
-    const legacy = path.join(process.env.APPDATA, "banter-mcp", "launcher-config.json");
+  if (platform === "win32" && env.APPDATA) {
+    const current = path.join(env.APPDATA, "creator-works-mcp", "launcher-config.json");
+    const legacy = path.join(env.APPDATA, "banter-mcp", "launcher-config.json");
     return fs.existsSync(current) || !fs.existsSync(legacy) ? current : legacy;
   }
-  const configRoot = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+  const configRoot = platform === "darwin"
+    ? path.join(home, "Library", "Application Support")
+    : env.XDG_CONFIG_HOME || path.join(home, ".config");
   const current = path.join(configRoot, "creator-works-mcp", "launcher-config.json");
   const legacy = path.join(configRoot, "banter-mcp", "launcher-config.json");
   return fs.existsSync(current) || !fs.existsSync(legacy) ? current : legacy;

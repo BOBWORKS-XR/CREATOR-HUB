@@ -97,6 +97,22 @@ test('SDK stdio: project selection is session-local and reconnect uses saved set
   assert.deepEqual(await snapshot(root), before);
 });
 
+test('SDK stdio: default settings discovery uses the native launcher directory', async t => {
+  const root = await fixture(t);
+  const saved = await project(root, 'Saved Project');
+  const configRoot = process.platform === 'darwin' ? path.join(root, 'Library', 'Application Support') : root;
+  const directory = path.join(configRoot, 'creator-works-mcp');
+  await mkdir(directory, { recursive: true });
+  await writeFile(path.join(directory, 'launcher-config.json'), JSON.stringify({ active_channel_id: 'saved',
+    channels: [{ id: 'saved', unity_project_path: saved }] }));
+  const before = await snapshot(root);
+  const client = await connect(t, root, { CREATOR_WORKS_LAUNCHER_CONFIG: '', BANTWORKS_LAUNCHER_CONFIG: '' });
+  assert.equal((await call(client, 'get_bridge_status')).project.path, saved);
+  assert.equal((await call(client, 'list_unity_projects')).projects.length, 1);
+  await client.close();
+  assert.deepEqual(await snapshot(root), before);
+});
+
 test('SDK stdio: malformed channel entries cannot prevent connection or hide valid projects', async t => {
   const root = await fixture(t);
   const valid = await project(root, 'Valid Project');

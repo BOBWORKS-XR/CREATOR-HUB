@@ -15,6 +15,10 @@ accepted unified migration release.
 - Runtime readiness, Unity bridge readiness, saved client configuration and a
   successful AI tool call are separate checks. Restart changed clients and ask
   the AI to call `get_bridge_status`; saved settings do not prove a connection.
+- Default server settings discovery uses the launcher's native location:
+  Windows AppData/Roaming, macOS Library/Application Support, and Linux
+  XDG_CONFIG_HOME or ~/.config. Explicit configuration-path overrides remain
+  available. Discovery does not copy, migrate or rewrite settings.
 
 ## Existing Client Entries
 
