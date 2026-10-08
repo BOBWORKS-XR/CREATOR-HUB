@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
 const { verifyStage } = require('./build-unified.cjs');
+const { saveBuiltinSettings } = require('./native-builtin-save.cjs');
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
   throw Error('Built-in native acceptance is restricted to a disposable GitHub-hosted Windows runner.');
 }
@@ -168,16 +169,7 @@ let child, browser, page;
       await frame.locator('#checkUpdatesBtn').waitFor({ state: 'hidden' });
       assert.match(await frame.locator('#updateStatus').innerText(), /included with Creator Hub/);
       assert.deepEqual(fs.readFileSync(settings), oldConfig, 'Opening built-in MCP must not migrate the old config');
-      await frame.locator('body').evaluate(async server => {
-        const invoke = (command, args = {}) => window.CreatorRuntime.invoke(command, args);
-        const workflow = await invoke('begin_ui_operation');
-        try {
-          const config = await invoke('load_config');
-          config.mcp_server_path = server;
-          config.auto_start = true;
-          await invoke('save_config', { config });
-        } finally { await invoke('finish_ui_operation', { id: workflow }); }
-      }, path.join(report.runtimeGeneration, 'mcp/server/creator-works-mcp.mjs'));
+      await saveBuiltinSettings(frame, path.join(report.runtimeGeneration, 'mcp/server/creator-works-mcp.mjs'));
       expectedConfig = fs.readFileSync(settings);
       assert.equal(JSON.parse(expectedConfig).migrationGuard, JSON.parse(oldConfig).migrationGuard);
       assert.equal(JSON.parse(expectedConfig).auto_start, true);
