@@ -1,6 +1,6 @@
 (() => {
   const guarded = new Set(['download_community_package', 'choose_community_project', 'install_community_menu', 'queue_community_import']);
-  const allowed = new Set([...guarded, 'community_catalogue', 'open_community_link', 'community_projects', 'community_import_status', 'community_transfer_status', 'cancel_community_transfer']);
+  const allowed = new Set([...guarded, 'community_catalogue', 'open_community_link', 'community_projects', 'community_import_status', 'community_transfer_status', 'cancel_community_transfer', 'open_plugins_website']);
   window.CreatorCommunityInvoke = async (command, args = {}) => {
     await window.CreatorRuntime.ready;
     if (window.CreatorRuntime.hosted || !allowed.has(command)) {
@@ -29,7 +29,7 @@
         if (!hidden) item.setAttribute('aria-current', 'page');
         else item.removeAttribute('aria-current');
       }
-      document.querySelector('.app-context').textContent = plugins ? 'Community creations' : 'Unity project connections';
+      document.querySelector('.app-context').textContent = plugins ? 'Plugins retirement' : 'Unity project connections';
       if (plugins) {
         void window.CreatorCommunity.show();
         document.getElementById('plugins-title')?.focus();

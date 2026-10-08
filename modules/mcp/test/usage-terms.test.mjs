@@ -79,11 +79,13 @@ test('AI usage warning only persists dismissal after a second checked confirmati
   assert.equal(store.get('creator-works-mcp.ai-usage-notice-hidden.v1'), 'true');
 });
 
-test('MCP help is fixed-access and covers client support, token controls and plugin formats', () => {
+test('MCP help covers client support, token controls and Plugins retirement', () => {
   assert.match(html, /id="context-help-open"/);
   assert.match(html, /id="context-help-dialog"/);
   assert.match(html, /Claude Desktop is not currently supported/);
   assert.match(html, /disable fast or high-cost modes/);
-  assert.match(html, /Visual Scripting is a graph/);
+  assert.match(html, /What happened to Creator Plugins\?/);
+  assert.match(html, /Existing imported assets, Unity project files and import receipts are not removed/);
+  assert.match(html, /MCP scene, prefab, component and Visual Scripting tools are not retired/);
   assert.match(fs.readFileSync('launcher/src/help.js', 'utf8'), /showModal\(\)/);
 });

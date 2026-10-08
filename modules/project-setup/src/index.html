@@ -29,7 +29,7 @@
       <span class="suite-item-copy"><strong>Project Setup</strong><small>Current app</small></span><span class="suite-current-dot" aria-hidden="true"></span>
     </button>
     <div class="suite-item unavailable"><span class="suite-mark converter-mark"><img src="sidequest-mark-white.svg" alt=""><span class="suite-letter">C</span></span><span class="suite-item-copy"><strong>Creator Converter</strong><small>SideQuest / Coming soon</small></span></div>
-    <button class="suite-item" type="button" id="suite-plugins"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.png" alt=""></span><span class="suite-item-copy"><strong>Creator Plugins</strong><small>Community contributions</small></span></button>
+    <button class="suite-item" type="button" id="suite-plugins"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.png" alt=""></span><span class="suite-item-copy"><strong>Creator Plugins</strong><small>Retirement notice</small></span></button>
     <p id="suite-error" class="suite-error hidden" role="status"></p>
   </nav>
   </div>
@@ -144,11 +144,11 @@
   <dialog id="context-help-dialog" class="context-help-dialog" aria-labelledby="context-help-title">
     <div class="context-help-heading"><div><h2 id="context-help-title">Project Setup help</h2><p>This app creates and validates Unity projects for the Creator SDK.</p></div><button id="context-help-close" class="icon-button" type="button" aria-label="Close help" title="Close help">×</button></div>
     <div class="context-help-content">
-      <details open><summary>What does each Creator app do?</summary><p><strong>Project Setup</strong> installs/checks supported prerequisites and creates or validates projects. It is not the AI tool. <strong>Creator Works MCP</strong> connects a compatible AI client to Unity. <strong>Creator Hub</strong> manages the apps and your projects. The Creator Plugins catalogue is available in Hub and its Unity Editor window.</p></details>
+      <details open><summary>What does each Creator app do?</summary><p><strong>Project Setup</strong> installs/checks supported prerequisites and creates or validates projects. It is not the AI tool. <strong>Creator Works MCP</strong> connects a compatible AI client to Unity. <strong>Creator Hub</strong> brings the tools and your projects together. Creator Plugins is retiring from the apps; its page contains the retirement notice.</p></details>
       <details><summary>Why does setup ask for Unity or Android components?</summary><p>The approved project recipe requires a matching Unity Editor and selected build modules. Setup can download supported components after you approve, but Unity account sign-in/licensing and any operating-system administrator prompts remain yours to complete.</p></details>
       <details><summary>Unity setup failed or is taking a long time</summary><p>Check the current activity and error first. Editor and Android tool downloads can be large; slow network or disk activity may extend setup. Retry only after checking available disk space and that Unity Hub/Unity are not actively changing the same installation. The app preserves the project and provides a local log when setup stops.</p></details>
       <details><summary>Can I use an existing project?</summary><p>Use the Existing project view to inspect first. Repairs require a separate approval and a safety backup. Close the project in Unity when requested, review the proposed changes, and keep another backup outside the project folder.</p></details>
-      <details><summary>Where do community plugins go?</summary><p>Plugin formats differ: graphs, prefabs, scripts, editor extensions and scenes have different import steps and dependencies. Read the listing instructions and verify Unity/SDK compatibility. Do not assume adding a package is the same as setting up the Creator SDK project.</p></details>
+      <details><summary>What happened to Creator Plugins?</summary><p>The in-app catalogue and new package imports have been retired. Existing imported assets, Unity project files and import receipts are not removed. This does not change how Project Setup creates and validates projects.</p></details>
       <details><summary>What should I include in a support report?</summary><p>Include this app’s version, the exact stage/message, and the local setup log. Remove account details, access tokens and private project information before sharing. Support is not guaranteed; keep independent backups of important projects.</p></details>
     </div>
   </dialog>

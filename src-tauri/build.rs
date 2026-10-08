@@ -25,6 +25,7 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "open_resource",
+            "open_plugins_website",
             "community_catalogue",
             "open_community_link",
             "download_community_package",

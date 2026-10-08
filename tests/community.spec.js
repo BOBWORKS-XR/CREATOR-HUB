@@ -2,6 +2,10 @@ const { test, expect } = require('@playwright/test');
 const entry = require('./fixtures/community/start-location.json');
 const path = require('node:path');
 const { verifyCommunityMedia } = require('../scripts/verify-community-media.cjs');
+// Historical protocol coverage only. The shipped retirement view has its own suite.
+test.beforeEach(async ({ page }) => {
+  await page.route('**/community.js', route => route.fulfill({ path: path.join(__dirname, 'fixtures/community/legacy-catalogue.js'), contentType: 'text/javascript' }));
+});
 async function load(page, options = {}) {
   await page.addInitScript(({ entry, options }) => {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));

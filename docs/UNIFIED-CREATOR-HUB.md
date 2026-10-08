@@ -6,7 +6,8 @@ directions in PROJECT-SETUP-IN-HUB.md and SHARED-MCP-DIRECTION.md.
 ## Product And Repository
 
 - Creator Hub is the one public desktop product, installer and update stream.
-- Projects, Project Setup, MCP and Plugins are sections of that product.
+- Projects, Project Setup and MCP are sections of that product.
+- Plugins has a temporary retirement notice, not an active catalogue.
 - CREATOR-HUB is the canonical repository for future development.
 - MCP and Setup remain internal modules, not independently installed products.
 - modules/mcp and modules/project-setup retain the complete Git ancestry of their
@@ -138,6 +139,38 @@ automatic self-updater. Some older users will need a guided one-time installer.
 Cancellation and failure must leave a usable old installation. Repeated starts,
 interrupted migration, already-completed migration and update-after-migration
 need explicit tests. Keep diagnostics local and exclude secrets from reports.
+
+The convergence release starts in Hub: detect standalone apps, explain retained
+data and backups, and request migration approval. Offer old-app removal only
+after migrated settings and a working Hub runtime/client route are verified.
+Removal must preserve app data and retained backups; it is not a prerequisite
+for starting migration. Final standalone transition builds should offer a
+clearly named **Move to Creator Hub** action rather than impersonating Hub or
+comparing incompatible product version numbers. These steps are requirements,
+not completed migration functionality.
+
+## Plugins Retirement
+
+Approved on 2026-10-08. New builds replace the catalogue in Hub, MCP and Setup
+with the same retirement notice. New catalogue fetches, package downloads,
+imports and Unity-menu installation are disabled in native dispatch as well as
+removed from the UI. Existing receipt/status and cancellation cleanup remain
+available. Existing imported assets, Unity projects and receipts are not deleted
+or rewritten. Already-installed Unity windows are not silently modified.
+
+Before **2026-10-20 00:00:00 UTC**, the notice offers a button for the fixed URL
+`https://creatorplugins.store/`. At and after that cutoff it shows the retired
+notice only: no website link or import action. Both frontend and native opener
+check the same boundary. Focus/visibility events and a bounded timer refresh an
+already-open view; a stale click also rechecks before invoking the native opener.
+The transition works offline using the device clock once this build is installed.
+It cannot alter old binaries that never install the retirement update, nor enforce
+real-world time when a device's clock is incorrect.
+
+Historical browser import coverage runs against an explicitly test-only legacy
+catalogue fixture. Production retirement UI has separate date-boundary, layout
+and no-import coverage; passing the historical fixture is not evidence that the
+retired production catalogue remains available.
 
 ## Acceptance Before Rollout
 

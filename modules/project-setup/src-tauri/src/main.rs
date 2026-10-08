@@ -15,6 +15,8 @@ mod hub_installer;
 mod hub_restart;
 mod lifecycle;
 mod logic;
+#[path = "../../../../native/plugins_retirement.rs"]
+mod plugins_retirement;
 mod repair;
 #[cfg(unix)]
 mod unix_editors;
@@ -395,29 +397,37 @@ fn main() {
             tauri::WindowEvent::Destroyed => lifecycle::LIFECYCLE.detach(),
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![
-            get_recipe,
-            probe_environment,
-            pick_parent_folder,
-            create_project,
-            open_project,
-            launch_hub,
-            restart_hub,
-            register_project,
-            inspect_project,
-            run_existing_project,
-            open_official_url,
-            community_catalogue,
-            community_projects,
-            choose_community_project,
-            install_community_menu,
-            queue_community_import,
-            community_import_status,
-            open_community_link,
-            download_community_package,
-            community_transfer_status,
-            cancel_community_transfer
-        ])
+        .invoke_handler(|invoke| {
+            if let Some(error) = plugins_retirement::command_error(invoke.message.command()) {
+                invoke.resolver.reject(error);
+                return true;
+            }
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                plugins_retirement::open_plugins_website,
+                get_recipe,
+                probe_environment,
+                pick_parent_folder,
+                create_project,
+                open_project,
+                launch_hub,
+                restart_hub,
+                register_project,
+                inspect_project,
+                run_existing_project,
+                open_official_url,
+                community_catalogue,
+                community_projects,
+                choose_community_project,
+                install_community_menu,
+                queue_community_import,
+                community_import_status,
+                open_community_link,
+                download_community_package,
+                community_transfer_status,
+                cancel_community_transfer
+            ];
+            handler(invoke)
+        })
         .build(context)
         .expect("error while running Creator Project Setup")
         .run(|_, event| {

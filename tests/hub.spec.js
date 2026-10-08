@@ -659,14 +659,14 @@ test('morphing drawer reverses, restores focus and honors reduced motion', async
   await expect(page.locator('.app-header .title-block')).toHaveCSS('opacity', '1');
 });
 
-test('Creator Plugins browses the catalogue without installation or account actions', async ({ page }) => {
+test('Creator Plugins shows retirement without fetching the catalogue or changing projects', async ({ page }) => {
   await load(page);
   await page.getByRole('button', { name: 'View Creator Plugins' }).click();
   await expect(page.locator('#plugins-title')).toBeFocused();
-  await expect(page.locator('#view-plugins')).toContainText('No contributions are listed yet');
-  await expect(page.locator('#view-plugins')).toContainText('Editor tools');
+  await expect(page.locator('#view-plugins')).toContainText(/Creator Plugins (is retiring|has been retired)/);
+  await expect(page.locator('#view-plugins')).toContainText('Existing imported assets');
   await expect(page.locator('#release-button')).toBeHidden();
-  expect(await page.evaluate(() => window.calls.filter(c => !['pending_hosted_restore', 'app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory', 'community_catalogue'].includes(c.command)))).toEqual([]);
+  expect(await page.evaluate(() => window.calls.filter(c => !['pending_hosted_restore', 'app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(c.command)))).toEqual([]);
 });
 
 test('download progress cancels, prevents duplicate actions and never auto-installs', async ({ page }) => {

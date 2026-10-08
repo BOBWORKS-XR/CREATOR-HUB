@@ -44,6 +44,9 @@ function checkSources(directory, manifest) {
     `${manifest.modules.setup.path}/unity/com.creatorworks.plugins/Editor/CreatorPluginsWindow.cs`];
   const hashes = helpers.map(file => crypto.createHash('sha256').update(fs.readFileSync(path.join(directory, file))).digest('hex'));
   if (new Set(hashes).size !== 1) throw Error('Unity catalogue helpers differ between Hub modules.');
+  const retirementViews = ['src/community.js', ...Object.values(manifest.modules).map(entry => `${entry.frontend}/community.js`)];
+  const retirementHashes = retirementViews.map(file => crypto.createHash('sha256').update(fs.readFileSync(path.join(directory, file))).digest('hex'));
+  if (new Set(retirementHashes).size !== 1) throw Error('Plugins retirement views differ between Hub modules.');
   for (const entry of Object.values(manifest.modules)) {
     const packageJson = JSON.parse(fs.readFileSync(path.join(directory, entry.path, 'package.json'), 'utf8'));
     if (!semver.valid(packageJson.version)) throw Error(`Invalid module version: ${entry.path}`);

@@ -1,25 +1,21 @@
 const { test, expect } = require('@playwright/test');
 
-for (const width of [980, 390]) test(`standalone Plugins grid keeps Setup state and remembers its view at ${width}px`, async ({ page }) => {
+for (const width of [980, 390]) test(`Plugins retirement keeps the Setup draft at ${width}px`, async ({ page }) => {
   await page.setViewportSize({ width, height: 760 });
-  const fixture = require('./fixtures/community/start-location.json');
-  await setup(page, { community: [fixture] });
+  await page.clock.install({ time: new Date('2026-10-19T23:59:00Z') });
+  await setup(page);
   await page.locator('#project-name').fill('Keep this project draft');
   await page.locator('#suite-trigger').click(); await page.locator('#suite-plugins').click();
-  await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'grid');
-  await expect(page.getByRole('button', { name: 'Grid view', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByRole('heading', { name: 'Start Location' })).toBeVisible();
+  await expect(page.locator('#view-plugins')).toContainText('20 October 2026');
+  await expect(page.getByRole('button', { name: 'Visit creatorplugins.store' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.locator('#suite-trigger').click(); await page.locator('#suite-current').click();
   await expect(page.locator('#project-name')).toHaveValue('Keep this project draft');
-  await page.reload();
   await page.locator('#suite-trigger').click(); await page.locator('#suite-plugins').click();
-  await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'grid');
-  await page.getByRole('button', { name: 'List view', exact: true }).click();
-  await page.reload();
-  await page.locator('#suite-trigger').click(); await page.locator('#suite-plugins').click();
-  await expect(page.locator('.community-list')).toHaveAttribute('data-layout', 'list');
-  expect(await page.evaluate(() => window.calls.some(c => /install_community|queue_community|download_community/.test(c.command)))).toBe(false);
+  await page.clock.runFor(60_000);
+  await expect(page.locator('#view-plugins')).toContainText('has been retired');
+  await expect(page.locator('#view-plugins button, #view-plugins a')).toHaveCount(0);
+  expect(await page.evaluate(() => window.calls.some(c => /community/.test(c.command)))).toBe(false);
 });
 
 test('fresh Windows PC offers one setup action without a wall of dependent errors', async ({ page }, testInfo) => {
@@ -281,7 +277,7 @@ async function setup(page, options = {}) {
       return () => { delete window.eventCallbacks[name]; if (name === 'setup-progress') window.progressCallback = null; };
     } }, core: { invoke: async (command, args) => {
       window.calls.push({ command, args });
-      if (command === 'community_catalogue') return { entries: window.options.community || [], warnings: [], stale: false };
+      if (command === 'open_plugins_website') return;
       if (command === 'probe_environment' && window.options.probeError) throw window.options.probeError;
       if (command === 'probe_environment') return {
         platform: window.options.platform || 'windows', ready: !window.options.missingUnity, hubInstalled: !window.options.missingHub, unityCliInstalled: false,
@@ -713,12 +709,12 @@ test('app switcher supports keyboard, outside dismissal and bounded links', asyn
   expect(await page.evaluate(() => window.calls.every(call => ['probe_environment', 'open_official_url'].includes(call.command)))).toBe(true);
 });
 
-test('Plugins is in Setup and switching back preserves a running project workflow', async ({ page }) => {
-  await setup(page, { pending: true, community: [require('./fixtures/community/start-location.json')] });
+test('Plugins retirement preserves a running project workflow', async ({ page }) => {
+  await setup(page, { pending: true });
   await page.locator('#create-button').click();
   await page.locator('#suite-trigger').click(); await page.locator('#suite-plugins').click();
   await expect(page.locator('#plugins-title')).toBeFocused();
-  await expect(page.locator('#view-plugins')).toContainText('Start Location');
+  await expect(page.locator('#view-plugins')).toContainText('Existing imported assets');
   await expect(page.locator('#setup-workspace')).toBeHidden();
   await page.evaluate(() => window.progressCallback({ payload: { step: 3, detail: 'Compiling while browsing' } }));
   await page.locator('#suite-trigger').click(); await page.locator('#suite-current').click();
@@ -740,21 +736,13 @@ test('external link failures are visible and do not claim installation', async (
   await expect(page.locator('#suite-trigger')).toBeFocused();
 });
 
-test('standalone Setup exposes MCP tools and AI skills without Unity import for instructions', async ({ page }) => {
-  const fixture = require('./fixtures/community/start-location.json');
-  const community = ['mcp-tool', 'ai-skill'].map(category => ({ ...fixture, id: `test.${category}`, category, name: category, download: undefined, scope: 'instructions-only', reviewStatus: 'listed' }));
-  await setup(page, { community });
+test('standalone Setup opens only the retirement website, without catalogue or imports', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-10-08T12:00:00Z') });
+  await setup(page);
   await page.locator('#suite-trigger').click(); await page.locator('#suite-plugins').click();
-  await expect(page.locator('.community-count')).toHaveText('2 contributions');
-  for (const [category, label] of [['mcp-tool', 'MCP tools'], ['ai-skill', 'AI skills']]) {
-    await page.getByRole('button', { name: label, exact: true }).click();
-    await expect(page.locator('.community-count')).toHaveText('1 contribution');
-    await expect(page.locator('.community-item h3')).toHaveText(category);
-    await expect(page.locator('.community-type')).toHaveText(label);
-    await expect(page.getByRole('button', { name: 'Add to project' })).toHaveCount(0);
-    await expect(page.locator('.community-review')).toHaveText('Instructions only');
-  }
-  expect(await page.evaluate(() => window.calls.some(c => /install_community|queue_community|download_community/.test(c.command)))).toBe(false);
+  await page.getByRole('button', { name: 'Visit creatorplugins.store' }).click();
+  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'open_plugins_website').length)).toBe(1);
+  expect(await page.evaluate(() => window.calls.some(c => /community/.test(c.command)))).toBe(false);
 });
 
 for (const width of [980, 720, 560, 390]) {

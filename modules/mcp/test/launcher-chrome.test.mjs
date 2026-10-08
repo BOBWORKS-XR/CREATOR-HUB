@@ -52,14 +52,14 @@ test('Hub badge uses a three-face cube backplate without replacing the original 
   assert.match(html, /app-icon app-icon-hub[^>]*><img src="creator-works-logo.png"/);
 });
 
-test('Converter remains disabled while Plugins opens the local catalogue', () => {
+test('Converter remains disabled while Plugins opens the retirement notice', () => {
   assert.equal(createHash('sha256').update(fs.readFileSync('launcher/src/sidequest-mark-white.svg')).digest('hex'),
     'bd5e1350ad3e1f6a3b767945f43631aa85b3ebb3f4278b1634d86c6e88cf14d6');
   assert.match(html, /aria-disabled="true">\s*<span class="app-icon app-icon-converter"/);
   assert.match(html, /sidequest-mark-white.svg/);
   assert.match(html, /Creator Converter<\/strong><small>SideQuest \/ Coming soon/);
   assert.match(html, /data-local-view="plugins"/);
-  assert.match(html, /Creator Plugins<\/strong><small>Community creations/);
+  assert.match(html, /Creator Plugins<\/strong><small>Retirement notice/);
   assert.match(html, /id="view-plugins" class="hidden" hidden inert/);
   assert.doesNotMatch(html, /URP Converter/);
   assert.match(chrome, /if \(item.getAttribute\('aria-disabled'\) === 'true'\) return/);

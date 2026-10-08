@@ -18,6 +18,8 @@ mod hosted_payload;
 mod hub;
 mod jsonc;
 mod lifecycle;
+#[path = "../../../../../native/plugins_retirement.rs"]
+mod plugins_retirement;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -2223,9 +2225,14 @@ fn main() {
                     .reject("Launcher is closing or lifecycle state is unavailable");
                 return true;
             };
+            if let Some(error) = plugins_retirement::command_error(invoke.message.command()) {
+                invoke.resolver.reject(error);
+                return true;
+            }
             // Synchronous handlers retain this dispatch guard. Community async
             // adapters retain their own guards inside each blocking worker.
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                plugins_retirement::open_plugins_website,
                 community_api::community_catalogue,
                 community_api::open_community_link,
                 community_api::download_community_package,

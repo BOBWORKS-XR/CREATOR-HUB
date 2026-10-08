@@ -73,7 +73,7 @@
     shell.querySelector('.suite-brand').innerHTML = pageBrand;
     trigger.replaceChildren(menu.querySelector(`[data-view="${view === 'plugins' ? 'plugins' : 'hub'}"] .suite-mark`).cloneNode(true));
     byId('mode-description').textContent = hosted ? (view === 'setup' ? 'Unity and Creator SDK. Android + Windows.' :
-      (window.CreatorHosted.writable(view) ? 'Unity project connections and MCP setup.' : 'Unity project connections. Read-only preview.')) : view === 'plugins' ? 'Made by the community. Shared with creators.' : 'Unity tools. One place.';
+      (window.CreatorHosted.writable(view) ? 'Unity project connections and MCP setup.' : 'Unity project connections. Read-only preview.')) : view === 'plugins' ? 'Plugins retirement' : 'Unity tools. One place.';
     document.querySelector('#view-plugins').classList.toggle('hidden', view !== 'plugins');
     if (view === 'plugins') window.CreatorCommunity.show();
     else window.CreatorCommunity.closePreview();
