@@ -7,6 +7,7 @@ const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
 const { verifyStage } = require('./build-unified.cjs');
 const { saveBuiltinSettings } = require('./native-builtin-save.cjs');
+const { helpOcclusion } = require('../tests/help-layout.cjs');
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
   throw Error('Built-in native acceptance is restricted to a disposable GitHub-hosted Windows runner.');
 }
@@ -181,6 +182,9 @@ let child, browser, page;
       report.checks.push('Explicit built-in settings save preserves unknown fields and retains the exact original bytes');
     }
     await retry(async () => assert.equal(await page.locator('#hosted-stop').isEnabled(), true));
+    assert.equal(await helpOcclusion(frame, 'footer .text-button, .footer a'), null, 'Fixed Help must not obscure module footer links');
+    await frame.locator('body').evaluate(() => scrollTo(0, 0));
+    report.checks.push(`${app}: fixed Help leaves footer links accessible while scrolling`);
     await page.screenshot({ path: path.join(out, `${app}.png`) });
     const windows = JSON.parse(native(pid, executable, 'snapshot'));
     assert.equal(windows.filter(w => w.title === (app === 'setup' ? 'Creator Project Setup' : 'Creator Works MCP')).length, 0);

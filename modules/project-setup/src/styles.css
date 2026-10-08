@@ -148,3 +148,10 @@ footer .text-button { font-size: 11px; }
   .workspace-toolbar { margin-bottom: 18px; }
 }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+/* Reserve clearance for fixed Help at every scroll position. */
+main, footer { padding-right: 80px; }
+:root:not(.creator-hosted) { scroll-padding-top: 80px; }
+:root:not(.creator-hosted) .app-header { position: sticky; top: 0; z-index: 30; background: #090b0d; }
+@media (max-width: 560px) {
+  :root:not(.creator-hosted) { scroll-padding-top: 120px; }
+}

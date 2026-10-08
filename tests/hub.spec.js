@@ -1,6 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
+const { helpOcclusion } = require('./help-layout.cjs');
 
 async function load(page, launchView = 'hub', options = {}) {
   await page.addInitScript(({ launchView, options }) => {
@@ -15,6 +16,7 @@ async function load(page, launchView = 'hub', options = {}) {
     window.__TAURI__ = { event: { listen: async (name, handler) => { window.events[name] = handler; return () => {}; } }, core: { invoke: async (command, args) => {
       window.calls.push({ command, args });
       if (command === 'get_launch_request') return { view: launchView, revision: 0 };
+      if (command === 'pending_hosted_restore') return [];
       if (command === 'project_inventory') return { projects: [], warnings: [] };
       if (command === 'community_catalogue') return { entries: [], warnings: [], stale: false };
       if (command === 'app_inventory') {
@@ -85,6 +87,17 @@ test('fixed Hub help opens with app roles and practical troubleshooting', async 
   await expect(help).toContainText('Claude Desktop is not currently supported');
   await page.locator('#context-help-close').click();
   await expect(help).toBeHidden();
+});
+
+for (const width of [940, 390, 320]) test(`Hub Help does not cover controls or footer while scrolling at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 580 });
+  await load(page);
+  await expect(page.locator('#context-help-open')).toBeVisible();
+  expect(await page.locator('.app-header').evaluate(node => ({ position: getComputedStyle(node).position, background: getComputedStyle(node).backgroundColor }))).toEqual({ position: 'sticky', background: 'rgb(9, 11, 13)' });
+  const overlap = await helpOcclusion(page, 'main button, main input, main select, main summary, main [role="status"], footer .text-button');
+  await page.screenshot({ path: testInfo.outputPath('hub-help-clearance.png') });
+  expect(overlap).toBeNull();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
 for (const app of ['mcp', 'setup']) for (const width of [940, 390, 320]) test(`Apps row updates ${app} without opening its view at ${width}px`, async ({ page }, testInfo) => {

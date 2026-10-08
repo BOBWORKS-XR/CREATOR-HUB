@@ -2,6 +2,7 @@ const { test, expect } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
 const semver = require('semver');
+const { helpOcclusion } = require('./help-layout.cjs');
 
 const setupSource = process.env.CREATOR_SETUP_SOURCE || path.resolve(__dirname, '../modules/project-setup/src');
 const setupVersion = JSON.parse(fs.readFileSync(path.resolve(setupSource, '../package.json'), 'utf8')).version;
@@ -111,6 +112,16 @@ async function switchTo(page, name) {
   await page.locator('#suite-trigger').click();
   await page.locator(`#suite-menu [data-view="${name}"]`).click();
 }
+
+for (const width of [940, 390, 320]) test(`Setup Help does not cover controls or footer while scrolling at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 580 });
+  const setup = await open(page, { builtIn: true });
+  await expect(setup.locator('#context-help-open')).toBeVisible();
+  const overlap = await helpOcclusion(setup, 'main button, main input, main select, main summary, .requirement, .blockers, .result, .activity, footer .text-button');
+  await page.screenshot({ path: testInfo.outputPath('setup-help-clearance.png') });
+  expect(overlap).toBeNull();
+  expect(await setup.locator('body').evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
 
 test('built-in features open automatically and expose no separate install or update controls', async ({ page }) => {
   const setup = await open(page, { builtIn: true, writableMcp: true });
