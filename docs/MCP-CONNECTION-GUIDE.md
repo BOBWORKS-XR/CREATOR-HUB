@@ -106,6 +106,22 @@ Contracts: [CLI reference](https://docs.unity.com/en-us/unity-cli/unity-cli-refe
 - Plugins retirement documentation is in
   [Creator Community PR 16](https://github.com/SideQuestVR/Creator-Community/pull/16).
 
+## Scene Command Recovery
+
+The release recheck reproduced a queued scene request reporting success without
+pending/project metadata. Scene reads and save/open/build-scene operations now
+return `success: false`, `pending: true` and the original command/project IDs when
+their result is unavailable. Follow their `nextAction`; do not resubmit a scene
+mutation merely because it timed out. No polling timeout was shortened.
+
+`get_unity_command_status` returns correlated scene data as `sceneResult` after
+completion. Scene receipts are retained under the bridge's existing 50-file
+retention policy, so repeated status reads do not dispatch another command or
+consume the data. Invalid shapes/IDs and wrong project/Editor acknowledgements
+are refused without deleting receipts. Ordinary command responses stay unchanged
+when no scene receipt exists. Tests use disposable file-transport fixtures;
+this is not new live Unity or signed-update acceptance.
+
 ## Remaining Acceptance
 
 Fixtures/units do not prove live Claude Desktop tool calls, Unity CLI Editor

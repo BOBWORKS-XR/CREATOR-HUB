@@ -142,3 +142,55 @@ test('SDK stdio: malformed JSON is recoverable without modifying it or crashing 
   await client.close();
   assert.deepEqual(await snapshot(root), before);
 });
+
+test('SDK stdio: scene data survives reconnect and status polling never repeats the command', async t => {
+  const root = await fixture(t);
+  const selected = await project(root, 'Scene Project');
+  const commands = path.join(selected, '.bantworks-mcp', 'commands');
+  const state = path.join(selected, '.bantworks-mcp', 'state');
+  for (const directory of [commands, ...['command-results', 'command-status', 'scene-results'].map(name => path.join(state, name))]) {
+    await mkdir(directory, { recursive: true });
+  }
+  const settings = JSON.stringify({ active_channel_id: 'scene', channels: [{ id: 'scene', unity_project_path: selected }] });
+  await writeFile(path.join(root, 'launcher-config.json'), settings);
+  const client = await connect(t, root, { CREATOR_WORKS_TOOL_GROUPS: 'read' });
+  const bridge = (async () => {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const files = (await readdir(commands)).filter(name => name.endsWith('.json'));
+      if (files.length) {
+        assert.equal(files.length, 1);
+        const command = JSON.parse(await readFile(path.join(commands, files[0]), 'utf8'));
+        assert.equal(command.type, 'get_scenes');
+        const receipt = { commandId: command.id, success: true, activeSceneName: 'Fixture',
+          openScenes: [{ name: 'Fixture', isDirty: false }], buildScenes: [] };
+        const acknowledgement = JSON.stringify({ commandId: command.id, success: true, status: 'completed',
+          projectPath: selected, editorInstanceId: 'fixture-editor' });
+        await writeFile(path.join(state, 'scene-results', `${command.id}.json`), JSON.stringify(receipt));
+        await writeFile(path.join(state, 'command-status', `${command.id}.json`), acknowledgement);
+        await writeFile(path.join(state, 'command-results', `${command.id}.json`), acknowledgement);
+        await rm(path.join(commands, files[0]));
+        return receipt;
+      }
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error('No scene command arrived in the disposable bridge fixture.');
+  })();
+  const [result, receipt] = await Promise.all([call(client, 'get_unity_scenes'), bridge]);
+  assert.equal(result.success, true);
+  assert.equal(result.pending, false);
+  assert.deepEqual(result.openScenes, receipt.openScenes);
+  await client.close();
+  const before = await snapshot(root);
+  const reopened = await connect(t, root);
+  for (let i = 0; i < 2; i++) {
+    const status = await call(reopened, 'get_unity_command_status', { commandId: result.commandId, projectId: result.projectId });
+    assert.equal(status.success, true);
+    assert.equal(status.pending, false);
+    assert.deepEqual(status.sceneResult, receipt);
+  }
+  await reopened.close();
+  assert.deepEqual(await snapshot(root), before);
+  assert.equal(await readFile(path.join(root, 'launcher-config.json'), 'utf8'), settings);
+  assert.deepEqual(await readdir(commands), []);
+});

@@ -40,7 +40,7 @@ import {
   type BridgeCommandResult,
 } from "../lib/unity-bridge-transport.js";
 import type { UnityProjectRouter } from "../lib/project-router.js";
-import { getUnityCommandStatus, pendingCommandTimeout } from "./get-unity-command-status.js";
+import { getUnityCommandStatus, pendingCommandTimeout, readUnitySceneResult } from "./get-unity-command-status.js";
 import {
   describeToolGroupSelection,
   isToolEnabled,
@@ -540,7 +540,7 @@ Use this first after configuring a new Unity project or when Unity tools appear 
 
     {
       name: "get_unity_command_status",
-      description: `Read one pending Unity command result from the currently selected project. The projectId returned with the original pending response is required, preventing a status poll from silently resolving against another Unity project.`,
+      description: `Read one pending Unity command result from the selected project. Requires its original projectId, preventing cross-project resolution. Scene commands include the retained data in sceneResult; polling never resubmits a command.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -787,7 +787,7 @@ Use this after a long test call returns status=running. This tool does not start
     {
       name: "get_unity_scenes",
       description: `Read Unity's open scenes and ordered Editor build settings.
-Returns active/open scene paths, GUIDs, dirty state, handles, build indices, and enabled build scenes. Requires a running Unity Editor with BanterMCPBridge installed.`,
+Returns active/open scene paths, GUIDs, dirty state, handles, build indices, and enabled build scenes. Pending calls include IDs for get_unity_command_status; its sceneResult returns the original data without resubmitting. Requires BanterMCPBridge.`,
       inputSchema: {
         type: "object",
         properties: {},
@@ -3221,19 +3221,16 @@ async function executeUnitySceneCommand(
     return result;
   }
 
-  const resultPath = path.join(config.mcpStatePath, "scene-results", `${result.commandId}.json`);
   const startedAt = Date.now();
   while (Date.now() - startedAt < 30000) {
-    if (fs.existsSync(resultPath)) {
-      try {
-        const sceneResult = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as Record<string, unknown>;
-        if (sceneResult.commandId === result.commandId) {
-          fs.unlinkSync(resultPath);
-          return sceneResult;
-        }
-      } catch {
-        // The bridge may still be atomically publishing the result.
+    try {
+      const sceneResult = readUnitySceneResult(result.commandId, config);
+      if (sceneResult) {
+        return { ...sceneResult, accepted: true, pending: false, status: "completed",
+          projectId: result.projectId, projectPath: result.projectPath };
       }
+    } catch {
+      // Keep incomplete or invalid receipts; status polling reports their diagnostic.
     }
 
     if (!result.completed) {
@@ -3248,18 +3245,15 @@ async function executeUnitySceneCommand(
 
   if (!result.completed && fs.existsSync(path.join(config.mcpCommandsPath, `${result.commandId}.json`))) {
     return {
-      success: true,
-      commandId: result.commandId,
+      ...pendingCommandTimeout(result.commandId, config, "Unity has not processed this scene command yet."),
+      accepted: true,
       status: "queued",
-      message: "Unity has not processed this scene command yet.",
     };
   }
 
   return {
-    success: false,
-    commandId: result.commandId,
-    status: "result_timeout",
-    error: "Unity acknowledged the scene command but its correlated scene result was not available.",
+    ...pendingCommandTimeout(result.commandId, config, "The correlated Unity scene result is not available; completion is unknown."),
+    accepted: true,
   };
 }
 

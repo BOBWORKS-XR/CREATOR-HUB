@@ -85,9 +85,10 @@ export function getUnityCommandStatus(
           message: "Unity dispatched this command. Completion is unknown; this is not proof it is still running. Do not resubmit. Menu return does not prove an asynchronous build completed.",
         };
       }
+      const sceneResult = result.success === true ? readUnitySceneResult(commandId, config) : undefined;
       if (resultPath === completionPath) fs.unlinkSync(resultPath);
       return {
-        success: result.success === true,
+        success: result.success === true && sceneResult?.success !== false,
         accepted: true,
         pending: false,
         status: "completed",
@@ -96,8 +97,9 @@ export function getUnityCommandStatus(
         projectPath: result.projectPath || config.unityProjectPath,
         editorInstanceId: result.editorInstanceId,
         message: result.message,
-        error: result.error,
+        error: sceneResult?.success === false ? String(sceneResult.error || "Unity scene command failed.") : result.error,
         observed: result.observed ?? undefined,
+        sceneResult,
         lastObservedAt: result.timestamp,
       };
     } catch (error) {
@@ -135,6 +137,24 @@ export function getUnityCommandStatus(
     editorInstanceId: descriptor?.editorInstanceId,
     error: "No pending command or correlated result exists in the selected project's state directory.",
   };
+}
+
+export function readUnitySceneResult(commandId: string, config: BanterMCPConfig): Record<string, unknown> | undefined {
+  if (!isSafeCommandId(commandId)) throw new Error("Invalid scene result command ID.");
+  const file = path.join(config.mcpStatePath, "scene-results", `${commandId}.json`);
+  if (!fs.existsSync(file)) return undefined;
+  let result: Record<string, unknown>;
+  try {
+    result = JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch {
+    throw new Error("Could not read the correlated Unity scene result.");
+  }
+  if (!result || typeof result !== "object" || Array.isArray(result) || result.commandId !== commandId ||
+      typeof result.success !== "boolean" ||
+      (result.success && (!Array.isArray(result.openScenes) || !Array.isArray(result.buildScenes)))) {
+    throw new Error("Unity scene result has an invalid shape or correlation ID. It was kept for inspection.");
+  }
+  return result;
 }
 
 function failure(commandId: string, config: BanterMCPConfig, error: string): UnityCommandStatusResult {
