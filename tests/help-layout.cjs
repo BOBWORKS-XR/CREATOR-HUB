@@ -4,6 +4,8 @@ async function helpOcclusion(frame, selector) {
     const switcher = document.querySelector('#suite-shell');
     const header = document.querySelector('.app-header');
     const targets = [...document.querySelectorAll(selector)];
+    if (!help || !help.getClientRects().length) return { kind: 'missing-help' };
+    if (!targets.length) return { kind: 'missing-targets', selector };
     const max = document.scrollingElement.scrollHeight - innerHeight;
     const positions = [...new Set([0, ...Array.from({ length: Math.ceil(max / 24) }, (_, i) => Math.min(max, (i + 1) * 24)), max])];
     for (const y of positions) {

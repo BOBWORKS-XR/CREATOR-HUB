@@ -84,6 +84,8 @@ jobs:
       - run: npm run build:unified -- ci-windows
       - name: Test native MCP settings and ownership guards
         run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml
+      - name: Test native Project Setup guards and repairs
+        run: cargo test --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml
       - run: npx playwright install chromium
       - name: Open both bundled modules without companion installations
         timeout-minutes: 8
@@ -132,6 +134,8 @@ jobs:
       - run: npm --prefix modules/mcp run release:launcher
       - name: Test native MCP settings and Unix ownership guards
         run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target
+      - name: Test native Project Setup guards and repairs
+        run: cargo test --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target-dir src-tauri/target
       - name: Build Linux AppImage, DEB, and RPM bundle
         run: NO_STRIP=1 npm run build -- --bundles appimage,deb,rpm
       - name: Retain development packages (not a release)
@@ -176,6 +180,8 @@ jobs:
       - run: npm --prefix modules/mcp run release:launcher
       - name: Test native MCP settings and Unix ownership guards
         run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target
+      - name: Test native Project Setup guards and repairs
+        run: cargo test --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target-dir src-tauri/target
       - name: Build macOS DMG bundle
         run: npm run build -- --bundles dmg
       - name: Verify ad-hoc signed app inside macOS DMG
