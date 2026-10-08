@@ -71,7 +71,7 @@
     state.finishInitialization?.();
     render();
   }
-  async function attach(app, state, result, restoring) {
+  async function attach(app, state, result) {
     if (!result?.session || result.appId !== apps[app].id || !result.files) throw new Error('Invalid hosted app response.');
     state.writable = app === 'mcp' && result.hostingRevision === 2 && result.effectiveMode === 'writable';
     state.session = result.session;
@@ -86,7 +86,7 @@
     const channel = new MessageChannel();
     const port = channel.port1;
     state.port = port;
-    // Transport-ready precedes the pinned apps' startup work. Restoration must
+    // Transport-ready precedes the pinned apps' startup work. Every startup must
     // finish Setup's probe / MCP's initial workflow before starting another app
     // or discovery: all of those operations share the native Manager lease.
     let initialized;
@@ -133,7 +133,7 @@
     document.querySelector('#hosted-content').append(frame);
     render();
     await loaded;
-    if (restoring) await initialization;
+    await initialization;
     if (state.failed) throw new Error(state.status);
     state.status = `${apps[app].label} ${result.version}`;
     render();
@@ -155,7 +155,7 @@
       const state = { frame: null, port: null, session: null, ready: false, inFlight: false, failed: false, closing: false, status: 'Opening app' };
       sessions.set(app, state);
       try {
-        await attach(app, state, await invoke(restoring ? 'restore_hosted_app' : 'start_hosted_app', { app }), restoring);
+        await attach(app, state, await invoke(restoring ? 'restore_hosted_app' : 'start_hosted_app', { app }));
         if (restoring) await invoke('complete_hosted_restore', { app });
       }
       catch (error) {

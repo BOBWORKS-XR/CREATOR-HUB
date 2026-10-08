@@ -14,6 +14,7 @@ async function open(page, options = {}) {
     if (window !== window.parent) return;
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     window.hostCalls = [];
+    window.pendingHost = {};
     window.events = {};
     window.restorePending = options.restoreApps || [];
     window.restoreFailures = options.restoreFailure ? 1 : 0;
@@ -37,14 +38,18 @@ async function open(page, options = {}) {
           throw 'Hub could not start its installer. Nothing was installed.';
         }
         if (command === 'project_inventory') return { projects: [], warnings: [] };
-        if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, builtIn: Boolean(options.builtIn), installed: true, trusted: true, hostedCompatible: true, updateAvailable: !options.builtIn && app === 'setup' && Boolean(window.setupUpdate), availableVersion: window.setupUpdate ? '0.3.0' : '0.3.0-alpha.1', installedVersion: '0.3.0-alpha.1', hostedPreview: app === 'mcp' && !options.writableMcp ? 'read-only' : 'writable' })) };
+        if (command === 'app_inventory') {
+          if (window.failInventory) throw 'Discovery failed in fixture';
+          return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, builtIn: Boolean(options.builtIn), installed: true, trusted: true, hostedCompatible: true, issue: app === 'setup' ? options.builtInIssue : undefined, updateAvailable: !options.builtIn && app === 'setup' && Boolean(window.setupUpdate), availableVersion: window.setupUpdate ? '0.3.0' : '0.3.0-alpha.1', installedVersion: '0.3.0-alpha.1', hostedPreview: app === 'mcp' && !options.writableMcp ? 'read-only' : 'writable' })) };
+        }
         if (command === 'start_hosted_app' || command === 'restore_hosted_app') {
+          if (options.holdHost) await new Promise((resolve, reject) => { window.pendingHost[args.app] = { resolve, reject }; });
           if (command === 'restore_hosted_app' && window.restoreFailures-- > 0) throw 'The app could not reopen.';
           if (options.decline) throw 'Opening Setup in Hub was declined. Standalone Setup is unchanged.';
           if (args.app === 'mcp') return { session: 'b'.repeat(64), appId: 'creator-works-mcp', version: '2.7.0-alpha.1', files: mcpFiles,
             builtIn: Boolean(options.builtIn),
             ...(options.writableMcp ? { hostingRevision: 2, effectiveMode: 'writable' } : {}) };
-          return { session: (command === 'restore_hosted_app' ? 'c' : 'a').repeat(64), appId: 'creator-project-setup', version: setupVersion, files };
+          return { session: (command === 'restore_hosted_app' ? 'c' : 'a').repeat(64), appId: 'creator-project-setup', version: setupVersion, builtIn: Boolean(options.builtIn), files };
         }
         if (command === 'stop_hosted_app') return !options.keepOpen;
         if (command !== 'hosted_app_call') return;
@@ -124,6 +129,94 @@ test('built-in features open automatically and expose no separate install or upd
   await expect(page.locator('#download-button')).toBeHidden();
   await expect(page.locator('#open-button')).toBeHidden();
   expect(await page.evaluate(() => window.hostCalls.some(call => ['install_app', 'download_app', 'open_app', 'use_existing_app'].includes(call.command)))).toBe(false);
+});
+
+for (const width of [940, 390]) test(`built-in startup uses its Hub section, not standalone app details, at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 760 });
+  await open(page, { builtIn: true, writableMcp: true, holdHost: true, onlyStartup: true });
+  await switchTo(page, 'setup');
+  await page.waitForFunction(() => Boolean(window.pendingHost.setup));
+  await expect(page.locator('#view-detail')).toBeHidden();
+  await expect(page.locator('#view-builtin')).toBeVisible();
+  await expect(page.locator('#page-title')).toContainText('PROJECT');
+  await expect(page.locator('#builtin-status')).toHaveText('Opening Project Setup...');
+  await expect(page.locator('#builtin-detail')).toContainText('permission prompt');
+  await expect(page.locator('#builtin-open')).toBeHidden();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await expect(page.locator('#suite-shell')).toHaveCSS('width', '55px');
+  await page.screenshot({ path: testInfo.outputPath('builtin-opening.png'), fullPage: true });
+  await page.evaluate(() => window.pendingHost.setup.resolve());
+  await expect(page.frameLocator('#setup-host-frame').locator('#create-button')).toBeEnabled();
+  await expect(page.locator('#view-builtin')).toBeHidden();
+});
+
+test('declined built-in startup stays in its section and permits an explicit retry', async ({ page }) => {
+  await open(page, { builtIn: true, holdHost: true, onlyStartup: true });
+  await switchTo(page, 'setup');
+  await page.waitForFunction(() => Boolean(window.pendingHost.setup));
+  await page.evaluate(() => window.pendingHost.setup.reject('Permission was declined.'));
+  await expect(page.locator('#builtin-status')).toHaveText('Could not open Project Setup');
+  await expect(page.locator('#builtin-detail')).toHaveText('Permission was declined.');
+  await expect(page.locator('#builtin-open')).toBeEnabled();
+  await expect(page.locator('#view-detail')).toBeHidden();
+  await page.locator('#builtin-open').click();
+  await expect.poll(() => page.evaluate(() => window.hostCalls.filter(c => c.command === 'start_hosted_app').length)).toBe(2);
+  await page.evaluate(() => window.pendingHost.setup.resolve());
+  await expect(page.frameLocator('#setup-host-frame').locator('#create-button')).toBeEnabled();
+});
+
+test('switching built-in sections during startup opens the final selection without a stale error', async ({ page }) => {
+  await open(page, { builtIn: true, writableMcp: true, holdHost: true, onlyStartup: true });
+  await switchTo(page, 'setup');
+  await page.waitForFunction(() => Boolean(window.pendingHost.setup));
+  await switchTo(page, 'mcp');
+  await expect(page.locator('#builtin-status')).toHaveText('Waiting to open Creator Works MCP...');
+  await page.evaluate(() => window.pendingHost.setup.reject('Setup permission was declined.'));
+  await page.waitForFunction(() => Boolean(window.pendingHost.mcp));
+  await expect(page.locator('#action-error')).toBeHidden();
+  await expect(page.locator('#builtin-status')).toHaveText('Opening Creator Works MCP...');
+  await page.evaluate(() => window.pendingHost.mcp.resolve());
+  await expect(page.frameLocator('#mcp-host-frame').locator('#setupBtn')).toBeVisible();
+  expect(await page.evaluate(() => window.hostCalls.filter(c => c.command === 'start_hosted_app').map(c => c.args.app))).toEqual(['setup', 'mcp']);
+});
+
+test('invalid built-in module never offers a separate installer or launches a backend', async ({ page }) => {
+  await open(page, { builtIn: true, builtInIssue: 'Bundled module integrity check failed.', onlyStartup: true });
+  await switchTo(page, 'setup');
+  await expect(page.locator('#builtin-status')).toHaveText('Project Setup unavailable');
+  await expect(page.locator('#builtin-detail')).toContainText('integrity check failed');
+  await expect(page.locator('#builtin-open')).toBeDisabled();
+  await expect(page.locator('#view-detail')).toBeHidden();
+  expect(await page.evaluate(() => window.hostCalls.some(c => c.command === 'start_hosted_app'))).toBe(false);
+});
+
+test('failed inventory blocks automatic hosting from last-known built-in state', async ({ page }) => {
+  await open(page, { builtIn: true, onlyStartup: true });
+  await page.evaluate(() => window.failInventory = true);
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#inventory-error')).toBeVisible();
+  await switchTo(page, 'setup');
+  await expect(page.locator('#builtin-status')).toHaveText('App discovery needs attention');
+  await expect(page.locator('#builtin-open')).toBeDisabled();
+  expect(await page.evaluate(() => window.hostCalls.some(c => c.command === 'start_hosted_app'))).toBe(false);
+});
+
+for (const first of ['setup', 'mcp']) test(`normal ${first} startup finishes before opening the next built-in tool`, async ({ page }) => {
+  await open(page, { builtIn: true, writableMcp: true, onlyStartup: true, pendingStartup: true });
+  await expect(page.locator('#catalog-status')).toContainText('Update check complete');
+  const next = first === 'setup' ? 'mcp' : 'setup';
+  const finish = { setup: 'finishSetupStartup', mcp: 'finishMcpStartup' };
+  await switchTo(page, first);
+  await page.waitForFunction(key => typeof window[key] === 'function', finish[first]);
+  await switchTo(page, next);
+  await expect(page.locator('#builtin-status')).toHaveText(`Waiting to open ${next === 'setup' ? 'Project Setup' : 'Creator Works MCP'}...`);
+  expect(await page.evaluate(() => window.hostCalls.filter(c => c.command === 'start_hosted_app').map(c => c.args.app))).toEqual([first]);
+  await page.evaluate(key => window[key](), finish[first]);
+  await page.waitForFunction(key => typeof window[key] === 'function', finish[next]);
+  await page.evaluate(key => window[key](), finish[next]);
+  await expect(page.locator(`#${next}-host-frame`)).toBeVisible();
+  await expect(page.locator('#view-builtin')).toBeHidden();
+  expect(await page.evaluate(() => window.hostCalls.filter(c => c.command === 'start_hosted_app').map(c => c.args.app))).toEqual([first, next]);
 });
 
 test('cancelling a Hub update leaves hosted forms and backends intact', async ({ page }) => {

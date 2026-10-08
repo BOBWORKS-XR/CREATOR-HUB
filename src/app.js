@@ -64,16 +64,9 @@
       else item.removeAttribute('aria-current');
     }
     if (view === 'projects') window.CreatorProjects.show();
-    const hosted = window.CreatorHosted.active(view);
-    window.CreatorHosted.show(hosted ? view : null);
-    document.body.classList.toggle('hosting-app', hosted);
-    document.querySelector('#view-detail').classList.toggle('hidden', !Object.hasOwn(tools, view) || hosted);
     const pageBrand = view === 'plugins' ? '<span>CREATOR</span> <strong>PLUGINS</strong>' : '<span>CREATOR</span> <strong>HUB</strong>';
-    title.innerHTML = hosted ? (view === 'setup' ? '<span>CREATOR</span> <strong>PROJECT</strong> SETUP' : '<span>CREATOR</span> <strong>WORKS</strong> MCP') : pageBrand;
     shell.querySelector('.suite-brand').innerHTML = pageBrand;
     trigger.replaceChildren(menu.querySelector(`[data-view="${view === 'plugins' ? 'plugins' : 'hub'}"] .suite-mark`).cloneNode(true));
-    byId('mode-description').textContent = hosted ? (view === 'setup' ? 'Unity and Creator SDK. Android + Windows.' :
-      (window.CreatorHosted.writable(view) ? 'Unity project connections and MCP setup.' : 'Unity project connections. Read-only preview.')) : view === 'plugins' ? 'Plugins retirement' : 'Unity tools. One place.';
     document.querySelector('#view-plugins').classList.toggle('hidden', view !== 'plugins');
     if (view === 'plugins') window.CreatorCommunity.show();
     else window.CreatorCommunity.closePreview();
@@ -96,28 +89,38 @@
         dt.textContent = label; dd.textContent = value; row.append(dt, dd); return row;
       }));
     }
-    const target = view === 'hub' || hosted ? title : document.querySelector(view === 'projects' ? '#hub-tab-projects' : view === 'plugins' ? '#plugins-title' : '#tool-title');
+    renderState();
+    const target = view === 'hub' || window.CreatorHosted.active(view) ? title : document.querySelector(view === 'projects' ? '#hub-tab-projects' : view === 'plugins' ? '#plugins-title' : appState()?.builtIn ? '#builtin-title' : '#tool-title');
     target.tabIndex = -1;
     target.focus();
-    renderState();
   }
   const hostAttempts = new Set();
+  const hostOpening = new Set();
+  const hostFailures = new Map();
   async function openHostedWhenReady(app) {
     const state = inventory?.apps?.find(item => item.app === app);
-    if (busy || hostAttempts.has(app) || window.CreatorHosted.active(app)
+    if (busy || inventoryError || !inventory?.supported || hostAttempts.has(app) || window.CreatorHosted.active(app)
       || !(state?.installed && state.trusted && state.hostedPreview && state.hostedCompatible === true && !state.issue)) return;
     hostAttempts.add(app);
+    hostOpening.add(app);
+    hostFailures.delete(app);
     busy = true; renderState();
     try {
       await window.CreatorHosted.start(app);
       if (current === app) show(app, true);
     } catch (reason) {
-      // Hub does not close standalone apps. Its normal fallback stays available.
-      error.textContent = String(reason);
-      error.classList.remove('hidden');
+      hostFailures.set(app, String(reason));
+      if (current === app && !state.builtIn) {
+        // Companion installations retain their normal fallback controls.
+        error.textContent = String(reason);
+        error.classList.remove('hidden');
+      }
     } finally {
+      hostOpening.delete(app);
       busy = false;
       renderState();
+      // A section selected during another startup must not need a second click.
+      if (current !== app && Object.hasOwn(tools, current)) void openHostedWhenReady(current);
     }
   }
   function selectView(view) {
@@ -160,15 +163,13 @@
   }
   for (const button of document.querySelectorAll('[data-resource]')) button.addEventListener('click', () => open(button.dataset.resource));
   document.querySelector('#source-button').addEventListener('click', () => { if (Object.hasOwn(tools, current)) open(`${current}-source`); });
-  for (const app of ['setup', 'mcp']) byId(`host-${app}-button`).addEventListener('click', async () => {
-    if (busy) return;
+  function retryHosted(app) {
     error.classList.add('hidden');
-    busy = true; byId(`host-${app}-button`).disabled = true; renderState();
-    byId('compatibility-detail').textContent = 'Opening in Hub... Check for a permission window from the installed app.';
-    try { await window.CreatorHosted.start(app); if (current === app) show(app); }
-    catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
-    finally { busy = false; byId(`host-${app}-button`).disabled = false; renderState(); }
-  });
+    hostAttempts.delete(app);
+    void openHostedWhenReady(app);
+  }
+  for (const app of ['setup', 'mcp']) byId(`host-${app}-button`).addEventListener('click', () => retryHosted(app));
+  byId('builtin-open').addEventListener('click', () => { if (appState()?.builtIn) retryHosted(current); });
   window.addEventListener('creator-host-closed', () => show(current, true));
 
   function appState() { return inventory?.apps?.find(app => app.app === current); }
@@ -211,6 +212,7 @@
     return '';
   }
   function renderState() {
+    renderToolView();
     byId('check-updates').disabled = busy;
     byId('retry-inventory').disabled = busy;
     byId('inventory-error').classList.toggle('hidden', !inventoryError);
@@ -345,6 +347,37 @@
       choose.addEventListener('click', () => action('use_existing_app', current, undefined, { path: copy.path }));
       row.append(detail, choose); copies.append(row);
     }
+  }
+
+  function renderToolView() {
+    const state = appState();
+    const tool = tools[current];
+    const builtIn = Boolean(state?.builtIn);
+    const hosted = window.CreatorHosted.active(current);
+    window.CreatorHosted.show(hosted ? current : null);
+    document.body.classList.toggle('hosting-app', hosted);
+    byId('view-detail').classList.toggle('hidden', !tool || builtIn || hosted);
+    byId('view-builtin').classList.toggle('hidden', !builtIn || hosted);
+    title.innerHTML = hosted || builtIn
+      ? current === 'setup' ? '<span>CREATOR</span> <strong>PROJECT</strong> SETUP' : '<span>CREATOR</span> <strong>WORKS</strong> MCP'
+      : current === 'plugins' ? '<span>CREATOR</span> <strong>PLUGINS</strong>' : '<span>CREATOR</span> <strong>HUB</strong>';
+    byId('mode-description').textContent = builtIn ? tool.summary : hosted ? (current === 'setup' ? 'Unity and Creator SDK. Android + Windows.' :
+      (window.CreatorHosted.writable(current) ? 'Unity project connections and MCP setup.' : 'Unity project connections. Read-only preview.')) : current === 'plugins' ? 'Plugins retirement' : 'Unity tools. One place.';
+    if (!builtIn || hosted) return;
+    const label = current === 'setup' ? 'Project Setup' : 'Creator Works MCP';
+    const opening = hostOpening.has(current);
+    const failure = hostFailures.get(current);
+    const canHost = inventory?.supported && state.installed && state.trusted && state.hostedPreview && state.hostedCompatible === true && !state.issue;
+    byId('builtin-title').textContent = tool.title;
+    byId('builtin-status').textContent = opening ? `Opening ${label}...` : inventoryError ? 'App discovery needs attention'
+      : !canHost ? `${label} unavailable` : failure ? `Could not open ${label}` : busy ? `Waiting to open ${label}...` : `Open ${label}`;
+    byId('builtin-detail').textContent = opening ? 'Complete the permission prompt to open this built-in tool. No separate app installation is needed.'
+      : inventoryError ? 'Retry app discovery above before opening this tool.'
+      : state.issue || (!canHost ? 'This built-in tool could not be verified for this platform. Check for a Creator Hub update from Apps.'
+        : failure || (busy ? 'Another Hub operation is finishing. This section will open when it is ready.' : 'Included in Creator Hub. Updates are delivered with Hub.'));
+    byId('builtin-open').classList.toggle('hidden', opening);
+    byId('builtin-open').disabled = busy || Boolean(inventoryError) || !canHost;
+    byId('builtin-open').querySelector('span:last-child').textContent = failure ? 'Retry opening' : `Open ${label}`;
   }
 
   function setProgress(payload) {

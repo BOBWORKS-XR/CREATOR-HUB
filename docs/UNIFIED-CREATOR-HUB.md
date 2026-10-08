@@ -28,6 +28,14 @@ inventory and startup use these payloads instead of companion discovery. The
 separate-app controls and MCP's standalone update check are hidden for built-ins.
 Legacy builds remain unchanged when no built-in descriptor is supplied.
 
+Built-in selections now use an opening/error/retry surface, not the legacy
+standalone app information and installer page. Startup completes the module's
+initial probe/workflow before opening a section selected while it was busy.
+Declined permission remains retryable, and a failed inventory prevents automatic
+hosting from last-known state. Browser regressions cover both startup orders,
+delayed native consent, failure and narrow layouts; they do not replace native
+consent, migration or signed update/restart acceptance.
+
 The existing consent and exclusive settings ownership checks remain in place.
 This is not migration acceptance: the current modules still use their existing
 settings locations, and no legacy client entries are repointed by this phase.
