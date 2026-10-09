@@ -92,6 +92,9 @@ function build(label) {
     manifest.modules[id] = { executable, version, files };
   }
   verifyStage(path.join(output, 'modules'), manifest);
+  const { writeRuntimeDescriptor } = require('./mcp-runtime-descriptor.cjs');
+  const hubVersion = JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'))).version;
+  writeRuntimeDescriptor(output, manifest, hubVersion);
   const descriptor = path.join(output, 'builtin-manifest.json');
   fs.writeFileSync(descriptor, JSON.stringify(manifest, null, 2));
   const overlay = path.join(output, 'tauri-unified.json');

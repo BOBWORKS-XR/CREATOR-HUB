@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { moduleFiles } = require('./build-unified.cjs');
+const { runtimeDescriptor } = require('./mcp-runtime-descriptor.cjs');
 
 function testSigner() {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
@@ -29,9 +30,9 @@ function generate() {
     for (const [name, hubVersion, server] of [['a', '0.1.12', 'server-a'], ['b', '0.1.13', 'server-b'], ['collision', '0.1.12', 'server-b']]) {
       const files = Object.fromEntries(moduleFiles('mcp', platform).sort().map(name => [name,
         crypto.createHash('sha256').update(name.endsWith('.mjs') ? server : `payload:${name}`).digest('hex')]));
-      const descriptor = { schemaVersion: 1, product: 'com.creatorworks.hub.mcp-runtime', hubVersion,
-        platform, arch, module: { executable: `mcp/creator-works-mcp-launcher${platform === 'windows' ? '.exe' : ''}`,
-          version: '2.7.7', files } };
+      const descriptor = runtimeDescriptor({ schemaVersion: 1, platform, arch,
+        modules: { mcp: { executable: `mcp/creator-works-mcp-launcher${platform === 'windows' ? '.exe' : ''}`,
+          version: '2.7.7', files } } }, hubVersion);
       const bytes = Buffer.from(JSON.stringify(descriptor));
       const prefix = path.join(directory, `${platform}-${arch}-${name}`);
       fs.writeFileSync(`${prefix}.json`, bytes, { flag: 'wx' });

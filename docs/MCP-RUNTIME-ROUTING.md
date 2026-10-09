@@ -92,6 +92,13 @@ runtime execution.
 
 ## Remaining Integration
 
+The candidate builder now emits `mcp-runtime.json` deterministically only after
+the staged module bytes verify. This is the exact unsigned signing input, not a
+signature or activation. It is not added to the executable's runtime resources
+and cannot authorize a connection until the signing/package integration exists.
+Its generation field ordering matches the router's ordered module serialization;
+the descriptor writer refuses overwriting any existing output.
+
 1. Package and verify the retained stable router itself; never point client
    configs at a replaceable Hub GUI executable or a test fixture driver.
 2. Have the established signing workflow sign the exact runtime descriptor and

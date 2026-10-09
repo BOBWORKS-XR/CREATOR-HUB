@@ -7,6 +7,7 @@ const { execFileSync, spawnSync, spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const { testSigner } = require('./generate-router-test-fixtures.cjs');
 const { verifyStage } = require('./build-unified.cjs');
+const { runtimeDescriptor } = require('./mcp-runtime-descriptor.cjs');
 
 if (process.platform !== 'win32') throw Error('Writable routing acceptance is currently Windows only.');
 if (process.argv.length !== 3) throw Error('Provide one immutable unified candidate directory.');
@@ -18,7 +19,9 @@ const out = fs.mkdtempSync(path.join(root, 'artifacts', 'router-native-'));
 const base = path.join(out, 'isolated hub data');
 const profile = path.join(out, 'isolated user profile');
 fs.mkdirSync(base); fs.mkdirSync(profile);
-const env = { ...process.env, HOME: profile, USERPROFILE: profile, APPDATA: path.join(profile, 'roaming'),
+const inherited = Object.fromEntries(['SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATH', 'PATHEXT', 'TEMP', 'TMP']
+  .filter(name => process.env[name] !== undefined).map(name => [name, process.env[name]]));
+const env = { ...inherited, HOME: profile, USERPROFILE: profile, APPDATA: path.join(profile, 'roaming'),
   LOCALAPPDATA: path.join(profile, 'local'), XDG_CONFIG_HOME: profile, UNITY_PROJECT_PATH: '', BANTER_PROJECT_PATH: '',
   CREATOR_WORKS_LAUNCHER_CONFIG: path.join(profile, 'launcher-config.json'), CREATOR_WORKS_TOOL_GROUPS: 'none' };
 const target = path.resolve(process.env.CARGO_TARGET_DIR || path.join(root, 'native/mcp-router/target'));
@@ -64,8 +67,8 @@ function stage(signer, name, hubVersion) {
   const files = Object.fromEntries(Object.keys(manifest.modules.mcp.files).sort().map(file =>
     [file, hash(fs.readFileSync(path.join(payload, file)))]));
   const module = { executable: manifest.modules.mcp.executable, version: manifest.modules.mcp.version, files };
-  const descriptor = Buffer.from(JSON.stringify({ schemaVersion: 1, product: 'com.creatorworks.hub.mcp-runtime',
-    hubVersion, platform: manifest.platform, arch: manifest.arch, module }));
+  const descriptor = Buffer.from(JSON.stringify(runtimeDescriptor({ ...manifest,
+    modules: { ...manifest.modules, mcp: module } }, hubVersion)));
   const document = path.join(out, `${name}.json`);
   const signature = `${document}.minisig`;
   fs.writeFileSync(document, descriptor, { flag: 'wx' });
