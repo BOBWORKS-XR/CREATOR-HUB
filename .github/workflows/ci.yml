@@ -108,10 +108,10 @@ jobs:
       - run: npm --prefix modules/mcp ci
       - run: npm --prefix modules/project-setup ci
       - run: npm run build:unified -- ci-windows
-      - name: Lint native MCP and Project Setup
-        run: |
-          cargo clippy --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --all-targets -- -D warnings
-          cargo clippy --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Lint native MCP
+        run: cargo clippy --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Lint native Project Setup
+        run: cargo clippy --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: Test native MCP settings and ownership guards
         run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml
       - name: Test native Project Setup guards and repairs
@@ -168,10 +168,10 @@ jobs:
       - run: cargo test --release --manifest-path src-tauri/Cargo.toml
       - run: npm --prefix modules/mcp ci
       - run: npm --prefix modules/mcp run release:launcher
-      - name: Lint native MCP and Project Setup
-        run: |
-          cargo clippy --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target --all-targets -- -D warnings
-          cargo clippy --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target-dir src-tauri/target --all-targets -- -D warnings
+      - name: Lint native MCP
+        run: cargo clippy --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target --all-targets -- -D warnings
+      - name: Lint native Project Setup
+        run: cargo clippy --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target-dir src-tauri/target --all-targets -- -D warnings
       - name: Test native MCP settings and Unix ownership guards
         run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target
       - name: Test native Project Setup guards and repairs
@@ -219,10 +219,10 @@ jobs:
       - run: cargo test --release --manifest-path src-tauri/Cargo.toml
       - run: npm --prefix modules/mcp ci
       - run: npm --prefix modules/mcp run release:launcher
-      - name: Lint native MCP and Project Setup
-        run: |
-          cargo clippy --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target --all-targets -- -D warnings
-          cargo clippy --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target-dir src-tauri/target --all-targets -- -D warnings
+      - name: Lint native MCP
+        run: cargo clippy --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target --all-targets -- -D warnings
+      - name: Lint native Project Setup
+        run: cargo clippy --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target-dir src-tauri/target --all-targets -- -D warnings
       - name: Test native MCP settings and Unix ownership guards
         run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target
       - name: Test native Project Setup guards and repairs

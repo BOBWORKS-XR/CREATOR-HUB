@@ -19,7 +19,8 @@ test('native CI lints the actual Hub and both module sources before acceptance',
   const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'ci.yml'), 'utf8');
   assert.equal((workflow.match(/cargo clippy --release --locked --manifest-path src-tauri\/Cargo.toml --all-targets -- -D warnings/g) || []).length, 3);
   for (const module of ['mcp/launcher', 'project-setup']) {
-    const pattern = new RegExp(`cargo clippy --release --locked --manifest-path modules/${module}/src-tauri/Cargo\\.toml`, 'g');
+    // One native command per step prevents a later success masking a PowerShell failure.
+    const pattern = new RegExp(`      run: cargo clippy --release --locked --manifest-path modules/${module}/src-tauri/Cargo\\.toml`, 'g');
     assert.equal((workflow.match(pattern) || []).length, 3);
   }
 });

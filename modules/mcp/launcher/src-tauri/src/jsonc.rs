@@ -337,10 +337,8 @@ fn value_end(tokens: &[Token], start: usize) -> Result<usize, String> {
                     return Err("config contains mismatched braces".to_string());
                 }
             }
-            TokenKind::ArrayClose => {
-                if stack.pop() != Some(true) {
-                    return Err("config contains mismatched brackets".to_string());
-                }
+            TokenKind::ArrayClose if stack.pop() != Some(true) => {
+                return Err("config contains mismatched brackets".to_string());
             }
             _ => {}
         }
@@ -456,7 +454,7 @@ fn serialize_value(value: &Value, indent: &str) -> Result<String, String> {
 fn remove_ranges(input: &str, ranges: &[(usize, usize)]) -> String {
     let mut output = input.to_string();
     let mut ordered = ranges.to_vec();
-    ordered.sort_by(|left, right| right.0.cmp(&left.0));
+    ordered.sort_by_key(|range| std::cmp::Reverse(range.0));
     for (start, end) in ordered {
         output.replace_range(start..end, "");
     }
@@ -567,6 +565,29 @@ fn upsert_object_member(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_values_consume_matching_closers_and_refuse_mismatches() {
+        let tokens = tokenize(r#"{"nested":[{},[1]],"other":{}}"#).unwrap();
+        assert_eq!(value_end(&tokens, 0).unwrap(), tokens.len());
+        for (input, expected) in [
+            ("{[}", "config contains mismatched braces"),
+            ("{]", "config contains mismatched brackets"),
+            ("[}", "config contains mismatched braces"),
+            ("[[]", "config contains an unterminated object or array"),
+        ] {
+            assert_eq!(
+                value_end(&tokenize(input).unwrap(), 0).unwrap_err(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn removing_ranges_uses_original_offsets_regardless_of_input_order() {
+        assert_eq!(remove_ranges("abcdefghi", &[(1, 3), (5, 7)]), "adehi");
+        assert_eq!(remove_ranges("abcdefghi", &[(5, 7), (1, 3)]), "adehi");
+    }
 
     fn entry() -> Value {
         serde_json::json!({
