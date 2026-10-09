@@ -382,7 +382,7 @@ mod tests {
         let entry = mcp_fixture(&root, b"fixture");
         assert!(verify(&root, "mcp", entry.clone()).is_ok());
         for name in entry.files.keys() {
-            let file = root.join(&name);
+            let file = root.join(name);
             std::fs::write(&file, b"tampered").unwrap();
             assert!(verify(&root, "mcp", entry.clone()).is_err(), "{name}");
             std::fs::remove_file(&file).unwrap();

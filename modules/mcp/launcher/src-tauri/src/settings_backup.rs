@@ -48,7 +48,7 @@ fn open_existing(path: &Path, writable: bool) -> Result<Option<File>, String> {
     reject_links(path)?;
     match protected_options().write(writable).open(path) {
         Ok(file) => Ok(Some(file)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err("Cannot reserve settings for a protected before-image.".into()),
     }
 }

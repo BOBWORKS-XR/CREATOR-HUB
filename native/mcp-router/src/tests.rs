@@ -309,6 +309,26 @@ fn verified_payload_is_write_delete_locked_until_the_runtime_lease_ends() {
 
 #[cfg(windows)]
 #[test]
+fn verified_payload_parent_paths_cannot_be_renamed_during_the_runtime_lease() {
+    let (_temporary, store) = setup();
+    activate_a(&store);
+    let runtime = store.resolve().unwrap();
+    let parent = runtime.server.parent().unwrap().to_path_buf();
+    let moved = parent.with_file_name("server-moved");
+    let renamed = fs::rename(&parent, &moved);
+    if renamed.is_ok() {
+        fs::rename(&moved, &parent).unwrap();
+    }
+    assert!(
+        renamed.is_err(),
+        "A verified runtime's parent path remained replaceable"
+    );
+    drop(runtime);
+    fs::rename(parent, moved).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
 fn routing_storage_junction_is_rejected_without_writing_to_its_target() {
     let (temporary, store) = setup();
     let (bytes, signature) = stage(&store, "a");

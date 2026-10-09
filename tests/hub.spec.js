@@ -84,7 +84,10 @@ test('fixed Hub help opens with app roles and practical troubleshooting', async 
   expect(Math.abs(rect.y - rect.viewport.y)).toBeLessThan(2);
   expect(rect.background).toBe('rgb(17, 21, 24)');
   await expect(help).toContainText('Setup is not the MCP');
-  await expect(help).toContainText('Claude Desktop is not currently supported');
+  await expect(help).toContainText('Connection guide when available');
+  await expect(help).toContainText('Claude Code and Claude Desktop are separate clients');
+  await expect(help).toContainText('Windows and macOS, not Linux');
+  await expect(help).toContainText('Saved settings alone do not prove a live connection');
   await page.locator('#context-help-close').click();
   await expect(help).toBeHidden();
 });
@@ -777,8 +780,16 @@ for (const width of [940, 560, 390]) {
     await expect(page.locator('#tool-state')).not.toContainText('Not installed');
     await expect(page.locator('#tool-state')).toContainText('App needs attention');
     await expect(page.locator('#detected-copies button').last()).toBeDisabled();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const overflow = await page.evaluate(() => ({
+      width: innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      elements: [...document.querySelectorAll('body *')].filter(node => {
+        const rect = node.getBoundingClientRect();
+        return rect.width && (rect.right > innerWidth || rect.left < 0) && !node.closest('[aria-hidden="true"]');
+      }).map(node => ({ tag: node.tagName, id: node.id, className: node.className, right: node.getBoundingClientRect().right })),
+    }));
     await page.screenshot({ path: testInfo.outputPath('compatibility.png'), fullPage: true });
+    expect(overflow.scrollWidth, JSON.stringify(overflow)).toBeLessThanOrEqual(width);
     await page.locator('#detected-copies button').first().click();
     expect(await page.evaluate(() => window.calls.find(c => c.command === 'use_existing_app').args)).toEqual({ app: 'mcp', path: selected });
     expect(await page.evaluate(() => window.calls.some(c => c.command === 'install_app'))).toBe(false);

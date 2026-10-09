@@ -58,8 +58,8 @@ pub(crate) fn merge(mut config: Value, entry: Value) -> Result<Value, String> {
         config["mcpServers"] = json!({});
     }
     if let Some(existing) = config["mcpServers"].get(crate::MCP_CLIENT_ID) {
-        if !owned(existing)
-            && !(existing["command"] == entry["command"] && existing["args"] == entry["args"])
+        if !(owned(existing)
+            || existing["command"] == entry["command"] && existing["args"] == entry["args"])
         {
             return Err("Claude Desktop already has a different creator-works entry. It was kept; review it in Desktop Settings > Developer > Edit Config.".into());
         }

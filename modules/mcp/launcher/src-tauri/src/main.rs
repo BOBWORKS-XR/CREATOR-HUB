@@ -303,7 +303,7 @@ fn sync_ephemeral_bundle_to(
     dest_root: &Path,
     legacy: Option<&Path>,
 ) -> Option<PathBuf> {
-    let _ = fs::create_dir_all(&dest_root);
+    let _ = fs::create_dir_all(dest_root);
     let _ = fs::create_dir_all(dest_root.join("runtime"));
     let _ = fs::create_dir_all(dest_root.join("unity-extension").join("Editor"));
 
@@ -374,7 +374,7 @@ fn sync_ephemeral_bundle_to(
         }
     }
 
-    if is_valid_mcp_root(&dest_root) {
+    if is_valid_mcp_root(dest_root) {
         Some(dest_root.to_owned())
     } else {
         None
@@ -2275,6 +2275,8 @@ fn get_onboarding_status(
 }
 
 #[tauri::command]
+// Keep the existing named frontend command arguments unchanged.
+#[allow(clippy::too_many_arguments)]
 fn one_click_setup(
     app: tauri::AppHandle,
     unity_project_path: String,
