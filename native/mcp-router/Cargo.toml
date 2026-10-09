@@ -1,0 +1,23 @@
+[package]
+name = "creator-hub-mcp-router"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Verified, retained MCP runtime routing for Creator Hub"
+
+[dependencies]
+dirs = "6"
+fs2 = "0.4"
+minisign-verify = "=0.2.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = "1"
+sha2 = "0.10"
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+
+[[bin]]
+name = "creator-hub-mcp-router"
+path = "src/main.rs"

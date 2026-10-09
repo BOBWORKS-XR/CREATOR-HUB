@@ -115,6 +115,14 @@ used to repoint existing AI clients, and no legacy client configuration is edite
 by staging. Power-loss recovery and a real signed update with active runtime
 connections remain release acceptance requirements.
 
+The branch now also contains an isolated signed runtime-router and atomic
+activation component in `native/mcp-router`. Native Windows SDK tests exercise
+new-connection activation while an old connection remains usable, as well as
+owned-process-tree cleanup. It is not yet packaged, installed or called by Hub's
+updater/client writers. See [the routing contract and remaining integration](MCP-RUNTIME-ROUTING.md).
+Unix execution remains disabled pending payload-use binding; component tests
+do not complete production routing, legacy migration or update acceptance.
+
 Packaged server smoke now also exercises the official SDK client over real stdio:
 fresh/unconfigured startup, saved project selection, session-local switching,
 reconnect, malformed saved settings and EOF shutdown during a pending Unity wait.

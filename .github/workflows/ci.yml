@@ -10,6 +10,23 @@ permissions:
   contents: read
 
 jobs:
+  runtime-router:
+    name: MCP runtime router (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04, macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/mcp-router
+      - run: cargo fmt --manifest-path native/mcp-router/Cargo.toml --check
+      - run: cargo clippy --locked --manifest-path native/mcp-router/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --release --locked --manifest-path native/mcp-router/Cargo.toml
+
   frontend:
     name: Frontend & script tests
     runs-on: ubuntu-22.04
@@ -90,6 +107,9 @@ jobs:
       - name: Open both bundled modules without companion installations
         timeout-minutes: 8
         run: node scripts/native-builtin-smoke.cjs artifacts/unified/ci-windows
+      - name: Verify retained MCP routing with real SDK reconnect and scoped process cleanup
+        timeout-minutes: 5
+        run: node scripts/native-router-smoke.cjs artifacts/unified/ci-windows
       - name: Retain native acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -101,6 +121,7 @@ jobs:
             artifacts/native-suite-*/report.json
             artifacts/native-suite-*/*.png
             artifacts/native-suite-*/*.txt
+            artifacts/router-native-*/report.json
 
   hub-linux:
     name: Hub (Linux)
