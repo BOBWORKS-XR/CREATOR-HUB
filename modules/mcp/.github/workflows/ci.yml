@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    name: Node ${{ matrix.node }} MCP server
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Use supported npm audit client
+        if: matrix.node == 20
+        run: npm install --global npm@11.19.1
+      - run: npm ci
+      - run: npm test
+      - run: npm run release:server
+      - run: npm run check:version
+      - if: matrix.node == 20
+        run: npm audit --audit-level=low
+
+  launcher-windows:
+    name: Tauri launcher (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run release:launcher
+      - run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-standalone.ps1
+      - run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-setup.ps1
+      - run: cargo fmt --check
+        working-directory: launcher/src-tauri
+      - run: cargo test
+        working-directory: launcher/src-tauri
+      - name: Build Windows Hub metadata executable
+        run: cargo build --release --locked
+        working-directory: launcher/src-tauri
+      - name: Verify read-only Hub identity from GUI executable
+        shell: pwsh
+        run: |
+          $binary = (Resolve-Path './launcher/src-tauri/target/release/creator-works-mcp-launcher.exe').Path
+          $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          node ./scripts/smoke-creator-hub-info.mjs $binary $hash
+      - run: powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -Help
+
+  launcher-linux:
+    name: Tauri launcher (Linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install Rust + Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            file
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: launcher/src-tauri -> target
+      - run: npm ci
+      - run: npm run release:launcher
+      - name: Build with the pinned official prebuilt Tauri CLI
+        run: NO_STRIP=1 npx --yes --package=@tauri-apps/cli@2.9.6 tauri build
+      - name: Retain development packages (not a release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-development-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            launcher/src-tauri/target/release/bundle/appimage/*.AppImage
+            launcher/src-tauri/target/release/bundle/deb/*.deb
+            launcher/src-tauri/target/release/bundle/rpm/*.rpm
+      - run: npm run build:standalone
+      - run: cargo fmt --check
+        working-directory: launcher/src-tauri
+      - run: cargo test
+        working-directory: launcher/src-tauri
+      - name: Smoke-test setup.sh
+        run: ./setup.sh help
+      - name: Smoke-test setup.mjs install
+        run: node scripts/cli/setup.mjs install
+
+  launcher-macos:
+    name: Tauri launcher (macOS ${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: Apple silicon
+          - os: macos-15-intel
+            label: Intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: launcher/src-tauri -> target
+      - run: npm ci
+      - run: npm run release:launcher
+      - name: Build with the pinned official prebuilt Tauri CLI
+        run: npx --yes --package=@tauri-apps/cli@2.9.6 tauri build --bundles dmg
+      - name: Retain development packages (not a release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-development-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            launcher/src-tauri/target/release/bundle/dmg/*.dmg
+      - run: npm run build:standalone
+      - run: cargo fmt --check
+        working-directory: launcher/src-tauri
+      - run: cargo test
+        working-directory: launcher/src-tauri
+      - name: Smoke-test setup.sh
+        run: ./setup.sh help
+      - name: Smoke-test setup.mjs install
+        run: node scripts/cli/setup.mjs install
+

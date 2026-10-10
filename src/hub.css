@@ -88,6 +88,11 @@ button.app-row:hover { background: #181d21; }
 .tool-heading > div { min-width: 0; }
 .tool-heading h2 { font-size: 17px; }
 .tool-heading p { margin-top: 6px; color: var(--muted); line-height: 1.5; font-size: 12px; }
+.builtin-opening { padding: 12px 0 24px; }
+.builtin-opening h2 { margin: 24px 0 16px; font-size: 17px; }
+.builtin-opening p { margin: 8px 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+#builtin-detail { color: var(--muted); }
+#builtin-open { display: inline-flex; align-items: center; gap: 8px; margin-top: 16px; }
 .tool-mark { flex-basis: 42px; width: 42px; height: 42px; }
 .tool-mark img { width: 40px; height: 40px; }
 .tool-facts { margin: 0; }
@@ -110,6 +115,7 @@ button.app-row:hover { background: #181d21; }
 /* The installed app owns this persistent viewport; navigation only hides it. */
 .hosting-app main { padding: 0; display: flex; flex-direction: column; }
 .hosting-app > footer { display: none; }
+.hosting-app > .context-help-open { display: none; }
 #view-hosted { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .hosted-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 0 24px; min-height: 28px; font-size: 11px; color: #9ba7af; }
 #hosted-content { flex: 1; min-height: 360px; display: flex; }

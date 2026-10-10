@@ -1,0 +1,44 @@
+[package]
+name = "creator-project-setup"
+version = "0.3.7"
+description = "Creator SDK Unity project setup and validation"
+license = "MIT"
+authors = ["Creator Works"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+dirs = "6"
+flate2 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tar = "0.4"
+tauri = { version = "2", features = [] }
+wait-timeout = "0.2"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls"] }
+sha2 = "0.10"
+base64 = "0.22"
+semver = "1"
+tempfile = "3"
+fs2 = "0.4"
+getrandom = "0.3"
+tokio = { version = "1", features = ["macros", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_System_RestartManager", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_Console"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tauri-plugin-dialog = "2"

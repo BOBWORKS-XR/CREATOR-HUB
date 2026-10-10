@@ -1,0 +1,92 @@
+name: Windows Installed Acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [hub-compatibility]
+    paths:
+      - .github/workflows/windows-installed-acceptance.yml
+      - scripts/Test-InstalledCandidate.ps1
+      - scripts/installed-acceptance-pin.json
+      - scripts/owned-setup-fixture*
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  installed:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        baseline: ['0.2.2', '0.3.0-alpha.1', '0.3.0-alpha.2', '0.3.0-alpha.6', '0.3.0']
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Check owned fixture and local-execution refusal
+        run: node --test scripts/owned-setup-fixture.test.cjs scripts/native-lifecycle.test.cjs
+      - name: Fetch the pinned successful candidate, without rebuilding
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $pin = Get-Content scripts/installed-acceptance-pin.json -Raw | ConvertFrom-Json
+          $raw = gh api "repos/$($pin.repository)/actions/runs/$($pin.runId)"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify candidate workflow run.' }
+          $run = $raw | ConvertFrom-Json
+          if ($run.status -ne 'completed' -or $run.conclusion -ne 'success' -or
+              $run.head_sha -cne $pin.sourceRevision -or $run.head_branch -ne 'feature/preview-galleries' -or
+              $run.path -ne '.github/workflows/windows-candidate.yml' -or
+              $run.repository.full_name -cne $pin.repository -or $run.event -ne 'workflow_dispatch') {
+            throw 'Candidate run does not match the approved successful branch build.'
+          }
+          gh run download $pin.runId --repo $pin.repository --name "creator-project-setup-windows-candidate-$($pin.sourceRevision)" --dir dist/installed-source
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the pinned candidate artifact.' }
+      - name: Install public baseline and test the exact candidate update
+        shell: pwsh
+        run: ./scripts/Test-InstalledCandidate.ps1 -CandidateDirectory dist/installed-source/dist/windows-candidate/candidate -BaselineVersion '${{ matrix.baseline }}'
+      - name: Enable Setup-only loopback debugging on disposable runner
+        if: matrix.baseline == '0.3.0'
+        id: test-policy
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Disposable runner required.' }
+          $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          $name = 'creator-project-setup.exe'
+          $existing = Get-Item -LiteralPath $key -ErrorAction SilentlyContinue
+          if ($existing -and $existing.GetValueNames() -contains $name) { throw 'Existing policy must not be overwritten.' }
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -LiteralPath $key -Name $name -Value '--remote-debugging-port=9240' -PropertyType String | Out-Null
+      - name: Test exact installed Setup busy refusal and idle close
+        if: matrix.baseline == '0.3.0'
+        run: node scripts/smoke-native-lifecycle-ci.cjs
+      - name: Remove only the test-specific policy
+        if: always() && steps.test-policy.outcome == 'success'
+        shell: pwsh
+        run: |
+          $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          $name = 'creator-project-setup.exe'
+          $value = (Get-ItemProperty -LiteralPath $key -Name $name -ErrorAction SilentlyContinue).$name
+          if ($value -ceq '--remote-debugging-port=9240') { Remove-ItemProperty -LiteralPath $key -Name $name }
+          elseif ($value) { throw 'Policy changed; left untouched.' }
+      - name: Upload installed acceptance evidence (not a release)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: creator-project-setup-installed-acceptance-${{ matrix.baseline }}-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            dist/installed-acceptance/installed-acceptance.json
+            dist/installed-acceptance/before-refusal.json
+            dist/installed-acceptance/after-refusal.json
+            dist/installed-acceptance/after-upgrade.json
+            dist/native-lifecycle/report.json
+            dist/native-lifecycle/*.png

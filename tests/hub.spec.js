@@ -1,6 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
+const { helpOcclusion } = require('./help-layout.cjs');
 
 async function load(page, launchView = 'hub', options = {}) {
   await page.addInitScript(({ launchView, options }) => {
@@ -15,6 +16,7 @@ async function load(page, launchView = 'hub', options = {}) {
     window.__TAURI__ = { event: { listen: async (name, handler) => { window.events[name] = handler; return () => {}; } }, core: { invoke: async (command, args) => {
       window.calls.push({ command, args });
       if (command === 'get_launch_request') return { view: launchView, revision: 0 };
+      if (command === 'pending_hosted_restore') return [];
       if (command === 'project_inventory') return { projects: [], warnings: [] };
       if (command === 'community_catalogue') return { entries: [], warnings: [], stale: false };
       if (command === 'app_inventory') {
@@ -82,9 +84,23 @@ test('fixed Hub help opens with app roles and practical troubleshooting', async 
   expect(Math.abs(rect.y - rect.viewport.y)).toBeLessThan(2);
   expect(rect.background).toBe('rgb(17, 21, 24)');
   await expect(help).toContainText('Setup is not the MCP');
-  await expect(help).toContainText('Claude Desktop is not currently supported');
+  await expect(help).toContainText('Connection guide when available');
+  await expect(help).toContainText('Claude Code and Claude Desktop are separate clients');
+  await expect(help).toContainText('Windows and macOS, not Linux');
+  await expect(help).toContainText('Saved settings alone do not prove a live connection');
   await page.locator('#context-help-close').click();
   await expect(help).toBeHidden();
+});
+
+for (const width of [940, 390, 320]) test(`Hub Help does not cover controls or footer while scrolling at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 580 });
+  await load(page);
+  await expect(page.locator('#context-help-open')).toBeVisible();
+  expect(await page.locator('.app-header').evaluate(node => ({ position: getComputedStyle(node).position, background: getComputedStyle(node).backgroundColor }))).toEqual({ position: 'sticky', background: 'rgb(9, 11, 13)' });
+  const overlap = await helpOcclusion(page, 'main button, main input, main select, main summary, main [role="status"], footer .text-button');
+  await page.screenshot({ path: testInfo.outputPath('hub-help-clearance.png') });
+  expect(overlap).toBeNull();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
 for (const app of ['mcp', 'setup']) for (const width of [940, 390, 320]) test(`Apps row updates ${app} without opening its view at ${width}px`, async ({ page }, testInfo) => {
@@ -659,14 +675,14 @@ test('morphing drawer reverses, restores focus and honors reduced motion', async
   await expect(page.locator('.app-header .title-block')).toHaveCSS('opacity', '1');
 });
 
-test('Creator Plugins browses the catalogue without installation or account actions', async ({ page }) => {
+test('Creator Plugins shows retirement without fetching the catalogue or changing projects', async ({ page }) => {
   await load(page);
   await page.getByRole('button', { name: 'View Creator Plugins' }).click();
   await expect(page.locator('#plugins-title')).toBeFocused();
-  await expect(page.locator('#view-plugins')).toContainText('No contributions are listed yet');
-  await expect(page.locator('#view-plugins')).toContainText('Editor tools');
+  await expect(page.locator('#view-plugins')).toContainText(/Creator Plugins (is retiring|has been retired)/);
+  await expect(page.locator('#view-plugins')).toContainText('Existing imported assets');
   await expect(page.locator('#release-button')).toBeHidden();
-  expect(await page.evaluate(() => window.calls.filter(c => !['pending_hosted_restore', 'app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory', 'community_catalogue'].includes(c.command)))).toEqual([]);
+  expect(await page.evaluate(() => window.calls.filter(c => !['pending_hosted_restore', 'app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(c.command)))).toEqual([]);
 });
 
 test('download progress cancels, prevents duplicate actions and never auto-installs', async ({ page }) => {
@@ -764,8 +780,16 @@ for (const width of [940, 560, 390]) {
     await expect(page.locator('#tool-state')).not.toContainText('Not installed');
     await expect(page.locator('#tool-state')).toContainText('App needs attention');
     await expect(page.locator('#detected-copies button').last()).toBeDisabled();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const overflow = await page.evaluate(() => ({
+      width: innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      elements: [...document.querySelectorAll('body *')].filter(node => {
+        const rect = node.getBoundingClientRect();
+        return rect.width && (rect.right > innerWidth || rect.left < 0) && !node.closest('[aria-hidden="true"]');
+      }).map(node => ({ tag: node.tagName, id: node.id, className: node.className, right: node.getBoundingClientRect().right })),
+    }));
     await page.screenshot({ path: testInfo.outputPath('compatibility.png'), fullPage: true });
+    expect(overflow.scrollWidth, JSON.stringify(overflow)).toBeLessThanOrEqual(width);
     await page.locator('#detected-copies button').first().click();
     expect(await page.evaluate(() => window.calls.find(c => c.command === 'use_existing_app').args)).toEqual({ app: 'mcp', path: selected });
     expect(await page.evaluate(() => window.calls.some(c => c.command === 'install_app'))).toBe(false);

@@ -44,6 +44,18 @@ fn current() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
 }
 
+fn view_notice(views: &[crate::hosted_restore::View], restore_views: bool) -> String {
+    if views.is_empty() {
+        return String::new();
+    }
+    let reopening = if restore_views {
+        "They will reopen after Hub restarts. The apps may ask for permission when reopening."
+    } else {
+        "Automatic reopening is turned off. You can open them again from Hub."
+    };
+    format!("\n\nHub will close these idle views: {}. Unsaved form entries will be discarded. {reopening} Standalone apps and MCP connections will stay open.", views.iter().map(|v| v.app.name()).collect::<Vec<_>>().join(", "))
+}
+
 fn cache_path(release: &Release) -> Result<PathBuf, String> {
     Ok(manager::child_dir("downloads")?.join(format!("hub-{}.exe", release.sha256)))
 }
@@ -272,9 +284,7 @@ pub async fn install_hub_update(
         let release = selected(&handle, &version)?;
         let installed = installed_location()?;
         let views = handle.state::<crate::hosted::Hosting>().update_views()?;
-        let view_notice = if views.is_empty() { String::new() } else {
-            format!("\n\nHub will close and reopen these idle views: {}. Unsaved form entries will be discarded. The apps may ask for permission when reopening. Standalone apps and MCP connections will stay open.", views.iter().map(|v| v.app.name()).collect::<Vec<_>>().join(", "))
-        };
+        let view_notice = view_notice(&views, restore_views);
         let approved = handle.dialog().message(format!("Update Creator Hub to {}?\n\nHub will close and reopen. Your projects, apps and settings will stay in place.{}", release.version, view_notice))
             .title("Update Creator Hub").buttons(MessageDialogButtons::OkCancelCustom("Update Hub".into(), "Not now".into())).blocking_show();
         if !approved { return Ok("Hub update cancelled. Nothing was installed.".into()); }
@@ -335,6 +345,31 @@ pub async fn install_hub_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn update_confirmation_respects_reopen_preference_and_names_each_view() {
+        let views = catalog::AppId::ALL.map(|app| crate::hosted_restore::View {
+            app,
+            path: std::env::temp_dir().join(app.exe()),
+            bundled: true,
+        });
+        for restore in [false, true] {
+            assert!(view_notice(&[], restore).is_empty());
+            let notice = view_notice(&views, restore);
+            for app in catalog::AppId::ALL {
+                assert!(notice.contains(app.name()));
+            }
+            assert!(notice.contains("Unsaved form entries will be discarded"));
+            assert!(notice.contains("Standalone apps and MCP connections will stay open"));
+            if restore {
+                assert!(notice.contains("They will reopen after Hub restarts"));
+            } else {
+                assert!(notice.contains("Automatic reopening is turned off"));
+                assert!(!notice.contains("They will reopen"));
+                assert!(!notice.contains("will close and reopen"));
+            }
+        }
+    }
+
     #[test]
     fn packaged_updater_configuration_initializes_with_the_catalog_key() {
         let context: tauri::Context<tauri::Wry> = tauri::generate_context!();

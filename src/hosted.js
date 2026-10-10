@@ -2,13 +2,14 @@
   const invoke = (...args) => window.CreatorHubNative.invoke(...args);
   const apps = Object.freeze({
     setup: { id: 'creator-project-setup', title: 'Creator Project Setup', label: 'Setup', commands: new Set(['get_recipe', 'probe_environment', 'pick_parent_folder', 'create_project', 'open_project', 'launch_hub', 'restart_hub', 'register_project', 'inspect_project', 'run_existing_project', 'open_official_url']) },
-    mcp: { id: 'creator-works-mcp', title: 'Creator Works MCP', label: 'MCP', commands: new Set(['get_hosted_snapshot', 'pick_project_folder', 'open_official_url']) },
+    mcp: { id: 'creator-works-mcp', title: 'Creator Works MCP', label: 'MCP', commands: new Set(['get_hosted_snapshot', 'pick_project_folder', 'open_official_url', 'get_ai_usage_notice_hidden', 'hide_ai_usage_notice']) },
   });
   const mcpWritable = new Set([
     'begin_ui_operation', 'finish_ui_operation', 'load_config', 'save_config',
     'discover_unity_projects', 'get_onboarding_status', 'add_project', 'one_click_setup',
     'get_project_sdk_profile', 'get_unity_extension_status', 'update_configured_unity_extensions',
     'update_codex_mcp_config', 'update_claude_mcp_config', 'update_antigravity_mcp_config',
+    'update_claude_desktop_mcp_config', 'remove_claude_desktop_mcp_config',
     'update_opencode_mcp_config', 'remove_codex_mcp_config', 'remove_claude_mcp_config',
     'remove_antigravity_mcp_config', 'remove_opencode_mcp_config', 'install_unity_extension',
     'set_unity_custom_scripts', 'set_unity_allow_all_tests', 'get_project_feedback_settings',
@@ -33,6 +34,21 @@
     stop.textContent = state ? `Close ${apps[selected].label}` : 'Close view';
   }
   const decode = encoded => new TextDecoder().decode(Uint8Array.from(atob(encoded), c => c.charCodeAt(0)));
+
+  // Sandboxed frames have no storage; only this fixed UI preference belongs to Hub.
+  function noticePreference(command, args) {
+    const key = 'creator-works-mcp.ai-usage-notice-hidden.v1';
+    if (command === 'get_ai_usage_notice_hidden') {
+      if (Object.keys(args).length) throw new Error('Invalid notice preference request.');
+      return localStorage.getItem(key) === 'true';
+    }
+    if (Object.keys(args).length !== 1 || args.acknowledged !== true) {
+      throw new Error('AI usage acknowledgement is required.');
+    }
+    localStorage.setItem(key, 'true');
+    if (localStorage.getItem(key) !== 'true') throw new Error('Notice preference was not saved.');
+    return true;
+  }
 
   function documentFor(files) {
     const mime = name => name.endsWith('.png') ? 'image/png' : name.endsWith('.svg') ? 'image/svg+xml' : name.endsWith('.js') ? 'text/javascript' : 'text/css';
@@ -71,7 +87,7 @@
     state.finishInitialization?.();
     render();
   }
-  async function attach(app, state, result, restoring) {
+  async function attach(app, state, result) {
     if (!result?.session || result.appId !== apps[app].id || !result.files) throw new Error('Invalid hosted app response.');
     state.writable = app === 'mcp' && result.hostingRevision === 2 && result.effectiveMode === 'writable';
     state.session = result.session;
@@ -86,7 +102,7 @@
     const channel = new MessageChannel();
     const port = channel.port1;
     state.port = port;
-    // Transport-ready precedes the pinned apps' startup work. Restoration must
+    // Transport-ready precedes the pinned apps' startup work. Every startup must
     // finish Setup's probe / MCP's initial workflow before starting another app
     // or discovery: all of those operations share the native Manager lease.
     let initialized;
@@ -107,7 +123,9 @@
         state.inFlight = true;
         render();
         try {
-          const value = await invoke('hosted_app_call', { session: state.session, command: data.command, args: data.args });
+          const value = app === 'mcp' && ['get_ai_usage_notice_hidden', 'hide_ai_usage_notice'].includes(data.command)
+            ? noticePreference(data.command, data.args)
+            : await invoke('hosted_app_call', { session: state.session, command: data.command, args: data.args });
           if (data.command === 'begin_ui_operation') state.workflow = true;
           if (data.command === 'finish_ui_operation') state.workflow = false;
           port.postMessage({ type: 'result', id: data.id, ok: true, result: value });
@@ -126,13 +144,14 @@
       if (connected) return disconnect(state, 'App navigated unexpectedly. The existing connection was disabled.');
       connected = true;
       frame.contentWindow.postMessage({ type: 'creator-host-connect', protocol: 1,
+        builtIn: result.builtIn === true,
         ...(app === 'mcp' ? { hostingRevision: result.hostingRevision, effectiveMode: state.writable ? 'writable' : 'read-only' } : {}) }, '*', [channel.port2]);
     });
     frame.srcdoc = html;
     document.querySelector('#hosted-content').append(frame);
     render();
     await loaded;
-    if (restoring) await initialization;
+    await initialization;
     if (state.failed) throw new Error(state.status);
     state.status = `${apps[app].label} ${result.version}`;
     render();
@@ -154,7 +173,7 @@
       const state = { frame: null, port: null, session: null, ready: false, inFlight: false, failed: false, closing: false, status: 'Opening app' };
       sessions.set(app, state);
       try {
-        await attach(app, state, await invoke(restoring ? 'restore_hosted_app' : 'start_hosted_app', { app }), restoring);
+        await attach(app, state, await invoke(restoring ? 'restore_hosted_app' : 'start_hosted_app', { app }));
         if (restoring) await invoke('complete_hosted_restore', { app });
       }
       catch (error) {

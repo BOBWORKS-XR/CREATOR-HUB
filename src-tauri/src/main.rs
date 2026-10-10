@@ -1,8 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod builtin;
 mod catalog;
 mod community;
 mod community_project;
+#[cfg(all(target_os = "macos", test))]
+#[allow(dead_code)]
+#[path = "../../native/host_parent_macos.rs"]
+mod host_parent_macos;
 mod hosted;
 mod hosted_operation;
 mod hosted_restore;
@@ -11,6 +16,8 @@ mod launch;
 mod manager;
 mod mcp_runtime;
 mod platform;
+#[path = "../../native/plugins_retirement.rs"]
+mod plugins_retirement;
 mod projects;
 mod self_update;
 use catalog::AppId;
@@ -135,6 +142,9 @@ async fn app_inventory(
     preview: bool,
 ) -> Result<manager::Snapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        if let Some(snapshot) = builtin::inventory(&app)? {
+            return Ok(snapshot);
+        }
         app.state::<manager::Manager>().snapshot(check, preview)
     })
     .await
@@ -312,6 +322,7 @@ fn main() {
     let shell_key: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
     let initialize = shell_initialization(&shell_key);
     let commands: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        plugins_retirement::open_plugins_website,
         open_resource,
         community_catalogue,
         community_projects,
@@ -375,6 +386,10 @@ fn main() {
             let key = app.state::<ShellKey>();
             if invoke.message.headers().get("x-creator-shell-key").and_then(|value| value.to_str().ok()) != Some(key.0.as_str()) {
                 invoke.resolver.reject("Hub commands are available only to its trusted shell.");
+                return true;
+            }
+            if let Some(error) = plugins_retirement::command_error(invoke.message.command()) {
+                invoke.resolver.reject(error);
                 return true;
             }
             commands(invoke)

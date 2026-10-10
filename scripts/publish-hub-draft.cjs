@@ -1,7 +1,18 @@
 const { checkDraft, checkLive } = require('./check-release-feed.cjs');
 const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const { checkSources, assertReleaseReady } = require('./check-unified-sources.cjs');
+
+function checkReadiness() {
+  const root = path.resolve(__dirname, '..');
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'modules/suite.json'), 'utf8'));
+  checkSources(root, manifest);
+  assertReleaseReady(manifest);
+}
 
 async function publishDraft(version, actions = {}) {
+  await (actions.checkReadiness || checkReadiness)();
   const inspectDraft = actions.checkDraft || checkDraft;
   const inspectLive = actions.checkLive || checkLive;
   const publish = actions.publish || (tag => execFileSync('gh', ['release', 'edit', tag,

@@ -19,8 +19,9 @@ those checks can pass while the installed 0.1.2 updater cannot discover it.
    checksum assembly, so a green package matrix cannot be mistaken for a
    discoverable in-app update.
 4. Publish with `node scripts/publish-hub-draft.cjs VERSION`, not an unguarded
-   `gh release edit --draft=false`. The command repeats that preflight before
-   writing, verifies the public feed afterwards, and does not mark latest or
+   `gh release edit --draft=false`. The command first repeats the unified source
+   and readiness gate before any GitHub read/write, then repeats the feed
+   preflight before writing, verifies the public feed afterwards, and does not mark latest or
    report readiness. Failure is a release blocker, not permission to bypass it.
 5. Update the source/target versions and exact hashes in
    `scripts/native-self-update-smoke.cjs`, then run **Public Hub self-update

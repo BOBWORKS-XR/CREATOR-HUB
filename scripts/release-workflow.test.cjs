@@ -3,6 +3,28 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
+test('browser failures retain screenshots and traces without enabling automatic retries', () => {
+  const config = require('../playwright.config.js');
+  assert.equal(config.use.trace, 'retain-on-failure');
+  assert.equal(config.use.screenshot, 'only-on-failure');
+  assert.equal(config.retries || 0, 0);
+  const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'ci.yml'), 'utf8');
+  const capture = workflow.indexOf('      - name: Retain browser failure diagnostics');
+  assert.ok(capture > workflow.indexOf('      - run: npm run test:ui'));
+  assert.match(workflow.slice(capture, workflow.indexOf('  hub-windows:', capture)), /if: failure\(\)/);
+  assert.match(workflow.slice(capture, workflow.indexOf('  hub-windows:', capture)), /path: test-results\//);
+});
+
+test('native CI lints the actual Hub and both module sources before acceptance', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'ci.yml'), 'utf8');
+  assert.equal((workflow.match(/cargo clippy --release --locked --manifest-path src-tauri\/Cargo.toml --all-targets -- -D warnings/g) || []).length, 3);
+  for (const module of ['mcp/launcher', 'project-setup']) {
+    // One native command per step prevents a later success masking a PowerShell failure.
+    const pattern = new RegExp(`      run: cargo clippy --release --locked --manifest-path modules/${module}/src-tauri/Cargo\\.toml`, 'g');
+    assert.equal((workflow.match(pattern) || []).length, 3);
+  }
+});
+
 test('Windows release build uses the reviewed companion acceptance receipt', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'release.yml'), 'utf8');
   assert.match(workflow, /Build-Installer\.ps1[^\r\n]*-HostedPins scripts\/prerelease-apps\.json/);

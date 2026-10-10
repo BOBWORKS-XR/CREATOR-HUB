@@ -19,7 +19,7 @@
     <div class="suite-entry"><button class="suite-item" data-view="mcp" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">M</span></span><span class="suite-item-copy"><strong>Creator Works MCP</strong><small>AI tools for Unity</small><span id="menu-status-mcp" class="suite-item-status">Checking</span></span></button><button id="menu-download-mcp" class="suite-download hidden" type="button" title="Download latest Creator Works MCP" aria-label="Download latest Creator Works MCP"><span class="icon icon-download" aria-hidden="true"></span></button></div>
     <div class="suite-entry"><button class="suite-item" data-view="setup" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span><span class="suite-item-copy"><strong>Project Setup</strong><small>Unity + Creator SDK projects</small><span id="menu-status-setup" class="suite-item-status">Checking</span></span></button><button id="menu-download-setup" class="suite-download hidden" type="button" title="Download latest Project Setup" aria-label="Download latest Project Setup"><span class="icon icon-download" aria-hidden="true"></span></button></div>
     <div class="suite-item unavailable"><span class="suite-mark converter-mark"><img src="sidequest-mark-white.svg" alt=""><span class="suite-letter">C</span></span><span class="suite-item-copy"><strong>Creator Converter</strong><small>SideQuest / Coming soon</small></span></div>
-    <button class="suite-item" data-view="plugins" type="button"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.png" alt=""></span><span class="suite-item-copy"><strong>Creator Plugins</strong><small>Community contributions</small></span></button>
+    <button class="suite-item" data-view="plugins" type="button"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.png" alt=""></span><span class="suite-item-copy"><strong>Creator Plugins</strong><small>Retirement notice</small></span></button>
   </nav>
   </div>
   <header class="app-header">
@@ -56,7 +56,7 @@
         <p id="update-reason-setup" class="row-update-reason hidden" role="status"></p>
         </div>
         <div class="app-row unavailable"><span class="suite-mark converter-mark"><img src="sidequest-mark-white.svg" alt=""><span class="suite-letter">C</span></span><span class="app-row-copy"><strong>Creator Converter</strong><small>SideQuest / Built-in rendering to Universal Render Pipeline.</small></span><span class="row-status">Coming soon</span></div>
-        <button class="app-row" type="button" data-view="plugins" aria-label="View Creator Plugins"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.png" alt=""></span><span class="app-row-copy"><strong>Creator Plugins</strong><small>Community projects, packages and tools.</small></span><span class="row-status">Browse</span><span class="icon icon-arrow" aria-hidden="true"></span></button>
+        <button class="app-row" type="button" data-view="plugins" aria-label="View Creator Plugins"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.png" alt=""></span><span class="app-row-copy"><strong>Creator Plugins</strong><small>Retirement notice. Existing project assets are unchanged.</small></span><span class="row-status" data-plugins-status>Retired</span><span class="icon icon-arrow" aria-hidden="true"></span></button>
       </div>
       <div class="update-preferences"><label><input id="preview-channel" type="checkbox" checked> Include prereleases</label><label><input id="auto-download" type="checkbox" checked> Download verified updates automatically</label><label><input id="restore-hosted-views" type="checkbox" checked> Reopen Hub app views after updating</label></div>
       <section class="hub-update" aria-labelledby="hub-update-title">
@@ -71,6 +71,12 @@
       <p id="project-status" class="catalog-status" role="status"></p>
       <p id="project-warnings" class="catalog-status"></p>
       <div id="project-list" class="project-list"></div>
+    </section>
+    <section id="view-builtin" class="builtin-opening hidden" aria-labelledby="builtin-title">
+      <button class="text-button" type="button" data-view="hub"><span class="icon icon-back" aria-hidden="true"></span>All apps</button>
+      <h2 id="builtin-title"></h2>
+      <div role="status"><p id="builtin-status"></p><p id="builtin-detail"></p></div>
+      <button id="builtin-open" class="primary-button hidden" type="button"><span class="icon icon-refresh" aria-hidden="true"></span><span>Retry opening</span></button>
     </section>
     <section id="view-detail" class="hidden" aria-labelledby="tool-title">
       <div class="page-heading"><button class="text-button" type="button" data-view="hub"><span class="icon icon-back" aria-hidden="true"></span>All apps</button><span>Standalone app</span></div>
@@ -99,10 +105,10 @@
   <dialog id="context-help-dialog" class="context-help-dialog" aria-labelledby="context-help-title">
     <div class="context-help-heading"><div><h2 id="context-help-title">Creator Hub help</h2><p>What each app does and where to start.</p></div><button id="context-help-close" class="icon-button" type="button" aria-label="Close help" title="Close help">×</button></div>
     <div class="context-help-content">
-      <details open><summary>Which app do I need?</summary><p><strong>Creator Hub</strong> manages your Creator apps and Unity projects. <strong>Project Setup</strong> creates and validates a Creator SDK project. <strong>Creator Works MCP</strong> connects a supported AI client to Unity tools. <strong>Creator Plugins</strong> is the community catalogue, available in Hub and in the Unity Editor window. These are separate tools; Setup is not the MCP.</p></details>
+      <details open><summary>Which app do I need?</summary><p><strong>Creator Hub</strong> brings your Creator tools and Unity projects together. <strong>Project Setup</strong> creates and validates a Creator SDK project. <strong>Creator Works MCP</strong> connects a supported AI client to Unity tools. Setup is not the MCP. The Creator Plugins catalogue is retiring from the apps; its page contains the retirement notice.</p></details>
       <details><summary>An app says Not installed</summary><p>Choose its download/install action in Apps. Hub checks the release and verifies the download before asking you to approve installation. Unity Editor licensing and sign-in remain with Unity.</p></details>
-      <details><summary>My AI cannot see MCP tools</summary><p>Open Creator Works MCP and check its connection/setup status. Confirm your AI client supports MCP, then restart or reconnect that client after configuration changes. Claude CLI is supported; Claude Desktop is not currently supported. The AI model is provided by your chosen client/provider, not by MCP.</p></details>
-      <details><summary>Plugin types and importing</summary><p>Visual Scripting graphs, prefabs, scripts, editor tools and scenes need different destinations and may have dependencies. Read each listing’s instructions, make a project backup, and import only into a compatible project. The Unity Plugins window handles supported queued packages; it does not install MCP or guarantee a package works in every Unity version.</p></details>
+      <details><summary>My AI cannot see MCP tools</summary><p>Open Creator Works MCP and use its Connection guide when available, or check the existing client setup controls. Claude Code and Claude Desktop are separate clients; the Claude website is not Claude Desktop. Compatible MCP builds offer Desktop configuration on Windows and macOS, not Linux. Fully quit and reopen a changed client, then ask your AI to call get_bridge_status. Saved settings alone do not prove a live connection. The AI model and billing come from your chosen client/provider, not MCP.</p></details>
+      <details><summary>What happened to Creator Plugins?</summary><p>The in-app catalogue and new package imports have been retired. Existing imported assets, project files and import receipts are not removed. Already-installed Unity catalogue windows are not silently rewritten by Hub.</p></details>
       <details><summary>AI token or usage costs are high</summary><p>Charges depend on your AI provider, client and model. Check provider billing and usage limits, reduce unnecessary context, disable fast/high-cost modes where available, and try a less expensive model for routine MCP tasks. MCP cannot set or cap your provider’s charges.</p></details>
       <details><summary>Something failed</summary><p>Read the message shown in the app first. Retry discovery for app status, or refresh the relevant list. For project operations, close the project in Unity when asked and keep a separate backup. Include the app version and its local log when reporting a problem; remove private project paths or credentials first.</p></details>
     </div>

@@ -14,6 +14,11 @@ use tauri::Manager as _;
 pub struct View {
     pub app: AppId,
     pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bundled: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Serialize, Deserialize)]
@@ -156,6 +161,17 @@ pub async fn restore_hosted_app(
             .ok_or("This app has no pending update restoration.")?;
         // Saved paths confer no authority. The current signed catalog selection
         // must still identify the same executable before it can be reopened.
+        if view.bundled {
+            let candidate = crate::builtin::hosting_candidate(&handle, app)?
+                .ok_or("This Hub has no verified built-in module to restore.")?;
+            return handle.state::<Hosting>().start_verified(
+                &handle,
+                app,
+                &candidate.path,
+                &candidate.hash,
+                true,
+            );
+        }
         let (path, release) = handle
             .state::<manager::Manager>()
             .hosted_candidate(app)?
@@ -190,6 +206,7 @@ mod tests {
             views: vec![View {
                 app: AppId::Setup,
                 path: std::env::temp_dir().join("setup.exe"),
+                bundled: false,
             }],
         }
     }
