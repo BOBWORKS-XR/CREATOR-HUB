@@ -12,7 +12,7 @@
   }
 
   // Being framed only waits for an explicit host connection; it grants no native authority.
-  const commands = new Set(['get_hosted_snapshot', 'pick_project_folder', 'open_official_url']);
+  const commands = new Set(['get_hosted_snapshot', 'pick_project_folder', 'open_official_url', 'get_ai_usage_notice_hidden', 'hide_ai_usage_notice']);
   const writableCommands = [
     'begin_ui_operation', 'finish_ui_operation', 'load_config', 'save_config',
     'discover_unity_projects', 'get_onboarding_status', 'add_project', 'one_click_setup',

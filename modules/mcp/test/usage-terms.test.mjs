@@ -6,7 +6,7 @@ import test from 'node:test';
 class Element {
   constructor() { this.listeners = {}; this.checked = false; this.disabled = false; this.hidden = false; this.inert = false; this.textContent = ''; this.open = false; }
   addEventListener(name, callback) { (this.listeners[name] ||= []).push(callback); }
-  fire(name, event = {}) { for (const callback of this.listeners[name] || []) callback({ preventDefault() {}, ...event }); }
+  fire(name, event = {}) { return Promise.all((this.listeners[name] || []).map(callback => callback({ preventDefault() {}, ...event }))); }
   showModal() { this.open = true; }
   close() { this.open = false; }
 }
@@ -58,25 +58,41 @@ test('MCP consent remains locked if local acceptance cannot be stored', async ()
   await Promise.race([accepted.then(() => assert.fail('Acceptance must not resolve')), new Promise(resolve => setTimeout(resolve, 0))]);
 });
 
-test('AI usage warning only persists dismissal after a second checked confirmation', () => {
+test('AI usage warning only persists dismissal after a second checked confirmation', async () => {
   const ids = ['#ai-usage-notice', '#ai-usage-dont-show', '#ai-usage-dismiss', '#ai-usage-confirm-dialog', '#ai-usage-confirm-form', '#ai-usage-confirm-checkbox', '#ai-usage-confirm', '#ai-usage-confirm-error', '#ai-usage-keep'];
   const { elements, store, window } = harness('launcher/src/ai-usage-notice.js', ids);
-  window.CreatorAiUsageNotice.initialize();
+  await window.CreatorAiUsageNotice.initialize();
   assert.equal(elements['#ai-usage-notice'].hidden, false);
   elements['#ai-usage-dismiss'].fire('click');
   assert.equal(elements['#ai-usage-notice'].hidden, true);
   assert.equal(store.size, 0);
-  window.CreatorAiUsageNotice.initialize();
+  await window.CreatorAiUsageNotice.initialize();
   elements['#ai-usage-dont-show'].checked = true;
   elements['#ai-usage-dismiss'].fire('click');
   assert.equal(elements['#ai-usage-confirm-dialog'].open, true);
   assert.equal(elements['#ai-usage-confirm'].disabled, true);
   elements['#ai-usage-confirm-checkbox'].checked = true;
   elements['#ai-usage-confirm-checkbox'].fire('change');
-  elements['#ai-usage-confirm'].fire('click');
+  await elements['#ai-usage-confirm'].fire('click');
   assert.equal(elements['#ai-usage-confirm-dialog'].open, false);
   assert.equal(elements['#ai-usage-notice'].hidden, true);
   assert.equal(store.get('creator-works-mcp.ai-usage-notice-hidden.v1'), 'true');
+});
+
+test('AI usage warning remains visible and recoverable when standalone storage fails', async () => {
+  const ids = ['#ai-usage-notice', '#ai-usage-dont-show', '#ai-usage-dismiss', '#ai-usage-confirm-dialog', '#ai-usage-confirm-checkbox', '#ai-usage-confirm', '#ai-usage-confirm-error', '#ai-usage-keep'];
+  const { elements, store, window } = harness('launcher/src/ai-usage-notice.js', ids, { storageFails: true });
+  await window.CreatorAiUsageNotice.initialize();
+  elements['#ai-usage-dont-show'].checked = true;
+  await elements['#ai-usage-dismiss'].fire('click');
+  elements['#ai-usage-confirm-checkbox'].checked = true;
+  await elements['#ai-usage-confirm-checkbox'].fire('change');
+  await elements['#ai-usage-confirm'].fire('click');
+  assert.equal(elements['#ai-usage-notice'].hidden, false);
+  assert.equal(elements['#ai-usage-confirm-dialog'].open, true);
+  assert.equal(elements['#ai-usage-confirm-error'].hidden, false);
+  assert.equal(elements['#ai-usage-confirm'].disabled, false);
+  assert.equal(store.size, 0);
 });
 
 test('MCP help covers client support, token controls and Plugins retirement', () => {

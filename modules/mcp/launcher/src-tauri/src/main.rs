@@ -1090,7 +1090,8 @@ fn build_claude_mcp_config(
         &config,
         Some(&serde_json::json!({"command":node_command,"args":[mcp_server_path]})),
         false,
-    )?;
+    )
+    .map_err(|error| format!("Claude Code: {error}"))?;
     if !config.is_object() {
         return Err("Claude config root must be a JSON object".to_string());
     }
@@ -1229,7 +1230,8 @@ fn build_codex_mcp_config(
     client_ownership::guard_toml(
         existing,
         Some((&node_command.replace('\\', "/"), mcp_server_path)),
-    )?;
+    )
+    .map_err(|error| format!("Codex: {error}"))?;
     let tool_groups = normalize_tool_groups(tool_groups)?;
     let existing = remove_client_mcp_tables(existing, MCP_CLIENT_ID)?;
     let existing = remove_client_mcp_tables(&existing, LEGACY_MCP_CLIENT_ID)?;
@@ -1425,7 +1427,8 @@ fn build_antigravity_mcp_config(
         &config,
         Some(&serde_json::json!({"command":node_command,"args":[mcp_server_path]})),
         false,
-    )?;
+    )
+    .map_err(|error| format!("Antigravity: {error}"))?;
     if !config.is_object() {
         return Err("Antigravity config root must be a JSON object".to_string());
     }
@@ -1569,7 +1572,8 @@ fn build_opencode_mcp_config(
         &config,
         Some(&serde_json::json!({"command":[node_command,mcp_server_path]})),
         true,
-    )?;
+    )
+    .map_err(|error| format!("OpenCode: {error}"))?;
     if !config.is_object() {
         return Err("OpenCode config root must be a JSON object".to_string());
     }
@@ -2938,6 +2942,53 @@ mod tests {
                 build_codex_mcp_config(&custom, &channel, "node", "server.mjs", "core").is_err()
             );
         }
+    }
+
+    #[test]
+    fn client_ownership_conflicts_name_the_client_and_leave_inputs_unchanged() {
+        let channel = codex_fixture_channel();
+        let original = serde_json::json!({"preferences":{"keep":true}, "mcpServers":{
+            "creator-works":{"command":"old-node", "args":["old-server"]},
+            "other":{"command":"keep"}
+        }});
+        for (client, error) in [
+            (
+                "Claude Code",
+                build_claude_mcp_config(
+                    original.clone(),
+                    &channel,
+                    "new-node",
+                    "new-server",
+                    "core",
+                )
+                .unwrap_err(),
+            ),
+            (
+                "Antigravity",
+                build_antigravity_mcp_config(
+                    original.clone(),
+                    &channel,
+                    "new-node",
+                    "new-server",
+                    "core",
+                )
+                .unwrap_err(),
+            ),
+        ] {
+            assert!(error.starts_with(&format!("{client}: ")));
+            assert!(error.contains("unverified setup. It was kept"));
+            assert_eq!(original["mcpServers"]["other"]["command"], "keep");
+        }
+        let original =
+            "# keep\n[mcp_servers.creator-works]\ncommand='old-node'\nargs=['old-server']\n";
+        let error = build_codex_mcp_config(original, &channel, "new-node", "new-server", "core")
+            .unwrap_err();
+        assert!(error.starts_with("Codex: "));
+        let original =
+            serde_json::json!({"mcp":{"creator-works":{"command":["old-node","old-server"]}}});
+        let error = build_opencode_mcp_config(original, &channel, "new-node", "new-server", "core")
+            .unwrap_err();
+        assert!(error.starts_with("OpenCode: "));
     }
 
     #[test]

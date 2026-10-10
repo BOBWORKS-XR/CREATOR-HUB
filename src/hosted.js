@@ -2,7 +2,7 @@
   const invoke = (...args) => window.CreatorHubNative.invoke(...args);
   const apps = Object.freeze({
     setup: { id: 'creator-project-setup', title: 'Creator Project Setup', label: 'Setup', commands: new Set(['get_recipe', 'probe_environment', 'pick_parent_folder', 'create_project', 'open_project', 'launch_hub', 'restart_hub', 'register_project', 'inspect_project', 'run_existing_project', 'open_official_url']) },
-    mcp: { id: 'creator-works-mcp', title: 'Creator Works MCP', label: 'MCP', commands: new Set(['get_hosted_snapshot', 'pick_project_folder', 'open_official_url']) },
+    mcp: { id: 'creator-works-mcp', title: 'Creator Works MCP', label: 'MCP', commands: new Set(['get_hosted_snapshot', 'pick_project_folder', 'open_official_url', 'get_ai_usage_notice_hidden', 'hide_ai_usage_notice']) },
   });
   const mcpWritable = new Set([
     'begin_ui_operation', 'finish_ui_operation', 'load_config', 'save_config',
@@ -34,6 +34,21 @@
     stop.textContent = state ? `Close ${apps[selected].label}` : 'Close view';
   }
   const decode = encoded => new TextDecoder().decode(Uint8Array.from(atob(encoded), c => c.charCodeAt(0)));
+
+  // Sandboxed frames have no storage; only this fixed UI preference belongs to Hub.
+  function noticePreference(command, args) {
+    const key = 'creator-works-mcp.ai-usage-notice-hidden.v1';
+    if (command === 'get_ai_usage_notice_hidden') {
+      if (Object.keys(args).length) throw new Error('Invalid notice preference request.');
+      return localStorage.getItem(key) === 'true';
+    }
+    if (Object.keys(args).length !== 1 || args.acknowledged !== true) {
+      throw new Error('AI usage acknowledgement is required.');
+    }
+    localStorage.setItem(key, 'true');
+    if (localStorage.getItem(key) !== 'true') throw new Error('Notice preference was not saved.');
+    return true;
+  }
 
   function documentFor(files) {
     const mime = name => name.endsWith('.png') ? 'image/png' : name.endsWith('.svg') ? 'image/svg+xml' : name.endsWith('.js') ? 'text/javascript' : 'text/css';
@@ -108,7 +123,9 @@
         state.inFlight = true;
         render();
         try {
-          const value = await invoke('hosted_app_call', { session: state.session, command: data.command, args: data.args });
+          const value = app === 'mcp' && ['get_ai_usage_notice_hidden', 'hide_ai_usage_notice'].includes(data.command)
+            ? noticePreference(data.command, data.args)
+            : await invoke('hosted_app_call', { session: state.session, command: data.command, args: data.args });
           if (data.command === 'begin_ui_operation') state.workflow = true;
           if (data.command === 'finish_ui_operation') state.workflow = false;
           port.postMessage({ type: 'result', id: data.id, ok: true, result: value });

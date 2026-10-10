@@ -45,9 +45,9 @@ document.addEventListener('DOMContentLoaded', async function() {
   }
 
   await window.CreatorUsageTerms.requireAcceptance();
-  window.CreatorAiUsageNotice.initialize();
   try { await window.CreatorRuntime.ready; }
   catch (error) { showToast(String(error), 'error'); return; }
+  await window.CreatorAiUsageNotice.initialize();
   if (window.CreatorRuntime.builtIn) {
     elements.automaticUpdates.closest('.setting-row').hidden = true;
     elements.checkUpdatesBtn.closest('.action-buttons').hidden = true;

@@ -70,7 +70,7 @@ async function open(page, options = {}) {
             case 'get_project_feedback_settings': return {enabled:false,usageCheckIns:false};
             case 'get_onboarding_status': return {runtime:{ready:true,bundled:true}, project:{valid:true,
               bridgeInstalled:true,bridgeCurrent:true,stateStatus:'fresh',sdkProfile:profile},
-              clients:['codex','claude','antigravity','opencode'].map(id => ({id,detected:true,configured:true}))};
+              clients:['codex','claude','claudeDesktop','antigravity','opencode'].map(id => ({id,detected:true,configured:true,supported:true}))};
             case 'update_configured_unity_extensions':
               if (options.pendingMcp) await new Promise(resolve => { window.finishBridges = resolve; });
               return {updated:62,failed:[]};
@@ -563,6 +563,85 @@ async function openMcp(page, writable = false) {
   else await expect(mcp.locator('#hostedPreviewStatus')).toContainText('Saved configuration loaded');
   return mcp;
 }
+
+for (const writable of [false, true]) test(`embedded MCP saves acknowledged notice dismissal and restores it on reopen, writable=${writable}`, async ({ page }) => {
+  await open(page, { builtIn: true, writableMcp: writable });
+  let mcp = await openMcp(page, writable);
+  expect(await mcp.locator('body').evaluate(() => {
+    try { localStorage.getItem('test'); return false; } catch { return true; }
+  })).toBe(true);
+  await expect(mcp.locator('#ai-usage-notice')).toBeVisible();
+  await mcp.locator('#ai-usage-dont-show').check();
+  await mcp.locator('#ai-usage-dismiss').click();
+  await expect(mcp.locator('#ai-usage-confirm')).toBeDisabled();
+  await mcp.locator('#ai-usage-confirm-checkbox').check();
+  await mcp.locator('#ai-usage-confirm').click();
+  await expect(mcp.locator('#ai-usage-confirm-dialog')).toBeHidden();
+  await expect(mcp.locator('#ai-usage-notice')).toBeHidden();
+  expect(await page.evaluate(() => localStorage.getItem('creator-works-mcp.ai-usage-notice-hidden.v1'))).toBe('true');
+  await page.locator('#hosted-stop').click();
+  await expect(page.locator('#mcp-host-frame')).not.toBeAttached();
+  await switchTo(page, 'hub');
+  mcp = await openMcp(page, writable);
+  await expect(mcp.locator('#ai-usage-notice')).toBeHidden();
+  await page.reload();
+  await expect(page.locator('#catalog-status')).toContainText('Update check complete');
+  mcp = await openMcp(page, writable);
+  await expect(mcp.locator('#ai-usage-notice')).toBeHidden();
+  await expect(page.locator('#mcp-host-frame')).toHaveAttribute('sandbox', 'allow-scripts');
+  expect(await page.evaluate(() => hostCalls.some(c => c.args?.command === 'save_config'))).toBe(false);
+});
+
+test('embedded notice refuses missing acknowledgement and arbitrary storage keys', async ({ page }) => {
+  await open(page, { builtIn: true, writableMcp: true });
+  const mcp = await openMcp(page, true);
+  for (const args of [{}, { acknowledged: false }, { acknowledged: true, key: 'creator-usage-terms.hub' }]) {
+    const error = await mcp.locator('body').evaluate(args => window.CreatorRuntime.invoke('hide_ai_usage_notice', args).catch(String), args);
+    expect(error).toContain('acknowledgement');
+  }
+  const error = await mcp.locator('body').evaluate(() => window.CreatorRuntime.invoke('get_ai_usage_notice_hidden', { key: 'other' }).catch(String));
+  expect(error).toContain('Invalid notice');
+  expect(await page.evaluate(() => localStorage.getItem('creator-works-mcp.ai-usage-notice-hidden.v1'))).toBeNull();
+  expect(await page.evaluate(() => hostCalls.some(c => /ai_usage_notice/.test(c.args?.command)))).toBe(false);
+});
+
+test('embedded notice keeps the warning visible after storage failure and allows a retry', async ({ page }) => {
+  await open(page, { builtIn: true, writableMcp: true });
+  const mcp = await openMcp(page, true);
+  await page.evaluate(() => {
+    window.originalStorageSet = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value) {
+      if (key === 'creator-works-mcp.ai-usage-notice-hidden.v1') throw new Error('Fixture storage full');
+      return window.originalStorageSet.call(this, key, value);
+    };
+  });
+  await mcp.locator('#ai-usage-dont-show').check();
+  await mcp.locator('#ai-usage-dismiss').click();
+  await mcp.locator('#ai-usage-confirm-checkbox').check();
+  await mcp.locator('#ai-usage-confirm').click();
+  await expect(mcp.locator('#ai-usage-confirm-error')).toContainText('preference could not be saved');
+  await expect(mcp.locator('#ai-usage-confirm-dialog')).toBeVisible();
+  await expect(mcp.locator('#ai-usage-notice')).toBeVisible();
+  await expect(mcp.locator('#ai-usage-confirm')).toBeEnabled();
+  await page.evaluate(() => { Storage.prototype.setItem = window.originalStorageSet; });
+  await mcp.locator('#ai-usage-confirm').click();
+  await expect(mcp.locator('#ai-usage-notice')).toBeHidden();
+  await expect(mcp.locator('#ai-usage-confirm-dialog')).toBeHidden();
+});
+
+test('embedded Set Up includes detected Claude Desktop separately from Claude Code', async ({ page }) => {
+  await open(page, { builtIn: true, writableMcp: true });
+  const mcp = await openMcp(page, true);
+  await expect(mcp.locator('#connectClaudeDesktop')).toBeChecked();
+  await mcp.locator('#setupBtn').click();
+  await expect(mcp.locator('#connection-review-summary')).toContainText('Claude Desktop');
+  expect(await page.evaluate(() => hostCalls.some(c => c.args?.command === 'one_click_setup'))).toBe(false);
+  await mcp.locator('#connection-review-apply').click();
+  await expect(mcp.locator('#setupMessage')).toContainText('Fully quit and reopen changed AI clients');
+  const request = await page.evaluate(() => hostCalls.find(c => c.args?.command === 'one_click_setup'));
+  expect(request.args.args.configureClaudeDesktop).toBe(true);
+  expect(request.args.args.configureClaude).toBe(true);
+});
 
 test('first-run guide in Hub is read-only until approval and closes after disconnect', async ({ page }) => {
   await open(page, { builtIn: true, writableMcp: true, showConnectionGuide: true });
