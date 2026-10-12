@@ -26,6 +26,27 @@ jobs:
       - run: cargo fmt --manifest-path native/mcp-router/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path native/mcp-router/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --release --locked --manifest-path native/mcp-router/Cargo.toml
+      - uses: actions/setup-node@v6
+        if: runner.os != 'Windows'
+        with:
+          node-version: 24.17.0
+      - name: Build real server for Unix transport acceptance
+        if: runner.os != 'Windows'
+        run: |
+          npm --prefix modules/mcp ci
+          npm --prefix modules/mcp run bundle:server
+      - name: Native Unix payload binding and owned runtime cleanup
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        run: node native/mcp-router/tests/unix-execution.cjs "$(node -p 'process.execPath')"
+      - name: Retain native Unix results (not writable GUI or update acceptance)
+        if: always() && runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unix-runtime-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: artifacts/unix-native-results/
 
   frontend:
     name: Frontend & script tests

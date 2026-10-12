@@ -350,7 +350,7 @@ fn routing_storage_junction_is_rejected_without_writing_to_its_target() {
 
 #[cfg(unix)]
 #[test]
-fn unix_execution_does_not_silently_replace_missing_payload_binding_with_advisory_locks() {
+fn unix_execution_refuses_multithreaded_library_callers() {
     let (_temporary, store) = setup();
     activate_a(&store);
     assert!(store
@@ -359,7 +359,7 @@ fn unix_execution_does_not_silently_replace_missing_payload_binding_with_advisor
         .run()
         .err()
         .unwrap()
-        .contains("payload binding acceptance"));
+        .contains("single-threaded headless router"));
 }
 
 #[cfg(unix)]

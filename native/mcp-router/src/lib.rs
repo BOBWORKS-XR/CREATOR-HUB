@@ -3,12 +3,14 @@ use fs2::FileExt;
 use minisign_verify::{PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(windows)]
+use std::process::{Command, Stdio};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
+    process::ExitStatus,
 };
 
 const MAX_DESCRIPTOR: u64 = 32 * 1024;
@@ -16,6 +18,14 @@ const MAX_RECEIPT: u64 = 2048;
 const MAX_PAYLOAD: u64 = 128 * 1024 * 1024;
 const PRODUCT: &str = "com.creatorworks.hub.mcp-runtime";
 const KEY: &str = include_str!("../../../src-tauri/src/catalog-key.pub");
+
+mod bootstrap;
+pub use bootstrap::Router;
+
+#[cfg(any(target_os = "macos", test))]
+mod macho_identity;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix_exec;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +67,9 @@ pub struct Runtime {
     pub generation: String,
     // Windows denies write/delete sharing for the lifetime of the child.
     _payload: Vec<File>,
+    // Unix execution consumes these exact verified bytes, not reopened paths.
+    #[cfg(unix)]
+    _snapshots: BTreeMap<String, Vec<u8>>,
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -284,14 +297,22 @@ impl Store {
         Ok(value)
     }
 
+    pub fn verify_descriptor(&self, bytes: &[u8], signature: &[u8]) -> Result<Descriptor, String> {
+        self.descriptor(bytes, signature)
+    }
+
     fn payload(&self, descriptor: &Descriptor) -> Result<Runtime, String> {
         let generation = generation(&descriptor.module)?;
         let root = self.generations.join(&generation);
         let mut handles = Vec::new();
+        #[cfg(unix)]
+        let mut snapshots = BTreeMap::new();
         for (name, hash) in &descriptor.module.files {
             let mut file = open_payload(&root.join(name))?;
             let mut hasher = Sha256::new();
             let mut buffer = [0; 64 * 1024];
+            #[cfg(unix)]
+            let mut contents = Vec::new();
             loop {
                 let count = file
                     .read(&mut buffer)
@@ -300,6 +321,15 @@ impl Store {
                     break;
                 }
                 hasher.update(&buffer[..count]);
+                #[cfg(unix)]
+                {
+                    if contents.len() as u64 + count as u64 > MAX_PAYLOAD {
+                        return Err(
+                            "MCP runtime grew beyond its size limit during verification.".into(),
+                        );
+                    }
+                    contents.extend_from_slice(&buffer[..count]);
+                }
             }
             if format!("{:x}", hasher.finalize()) != *hash {
                 return Err(format!(
@@ -307,6 +337,8 @@ impl Store {
                 ));
             }
             handles.push(file);
+            #[cfg(unix)]
+            snapshots.insert(name.clone(), contents);
         }
         Ok(Runtime {
             node: root.join(format!(
@@ -317,6 +349,8 @@ impl Store {
             hub_version: descriptor.hub_version.clone(),
             generation,
             _payload: handles,
+            #[cfg(unix)]
+            _snapshots: snapshots,
         })
     }
 
@@ -499,43 +533,50 @@ impl Store {
 
 impl Runtime {
     /// Only the single-connection headless executable may call this method.
-    /// Its Windows process containment lives until that executable exits.
+    /// Unix requires a single-threaded caller before its private supervisor fork.
+    /// Never run this adapter inside the Hub GUI.
     pub fn run(self) -> Result<ExitStatus, String> {
-        // Unix file locks do not prevent a non-cooperating writer replacing a
-        // verified path. Do not mistake them for the Windows payload binding.
-        if !cfg!(windows) {
-            return Err("Managed MCP routing on this platform still needs native payload binding acceptance.".into());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            unix_exec::run(self)
         }
-        #[cfg(windows)]
-        let job = child_job::Job::contain_router()?;
-        let mut command = Command::new(&self.node);
-        command
-            .arg(&self.server)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .env_remove("NODE_OPTIONS")
-            .env_remove("NODE_PATH");
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+        {
+            Err("Managed MCP execution is unsupported on this platform.".into())
+        }
         #[cfg(windows)]
         {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|_| "Cannot start verified MCP runtime.")?;
-        #[cfg(windows)]
-        if !job.contains(&child) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(
+            #[cfg(windows)]
+            let job = child_job::Job::contain_router()?;
+            let mut command = Command::new(&self.node);
+            command
+                .arg(&self.server)
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .env_remove("NODE_OPTIONS")
+                .env_remove("NODE_PATH");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x08000000);
+            }
+            let mut child = command
+                .spawn()
+                .map_err(|_| "Cannot start verified MCP runtime.")?;
+            #[cfg(windows)]
+            if !job.contains(&child) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(
                 "MCP runtime did not inherit its owned process group. Nothing was left running."
                     .into(),
             );
+            }
+            child
+                .wait()
+                .map_err(|_| "Cannot wait for the MCP runtime; check Creator Hub.".into())
         }
-        child
-            .wait()
-            .map_err(|_| "Cannot wait for the MCP runtime; check Creator Hub.".into())
     }
 }
 
