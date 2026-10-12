@@ -2,6 +2,9 @@
 #[allow(dead_code)]
 #[path = "../src/catalog.rs"]
 mod catalog;
+#[path = "../src/update_target.rs"]
+#[allow(dead_code)]
+mod update_target;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = catalog::client()?;

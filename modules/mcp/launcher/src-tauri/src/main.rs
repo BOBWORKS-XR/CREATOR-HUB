@@ -4,6 +4,7 @@
 mod claude_desktop;
 mod client_migration;
 mod client_ownership;
+mod client_recovery_ui;
 mod community;
 mod community_api;
 mod community_project;
@@ -21,6 +22,7 @@ mod hosted_payload;
 mod hub;
 mod jsonc;
 mod lifecycle;
+mod managed_client;
 #[path = "../../../../../native/plugins_retirement.rs"]
 mod plugins_retirement;
 mod settings_backup;
@@ -160,6 +162,7 @@ struct OnboardingStatus {
     clients: Vec<ClientStatus>,
     project: Option<ProjectSetupStatus>,
     unity_cli: unity_cli::Status,
+    managed_routing: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1089,7 +1092,7 @@ fn build_claude_mcp_config(
 ) -> Result<serde_json::Value, String> {
     client_ownership::guard_json(
         &config,
-        Some(&serde_json::json!({"command":node_command,"args":[mcp_server_path]})),
+        Some(&serde_json::json!({"command":node_command,"args":managed_client::arguments(mcp_server_path)})),
         false,
     )
     .map_err(|error| format!("Claude Code: {error}"))?;
@@ -1118,11 +1121,14 @@ fn build_claude_mcp_config(
 
     config["mcpServers"][MCP_CLIENT_ID] = serde_json::json!({
         "command": node_command,
-        "args": [mcp_server_path],
+        "args": managed_client::arguments(mcp_server_path),
         "env": env
     });
     Ok(config)
 }
+
+#[path = "client_setup_write.rs"]
+mod client_setup_write;
 
 /// Update Claude Code MCP configuration for a channel
 #[tauri::command]
@@ -1138,10 +1144,9 @@ fn update_claude_mcp_config(
         .to_string();
     let tool_groups = normalize_tool_groups(&tool_groups)?;
 
-    let config: serde_json::Value = if config_path.exists() {
-        let content = fs::read_to_string(&config_path)
-            .map_err(|e| format!("Failed to read Claude config: {}", e))?;
-        serde_json::from_str(&content).map_err(|e| {
+    let before = client_setup_write::snapshot(&config_path)?;
+    let config: serde_json::Value = if let Some(content) = before.as_deref() {
+        serde_json::from_str(content).map_err(|e| {
             format!(
                 "Failed to parse Claude config; refusing to overwrite it: {}",
                 e
@@ -1151,7 +1156,7 @@ fn update_claude_mcp_config(
         serde_json::json!({})
     };
 
-    let node_command = resolve_node_command(&app)?.0.to_string_lossy().to_string();
+    let (node_command, mcp_server_path) = managed_client::target(&app, &mcp_server_path)?;
     let config = build_claude_mcp_config(
         config,
         &channel,
@@ -1161,11 +1166,15 @@ fn update_claude_mcp_config(
     )?;
 
     let config = unity_cli::augment_json(config, &channel.unity_project_path, false)?;
-    settings_backup::retain(&config_path)?;
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Claude config: {}", e))?;
 
-    atomic_write(&config_path, &content)
+    client_setup_write::commit(
+        "Claude Code",
+        &config_path,
+        before.as_deref().map(str::as_bytes),
+        &content,
+    )
 }
 
 fn desktop_entry(
@@ -1174,9 +1183,13 @@ fn desktop_entry(
     server: &str,
     groups: &str,
 ) -> Result<serde_json::Value, String> {
+    let physical = validate_mcp_server_path(server)?
+        .to_string_lossy()
+        .into_owned();
+    let (command, server) = managed_client::target(app, &physical)?;
     Ok(serde_json::json!({
-        "command": resolve_node_command(app)?.0,
-        "args": [validate_mcp_server_path(server)?],
+        "command": command,
+        "args": managed_client::arguments(&server),
         "env": {"UNITY_PROJECT_PATH": channel.unity_project_path,
             TOOL_GROUPS_ENV: normalize_tool_groups(groups)?, "CREATOR_WORKS_CONFIG_OWNER": "creator-hub-v1"}
     }))
@@ -1246,10 +1259,14 @@ fn build_codex_mcp_config(
         "command = \"{}\"\n",
         escape_toml_string(&node_command.replace("\\", "/"))
     ));
-    content.push_str(&format!(
-        "args = [\"{}\"]\n",
-        escape_toml_string(mcp_server_path)
-    ));
+    if mcp_server_path.is_empty() {
+        content.push_str("args = []\n");
+    } else {
+        content.push_str(&format!(
+            "args = [\"{}\"]\n",
+            escape_toml_string(mcp_server_path)
+        ));
+    }
     content.push_str("startup_timeout_sec = 20\n");
     content.push_str("tool_timeout_sec = 600\n");
     content.push_str(&format!("\n[mcp_servers.{}.env]\n", MCP_CLIENT_ID));
@@ -1355,16 +1372,12 @@ fn update_codex_mcp_config(
             .map_err(|e| format!("Failed to create Codex config directory: {}", e))?;
     }
 
-    let existing = if config_path.exists() {
-        fs::read_to_string(&config_path)
-            .map_err(|e| format!("Failed to read Codex config: {}", e))?
-    } else {
-        String::new()
-    };
+    let before = client_setup_write::snapshot(&config_path)?;
+    let existing = before.as_deref().unwrap_or("");
 
-    let node_command = resolve_node_command(&app)?.0.to_string_lossy().to_string();
+    let (node_command, mcp_server_path) = managed_client::target(&app, &mcp_server_path)?;
     let content = build_codex_mcp_config(
-        &existing,
+        existing,
         &channel,
         &node_command,
         &mcp_server_path,
@@ -1372,8 +1385,12 @@ fn update_codex_mcp_config(
     )?;
 
     let content = unity_cli::augment_toml(content, &channel.unity_project_path)?;
-    settings_backup::retain(&config_path)?;
-    atomic_write(&config_path, &content)
+    client_setup_write::commit(
+        "Codex",
+        &config_path,
+        before.as_deref().map(str::as_bytes),
+        &content,
+    )
 }
 
 /// Remove Creator Works MCP and its former Banter entry from Codex config.
@@ -1426,7 +1443,7 @@ fn build_antigravity_mcp_config(
 ) -> Result<serde_json::Value, String> {
     client_ownership::guard_json(
         &config,
-        Some(&serde_json::json!({"command":node_command,"args":[mcp_server_path]})),
+        Some(&serde_json::json!({"command":node_command,"args":managed_client::arguments(mcp_server_path)})),
         false,
     )
     .map_err(|error| format!("Antigravity: {error}"))?;
@@ -1453,7 +1470,7 @@ fn build_antigravity_mcp_config(
     }
     config["mcpServers"][MCP_CLIENT_ID] = serde_json::json!({
         "command": node_command,
-        "args": [mcp_server_path],
+        "args": managed_client::arguments(mcp_server_path),
         "env": env
     });
     Ok(config)
@@ -1477,13 +1494,12 @@ fn update_antigravity_mcp_config(
             .map_err(|e| format!("Failed to create Antigravity config directory: {}", e))?;
     }
 
-    let config: serde_json::Value = if config_path.exists() {
-        let content = fs::read_to_string(&config_path)
-            .map_err(|e| format!("Failed to read Antigravity config: {}", e))?;
+    let before = client_setup_write::snapshot(&config_path)?;
+    let config: serde_json::Value = if let Some(content) = before.as_deref() {
         if content.trim().is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::from_str(&content).map_err(|e| {
+            serde_json::from_str(content).map_err(|e| {
                 format!(
                     "Failed to parse Antigravity config; refusing to overwrite it: {}",
                     e
@@ -1494,7 +1510,7 @@ fn update_antigravity_mcp_config(
         serde_json::json!({})
     };
 
-    let node_command = resolve_node_command(&app)?.0.to_string_lossy().to_string();
+    let (node_command, mcp_server_path) = managed_client::target(&app, &mcp_server_path)?;
     let config = build_antigravity_mcp_config(
         config,
         &channel,
@@ -1504,11 +1520,15 @@ fn update_antigravity_mcp_config(
     )?;
 
     let config = unity_cli::augment_json(config, &channel.unity_project_path, false)?;
-    settings_backup::retain(&config_path)?;
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Antigravity config: {}", e))?;
 
-    atomic_write(&config_path, &content)
+    client_setup_write::commit(
+        "Antigravity",
+        &config_path,
+        before.as_deref().map(str::as_bytes),
+        &content,
+    )
 }
 
 #[tauri::command]
@@ -1571,7 +1591,7 @@ fn build_opencode_mcp_config(
 ) -> Result<serde_json::Value, String> {
     client_ownership::guard_json(
         &config,
-        Some(&serde_json::json!({"command":[node_command,mcp_server_path]})),
+        Some(&serde_json::json!({"command":std::iter::once(node_command).chain(managed_client::arguments(mcp_server_path)).collect::<Vec<_>>()})),
         true,
     )
     .map_err(|error| format!("OpenCode: {error}"))?;
@@ -1598,7 +1618,7 @@ fn build_opencode_mcp_config(
     }
     config["mcp"][MCP_CLIENT_ID] = serde_json::json!({
         "type": "local",
-        "command": [node_command, mcp_server_path],
+        "command": std::iter::once(node_command).chain(managed_client::arguments(mcp_server_path)).collect::<Vec<_>>(),
         "enabled": true,
         "environment": environment,
     });
@@ -1623,16 +1643,11 @@ fn update_opencode_mcp_config(
             .map_err(|e| format!("Failed to create OpenCode config directory: {}", e))?;
     }
 
-    let content = if config_path.exists() {
-        let content = fs::read_to_string(&config_path)
-            .map_err(|e| format!("Failed to read OpenCode config: {}", e))?;
-        parse_opencode_config(&content)?;
-        content
-    } else {
-        "{}".to_string()
-    };
+    let before = client_setup_write::snapshot(&config_path)?;
+    let content = before.as_deref().unwrap_or("{}");
+    parse_opencode_config(content)?;
 
-    let node_command = resolve_node_command(&app)?.0.to_string_lossy().to_string();
+    let (node_command, mcp_server_path) = managed_client::target(&app, &mcp_server_path)?;
     let config = build_opencode_mcp_config(
         serde_json::json!({ "mcp": {} }),
         &channel,
@@ -1641,9 +1656,9 @@ fn update_opencode_mcp_config(
         &tool_groups,
     )?;
     let entry = config["mcp"][MCP_CLIENT_ID].clone();
-    client_ownership::guard_json(&parse_opencode_config(&content)?, Some(&entry), true)?;
+    client_ownership::guard_json(&parse_opencode_config(content)?, Some(&entry), true)?;
     let content =
-        jsonc::update_managed_entry(&content, "mcp", MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID, &entry)
+        jsonc::update_managed_entry(content, "mcp", MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID, &entry)
             .map_err(|e| format!("Failed to update OpenCode config: {}", e))?;
     let content = if unity_cli::mode()?.is_some() {
         let merged = unity_cli::augment_json(
@@ -1670,8 +1685,12 @@ fn update_opencode_mcp_config(
     } else {
         content
     };
-    settings_backup::retain(&config_path)?;
-    atomic_write(&config_path, &content)
+    client_setup_write::commit(
+        "OpenCode",
+        &config_path,
+        before.as_deref().map(str::as_bytes),
+        &content,
+    )
 }
 
 #[tauri::command]
@@ -1770,14 +1789,41 @@ fn unity_extension_status(source: &Path, project_path: &Path) -> UnityExtensionS
     UnityExtensionStatus { installed, current }
 }
 
+fn bridge_payload(app: &tauri::AppHandle) -> Result<(Vec<u8>, Vec<u8>), String> {
+    if let Some(root) = app.try_state::<hosted_payload::Root>() {
+        return Ok((
+            root.read_verified("unity-extension/Editor/BanterMCPBridge.cs")?,
+            root.read_verified("unity-extension/Editor/CreatorWorksMCPLogo.png")?,
+        ));
+    }
+    let root = resolve_mcp_root(app)?;
+    Ok((
+        fs::read(unity_bridge_path(&root)).map_err(|_| "Unity bridge source could not be read.")?,
+        fs::read(unity_bridge_logo_path(&root))
+            .map_err(|_| "Unity bridge logo could not be read.")?,
+    ))
+}
+
+fn extension_status_bytes(bridge: &[u8], logo: &[u8], project: &Path) -> UnityExtensionStatus {
+    let destination = unity_bridge_destination(project);
+    let installed = destination.is_file();
+    UnityExtensionStatus {
+        installed,
+        current: installed
+            && fs::read(&destination).is_ok_and(|bytes| bytes == bridge)
+            && fs::read(unity_bridge_logo_destination(project)).is_ok_and(|bytes| bytes == logo),
+    }
+}
+
 #[tauri::command]
 fn get_unity_extension_status(
     app: tauri::AppHandle,
     unity_project_path: String,
 ) -> Result<UnityExtensionStatus, String> {
-    let source = unity_bridge_path(&resolve_mcp_root(&app)?);
-    Ok(unity_extension_status(
-        &source,
+    let (bridge, logo) = bridge_payload(&app)?;
+    Ok(extension_status_bytes(
+        &bridge,
+        &logo,
         Path::new(&unity_project_path),
     ))
 }
@@ -1788,9 +1834,7 @@ fn install_unity_extension(
     app: tauri::AppHandle,
     unity_project_path: String,
 ) -> Result<(), String> {
-    let root = resolve_mcp_root(&app)?;
-    let source = unity_bridge_path(&root);
-    let logo_source = unity_bridge_logo_path(&root);
+    let (bridge, logo) = bridge_payload(&app)?;
 
     let dest_dir = PathBuf::from(&unity_project_path)
         .join("Assets")
@@ -1798,19 +1842,6 @@ fn install_unity_extension(
 
     let dest = dest_dir.join(UNITY_BRIDGE_FILE_NAME);
     let logo_dest = dest_dir.join(UNITY_BRIDGE_LOGO_FILE_NAME);
-
-    if !source.exists() {
-        return Err(format!(
-            "Unity bridge source was not found: {}",
-            source.display()
-        ));
-    }
-    if !logo_source.exists() {
-        return Err(format!(
-            "Unity bridge logo was not found: {}",
-            logo_source.display()
-        ));
-    }
 
     if !PathBuf::from(&unity_project_path).join("Assets").is_dir() {
         return Err(format!(
@@ -1836,9 +1867,9 @@ fn install_unity_extension(
     let temporary_dest = dest_dir.join(format!(".BanterMCPBridge-{}.tmp", uuid::Uuid::new_v4()));
     let temporary_logo_dest =
         dest_dir.join(format!(".CreatorWorksMCPLogo-{}.tmp", uuid::Uuid::new_v4()));
-    fs::copy(&source, &temporary_dest)
+    fs::write(&temporary_dest, &bridge)
         .map_err(|e| format!("Failed to stage Unity bridge: {}", e))?;
-    if let Err(error) = fs::copy(&logo_source, &temporary_logo_dest) {
+    if let Err(error) = fs::write(&temporary_logo_dest, &logo) {
         let _ = fs::remove_file(&temporary_dest);
         return Err(format!("Failed to stage Unity bridge logo: {}", error));
     }
@@ -1860,7 +1891,7 @@ fn update_configured_unity_extensions(
     app: tauri::AppHandle,
 ) -> Result<BridgeUpdateSummary, String> {
     let config = load_config(app.clone())?;
-    let source = unity_bridge_path(&resolve_mcp_root(&app)?);
+    let (bridge, logo) = bridge_payload(&app)?;
     let mut summary = BridgeUpdateSummary {
         checked: 0,
         updated: 0,
@@ -1876,7 +1907,7 @@ fn update_configured_unity_extensions(
         }
 
         summary.checked += 1;
-        if unity_extension_status(&source, &project_path).current {
+        if extension_status_bytes(&bridge, &logo, &project_path).current {
             summary.current += 1;
             continue;
         }
@@ -2247,9 +2278,19 @@ fn get_onboarding_status(
     app: tauri::AppHandle,
     unity_project_path: Option<String>,
 ) -> OnboardingStatus {
-    let source_bridge = resolve_mcp_root(&app)
-        .ok()
-        .map(|root| unity_bridge_path(&root));
+    let hosted = app.try_state::<hosted_payload::Root>().is_some();
+    let source_bridge = if hosted {
+        None
+    } else {
+        resolve_mcp_root(&app)
+            .ok()
+            .map(|root| unity_bridge_path(&root))
+    };
+    let snapshots = if hosted {
+        bridge_payload(&app).ok()
+    } else {
+        None
+    };
     let runtime = match resolve_node_command(&app) {
         Ok((command, bundled)) => RuntimeStatus {
             ready: true,
@@ -2271,11 +2312,19 @@ fn get_onboarding_status(
 
     OnboardingStatus {
         runtime,
+        managed_routing: app.try_state::<managed_client::ManagedClient>().is_some(),
         clients: client_statuses(),
         unity_cli: unity_cli::status(unity_project_path.as_deref()),
         project: unity_project_path
             .filter(|path| !path.trim().is_empty())
-            .map(|path| project_setup_status(source_bridge.as_deref(), Path::new(&path))),
+            .map(|path| {
+                let mut status = project_setup_status(source_bridge.as_deref(), Path::new(&path));
+                if let Some((bridge, logo)) = &snapshots {
+                    status.bridge_current =
+                        extension_status_bytes(bridge, logo, Path::new(&path)).current;
+                }
+                status
+            }),
     }
 }
 
@@ -2296,8 +2345,10 @@ fn one_click_setup(
     unity_cli_consent: Option<String>,
 ) -> Result<SetupResult, String> {
     let candidate = channel_for_project(Path::new(&unity_project_path))?;
-    let mcp_server_path = default_mcp_server_path(&app)?.to_string_lossy().to_string();
-    let runtime_command = resolve_node_command(&app)?.0.to_string_lossy().to_string();
+    let physical_server = default_mcp_server_path(&app)?
+        .to_string_lossy()
+        .into_owned();
+    let (runtime_command, mcp_server_path) = managed_client::target(&app, &physical_server)?;
     let tool_groups = normalize_tool_groups(&tool_groups)?;
 
     let configure_desktop = configure_claude_desktop.unwrap_or(false);
@@ -2368,7 +2419,7 @@ fn one_click_setup(
         let (_, existing) = claude_desktop::read(&path)?;
         let built = claude_desktop::merge(
             existing,
-            desktop_entry(&app, &candidate, &mcp_server_path, &tool_groups)?,
+            desktop_entry(&app, &candidate, &physical_server, &tool_groups)?,
         )?;
         if cli_mode.is_some() {
             unity_cli::merge_json(built, cli_entry.clone(), false)?;
@@ -2403,7 +2454,7 @@ fn one_click_setup(
     };
 
     config.active_channel_id = Some(channel.id.clone());
-    config.mcp_server_path = mcp_server_path.clone();
+    config.mcp_server_path = physical_server.clone();
     config.auto_start = true;
     config.enable_custom_scripts = enable_custom_scripts;
     config.tool_groups = tool_groups.clone();
@@ -2429,7 +2480,7 @@ fn one_click_setup(
         update_codex_mcp_config(
             app.clone(),
             channel.clone(),
-            mcp_server_path.clone(),
+            physical_server.clone(),
             tool_groups.clone(),
         )?;
     }
@@ -2437,7 +2488,7 @@ fn one_click_setup(
         update_claude_mcp_config(
             app.clone(),
             channel.clone(),
-            mcp_server_path.clone(),
+            physical_server.clone(),
             tool_groups.clone(),
         )?;
     }
@@ -2445,7 +2496,7 @@ fn one_click_setup(
         update_antigravity_mcp_config(
             app.clone(),
             channel.clone(),
-            mcp_server_path.clone(),
+            physical_server.clone(),
             tool_groups.clone(),
         )?;
     }
@@ -2453,12 +2504,12 @@ fn one_click_setup(
         update_claude_desktop_mcp_config(
             app.clone(),
             channel.clone(),
-            mcp_server_path.clone(),
+            physical_server.clone(),
             tool_groups.clone(),
         )?;
     }
     if configure_opencode {
-        update_opencode_mcp_config(app, channel.clone(), mcp_server_path, tool_groups)?;
+        update_opencode_mcp_config(app, channel.clone(), physical_server, tool_groups)?;
     }
 
     Ok(SetupResult {
@@ -2483,7 +2534,6 @@ fn review_existing_client_connection(
     app: tauri::AppHandle,
     client: String,
 ) -> Result<serde_json::Value, String> {
-    use client_migration::Format;
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     if !cfg!(windows) || option_env!("CREATOR_HUB_INTERNAL_MODULE") != Some("1") {
         return Err(
@@ -2491,28 +2541,37 @@ fn review_existing_client_connection(
                 .into(),
         );
     }
-    let (name, path, format) = match client.as_str() {
-        "codex" => ("Codex", get_codex_config_path(), Format::Codex),
-        "claude" => ("Claude Code", get_claude_config_path(), Format::Json),
-        "claudeDesktop" => ("Claude Desktop", claude_desktop::path()?, Format::Json),
-        "antigravity" => ("Antigravity", get_antigravity_config_path(), Format::Json),
-        "opencode" => ("OpenCode", get_opencode_config_path(), Format::OpenCode),
-        _ => return Err("Unknown client. Nothing was changed.".into()),
-    };
+    let (name, path, format) = client_target(&client)?;
     let (node, bundled) = resolve_node_command(&app)?;
     if !bundled {
         return Err("A verified private runtime is required. No client was changed.".into());
     }
     let server = default_mcp_server_path(&app)?;
-    let Some(plan) = client_migration::Plan::review(name, &path, format, &node, &server)
-        .map_err(|error| format!("{name}: {error}"))?
-    else {
+    let plan = if let Some(managed) = app.try_state::<managed_client::ManagedClient>() {
+        client_migration::Plan::review_router(name, &path, format, &managed.0.command)
+    } else {
+        client_migration::Plan::review(name, &path, format, &node, &server)
+    };
+    let Some(plan) = plan.map_err(|error| format!("{name}: {error}"))? else {
         return Ok(serde_json::json!({"client":client,"status":"unchanged"}));
+    };
+    let target_description = if let Some(managed) = app.try_state::<managed_client::ManagedClient>()
+    {
+        format!(
+            "Managed router: {}\nArguments: none. Signed activation selects the retained runtime.",
+            managed.0.command.display()
+        )
+    } else {
+        format!(
+            "New Node: {}\nNew server: {}",
+            node.display(),
+            server.display()
+        )
     };
     let backup = plan.apply(|review| {
         app.dialog().message(format!(
-            "Move this existing {} connection to the running Hub's retained runtime?\n\nSettings: {}\nOld Node: {}\nOld server: {}\n\nNew Node: {}\nNew server: {}\n\nExisting project (kept): {}\n\nThe old entry has no Hub ownership marker; its publisher is not verified by its name. Continue only if this is your Creator Works connection. An exact local backup is kept. Other servers, project selection and client options are preserved. No old app is uninstalled and no client or Unity process is stopped.",
-            review.client, path.display(), review.old_node, review.old_server, node.display(), server.display(), review.project.as_deref().unwrap_or("Not specified")
+            "Move this existing {} connection to the running Hub's managed runtime?\n\nSettings: {}\nOld command: {}\nOld server: {}\n\n{}\n\nExisting project (kept): {}\n\nIts publisher is not verified by its name or ownership marker. Continue only if this is your Creator Works connection. An exact local backup is kept. Other servers, project selection and client options are preserved. No old app is uninstalled and no client or Unity process is stopped.",
+            review.client, path.display(), review.old_node, review.old_server, target_description, review.project.as_deref().unwrap_or("Not specified")
         )).title("Review existing MCP connection").kind(MessageDialogKind::Warning)
             .buttons(MessageDialogButtons::OkCancelCustom("Move connection".into(), "Keep existing".into())).blocking_show()
     }).map_err(|error| format!("{name}: {error}"))?;
@@ -2520,6 +2579,83 @@ fn review_existing_client_connection(
         Some(path) => serde_json::json!({"client":client,"status":"migrated","backupPath":path}),
         None => serde_json::json!({"client":client,"status":"cancelled"}),
     })
+}
+
+fn client_target(
+    client: &str,
+) -> Result<(&'static str, PathBuf, client_migration::Format), String> {
+    use client_migration::Format;
+    Ok(match client {
+        "codex" => ("Codex", get_codex_config_path(), Format::Codex),
+        "claude" => ("Claude Code", get_claude_config_path(), Format::Json),
+        "claudeDesktop" => ("Claude Desktop", claude_desktop::path()?, Format::Json),
+        "antigravity" => ("Antigravity", get_antigravity_config_path(), Format::Json),
+        "opencode" => ("OpenCode", get_opencode_config_path(), Format::OpenCode),
+        _ => return Err("Unknown client. Nothing was changed.".into()),
+    })
+}
+
+#[tauri::command]
+fn review_existing_client_connections(
+    app: tauri::AppHandle,
+    clients: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    if !cfg!(windows) || option_env!("CREATOR_HUB_INTERNAL_MODULE") != Some("1") {
+        return Err("Managed batch migration is not available in this app.".into());
+    }
+    if clients.is_empty()
+        || clients.len() > 5
+        || clients
+            .iter()
+            .enumerate()
+            .any(|(index, id)| clients[..index].contains(id))
+    {
+        return Err("Select distinct supported clients. No settings were changed.".into());
+    }
+    let managed = app
+        .try_state::<managed_client::ManagedClient>()
+        .ok_or("A verified managed router is required for batch migration.")?;
+    let mut plans = Vec::new();
+    for client in &clients {
+        let (name, path, format) = client_target(client)?;
+        client_recovery_ui::require_no_pending_adjacent(&path)?;
+        if let Some(plan) =
+            client_migration::Plan::review_router(name, &path, format, &managed.0.command)?
+        {
+            plans.push(plan);
+        }
+    }
+    if plans.is_empty() {
+        return Ok(serde_json::json!({"status":"unchanged", "count":0}));
+    }
+    let report = client_migration::Plan::apply_reviewed(
+        &plans,
+        &client_recovery_ui::central_root()?,
+        |plans| {
+            let details = plans
+                .iter()
+                .map(|plan| {
+                    format!(
+                        "{}\nOld command: {}\nOld server: {}\nProject kept: {}",
+                        plan.client,
+                        plan.old_node,
+                        plan.old_server,
+                        plan.project.as_deref().unwrap_or("Not specified")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            app.dialog().message(format!("Move these existing connections to Creator Hub?\n\n{details}\n\nManaged router: {}\nArguments: none. Signed activation selects the retained runtime.\n\nNames and ownership markers are not publisher verification. Continue only for your Creator Works connections. Exact local before/after images and backups are retained. Client options, other servers and selected projects are preserved. Interrupted changes require recovery review; no blind rollback is attempted. No app is uninstalled or stopped.", managed.0.command.display()))
+            .title("Review existing MCP connections").kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom("Move selected connections".into(), "Keep existing".into())).blocking_show()
+        },
+    )?;
+    match report {
+        None => Ok(serde_json::json!({"status":"cancelled", "count":0})),
+        Some(report) if report.completed => Ok(serde_json::json!({"status":"migrated", "count":report.files.len(), "journal":report.journal})),
+        Some(report) => Err(format!("Migration stopped for recovery review at {}. All retained files were kept; no automatic retry or restoration.", report.journal.display())),
+    }
 }
 
 #[tauri::command]
@@ -2680,6 +2816,9 @@ fn main() {
                 set_project_feedback_settings,
                 one_click_setup,
                 review_existing_client_connection,
+                review_existing_client_connections,
+                client_recovery_ui::pending_client_recovery,
+                client_recovery_ui::recover_client_connection,
             ];
             handler(invoke)
         })
@@ -3089,6 +3228,45 @@ mod tests {
             Some("new-node")
         );
         assert_eq!(client_ownership::guard_toml(&updated, None), Ok(true));
+    }
+
+    #[test]
+    fn routed_client_builders_do_not_serialize_an_empty_server_argument() {
+        let channel = codex_fixture_channel();
+        let command = if cfg!(windows) {
+            "C:/verified/creator-hub-mcp-router.exe"
+        } else {
+            "/verified/creator-hub-mcp-router"
+        };
+        let config =
+            build_claude_mcp_config(serde_json::json!({}), &channel, command, "", "core").unwrap();
+        assert_eq!(
+            config["mcpServers"][MCP_CLIENT_ID]["args"],
+            serde_json::json!([])
+        );
+        assert!(claude_desktop::owned(&config["mcpServers"][MCP_CLIENT_ID]));
+        assert!(client_ownership::guard_json(&config, None, false).unwrap());
+        let updated = build_claude_mcp_config(config, &channel, command, "", "read").unwrap();
+        assert_eq!(
+            updated["mcpServers"][MCP_CLIENT_ID]["args"],
+            serde_json::json!([])
+        );
+        let config =
+            build_codex_mcp_config("model='preserve'\n", &channel, command, "", "core").unwrap();
+        assert!(client_ownership::guard_toml(&config, None).unwrap());
+        let parsed = config.parse::<toml_edit::Document>().unwrap();
+        assert!(parsed["mcp_servers"][MCP_CLIENT_ID]["args"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let config =
+            build_opencode_mcp_config(serde_json::json!({}), &channel, command, "", "core")
+                .unwrap();
+        assert_eq!(
+            config["mcp"][MCP_CLIENT_ID]["command"],
+            serde_json::json!([command])
+        );
+        assert!(client_ownership::guard_json(&config, None, true).unwrap());
     }
 
     #[test]

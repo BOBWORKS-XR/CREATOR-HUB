@@ -462,10 +462,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "creator-hub-mcp-router"
+version = "0.1.0"
+dependencies = [
+ "dirs 6.0.0",
+ "fs2",
+ "libc",
+ "minisign-verify",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "creator-works-mcp-launcher"
 version = "2.7.7"
 dependencies = [
  "base64 0.22.1",
+ "creator-hub-mcp-router",
  "dirs 5.0.1",
  "flate2",
  "fs2",
@@ -1990,6 +2007,12 @@ name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "minisign-verify"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22f9645cb765ea72b8111f36c522475d2daa0d22c957a9826437e97534bc4e9e"
 
 [[package]]
 name = "miniz_oxide"

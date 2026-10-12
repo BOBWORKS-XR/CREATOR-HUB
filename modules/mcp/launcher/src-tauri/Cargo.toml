@@ -11,6 +11,7 @@ tauri-build = { version = "2", features = [] }
 sha2 = "0.10"
 
 [dependencies]
+creator-hub-mcp-router = { path = "../../../../native/mcp-router" }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
@@ -40,3 +41,5 @@ libc = "0.2"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# Disposable native acceptance only. Never enable in a production package yet.
+experimental-unix-hosting = []

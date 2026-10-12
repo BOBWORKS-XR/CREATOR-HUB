@@ -67,11 +67,19 @@ async function open(page, options = {}) {
             case 'review_existing_client_connection':
               if (options.migrationError) throw 'Codex: Client settings changed after review. Nothing was changed.';
               return { client: args.args.client, status: options.cancelMigration ? 'cancelled' : (args.args.client === 'codex' ? 'migrated' : 'unchanged') };
+            case 'review_existing_client_connections':
+              if (options.migrationError) throw 'Migration stopped for recovery review. Retained files were kept.';
+              return { status: options.cancelMigration ? 'cancelled' : 'migrated', count: options.cancelMigration ? 0 : args.args.clients.length };
+            case 'pending_client_recovery': return options.recoveryRecords || [];
+            case 'recover_client_connection':
+              if (options.cancelRecovery) return {completed:false};
+              options.recoveryRecords = [];
+              return {completed:true};
             case 'discover_unity_projects': return channels.map(channel => ({name:channel.name,path:channel.unity_project_path}));
             case 'get_project_sdk_profile': return profile;
             case 'get_unity_extension_status': return {current:true,installed:true};
             case 'get_project_feedback_settings': return {enabled:false,usageCheckIns:false};
-            case 'get_onboarding_status': return {runtime:{ready:true,bundled:true}, project:{valid:true,
+            case 'get_onboarding_status': return {managedRouting:Boolean(options.managedRouting),runtime:{ready:true,bundled:true}, project:{valid:true,
               bridgeInstalled:true,bridgeCurrent:true,stateStatus:'fresh',sdkProfile:profile},
               clients:['codex','claude','claudeDesktop','antigravity','opencode'].map(id => ({id,detected:true,configured:true,supported:true}))};
             case 'update_configured_unity_extensions':
@@ -660,6 +668,40 @@ test('read-only hosted MCP cannot request client migration', async ({ page }) =>
   await expect(mcp.locator('#reviewExistingConnectionsBtn')).toBeDisabled();
   const error = await mcp.locator('body').evaluate(() => window.CreatorRuntime.invoke('review_existing_client_connection', { client: 'codex' }).catch(String));
   expect(error).toContain('read-only');
+});
+
+for (const cancelMigration of [false, true]) test(`managed migration reviews a single selected-client batch, cancelled=${cancelMigration}`, async ({ page }) => {
+  await open(page, { builtIn: true, writableMcp: true, managedRouting: true, cancelMigration });
+  const mcp = await openMcp(page, true);
+  for (const id of ['connectClaude', 'connectAntigravity', 'connectOpenCode']) await mcp.locator('#' + id).uncheck();
+  await mcp.locator('#reviewExistingConnectionsBtn').click();
+  await expect(mcp.locator('#setupMessage')).toContainText(cancelMigration ? 'Review cancelled. No selected connection was moved' : '2 connection(s) moved');
+  const calls = await page.evaluate(() => hostCalls.filter(c => c.args?.command === 'review_existing_client_connections'));
+  expect(calls).toHaveLength(1);
+  expect(calls[0].args.args.clients).toEqual(['codex','claudeDesktop']);
+  expect(await page.evaluate(() => hostCalls.some(c => ['one_click_setup','review_existing_client_connection'].includes(c.args?.command)))).toBe(false);
+});
+
+test('interrupted batch is visible and never resumes until the user requests native review', async ({ page }) => {
+  const record = {clients:['codex','claude'],clientName:'Selected AI clients',central:true,operation:'a'.repeat(64),canResume:true,message:'Previous migration: Ready. Review is required.'};
+  await open(page, { builtIn: true, writableMcp: true, recoveryRecords:[record] });
+  const mcp = await openMcp(page, true);
+  await expect(mcp.locator('#migrationRecovery')).toBeVisible();
+  expect(await page.evaluate(() => hostCalls.some(c => c.args?.command === 'recover_client_connection'))).toBe(false);
+  await mcp.locator('#recoverConnectionsBtn').click();
+  await expect(mcp.locator('#migrationRecovery')).toBeHidden();
+  const calls = await page.evaluate(() => hostCalls.filter(c => c.args?.command === 'recover_client_connection'));
+  expect(calls).toHaveLength(1);
+  expect(calls[0].args.args).toEqual({clients:['codex','claude'],operation:record.operation,central:true});
+  expect(await page.evaluate(() => hostCalls.some(c => c.args?.command === 'one_click_setup'))).toBe(false);
+});
+
+test('uncertain recovery remains visible but cannot overwrite current client files', async ({ page }) => {
+  await open(page, { builtIn: true, writableMcp: true, recoveryRecords:[{clients:['codex'],clientName:'Codex',central:false,operation:'b'.repeat(64),canResume:false,message:'PublicationConflict. Manual inspection required.'}] });
+  const mcp = await openMcp(page, true);
+  await expect(mcp.locator('#migrationRecoveryMessage')).toContainText('Manual inspection');
+  await expect(mcp.locator('#recoverConnectionsBtn')).toBeDisabled();
+  expect(await page.evaluate(() => hostCalls.some(c => c.args?.command === 'recover_client_connection'))).toBe(false);
 });
 
 test('embedded Set Up includes detected Claude Desktop separately from Claude Code', async ({ page }) => {

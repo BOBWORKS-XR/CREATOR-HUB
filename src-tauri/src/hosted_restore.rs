@@ -21,6 +21,14 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
+fn restore_builtin(saved_builtin: bool, available: bool) -> Result<bool, String> {
+    match (saved_builtin, available) {
+        (_, true) => Ok(true),
+        (false, false) => Ok(false),
+        (true, false) => Err("This Hub has no verified built-in module to restore.".into()),
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Record {
@@ -161,9 +169,11 @@ pub async fn restore_hosted_app(
             .ok_or("This app has no pending update restoration.")?;
         // Saved paths confer no authority. The current signed catalog selection
         // must still identify the same executable before it can be reopened.
-        if view.bundled {
-            let candidate = crate::builtin::hosting_candidate(&handle, app)?
-                .ok_or("This Hub has no verified built-in module to restore.")?;
+        let builtin = crate::builtin::hosting_candidate(&handle, app)?;
+        // Convergence from an older Hub restores its section using the new
+        // built-in payload, not the standalone app recorded by the old build.
+        if restore_builtin(view.bundled, builtin.is_some())? {
+            let candidate = builtin.ok_or("The verified built-in module is unavailable.")?;
             return handle.state::<Hosting>().start_verified(
                 &handle,
                 app,
@@ -197,6 +207,13 @@ pub fn complete_hosted_restore(handle: tauri::AppHandle, app: AppId) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn convergence_reopens_old_standalone_views_as_current_verified_builtins() {
+        assert_eq!(restore_builtin(false, true), Ok(true));
+        assert_eq!(restore_builtin(true, true), Ok(true));
+        assert_eq!(restore_builtin(false, false), Ok(false));
+        assert!(restore_builtin(true, false).is_err());
+    }
     fn record() -> Record {
         Record {
             schema_version: 1,

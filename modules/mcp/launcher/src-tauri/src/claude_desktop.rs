@@ -76,23 +76,44 @@ pub(crate) fn merge(mut config: Value, entry: Value) -> Result<Value, String> {
 }
 
 pub(crate) fn owned(entry: &Value) -> bool {
-    entry["env"]["CREATOR_WORKS_CONFIG_OWNER"] == "creator-hub-v1"
-        && entry["command"].as_str().is_some_and(|s| !s.is_empty())
-        && entry["args"]
-            .as_array()
-            .is_some_and(|a| a.len() == 1 && a[0].is_string())
+    crate::client_ownership::guard_json(
+        &json!({"mcpServers":{crate::MCP_CLIENT_ID:entry}}),
+        None,
+        false,
+    ) == Ok(true)
 }
 
 pub(crate) fn write(path: &Path, before: Option<&[u8]>, config: &Value) -> Result<(), String> {
+    let protected = crate::client_setup_write::protected();
+    write_using(path, before, config, protected, |text| {
+        if protected {
+            crate::client_setup_write::commit("Claude Desktop", path, before, text)
+        } else {
+            crate::atomic_write(path, text)
+        }
+    })
+}
+
+fn write_using(
+    path: &Path,
+    before: Option<&[u8]>,
+    config: &Value,
+    protected: bool,
+    publish: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
     crate::settings_backup::reject_links(path)?;
-    crate::settings_backup::retain(path)?;
-    let now = read(path)?.0;
-    if now.as_deref() != before {
-        return Err("Client settings changed during setup. Check again before retrying.".into());
+    if !protected {
+        crate::settings_backup::retain(path)?;
+        let now = read(path)?.0;
+        if now.as_deref() != before {
+            return Err(
+                "Client settings changed during setup. Check again before retrying.".into(),
+            );
+        }
     }
     let text =
         serde_json::to_string_pretty(config).map_err(|_| "Cannot encode client settings.")?;
-    crate::atomic_write(path, &text)
+    publish(&text)
 }
 
 #[cfg(test)]
@@ -100,6 +121,32 @@ mod tests {
     use super::*;
     fn entry() -> Value {
         json!({"command":"/private/node", "args":["/private/server.mjs"],"env":{"CREATOR_WORKS_CONFIG_OWNER":"creator-hub-v1"}})
+    }
+    #[cfg(windows)]
+    #[test]
+    fn refuses_concurrent_edit_after_desktop_parse() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap().join("desktop.json");
+        fs::write(&path, b"{\"preferences\":{\"keep\":true}}\n").unwrap();
+        let (before, config) = read(&path).unwrap();
+        let merged = merge(config, entry()).unwrap();
+        let external = b"{\"preferences\":{\"concurrent\":true}}\r\n";
+        let journal_root = path.parent().unwrap().join("journals");
+        let result = write_using(&path, before.as_deref(), &merged, true, |text| {
+            let edited = path.clone();
+            std::thread::spawn(move || fs::write(edited, external).unwrap())
+                .join()
+                .unwrap();
+            crate::client_setup_write::commit_fixture(
+                "Claude Desktop",
+                &path,
+                before.as_deref(),
+                text,
+                &journal_root,
+            )
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), external);
     }
     #[test]
     fn preserves_other_servers_preferences_and_requires_ownership() {

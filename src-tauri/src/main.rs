@@ -11,8 +11,12 @@ mod host_parent_macos;
 mod hosted;
 mod hosted_operation;
 mod hosted_restore;
+#[cfg(any(unix, test))]
+mod installation_identity;
 mod installer_preflight;
 mod launch;
+#[cfg(any(target_os = "macos", test))]
+mod mac_update;
 mod manager;
 mod mcp_runtime;
 mod platform;
@@ -20,6 +24,7 @@ mod platform;
 mod plugins_retirement;
 mod projects;
 mod self_update;
+mod update_target;
 use catalog::AppId;
 use tauri::{Emitter, Manager as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -368,6 +373,13 @@ fn main() {
         .manage(community::Community::default())
         .manage(community_project::ProjectImports::default())
         .manage(self_update::SelfUpdate::default())
+        .setup(|app| {
+            #[cfg(unix)]
+            self_update::initialize(app.handle());
+            #[cfg(not(unix))]
+            let _ = app;
+            Ok(())
+        })
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(hosted::Hosting::default())
         .manage(hosted_restore::Restore::default())

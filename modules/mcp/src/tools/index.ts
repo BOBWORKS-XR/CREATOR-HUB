@@ -65,6 +65,7 @@ export {
 interface Tool {
   name: string;
   description: string;
+  annotations?: { readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean };
   inputSchema: {
     type: "object";
     properties: Record<string, unknown>;
@@ -527,6 +528,7 @@ In-flight calls retain their original project snapshot. This does not rewrite la
 
     {
       name: "get_bridge_status",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       description: `Inspect Creator Works MCP bridge health without modifying the project.
 Reports the configured project, bridge installation, state and command directories,
 state freshness, and the next setup step when the bridge is not ready.

@@ -16,6 +16,13 @@ import {
 
 const tools = new Map(registerTools().map((tool) => [tool.name, tool]));
 
+test("bridge health advertises its read-only local contract without annotating authoring tools as safe", () => {
+  assert.deepEqual(tools.get("get_bridge_status").annotations, {
+    readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
+  });
+  assert.notEqual(tools.get("write_vs_graph")?.annotations?.readOnlyHint, true);
+});
+
 test("tool names are unique", () => {
   const names = registerTools().map((tool) => tool.name);
   assert.equal(new Set(names).size, names.length);

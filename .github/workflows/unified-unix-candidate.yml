@@ -1,0 +1,65 @@
+name: Experimental unified Unix packaging (not release)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/unified-unix-candidate.yml'
+      - 'scripts/build-unified.cjs'
+      - 'scripts/unix-package-payload*'
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            modules/mcp/launcher/src-tauri
+            modules/project-setup/src-tauri
+          cache-on-failure: true
+      - name: Install disposable Linux build and extraction tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev \
+            patchelf build-essential file rpm libarchive-tools
+      - name: Install repository dependencies
+        run: |
+          npm ci
+          npm --prefix modules/mcp ci
+          npm --prefix modules/project-setup ci
+      - name: Verify source and packaging controls
+        run: |
+          npm run check:sources
+          node --test scripts/unix-package-payload.test.cjs scripts/build-unified.test.cjs
+      - name: Build and inspect real included payloads (MCP deliberately read-only)
+        run: npm run build:unified -- ci-native-package --experimental-unix --installer
+      - name: Retain package/integrity evidence without any release upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unified-unix-candidate-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/unified/ci-native-package/builtin-manifest.json
+            artifacts/unified/ci-native-package/experimental-unix.json
+            artifacts/unified/ci-native-package/unix-package-integrity.json
+            artifacts/unified/ci-native-package/native-packages/

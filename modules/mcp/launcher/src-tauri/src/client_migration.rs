@@ -1,8 +1,14 @@
-//! Explicit single-client connection conversion; not the product installer transaction.
+//! Reviewed client edits with durable recovery; not the product installer transaction.
 use crate::{client_ownership, jsonc, settings_backup};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+
+#[path = "migration_recovery.rs"]
+pub(crate) mod recovery;
+
+#[cfg(test)]
+#[path = "client_migration_render_tests.rs"]
+mod render_tests;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Format {
@@ -80,6 +86,234 @@ fn legacy_shape(node: &str, server: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn set_toml(table: &mut dyn toml_edit::TableLike, key: &str, value: impl Into<toml_edit::Value>) {
+    let mut value = value.into();
+    if let Some(previous) = table.get(key).and_then(toml_edit::Item::as_value) {
+        *value.decor_mut() = previous.decor().clone();
+    }
+    table.insert(key, toml_edit::Item::Value(value));
+}
+
+// The existing JSONC parser validates semantics and ambiguity. These ranges only
+// locate edits in that validated source, so unrelated fields/comments stay byte-exact.
+struct JsonRanges {
+    members: Vec<(String, std::ops::Range<usize>)>,
+    close: usize,
+}
+fn json_trivia(source: &str, mut at: usize) -> usize {
+    let bytes = source.as_bytes();
+    loop {
+        while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+            at += 1;
+        }
+        if bytes.get(at..at + 2) == Some(b"//") {
+            while bytes.get(at).is_some_and(|byte| *byte != b'\n') {
+                at += 1;
+            }
+        } else if bytes.get(at..at + 2) == Some(b"/*") {
+            at += 2;
+            while at < bytes.len() && bytes.get(at..at + 2) != Some(b"*/") {
+                at += 1;
+            }
+            at += 2;
+        } else {
+            return at;
+        }
+    }
+}
+fn json_string_end(source: &str, mut at: usize) -> usize {
+    at += 1;
+    let bytes = source.as_bytes();
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => at += 2,
+            b'"' => return at + 1,
+            _ => at += 1,
+        }
+    }
+    at
+}
+fn json_value_end(source: &str, start: usize) -> usize {
+    let bytes = source.as_bytes();
+    if bytes[start] == b'"' {
+        return json_string_end(source, start);
+    }
+    if matches!(bytes[start], b'{' | b'[') {
+        let mut depth = 0;
+        let mut at = start;
+        while at < bytes.len() {
+            at = json_trivia(source, at);
+            match bytes[at] {
+                b'"' => {
+                    at = json_string_end(source, at);
+                    continue;
+                }
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return at + 1;
+                    }
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+        return at;
+    }
+    let mut at = start;
+    while bytes.get(at).is_some_and(|byte| {
+        !byte.is_ascii_whitespace() && !matches!(byte, b',' | b'}' | b']' | b'/')
+    }) {
+        at += 1;
+    }
+    at
+}
+fn json_object(source: &str, start: usize) -> Result<JsonRanges, String> {
+    let bytes = source.as_bytes();
+    if bytes.get(start) != Some(&b'{') {
+        return Err("Reviewed JSON object has changed shape.".into());
+    }
+    let mut at = start + 1;
+    let mut members = Vec::new();
+    loop {
+        at = json_trivia(source, at);
+        if bytes.get(at) == Some(&b'}') {
+            return Ok(JsonRanges { members, close: at });
+        }
+        if bytes.get(at) != Some(&b'"') {
+            return Err("Cannot locate reviewed JSON member.".into());
+        }
+        let end = json_string_end(source, at);
+        let key = serde_json::from_str(&source[at..end]).map_err(|_| "Cannot decode JSON key.")?;
+        at = json_trivia(source, end);
+        if bytes.get(at) != Some(&b':') {
+            return Err("Cannot locate reviewed JSON value.".into());
+        }
+        at = json_trivia(source, at + 1);
+        let end = json_value_end(source, at);
+        members.push((key, at..end));
+        at = json_trivia(source, end);
+        if bytes.get(at) == Some(&b',') {
+            at += 1;
+        }
+    }
+}
+fn json_member(object: &JsonRanges, key: &str) -> Result<std::ops::Range<usize>, String> {
+    object
+        .members
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, range)| range.clone())
+        .ok_or("Cannot locate reviewed client entry.".into())
+}
+fn json_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut at = 0;
+    let mut comments = String::new();
+    while at < bytes.len() {
+        if bytes[at] == b'"' {
+            at = json_string_end(source, at);
+        } else if bytes.get(at..at + 2) == Some(b"//") || bytes.get(at..at + 2) == Some(b"/*") {
+            let end = json_trivia(source, at);
+            comments.push('\n');
+            comments.push_str(&source[at..end]);
+            comments.push('\n');
+            at = end;
+        } else {
+            at += 1;
+        }
+    }
+    comments
+}
+fn json_insert(
+    source: &str,
+    object: &JsonRanges,
+    key: &str,
+    value: &Value,
+    edits: &mut Vec<(std::ops::Range<usize>, String)>,
+) -> Result<(), String> {
+    let key = serde_json::to_string(key).map_err(|_| "Cannot encode JSON key.")?;
+    let value = serde_json::to_string(value).map_err(|_| "Cannot encode JSON value.")?;
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let indent_at = |at: usize| {
+        let start = source[..at].rfind('\n').map_or(0, |index| index + 1);
+        source[start..at]
+            .chars()
+            .take_while(|c| matches!(c, ' ' | '\t'))
+            .collect::<String>()
+    };
+    let close_indent = indent_at(object.close);
+    let indent = object
+        .members
+        .last()
+        .map(|(_, range)| indent_at(range.start))
+        .unwrap_or_else(|| format!("{close_indent}  "));
+    edits.push((
+        object.close..object.close,
+        format!("{newline}{indent}{key}: {value}{newline}{close_indent}"),
+    ));
+    if let Some((_, last)) = object.members.last() {
+        if source.as_bytes().get(json_trivia(source, last.end)) != Some(&b',') {
+            edits.push((last.end..last.end, ",".into()));
+        }
+    }
+    Ok(())
+}
+fn edit_json_entry(
+    source: &str,
+    servers_key: &str,
+    id: &str,
+    env_key: &str,
+    entry: &Value,
+) -> Result<String, String> {
+    let root = json_object(source, json_trivia(source, 0))?;
+    let servers = json_object(source, json_member(&root, servers_key)?.start)?;
+    let object = json_object(source, json_member(&servers, id)?.start)?;
+    let mut edits = Vec::new();
+    for key in ["command", "args"] {
+        if let Some(value) = entry.get(key) {
+            let range = json_member(&object, key)?;
+            if jsonc::parse(&source[range.clone()])? == *value {
+                continue;
+            }
+            let mut text =
+                serde_json::to_string(value).map_err(|_| "Cannot encode client value.")?;
+            // Removed legacy arguments may have internal comments. Keep them at the
+            // changed array, even when the router's argument list becomes empty.
+            if value.is_array() {
+                let comments = json_comments(&source[range.clone()]);
+                text.insert_str(text.len() - 1, &comments);
+            }
+            edits.push((range, text));
+        }
+    }
+    if let Ok(range) = json_member(&object, env_key) {
+        let env = json_object(source, range.start)?;
+        if json_member(&env, client_ownership::OWNER_KEY).is_err() {
+            json_insert(
+                source,
+                &env,
+                client_ownership::OWNER_KEY,
+                &entry[env_key][client_ownership::OWNER_KEY],
+                &mut edits,
+            )?;
+        }
+    } else {
+        json_insert(source, &object, env_key, &entry[env_key], &mut edits)?;
+    }
+    edits.sort_by(|a, b| b.0.start.cmp(&a.0.start));
+    let mut after = source.to_owned();
+    for (range, text) in edits {
+        after.replace_range(range, &text);
+    }
+    Ok(after)
+}
+
 impl Plan {
     pub(crate) fn review(
         client: &str,
@@ -88,6 +322,23 @@ impl Plan {
         node: &Path,
         server: &Path,
     ) -> Result<Option<Self>, String> {
+        Self::review_target(client, path, format, node, Some(server))
+    }
+    pub(crate) fn review_router(
+        client: &str,
+        path: &Path,
+        format: Format,
+        router: &Path,
+    ) -> Result<Option<Self>, String> {
+        Self::review_target(client, path, format, router, None)
+    }
+    fn review_target(
+        client: &str,
+        path: &Path,
+        format: Format,
+        node: &Path,
+        server: Option<&Path>,
+    ) -> Result<Option<Self>, String> {
         if !path.is_absolute() {
             return Err("Client settings require an absolute path.".into());
         }
@@ -95,7 +346,8 @@ impl Plan {
             return Ok(None);
         };
         let node = target(node)?;
-        let server = target(server)?;
+        let managed = server.is_none();
+        let server = server.map(target).transpose()?.unwrap_or_default();
         let (after, old_node, old_server, project) = match format {
             Format::Codex => {
                 let mut doc = before
@@ -129,10 +381,20 @@ impl Plan {
                     .get("env")
                     .and_then(toml_edit::Item::as_table_like)
                     .and_then(|env| env.get(client_ownership::OWNER_KEY));
-                if owner.and_then(toml_edit::Item::as_str) == Some(client_ownership::OWNER) {
+                let owned =
+                    owner.and_then(toml_edit::Item::as_str) == Some(client_ownership::OWNER);
+                if owned
+                    && (!managed
+                        || entry.get("command").and_then(toml_edit::Item::as_str)
+                            == Some(node.as_str())
+                            && entry
+                                .get("args")
+                                .and_then(toml_edit::Item::as_array)
+                                .is_some_and(|args| args.is_empty()))
+                {
                     return Ok(None);
                 }
-                if owner.is_some() {
+                if owner.is_some() && !owned {
                     return Err("A different owner is recorded. Nothing was changed.".into());
                 }
                 let old_node = entry
@@ -151,10 +413,31 @@ impl Plan {
                     .ok_or("Custom client arguments require manual review.")?
                     .to_owned();
                 legacy_shape(&old_node, &old_server)?;
-                entry.insert("command", toml_edit::value(node));
-                let mut args = toml_edit::Array::new();
-                args.push(server);
-                entry.insert("args", toml_edit::value(args));
+                let mut args = args.clone();
+                if managed {
+                    let value = args.get(0).unwrap();
+                    let trivia = format!(
+                        "{}{}{}",
+                        value
+                            .decor()
+                            .prefix()
+                            .and_then(|raw| raw.as_str())
+                            .unwrap_or(""),
+                        value
+                            .decor()
+                            .suffix()
+                            .and_then(|raw| raw.as_str())
+                            .unwrap_or(""),
+                        args.trailing().as_str().unwrap_or("")
+                    );
+                    args.clear();
+                    args.set_trailing_comma(false);
+                    args.set_trailing(trivia);
+                } else {
+                    args.replace(0, server);
+                }
+                set_toml(entry, "command", node);
+                set_toml(entry, "args", args);
                 if entry.get("env").is_none() {
                     entry.insert("env", toml_edit::Item::Table(toml_edit::Table::new()));
                 }
@@ -168,10 +451,7 @@ impl Plan {
                     .get("UNITY_PROJECT_PATH")
                     .and_then(toml_edit::Item::as_str)
                     .map(str::to_owned);
-                env.insert(
-                    client_ownership::OWNER_KEY,
-                    toml_edit::value(client_ownership::OWNER),
-                );
+                set_toml(env, client_ownership::OWNER_KEY, client_ownership::OWNER);
                 (doc.to_string(), old_node, old_server, project)
             }
             Format::Json | Format::OpenCode => {
@@ -220,10 +500,16 @@ impl Plan {
                 let owner = entry
                     .get(env_key)
                     .and_then(|env| env.get(client_ownership::OWNER_KEY));
-                if owner == Some(&Value::String(client_ownership::OWNER.into())) {
+                let owned = owner == Some(&Value::String(client_ownership::OWNER.into()));
+                let routed = if matches!(format, Format::OpenCode) {
+                    entry["command"] == serde_json::json!([node])
+                } else {
+                    entry["command"] == node && entry["args"] == serde_json::json!([])
+                };
+                if owned && (!managed || routed) {
                     return Ok(None);
                 }
-                if owner.is_some() {
+                if owner.is_some() && !owned {
                     return Err("A different owner is recorded. Nothing was changed.".into());
                 }
                 let (old_node, old_server) = if matches!(format, Format::OpenCode) {
@@ -252,10 +538,18 @@ impl Plan {
                 );
                 legacy_shape(&old_node, &old_server)?;
                 if matches!(format, Format::OpenCode) {
-                    entry["command"] = serde_json::json!([node, server]);
+                    entry["command"] = if managed {
+                        serde_json::json!([node])
+                    } else {
+                        serde_json::json!([node, server])
+                    };
                 } else {
                     entry["command"] = Value::String(node);
-                    entry["args"] = serde_json::json!([server]);
+                    entry["args"] = if managed {
+                        serde_json::json!([])
+                    } else {
+                        serde_json::json!([server])
+                    };
                 }
                 if entry.get(env_key).is_none() {
                     entry[env_key] = serde_json::json!({});
@@ -273,12 +567,7 @@ impl Plan {
                     Value::String(client_ownership::OWNER.into()),
                 );
                 let entry = entry.clone();
-                let other_id = if id == crate::MCP_CLIENT_ID {
-                    crate::LEGACY_MCP_CLIENT_ID
-                } else {
-                    crate::MCP_CLIENT_ID
-                };
-                let after = jsonc::update_managed_entry(&before, key, id, other_id, &entry)?;
+                let after = edit_json_entry(&before, key, id, env_key, &entry)?;
                 if jsonc::parse_unambiguous(&after)? != config {
                     return Err("Client edit could not be verified. Nothing was changed.".into());
                 }
@@ -311,30 +600,39 @@ impl Plan {
                 "Client settings changed after review. Nothing was changed; review again.".into(),
             );
         }
-        settings_backup::retain(&self.path)?;
-        if settings_backup::read_text(&self.path)?.as_deref() != Some(&self.before) {
-            return Err(
-                "Client settings changed during backup. Nothing was changed; review again.".into(),
-            );
+        let root = self.path.parent().unwrap().join(".creator-hub-migrations");
+        let write = self.reviewed_write();
+        let transaction = recovery::Transaction::prepare(&root, vec![write])?;
+        let report = transaction.resume(|_| true)?;
+        if !report.completed {
+            return Err(format!("Migration requires recovery review at {} ({:?}). All retained files were kept; no restore or write retry was attempted.", report.journal.display(), report.files[0].status));
         }
-        let backup = self
-            .path
-            .parent()
-            .unwrap()
-            .join(".creator-hub-settings-backups")
-            .join(format!(
-                "{}.{:x}.bak",
-                self.path.file_name().unwrap().to_string_lossy(),
-                Sha256::digest(self.before.as_bytes())
-            ));
-        if settings_backup::read_text(&backup)?.as_deref() != Some(&self.before) {
-            return Err("The retained backup could not be verified. Nothing was changed.".into());
+        Ok(Some(report.files[0].before_backup.clone()))
+    }
+
+    /// For an explicitly approved batch that also includes reviewed product-settings adapters.
+    pub(crate) fn reviewed_write(&self) -> recovery::ReviewedWrite {
+        recovery::ReviewedWrite::new(
+            &self.client,
+            &self.path,
+            self.before.as_bytes(),
+            self.after.as_bytes(),
+        )
+    }
+
+    /// Approval covers the whole list; missing clients are not synthesized or required.
+    pub(crate) fn apply_reviewed(
+        plans: &[Self],
+        journal_root: &Path,
+        approve: impl FnOnce(&[Self]) -> bool,
+    ) -> Result<Option<recovery::Report>, String> {
+        if plans.is_empty() || !approve(plans) {
+            return Ok(None);
         }
-        crate::atomic_write(&self.path, &self.after)?;
-        if settings_backup::read_text(&self.path)?.as_deref() != Some(&self.after) {
-            return Err("Migration outcome could not be verified. Keep the backup and inspect the client settings; no retry was attempted.".into());
-        }
-        Ok(Some(backup))
+        let writes = plans.iter().map(Self::reviewed_write).collect();
+        recovery::Transaction::prepare(journal_root, writes)?
+            .resume(|_| true)
+            .map(Some)
     }
 }
 
@@ -342,6 +640,46 @@ impl Plan {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[cfg(windows)]
+    #[test]
+    fn approved_router_conversion_preserves_settings_and_is_idempotent() {
+        let f = Fixture::new();
+        let router = f.root.join(if cfg!(windows) {
+            "creator-hub-mcp-router.exe"
+        } else {
+            "creator-hub-mcp-router"
+        });
+        fs::write(&router, b"fixture, never executed").unwrap();
+        for owned in [false, true] {
+            let mut entry = f.old_entry();
+            if owned {
+                entry["env"][client_ownership::OWNER_KEY] =
+                    serde_json::json!(client_ownership::OWNER);
+            }
+            let original = serde_json::json!({"preferences":{"keep":true},"mcpServers":{"other":{"command":"preserve"},"creator-works":entry}}).to_string();
+            let path = f.root.join("router-client.json");
+            fs::write(&path, &original).unwrap();
+            let review = || Plan::review_router("Fixture", &path, Format::Json, &router).unwrap();
+            assert!(review().unwrap().apply(|_| false).unwrap().is_none());
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+            let backup = review().unwrap().apply(|_| true).unwrap().unwrap();
+            assert_eq!(fs::read_to_string(backup).unwrap(), original);
+            let result: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(
+                result["mcpServers"]["creator-works"]["args"],
+                serde_json::json!([])
+            );
+            assert_eq!(result["mcpServers"]["creator-works"]["timeout"], 37);
+            assert_eq!(
+                result["mcpServers"]["creator-works"]["env"]["CUSTOM"],
+                "keep"
+            );
+            assert_eq!(result["mcpServers"]["other"]["command"], "preserve");
+            assert!(client_ownership::guard_json(&result, None, false).unwrap());
+            assert!(review().is_none());
+        }
+    }
 
     struct Fixture {
         _directory: tempfile::TempDir,
@@ -431,6 +769,7 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"user edited while reviewing");
     }
 
+    #[cfg(windows)]
     #[test]
     fn approved_json_connection_keeps_project_other_servers_and_exact_before_image() {
         let f = Fixture::new();
@@ -471,6 +810,7 @@ mod tests {
         assert_eq!(fs::read(&backup).unwrap(), original.as_bytes());
     }
 
+    #[cfg(windows)]
     #[test]
     fn toml_quoted_dotted_and_inline_forms_keep_custom_fields_and_other_servers() {
         let f = Fixture::new();
@@ -503,6 +843,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn opencode_comments_and_existing_environment_survive_migration() {
         let f = Fixture::new();

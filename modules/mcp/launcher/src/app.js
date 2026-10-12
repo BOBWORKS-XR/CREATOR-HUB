@@ -8,6 +8,7 @@ let config = {
 };
 
 let onboarding = null;
+let migrationRecovery = [];
 let discoveredProjects = [];
 let selectedProjectPath = '';
 let clientSelectionInitialized = false;
@@ -33,6 +34,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     'claudeDesktopDetection', 'claudeDesktopState', 'clientSetupIssue',
     'useUnityCli', 'unityCliStatus', 'unityCliDocs', 'getClaudeDesktopBtn', 'guideWorkspace',
     'setupBtn', 'setupMessage', 'reviewExistingConnectionsBtn', 'projectsList', 'emptyState', 'addProjectBtn',
+    'migrationRecovery', 'migrationRecoveryMessage', 'recoverConnectionsBtn',
     'updateBridgesBtn', 'localFeedback', 'usageCheckIns', 'feedbackStatus',
     'automaticUpdates', 'checkUpdatesBtn', 'openReleaseBtn', 'updateStatus',
     'mcpServerPath', 'toolGroups', 'autoConfig', 'customScripts', 'allowAllTests', 'applyConfigBtn',
@@ -92,6 +94,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     await refreshOnboardingStatus();
     updateUI();
     scheduleUpdateChecks();
+    await refreshMigrationRecovery();
   });
   if (onboarding) window.CreatorConnectionGuide.initialize({
     suggest: config.connection_guide_version !== 1,
@@ -267,6 +270,7 @@ function setupEventListeners() {
   elements.connectOpenCode.addEventListener('change', updateSetupButton);
   onOperation(elements.setupBtn, 'click', runQuickSetup);
   onOperation(elements.reviewExistingConnectionsBtn, 'click', reviewExistingConnections);
+  onOperation(elements.recoverConnectionsBtn, 'click', recoverConnections);
 
   onOperation(elements.mcpServerPath, 'change', async function() {
     config.mcp_server_path = elements.mcpServerPath.value.trim();
@@ -632,6 +636,12 @@ async function reviewExistingConnections() {
   if (!selected.length) { elements.setupMessage.textContent = 'No AI client selected.'; return; }
   let migrated = 0;
   try {
+    if (onboarding?.managedRouting) {
+      const result = await window.CreatorRuntime.invoke('review_existing_client_connections', { clients: selected });
+      if (result?.status === 'cancelled') { elements.setupMessage.textContent = 'Review cancelled. No selected connection was moved.'; return; }
+      if (result?.status === 'migrated' && Number.isInteger(result.count)) migrated = result.count;
+      else if (result?.status !== 'unchanged') throw new Error('Batch migration outcome is unknown. Review retained recovery records.');
+    } else {
     for (const client of selected) {
       const result = await window.CreatorRuntime.invoke('review_existing_client_connection', { client });
       if (result?.status === 'cancelled') {
@@ -641,12 +651,41 @@ async function reviewExistingConnections() {
       if (result?.status === 'migrated') migrated++;
       else if (result?.status !== 'unchanged') throw new Error('Migration outcome is unknown. Check client settings before retrying.');
     }
+    }
     elements.setupMessage.textContent = migrated
       ? migrated + ' connection(s) moved with local backups. Existing project selections were kept. Fully quit and reopen changed AI clients.'
       : 'No eligible unmarked connection was found. Nothing was changed.';
   } catch (error) {
     elements.setupMessage.textContent = 'Review stopped: ' + String(error) + ' ' + migrated + ' previously approved connection(s) moved. No automatic retry.';
-  } finally { await refreshAll(); }
+  } finally { await refreshAll(); await refreshMigrationRecovery(); }
+}
+
+async function refreshMigrationRecovery() {
+  if (!window.CreatorRuntime.builtIn || window.CreatorRuntime.readOnly) return;
+  try {
+    const records = await window.CreatorRuntime.invoke('pending_client_recovery');
+    if (!Array.isArray(records) || records.length > 768) throw new Error('Invalid recovery response. No recovery was attempted.');
+    migrationRecovery = records;
+    elements.migrationRecovery.hidden = !records.length;
+    elements.migrationRecoveryMessage.textContent = records.map(record => `${record.clientName}: ${record.message}`).join('\n');
+    elements.recoverConnectionsBtn.disabled = !records.some(record => record.canResume);
+  } catch (error) {
+    migrationRecovery = [];
+    elements.migrationRecovery.hidden = false;
+    elements.migrationRecoveryMessage.textContent = 'Could not inspect previous migrations: ' + String(error) + '. Keep the retained files; no automatic recovery was attempted.';
+    elements.recoverConnectionsBtn.disabled = true;
+  }
+}
+
+async function recoverConnections() {
+  try {
+    for (const record of migrationRecovery.filter(record => record.canResume)) {
+      const result = await window.CreatorRuntime.invoke('recover_client_connection', { clients: record.clients, operation: record.operation, central: record.central });
+      if (!result?.completed) { elements.setupMessage.textContent = 'Recovery was declined or needs manual inspection. Current files were kept.'; return; }
+    }
+    elements.setupMessage.textContent = 'Reviewed connection changes are complete. Backups were kept. Restart changed AI clients, then check the connection.';
+  } catch (error) { elements.setupMessage.textContent = 'Recovery stopped: ' + String(error) + '. No automatic retry or restoration.'; }
+  finally { await refreshMigrationRecovery(); await refreshAll(); }
 }
 
 async function waitForFreshBridge(maxSeconds) {

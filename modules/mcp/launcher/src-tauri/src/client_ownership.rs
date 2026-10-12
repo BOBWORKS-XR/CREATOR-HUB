@@ -20,17 +20,35 @@ fn same_path(left: &str, right: &str) -> bool {
 fn json_command(entry: &Value, opencode: bool) -> Option<(&str, &str)> {
     if opencode {
         let command = entry["command"].as_array()?;
+        if command.len() == 1 && router_command(command[0].as_str()?) {
+            return Some((command[0].as_str()?, ""));
+        }
         if command.len() != 2 {
             return None;
         }
         Some((command[0].as_str()?, command[1].as_str()?))
     } else {
         let args = entry["args"].as_array()?;
+        if args.is_empty() && router_command(entry["command"].as_str()?) {
+            return Some((entry["command"].as_str()?, ""));
+        }
         if args.len() != 1 {
             return None;
         }
         Some((entry["command"].as_str()?, args[0].as_str()?))
     }
+}
+fn router_command(command: &str) -> bool {
+    std::path::Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name == if cfg!(windows) {
+                "creator-hub-mcp-router.exe"
+            } else {
+                "creator-hub-mcp-router"
+            }
+        })
 }
 
 pub(crate) fn guard_json(
@@ -51,7 +69,9 @@ pub(crate) fn guard_json(
         present = true;
         let command = json_command(existing, opencode);
         let owned = existing[env][OWNER_KEY] == OWNER
-            && command.is_some_and(|(node, server)| !node.is_empty() && !server.is_empty());
+            && command.is_some_and(|(node, server)| {
+                !node.is_empty() && (!server.is_empty() || router_command(node))
+            });
         let same = command
             .zip(expected.and_then(|entry| json_command(entry, opencode)))
             .is_some_and(|((node, server), (wanted_node, wanted_server))| {
@@ -83,10 +103,15 @@ pub(crate) fn guard_toml(content: &str, expected: Option<(&str, &str)>) -> Resul
         let table = existing.as_table_like().ok_or_else(|| conflict(id))?;
         let node = table.get("command").and_then(toml_edit::Item::as_str);
         let args = table.get("args").and_then(toml_edit::Item::as_array);
-        let server = args
-            .filter(|args| args.len() == 1)
-            .and_then(|args| args.get(0))
-            .and_then(toml_edit::Value::as_str);
+        let server = args.and_then(|args| {
+            if args.is_empty() && node.is_some_and(router_command) {
+                Some("")
+            } else if args.len() == 1 {
+                args.get(0).and_then(toml_edit::Value::as_str)
+            } else {
+                None
+            }
+        });
         let owner = table
             .get("env")
             .and_then(toml_edit::Item::as_table_like)
@@ -94,7 +119,7 @@ pub(crate) fn guard_toml(content: &str, expected: Option<(&str, &str)>) -> Resul
             .and_then(toml_edit::Item::as_str);
         let owned = owner == Some(OWNER)
             && node.is_some_and(|s| !s.is_empty())
-            && server.is_some_and(|s| !s.is_empty());
+            && server.is_some_and(|s| !s.is_empty() || node.is_some_and(router_command));
         let same = node.zip(server).zip(expected).is_some_and(
             |((node, server), (wanted_node, wanted_server))| {
                 same_path(node, wanted_node) && same_path(server, wanted_server)

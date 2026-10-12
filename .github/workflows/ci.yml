@@ -33,6 +33,7 @@ jobs:
       - name: Build real server for Unix transport acceptance
         if: runner.os != 'Windows'
         run: |
+          npm ci
           npm --prefix modules/mcp ci
           npm --prefix modules/mcp run bundle:server
       - name: Native Unix payload binding and owned runtime cleanup
@@ -182,7 +183,8 @@ jobs:
             patchelf \
             build-essential \
             file \
-            rpm
+            rpm \
+            libarchive-tools
       - run: npm ci
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --release --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

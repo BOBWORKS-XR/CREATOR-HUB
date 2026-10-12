@@ -10,10 +10,11 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+creator-hub-mcp-router = { path = "../native/mcp-router" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "=2.4.4"
-tauri-plugin-updater = { version = "=2.11.0", default-features = false, features = ["native-tls", "system-proxy"] }
+tauri-plugin-updater = { version = "=2.11.0", default-features = false, features = ["native-tls", "system-proxy", "zip"] }
 base64 = "0.22"
 dirs = "6"
 serde = { version = "1", features = ["derive"] }

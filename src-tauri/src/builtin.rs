@@ -19,6 +19,14 @@ struct Manifest {
     platform: String,
     arch: String,
     modules: BTreeMap<String, Module>,
+    #[serde(default)]
+    managed_routing: Option<Routing>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Routing {
+    protocol: u32,
+    files: BTreeMap<String, String>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -165,6 +173,72 @@ pub fn hosting_candidate(
             std::env::consts::ARCH
         ));
     prepare_generation(&source, &generations, entry).map(Some)
+}
+
+pub fn managed_route(
+    handle: &tauri::AppHandle,
+) -> Result<Option<creator_hub_mcp_router::Router>, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    if !enabled() {
+        return Ok(None);
+    }
+    let manifest = manifest()?;
+    let Some(routing) = manifest.managed_routing else {
+        return Ok(None);
+    };
+    let root = handle
+        .path()
+        .resource_dir()
+        .map_err(|_| "Cannot locate signed routing resources.")?
+        .join("modules");
+    let binary = format!(
+        "routing/creator-hub-mcp-router{}",
+        if cfg!(windows) { ".exe" } else { "" }
+    );
+    let mut names = vec![
+        binary.clone(),
+        "routing/router.json".into(),
+        "routing/router.minisig".into(),
+        "routing/runtime.json".into(),
+        "routing/runtime.minisig".into(),
+    ];
+    names.sort();
+    if routing.protocol != 1 || routing.files.keys().cloned().collect::<Vec<_>>() != names {
+        return Err("Invalid managed router package identity.".into());
+    }
+    for (name, expected) in &routing.files {
+        platform::reject_links(&root.join(name))?;
+        if !crate::catalog::hash_valid(expected)
+            || crate::manager::file_hash(&root.join(name))? != *expected
+        {
+            return Err("The signed routing package changed. Nothing was activated.".into());
+        }
+    }
+    let read = |name: &str| crate::manager::bounded_read(&root.join(name), 32768);
+    let bytes = read("routing/runtime.json")?;
+    let signature = read("routing/runtime.minisig")?;
+    let store = creator_hub_mcp_router::Store::installed()?;
+    let descriptor = store.verify_descriptor(&bytes, &signature)?;
+    let expected = manifest.modules.get("mcp").ok_or("Missing MCP identity.")?;
+    if descriptor.hub_version != env!("CARGO_PKG_VERSION")
+        || serde_json::to_value(&descriptor.module)
+            .map_err(|_| "Cannot inspect signed runtime identity.")?
+            != serde_json::to_value(expected)
+                .map_err(|_| "Cannot inspect packaged runtime identity.")?
+    {
+        return Err("The signed runtime does not match this Hub package/version.".into());
+    }
+    let previous = store.snapshot()?;
+    if previous.is_none() && !handle.dialog().message("Enable Creator Hub's managed MCP connection?\n\nA signed retained router will keep AI-client command paths stable across compatible Hub updates. Existing client settings are not changed by this action. Moving their connections still requires your approval. Old apps and Unity projects stay in place.")
+        .title("Enable managed MCP routing").buttons(MessageDialogButtons::OkCancelCustom("Enable managed routing".into(), "Not now".into())).blocking_show()
+    { return Err("Managed MCP routing was declined. Existing connections were not changed.".into()); }
+    let router = store.prepare_router(
+        &root.join(binary),
+        &read("routing/router.json")?,
+        &read("routing/router.minisig")?,
+    )?;
+    store.activate(&bytes, &signature, previous.as_deref())?;
+    Ok(Some(router))
 }
 
 fn generation_id(entry: &Module) -> Result<String, String> {

@@ -37,20 +37,35 @@ function verifyStage(directory, manifest) {
       if (fs.lstatSync(file).isSymbolicLink() || sha256(file) !== hash) throw Error(`Bundled module changed: ${name}`);
     }
   }
+  if (manifest.managedRouting) {
+    const routing = manifest.managedRouting;
+    const names = require('./managed-router-package.cjs').routeFiles(manifest.platform);
+    if (routing.protocol !== 1 || !routing.files || Object.keys(routing.files).sort().join(',') !== names.sort().join(',')) throw Error('Invalid managed router payload.');
+    for (const [name, expected] of Object.entries(routing.files)) {
+      const file = path.join(directory, name);
+      if (!/^[a-f0-9]{64}$/.test(expected) || fs.lstatSync(file).isSymbolicLink() || sha256(file) !== expected) throw Error(`Managed router package changed: ${name}`);
+    }
+  }
 }
-function build(label, { installer = false } = {}) {
+function build(label, { installer = false, managed = false, experimentalUnix = false } = {}) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(label || '')) throw Error('Provide a unique, simple build name.');
   const platform = { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
   const arch = { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
-  if (!platform || !arch || (platform !== 'macos' && arch !== 'x86_64')) throw Error('Unsupported native build host.');
-  if (platform !== 'windows') throw Error('Unified native hosting is currently a Windows candidate only. Cross-platform hosting acceptance is still required.');
+  const unix = require('./unix-package-payload.cjs');
+  const plan = unix.nativePlan(platform, arch, { installer, experimentalUnix });
+  const nativeTargetArgs = plan.rustTarget ? ['--target', plan.rustTarget] : [];
+  const releaseDirectory = target => path.join(target, ...(plan.rustTarget ? [plan.rustTarget] : []), 'release');
+  const buildEnv = plan.experimentalUnix ? unix.packageEnvironment(process.env, platform) : process.env;
+  const routing = require('./managed-router-package.cjs');
+  const key = managed ? routing.signingKey(root) : null;
   const output = path.join(root, 'artifacts', 'unified', label);
   if (fs.existsSync(output)) throw Error('Build output exists. Use a new name; artifacts are immutable.');
   const npm = process.env.npm_execpath;
   if (!npm || !fs.existsSync(npm)) throw Error('Run this builder through npm run build:unified.');
   fs.mkdirSync(output, { recursive: true });
-  const run = (args, cwd, env = process.env) => execFileSync(process.execPath, args, { cwd, env, stdio: 'inherit', windowsHide: true });
+  const run = (args, cwd, env = buildEnv) => execFileSync(process.execPath, args, { cwd, env, stdio: 'inherit', windowsHide: true });
   run([npm, 'run', 'release:launcher'], path.join(root, 'modules/mcp'));
+  const mcpSources = plan.experimentalUnix ? unix.hostedSourceHashes(path.join(root, 'modules/mcp')) : null;
   const cli = path.join(root, 'node_modules/@tauri-apps/cli/tauri.js');
   const extension = platform === 'windows' ? '.exe' : '';
   const manifest = { schemaVersion: 1, platform, arch, modules: {} };
@@ -61,22 +76,24 @@ function build(label, { installer = false } = {}) {
   ]) {
     const cwd = path.join(root, source);
     const target = path.resolve(process.env[`CREATOR_${id.toUpperCase()}_TARGET_DIR`] || path.join(cwd, 'src-tauri/target'));
-    const env = { ...process.env, CARGO_TARGET_DIR: target, CREATOR_HUB_INTERNAL_MODULE: '1' };
-    run([cli, 'build', '--no-bundle', '--', '--locked'], cwd, env);
+    const env = { ...buildEnv, CARGO_TARGET_DIR: target, CREATOR_HUB_INTERNAL_MODULE: '1' };
+    run([cli, 'build', '--no-bundle', ...nativeTargetArgs, '--', '--locked'], cwd, env);
     const files = {};
     const copy = (sourceFile, name) => {
       const dest = path.join(output, 'modules', name);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(sourceFile, dest, fs.constants.COPYFILE_EXCL);
       if (platform !== 'windows' && (name.endsWith(binary) || name.endsWith('/runtime/node'))) fs.chmodSync(dest, 0o755);
-      if (platform === 'macos' && (name.endsWith(binary) || name.endsWith('/runtime/node'))) {
+      // Node is already signed in the pinned archive and its bytes were hashed
+      // by MCP's build.rs. Re-sign only Rust backends before manifest binding.
+      if (platform === 'macos' && name === `${id}/${binary}`) {
         execFileSync('codesign', ['--force', '--sign', '-', dest], { stdio: 'inherit' });
       }
       files[name] = sha256(dest);
       resources[dest] = `modules/${name}`;
     };
     const executable = `${id}/${binary}${extension}`;
-    copy(path.join(target, 'release', binary + extension), executable);
+    copy(path.join(releaseDirectory(target), binary + extension), executable);
     if (id === 'mcp') {
       const mcp = path.join(root, 'modules/mcp');
       for (const [sourceFile, name] of [
@@ -92,19 +109,42 @@ function build(label, { installer = false } = {}) {
     manifest.modules[id] = { executable, version, files };
   }
   verifyStage(path.join(output, 'modules'), manifest);
+  if (plan.experimentalUnix) unix.verifyHostedBinding(manifest, mcpSources, unix.hostedSourceHashes(path.join(root, 'modules/mcp')));
   const { writeRuntimeDescriptor } = require('./mcp-runtime-descriptor.cjs');
   const hubVersion = JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'))).version;
   writeRuntimeDescriptor(output, manifest, hubVersion);
+  if (managed) {
+    const routerTarget = path.resolve(process.env.CREATOR_ROUTER_TARGET_DIR || path.join(root, 'native/mcp-router/target'));
+    execFileSync('cargo', ['build', '--release', '--locked', ...nativeTargetArgs, '--manifest-path', path.join(root, 'native/mcp-router/Cargo.toml')], {
+      env: { ...buildEnv, CARGO_TARGET_DIR: routerTarget }, stdio: 'inherit', windowsHide: true,
+    });
+    let routerSource = path.join(releaseDirectory(routerTarget), `creator-hub-mcp-router${extension}`);
+    if (platform === 'macos') {
+      // Ad-hoc sign the disposable copy before the existing managed signer
+      // binds its digest. Never alter a signature or signed receipt afterwards.
+      const signed = path.join(output, 'router-for-package');
+      fs.copyFileSync(routerSource, signed, fs.constants.COPYFILE_EXCL);
+      execFileSync('codesign', ['--force', '--sign', '-', signed], { stdio: 'inherit' });
+      routerSource = signed;
+    }
+    manifest.managedRouting = routing.prepare(output, manifest,
+      routerSource, path.join(output, 'mcp-runtime.json'),
+      file => routing.signDetached(file, key));
+    for (const name of routing.routeFiles(platform)) resources[path.join(output, 'modules', name)] = `modules/${name}`;
+    verifyStage(path.join(output, 'modules'), manifest);
+  }
   const descriptor = path.join(output, 'builtin-manifest.json');
   fs.writeFileSync(descriptor, JSON.stringify(manifest, null, 2));
   const overlay = path.join(output, 'tauri-unified.json');
   fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources } }, null, 2));
-  const env = { ...process.env, CREATOR_BUILTIN_MANIFEST: descriptor,
+  const env = { ...buildEnv, CREATOR_BUILTIN_MANIFEST: descriptor,
     CREATOR_MCP_HOST_WRITABLE: platform === 'windows' ? '1' : '0', CREATOR_MCP_HOST_READONLY_EVENTS: '1',
-    CARGO_TARGET_DIR: path.resolve(process.env.CARGO_TARGET_DIR || path.join(root, 'src-tauri/target')) };
-  run([cli, 'build', ...(installer ? ['--bundles', 'nsis'] : ['--no-bundle']), '--config', overlay, '--', '--locked'], root, env);
-  fs.copyFileSync(path.join(env.CARGO_TARGET_DIR, 'release', `creator-hub${extension}`), path.join(output, `creator-hub${extension}`));
-  if (installer) {
+    CARGO_TARGET_DIR: path.resolve(process.env.CARGO_TARGET_DIR || (plan.experimentalUnix ? path.join(output, 'hub-target') : path.join(root, 'src-tauri/target'))) };
+  const bundleDirectory = path.join(releaseDirectory(env.CARGO_TARGET_DIR), 'bundle');
+  if (plan.experimentalUnix && installer && fs.existsSync(bundleDirectory)) throw Error('Unix packaging requires a fresh bundle directory; select a new CARGO_TARGET_DIR. Existing outputs are not removed.');
+  run([cli, 'build', ...nativeTargetArgs, ...(installer ? ['--bundles', plan.bundles.join(',')] : ['--no-bundle']), '--config', overlay, '--', '--locked'], root, env);
+  fs.copyFileSync(path.join(releaseDirectory(env.CARGO_TARGET_DIR), `creator-hub${extension}`), path.join(output, `creator-hub${extension}`));
+  if (installer && platform === 'windows') {
     const bundles = path.join(env.CARGO_TARGET_DIR, 'release/bundle/nsis');
     const matches = fs.readdirSync(bundles).filter(name => name.endsWith(`_${hubVersion}_x64-setup.exe`));
     if (matches.length !== 1) throw Error('Expected exactly one matching unified NSIS candidate.');
@@ -113,14 +153,24 @@ function build(label, { installer = false } = {}) {
     const installed = require('./installer-payload.cjs').extract(target, path.join(output, 'installer-extracted'), path.join(output, 'creator-hub.exe'), manifest);
     fs.writeFileSync(path.join(output, 'installer-checksum.json'), JSON.stringify({ version: hubVersion, sha256: sha256(target), installedExecutableSha256: sha256(installed), signed: false, acceptanceOnly: true }));
   }
+  if (plan.experimentalUnix) {
+    verifyStage(path.join(output, 'modules'), manifest);
+    if (installer) unix.validatePackages({ output, bundleDirectory, manifest,
+      productName: JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'))).productName,
+      rawHub: path.join(output, 'creator-hub') });
+    fs.writeFileSync(path.join(output, 'experimental-unix.json'), JSON.stringify({ schemaVersion: 1,
+      platform, arch, mcpMode: 'read-only', writableGuiAccepted: false, releaseReady: false,
+      packages: plan.bundles, managedRoutingIncluded: managed }, null, 2), { flag: 'wx' });
+  }
   console.log(`Local unified candidate: ${output}. Not a release or migration acceptance.`);
   return output;
 }
 module.exports = { relativeFile, moduleFiles, verifyStage, build };
 if (require.main === module) {
   try {
-    if (process.argv.length !== 3 && !(process.argv.length === 4 && process.argv[3] === '--installer')) throw Error('Provide one build name and optional --installer.');
-    build(process.argv[2], { installer: process.argv[3] === '--installer' });
+    const flags = process.argv.slice(3);
+    if (!process.argv[2] || flags.some(flag => !['--installer', '--managed', '--experimental-unix'].includes(flag)) || new Set(flags).size !== flags.length) throw Error('Provide one build name and optional --installer, --managed and --experimental-unix.');
+    build(process.argv[2], { installer: flags.includes('--installer'), managed: flags.includes('--managed'), experimentalUnix: flags.includes('--experimental-unix') });
   }
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }

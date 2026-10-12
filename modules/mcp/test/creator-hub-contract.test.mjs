@@ -19,8 +19,9 @@ test("Hub module cannot reach application/configuration/network or project opera
   assert.doesNotMatch(hub, /"launch\.singleInstance"/);
 });
 
-test("metadata does not add a first-run prompt, Hub dependency or single-instance plugin", () => {
+test("metadata remains independent of the Hub GUI and its single-instance plugin", () => {
   const manifest = fs.readFileSync("launcher/src-tauri/Cargo.toml", "utf8");
-  assert.doesNotMatch(manifest, /single-instance|creator-hub/);
+  assert.doesNotMatch(manifest, /^\s*(?:tauri-plugin-single-instance|creator-hub)\s*=/m);
+  assert.match(manifest, /^creator-hub-mcp-router\s*=\s*\{\s*path\s*=/m);
   assert.doesNotMatch(main, /tauri_plugin_single_instance/);
 });

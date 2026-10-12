@@ -12,6 +12,9 @@ pub const COMMANDS: &[&str] = &[
     "add_project",
     "one_click_setup",
     "review_existing_client_connection",
+    "review_existing_client_connections",
+    "pending_client_recovery",
+    "recover_client_connection",
     "get_project_sdk_profile",
     "get_unity_extension_status",
     "update_configured_unity_extensions",
@@ -59,6 +62,26 @@ fn encoded(value: impl serde::Serialize) -> Result<Value, String> {
 
 pub fn dispatch(app: &tauri::AppHandle, command: &str, value: Value) -> Result<Value, String> {
     match command {
+        "review_existing_client_connections" => {
+            let a = args!(value, {clients: Vec<String>});
+            encoded(crate::review_existing_client_connections(
+                app.clone(),
+                a.clients,
+            )?)
+        }
+        "pending_client_recovery" => {
+            args!(value, {});
+            encoded(crate::client_recovery_ui::pending_client_recovery()?)
+        }
+        "recover_client_connection" => {
+            let a = args!(value, {clients: Vec<String>, operation: String, central: bool});
+            encoded(crate::client_recovery_ui::recover_client_connection(
+                app.clone(),
+                a.clients,
+                a.operation,
+                a.central,
+            )?)
+        }
         "load_config" => {
             args!(value, {});
             encoded(crate::load_config(app.clone())?)

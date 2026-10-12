@@ -43,6 +43,9 @@ const MCP_WRITABLE_COMMANDS: &[&str] = &[
     "add_project",
     "one_click_setup",
     "review_existing_client_connection",
+    "review_existing_client_connections",
+    "pending_client_recovery",
+    "recover_client_connection",
     "get_project_sdk_profile",
     "get_unity_extension_status",
     "update_configured_unity_extensions",
@@ -432,6 +435,11 @@ impl Hosting {
         let verified = Arc::new(verify_executable(path, expected_hash)?);
         // Neither a renderer argument nor installed presence can authorize hosting.
         let writable = kind == AppId::Mcp && option_env!("CREATOR_MCP_HOST_WRITABLE") == Some("1");
+        let managed = if bundled && writable {
+            crate::builtin::managed_route(handle)?
+        } else {
+            None
+        };
         let read_only_events = kind == AppId::Mcp
             && (writable || option_env!("CREATOR_MCP_HOST_READONLY_EVENTS") == Some("1"));
         let running = crate::platform::running(kind, path)?;
@@ -523,11 +531,14 @@ impl Hosting {
             nonce,
             _verified_executable: verified,
         };
-        let hello = if writable {
+        let mut hello = if writable {
             json!({"hostingRevision":2,"requestedMode":"writable"})
         } else {
             initialize_args(read_only_events)
         };
+        if managed.is_some() {
+            hello["managedRouting"] = json!(true);
+        }
         backend.send("initialize", hello)?;
         let response = backend
             .replies

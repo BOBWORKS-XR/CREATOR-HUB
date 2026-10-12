@@ -35,10 +35,12 @@ This follows the [Windows job-object inheritance and close contract](https://lea
 Only the headless executable may call this process-lifetime execution adapter;
 the Hub GUI must launch the router, not call it inside its own process.
 
-Unix descriptor/activation tests compile and run, but execution explicitly refuses.
-An advisory file lock does not stop non-cooperating replacement of a verified
-executable. Full Unix payload-use binding remains an implementation and native
-acceptance gate, not an inferred property of the Windows implementation.
+Unix execution now has experimental kernel-backed adapters: sealed fd-bound Node
+execution on Linux and suspended-spawn CodeDirectory/enforcement verification on
+macOS, with exact-buffer server loading. Production Unix writable hosting remains
+refused pending native acceptance and consumption integration. An advisory lock
+is not immutable payload protection. See [Unix contracts, limitations and native
+commands](MCP-UNIX-EXECUTION.md); source checks do not lift the production gate.
 
 ## Activation Contract
 
@@ -87,10 +89,22 @@ Actual SDK checks cover old-session survival, new-connection activation, EOF,
 forced router exit, descendant cleanup, unrelated Node preservation, signed wrong
 product refusal, downgrade refusal and tampered payload refusal. Windows runs
 these against the built-in CI candidate. The library also has native test lanes
-for Linux, Intel macOS and Apple silicon macOS; those lanes do not enable Unix
-runtime execution.
+for Linux, Intel macOS and Apple silicon macOS. Unix execution fixtures are now
+available separately; ordinary unit lanes do not constitute packaged Unix
+writable-hosting acceptance.
 
 ## Remaining Integration
+
+The 2026-10-13 Windows managed candidate now includes signed router/runtime
+resources, approval-backed activation and zero-argument client routing. The
+producer uses the existing external signer; no replacement key was generated.
+Reviewed selected-client batches and conservative interruption recovery are
+integrated, with no legacy uninstall. These code changes do not complete the
+native install/update/reconnect gates. Current evidence and remaining work are
+recorded in [Unified Update Integration](UNIFIED-UPDATE-INTEGRATION.md).
+
+The paragraph and numbered source-phase checklist below describe the original
+integration requirements; implementation is not acceptance.
 
 The candidate builder now emits `mcp-runtime.json` deterministically only after
 the staged module bytes verify. This is the exact unsigned signing input, not a

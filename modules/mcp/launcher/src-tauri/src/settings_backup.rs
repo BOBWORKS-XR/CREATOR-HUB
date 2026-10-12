@@ -7,7 +7,7 @@ use std::{
 };
 
 const DIRECTORY: &str = ".creator-hub-settings-backups";
-const MAX_BYTES: u64 = 2 * 1024 * 1024;
+pub(crate) const MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 pub(crate) fn reject_links(path: &Path) -> Result<(), String> {
     for ancestor in path.ancestors() {
@@ -32,7 +32,7 @@ pub(crate) fn reject_links(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn protected_options() -> OpenOptions {
+pub(crate) fn protected_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
@@ -53,7 +53,7 @@ fn open_existing(path: &Path, writable: bool) -> Result<Option<File>, String> {
     }
 }
 
-fn read(file: &mut File) -> Result<Vec<u8>, String> {
+pub(crate) fn read(file: &mut File) -> Result<Vec<u8>, String> {
     if !file
         .metadata()
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= MAX_BYTES)
@@ -79,6 +79,153 @@ pub(crate) fn read_text(path: &Path) -> Result<Option<String>, String> {
     String::from_utf8(read(&mut file)?)
         .map(Some)
         .map_err(|_| "Settings must contain UTF-8 text. Nothing was changed.".into())
+}
+
+pub(crate) fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    open_existing(path, false)?
+        .map(|mut file| read(&mut file))
+        .transpose()
+}
+
+/// Retain the reviewed image, not a second pathname read that might be a new file.
+pub(crate) fn retain_image(path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+    if !path.is_absolute() || bytes.len() as u64 > MAX_BYTES {
+        return Err("Invalid retained settings image.".into());
+    }
+    let directory = path
+        .parent()
+        .ok_or("Settings have no parent folder.")?
+        .join(DIRECTORY);
+    private_directory(&directory)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Invalid settings file name.")?;
+    let backup = directory.join(format!("{name}.{:x}.bak", Sha256::digest(bytes)));
+    durable_image(&backup, bytes)?;
+    Ok(backup)
+}
+
+pub(crate) fn private_directory(path: &Path) -> Result<(), String> {
+    reject_links(path)?;
+    #[allow(unused_mut)]
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => {
+            #[cfg(unix)]
+            File::open(path.parent().ok_or("Directory has no parent.")?)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| "Cannot flush new directory.")?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err("Cannot create private migration storage.".into()),
+    }
+    reject_links(path)?;
+    let metadata = fs::metadata(path).map_err(|_| "Cannot inspect migration storage.")?;
+    if !metadata.is_dir() {
+        return Err("Migration storage must be a directory.".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err("Migration storage permissions are not private.".into());
+        }
+    }
+    Ok(())
+}
+
+/// Publish an immutable, bounded image without replacing any existing bytes.
+pub(crate) fn durable_image(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("Migration image exceeds 2 MiB.".into());
+    }
+    reject_links(path)?;
+    if let Some(mut existing) = open_existing(path, true)? {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if existing
+                .metadata()
+                .map_err(|_| "Cannot inspect image.")?
+                .permissions()
+                .mode()
+                & 0o077
+                != 0
+            {
+                return Err("Retained image permissions are not private.".into());
+            }
+        }
+        if read(&mut existing)? != bytes {
+            return Err("Retained migration image differs; it was not overwritten.".into());
+        }
+        existing
+            .sync_all()
+            .map_err(|_| "Cannot flush retained migration image.")?;
+        #[cfg(unix)]
+        File::open(path.parent().ok_or("Image has no parent.")?)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| "Cannot flush retained migration image directory.")?;
+        return Ok(());
+    }
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .ok_or("Image has no name.")?
+            .to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    let staged = StagedFile::write(&temporary, |file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    })
+    .map_err(|_| "Cannot stage durable migration image.")?;
+    staged
+        .publish(|source| durable_move(source, path))
+        .map_err(|_| {
+            "Cannot publish durable migration image; retained files were not replaced.".into()
+        })
+}
+
+/// Both names are reserved migration storage. Destination must never be overwritten.
+pub(crate) fn durable_move(source: &Path, path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+        let source: Vec<_> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // No REPLACE_EXISTING and no cross-volume copy fallback.
+        if unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    #[cfg(unix)]
+    {
+        // link is create-if-absent; rename would overwrite on Unix.
+        fs::hard_link(source, path)?;
+        File::open(path.parent().unwrap())?.sync_all()?;
+        fs::remove_file(source)?;
+        File::open(path.parent().unwrap())?.sync_all()?;
+    }
+    #[cfg(not(any(windows, unix)))]
+    return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Unsupported migration storage platform",
+    ));
+    Ok(())
 }
 
 pub fn retain(path: &Path) -> Result<(), String> {
@@ -230,6 +377,37 @@ impl Drop for StagedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reviewed_binary_image_is_retained_without_rereading_or_changing_the_target() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let path = root.join("config.json");
+        fs::write(&path, b"later external settings").unwrap();
+        let original = b"reviewed original\r\n\xff";
+        let backup = retain_image(&path, original).unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(read_bytes(&backup).unwrap().unwrap(), original);
+        assert_eq!(fs::read(&path).unwrap(), b"later external settings");
+        assert_eq!(retain_image(&path, original).unwrap(), backup);
+        fs::write(&backup, b"external backup edit").unwrap();
+        assert!(retain_image(&path, original).is_err());
+        assert_eq!(fs::read(backup).unwrap(), b"external backup edit");
+    }
+
+    #[test]
+    fn durable_image_and_move_never_replace_existing_unknown_bytes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let source = root.join("source.bin");
+        let destination = root.join("destination.bin");
+        durable_image(&source, b"source image").unwrap();
+        durable_image(&destination, b"unknown destination").unwrap();
+        assert!(durable_image(&destination, b"proposed replacement").is_err());
+        assert!(durable_move(&source, &destination).is_err());
+        assert_eq!(fs::read(source).unwrap(), b"source image");
+        assert_eq!(fs::read(destination).unwrap(), b"unknown destination");
+    }
 
     #[test]
     fn bounded_text_rejects_large_and_invalid_utf8_settings_without_changes() {

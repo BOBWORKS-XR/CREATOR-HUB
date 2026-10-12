@@ -66,6 +66,8 @@ struct NoArgs {}
 struct InitializeArgs {
     hosting_revision: u32,
     requested_mode: String,
+    #[serde(default)]
+    managed_routing: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -204,6 +206,11 @@ pub(crate) fn config_snapshot(
 }
 
 fn dispatch(app: &tauri::AppHandle, command: &str, args: Value) -> Result<Value, String> {
+    if command == "bind_managed_route" {
+        decode::<NoArgs>(args)?;
+        crate::managed_client::bind(app)?;
+        return Ok(json!({}));
+    }
     let _command = crate::lifecycle::LIFECYCLE
         .command()
         .map_err(String::from)?;
@@ -287,18 +294,23 @@ fn serve_authorized(
     if hello.id != 0 || hello.command != "initialize" {
         return Err("Expected hosted initialization.".into());
     }
-    let (lifecycle_events, writable) = if hello.args.as_object().is_some_and(|args| args.is_empty())
-    {
-        (false, false)
-    } else {
-        let args = decode::<InitializeArgs>(hello.args)?;
-        if args.hosting_revision != 2
-            || !["read-only", "writable"].contains(&args.requested_mode.as_str())
-        {
-            return Err("Unsupported hosting revision or mode.".into());
-        }
-        (true, args.requested_mode == "writable")
-    };
+    let (lifecycle_events, writable, managed) =
+        if hello.args.as_object().is_some_and(|args| args.is_empty()) {
+            (false, false, false)
+        } else {
+            let args = decode::<InitializeArgs>(hello.args)?;
+            if args.hosting_revision != 2
+                || !["read-only", "writable"].contains(&args.requested_mode.as_str())
+                || args.managed_routing && args.requested_mode != "writable"
+            {
+                return Err("Unsupported hosting revision or mode.".into());
+            }
+            (
+                true,
+                args.requested_mode == "writable",
+                args.managed_routing,
+            )
+        };
     let mut permission = match approve(writable) {
         Ok(permission) if permission.writable == writable => permission,
         Ok(_) => return Err("Hosting permission does not match the requested mode.".into()),
@@ -307,6 +319,12 @@ fn serve_authorized(
             return Ok(());
         }
     };
+    if managed {
+        if let Err(error) = call("bind_managed_route", json!({})) {
+            send(output, &hello.session, 0, Err(error))?;
+            return Ok(());
+        }
+    }
     let mut initialization = json!({"appId": "creator-works-mcp", "version": env!("CARGO_PKG_VERSION"), "protocol": 1, "files": files});
     if lifecycle_events {
         initialization["hostingRevision"] = json!(2);
@@ -557,8 +575,13 @@ fn authorize(
     host_hash: &str,
     writable: bool,
 ) -> Result<Permission, String> {
+    let image_binding = if cfg!(windows) {
+        "Its exact running image is locked for this session; the fingerprint is not a publisher signature."
+    } else {
+        "The direct parent and private pipes are checked. This fingerprint is a file snapshot, not a publisher signature or an immutable executable lock."
+    };
     let (message, button) = if writable {
-        (format!("Enable the normal MCP controls in this running Creator Hub?\n\n{host}\nSHA-256: {host_hash}\n\nThis permits launcher settings, selected AI-client configuration and Unity bridge changes when you use their controls. Only approve the Hub you intentionally opened. Its exact running image is locked for this session; the fingerprint is not a publisher signature. This does not install updates, adopt shortcuts, or stop any client."), "Enable MCP controls")
+        (format!("Enable the normal MCP controls in this running Creator Hub?\n\n{host}\nSHA-256: {host_hash}\n\nThis permits launcher settings, selected AI-client configuration and Unity bridge changes when you use their controls. Only approve the Hub you intentionally opened. {image_binding} This does not install updates, adopt shortcuts, or stop any client."), "Enable MCP controls")
     } else {
         (format!("Open MCP's read-only preview inside this Creator Hub window?\n\n{host}\n\nOnly continue if you just chose MCP in Hub. It can read saved launcher settings and show a folder picker. It cannot update bridges, migrate settings, install apps, or change shortcuts. The host path alone does not verify its publisher."), "Open read-only preview")
     };
@@ -622,13 +645,109 @@ fn authorize(
             _payload: payload,
         })
     }
-    #[cfg(not(windows))]
-    Err("Writable native hosting is currently Windows-only.".into())
+    #[cfg(all(unix, feature = "experimental-unix-hosting"))]
+    {
+        // Recheck direct-parent/private-pipe admission after the native dialog.
+        // Snapshot methods bind later resource reads; no advisory lock claim.
+        if parent_host()? != host {
+            return Err("Creator Hub's direct-parent identity changed during consent.".into());
+        }
+        let root = app
+            .path()
+            .resource_dir()
+            .map_err(|_| "Cannot locate MCP resources.")?
+            .join("server");
+        let payload = crate::hosted_payload::Root::verified(root)?;
+        let owner = crate::gui_owner::GuiWriteOwner::current_user()
+            .map_err(|_| "Another MCP window owns these settings, or exclusive access is unavailable. No window was closed.")?;
+        let settings = dirs::config_dir()
+            .ok_or("Cannot locate settings.")?
+            .join(crate::APP_CONFIG_DIR);
+        let mut journal = crate::hosted_journal::Journal::open(&settings)?;
+        if !journal.pending().is_empty() {
+            let message = format!("An earlier MCP operation did not record its outcome:\n\n{}\n\nInspect those settings or projects before repeating the operation. Nothing will be retried or rolled back automatically. Acknowledging this warning does not mark it successful.\n\nLocal record: {}", journal.pending().join(", "), settings.join("hosted-operation-outcomes.json").display());
+            if !app
+                .dialog()
+                .message(message)
+                .title("Previous MCP outcome needs checking")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Acknowledge".into(),
+                    "Not now".into(),
+                ))
+                .blocking_show()
+            {
+                return Err(
+                    "Previous operation remains unreviewed; writable hosting was not opened."
+                        .into(),
+                );
+            }
+            journal.acknowledge_unknowns()?;
+        }
+        if !app.manage(payload) {
+            return Err("Hosted resource authority already exists.".into());
+        }
+        Ok(Permission {
+            writable: true,
+            journal: Some(journal),
+            _owner: Some(owner),
+            _payload: Vec::new(),
+        })
+    }
+    #[cfg(not(any(windows, all(unix, feature = "experimental-unix-hosting"))))]
+    Err("Production Unix writable hosting remains disabled pending kernel-backed payload use and native acceptance.".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_binding_happens_only_after_permission_and_never_from_read_only() {
+        use std::cell::Cell;
+        let approved = Cell::new(false);
+        let input = request(0, "initialize").replace("\"args\":{}", "\"args\":{\"hostingRevision\":2,\"requestedMode\":\"writable\",\"managedRouting\":true}");
+        let mut output = vec![];
+        serve_authorized(
+            &mut input.as_bytes(),
+            &mut output,
+            BTreeMap::new(),
+            |writable| {
+                assert!(writable);
+                approved.set(true);
+                let mut permission = Permission::read_only();
+                permission.writable = true;
+                Ok(permission)
+            },
+            |command, _| {
+                assert!(approved.get());
+                assert_eq!(command, "bind_managed_route");
+                Ok(json!({}))
+            },
+        )
+        .unwrap();
+        assert!(String::from_utf8(output).unwrap().contains("effectiveMode"));
+        let input = input.replace("\"writable\"", "\"read-only\"");
+        assert!(serve_authorized(
+            &mut input.as_bytes(),
+            &mut vec![],
+            BTreeMap::new(),
+            |_| panic!("Never prompt"),
+            |_, _| panic!("Never bind")
+        )
+        .is_err());
+        let input = request(0, "initialize").replace("\"args\":{}", "\"args\":{\"hostingRevision\":2,\"requestedMode\":\"writable\",\"managedRouting\":true}");
+        let mut output = vec![];
+        serve_authorized(
+            &mut input.as_bytes(),
+            &mut output,
+            BTreeMap::new(),
+            |_| Err("declined".into()),
+            |_, _| panic!("No binding after decline"),
+        )
+        .unwrap();
+        assert!(String::from_utf8(output).unwrap().contains("declined"));
+    }
 
     #[test]
     fn release_links_are_limited_to_exact_official_stable_tags() {

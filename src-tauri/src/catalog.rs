@@ -101,12 +101,25 @@ impl Release {
     }
 
     pub(crate) fn validate_id(&self, app_id: &str, preview: bool) -> Result<Version, String> {
+        self.validate_target(
+            app_id,
+            preview,
+            crate::update_target::Target::select("windows", "x86_64", None)?,
+        )
+    }
+
+    pub(crate) fn validate_target(
+        &self,
+        app_id: &str,
+        preview: bool,
+        target: crate::update_target::Target,
+    ) -> Result<Version, String> {
         let version = Version::parse(&self.version).map_err(|_| "Invalid release version.")?;
         Version::parse(&self.min_hub_version).map_err(|_| "Invalid minimum Hub version.")?;
         if self.schema_version != 1
             || self.app_id != app_id
-            || self.platform != "windows"
-            || self.architecture != "x86_64"
+            || self.platform != target.platform
+            || self.architecture != target.architecture
             || self.identity_protocol > 1
             || self.lifecycle_protocol > 1
             || self.installer_protocol > 1
@@ -115,14 +128,13 @@ impl Release {
         {
             return Err("Release is incompatible with this Hub or channel.".into());
         }
-        let package = "nsis";
-        if self.package_type != package
+        if self.package_type != target.package
             || self.byte_length == 0
             || self.byte_length > MAX_ARTIFACT
             || !hash_valid(&self.sha256)
             || !hash_valid(&self.executable_sha256)
             || self.asset_name.len() > 160
-            || !self.asset_name.ends_with(".exe")
+            || !self.asset_name.ends_with(target.extension)
             || !self
                 .asset_name
                 .bytes()
@@ -253,6 +265,22 @@ pub(crate) fn verify_signed_id(
     signature: &[u8],
     preview: bool,
 ) -> Result<Release, String> {
+    verify_signed_target(
+        app_id,
+        data,
+        signature,
+        preview,
+        crate::update_target::Target::select("windows", "x86_64", None)?,
+    )
+}
+
+pub(crate) fn verify_signed_target(
+    app_id: &str,
+    data: &[u8],
+    signature: &[u8],
+    preview: bool,
+    target: crate::update_target::Target,
+) -> Result<Release, String> {
     if data.len() > MAX_METADATA as usize || signature.len() > 4096 {
         return Err("Signed metadata is too large.".into());
     }
@@ -266,7 +294,7 @@ pub(crate) fn verify_signed_id(
         .map_err(|_| "Release signature verification failed.")?;
     let release: Release =
         serde_json::from_slice(data).map_err(|_| "Invalid signed release descriptor.")?;
-    release.validate_id(app_id, preview)?;
+    release.validate_target(app_id, preview, target)?;
     Ok(release)
 }
 
@@ -284,18 +312,28 @@ struct GithubAsset {
     name: String,
 }
 
+#[cfg(test)]
 fn candidate_versions(
     items: Vec<GithubRelease>,
     preview: bool,
     baseline: &Version,
 ) -> Vec<Version> {
-    let signature_name = format!("{DESCRIPTOR_NAME}.minisig");
+    candidate_versions_for(items, preview, baseline, DESCRIPTOR_NAME)
+}
+
+fn candidate_versions_for(
+    items: Vec<GithubRelease>,
+    preview: bool,
+    baseline: &Version,
+    descriptor_name: &str,
+) -> Vec<Version> {
+    let signature_name = format!("{descriptor_name}.minisig");
     let mut versions: Vec<_> = items
         .into_iter()
         .filter(|r| !r.draft && (preview || !r.prerelease))
         // Old/manual releases without both signed catalog files are not Hub updates.
         .filter(|r| {
-            r.assets.iter().any(|a| a.name == DESCRIPTOR_NAME)
+            r.assets.iter().any(|a| a.name == descriptor_name)
                 && r.assets.iter().any(|a| a.name == signature_name)
         })
         .filter_map(|r| {
@@ -338,20 +376,39 @@ pub(crate) fn discover_from(
     preview: bool,
     baseline: &Version,
 ) -> Result<Option<SignedRelease>, String> {
+    discover_target(
+        client,
+        repo,
+        app_id,
+        preview,
+        baseline,
+        crate::update_target::Target::select("windows", "x86_64", None)?,
+    )
+}
+
+pub(crate) fn discover_target(
+    client: &Client,
+    repo: &str,
+    app_id: &str,
+    preview: bool,
+    baseline: &Version,
+    target: crate::update_target::Target,
+) -> Result<Option<SignedRelease>, String> {
+    let descriptor_name = target.descriptor();
     let url = format!(
         "https://api.github.com/repos/BOBWORKS-XR/{}/releases?per_page=10",
         repo
     );
     let items: Vec<GithubRelease> = serde_json::from_slice(&fetch_small(client, &url, 256 * 1024)?)
         .map_err(|_| "GitHub returned invalid release metadata.")?;
-    let versions = candidate_versions(items, preview, baseline);
+    let versions = candidate_versions_for(items, preview, baseline, &descriptor_name);
     let Some(version) = versions.first() else {
         return Ok(None);
     };
-    let url = release_url(repo, &version.to_string(), DESCRIPTOR_NAME);
+    let url = release_url(repo, &version.to_string(), &descriptor_name);
     let bytes = fetch_small(client, &url, MAX_METADATA)?;
     let signature = fetch_small(client, &format!("{url}.minisig"), 4096)?;
-    let release = verify_signed_id(app_id, &bytes, &signature, preview)?;
+    let release = verify_signed_target(app_id, &bytes, &signature, preview, target)?;
     if release.version != version.to_string() {
         return Err("Release tag and signed version differ.".into());
     }
