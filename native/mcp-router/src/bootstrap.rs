@@ -212,6 +212,13 @@ mod tests {
         let router = store.prepare_router(&source, &bytes, &signature).unwrap();
         let command = router.command.clone();
         drop(router);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // The owned fixture is deliberately damaged by an external writer;
+            // do not mistake its normal 0500 protection for immutable storage.
+            fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         fs::write(&command, b"changed by another writer").unwrap();
         assert!(store.router().is_err());
         assert!(store.prepare_router(&source, &bytes, &signature).is_err());
