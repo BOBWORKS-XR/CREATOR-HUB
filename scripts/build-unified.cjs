@@ -110,7 +110,8 @@ function build(label, { installer = false } = {}) {
     if (matches.length !== 1) throw Error('Expected exactly one matching unified NSIS candidate.');
     const target = path.join(output, 'installer.exe');
     fs.copyFileSync(path.join(bundles, matches[0]), target, fs.constants.COPYFILE_EXCL);
-    fs.writeFileSync(path.join(output, 'installer-checksum.json'), JSON.stringify({ version: hubVersion, sha256: sha256(target), signed: false, acceptanceOnly: true }));
+    const installed = require('./installer-payload.cjs').extract(target, path.join(output, 'installer-extracted'), path.join(output, 'creator-hub.exe'), manifest);
+    fs.writeFileSync(path.join(output, 'installer-checksum.json'), JSON.stringify({ version: hubVersion, sha256: sha256(target), installedExecutableSha256: sha256(installed), signed: false, acceptanceOnly: true }));
   }
   console.log(`Local unified candidate: ${output}. Not a release or migration acceptance.`);
   return output;

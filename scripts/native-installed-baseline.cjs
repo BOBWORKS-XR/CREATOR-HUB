@@ -42,9 +42,12 @@ function install(mode, candidate, out, seedBeforeInstall = () => {}) {
   assert.equal(metadata.acceptanceOnly, true); assert.equal(metadata.signed, false);
   const installer = path.join(candidate, 'installer.exe');
   assert.equal(sha256(installer), metadata.sha256);
+  const manifest = JSON.parse(fs.readFileSync(path.join(candidate, 'builtin-manifest.json')));
+  const expectedExecutable = require('./installer-payload.cjs').extract(installer, path.join(out, 'expected-installer-payload'), path.join(candidate, 'creator-hub.exe'), manifest);
+  if (metadata.installedExecutableSha256) assert.equal(sha256(expectedExecutable), metadata.installedExecutableSha256);
   execFileSync(installer, ['/S'], { windowsHide: true, timeout: 180000, stdio: 'pipe' });
   const directory = installs[0].directory;
-  assert.equal(sha256(path.join(directory, 'creator-hub.exe')), sha256(path.join(candidate, 'creator-hub.exe')), 'Installed Hub must match the exact candidate');
+  assert.equal(sha256(path.join(directory, 'creator-hub.exe')), sha256(expectedExecutable), 'Installed Hub must match the exact packaged candidate');
   if (mode === 'upgrade') {
     assert.notEqual(sha256(path.join(directory, 'creator-hub.exe')), installs[0].before, 'The published Hub must actually have been replaced');
     for (const b of installs.slice(1)) assert.equal(sha256(path.join(b.directory, b.binary)), b.before, 'Legacy app must not be silently replaced or uninstalled');

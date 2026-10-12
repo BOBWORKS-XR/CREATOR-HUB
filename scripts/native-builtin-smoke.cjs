@@ -116,6 +116,8 @@ async function verifyMigratedJsonConnection(entry) {
     installed = require('./native-installed-baseline.cjs').install(installedMode, directory, out, seed);
     directory = installed.directory; expectedRegistrations = installed.expectedRegistrations;
     hub = path.join(directory, 'creator-hub.exe');
+    report.unbundledHubSha256 = report.hubSha256;
+    report.hubSha256 = crypto.createHash('sha256').update(fs.readFileSync(hub)).digest('hex');
     verifyStage(path.join(directory, 'modules'), descriptor);
     registrations();
     report.checks.push(`${installedMode}: exact candidate installed using real NSIS; expected legacy registrations and binaries preserved`);
