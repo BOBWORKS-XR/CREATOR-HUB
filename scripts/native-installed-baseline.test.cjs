@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const { baselines } = require('./native-installed-baseline.cjs');
+const { baselines, registrationArray } = require('./native-installed-baseline.cjs');
 
 test('installed candidate helper refuses local and self-hosted runners before filesystem access', () => {
   for (const env of [{ GITHUB_ACTIONS: 'false' }, { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'self-hosted', RUNNER_OS: 'Windows' }]) {
@@ -19,4 +19,13 @@ test('installed acceptance pins all three public installers and separates direct
   const source = fs.readFileSync(path.join(__dirname, 'native-installed-baseline.cjs'), 'utf8');
   assert.match(source, /not signed in-app updater acceptance/);
   assert.ok(source.indexOf('seedBeforeInstall();') < source.indexOf("execFileSync(installer, ['/S']", source.indexOf('seedBeforeInstall();')));
+});
+
+test('PowerShell registration arrays preserve empty, one and three item counts', { skip: process.platform !== 'win32' }, () => {
+  for (const names of [[], ['Creator Hub'], baselines.map(b => b.product)]) {
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', `$items=${registrationArray(names)}; $items.Count`], { encoding: 'utf8', windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(Number(result.stdout.trim()), names.length);
+  }
+  assert.throws(() => registrationArray(['unknown']), /Unknown registration/);
 });

@@ -17,7 +17,7 @@ verifyStage(path.join(directory, 'modules'), descriptor);
 let hub = path.join(directory, 'creator-hub.exe');
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out);
-const report = { sourceRevision: process.env.GITHUB_SHA, hubSha256: crypto.createHash('sha256').update(fs.readFileSync(hub)).digest('hex'), checks: [], passed: false };
+const report = { sourceRevision: process.env.GITHUB_SHA, candidateSourceRevision: process.env.CREATOR_CANDIDATE_SOURCE || process.env.GITHUB_SHA, hubSha256: crypto.createHash('sha256').update(fs.readFileSync(hub)).digest('hex'), checks: [], passed: false };
 const backendPids = new Map();
 const installedMode = process.argv[3];
 let expectedRegistrations = [];
@@ -49,9 +49,9 @@ async function retry(action, seconds = 45) {
   throw last;
 }
 function registrations() {
-  const expected = JSON.stringify(expectedRegistrations).replaceAll("'", "''");
+  const expected = require('./native-installed-baseline.cjs').registrationArray(expectedRegistrations);
   return execFileSync('powershell.exe', ['-NoProfile', '-Command',
-    `$expected=@('${expected}' | ConvertFrom-Json); $found=@(); $names=@('Creator Hub','Creator Works MCP','Creator Project Setup','BANTWORKS MCP'); foreach ($h in @('HKCU:','HKLM:')) { foreach ($n in $names) { if(Test-Path -LiteralPath ($h+'\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'+$n)) { if($n -notin $expected) { throw ('Unexpected app registration: '+$n) }; $found+=$n } } }; foreach($n in $expected) { if($n -notin $found) { throw ('Missing app registration: '+$n) } }`], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+    `$expected=${expected}; $found=@(); $names=@('Creator Hub','Creator Works MCP','Creator Project Setup','BANTWORKS MCP'); foreach ($h in @('HKCU:','HKLM:')) { foreach ($n in $names) { if(Test-Path -LiteralPath ($h+'\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'+$n)) { if($n -notin $expected) { throw ('Unexpected app registration: '+$n) }; $found+=$n } } }; foreach($n in $expected) { if($n -notin $found) { throw ('Missing app registration: '+$n) } }`], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
 }
 async function backendFor(app) {
   return retry(() => {

@@ -10,6 +10,10 @@ const baselines = [
   { product: 'Creator Project Setup', repo: 'CREATOR-PROJECT-SETUP', version: '0.3.7', asset: 'Creator.Project.Setup_0.3.7_x64-setup.exe', sha256: '223bbc00bf7f861efe1760310a4be4cbedfc9829c4d3841fae0a84038bc7e47b', binary: 'creator-project-setup.exe' },
 ];
 const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+function registrationArray(names) {
+  assert.ok(names.every(name => baselines.some(b => b.product === name)), 'Unknown registration');
+  return `@(${names.map(name => `'${name.replaceAll("'", "''")}'`).join(',')})`;
+}
 function requireDisposable() {
   if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
     throw Error('Installed unified acceptance is restricted to a disposable GitHub-hosted Windows runner.');
@@ -51,4 +55,4 @@ function install(mode, candidate, out, seedBeforeInstall = () => {}) {
   fs.writeFileSync(path.join(out, 'installed-baseline.json'), JSON.stringify(report, null, 2));
   return { directory, expectedRegistrations: mode === 'upgrade' ? installs.map(b => b.product) : ['Creator Hub'], oldMcp: installs[1].directory };
 }
-module.exports = { install, requireDisposable, baselines };
+module.exports = { install, requireDisposable, baselines, registrationArray };
