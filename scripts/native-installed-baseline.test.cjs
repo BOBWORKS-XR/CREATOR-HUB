@@ -29,3 +29,11 @@ test('PowerShell registration arrays preserve empty, one and three item counts',
   }
   assert.throws(() => registrationArray(['unknown']), /Unknown registration/);
 });
+
+test('native migration dialog buttons are allowlisted without relaxing process or title checks', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-window.ps1'), 'utf8');
+  assert.match(source, /'Move connection' = @\('Review existing MCP connection'\)/);
+  assert.match(source, /'Keep existing' = @\('Review existing MCP connection'\)/);
+  assert.match(source, /window.Current.Name -cnotin \$titles\[\$Value\]/);
+  assert.match(source, /ProcessId\(\$dialog\) -ne \$TargetPid/);
+});

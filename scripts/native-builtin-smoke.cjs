@@ -240,10 +240,12 @@ async function verifyMigratedJsonConnection(entry) {
           finally { await window.CreatorRuntime.invoke('finish_ui_operation', { id: workflow }); }
         }, client.id);
         const cancelled = migrate();
+        void cancelled.catch(() => {});
         await retry(() => native(pid, executable, 'button', 'Keep existing'));
         assert.equal((await cancelled).status, 'cancelled');
         assert.equal(fs.readFileSync(client.path, 'utf8'), client.content);
         const approved = migrate();
+        void approved.catch(() => {});
         await retry(() => native(pid, executable, 'button', 'Move connection'));
         const result = await approved;
         assert.equal(result.status, 'migrated');
@@ -356,6 +358,9 @@ async function verifyMigratedJsonConnection(entry) {
     fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
     if (child && child.exitCode === null) {
       try {
+        for (const backend of backendPids.values()) {
+          try { native(backend.pid, backend.executable, 'button', 'Keep existing'); } catch { /* No pending owned migration review. */ }
+        }
         // An unanswered view-close prompt blocks normal window close. Cancel only
         // that known test-owned prompt before requesting a graceful Hub exit.
         try { native(child.pid, hub, 'button', 'Keep open'); } catch { /* No pending close prompt. */ }
