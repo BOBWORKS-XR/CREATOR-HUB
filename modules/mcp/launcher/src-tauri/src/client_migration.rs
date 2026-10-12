@@ -26,7 +26,8 @@ fn target(path: &Path) -> Result<String, String> {
         return Err("The retained Hub runtime is unavailable. No client was changed.".into());
     }
     settings_backup::reject_links(path)?;
-    path.to_str()
+    crate::normalized_existing_path(path.to_path_buf())
+        .to_str()
         .map(str::to_owned)
         .ok_or("Runtime paths must be UTF-8.".into())
 }
@@ -449,7 +450,12 @@ mod tests {
         assert_eq!(after["preferences"]["keep"], true);
         assert_eq!(after["mcpServers"]["other"]["command"], "keep");
         let migrated = &after["mcpServers"]["creator-works"];
-        assert_eq!(migrated["command"], f.node.to_str().unwrap());
+        assert_eq!(
+            migrated["command"],
+            crate::normalized_existing_path(f.node.clone())
+                .to_str()
+                .unwrap()
+        );
         assert_eq!(
             migrated["env"]["UNITY_PROJECT_PATH"],
             entry["env"]["UNITY_PROJECT_PATH"]
@@ -583,6 +589,28 @@ mod tests {
         assert!(reviewable("project\nmisleading review text").is_err());
         assert!(reviewable(&"x".repeat(4097)).is_err());
         assert!(reviewable("a normal project path").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migrated_server_paths_use_the_existing_node_compatible_normalizer() {
+        let f = Fixture::new();
+        let namespaced = f.server.canonicalize().unwrap();
+        assert!(namespaced.to_string_lossy().starts_with(r"\\?\"));
+        assert_eq!(
+            target(&namespaced).unwrap(),
+            crate::normalized_existing_path(f.server.clone())
+                .to_str()
+                .unwrap()
+        );
+        let original =
+            serde_json::json!({"mcpServers":{"creator-works":f.old_entry()}}).to_string();
+        let (_, plan) = f.review(Format::Json, &original);
+        let after: Value = serde_json::from_str(&plan.unwrap().after).unwrap();
+        assert!(!after["mcpServers"]["creator-works"]["args"][0]
+            .as_str()
+            .unwrap()
+            .starts_with(r"\\?\"));
     }
 
     #[cfg(windows)]
