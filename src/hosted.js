@@ -6,7 +6,7 @@
   });
   const mcpWritable = new Set([
     'begin_ui_operation', 'finish_ui_operation', 'load_config', 'save_config',
-    'discover_unity_projects', 'get_onboarding_status', 'add_project', 'one_click_setup',
+    'discover_unity_projects', 'get_onboarding_status', 'add_project', 'one_click_setup', 'review_existing_client_connection',
     'get_project_sdk_profile', 'get_unity_extension_status', 'update_configured_unity_extensions',
     'update_codex_mcp_config', 'update_claude_mcp_config', 'update_antigravity_mcp_config',
     'update_claude_desktop_mcp_config', 'remove_claude_desktop_mcp_config',

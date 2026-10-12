@@ -64,6 +64,9 @@ async function open(page, options = {}) {
               if (options.pendingStartup) await new Promise(resolve => { window.finishMcpStartup = resolve; });
               return structuredClone(mcpConfig);
             case 'save_config': mcpConfig = structuredClone(args.args.config); return null;
+            case 'review_existing_client_connection':
+              if (options.migrationError) throw 'Codex: Client settings changed after review. Nothing was changed.';
+              return { client: args.args.client, status: options.cancelMigration ? 'cancelled' : (args.args.client === 'codex' ? 'migrated' : 'unchanged') };
             case 'discover_unity_projects': return channels.map(channel => ({name:channel.name,path:channel.unity_project_path}));
             case 'get_project_sdk_profile': return profile;
             case 'get_unity_extension_status': return {current:true,installed:true};
@@ -627,6 +630,36 @@ test('embedded notice keeps the warning visible after storage failure and allows
   await mcp.locator('#ai-usage-confirm').click();
   await expect(mcp.locator('#ai-usage-notice')).toBeHidden();
   await expect(mcp.locator('#ai-usage-confirm-dialog')).toBeHidden();
+});
+
+test('built-in connection review targets selected clients only and never runs Set Up automatically', async ({ page }) => {
+  await open(page, { builtIn: true, writableMcp: true });
+  const mcp = await openMcp(page, true);
+  for (const id of ['connectClaude', 'connectClaudeDesktop', 'connectAntigravity', 'connectOpenCode']) await mcp.locator('#' + id).uncheck();
+  await mcp.locator('#reviewExistingConnectionsBtn').click();
+  await expect(mcp.locator('#setupMessage')).toContainText('1 connection(s) moved with local backups');
+  await expect(mcp.locator('#setupMessage')).toContainText('Existing project selections were kept');
+  const calls = await page.evaluate(() => hostCalls.filter(c => c.args?.command === 'review_existing_client_connection'));
+  expect(calls.map(c => c.args.args.client)).toEqual(['codex']);
+  expect(await page.evaluate(() => hostCalls.some(c => c.args?.command === 'one_click_setup'))).toBe(false);
+});
+
+for (const options of [{ cancelMigration: true }, { migrationError: true }]) test(`connection review stops without retry or automatic setup: ${JSON.stringify(options)}`, async ({ page }) => {
+  await open(page, { builtIn: true, writableMcp: true, ...options });
+  const mcp = await openMcp(page, true);
+  await mcp.locator('#reviewExistingConnectionsBtn').click();
+  await expect(mcp.locator('#setupMessage')).toContainText(options.cancelMigration ? 'Review cancelled' : 'Review stopped');
+  await expect(mcp.locator('#setupBtn')).toBeEnabled();
+  expect(await page.evaluate(() => hostCalls.filter(c => c.args?.command === 'review_existing_client_connection').length)).toBe(1);
+  expect(await page.evaluate(() => hostCalls.some(c => c.args?.command === 'one_click_setup'))).toBe(false);
+});
+
+test('read-only hosted MCP cannot request client migration', async ({ page }) => {
+  await open(page, { builtIn: true });
+  const mcp = await openMcp(page);
+  await expect(mcp.locator('#reviewExistingConnectionsBtn')).toBeDisabled();
+  const error = await mcp.locator('body').evaluate(() => window.CreatorRuntime.invoke('review_existing_client_connection', { client: 'codex' }).catch(String));
+  expect(error).toContain('read-only');
 });
 
 test('embedded Set Up includes detected Claude Desktop separately from Claude Code', async ({ page }) => {

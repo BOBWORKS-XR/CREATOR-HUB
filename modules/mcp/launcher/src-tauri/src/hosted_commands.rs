@@ -11,6 +11,7 @@ pub const COMMANDS: &[&str] = &[
     "get_onboarding_status",
     "add_project",
     "one_click_setup",
+    "review_existing_client_connection",
     "get_project_sdk_profile",
     "get_unity_extension_status",
     "update_configured_unity_extensions",
@@ -61,6 +62,13 @@ pub fn dispatch(app: &tauri::AppHandle, command: &str, value: Value) -> Result<V
         "load_config" => {
             args!(value, {});
             encoded(crate::load_config(app.clone())?)
+        }
+        "review_existing_client_connection" => {
+            let a = args!(value, {client: String});
+            encoded(crate::review_existing_client_connection(
+                app.clone(),
+                a.client,
+            )?)
         }
         "save_config" => {
             let a = args!(value, {config: crate::LauncherConfig});

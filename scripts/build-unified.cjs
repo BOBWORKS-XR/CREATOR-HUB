@@ -38,7 +38,7 @@ function verifyStage(directory, manifest) {
     }
   }
 }
-function build(label) {
+function build(label, { installer = false } = {}) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(label || '')) throw Error('Provide a unique, simple build name.');
   const platform = { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
   const arch = { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
@@ -102,13 +102,24 @@ function build(label) {
   const env = { ...process.env, CREATOR_BUILTIN_MANIFEST: descriptor,
     CREATOR_MCP_HOST_WRITABLE: platform === 'windows' ? '1' : '0', CREATOR_MCP_HOST_READONLY_EVENTS: '1',
     CARGO_TARGET_DIR: path.resolve(process.env.CARGO_TARGET_DIR || path.join(root, 'src-tauri/target')) };
-  run([cli, 'build', '--no-bundle', '--config', overlay, '--', '--locked'], root, env);
+  run([cli, 'build', ...(installer ? ['--bundles', 'nsis'] : ['--no-bundle']), '--config', overlay, '--', '--locked'], root, env);
   fs.copyFileSync(path.join(env.CARGO_TARGET_DIR, 'release', `creator-hub${extension}`), path.join(output, `creator-hub${extension}`));
+  if (installer) {
+    const bundles = path.join(env.CARGO_TARGET_DIR, 'release/bundle/nsis');
+    const matches = fs.readdirSync(bundles).filter(name => name.endsWith(`_${hubVersion}_x64-setup.exe`));
+    if (matches.length !== 1) throw Error('Expected exactly one matching unified NSIS candidate.');
+    const target = path.join(output, 'installer.exe');
+    fs.copyFileSync(path.join(bundles, matches[0]), target, fs.constants.COPYFILE_EXCL);
+    fs.writeFileSync(path.join(output, 'installer-checksum.json'), JSON.stringify({ version: hubVersion, sha256: sha256(target), signed: false, acceptanceOnly: true }));
+  }
   console.log(`Local unified candidate: ${output}. Not a release or migration acceptance.`);
   return output;
 }
 module.exports = { relativeFile, moduleFiles, verifyStage, build };
 if (require.main === module) {
-  try { if (process.argv.length !== 3) throw Error('Provide one build name.'); build(process.argv[2]); }
+  try {
+    if (process.argv.length !== 3 && !(process.argv.length === 4 && process.argv[3] === '--installer')) throw Error('Provide one build name and optional --installer.');
+    build(process.argv[2], { installer: process.argv[3] === '--installer' });
+  }
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }

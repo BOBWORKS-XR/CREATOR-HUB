@@ -11,14 +11,18 @@ const { helpOcclusion } = require('../tests/help-layout.cjs');
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
   throw Error('Built-in native acceptance is restricted to a disposable GitHub-hosted Windows runner.');
 }
-const directory = path.resolve(process.argv[2]);
+let directory = path.resolve(process.argv[2]);
 const descriptor = JSON.parse(fs.readFileSync(path.join(directory, 'builtin-manifest.json')));
 verifyStage(path.join(directory, 'modules'), descriptor);
-const hub = path.join(directory, 'creator-hub.exe');
+let hub = path.join(directory, 'creator-hub.exe');
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out);
 const report = { sourceRevision: process.env.GITHUB_SHA, hubSha256: crypto.createHash('sha256').update(fs.readFileSync(hub)).digest('hex'), checks: [], passed: false };
 const backendPids = new Map();
+const installedMode = process.argv[3];
+let expectedRegistrations = [];
+let installed;
+let legacyClients = [];
 const watchdog = setTimeout(() => {
   report.passed = false;
   report.error = 'Native acceptance exceeded its 5-minute deadline; no successful outcome is assumed.';
@@ -45,8 +49,9 @@ async function retry(action, seconds = 45) {
   throw last;
 }
 function registrations() {
+  const expected = JSON.stringify(expectedRegistrations).replaceAll("'", "''");
   return execFileSync('powershell.exe', ['-NoProfile', '-Command',
-    "$names=@('Creator Hub','Creator Works MCP','Creator Project Setup','BANTWORKS MCP'); foreach ($h in @('HKCU:','HKLM:')) { foreach ($n in $names) { if(Test-Path -LiteralPath ($h+'\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'+$n)) { throw ('Unexpected app registration: '+$n) } } }"], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+    `$expected=@('${expected}' | ConvertFrom-Json); $found=@(); $names=@('Creator Hub','Creator Works MCP','Creator Project Setup','BANTWORKS MCP'); foreach ($h in @('HKCU:','HKLM:')) { foreach ($n in $names) { if(Test-Path -LiteralPath ($h+'\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'+$n)) { if($n -notin $expected) { throw ('Unexpected app registration: '+$n) }; $found+=$n } } }; foreach($n in $expected) { if($n -notin $found) { throw ('Missing app registration: '+$n) } }`], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
 }
 async function backendFor(app) {
   return retry(() => {
@@ -64,17 +69,62 @@ async function backendExited(pid, executable) {
   }, 15);
 }
 let child, browser, page, protocolClient;
+async function verifyMigratedJsonConnection(entry) {
+  const sdk = require('node:module').createRequire(path.resolve('modules/mcp/package.json'));
+  const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = sdk('@modelcontextprotocol/sdk/client/stdio.js');
+  const client = new Client({ name: 'installed-migrated-client', version: '1' });
+  const transport = new StdioClientTransport({ command: entry.command, args: entry.args, env: entry.env, stderr: 'pipe' });
+  try {
+    await client.connect(transport, { timeout: 10000 });
+    transport.stderr?.resume();
+    assert.ok((await client.listTools({}, { timeout: 10000 })).tools.length > 0, 'Actual migrated command must expose MCP tools');
+  } finally { await client.close(); }
+}
 (async () => {
   registrations();
-  for (const app of ['Creator Works MCP', 'Creator Project Setup']) assert.equal(fs.existsSync(path.join(process.env.LOCALAPPDATA, app)), false);
   const settings = path.join(process.env.APPDATA, 'creator-works-mcp', 'launcher-config.json');
   assert.equal(fs.existsSync(settings), false);
-  const oldConfig = Buffer.from(JSON.stringify({ channels: [], active_channel_id: null,
+  const settingsBytes = () => fs.existsSync(settings) ? fs.readFileSync(settings) : null;
+  const oldConfig = installedMode === 'fresh' ? null : Buffer.from(JSON.stringify({ channels: [], active_channel_id: null,
     mcp_server_path: 'C:/old-install/banter-mcp.mjs', auto_start: false, tool_groups: 'full',
     migrationGuard: 'Preserve unknown fields and exact bytes when opening the built-in view' }));
+  const seed = () => {
+    if (oldConfig) {
+      fs.mkdirSync(path.dirname(settings), { recursive: true });
+      fs.writeFileSync(settings, oldConfig, { flag: 'wx' });
+    }
+    if (installedMode === 'upgrade') {
+      const root = path.join(process.env.LOCALAPPDATA, 'Creator Works MCP', 'server');
+      const node = path.join(root, 'runtime/node.exe');
+      const server = path.join(root, 'creator-works-mcp.mjs');
+      assert.equal(fs.existsSync(node), true); assert.equal(fs.existsSync(server), true);
+      const project = path.join(out, 'Existing-client-project'); fs.mkdirSync(project);
+      const env = { UNITY_PROJECT_PATH: project, CREATOR_WORKS_TOOL_GROUPS: 'read', CUSTOM_SETTING: 'keep' };
+      const entry = { command: node, args: [server], env, timeout: 37 };
+      legacyClients = [
+        { id: 'codex', path: path.join(process.env.USERPROFILE, '.codex/config.toml'), content: `# Keep the existing model and other server\nmodel='keep'\n[mcp_servers.other]\ncommand='keep'\n[mcp_servers.creator-works]\ncommand=${JSON.stringify(node.replaceAll('\\', '/'))}\nargs=[${JSON.stringify(server)}]\ntimeout=37\n[mcp_servers.creator-works.env]\nUNITY_PROJECT_PATH=${JSON.stringify(project)}\nCREATOR_WORKS_TOOL_GROUPS='read'\nCUSTOM_SETTING='keep'\n` },
+        { id: 'claude', path: path.join(process.env.USERPROFILE, '.claude.json'), content: JSON.stringify({ preferences: { keep: true }, mcpServers: { other: { command: 'keep' }, 'creator-works': entry } }) },
+      ];
+      for (const client of legacyClients) {
+        fs.mkdirSync(path.dirname(client.path), { recursive: true });
+        fs.writeFileSync(client.path, client.content, { flag: 'wx' });
+      }
+    }
+  };
+  if (installedMode) {
+    installed = require('./native-installed-baseline.cjs').install(installedMode, directory, out, seed);
+    directory = installed.directory; expectedRegistrations = installed.expectedRegistrations;
+    hub = path.join(directory, 'creator-hub.exe');
+    verifyStage(path.join(directory, 'modules'), descriptor);
+    registrations();
+    report.checks.push(`${installedMode}: exact candidate installed using real NSIS; expected legacy registrations and binaries preserved`);
+  }
+  else seed();
+  if (installedMode !== 'upgrade') for (const app of ['Creator Works MCP', 'Creator Project Setup']) assert.equal(fs.existsSync(path.join(process.env.LOCALAPPDATA, app)), false);
   let expectedConfig = oldConfig;
-  fs.mkdirSync(path.dirname(settings), { recursive: true });
-  fs.writeFileSync(settings, oldConfig, { flag: 'wx' });
+  assert.deepEqual(settingsBytes(), oldConfig, 'Real installer must preserve existing or absent MCP settings');
+  for (const client of legacyClients) assert.equal(fs.readFileSync(client.path, 'utf8'), client.content, 'Installation must not silently adopt legacy client entries');
   for (const module of Object.values(descriptor.modules)) {
     const file = path.join(directory, 'modules', module.executable);
     const result = require('node:child_process').spawnSync(file, [], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
@@ -154,7 +204,7 @@ let child, browser, page, protocolClient;
     assert.equal(await page.locator('#view-detail').isVisible(), false);
     assert.equal(await page.locator(`#${app}-host-frame`).count(), 0);
     await backendExited(pid, executable);
-    assert.deepEqual(fs.readFileSync(settings), oldConfig, 'Declined startup must not change legacy MCP settings');
+    assert.deepEqual(settingsBytes(), oldConfig, 'Declined startup must not change or create MCP settings');
     await page.screenshot({ path: path.join(out, `${app}-declined.png`) });
     report.checks.push(`${app}: real native consent decline shows retry, exits the backend and preserves legacy settings`);
     await page.locator('#builtin-open').click();
@@ -174,23 +224,51 @@ let child, browser, page, protocolClient;
       await frame.locator('#project-name').fill('Retained built-in form');
     } else {
       await frame.locator('#connection-guide-dialog').waitFor({ state: 'visible' });
-      assert.deepEqual(fs.readFileSync(settings), oldConfig, 'First-run connection guide must not change legacy settings');
+      assert.deepEqual(settingsBytes(), oldConfig, 'First-run connection guide must not change or create settings');
       await frame.locator('#connection-guide-close').click();
       report.checks.push('MCP: upgrade connection guide opens and can be dismissed without changing legacy settings');
       await frame.locator('#setupBtn').waitFor();
       await frame.locator('#checkUpdatesBtn').waitFor({ state: 'hidden' });
       assert.match(await frame.locator('#updateStatus').innerText(), /included with Creator Hub/);
-      assert.deepEqual(fs.readFileSync(settings), oldConfig, 'Opening built-in MCP must not migrate the old config');
+      assert.deepEqual(settingsBytes(), oldConfig, 'Opening built-in MCP must not migrate or create the config');
+      for (const client of legacyClients) {
+        const migrate = () => frame.locator('body').evaluate(async (_element, client) => {
+          const workflow = await window.CreatorRuntime.invoke('begin_ui_operation');
+          try { return await window.CreatorRuntime.invoke('review_existing_client_connection', { client }); }
+          finally { await window.CreatorRuntime.invoke('finish_ui_operation', { id: workflow }); }
+        }, client.id);
+        const cancelled = migrate();
+        await retry(() => native(pid, executable, 'button', 'Keep existing'));
+        assert.equal((await cancelled).status, 'cancelled');
+        assert.equal(fs.readFileSync(client.path, 'utf8'), client.content);
+        const approved = migrate();
+        await retry(() => native(pid, executable, 'button', 'Move connection'));
+        const result = await approved;
+        assert.equal(result.status, 'migrated');
+        assert.equal(fs.readFileSync(result.backupPath, 'utf8'), client.content, 'Native migration must retain exact before-images');
+        const content = fs.readFileSync(client.path, 'utf8');
+        assert.ok(content.includes(report.runtimeGeneration.replaceAll('\\', '/')) || content.includes(JSON.stringify(report.runtimeGeneration).slice(1, -1)));
+        assert.ok(content.includes('CUSTOM_SETTING')); assert.ok(content.includes('keep')); assert.ok(content.includes('other'));
+        assert.equal((await migrate()).status, 'unchanged', 'Repeated migration must not rewrite a marked entry');
+        assert.equal(fs.readFileSync(client.path, 'utf8'), content);
+        if (client.id === 'claude') {
+          await verifyMigratedJsonConnection(JSON.parse(content).mcpServers['creator-works']);
+          report.checks.push('Exact migrated Claude Code command connects and lists tools through the official SDK; not live Claude app/model acceptance');
+        }
+        report.checks.push(`${client.id}: real native decline preserves legacy config; approval moves its connection with exact backup and idempotent retry`);
+      }
       await saveBuiltinSettings(frame, path.join(report.runtimeGeneration, 'mcp/server/creator-works-mcp.mjs'));
       expectedConfig = fs.readFileSync(settings);
-      assert.equal(JSON.parse(expectedConfig).migrationGuard, JSON.parse(oldConfig).migrationGuard);
+      if (oldConfig) assert.equal(JSON.parse(expectedConfig).migrationGuard, JSON.parse(oldConfig).migrationGuard);
       assert.equal(JSON.parse(expectedConfig).auto_start, true);
       assert.equal(JSON.parse(expectedConfig).tool_groups, 'core');
       const backups = path.join(path.dirname(settings), '.creator-hub-settings-backups');
-      const beforeImage = fs.readdirSync(backups).find(name => name.startsWith('launcher-config.json.') && name.endsWith('.bak'));
-      assert.ok(beforeImage, 'Explicit built-in save must retain a backup first');
-      assert.deepEqual(fs.readFileSync(path.join(backups, beforeImage)), oldConfig);
-      report.checks.push('Explicit built-in settings save preserves unknown fields and retains the exact original bytes');
+      if (oldConfig) {
+        const beforeImage = fs.readdirSync(backups).find(name => name.startsWith('launcher-config.json.') && name.endsWith('.bak'));
+        assert.ok(beforeImage, 'Explicit built-in save must retain a backup first');
+        assert.deepEqual(fs.readFileSync(path.join(backups, beforeImage)), oldConfig);
+      } else assert.equal(fs.existsSync(backups), false, 'Fresh profile has no invented before-image');
+      report.checks.push(oldConfig ? 'Explicit built-in save preserves unknown fields and exact original bytes' : 'Fresh-profile startup creates no settings before an explicit save');
     }
     await retry(async () => assert.equal(await page.locator('#hosted-stop').isEnabled(), true));
     assert.equal(await helpOcclusion(frame, 'footer .text-button, .footer a'), null, 'Fixed Help must not obscure module footer links');

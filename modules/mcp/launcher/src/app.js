@@ -32,7 +32,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     'codexState', 'claudeState', 'antigravityState', 'opencodeState',
     'claudeDesktopDetection', 'claudeDesktopState', 'clientSetupIssue',
     'useUnityCli', 'unityCliStatus', 'unityCliDocs', 'getClaudeDesktopBtn', 'guideWorkspace',
-    'setupBtn', 'setupMessage', 'projectsList', 'emptyState', 'addProjectBtn',
+    'setupBtn', 'setupMessage', 'reviewExistingConnectionsBtn', 'projectsList', 'emptyState', 'addProjectBtn',
     'updateBridgesBtn', 'localFeedback', 'usageCheckIns', 'feedbackStatus',
     'automaticUpdates', 'checkUpdatesBtn', 'openReleaseBtn', 'updateStatus',
     'mcpServerPath', 'toolGroups', 'autoConfig', 'customScripts', 'allowAllTests', 'applyConfigBtn',
@@ -49,6 +49,7 @@ document.addEventListener('DOMContentLoaded', async function() {
   catch (error) { showToast(String(error), 'error'); return; }
   await window.CreatorAiUsageNotice.initialize();
   if (window.CreatorRuntime.builtIn) {
+    elements.reviewExistingConnectionsBtn.hidden = false;
     elements.automaticUpdates.closest('.setting-row').hidden = true;
     elements.checkUpdatesBtn.closest('.action-buttons').hidden = true;
     elements.updateStatus.textContent = 'MCP updates are included with Creator Hub updates.';
@@ -265,6 +266,7 @@ function setupEventListeners() {
   elements.connectAntigravity.addEventListener('change', updateSetupButton);
   elements.connectOpenCode.addEventListener('change', updateSetupButton);
   onOperation(elements.setupBtn, 'click', runQuickSetup);
+  onOperation(elements.reviewExistingConnectionsBtn, 'click', reviewExistingConnections);
 
   onOperation(elements.mcpServerPath, 'change', async function() {
     config.mcp_server_path = elements.mcpServerPath.value.trim();
@@ -621,6 +623,30 @@ async function runQuickSetup() {
     elements.setupBtn.classList.remove('working');
     updateSetupButton();
   }
+}
+
+async function reviewExistingConnections() {
+  const selected = [['codex', elements.connectCodex], ['claude', elements.connectClaude],
+    ['claudeDesktop', elements.connectClaudeDesktop], ['antigravity', elements.connectAntigravity],
+    ['opencode', elements.connectOpenCode]].filter(([, control]) => control.checked).map(([id]) => id);
+  if (!selected.length) { elements.setupMessage.textContent = 'No AI client selected.'; return; }
+  let migrated = 0;
+  try {
+    for (const client of selected) {
+      const result = await window.CreatorRuntime.invoke('review_existing_client_connection', { client });
+      if (result?.status === 'cancelled') {
+        elements.setupMessage.textContent = 'Review cancelled. ' + migrated + ' previously approved connection(s) moved; remaining connections were kept.';
+        return;
+      }
+      if (result?.status === 'migrated') migrated++;
+      else if (result?.status !== 'unchanged') throw new Error('Migration outcome is unknown. Check client settings before retrying.');
+    }
+    elements.setupMessage.textContent = migrated
+      ? migrated + ' connection(s) moved with local backups. Existing project selections were kept. Fully quit and reopen changed AI clients.'
+      : 'No eligible unmarked connection was found. Nothing was changed.';
+  } catch (error) {
+    elements.setupMessage.textContent = 'Review stopped: ' + String(error) + ' ' + migrated + ' previously approved connection(s) moved. No automatic retry.';
+  } finally { await refreshAll(); }
 }
 
 async function waitForFreshBridge(maxSeconds) {

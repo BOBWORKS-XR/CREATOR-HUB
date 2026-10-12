@@ -42,6 +42,28 @@ pub fn parse(content: &str) -> Result<Value, String> {
     serde_json::from_str(&normalized).map_err(|error| error.to_string())
 }
 
+pub(crate) fn parse_unambiguous(content: &str) -> Result<Value, String> {
+    let value = parse(content)?;
+    let tokens = tokenize(content)?;
+    for (index, token) in tokens.iter().enumerate() {
+        if matches!(token.kind, TokenKind::ObjectOpen) {
+            let object = parse_object(&tokens, index)?;
+            let mut keys = std::collections::HashSet::new();
+            if object
+                .members
+                .iter()
+                .any(|member| !keys.insert(&member.key))
+            {
+                return Err(
+                    "Duplicate client settings keys require manual review. Nothing was changed."
+                        .into(),
+                );
+            }
+        }
+    }
+    Ok(value)
+}
+
 pub fn update_managed_entry(
     content: &str,
     object_key: &str,

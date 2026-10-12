@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod claude_desktop;
+mod client_migration;
 mod client_ownership;
 mod community;
 mod community_api;
@@ -2478,6 +2479,50 @@ fn begin_ui_operation() -> Result<u32, &'static str> {
 }
 
 #[tauri::command]
+fn review_existing_client_connection(
+    app: tauri::AppHandle,
+    client: String,
+) -> Result<serde_json::Value, String> {
+    use client_migration::Format;
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    if !cfg!(windows) || option_env!("CREATOR_HUB_INTERNAL_MODULE") != Some("1") {
+        return Err(
+            "Reviewed connection migration is available only in the built-in Windows Hub preview."
+                .into(),
+        );
+    }
+    let (name, path, format) = match client.as_str() {
+        "codex" => ("Codex", get_codex_config_path(), Format::Codex),
+        "claude" => ("Claude Code", get_claude_config_path(), Format::Json),
+        "claudeDesktop" => ("Claude Desktop", claude_desktop::path()?, Format::Json),
+        "antigravity" => ("Antigravity", get_antigravity_config_path(), Format::Json),
+        "opencode" => ("OpenCode", get_opencode_config_path(), Format::OpenCode),
+        _ => return Err("Unknown client. Nothing was changed.".into()),
+    };
+    let (node, bundled) = resolve_node_command(&app)?;
+    if !bundled {
+        return Err("A verified private runtime is required. No client was changed.".into());
+    }
+    let server = default_mcp_server_path(&app)?;
+    let Some(plan) = client_migration::Plan::review(name, &path, format, &node, &server)
+        .map_err(|error| format!("{name}: {error}"))?
+    else {
+        return Ok(serde_json::json!({"client":client,"status":"unchanged"}));
+    };
+    let backup = plan.apply(|review| {
+        app.dialog().message(format!(
+            "Move this existing {} connection to the running Hub's retained runtime?\n\nSettings: {}\nOld Node: {}\nOld server: {}\n\nNew Node: {}\nNew server: {}\n\nExisting project (kept): {}\n\nThe old entry has no Hub ownership marker; its publisher is not verified by its name. Continue only if this is your Creator Works connection. An exact local backup is kept. Other servers, project selection and client options are preserved. No old app is uninstalled and no client or Unity process is stopped.",
+            review.client, path.display(), review.old_node, review.old_server, node.display(), server.display(), review.project.as_deref().unwrap_or("Not specified")
+        )).title("Review existing MCP connection").kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom("Move connection".into(), "Keep existing".into())).blocking_show()
+    }).map_err(|error| format!("{name}: {error}"))?;
+    Ok(match backup {
+        Some(path) => serde_json::json!({"client":client,"status":"migrated","backupPath":path}),
+        None => serde_json::json!({"client":client,"status":"cancelled"}),
+    })
+}
+
+#[tauri::command]
 fn finish_ui_operation(id: u32) -> Result<(), &'static str> {
     lifecycle::LIFECYCLE.finish_workflow(id)
 }
@@ -2634,6 +2679,7 @@ fn main() {
                 get_project_feedback_settings,
                 set_project_feedback_settings,
                 one_click_setup,
+                review_existing_client_connection,
             ];
             handler(invoke)
         })

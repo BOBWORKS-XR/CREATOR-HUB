@@ -44,6 +44,24 @@ for tested scope and remaining live-client/Editor acceptance; these changes do
 not complete the migration or release gates below.
 This is not migration acceptance: the current modules still use their existing
 settings locations, and no legacy client entries are repointed by this phase.
+The Windows built-in preview now has a separate **Review existing connections**
+action for selected AI clients. Native review shows the existing and retained
+runtime paths and the project that will be kept. It requires explicit approval
+for each eligible unmarked entry, retains a verified exact before-image, rejects
+changed snapshots, and preserves existing project/environment/client options.
+Unknown commands, duplicate Creator/Banter entries, foreign markers, malformed
+or ambiguous documents and Node overrides refuse conversion. Windows environment
+names are [case-insensitive](https://learn.microsoft.com/dotnet/api/system.environment.getenvironmentvariable);
+case variants of overrides and ownership keys are refused too. Normal Set Up
+still does not adopt unmarked entries. Read-only and standalone presentations
+cannot invoke this preview-only operation.
+This is a per-client, explicitly approved conversion to the current retained
+runtime, not the complete product migration: it does not install a stable router,
+create the signed activation receipt, resolve all product-settings conflicts,
+remove standalone apps or provide a multi-file power-loss recovery transaction.
+Before-images are retained locally; concurrent non-cooperating filesystem
+replacement at the publication boundary remains outside the reviewed snapshot
+checks and must be addressed in production transaction acceptance.
 Private MCP startup reads existing settings without persisting the standalone
 loader's automatic path/schema migration. Explicit setup/save operations remain
 separate; a complete approved migration and backup adapter is still required.
@@ -61,6 +79,17 @@ candidate under `artifacts/unified/`. It does not install it or publish a releas
 The dedicated clean Windows CI check launches both real backends without
 companion installations. The native acceptance script refuses non-disposable
 machines before inspecting settings or registrations.
+The separate `unified-installed-candidate.yml` workflow builds an unsigned
+NSIS candidate and tests fresh installation plus direct reinstallation over the
+exact published Hub 0.1.12, MCP 2.7.7 and Setup 0.3.7 installer hashes. The
+fresh lane has no MCP settings before first startup. The existing-app lane seeds
+representative unmarked Codex/Claude Code entries before installing the new
+candidate, checks silent installation leaves them unchanged, then exercises
+native migration refusal/approval, retained before-images and idempotency.
+It also checks the migrated command via the official MCP SDK, not a live AI app.
+This same-version development installer test is not signed in-app update or
+next-version public discovery/restart acceptance. Its results must be recorded
+as pending until the actual runs finish; source tests of the harness do not count.
 
 The modules now share a macOS parent-process check using Apple's `proc_pidpath`:
 private pipes, direct Hub parent and valid native executable path remain required.

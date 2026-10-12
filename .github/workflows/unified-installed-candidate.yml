@@ -1,0 +1,69 @@
+name: Unified installed candidate (not release)
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/unified-creator-hub]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            modules/mcp/launcher/src-tauri
+            modules/project-setup/src-tauri
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - run: npm --prefix modules/project-setup ci
+      - run: npm run test:scripts
+      - run: npm run build:unified -- installed-ci --installer
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unified-installed-candidate
+          if-no-files-found: error
+          retention-days: 7
+          path: artifacts/unified/installed-ci/
+  installed:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [fresh, upgrade]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - run: npx playwright install chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: unified-installed-candidate
+          path: artifacts/unified/installed-ci
+      - run: node scripts/native-builtin-smoke.cjs artifacts/unified/installed-ci ${{ matrix.mode }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unified-installed-${{ matrix.mode }}-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: artifacts/native-suite-*/
