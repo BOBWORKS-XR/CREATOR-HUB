@@ -132,7 +132,7 @@ async function verifyMigratedJsonConnection(entry) {
     const result = require('node:child_process').spawnSync(file, [], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
     assert.equal(result.status, 2, 'Private backend must not launch a standalone app');
   }
-  report.checks.push('No companion installations; private modules reject standalone launch');
+  report.checks.push(installedMode === 'upgrade' ? 'Legacy companion installations retained; private modules reject standalone launch' : 'No companion installations; private modules reject standalone launch');
   webviewPolicy('Enable');
   child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238', WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview') } });
@@ -351,7 +351,13 @@ async function verifyMigratedJsonConnection(entry) {
   report.checks.push('Corrupt packaged candidate refuses startup without changing settings or disrupting an active SDK stdio client on the retained generation');
   report.checks.push('Restoring exact candidate bytes permits a successful embedded retry on the same retained generation; active stdio client remains usable. This is failure recovery, not signed-update acceptance');
   report.passed = true;
-})().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; })
+})().catch(error => {
+  report.error = String(error.stack || error);
+  report.exitCode = error.status ?? null;
+  report.errorCode = error.code ?? null;
+  report.signal = error.signal ?? null;
+  process.exitCode = 1;
+})
   .finally(async () => {
     try { await protocolClient?.close(); }
     catch (error) { report.protocolCleanupError = String(error); report.passed = false; process.exitCode = 1; }

@@ -6,6 +6,11 @@ on:
         description: Reuse an immutable candidate artifact from a completed build run (test-script-only fixes)
         required: false
         type: string
+      mode:
+        description: Installer scenario to test
+        type: choice
+        options: [all, fresh, upgrade]
+        default: all
   push:
     branches: [feature/unified-creator-hub]
     paths:
@@ -53,7 +58,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [fresh, upgrade]
+        mode: ${{ fromJSON(inputs.mode == 'fresh' && '["fresh"]' || inputs.mode == 'upgrade' && '["upgrade"]' || '["fresh","upgrade"]') }}
     runs-on: windows-latest
     timeout-minutes: 15
     env:

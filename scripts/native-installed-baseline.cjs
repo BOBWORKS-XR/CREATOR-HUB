@@ -31,7 +31,15 @@ function install(mode, candidate, out, seedBeforeInstall = () => {}) {
       execFileSync('gh', ['release', 'download', `v${b.version}`, '--repo', `BOBWORKS-XR/${b.repo}`, '--pattern', b.asset, '--dir', downloads], { windowsHide: true, timeout: 120000, stdio: 'pipe' });
       const installer = path.join(downloads, b.asset);
       assert.equal(sha256(installer), b.sha256, 'Published baseline installer changed');
-      execFileSync(installer, ['/S'], { windowsHide: true, timeout: 180000, stdio: 'pipe' });
+      try { execFileSync(installer, ['/S'], { windowsHide: true, timeout: 180000, stdio: 'pipe' }); }
+      catch (error) {
+        report.failedInstaller = b.product;
+        report.exitCode = error.status ?? null; report.errorCode = error.code ?? null; report.signal = error.signal ?? null;
+        report.creatorProcesses = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+          "Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('creator-hub.exe','creator-works-mcp-launcher.exe','creator-project-setup.exe') -or ($_.Name -eq 'node.exe' -and $_.ExecutablePath -like '*Creator Works MCP*') } | Select-Object ProcessId,Name,ExecutablePath | ConvertTo-Json -Compress"], { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
+        fs.writeFileSync(path.join(out, 'installed-baseline.json'), JSON.stringify(report, null, 2));
+        throw error;
+      }
       b.before = sha256(path.join(b.directory, b.binary));
       report.baselines.push({ product: b.product, version: b.version, installerSha256: b.sha256, executableSha256: b.before });
     }
