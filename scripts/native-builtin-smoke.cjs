@@ -251,14 +251,24 @@ async function verifyMigratedJsonConnection(entry) {
         assert.equal(result.status, 'migrated');
         assert.equal(fs.readFileSync(result.backupPath, 'utf8'), client.content, 'Native migration must retain exact before-images');
         const content = fs.readFileSync(client.path, 'utf8');
-        assert.ok(content.includes(report.runtimeGeneration.replaceAll('\\', '/')) || content.includes(JSON.stringify(report.runtimeGeneration).slice(1, -1)));
-        assert.ok(content.includes('CUSTOM_SETTING')); assert.ok(content.includes('keep')); assert.ok(content.includes('other'));
+        let entry;
+        if (client.id === 'codex') {
+          const decoded = execFileSync('python', ['-c',
+            "import json,sys,tomllib; d=tomllib.load(open(sys.argv[1],'rb')); e=d['mcp_servers']['creator-works']; assert d['model']=='keep' and d['mcp_servers']['other']['command']=='keep'; print(json.dumps(e))", client.path], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+          entry = JSON.parse(decoded);
+        } else {
+          const parsed = JSON.parse(content);
+          assert.equal(parsed.preferences.keep, true); assert.equal(parsed.mcpServers.other.command, 'keep');
+          entry = parsed.mcpServers['creator-works'];
+        }
+        assert.equal(fs.realpathSync(entry.command), fs.realpathSync(path.join(report.runtimeGeneration, 'mcp/server/runtime/node.exe')));
+        assert.equal(fs.realpathSync(entry.args[0]), fs.realpathSync(path.join(report.runtimeGeneration, 'mcp/server/creator-works-mcp.mjs')));
+        assert.equal(entry.env.CUSTOM_SETTING, 'keep'); assert.equal(entry.env.CREATOR_WORKS_TOOL_GROUPS, 'read'); assert.equal(entry.timeout, 37);
+        assert.equal(entry.env.UNITY_PROJECT_PATH, path.join(out, 'Existing-client-project'));
         assert.equal((await migrate()).status, 'unchanged', 'Repeated migration must not rewrite a marked entry');
         assert.equal(fs.readFileSync(client.path, 'utf8'), content);
-        if (client.id === 'claude') {
-          await verifyMigratedJsonConnection(JSON.parse(content).mcpServers['creator-works']);
-          report.checks.push('Exact migrated Claude Code command connects and lists tools through the official SDK; not live Claude app/model acceptance');
-        }
+        await verifyMigratedJsonConnection(entry);
+        report.checks.push(`${client.id}: exact migrated command connects and lists tools through the official SDK; not live AI app/model acceptance`);
         report.checks.push(`${client.id}: real native decline preserves legacy config; approval moves its connection with exact backup and idempotent retry`);
       }
       await saveBuiltinSettings(frame, path.join(report.runtimeGeneration, 'mcp/server/creator-works-mcp.mjs'));

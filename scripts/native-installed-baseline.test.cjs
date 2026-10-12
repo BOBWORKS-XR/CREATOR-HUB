@@ -37,3 +37,10 @@ test('native migration dialog buttons are allowlisted without relaxing process o
   assert.match(source, /window.Current.Name -cnotin \$titles\[\$Value\]/);
   assert.match(source, /ProcessId\(\$dialog\) -ne \$TargetPid/);
 });
+
+test('migration acceptance parses TOML and compares real paths rather than encoded source strings', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-builtin-smoke.cjs'), 'utf8');
+  assert.match(source, /tomllib.load/);
+  assert.match(source, /fs.realpathSync\(entry.command\)/);
+  assert.doesNotMatch(source, /content.includes\(report.runtimeGeneration/);
+});
