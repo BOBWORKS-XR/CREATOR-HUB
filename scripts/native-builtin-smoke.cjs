@@ -7,6 +7,7 @@ const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
 const { verifyStage } = require('./build-unified.cjs');
 const { saveBuiltinSettings } = require('./native-builtin-save.cjs');
+const { managedLocations, verifyMigratedTarget } = require('./native-managed-target.cjs');
 const { helpOcclusion } = require('../tests/help-layout.cjs');
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
   throw Error('Built-in native acceptance is restricted to a disposable GitHub-hosted Windows runner.');
@@ -159,6 +160,19 @@ async function verifyMigratedJsonConnection(entry) {
   for (const app of ['setup', 'mcp']) {
     await page.locator('#suite-trigger').click();
     await page.locator(`#suite-menu [data-view="${app}"]`).click();
+    if (app === 'mcp' && descriptor.managedRouting) {
+      const route = managedLocations(process.env.LOCALAPPDATA);
+      assert.equal(fs.existsSync(route.active), false, 'Disposable baseline must not already have a managed route');
+      await retry(() => native(child.pid, hub, 'button', 'Not now'));
+      await retry(async () => assert.equal(await page.locator('#builtin-open').isEnabled(), true));
+      assert.match(await page.locator('#builtin-detail').innerText(), /declined/i);
+      assert.equal(fs.existsSync(route.active), false, 'Declining routing must not activate a generation');
+      assert.deepEqual(settingsBytes(), oldConfig);
+      for (const client of legacyClients) assert.equal(fs.readFileSync(client.path, 'utf8'), client.content);
+      await page.locator('#builtin-open').click();
+      await retry(() => native(child.pid, hub, 'button', 'Enable managed routing'));
+      report.checks.push('Native managed-route refusal preserves settings/client entries; explicit retry approves signed routing before MCP consent');
+    }
     let { ProcessId: pid, ExecutablePath: executable } = await backendFor(app);
     assert.equal(Number.isInteger(pid), true);
     if (app === 'setup') {
@@ -261,8 +275,7 @@ async function verifyMigratedJsonConnection(entry) {
           assert.equal(parsed.preferences.keep, true); assert.equal(parsed.mcpServers.other.command, 'keep');
           entry = parsed.mcpServers['creator-works'];
         }
-        assert.equal(fs.realpathSync(entry.command), fs.realpathSync(path.join(report.runtimeGeneration, 'mcp/server/runtime/node.exe')));
-        assert.equal(fs.realpathSync(entry.args[0]), fs.realpathSync(path.join(report.runtimeGeneration, 'mcp/server/creator-works-mcp.mjs')));
+        verifyMigratedTarget(entry, descriptor, report.runtimeGeneration, process.env.LOCALAPPDATA);
         assert.equal(entry.env.CUSTOM_SETTING, 'keep'); assert.equal(entry.env.CREATOR_WORKS_TOOL_GROUPS, 'read'); assert.equal(entry.timeout, 37);
         assert.equal(entry.env.UNITY_PROJECT_PATH, path.join(out, 'Existing-client-project'));
         assert.equal((await migrate()).status, 'unchanged', 'Repeated migration must not rewrite a marked entry');

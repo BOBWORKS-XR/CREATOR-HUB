@@ -1,0 +1,50 @@
+name: Signed routing candidate acceptance (not release)
+on:
+  push:
+    branches: [validation/unified-managed-input]
+    paths: ['.github/workflows/managed-candidate-acceptance.yml']
+permissions:
+  contents: read
+jobs:
+  installed:
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [fresh, upgrade]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - run: npx playwright install chromium
+      - name: Download immutable public-only signed routing test input
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path artifacts/managed-native-input | Out-Null
+          gh release download v0.1.13-validation --repo BOBWORKS-XR/CREATOR-HUB --pattern managed-candidate.zip --dir artifacts/managed-native-input
+          if ($LASTEXITCODE -ne 0) { throw 'Managed candidate download failed.' }
+          $zip = 'artifacts/managed-native-input/managed-candidate.zip'
+          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne 'eee2b101c888db32be8e1fb3751717ce57e4ff7fd7a74aa6d5a179467129e5a0') { throw 'Managed candidate archive hash differs.' }
+          Expand-Archive -LiteralPath $zip -DestinationPath artifacts/managed-native-input/candidate
+          $proof = Get-Content artifacts/managed-native-input/candidate/candidate-source.json -Raw | ConvertFrom-Json
+          if ($proof.sourceRevision -ne 'd59c030eb7567bbd5a93c005830d407acfc81b1d' -or $proof.version -ne '0.1.13' -or $proof.acceptanceOnly -ne $true -or $proof.releaseReady -ne $false) { throw 'Unexpected candidate scope.' }
+          "CREATOR_CANDIDATE_SOURCE=$($proof.sourceRevision)" >> $env:GITHUB_ENV
+      - name: Verify input pins and managed target assertions
+        run: node --test scripts/native-managed-target.test.cjs scripts/native-installed-baseline.test.cjs
+      - name: Test actual installed signed routing and migration
+        run: node scripts/native-builtin-smoke.cjs artifacts/managed-native-input/candidate ${{ matrix.mode }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: managed-native-${{ matrix.mode }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: artifacts/native-suite-*/

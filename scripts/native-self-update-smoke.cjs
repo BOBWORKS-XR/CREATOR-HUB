@@ -21,6 +21,9 @@ const from = selectBaseline(to.version);
 assert.match(to.installer || '', /^[a-f0-9]{64}$/, 'Supply the exact published target installer SHA-256');
 assert.match(to.exe || '', /^[a-f0-9]{64}$/, 'Supply the exact packaged target executable SHA-256');
 const fixture = process.env.CREATOR_HOSTED_UPDATE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.CREATOR_HOSTED_UPDATE_FIXTURE, 'utf8')) : null;
+const lab = process.env.CREATOR_SELF_UPDATE_LAB_CONFIG
+  ? require('./self-update-lab-target.cjs').selectLab(process.env.CREATOR_SELF_UPDATE_LAB_CONFIG, to, fixture)
+  : null;
 if (fixture) {
   assert.equal(fixture.testOnly, true);
   assert.equal(fixture.fromVersion, from.version);
@@ -34,6 +37,10 @@ assert.equal(fs.existsSync(hub), false, 'Expected a fresh runner without Hub ins
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out, { recursive: true });
 const report = { passed: false, from, to, checks: [], userMachineUsed: false, selfUpdateTested: false };
+report.discoveryKind = lab ? 'controlled-lab-not-public-discovery' : 'public-github-discovery';
+report.labDiscovery = Boolean(lab);
+report.publicDiscovery = !lab;
+if (lab) report.releaseReady = false;
 report.sourceKind = fixture ? 'version-only-runtime-fixture-not-public-stable' : 'unmodified-public-stable';
 if (fixture) report.fixture = fixture;
 const policyState = path.join(out, 'webview-policy.json');
@@ -137,7 +144,7 @@ async function installCompanions() {
   await retry(() => { assert.match(output, /ready/); assert.equal(unrelatedRuntime.exitCode, null); });
 }
 (async () => {
-  report.feed = await checkLive(to.version);
+  report.feed = lab ? require('./self-update-lab-target.cjs').discoveryScope(lab) : await checkLive(to.version);
   assertPreviousStable(report.feed.previousStable, from);
   const installer = fixture ? fixture.installerPath : path.join(out, `Creator-Hub-${from.version}-Windows-setup.exe`);
   if (!fixture) execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '120', '--output', installer,
@@ -146,6 +153,7 @@ async function installCompanions() {
   const setup = spawn(installer, ['/S', '/NS'], { windowsHide: true, stdio: 'ignore' });
   await retry(() => assert.equal(setup.exitCode, 0), 120);
   assert.equal(hash(hub), from.exe);
+  if (lab) require('./self-update-lab-target.cjs').checkBaseline(lab, installer, hub);
   if (fixture) await installCompanions();
   const sentinel = path.join(path.dirname(hub), 'ci-self-update-sentinel.txt');
   fs.writeFileSync(sentinel, 'Preserve unmanaged installed content.', { flag: 'wx' });
@@ -180,7 +188,7 @@ async function installCompanions() {
   const preference = 'self-update-preserves-storage';
   await page.evaluate(value => localStorage.setItem('creator-hub.ci-self-update', value), preference);
   report.before = state;
-  report.checks.push(`${report.sourceKind} ${from.version} discovers public signed ${to.version} and enables its actual Update Hub button`);
+  report.checks.push(`${report.sourceKind} ${from.version} discovers ${lab ? 'controlled-lab' : 'public'} signed ${to.version} and enables its actual Update Hub button`);
   await page.screenshot({ path: path.join(out, 'before-update.png') });
   await page.locator('#hub-update-button').click();
   await retry(() => native(child.pid, 'button', 'Not now'));
