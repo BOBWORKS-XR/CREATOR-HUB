@@ -64,8 +64,34 @@ function New-LabStartInfo([string]$Executable, [string[]]$Arguments, [string]$Pr
     return $info
 }
 
+function Get-LabImagePath($Process) {
+    # MainModule can be null during loader startup; query the owned process handle instead.
+    if (-not ('CreatorHubLabProcessImage' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+public static class CreatorHubLabProcessImage {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageNameW(SafeProcessHandle process, uint flags, StringBuilder name, ref uint size);
+    public static string Read(SafeProcessHandle process) {
+        var name = new StringBuilder(32768);
+        uint size = (uint)name.Capacity;
+        if (!QueryFullProcessImageNameW(process, 0, name, ref size)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (size == 0 || size >= name.Capacity || name.Length != size) throw new InvalidOperationException("Invalid process image length.");
+        return name.ToString();
+    }
+}
+'@
+    }
+    return [CreatorHubLabProcessImage]::Read($Process.SafeHandle)
+}
+
 function Get-LabProcessRecord($Process, [string]$ExpectedPath) {
-    $actualPath = $Process.MainModule.FileName
+    $actualPath = Get-LabImagePath $Process
     if (-not [string]::Equals($actualPath, $ExpectedPath, [StringComparison]::OrdinalIgnoreCase)) {
         # Only executable identity, never argv/environment or private transport material.
         $script:processIdentityFailure = [ordered]@{pid=$Process.Id; expectedImage=$ExpectedPath; actualImage=$actualPath}
@@ -79,7 +105,7 @@ function Test-LabProcess($Record) {
     try {
         $process = [Diagnostics.Process]::GetProcessById([int]$Record.pid)
         return (-not $process.HasExited -and $process.StartTime.ToUniversalTime().Ticks.ToString() -ceq $Record.startTimeTicks -and
-            [string]::Equals($process.MainModule.FileName, $Record.executablePath, [StringComparison]::OrdinalIgnoreCase))
+            [string]::Equals((Get-LabImagePath $process), $Record.executablePath, [StringComparison]::OrdinalIgnoreCase))
     } catch [ArgumentException] { return $false }
     finally { if ($process) { $process.Dispose() } }
 }
@@ -90,7 +116,7 @@ function Stop-LabProcess($Record) {
         $process = [Diagnostics.Process]::GetProcessById([int]$Record.pid)
         if ($process.HasExited) { return }
         if ($process.StartTime.ToUniversalTime().Ticks.ToString() -cne $Record.startTimeTicks -or
-            -not [string]::Equals($process.MainModule.FileName, $Record.executablePath, [StringComparison]::OrdinalIgnoreCase)) { throw 'Refused to stop an unowned process.' }
+            -not [string]::Equals((Get-LabImagePath $process), $Record.executablePath, [StringComparison]::OrdinalIgnoreCase)) { throw 'Refused to stop an unowned process.' }
         # No name-wide or process-tree kills: descendant runtime ownership belongs to the driver.
         $process.Kill()
         if (-not $process.WaitForExit(5000)) { throw 'Owned process did not stop.' }
@@ -297,6 +323,9 @@ try {
     $nodePath = Resolve-LabNode
     $phase = 'pwsh-path'
     $pwshPath = Resolve-LabFile (Join-Path $PSHOME 'pwsh.exe')
+    # Compile the image-query adapter before any short-lived child is launched.
+    $ownerProcess = [Diagnostics.Process]::GetCurrentProcess()
+    try { $owner = Get-LabProcessRecord $ownerProcess $pwshPath } finally { $ownerProcess.Dispose() }
     $phase = 'validator-start'
     $validator = [Diagnostics.Process]::new()
     $validator.StartInfo = New-LabStartInfo $nodePath @('-e', $proxyBootstrap, $feedPath, $ContractPath, 'validate')
@@ -345,7 +374,6 @@ try {
     $watcher.StartInfo = New-LabStartInfo $pwshPath @('-NoProfile', '-NonInteractive', '-File', $PSCommandPath, '-CleanupWatch')
     [void]$watcher.Start(); $watcherRecord = Get-LabProcessRecord $watcher $pwshPath
     $watcherErrorDrain = $watcher.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
-    $owner = Get-LabProcessRecord ([Diagnostics.Process]::GetCurrentProcess()) $pwshPath
     $watcher.StandardInput.WriteLine((@{rootDer=[Convert]::ToBase64String($publicRoot.RawData); owner=$owner; timeoutSeconds=($TimeoutSeconds + 60)} | ConvertTo-Json -Depth 4 -Compress))
     $watcher.StandardInput.Flush()
     $phase = 'watcher-arm'

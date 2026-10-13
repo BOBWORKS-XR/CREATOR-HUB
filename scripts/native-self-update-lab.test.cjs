@@ -24,7 +24,7 @@ function powershell(command, env = process.env) {
 
 function isolatedFunctions(names, body) {
   // Parse/extract only whitelisted pure or mocked functions; never execute the script body.
-  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Resolve-LabNode', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure', 'Get-LabProcessRecord'].includes(name)));
+  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Resolve-LabNode', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure', 'Get-LabProcessRecord', 'Get-LabImagePath'].includes(name)));
   const result = powershell(`$ErrorActionPreference='Stop'; $PSScriptRoot='${__dirname.replaceAll("'", "''")}'; $tokens=$null; $errors=$null;
     $ast=[System.Management.Automation.Language.Parser]::ParseFile('${helper.replaceAll("'", "''")}',[ref]$tokens,[ref]$errors);
     foreach ($name in @(${names.map(name => `'${name}'`).join(',')})) {
@@ -273,7 +273,7 @@ test('cleanup is armed before trust, covers partially failed add, and verifies e
 
 test('only recorded own PID/image/start-time identities may be stopped; no runtime tree kill', () => {
   assert.match(source, /StartTime\.ToUniversalTime\(\)\.Ticks\.ToString\(\) -cne \$Record\.startTimeTicks/);
-  assert.match(source, /\$process\.MainModule\.FileName, \$Record\.executablePath/);
+  assert.match(source, /\(Get-LabImagePath \$process\), \$Record\.executablePath/);
   assert.match(source, /\$parent\.ParentProcessId -ne \[int\]\$control\.owner\.pid/);
   assert.match(source, /\$process\.Kill\(\)/);
   assert.doesNotMatch(source, /Kill\(\$true\)|taskkill|Stop-Process|Get-Process -Name|GetProcessesByName/i);
@@ -304,6 +304,7 @@ test('failure diagnostics expose only allowlisted phase, exception class, numeri
 
 test('image mismatch diagnostic preserves refusal and includes only PID and executable paths', { skip: !hasPwsh }, () => {
   const output = isolatedFunctions(['Get-LabProcessRecord'], `
+    function Get-LabImagePath($Process) { return $Process.MainModule.FileName }
     $process=[pscustomobject]@{Id=123;MainModule=@{FileName='C:\\other\\pwsh.exe'};CommandLine='NEVER-LOG-SECRET';StartTime=[DateTime]::UtcNow};
     $script:processIdentityFailure=$null; $refused=$false;
     try { [void](Get-LabProcessRecord $process 'C:\\reviewed\\pwsh.exe') } catch { $refused=$true }
@@ -315,6 +316,26 @@ test('image mismatch diagnostic preserves refusal and includes only PID and exec
     if ($record.pid -ne 123 -or $null -ne $script:processIdentityFailure) { throw 'Valid image refused' }
     'image-mismatch-remains-refused'`);
   assert.equal(output, 'image-mismatch-remains-refused');
+});
+
+test('Windows image query reads a benign owned CLI child immediately, without MainModule or trust setup', { skip: !hasPwsh || process.platform !== 'win32' }, () => {
+  const output = isolatedFunctions(['Get-LabImagePath', 'Get-LabProcessRecord'], `
+    $expected=Join-Path $PSHOME 'pwsh.exe';
+    $owner=[Diagnostics.Process]::GetCurrentProcess();
+    try { [void](Get-LabProcessRecord $owner $expected) } finally { $owner.Dispose() }
+    $info=[Diagnostics.ProcessStartInfo]::new($expected); $info.UseShellExecute=$false; $info.CreateNoWindow=$true;
+    foreach ($arg in @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Milliseconds 200')) { $info.ArgumentList.Add($arg) }
+    $child=[Diagnostics.Process]::new(); $child.StartInfo=$info;
+    try {
+      [void]$child.Start(); $record=Get-LabProcessRecord $child $expected;
+      if ($record.pid -ne $child.Id -or -not [string]::Equals($record.executablePath,$expected,[StringComparison]::OrdinalIgnoreCase)) { throw 'Wrong process image' }
+      if (-not $child.WaitForExit(5000)) { throw 'CLI fixture did not exit' }
+    } finally { $child.Dispose() }
+    'owned-cli-image-verified'`);
+  assert.equal(output, 'owned-cli-image-verified');
+  assert.doesNotMatch(source, /\.MainModule/);
+  assert.match(source, /QueryFullProcessImageNameW\(process, 0, name, ref size\)/);
+  assert.ok(source.indexOf('$owner = Get-LabProcessRecord $ownerProcess $pwshPath') < source.indexOf('$validator.Start();'));
 });
 
 test('adapter refuses every bad runner before requiring modules or reading contract', () => {
