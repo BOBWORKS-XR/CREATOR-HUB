@@ -21,16 +21,16 @@ const BASELINES = Object.freeze({
 });
 const LIMIT = 512 * 1024 * 1024;
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
-const CANDIDATE = Object.freeze({ runId: '38407664529',
-  headSha: 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e',
-  sourceSha: '15f69917f827cac51af67ca027b460c142030379',
+const CANDIDATE = Object.freeze({ runId: '38423134520',
+  headSha: '288d3d60a8108d6ff41729b63705af3598721f60',
+  sourceSha: 'da87dfb1f815653f23737a98766b5eaa8a525dc4',
   artifacts: Object.freeze({
-    X64: Object.freeze({ id: 11819847905, size: 5430323, dmgSize: 5462532,
-      dmgSha256: 'e5efa060a776d325723a40dbddf79f198366db4374bffe41bc5de53fe865464e',
-      sha256: 'e68ab4993d7c8d50dd8649d74be8a36f6190bddcddff27e73ff46415e6911825' }),
-    ARM64: Object.freeze({ id: 11819379798, size: 5133859, dmgSize: 5161503,
-      dmgSha256: '9cf7377c0e7ee37eda87213e098886fbb073cb106f9157857488025f15dadb53',
-      sha256: '650a85b57369bc84049f9e0c49374cccb482f13d1c1cbd3757829bf5b756b917' }),
+    X64: Object.freeze({ id: 11827783041, size: 5432006, dmgSize: 5463320,
+      dmgSha256: 'b5ffca2db3d20445f4a29b15972b61be76ea8a7ce8b2d09b09e5f90b6579fdd7',
+      sha256: '95217142d7415383c1399c0485df0a501d013c49409c0233b1266514701c1841' }),
+    ARM64: Object.freeze({ id: 11827864821, size: 5139069, dmgSize: 5166375,
+      dmgSha256: '3d8ecdfca77eb475607f2a1aadd9afc63195119bd7a7b73ad861608d727d47e2',
+      sha256: '4cbf383054a92b9cf923dd59596b39b99a208070a878fcd571d98de2e10a67d4' }),
   }),
 });
 const PROBE_FILES = Object.freeze(['scripts/native-mac-maintenance-smoke.cjs',
@@ -43,6 +43,13 @@ const REVIEWED_TEST_ONLY_FILES = Object.freeze([
   '.github/workflows/flatpak-maintenance-validation.yml', 'docs/FLATPAK-NATIVE-VALIDATION.md',
   '.github/workflows/windows-candidate.yml', 'scripts/Test-InstalledCandidate.ps1',
   'scripts/self-update-baselines.test.cjs',
+  '.github/workflows/maintenance-signed-update-lab.yml',
+  'scripts/maintenance-signed-update.test.cjs',
+  'tests/fixtures/maintenance-signed-update/README.md',
+  'tests/fixtures/maintenance-signed-update/creator-hub-windows-x86_64.json',
+  'tests/fixtures/maintenance-signed-update/creator-hub-windows-x86_64.json.minisig',
+  'tests/fixtures/maintenance-signed-update/latest.json',
+  'scripts/flatpak-xres-window-pid.c',
 ]);
 const TREE_EXCLUSIONS = Object.freeze([...PROBE_FILES, ...REVIEWED_TEST_ONLY_FILES]);
 

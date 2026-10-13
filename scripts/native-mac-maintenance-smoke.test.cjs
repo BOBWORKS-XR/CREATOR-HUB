@@ -131,8 +131,8 @@ test('product tree comparison excludes only finite reviewed testing paths and in
 });
 
 test('concurrent Linux/Flatpak probes and three reviewed Windows baseline-testing changes are accepted', () => {
-  assert.equal(mac.REVIEWED_TEST_ONLY_FILES.length, 11);
-  assert.equal(mac.TREE_EXCLUSIONS.length, 16);
+  assert.equal(mac.REVIEWED_TEST_ONLY_FILES.length, 18);
+  assert.equal(mac.TREE_EXCLUSIONS.length, 23);
   assert.ok(Object.isFrozen(mac.TREE_EXCLUSIONS));
   const source = { path: 'src-tauri/src/main.rs', mode: '100644', type: 'blob', sha: 'a'.repeat(40) };
   const windows = mac.REVIEWED_TEST_ONLY_FILES.slice(-3).map(name => ({ path: name, mode: '100644', type: 'blob', sha: 'b'.repeat(40) }));

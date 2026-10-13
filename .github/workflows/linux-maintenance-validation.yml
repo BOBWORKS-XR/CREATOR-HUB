@@ -24,16 +24,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/runs/38407664529 > native-run.json
-          node -e 'const r=require("./native-run.json");if(r.conclusion!=="success"||r.head_sha!=="b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e"||r.repository.full_name!=="BOBWORKS-XR/CREATOR-HUB")throw Error("Native run binding differs")'
-          git fetch --no-tags origin b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e
-          git diff --exit-code b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e HEAD -- package.json package-lock.json rust-toolchain.toml src src-tauri unity
+          gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/runs/38423134520 > native-run.json
+          node -e 'const r=require("./native-run.json");if(r.conclusion!=="success"||r.head_sha!=="288d3d60a8108d6ff41729b63705af3598721f60"||r.repository.full_name!=="BOBWORKS-XR/CREATOR-HUB")throw Error("Native run binding differs")'
+          git fetch --no-tags origin 288d3d60a8108d6ff41729b63705af3598721f60
+          git diff --exit-code 288d3d60a8108d6ff41729b63705af3598721f60 HEAD -- package.json package-lock.json rust-toolchain.toml src src-tauri unity
       - uses: actions/download-artifact@v4
         with:
           repository: BOBWORKS-XR/CREATOR-HUB
-          run-id: 38407664529
+          run-id: 38423134520
           github-token: ${{ github.token }}
-          name: hub-development-Linux-X64-15f69917f827cac51af67ca027b460c142030379
+          name: hub-development-Linux-X64-da87dfb1f815653f23737a98766b5eaa8a525dc4
           path: artifacts/native-input
       - name: Provision disposable native desktop tools
         run: |

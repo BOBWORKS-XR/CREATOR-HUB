@@ -54,11 +54,13 @@ artifact ID/name/ZIP length/digest, artifact workflow repository IDs, equal head
 and merge trees, and exact PR merge parents. The downloaded ZIP digest is checked
 before extracting its single expected DMG. Extra entries or traversal are refused.
 All committed file hashes/modes, including submodules, in the harness checkout
-must match the artifact source except sixteen exact reviewed testing-only paths:
+must match the artifact source except twenty-three exact reviewed testing-only paths:
 the five Mac files below, the Linux harness/test/window/workflow, the Flatpak
 harness/test/workflow/evidence document, and the reviewed Windows baseline changes
 in `windows-candidate.yml`, `Test-InstalledCandidate.ps1` and
-`self-update-baselines.test.cjs`. The complete finite list is retained in the
+`self-update-baselines.test.cjs`; the signed Windows lab workflow/test, its four
+exact public fixture paths, and the Flatpak XRes test helper. These are test
+inputs and drivers, not app code or shipped permissions. The complete finite list is retained in the
 report's `productTree.excludedPaths`. There are no directory/glob exclusions:
 app source, Unity/script resources, settings, versions, package locks and all
 other files retain full mode/type/hash comparison. Any other change is a blocker

@@ -25,14 +25,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $run = gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/runs/38400543084 | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $run.conclusion -ne 'success' -or $run.head_sha -ne '7ee1cab7278ed4dbb48542ce26305f74b989b9d3' -or $run.repository.full_name -ne 'BOBWORKS-XR/CREATOR-HUB') { throw 'Accepted Windows candidate run differs.' }
-          $artifact = gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/artifacts/11815866712 | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $artifact.expired -or $artifact.name -ne 'creator-hub-windows-candidate' -or $artifact.workflow_run.id -ne 38400543084 -or $artifact.digest -ne 'sha256:69cfb9fc73ba8dce4d4fdf010c7ec2c4087b9c9433e5ca8b3418272311f7d4b3') { throw 'Accepted candidate artifact differs.' }
+          $run = gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/runs/38423123336 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.conclusion -ne 'success' -or $run.head_sha -ne '288d3d60a8108d6ff41729b63705af3598721f60' -or $run.repository.full_name -ne 'BOBWORKS-XR/CREATOR-HUB') { throw 'Accepted Windows candidate run differs.' }
+          $artifact = gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/artifacts/11828292672 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $artifact.expired -or $artifact.name -ne 'creator-hub-windows-candidate' -or $artifact.workflow_run.id -ne 38423123336 -or $artifact.digest -ne 'sha256:1fddb5c51ae92f3d1e7dd92792569fa5f4c70f378e269153e8f4f3f6db4631cc') { throw 'Accepted candidate artifact differs.' }
       - uses: actions/download-artifact@v4
         with:
           name: creator-hub-windows-candidate
-          run-id: 38400543084
+          run-id: 38423123336
           github-token: ${{ github.token }}
           path: artifacts/accepted-candidate
       - name: Stage exact public inputs before enabling the owned lab proxy
@@ -44,18 +44,18 @@ jobs:
           $accepted = Join-Path $PWD artifacts/accepted-candidate/dist/Creator-Hub-0.1.13-Windows-Candidate
           $installer = Join-Path $accepted Creator-Hub-0.1.13-Windows-setup.exe
           $exe = Join-Path $accepted extracted/creator-hub.exe
-          if ((Get-FileHash -LiteralPath $installer).Hash.ToLowerInvariant() -ne '07e7356087b74a2de537b43196e104d58d521358a3ac84a2ea33ec49aa985bb4' -or
-              (Get-FileHash -LiteralPath $exe).Hash.ToLowerInvariant() -ne '2315ad9d3eed9387e5409fd448219c012ab096b64653e1dbca2939eaa5c5b8d3') { throw 'Exact accepted installed payload differs.' }
+          if ((Get-FileHash -LiteralPath $installer).Hash.ToLowerInvariant() -ne 'bbdc390ba49526c9bdd40efa373c7e7d292b68ebe7209fb31aa4c833bc2805cb' -or
+              (Get-FileHash -LiteralPath $exe).Hash.ToLowerInvariant() -ne '2b2c8f5014d121f7ef408caab6626d14dc73b9f716b321ec9c1177ebe5c4a3ca') { throw 'Exact accepted installed payload differs.' }
           Copy-Item -LiteralPath $installer -Destination (Join-Path $candidate Creator.Hub_0.1.13_x64-setup.exe)
           foreach ($name in @('creator-hub-windows-x86_64.json','creator-hub-windows-x86_64.json.minisig','latest.json')) {
             Copy-Item -LiteralPath (Join-Path $PWD ('tests/fixtures/maintenance-signed-update/' + $name)) -Destination (Join-Path $candidate $name)
           }
           $config = @{ schemaVersion=1; targetVersion='0.1.13'; directory=$candidate; pins=@{
-            descriptor='43aba0e0514adc9fc1549fd43a6eda2108d6a13e5c77dd81f6af33de17b26865'
-            descriptorSignature='b35e7cadc7368ecadd5d387a16a5a3b043124968e3ac7079bed5a57e4874bba7'
-            installer='07e7356087b74a2de537b43196e104d58d521358a3ac84a2ea33ec49aa985bb4'
-            manifest='0811f4ebdd225ee4e8087f5412a755bfc057b9c0e01864feeec370d38c1b5b3b'
-            executable='2315ad9d3eed9387e5409fd448219c012ab096b64653e1dbca2939eaa5c5b8d3'
+            descriptor='8e937241dc55a1871f1eff2a447c8797a1092e9209b8a9e760771772f43eb971'
+            descriptorSignature='4badb69f01275b7616db9c0cf95826cafcc54ae63d69004a65d8b515bc5b8c2b'
+            installer='bbdc390ba49526c9bdd40efa373c7e7d292b68ebe7209fb31aa4c833bc2805cb'
+            manifest='017287c53c3616bc1b3477c7a3631362714818098f030a8cce8dd94e642c59fd'
+            executable='2b2c8f5014d121f7ef408caab6626d14dc73b9f716b321ec9c1177ebe5c4a3ca'
           }}
           $config | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root lab-config.json) -Encoding utf8NoBOM
           node -e "const f=require('fs');require('./scripts/self-update-lab-feed.cjs').loadContract(JSON.parse(f.readFileSync(process.argv[1],'utf8')));console.log('Pinned signed inputs validated; not updater acceptance.');" (Join-Path $root lab-config.json)

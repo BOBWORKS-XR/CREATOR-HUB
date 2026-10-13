@@ -5,12 +5,12 @@ const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const { spawn, execFileSync } = require('node:child_process');
 
-const SOURCE = 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e';
-const MERGE = '15f69917f827cac51af67ca027b460c142030379';
+const SOURCE = '288d3d60a8108d6ff41729b63705af3598721f60';
+const MERGE = 'da87dfb1f815653f23737a98766b5eaa8a525dc4';
 const PINS = Object.freeze({
-  appimage: Object.freeze({ name: 'Creator Hub_0.1.13_amd64.AppImage', sha256: '374cd60922dbef9664d2f4ff2b5a3a53fb0f09fcc50714c1a9d69f6d490c26ad', bytes: 85748216,
+  appimage: Object.freeze({ name: 'Creator Hub_0.1.13_amd64.AppImage', sha256: '967cf1a0c0b0d6de7a5b15152da3f5cc2bb70c7d8ab8cdd06d6590d6b5e96d0e', bytes: 85768696,
     oldName: 'Creator.Hub_0.1.12_amd64.AppImage', oldSha256: 'b2d161cc9fc98522d25a11d1c649994fed591c07a2d0ad3e89976fe985f454c4' }),
-  deb: Object.freeze({ name: 'Creator Hub_0.1.13_amd64.deb', sha256: '950392f2ded56017a5553e702dc76f2c296bfea2b6809a9e56e05b2030b7916f', bytes: 5975056,
+  deb: Object.freeze({ name: 'Creator Hub_0.1.13_amd64.deb', sha256: 'b95d71ab62ae75b38d2e653eee3d21eacba4869027d2c1fa01495065c429b3e0', bytes: 6004284,
     oldName: 'Creator.Hub_0.1.12_amd64.deb', oldSha256: 'a1d20fb23544356d90ab2314b6d430b274220e97d9129815eea731ac39c7ffd2' }),
 });
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -195,7 +195,7 @@ async function main() {
   const packageFile = path.join(directory, PINS[kind].name);
   const pin = candidate(packageFile, kind);
   fs.mkdirSync(output);
-  const report = { passed: false, releaseReady: false, source: SOURCE, mergeSource: MERGE, sourceRun: '38407664529',
+  const report = { passed: false, releaseReady: false, source: SOURCE, mergeSource: MERGE, sourceRun: '38423134520',
     kind, nativeGuiTested: false, manualUpgradeTested: false, signedUpdateTested: false,
     automaticRestartTested: false, nativeCompanionManagementTested: false, userMachineUsed: false, phases: [] };
   try {

@@ -1,7 +1,7 @@
 # Prepublication Windows Maintenance Update Inputs
 
 These three public files bind the exact separate-app 0.1.13 NSIS candidate from
-Windows acceptance run `38400543084`, source `7ee1cab7278ed4dbb48542ce26305f74b989b9d3`.
+Windows acceptance run `38423123336`, source `288d3d60a8108d6ff41729b63705af3598721f60`.
 The installed executable is the extracted installer payload, not the earlier raw
 build executable. The installer is downloaded from that immutable CI artifact,
 not committed here. No private key is present.

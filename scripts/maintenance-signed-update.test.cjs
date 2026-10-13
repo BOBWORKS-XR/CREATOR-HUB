@@ -331,9 +331,9 @@ test('maintenance driver uses only classic separate-app routes and preserves nat
 test('public signature fixture and lab workflow bind the exact installed maintenance payload, never raw or unified bytes', () => {
   const directory = path.join(__dirname, '../tests/fixtures/maintenance-signed-update');
   const hashes = {
-    'creator-hub-windows-x86_64.json': '43aba0e0514adc9fc1549fd43a6eda2108d6a13e5c77dd81f6af33de17b26865',
-    'creator-hub-windows-x86_64.json.minisig': 'b35e7cadc7368ecadd5d387a16a5a3b043124968e3ac7079bed5a57e4874bba7',
-    'latest.json': '0811f4ebdd225ee4e8087f5412a755bfc057b9c0e01864feeec370d38c1b5b3b',
+    'creator-hub-windows-x86_64.json': '8e937241dc55a1871f1eff2a447c8797a1092e9209b8a9e760771772f43eb971',
+    'creator-hub-windows-x86_64.json.minisig': '4badb69f01275b7616db9c0cf95826cafcc54ae63d69004a65d8b515bc5b8c2b',
+    'latest.json': '017287c53c3616bc1b3477c7a3631362714818098f030a8cce8dd94e642c59fd',
   };
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/maintenance-signed-update-lab.yml'), 'utf8');
   for (const [name, expected] of Object.entries(hashes)) {
@@ -344,8 +344,8 @@ test('public signature fixture and lab workflow bind the exact installed mainten
   assert.equal(descriptor.appId, 'creator-hub');
   assert.equal(descriptor.version, '0.1.13');
   assert.equal(descriptor.installerProtocol, 1);
-  assert.equal(descriptor.sha256, '07e7356087b74a2de537b43196e104d58d521358a3ac84a2ea33ec49aa985bb4');
-  assert.equal(descriptor.executableSha256, '2315ad9d3eed9387e5409fd448219c012ab096b64653e1dbca2939eaa5c5b8d3');
+  assert.equal(descriptor.sha256, 'bbdc390ba49526c9bdd40efa373c7e7d292b68ebe7209fb31aa4c833bc2805cb');
+  assert.equal(descriptor.executableSha256, '2b2c8f5014d121f7ef408caab6626d14dc73b9f716b321ec9c1177ebe5c4a3ca');
   assert.ok(workflow.includes(descriptor.executableSha256) && workflow.includes(descriptor.sha256));
   assert.match(workflow, /actions: read/);
   assert.doesNotMatch(workflow, /contents: write|secrets\.|SIGNING_KEY_PATH|signer sign|gh release|git tag/);
