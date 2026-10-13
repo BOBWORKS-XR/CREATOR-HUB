@@ -64,5 +64,11 @@ test('lab workflow uses pinned public signatures, keeps import privileges separa
   assert.match(source, /61f76d75123dfd3ff2436153fbe19313121def99f86dd817054a9d0bc35b1c73/);
   assert.ok(native.indexOf('Public baseline differs') < native.indexOf('./scripts/native-self-update-lab.ps1'));
   assert.match(native, /BaselineInstallerPath/);
+  assert.match(native, /Get-ChildItem -LiteralPath artifacts -Directory/);
+  assert.match(native, /Get-ChildItem -LiteralPath \$_.FullName -File -Filter self-update-report.json/);
+  assert.doesNotMatch(native, /Get-ChildItem artifacts\/native-suite-\* -Filter/);
+  assert.match(native, /receipt\.selfUpdateTested -ne \$true/);
+  assert.match(native, /receipt\.managedRouteReconnectTested -ne \$true/);
+  assert.match(native, /receipt\.publicDiscovery -ne \$false/);
   assert.doesNotMatch(source, /gh release (create|edit|upload)|rejectUnauthorized|ignore-certificate/);
 });
