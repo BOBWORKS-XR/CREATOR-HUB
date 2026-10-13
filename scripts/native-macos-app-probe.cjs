@@ -103,6 +103,38 @@ function closeAssessment(close, exit, owner) {
     postProcessState: bound && ['absent', 'same-kernel-process', 'different-process', 'unavailable'].includes(status.state) ? status.state : 'unknown',
     closeAccepted: callerOwnedExit0 && acceptedExit(close, exit, owner), diagnosticOnly: true };
 }
+function bitmapArguments(id, file) {
+  requireThat(Number.isSafeInteger(id) && id > 0 && id <= 0xffffffff, 'bitmap-exact-window-id-required');
+  requireThat(path.isAbsolute(file) && path.normalize(file) === file && file.endsWith('.png') && !/[\x00-\x1f]/.test(file), 'bitmap-owned-png-path-required');
+  return ['-l', String(id), '-x', file];
+}
+async function windowBitmapDiagnostic(owner, io) {
+  const result = { diagnosticOnly: true, attempted: false, completed: false, ...acceptance };
+  const verify = receipt => requireThat(receipt?.command === 'bitmap-fence' && receipt.screenCaptureAccess === true
+    && receipt.cgWindowFenceVerified === true && receipt.permissionRequestsPerformed === false && receipt.actionAttempted === false
+    && isDeepStrictEqual(receipt.process, owner.process) && isDeepStrictEqual(receipt.window, owner.window), 'bitmap-owned-root-fence-unverified');
+  try {
+    result.before = await io.fence('before');
+    if (result.before?.screenCaptureAccess === false) { result.reason = 'screen-capture-permission-unavailable'; return result; }
+    verify(result.before);
+    result.attempted = true;
+    let captureError;
+    try { result.capture = await io.capture(owner.window.id); } catch (error) { captureError = error; }
+    result.after = await io.fence('after'); verify(result.after);
+    if (captureError) throw captureError;
+    requireThat(result.capture?.exitCode === 0 && result.capture.signal === null && !result.capture.timedOut && !result.capture.error, 'bitmap-tool-capture-unverified');
+    result.image = io.image(); result.completed = true;
+  } catch (error) { result.reason = error.message; }
+  return result;
+}
+function bitmapImage(file) {
+  const image = pin(file, 32 * 1024 * 1024), head = image.head;
+  requireThat(head.length >= 24 && head.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    && head.readUInt32BE(8) === 13 && head.subarray(12, 16).toString('ascii') === 'IHDR', 'bitmap-png-header-unverified');
+  const width = head.readUInt32BE(16), height = head.readUInt32BE(20);
+  requireThat(width > 0 && height > 0 && width <= 32768 && height <= 32768, 'bitmap-dimensions-unverified');
+  return { ...image.image, width, height };
+}
 
 // A separate read-only sampler is needed because the unchanged action helper emits only fixed consent controls.
 const surfaceSource = String.raw`
@@ -199,9 +231,16 @@ do {
     try admitted()
     let args = Array(CommandLine.arguments.dropFirst())
     if args == ["availability"] { emit(["accessibilityTrusted": AXIsProcessTrusted(), "readOnly": true]); exit(0) }
-    try check(args.count == 2 && AXIsProcessTrusted(), "accessibility-or-owner-required")
-    guard let parent = UInt32(args[1]), parent > 0 else { throw Denied("owned-parent-required") }
-    let file = args[0], env = ProcessInfo.processInfo.environment
+    let bitmap = args.first == "bitmap-fence"
+    if bitmap {
+        try check(args.count == 3, "bitmap-fence-owner-parent-required")
+        if !CGPreflightScreenCaptureAccess() {
+            emit(["command": "bitmap-fence", "screenCaptureAccess": false, "cgWindowFenceVerified": false,
+                  "diagnosticOnly": true, "actionAttempted": false, "permissionRequestsPerformed": false]); exit(0)
+        }
+    } else { try check(args.count == 2 && AXIsProcessTrusted(), "accessibility-or-owner-required") }
+    guard let parent = UInt32(args[bitmap ? 2 : 1]), parent > 0 else { throw Denied("owned-parent-required") }
+    let file = args[bitmap ? 1 : 0], env = ProcessInfo.processInfo.environment
     try check(file.hasPrefix((env["RUNNER_TEMP"] ?? "invalid") + "/") && URL(fileURLWithPath: file).resolvingSymlinksInPath().path == file, "owner-path-refused")
     let fd = open(file, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
     try check(fd >= 0, "owner-open-refused"); let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
@@ -225,6 +264,12 @@ do {
         try check(["x": Double(b.minX), "y": Double(b.minY), "width": Double(b.width), "height": Double(b.height)] == expected, "root-bounds-drift")
     }
     try checkCG()
+    if bitmap {
+        try fence(p, parent); try checkCG()
+        emit(["command": "bitmap-fence", "screenCaptureAccess": true, "cgWindowFenceVerified": true,
+              "process": p, "window": w, "diagnosticOnly": true, "actionAttempted": false,
+              "permissionRequestsPerformed": false]); exit(0)
+    }
     let root = AXUIElementCreateApplication(pid)
     let matches = try children(root, kAXWindowsAttribute).filter { item in
         try pidMatches(item, pid)
@@ -328,10 +373,11 @@ async function probe(args, env) {
   const cpu = process.arch === 'arm64' ? 0x0100000c : 0x01000007;
   requireThat(executablePin.head.length >= 8 && executablePin.head.readUInt32LE(0) === 0xfeedfacf
     && executablePin.head.readUInt32LE(4) === cpu, 'exact-native-thin-mach-o-required');
-  const output = reserveOutput(temporary, request.app, request.output), report = { schemaVersion: 1, scope: 'Owned Root AX surface capture only; not product acceptance.',
+  const output = reserveOutput(temporary, request.app, request.output), report = { schemaVersion: 1, scope: 'Owned Root AX surface/window bitmap diagnostics only; not product acceptance.',
     ...acceptance, passed: false, captureCompleted: false, acceptedExit: false, cleanupUncertain: false,
     app: request.app, executable, suppliedHubSha256: request.hubSha256, runnerArchitecture: env.RUNNER_ARCH,
-    childPid: null, ownedChildExit: null, tools: [] };
+    childPid: null, ownedChildExit: null, tools: [],
+    windowBitmap: { diagnosticOnly: true, attempted: false, completed: false, reason: 'owned-live-window-not-available', ...acceptance } };
   const write = (name, data) => fs.writeFileSync(path.join(output, name), typeof data === 'string' || Buffer.isBuffer(data) ? data : JSON.stringify(data, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
   let child, owner, ownerImage, closeReceipt, ownedExit = null, toolUncertain = false, sequence = 0;
   function retainForeign(receipt, label) {
@@ -437,6 +483,28 @@ async function probe(args, env) {
   finally {
     if (child && owner && !ownedExit && !toolUncertain) {
       try {
+        const directory = path.join(output, 'window-bitmap');
+        fs.mkdirSync(directory, { mode: 0o700 }); canonical(directory);
+        const file = path.join(directory, 'root-window.png'), sampler = report.sampler;
+        report.windowBitmap = await windowBitmapDiagnostic(owner, {
+          fence: async stage => {
+            requireThat(!toolUncertain && !ownedExit && ownerImage && sameImage(pin(path.join(output, 'owner.json'), 8192).image, ownerImage), 'bitmap-owner-or-tool-state-unverified');
+            const result = await command(sampler.path, ['bitmap-fence', path.join(output, 'owner.json'), String(process.pid)], `bitmap-fence-${stage}`, 15000, sampler.image);
+            requireThat(result.exitCode === 0, 'bitmap-native-fence-refused');
+            return JSON.parse(result.text);
+          },
+          capture: async id => {
+            requireThat(!ownedExit && !toolUncertain, 'bitmap-owned-child-not-live');
+            try { fs.lstatSync(file); throw Error('bitmap-output-already-exists'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+            return command('/usr/sbin/screencapture', bitmapArguments(id, file), 'window-bitmap', 15000);
+          },
+          image: () => { const image = bitmapImage(file); fs.chmodSync(file, 0o600); return { path: file, ...image }; },
+        });
+        write('window-bitmap/receipt.json', report.windowBitmap);
+      } catch (error) { report.windowBitmap = { diagnosticOnly: true, completed: false, reason: error.message, ...acceptance }; }
+    }
+    if (child && owner && !ownedExit && !toolUncertain) {
+      try {
         const helper = report.helper;
         requireThat(ownerImage && sameImage(pin(path.join(output, 'owner.json'), 8192).image, ownerImage), 'owner-file-drift-no-close-attempted');
         const close = await command(helper.path, ['close', path.join(output, 'owner.json')], 'normal-close', 15000, helper.image);
@@ -455,6 +523,7 @@ async function probe(args, env) {
     if (child && !ownedExit) child.unref();
   }
   return { report: path.join(output, 'report.json'), surface: fs.existsSync(path.join(output, 'surface.json')) ? path.join(output, 'surface.json') : null,
+    bitmap: report.windowBitmap?.completed ? report.windowBitmap.image.path : null,
     passed: report.passed, ...acceptance };
 }
 
@@ -463,4 +532,5 @@ if (require.main === module) {
     console.log(JSON.stringify(result)); process.exitCode = result.passed ? 0 : 2;
   }).catch(error => { console.log(JSON.stringify({ error: error.message, passed: false, ...acceptance })); process.exitCode = 2; });
 }
-module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, closeAssessment, acceptance, surfaceSource };
+module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, closeAssessment,
+  bitmapArguments, bitmapImage, windowBitmapDiagnostic, acceptance, surfaceSource };

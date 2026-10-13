@@ -44,7 +44,8 @@ CREATOR_MACOS_APP_PROBE=1 CREATOR_MACOS_OWNED_GUI_TEST=1 \
 
 `APP_PATH` and `HUB_SHA256` must come from main's independent pins, not a newly
 computed hash that merely agrees with an unreviewed input. The script prints
-JSON containing `report`, optional partial/complete `surface`, `passed`, and the
+JSON containing `report`, optional partial/complete `surface`, optional verified
+window-only `bitmap`, `passed`, and the
 always-false product acceptance flags. Exit 0 requires complete capture, a
 verified normal AX close and this exact spawned child's exit code 0 without a
 signal. Otherwise exit 2; preflight refusal is printed without creating output.
@@ -167,6 +168,70 @@ stdout and tool exit codes, `surface.json` with changed snapshots/notification
 readiness, and `report.json` with exact child exit/separate close assessment.
 ARM should explain readiness or retain its bounded failure; Intel should identify
 the first refused child without entering it. All product flags remain false.
+
+## Window-Only Bitmap Diagnostic
+
+Run `38480897377` compiled on both Macs. ARM reached the 20-second readiness
+deadline with eight native chrome nodes, no AXWebArea and no AX notifications;
+its close stayed exit3/unaccepted despite caller exit0 and post-kernel absence.
+Intel's first foreign child at `window/0/0` was AXGroup PID3070, UID501, kernel
+parent1. Its native parent/window linked to Root3060 and the frozen Root CF
+references were unchanged. Originals remain in
+`artifacts/mac-root-probe-38480897377-{arm,intel}`. These observations do not
+establish visual blankness or authorize foreign AX input.
+[WebKit bug297546](https://bugs.webkit.org/show_bug.cgi?id=297546) and
+[PR49539](https://github.com/WebKit/WebKit/pull/49539) document a remote-AX
+mechanism consistent with the Intel linkage. That is context, not proof of this
+foreign executable's identity; no private API from that change is injected.
+
+The next diagnostic attempts one bitmap before normal cleanup, including when
+strict AX inspection/readiness failed. The same compiled read-only sampler
+has a `bitmap-fence OWNER_FILE PROBE_PARENT_PID` command. After the unchanged
+real-GHA/repository/native-architecture/opt-in guards, it checks
+[CGPreflightScreenCaptureAccess()](https://developer.apple.com/documentation/coregraphics/cgpreflightscreencaptureaccess%28%29).
+False returns a denial receipt without inspecting pixels or invoking capture.
+Unknown/refused output also prevents capture. No permission request API, TCC/
+Gatekeeper change, prompt, global AX discovery, activation or input is added.
+
+With existing permission, the bitmap command independently validates the saved
+Root PID, kernel parent/start/UID, executable path/hash/file identity,
+Info.plist identity, exact CG window ID/owner/visibility and frozen bounds. It
+does not enter AX children and cannot authorize any AX action. The caller runs
+the exact-window-only noninteractive command once:
+
+```sh
+/usr/sbin/screencapture -l EXACT_OWNED_CG_WINDOW_ID -x NEW_OWNED_PNG_PATH
+```
+
+No interactive, full-screen, rectangle, alternate-window or retry mode exists.
+Output is only the new private `window-bitmap/root-window.png` within the fresh
+probe directory; existing output refuses. The same native permission/Root/CG
+fences run again after capture. Failed CLI status, unknown permission, changed
+PID/start/hash/bounds/window ID or missing post-fence cannot verify the image.
+The PNG is capped at 32 MiB, checked for PNG/IHDR metadata and positive bounded
+dimensions, hashed and made private. Header checks are not pixel/render proof;
+Retina scaling/window shadows can differ from point-space CG bounds. Before/
+after fences detect observable drift, not an atomic window-server transaction.
+Preflight is a current sampler observation, not a guarantee that the separate
+OS capture tool succeeds; an OS refusal has no permission-changing fallback.
+
+New receipts: `report.json.windowBitmap`, `window-bitmap/receipt.json`, numbered
+`bitmap-fence-before`, `window-bitmap` and `bitmap-fence-after` tool receipts,
+and the PNG only if capture was attempted. A false preflight has
+`attempted=false`, `completed=false`, reason
+`screen-capture-permission-unavailable` and no PNG. `completed=true` means the
+window-only capture/file/identity checks completed, not that the pixels show a
+working frontend. It never changes the original AX/readiness/close error,
+`passed` logic or any GUI/MCP/migration/update/release acceptance flag.
+
+The invocation is unchanged. Main owns upload wiring: retain all JSON/tool
+refusals with `always()`, but upload the PNG only when
+`report.windowBitmap.completed === true`. Failed/unfenced partial PNGs remain
+private on the disposable runner, never a trusted Root artifact. Continue to
+exclude profile/Root logs. No native screenshot was executed by local tests.
+Smallest next test is one fresh caller-pinned run on each Mac and visual review
+of only the verified PNG, distinguishing visible Root HTML from a blank window
+without treating either result as full product acceptance.
 
 ## Tests And Remaining Gates
 

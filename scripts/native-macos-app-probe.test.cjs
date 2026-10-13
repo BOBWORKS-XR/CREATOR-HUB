@@ -172,6 +172,69 @@ test('Root readiness polling preserves the native CF window and stores changes o
   assert.doesNotMatch(probe.surfaceSource, /Thread.sleep|usleep\(|sleep\(/);
 });
 
+test('window bitmap refuses false/unknown permission and never calls capture without exact owned fences', async () => {
+  const { owner } = ownership();
+  let captures = 0;
+  const denied = await probe.windowBitmapDiagnostic(owner, {
+    fence: async () => ({ screenCaptureAccess: false }), capture: async () => { captures++; }, image: () => { throw Error('unexpected image read'); },
+  });
+  assert.equal(captures, 0); assert.equal(denied.completed, false); assert.equal(denied.reason, 'screen-capture-permission-unavailable');
+  const unknown = await probe.windowBitmapDiagnostic(owner, {
+    fence: async () => ({}), capture: async () => { captures++; }, image: () => { throw Error('unexpected image read'); },
+  });
+  assert.equal(captures, 0); assert.equal(unknown.completed, false);
+});
+
+test('window bitmap captures once between exact process/start/hash/bounds fences without changing acceptance', async () => {
+  const { owner } = ownership(), order = [];
+  const fence = { screenCaptureAccess: true, cgWindowFenceVerified: true, process: owner.process, window: owner.window,
+    command: 'bitmap-fence', permissionRequestsPerformed: false, actionAttempted: false };
+  const result = await probe.windowBitmapDiagnostic(owner, {
+    fence: async stage => { order.push(stage); return fence; },
+    capture: async id => { order.push(`capture:${id}`); return { exitCode: 0, signal: null }; },
+    image: () => { order.push('image'); return { sha256: 'b'.repeat(64), width: 940, height: 580 }; },
+  });
+  assert.deepEqual(order, ['before', `capture:${owner.window.id}`, 'after', 'image']);
+  assert.equal(result.completed, true);
+  for (const key of Object.keys(probe.acceptance)) assert.equal(result[key], false);
+  for (const mutate of [p => p.process.pid++, p => p.process.startSeconds++, p => p.process.image.sha256 = 'c'.repeat(64),
+    p => p.window.id++, p => p.window.bounds.width++]) {
+    let stage = 0;
+    const drift = await probe.windowBitmapDiagnostic(owner, {
+      fence: async () => { const value = structuredClone(fence); if (stage++) mutate(value); return value; },
+      capture: async () => ({ exitCode: 0, signal: null }), image: () => { throw Error('drifted image must not be verified'); },
+    });
+    assert.equal(drift.completed, false);
+  }
+  const failed = await probe.windowBitmapDiagnostic(owner, {
+    fence: async () => fence, capture: async () => ({ exitCode: 1, signal: null }),
+    image: () => { throw Error('failed capture must not verify an image'); },
+  });
+  assert.equal(failed.completed, false); assert.ok(failed.after);
+});
+
+test('bitmap source preflights without prompting and has only exact-window noninteractive capture arguments', () => {
+  assert.ok(probe.surfaceSource.includes('CGPreflightScreenCaptureAccess()'));
+  assert.ok(!probe.surfaceSource.includes('CGRequestScreenCaptureAccess'));
+  const { owner } = ownership(), file = path.join(scratch, 'root-window.png');
+  assert.deepEqual(probe.bitmapArguments(owner.window.id, file), ['-l', String(owner.window.id), '-x', file]);
+  for (const id of [0, -1, 0x100000000, NaN]) assert.throws(() => probe.bitmapArguments(id, file));
+  assert.ok(source.includes("command('/usr/sbin/screencapture'"));
+  const bitmapBranch = probe.surfaceSource.split('if bitmap {')[1].split('} else {')[0];
+  assert.ok(bitmapBranch.includes('exit(0)'));
+  assert.ok(!bitmapBranch.includes('AXUIElement') && !bitmapBranch.includes('CGRequest'));
+});
+
+test('bitmap output is bounded PNG metadata, not a visual or product acceptance claim', () => {
+  const file = path.join(scratch, 'synthetic.png'), bytes = Buffer.alloc(32);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes);
+  bytes.writeUInt32BE(13, 8); bytes.write('IHDR', 12, 'ascii'); bytes.writeUInt32BE(940, 16); bytes.writeUInt32BE(580, 20);
+  fs.writeFileSync(file, bytes, { flag: 'wx' });
+  assert.equal(probe.bitmapImage(file).width, 940);
+  bytes.writeUInt32BE(0, 16); fs.writeFileSync(file, bytes); assert.throws(() => probe.bitmapImage(file));
+  fs.writeFileSync(file, 'not a bitmap'); assert.throws(() => probe.bitmapImage(file));
+});
+
 test('orchestrator uses one unchanged pinned helper, one Root spawn and one normal close without fallback', () => {
   assert.match(source, /admission\(env, process.platform, process.arch\)[\s\S]*?const request = options/);
   assert.match(source, /write\('native-macos-window.swift', source.bytes\)/);

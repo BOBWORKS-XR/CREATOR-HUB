@@ -112,3 +112,30 @@ jobs:
             ${{ runner.temp }}/root-app-probe/*.json
             ${{ runner.temp }}/root-app-probe/*.stdout
             ${{ runner.temp }}/root-app-probe/*.stderr
+            ${{ runner.temp }}/root-app-probe/window-bitmap/receipt.json
+      - name: Admit only a completed exact-owned-window bitmap diagnostic
+        if: always()
+        id: bitmap
+        run: |
+          node - <<'NODE'
+          const fs=require('node:fs'), path=require('node:path');
+          const root=path.join(process.env.RUNNER_TEMP,'root-app-probe');
+          try {
+            const report=JSON.parse(fs.readFileSync(path.join(root,'report.json'),'utf8'));
+            const file=path.join(root,'window-bitmap','root-window.png');
+            if(report.windowBitmap?.completed!==true || report.windowBitmap.diagnosticOnly!==true) process.exit(0);
+            const meta=fs.lstatSync(file);
+            if(!meta.isFile() || meta.isSymbolicLink() || meta.size<=0 || meta.size>10*1024*1024) throw Error('Invalid diagnostic bitmap');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT,'completed=true\n');
+          } catch(error) {
+            if(error.code!=='ENOENT') throw error;
+          }
+          NODE
+      - name: Retain completed owned-window bitmap, never another desktop surface
+        if: always() && steps.bitmap.outputs.completed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-root-window-${{ runner.arch }}-${{ github.sha }}
+          path: ${{ runner.temp }}/root-app-probe/window-bitmap/root-window.png
+          retention-days: 7
+          if-no-files-found: error
