@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, macos-15-intel]
+        os: [ubuntu-22.04, macos-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
@@ -29,3 +29,8 @@ jobs:
       - name: Compile both Swift branches and test pure ownership/refusal cases
         if: runner.os == 'macOS'
         run: node --test scripts/native-macos-window.test.cjs
+      - name: Test Linux ownership/refusal and the actual sealed-kernel fixture
+        if: runner.os == 'Linux'
+        env:
+          CREATOR_UNIX_WINDOW_KERNEL_TEST: '1'
+        run: python3 scripts/native-unix-window.test.py

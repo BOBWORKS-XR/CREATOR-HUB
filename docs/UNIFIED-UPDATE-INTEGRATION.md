@@ -301,6 +301,57 @@ together. Original failed/cancelled harness runs remain unchanged, including
 because the helper had no explicit success exit. The corrected rerun verifies
 the independent app receipt as well as the process exit code.
 
+## Unified 0.1.14 Validation (2026-10-13)
+
+0.1.14 is the approved unified target. The unpublished 0.1.13 evidence above
+remains historical; it is not the accepted 0.1.14 installer.
+
+The managed Windows candidate from product source
+`c44f9b30cf7ca41c27d66fcd3fb41a562e1dca1f` passed actual fresh installation
+and direct public-0.1.12 upgrade in
+[38463811138](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38463811138).
+The retained fresh/upgrade reports pass 21/27 checks. They include inactive
+legacy MCP settings and Setup editor-cache preservation, native consent
+decline/retry, reviewed Codex/Claude Code/Claude Desktop configuration migration,
+exact before-images, idempotence and official SDK tool listing.
+
+The same exact candidate then passed
+[38465322506](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38465322506):
+the unmodified public 0.1.12 app discovered the signed target through the
+controlled five-route feed, retained its executable/settings on cancellation,
+installed after native approval and restarted automatically. Installed version,
+preferences and unmanaged content survived; both included backends opened after
+native consent and the signed managed router connected/reconnected with the
+official MCP SDK. Temporary VM TLS trust was removed. No user-PC installation
+or trust-store change was used for these tests.
+
+- Installer SHA-256: `76dc1398a5b08200bdf048d6d63a9f85bb7cbdb62629d255c8910a7508d95147`.
+- Installed Hub SHA-256: `d0866c2398c2970e3e0716ef1cb62e866f114a7a77b473cfbbb56317ec33d71b`.
+- Runtime/router metadata uses the existing compiled trusted release key.
+  This is not Windows Authenticode publisher signing or Apple notarization.
+
+The installed Codex CLI also completed a real read-only `get_bridge_status` call
+using this candidate's private Node/server and an unopened disposable project.
+The Claude Code CLI connected to MCP but its provider monthly spending limit
+blocked the model call; this is not a passed tool-call test or an authentication
+failure. Neither CLI test proves post-update managed routing or live Editor
+operation, and Claude Desktop's actual post-update call remains pending.
+
+Native Mac Intel/Apple-silicon owned-window helpers now compile and pass their
+ownership/refusal fixtures in
+[38465095134](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38465095134).
+The Linux helper binds owned PID/start/executable identity, and supports an
+explicit independently pinned sealed-child receipt. Its kernel/pure fixtures
+do not establish packaged backend GUI acceptance. Both helpers remain test-only;
+missing ownership/accessibility evidence refuses without generic input or kills.
+
+Experimental Unix packaging still has `writableGuiAccepted=false` and
+`releaseReady=false`. The new explicit writable producer is experimental and
+requires signed managed routing; it is not production permission. Full native
+writable operation, migration, signed update/restart, outgoing-view restoration,
+actual clients/Editor and Flatpak host operation remain gates. Public discovery
+is not covered by the controlled Windows feed. No 0.1.14 release is published.
+
 ## Remaining Release Gates
 
 - Full accepted product-settings convergence and conflict review, without legacy
