@@ -338,6 +338,20 @@ class ActionTests(unittest.TestCase):
 
 
 class XResTests(unittest.TestCase):
+    def test_native_library_soname_is_case_sensitive(self):
+        loaded = []
+        def load(name):
+            loaded.append(name)
+            if name == "libXRes.so.1":
+                raise RuntimeError("Exact native XRes soname selected")
+            if name != "libX11.so.6":
+                raise OSError("Wrong case-sensitive soname")
+            return types.SimpleNamespace()
+        with patch.dict(os.environ, {"DISPLAY": ":99"}), patch.object(h.C, "sizeof", return_value=8), \
+                patch.object(h.C, "CDLL", side_effect=load), self.assertRaisesRegex(RuntimeError, "Exact native XRes soname"):
+            h.X11()
+        self.assertEqual(loaded, ["libX11.so.6", "libXRes.so.1"])
+
     def test_remote_display_refuses_before_loading_native_libraries(self):
         for value in ("remote.example:0", "localhost:99", "", "unix:99"):
             with self.subTest(display=value), patch.dict(os.environ, {"DISPLAY": value}), \

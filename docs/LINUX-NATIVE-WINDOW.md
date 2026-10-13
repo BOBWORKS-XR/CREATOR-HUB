@@ -103,7 +103,7 @@ execution restriction, not a security claim that environment strings authenticat
 a runner. The caller must bind the actual GitHub job and use isolated profiles.
 
 The runner needs Python/PyGObject, the AT-SPI 2 typelib/session bus/accessibility
-bridge, `libX11.so.6`, `libXres.so.1`, a local Unix-socket X server with XRes 1.2,
+bridge, `libX11.so.6`, `libXRes.so.1`, a local Unix-socket X server with XRes 1.2,
 and a normal owned WM session for `close`. No provisioning is performed by this
 helper. Wayland-only, remote X, portal-owned dialogs, missing PID evidence,
 ambiguous objects and unsupported action APIs refuse; there is no fallback.
@@ -209,6 +209,15 @@ The Python ctypes XRes/X11 ABI and actual GTK/AT-SPI/native-dialog roles still
 need the first disposable native run.
 Existing maintenance C/XRes and Linux preference helpers were read-only references;
 neither their checkout nor any workflow, builder, app or hosting probe was edited.
+
+The first real GTK fixture run, `38468935010`, failed before any action because
+the helper requested the wrong case-sensitive `libXres.so.1` soname. The
+[distribution file list](https://packages.debian.org/bookworm/armhf/libxres1/filelist)
+uses `libXRes.so.1`. The original failed receipt is retained at
+`artifacts/linux-gtk-38468935010`; fixture EOF cleanup exited 75, not a passed
+normal close. A focused library-selection regression fails before the correction.
+The corrected helper and fixture still need their native rerun; pure fixtures
+cannot prove that all native ctypes/AT-SPI calls are valid.
 
 Primary contracts: [AT-SPI action-name API](https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/method.Action.get_action_name.html),
 [GTK3 native button actions](https://github.com/GNOME/gtk/blob/gtk-3-24/gtk/a11y/gtkbuttonaccessible.c),

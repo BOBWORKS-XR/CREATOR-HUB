@@ -494,7 +494,7 @@ class X11:
         require(re.fullmatch(r":[0-9]{1,5}(?:\.[0-9]{1,2})?", os.environ.get("DISPLAY", "")), "Local runner DISPLAY required")
         require(C.sizeof(C.c_long) == 8, "Native LP64 X11 ABI required")
         self.x = C.CDLL("libX11.so.6")
-        self.res = C.CDLL("libXres.so.1")
+        self.res = C.CDLL("libXRes.so.1")
         signatures = {
             "XOpenDisplay": ([C.c_char_p], C.c_void_p), "XCloseDisplay": ([C.c_void_p], C.c_int),
             "XConnectionNumber": ([C.c_void_p], C.c_int), "XSync": ([C.c_void_p, C.c_int], C.c_int),
