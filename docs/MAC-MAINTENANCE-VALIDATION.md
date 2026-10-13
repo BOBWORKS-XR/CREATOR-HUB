@@ -331,6 +331,74 @@ native cancel/consent, outgoing owned-process shutdown, automatic restart,
 effective settings preservation and live companion/client reconnect. Those lab
 inputs are not available in this bounded probe; release readiness stays false.
 
+## Bounded Post-Exit WebKit Diagnostic
+
+The additional `webkitPreferenceDiagnostics.captures` receipts are diagnostics,
+not acceptance evidence. They run after **each verified normal exit**, including
+owned cleanup following the existing off-to-on relaunch failure. Failed,
+already-exited, unrequested or forced termination never authorizes a store read.
+The original GUI assertion, raw snapshots, PNG gates, Gatekeeper assessment,
+historical failures and `releaseReady: false` are unchanged. Swift and artifact
+pins are unchanged. No new runtime/UI behavior or permissions are introduced.
+
+Pinned Wry 0.55.1 uses `WKWebsiteDataStore::defaultDataStore` when no custom
+identifier/incognito configuration is supplied. The expected app origin is
+`tauri://localhost`. WebKit primary source derives the default non-container root
+as `$HOME/Library/WebKit/com.creatorworks.hub/WebsiteData`, and distinguishes
+legacy `LocalStorage` from unified `Default` storage:
+[default Cocoa paths](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/WebsiteData/Cocoa/WebsiteDataStoreCocoa.mm),
+[localStorage filenames](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/NetworkProcess/storage/LocalStorageManager.cpp).
+
+Only these exact source-derived candidates are inspected; no directory search,
+other app/profile scan or container fallback is performed:
+
+- `LocalStorage/tauri_localhost_0.localstorage`
+- `Default/<H>/<H>/LocalStorage/localstorage.sqlite3`, only when `Default/salt` is exactly eight bytes.
+
+`H` is unpadded base64url of SHA-256 over UTF-8 `tauri://localhost` followed by
+the salt, for identical top/client origins. This follows
+[origin-path derivation](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/NetworkProcess/storage/NetworkStorageManager.cpp),
+[salt size](https://github.com/WebKit/WebKit/blob/main/Source/WTF/wtf/FileSystem.h),
+[base64url encoding](https://github.com/WebKit/WebKit/blob/main/Source/WTF/wtf/text/Base64.h).
+Those paths are **candidates, not proof of the running WebKit version's active
+origin/profile**. Every receipt retains `activeStoreBound: false` and
+`rootCause: unknown`; absent, unsupported or ambiguous candidates remain unknown.
+
+Production reads require the existing exact hosted-Mac CI guard, an app WebKit
+root absent at lane preflight, and no running Hub after the verified exit.
+The fixed paths reject symlinks/junctions, non-files, hardlinks and foreign UID
+ownership. Each candidate DB and WAL is capped at 2 MiB, SHM at 128 KiB, and salt
+at eight bytes. A present rollback journal, orphan sidecar, invalid salt or two
+candidate DBs refuses key capture. Root/file identity, size, mode, timestamps and
+SHA-256 are recorded, not file contents.
+
+Exact bounded DB/WAL/SHM bytes are copied to a private, newly owned scratch
+directory under `RUNNER_TEMP`, outside the uploaded report directory. Node 24
+SQLite opens only the copy with `readOnly`, `query_only` and `trusted_schema=OFF`;
+WAL is retained, not bypassed using immutable mode. Source identity and hashes,
+including sidecar absence, are rechecked after the query. Drift invalidates the
+key receipt. Scratch copies are removed in `finally`; no salt bytes or raw DBs
+are reported/uploaded. Cleanup failure is unknown, not a pass.
+
+Only the exact `ItemTable` schema is accepted:
+`key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB NOT NULL ON CONFLICT FAIL`.
+The parameterized query reads only `creator-hub.auto-download`, with a 64-byte
+value bound. Recognized values are UTF-16LE `true`/`false`; receipts record that
+key's type, size, raw hex and decoded value, or an error. A missing key can be
+reported only inside a validated candidate DB, never inferred from missing files.
+No unrelated keys or values are selected. See
+[SQLite storage schema/query](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/NetworkProcess/storage/SQLiteStorageArea.cpp) and
+[UTF-16 blob binding](https://github.com/WebKit/WebKit/blob/main/Source/WebCore/platform/sql/SQLiteStatement.cpp).
+
+Local Node 24 verification currently has **133 passed, 0 failed, 1 skipped**
+across 134 tests (22 additional tests). The skipped file-symlink test requires
+Windows symlink privilege; the actual directory-junction refusal test passed.
+Fixtures cover both exact layouts, encoded true/false, WAL-only committed data,
+unchanged source SHM, malformed/missing/ambiguous stores, schema/value bounds,
+links, source drift and failure-cleanup receipts. These are synthetic fixtures,
+not the runner's actual storage or native acceptance. Main dispatches the next
+native run after review; backend persistence/lifecycle root cause remains unknown.
+
 ## Files Owned by This Worker
 
 - `scripts/native-mac-maintenance-smoke.cjs`

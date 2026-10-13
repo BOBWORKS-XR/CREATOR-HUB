@@ -12,6 +12,9 @@ const TERMS = Object.freeze({ title: 'Terms of use and risk acknowledgement',
   checkbox: 'I have read and agree to these terms, including the risk assumption and liability limitations above.',
   continue: 'Accept and continue' });
 const AUTO_DOWNLOAD = 'Download verified updates automatically';
+const AUTO_DOWNLOAD_KEY = 'creator-hub.auto-download';
+const WEBKIT_ROOT = 'Library/WebKit/com.creatorworks.hub/WebsiteData';
+const ITEM_SCHEMA = 'CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB NOT NULL ON CONFLICT FAIL)';
 const BASELINE_SOURCE = '35a16a45814d821d65b5d203628478449174cd55';
 const BASELINES = Object.freeze({
   X64: Object.freeze({ name: 'Creator.Hub_0.1.12_x64.dmg', size: 5397091,
@@ -396,6 +399,134 @@ function verifySentinels(sentinels) {
   return sentinels.map(s => ({ label: s.label, sha256: s.sha256, unchanged: true }));
 }
 
+function storageCheck(condition, reason) {
+  if (!condition) throw Object.assign(Error(reason), { storageReason: reason });
+}
+
+function storageFile(file, max) {
+  noLinks(file);
+  let before;
+  try { before = fs.lstatSync(file, { bigint: true }); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  storageCheck(before.isFile() && before.nlink === 1n, 'not-single-owned-file');
+  storageCheck(!process.getuid || before.uid === BigInt(process.getuid()), 'foreign-file-owner');
+  storageCheck(before.size <= BigInt(max), 'file-size-bound');
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const opened = fs.fstatSync(fd, { bigint: true });
+    const identity = stat => ({ device: String(stat.dev), inode: String(stat.ino), owner: String(stat.uid),
+      size: Number(stat.size), mtimeNs: String(stat.mtimeNs), ctimeNs: String(stat.ctimeNs), mode: Number(stat.mode) });
+    assert.deepEqual(identity(opened), identity(before));
+    const bytes = Buffer.alloc(Number(opened.size));
+    let read = 0;
+    while (read < bytes.length) {
+      const count = fs.readSync(fd, bytes, read, bytes.length - read, read);
+      storageCheck(count > 0, 'source-drift');
+      read += count;
+    }
+    assert.deepEqual(identity(fs.fstatSync(fd, { bigint: true })), identity(before));
+    assert.deepEqual(identity(fs.lstatSync(file, { bigint: true })), identity(before));
+    return { bytes, receipt: { ...identity(before), sha256: digest(bytes) } };
+  } finally { fs.closeSync(fd); }
+}
+
+// Production calls this only on hosted disposable CI, after a verified normal exit.
+// Paths are source-derived candidates, not an attestation of the active WebKit store.
+function captureWebKitPreference(home, scratchRoot, hooks = {}) {
+  const result = { status: 'unknown', candidatePathScope: 'source-derived-default-store-tauri-localhost-only',
+    expectedOrigin: 'tauri://localhost', activeStoreBound: false, rootCause: 'unknown', key: AUTO_DOWNLOAD_KEY,
+    startedAt: new Date().toISOString(), candidates: [], sourceUnchanged: false };
+  let scratch;
+  try {
+    const root = contained(home, path.join(home, ...WEBKIT_ROOT.split('/')));
+    noLinks(root);
+    if (fs.existsSync(root)) {
+      const stat = fs.lstatSync(root);
+      storageCheck(stat.isDirectory() && (!process.getuid || stat.uid === process.getuid()), 'foreign-store-root');
+      result.rootIdentity = { device: String(stat.dev), inode: String(stat.ino), owner: String(stat.uid), mode: stat.mode };
+    }
+    const observed = new Map();
+    const read = (relative, max) => {
+      const file = contained(root, path.join(root, ...relative.split('/')));
+      const value = storageFile(file, max);
+      observed.set(file, { max, value });
+      return value;
+    };
+    const salt = read('Default/salt', 8);
+    if (salt) storageCheck(salt.bytes.length === 8, 'unsupported-salt');
+    const relatives = ['LocalStorage/tauri_localhost_0.localstorage'];
+    if (salt) {
+      const hash = crypto.createHash('sha256').update(result.expectedOrigin, 'utf8').update(salt.bytes).digest('base64url');
+      relatives.push(`Default/${hash}/${hash}/LocalStorage/localstorage.sqlite3`);
+      result.saltIdentity = salt.receipt; // No salt bytes are recorded.
+    }
+    const copies = [];
+    for (const relative of relatives) {
+      const candidate = { relativePath: relative, files: {} };
+      const files = [];
+      for (const [suffix, max] of [['', 2 * 1024 * 1024], ['-wal', 2 * 1024 * 1024], ['-shm', 128 * 1024], ['-journal', 2 * 1024 * 1024]]) {
+        const value = read(relative + suffix, max);
+        candidate.files[suffix || 'database'] = value?.receipt || null;
+        if (value) files.push({ suffix, bytes: value.bytes });
+      }
+      result.candidates.push(candidate);
+      storageCheck(!candidate.files['-journal'], 'unsupported-rollback-journal');
+      storageCheck(candidate.files.database || !files.length, 'orphan-sidecar');
+      if (candidate.files.database) copies.push({ candidate, files });
+    }
+    storageCheck(copies.length === 1, copies.length ? 'ambiguous-candidates' : 'missing-candidate');
+    noLinks(scratchRoot);
+    scratch = fs.mkdtempSync(path.join(scratchRoot, 'creator-mac-storage-'));
+    fs.chmodSync(scratch, 0o700);
+    const { candidate, files } = copies[0];
+    const copiedDb = contained(scratch, path.join(scratch, 'store.sqlite3'));
+    for (const { suffix, bytes } of files) fs.writeFileSync(copiedDb + suffix, bytes, { flag: 'wx', mode: 0o600 });
+    hooks.afterCopy?.();
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(copiedDb, { readOnly: true, timeout: 1000, allowExtension: false });
+    try {
+      db.exec('PRAGMA query_only=ON; PRAGMA trusted_schema=OFF');
+      const schema = db.prepare("SELECT type, sql FROM sqlite_schema WHERE name=? LIMIT 2").all('ItemTable');
+      candidate.itemTableSchemaSha256 = schema.length === 1 && typeof schema[0].sql === 'string' ? digest(Buffer.from(schema[0].sql)) : null;
+      storageCheck(schema.length === 1 && schema[0].type === 'table'
+        && [ITEM_SCHEMA, ITEM_SCHEMA.replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS ')].includes(schema[0].sql), 'unsupported-item-schema');
+      candidate.itemTableSchema = schema[0].sql;
+      const values = db.prepare('SELECT typeof(value) AS type, length(value) AS size, substr(value,1,64) AS raw FROM ItemTable WHERE key=? LIMIT 2').all(AUTO_DOWNLOAD_KEY);
+      storageCheck(values.length <= 1, 'ambiguous-key');
+      result.keyObservation = values.length ? { type: values[0].type, size: values[0].size } : { type: 'missing', size: 0, raw: null };
+      if (values.length) {
+        const value = values[0];
+        storageCheck(value.type === 'blob' && value.size <= 64 && value.size % 2 === 0, 'unsupported-key-type-or-bound');
+        const raw = Buffer.from(value.raw);
+        result.keyObservation.rawHex = raw.toString('hex');
+        result.keyObservation.encoding = 'UTF-16LE';
+        result.keyObservation.raw = raw.toString('utf16le');
+        storageCheck(['true', 'false'].includes(result.keyObservation.raw), 'unsupported-key-value');
+      }
+    } finally { db.close(); }
+    hooks.beforeRecheck?.();
+    for (const [file, before] of observed) {
+      const after = storageFile(file, before.max);
+      storageCheck(JSON.stringify(after?.receipt || null) === JSON.stringify(before.value?.receipt || null), 'source-drift');
+    }
+    result.sourceUnchanged = true;
+    result.status = 'candidate-key-captured-active-store-unbound';
+  } catch (error) {
+    result.status = 'unknown';
+    result.error = error.storageReason || 'capture-unavailable';
+    delete result.keyObservation;
+  } finally {
+    if (scratch) {
+      try {
+        noLinks(scratch);
+        fs.rmSync(contained(scratchRoot, scratch), { recursive: true });
+      } catch { result.status = 'unknown'; result.error = 'scratch-cleanup-failed'; delete result.keyObservation; }
+    }
+    result.finishedAt = new Date().toISOString();
+  }
+  return result;
+}
+
 function termsState(snapshot) {
   const nodes = snapshot.axNodes || [];
   const hints = nodes.filter(n => [TERMS.checkbox, TERMS.continue].includes(n.AXTitle?.trim()));
@@ -538,6 +669,7 @@ function newReport(input) {
       automaticRestart: false, reason: 'Public 0.1.12 native in-app updater is Windows-only; manual launches are not updater restart proof.' },
     syntheticTerms: { testOnly: true, customerConsent: false, actions: [] }, termsPersistenceTested: false,
     syntheticPreference: { testOnly: true, customerConsent: false, controlTitle: AUTO_DOWNLOAD, actions: [] },
+    webkitPreferenceDiagnostics: { acceptanceEvidence: false, activeStoreBound: false, rootCause: 'unknown', captures: [] },
     autoDownloadPreferencePersistenceTested: false,
     effectivePreferencesScope: '0.1.13-auto-download-normal-quit-relaunch-only', otherBrowserPreferencesTested: false,
     aiWorkflowTested: false, unityWorkflowTested: false,
@@ -548,6 +680,15 @@ function newReport(input) {
 async function runLane(report, ops) {
   const input = report.input;
   const owned = [];
+  const captureStopped = async (launched, stopped) => {
+    if (!stopped.normalQuitRequested || stopped.alreadyExited || !stopped.exited || stopped.forceKillPerformed !== false) return;
+    const row = report.launches.find(row => row.pid === launched.pid);
+    let captured;
+    try { captured = await ops.captureStorage(launched, stopped); }
+    catch { captured = { status: 'unknown', error: 'capture-unavailable' }; }
+    report.webkitPreferenceDiagnostics.captures.push({ version: row.version, purpose: row.purpose,
+      pid: launched.pid, normalExitVerified: true, ...captured });
+  };
   try {
     report.capability = await ops.probe();
     report.blockers.push(...guiBlockers(report.capability));
@@ -640,6 +781,7 @@ async function runLane(report, ops) {
         assert.equal(stopped.exited, true, 'Owned app did not quit normally; replacement is refused');
         assert.equal(stopped.forceKillPerformed, false, 'Force termination is outside this probe');
         owned.pop();
+        await captureStopped(launched, stopped);
         report.preservation = await ops.preserve(report.sentinels);
       }
     }
@@ -663,6 +805,7 @@ async function runLane(report, ops) {
         if (!stopped.normalQuitRequested || stopped.alreadyExited || !stopped.exited || stopped.forceKillPerformed !== false) {
           report.failures.push({ phase: 'cleanup', error: 'Owned normal-quit proof incomplete; no retry or force kill attempted' });
         }
+        await captureStopped(launched, stopped);
       } catch (error) { report.failures.push({ phase: 'cleanup', error: String(error) }); }
     }
     if (report.sentinels) {
@@ -685,6 +828,7 @@ function nativeOperations(out, binding, report) {
   const app = contained(applications, path.join(applications, 'Creator Hub.app'));
   const helper = path.join(out, 'native-mac-window');
   const activeMounts = [];
+  let storeWasAbsent = false;
   const window = (args, synthetic = '') => {
     assert.ok(['', 'terms', 'preference'].includes(synthetic));
     const result = JSON.parse(command(helper, args, false,
@@ -720,6 +864,9 @@ function nativeOperations(out, binding, report) {
       assert.equal(fs.existsSync(app), false, 'Refusing to replace an existing app');
       assert.equal(fs.existsSync('/Applications/Creator Hub.app'), false, 'System-wide Hub must not be touched');
       assert.equal(window(['inventory']).running.length, 0, 'An unrelated running Hub exists');
+      const store = path.join(home, 'Library', 'WebKit', 'com.creatorworks.hub');
+      noLinks(store);
+      storeWasAbsent = !fs.existsSync(store);
       fs.mkdirSync(applications, { recursive: true });
     },
     install: version => {
@@ -786,6 +933,14 @@ function nativeOperations(out, binding, report) {
         screenshot: path.basename(screenshot), sha256: digest(boundedFile(screenshot, 64 * 1024 * 1024)), pixels };
     },
     quit: launched => window(['quit', String(launched.pid), app, launched.executablePath]),
+    captureStorage: () => {
+      guard();
+      if (!storeWasAbsent) return { status: 'unknown', error: 'store-preexisted-disposable-lane' };
+      if (window(['inventory']).running.length) return { status: 'unknown', error: 'hub-still-running' };
+      const temp = fs.realpathSync(process.env.RUNNER_TEMP);
+      contained(temp, out);
+      return captureWebKitPreference(home, temp);
+    },
     detach: () => {
       const errors = [];
       for (const mount of activeMounts) {
@@ -833,7 +988,7 @@ async function main() {
 }
 
 module.exports = { BASELINES, BASELINE_SOURCE, CANDIDATE, TERMS, AUTO_DOWNLOAD, PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS,
-  options, guard, contained, noLinks, digest, validateBinding,
+  options, guard, contained, noLinks, digest, validateBinding, AUTO_DOWNLOAD_KEY, WEBKIT_ROOT, ITEM_SCHEMA, captureWebKitPreference,
   parseLocalTree, verifyProductTree,
   validateSource, zipEntry, validateBundle, atLeast, sentinelFiles, seedSentinels, verifySentinels,
   termsState, bodyKind, validateBody, termsControl, autoDownloadControl, preferenceSnapshot, preferenceReceipt,

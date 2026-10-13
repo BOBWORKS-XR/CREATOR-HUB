@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
+const { DatabaseSync } = require('node:sqlite');
 const mac = require('./native-mac-maintenance-smoke.cjs');
 
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -295,6 +296,7 @@ function operations(events, renderedSnapshot = visible) {
         sha256: 'a'.repeat(64), pixels: clone(renderedPixels) };
     },
     quit: launched => { events.push(`quit:${launched.pid}`); return { normalQuitRequested: true, exited: true, forceKillPerformed: false }; },
+    captureStorage: launched => { events.push(`storage:${launched.pid}`); return { status: 'unknown', error: 'synthetic-no-native-store' }; },
     preserve: () => { events.push('preserve'); return []; }, detach: () => events.push('detach'),
   };
 }
@@ -447,8 +449,186 @@ test('target normal relaunch returning on preserves the observed failure, never 
   assert.equal(report.autoDownloadPreferencePersistenceTested, false);
   assert.equal(events.filter(e => e.startsWith('preference:')).length, 1);
   assert.ok(events.includes('quit:101') && events.includes('quit:102'));
+  assert.deepEqual(report.webkitPreferenceDiagnostics.captures.map(c => [c.purpose, c.pid]), [['initial', 101], ['relaunch', 102]]);
+  assert.ok(events.indexOf('quit:101') < events.indexOf('storage:101'));
+  assert.ok(events.indexOf('quit:102') < events.indexOf('storage:102'));
   assert.ok(events.includes('preserve'));
   assert.equal(report.releaseReady, false);
+});
+
+function storageFixture(t, modern = false, schema = mac.ITEM_SCHEMA) {
+  const temp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'creator-mac-storage-test-'));
+  t.after(() => { mac.noLinks(temp); fs.rmSync(mac.contained(path.dirname(temp), temp), { recursive: true }); });
+  const home = path.join(temp, 'home'), scratch = path.join(temp, 'scratch');
+  const root = path.join(home, ...mac.WEBKIT_ROOT.split('/'));
+  fs.mkdirSync(scratch);
+  fs.mkdirSync(root, { recursive: true });
+  let relative = 'LocalStorage/tauri_localhost_0.localstorage';
+  if (modern) {
+    const salt = Buffer.from('0001020304050607', 'hex');
+    fs.mkdirSync(path.join(root, 'Default'));
+    fs.writeFileSync(path.join(root, 'Default', 'salt'), salt);
+    const hash = require('node:crypto').createHash('sha256').update('tauri://localhost').update(salt).digest('base64url');
+    relative = `Default/${hash}/${hash}/LocalStorage/localstorage.sqlite3`;
+  }
+  const file = path.join(root, ...relative.split('/'));
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const db = new DatabaseSync(file);
+  db.exec(schema);
+  return { temp, home, root, scratch, file, db, capture: hooks => mac.captureWebKitPreference(home, scratch, hooks) };
+}
+
+for (const modern of [false, true]) {
+  for (const value of ['true', 'false']) {
+    test(`exact ${modern ? 'salted' : 'legacy'} store captures UTF-16 ${value} only, without altering or retaining raw files`, t => {
+      const fixture = storageFixture(t, modern);
+      fixture.db.prepare('INSERT INTO ItemTable VALUES (?, ?)').run(mac.AUTO_DOWNLOAD_KEY, Buffer.from(value, 'utf16le'));
+      fixture.db.prepare('INSERT INTO ItemTable VALUES (?, ?)').run('unrelated-private-key', Buffer.from('do-not-report-this', 'utf16le'));
+      fixture.db.close();
+      const before = mac.digest(fs.readFileSync(fixture.file));
+      const result = fixture.capture();
+      assert.equal(result.status, 'candidate-key-captured-active-store-unbound');
+      assert.equal(result.activeStoreBound, false);
+      assert.equal(result.rootCause, 'unknown');
+      assert.equal(result.sourceUnchanged, true);
+      assert.equal(result.keyObservation.raw, value);
+      assert.equal(result.keyObservation.rawHex, Buffer.from(value, 'utf16le').toString('hex'));
+      assert.equal(result.keyObservation.type, 'blob');
+      assert.equal(mac.digest(fs.readFileSync(fixture.file)), before);
+      assert.deepEqual(fs.readdirSync(fixture.scratch), []);
+      assert.doesNotMatch(JSON.stringify(result), /unrelated-private-key|do-not-report-this|0001020304050607/);
+    });
+  }
+}
+
+test('copied read-only SQLite includes committed WAL, never writes source SHM or ignores WAL via immutable mode', t => {
+  const fixture = storageFixture(t);
+  fixture.db.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0');
+  fixture.db.prepare('INSERT INTO ItemTable VALUES (?, ?)').run(mac.AUTO_DOWNLOAD_KEY, Buffer.from('false', 'utf16le'));
+  const before = ['','-wal','-shm'].map(suffix => mac.digest(fs.readFileSync(fixture.file + suffix)));
+  const result = fixture.capture();
+  const after = ['','-wal','-shm'].map(suffix => mac.digest(fs.readFileSync(fixture.file + suffix)));
+  fixture.db.close();
+  assert.equal(result.keyObservation.raw, 'false');
+  assert.equal(result.sourceUnchanged, true);
+  assert.deepEqual(after, before);
+  assert.deepEqual(fs.readdirSync(fixture.scratch), []);
+});
+
+test('a missing exact key is recorded only within a supported candidate schema, not inferred from missing files', t => {
+  const fixture = storageFixture(t);
+  fixture.db.close();
+  const result = fixture.capture();
+  assert.deepEqual(result.keyObservation, { type: 'missing', size: 0, raw: null });
+  assert.equal(result.status, 'candidate-key-captured-active-store-unbound');
+  fs.unlinkSync(fixture.file);
+  assert.equal(fixture.capture().error, 'missing-candidate');
+});
+
+const storageFaults = {
+  'malformed database': f => fs.writeFileSync(f.file, 'not sqlite'),
+  'unsupported schema': f => {
+    const db = new DatabaseSync(f.file); db.exec('DROP TABLE ItemTable; CREATE TABLE ItemTable (key TEXT, value TEXT)'); db.close();
+  },
+  'oversized database': f => fs.truncateSync(f.file, 2 * 1024 * 1024 + 1),
+  'oversized key': f => {
+    const db = new DatabaseSync(f.file); db.prepare('INSERT INTO ItemTable VALUES (?, ?)').run(mac.AUTO_DOWNLOAD_KEY, Buffer.alloc(66)); db.close();
+  },
+  'wrong value type': f => {
+    const db = new DatabaseSync(f.file); db.prepare('INSERT INTO ItemTable VALUES (?, ?)').run(mac.AUTO_DOWNLOAD_KEY, 'false'); db.close();
+  },
+  'unsupported value': f => {
+    const db = new DatabaseSync(f.file); db.prepare('INSERT INTO ItemTable VALUES (?, ?)').run(mac.AUTO_DOWNLOAD_KEY, Buffer.from('future', 'utf16le')); db.close();
+  },
+  'invalid salt': f => { fs.mkdirSync(path.join(f.root, 'Default')); fs.writeFileSync(path.join(f.root, 'Default', 'salt'), Buffer.alloc(7)); },
+  'rollback journal': f => fs.writeFileSync(f.file + '-journal', 'unknown-journal'),
+  'orphan WAL': f => { fs.unlinkSync(f.file); fs.writeFileSync(f.file + '-wal', 'orphan'); },
+};
+for (const [name, change] of Object.entries(storageFaults)) {
+  test(`store diagnostic reports unknown for ${name}, without a key receipt or retained copy`, t => {
+    const fixture = storageFixture(t);
+    fixture.db.close(); change(fixture);
+    const result = fixture.capture();
+    assert.equal(result.status, 'unknown');
+    assert.ok(result.error);
+    assert.equal(result.keyObservation, undefined);
+    assert.equal(result.activeStoreBound, false);
+    assert.deepEqual(fs.readdirSync(fixture.scratch), []);
+  });
+}
+
+test('two source-derived candidate databases are ambiguous; no arbitrary store is selected', t => {
+  const fixture = storageFixture(t, true);
+  fixture.db.close();
+  const legacy = path.join(fixture.root, 'LocalStorage', 'tauri_localhost_0.localstorage');
+  fs.mkdirSync(path.dirname(legacy)); fs.copyFileSync(fixture.file, legacy);
+  const result = fixture.capture();
+  assert.equal(result.error, 'ambiguous-candidates');
+  assert.equal(result.candidates.length, 2);
+  assert.equal(result.keyObservation, undefined);
+  assert.deepEqual(fs.readdirSync(fixture.scratch), []);
+});
+
+test('store symlinks are refused without reading the linked database', t => {
+  const fixture = storageFixture(t); fixture.db.close();
+  const target = path.join(fixture.temp, 'outside.sqlite3'); fs.renameSync(fixture.file, target);
+  try { fs.symlinkSync(target, fixture.file); }
+  catch (error) { if (error.code === 'EPERM') { t.skip('File symlinks require Windows privilege; directory link test still runs'); return; } throw error; }
+  const before = mac.digest(fs.readFileSync(target));
+  assert.equal(fixture.capture().status, 'unknown');
+  assert.equal(mac.digest(fs.readFileSync(target)), before);
+});
+
+test('linked store directories are refused, including Windows junctions', t => {
+  const fixture = storageFixture(t); fixture.db.close();
+  const original = path.dirname(fixture.file), target = path.join(fixture.temp, 'outside-store');
+  fs.renameSync(original, target); fs.symlinkSync(target, original, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal(fixture.capture().status, 'unknown');
+  fs.unlinkSync(original); // Do not recursively follow a junction in fixture cleanup.
+});
+
+for (const hook of ['afterCopy', 'beforeRecheck']) {
+  test(`source tamper at ${hook} invalidates the copied key receipt`, t => {
+    const fixture = storageFixture(t);
+    fixture.db.prepare('INSERT INTO ItemTable VALUES (?, ?)').run(mac.AUTO_DOWNLOAD_KEY, Buffer.from('false', 'utf16le'));
+    fixture.db.close();
+    const result = fixture.capture({ [hook]: () => fs.appendFileSync(fixture.file, 'tamper') });
+    assert.equal(result.status, 'unknown');
+    assert.equal(result.error, 'source-drift');
+    assert.equal(result.keyObservation, undefined);
+    assert.equal(result.sourceUnchanged, false);
+    assert.deepEqual(fs.readdirSync(fixture.scratch), []);
+  });
+}
+
+test('every verified normal exit captures diagnostics, while capture errors never replace an original GUI failure', async () => {
+  const events = [], ops = operations(events);
+  ops.captureStorage = () => { throw Error('synthetic diagnostic failure'); };
+  const snapshot = ops.snapshot;
+  ops.snapshot = () => {
+    const result = snapshot();
+    if (result.pid === 104) result.axNodes.find(n => n.AXTitle === mac.AUTO_DOWNLOAD).AXValue = '1';
+    return result;
+  };
+  const report = await mac.runLane(mac.newReport(mac.options(environment())), ops);
+  assert.equal(report.webkitPreferenceDiagnostics.captures.length, 4);
+  assert.ok(report.webkitPreferenceDiagnostics.captures.every(c => c.status === 'unknown' && c.normalExitVerified));
+  assert.equal(report.failures.length, 1);
+  assert.equal(report.failures[0].phase, 'auto-download-0.1.13-relaunch');
+  assert.equal(report.status, 'failed');
+  assert.equal(report.effectivePreferencesTested, false);
+  assert.equal(report.releaseReady, false);
+});
+
+test('failed, already-exited or forced quit receipts never authorize storage reads', async () => {
+  for (const fault of [{ exited: false }, { alreadyExited: true }, { normalQuitRequested: false }, { forceKillPerformed: true }]) {
+    const events = [], ops = operations(events), quit = ops.quit;
+    ops.quit = launched => ({ ...quit(launched), ...fault });
+    const report = await mac.runLane(mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' })), ops);
+    assert.equal(report.status, 'failed');
+    assert.deepEqual(report.webkitPreferenceDiagnostics.captures, []);
+    assert.ok(!events.some(e => e.startsWith('storage:')));
+  }
 });
 
 test('post-toggle snapshot from another process cannot prove preference state', async () => {
