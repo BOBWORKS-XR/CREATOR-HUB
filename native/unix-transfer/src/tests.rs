@@ -9,7 +9,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new(platform: &str, arch: &str) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        // macOS may expose its temporary directory through /var -> /private/var.
+        let temp_root = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let root = tempfile::tempdir_in(temp_root).unwrap();
         let members = NAMES
             .into_iter()
             .map(|name| {
