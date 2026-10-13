@@ -141,6 +141,19 @@ jobs:
             fs.writeFileSync(path.join(root, 'source-artifact.zip'), bytes, { flag: 'wx', mode: 0o444 });
       - name: Recheck binding before provisioning tools
         run: node scripts/flatpak-native-smoke.cjs bind --root "$VALIDATION_ROOT"
+      - name: Install pinned Playwright WebKit only on the disposable runner
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/creator-flatpak-validation/playwright-browsers
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node -e "require('node:assert/strict').equal(require('@playwright/test/package.json').version, '1.63.0')"
+          node node_modules/playwright/cli.js install --with-deps webkit
+      - name: Prove single-keyboard terms contract before any native submit input
+        timeout-minutes: 3
+        env:
+          FLATPAK_WEBKIT_CONTRACT: '1'
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/creator-flatpak-validation/playwright-browsers
+        run: node --test --test-name-pattern='disposable WebKit keyboard contract' scripts/flatpak-native-smoke.test.cjs
       - name: Provision tools only on this disposable hosted runner
         run: |
           sudo apt-get update
@@ -174,6 +187,7 @@ jobs:
           path: |
             ${{ runner.temp }}/creator-flatpak-validation/evidence/report.json
             ${{ runner.temp }}/creator-flatpak-validation/evidence/source-binding.json
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/terms-keyboard-contract.json
             ${{ runner.temp }}/creator-flatpak-validation/evidence/commands.json
             ${{ runner.temp }}/creator-flatpak-validation/evidence/beforeimage.json
             ${{ runner.temp }}/creator-flatpak-validation/evidence/afterimage.json

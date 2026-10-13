@@ -6,10 +6,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { EventEmitter } = require('node:events');
-const { spawnSync, execFileSync } = require('node:child_process');
+const { spawn, spawnSync, execFileSync } = require('node:child_process');
 const { parseArgs, hostedRoot, requestIdentity, validateBinding, initialReport, finalizeReport,
   inventorySnapshot, parsePs, processSnapshot, verifyProcessBinding, executableSnapshot, verifyInstanceIdentity,
-  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, TERMS_CHECKBOX, termsChoice,
+  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, TERMS_CHECKBOX, termsChoice, KEYBOARD_CASES, termsSourceHashes,
   fixtureMetadata, permissionMetadata, EXTRACT_DEB,
   Experiment, PHASES, PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS, REVIEWED_CANDIDATE,
   REPO, APP, PLATFORM, FIXTURE_RUNTIME } = require('./flatpak-native-smoke.cjs');
@@ -50,6 +50,146 @@ function temporary(t) {
   });
   return root;
 }
+
+test('disposable WebKit keyboard contract', {
+  skip: process.env.FLATPAK_WEBKIT_CONTRACT !== '1', timeout: 120000,
+}, async t => {
+  // Guard precedes browser imports, output creation and server launch. Never provision or run locally.
+  const root = hostedRoot({ root: process.env.VALIDATION_ROOT });
+  const filename = path.join(root, 'evidence/terms-keyboard-contract.json');
+  const source = JSON.parse(fs.readFileSync(path.join(root, 'evidence/source-binding.json'), 'utf8'));
+  assert.equal(source.sourceCommit, process.env.SOURCE_COMMIT);
+  assert.match(process.env.VALIDATION_HARNESS_COMMIT || '', /^[a-f0-9]{40}$/);
+  const proof = { schemaVersion: 1, status: 'running', releaseReady: false,
+    engine: 'Playwright WebKit', playwrightVersion: '1.63.0', nativeGnomeAcceptance: false,
+    githubRunId: process.env.GITHUB_RUN_ID, harnessCommit: process.env.VALIDATION_HARNESS_COMMIT,
+    sourceCommit: source.sourceCommit, sourceHashes: termsSourceHashes(), cases: [], cleanupPassed: false,
+    scope: 'Exact source markup/module with a synthetic native bridge, not installed GNOME WebKitGTK or real user consent' };
+  fs.writeFileSync(filename, `${JSON.stringify(proof, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+  const save = () => fs.writeFileSync(filename, `${JSON.stringify(proof, null, 2)}\n`);
+  let browser, server, serverError, failure;
+  try {
+    assert.equal(require('@playwright/test/package.json').version, '1.63.0');
+    const { webkit, expect } = require('@playwright/test');
+    const home = path.join(root, 'webkit-home'); fs.mkdirSync(home, { mode: 0o700 });
+    const env = { HOME: home, TMPDIR: home, PATH: '/usr/bin:/bin', LANG: 'C.UTF-8',
+      PLAYWRIGHT_BROWSERS_PATH: path.join(root, 'playwright-browsers') };
+    server = spawn(process.execPath, [path.join(__dirname, '../tests/server.cjs')], {
+      env, stdio: 'ignore', windowsHide: true,
+    });
+    server.on('error', error => { serverError = error; });
+    let ready = false;
+    for (const end = Date.now() + 5000; Date.now() < end && !ready;) {
+      assert.ok(!serverError && server.exitCode === null, 'Owned static server failed to start');
+      try {
+        const response = await fetch('http://127.0.0.1:4188', { signal: AbortSignal.timeout(500) });
+        ready = response.ok && await response.text() === fs.readFileSync(path.join(__dirname, '../src/index.html'), 'utf8');
+      } catch { /* Only server readiness is polled; no user input is retried. */ }
+      if (!ready) await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(ready && server.exitCode === null, 'Exact source server did not become ready');
+    browser = await webkit.launch({ headless: true, env, timeout: 30000 });
+    proof.browserVersion = browser.version(); save();
+    for (const name of KEYBOARD_CASES) {
+      const evidence = { name, passed: false, pointerLabelClicks: 0, keys: [] };
+      proof.cases.push(evidence); save();
+      await t.test(name, async () => {
+        const context = await browser.newContext({ viewport: { width: 1100, height: 890 } });
+        let caseError;
+        try {
+          const page = await context.newPage();
+          page.setDefaultTimeout(10000);
+          const state = { accepted: false, calls: [] };
+          await page.exposeFunction('termsNativeMock', async (command, args) => {
+            state.calls.push({ command, args });
+            if (command === 'usage_terms_status') return state.accepted;
+            if (command === 'accept_usage_terms') {
+              assert.deepEqual(args, { policyVersion: '2026-09-28-v1', accepted: true });
+              if (name === 'native-write-failure') throw Error('Native storage is unavailable');
+              state.accepted = true; return null;
+            }
+            if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
+            if (command === 'pending_hosted_restore') return [];
+            if (command === 'project_inventory') return { projects: [], warnings: [] };
+            if (command === 'app_inventory') return { supported: true, apps: [] };
+            if (command === 'hub_update_status') return { currentVersion: '0.1.13', availableVersion: null, downloaded: false };
+            return null;
+          });
+          // Only the native bridge is a fixture. Source DOM/module, focus, pointer and keyboard are unmodified.
+          await page.addInitScript(() => {
+            window.__CREATOR_HUB_TERMS_PROTOCOL__ = 1;
+            window.__TAURI__ = { core: { invoke: (command, args) => window.termsNativeMock(command, args) },
+              event: { listen: async () => () => {} } };
+          });
+          await page.goto('http://127.0.0.1:4188');
+          const dialog = page.locator('#usage-terms-dialog');
+          const checkbox = page.locator('#usage-terms-checkbox');
+          const button = dialog.getByRole('button', { name: 'Accept and continue', exact: true });
+          await expect(dialog).toBeVisible();
+          await expect(dialog.locator('button')).toHaveCount(1);
+          await expect(button).toBeDisabled(); await expect(checkbox).not.toBeChecked();
+          assert.equal(state.calls.some(call => call.command === 'app_inventory'), false);
+          if (name === 'disabled-no-submit') {
+            await expect(dialog.locator('.usage-terms-copy')).toBeFocused();
+          } else {
+            const label = dialog.locator('.usage-terms-accept span');
+            await expect(label).toHaveCount(1); await expect(label).toBeVisible();
+            const box = await label.boundingBox();
+            assert.ok(box && box.width > 0 && box.height > 0);
+            evidence.pointerLabelClicks = 1;
+            await page.mouse.click(box.x + Math.min(20, box.width / 2), box.y + Math.min(10, box.height / 2));
+            await expect(checkbox).toBeChecked(); await expect(checkbox).toBeFocused();
+            await expect(button).toBeEnabled();
+            evidence.checkedCheckboxFocused = true; evidence.uniqueEnabledButton = true;
+          }
+          evidence.keys.push('Tab'); await page.keyboard.press('Tab');
+          await expect(name === 'disabled-no-submit' ? checkbox : button).toBeFocused();
+          evidence.tabFocus = name === 'disabled-no-submit' ? 'checkbox' : 'continue';
+          evidence.keys.push('Return'); await page.keyboard.press('Enter');
+          if (name === 'enabled-single-submit') {
+            await expect(dialog).toBeHidden();
+            await expect.poll(() => state.calls.some(call => call.command === 'app_inventory')).toBe(true);
+            assert.equal(state.accepted, true);
+          } else {
+            if (name === 'native-write-failure') await expect(page.locator('#usage-terms-error')).toContainText('Native storage is unavailable');
+            else { await expect(button).toBeDisabled(); await expect(checkbox).not.toBeChecked(); }
+            await expect(dialog).toBeVisible(); assert.equal(state.accepted, false);
+            assert.equal(state.calls.some(call => call.command === 'app_inventory'), false);
+            const locked = await page.evaluate(() => [...document.body.children]
+              .filter(element => !['SCRIPT', 'DIALOG'].includes(element.tagName)).every(element => element.inert));
+            assert.equal(locked, true); evidence.appRemainsLocked = true;
+          }
+          evidence.nativeAcceptCalls = state.calls.filter(call => call.command === 'accept_usage_terms').length;
+          assert.equal(evidence.nativeAcceptCalls, name === 'disabled-no-submit' ? 0 : 1);
+        } catch (error) { caseError = error; evidence.failure = error.message.slice(0, 1500); }
+        finally {
+          try { await context.close(); }
+          catch (error) { evidence.cleanupFailure = error.message.slice(0, 1500); caseError ||= error; }
+          evidence.passed = !caseError; save();
+        }
+        if (caseError) throw caseError;
+      });
+    }
+    assert.ok(proof.cases.every(item => item.passed), 'One or more WebKit keyboard contract cases failed');
+    assert.deepEqual(termsSourceHashes(), proof.sourceHashes, 'Source changed during keyboard proof');
+  } catch (error) { failure = error; proof.failure = error.message.slice(0, 1500); }
+  finally {
+    proof.cleanupErrors = [];
+    try { if (browser) await browser.close(); }
+    catch (error) { proof.cleanupErrors.push(error.message.slice(0, 1500)); failure ||= error; }
+    try {
+      if (server) {
+        assert.ok(!serverError && server.exitCode === null && server.signalCode === null, 'Owned static server exited unexpectedly');
+        assert.equal(server.kill('SIGTERM'), true);
+        await waitForLauncherExit(server, 5000);
+        assert.equal(server.signalCode, 'SIGTERM');
+      }
+    } catch (error) { proof.cleanupErrors.push(error.message.slice(0, 1500)); failure ||= error; }
+    proof.cleanupPassed = proof.cleanupErrors.length === 0;
+    proof.status = failure ? 'failed' : 'passed'; save();
+  }
+  if (failure) throw failure;
+});
 
 test('CLI is strict and all artifact/native pins are independently mandatory', () => {
   assert.deepEqual(parseArgs(['run', '--root', '/tmp/example']), { mode: 'run', root: '/tmp/example' });
@@ -610,18 +750,22 @@ for (const fault of [null, 'kill-nonzero', 'kill-hang', 'launcher-hang', 'instan
 }
 
 for (const originalFailure of [false, true, 'xres-unavailable', 'no-net-wm-pid', 'identity-drift-after-import',
-  'identity-drift-before-consent', 'captured-pipe-terms']) {
+  'identity-drift-before-consent', 'captured-pipe-terms', 'no-initial-terms', 'persisted-terms-reappears', 'persisted-terms-absent']) {
   test(`GUI cleanup invalidates capture and retains the original error: ${originalFailure}`, async t => {
     // Entire GUI/launcher/command surface is synthetic; never launch Flatpak or capture a host window.
     const root = temporary(t); fs.mkdirSync(path.join(root, 'evidence'));
     const f = identityFixture(root);
-    const child = fakeLauncher(); let psCalls = 0; let killed = false; let clicks = 0;
+    const child = fakeLauncher(); let psCalls = 0; let killed = false; let clicks = 0; const keys = [];
     const missingXres = originalFailure === 'xres-unavailable';
     const pipeTerms = originalFailure === 'captured-pipe-terms';
-    const passed = originalFailure === 'no-net-wm-pid' || pipeTerms;
+    const persisted = originalFailure === 'persisted-terms-absent';
+    const passed = originalFailure === 'no-net-wm-pid' || pipeTerms || persisted;
     const identityDrift = originalFailure === 'identity-drift-after-import';
     const consentDrift = originalFailure === 'identity-drift-before-consent';
-    const cleanupPasses = missingXres || passed || identityDrift || consentDrift;
+    const noInitialTerms = originalFailure === 'no-initial-terms';
+    const lostPersistence = originalFailure === 'persisted-terms-reappears';
+    const label = lostPersistence || persisted ? 'fixture' : 'candidate';
+    const cleanupPasses = missingXres || passed || identityDrift || consentDrift || noInitialTerms || lostPersistence;
     const original = Error('original namespace diagnostic');
     const rendered = ['Creator Hub 0.1.13', 'Updates are managed by Flatpak', 'Native installers cannot', 'App management is not supported on Linux'];
     const terms = ['Terms of use and risk acknowledgement', 'Creator Suite Terms v2026-09-28.',
@@ -640,7 +784,9 @@ for (const originalFailure of [false, true, 'xres-unavailable', 'no-net-wm-pid',
       if (tool === 'flatpak' && args[0] === 'info') stdout = args.includes('--show-runtime') ? PLATFORM.slice(8)
         : args.at(-1) === APP ? f.expected.appCommit : f.expected.runtimeCommit;
       if (tool === 'xdotool' && args[0] === 'search') stdout = '987\n';
+      if (tool === 'xdotool' && args[0] === 'getwindowfocus') stdout = '987\n';
       if (tool === 'xdotool' && args.includes('click')) clicks += 1;
+      if (tool === 'xdotool' && args[0] === 'key') keys.push(args.at(-1));
       assert.notEqual(tool, 'xprop', 'Neither absent nor spoofed window PID properties grant identity');
       if (tool.endsWith('flatpak-xres-window-pid')) {
         if (missingXres) return { status: 5, stdout: '', stderr: 'No unique live local XRes PID' };
@@ -648,7 +794,7 @@ for (const originalFailure of [false, true, 'xres-unavailable', 'no-net-wm-pid',
       }
       if (tool === 'import' && identityDrift) f.processes[458].startTime = '2000';
       if (tool === 'tesseract') {
-        stdout = tsv(consentDrift || (pipeTerms && clicks < 2) ? terms : rendered);
+        stdout = tsv(!noInitialTerms && !persisted && !keys.includes('Return') ? terms : rendered);
         if (consentDrift) f.processes[458].startTime = '2000';
       }
       if (tool === '/usr/bin/python3') stdout = args[1] === INSTANCE_IDENTITY ? JSON.stringify(f.info)
@@ -658,27 +804,154 @@ for (const originalFailure of [false, true, 'xres-unavailable', 'no-net-wm-pid',
       assert.equal(tool, 'flatpak'); assert.deepEqual(args, ['run', '--user', '--die-with-parent', APP]); return child;
     }, f.io);
     e.resources = () => f.resources;
+    e.keyboardContract = () => ({ unitOnly: true }); // All GUI input in this test is a synthetic command fixture.
+    if (lostPersistence || persisted) e.report.guiTerms = { candidate: { acknowledged: true } };
     if (originalFailure === true) {
       const flat = e.flat.bind(e);
       e.flat = (args, opts) => { if (args[0] === 'enter') throw original; return flat(args, opts); };
     }
-    const execute = () => e.phase('candidate-gui', () => e.gui('candidate'));
+    const execute = () => e.phase('candidate-gui', () => e.gui(label));
     if (passed) {
-      await execute(); assert.ok(e.report.guiIdentity.candidate.rechecks >= 4);
-      if (pipeTerms) assert.equal(clicks, 2, 'Only the visible checkbox and continue control are used');
+      await execute(); assert.ok(e.report.guiIdentity[label].rechecks >= 4);
+      if (pipeTerms) {
+        assert.equal(clicks, 1, 'Only the unique visible checkbox label is clicked');
+        assert.deepEqual(keys, ['Tab', 'Return']);
+        assert.equal(e.report.guiTerms.candidate.acknowledged, true);
+      }
+      assert.equal(e.report.checks.find(check => check.name === 'candidate-gui').evidence.syntheticTermsFixture, !persisted);
+      if (persisted) {
+        assert.equal(clicks, 0); assert.deepEqual(keys, []);
+        assert.equal(e.report.guiTerms.fixture.persistedFromCandidate, true);
+      }
     } else await assert.rejects(execute, error => originalFailure === true ? error === original : missingXres
       ? /flatpak-xres-window-pid.*failed/.test(error.message) : identityDrift || consentDrift
-        ? /identity changed during GUI capture/.test(error.message) : /GUI cleanup failed/.test(error.message));
+        ? /identity changed during GUI capture/.test(error.message) : noInitialTerms
+          ? /Fresh isolated candidate has no initial terms/.test(error.message) : lostPersistence
+            ? /acknowledgement was not retained/.test(error.message) : /GUI cleanup failed/.test(error.message));
     const saved = JSON.parse(fs.readFileSync(path.join(root, 'evidence/report.json')));
     assert.equal(saved.checks.find(check => check.name === 'candidate-gui').status, passed ? 'passed' : 'failed');
-    assert.equal(saved.guiCleanup.candidate.passed, cleanupPasses); assert.equal(saved.releaseReady, false);
+    assert.equal(saved.guiCleanup[label].passed, cleanupPasses); assert.equal(saved.releaseReady, false);
     if (missingXres) assert.ok(!e.commands.some(command => command.tool === 'import' || command.tool === 'tesseract'), 'No unowned pixel/consent capture after identity failure');
     if (identityDrift) assert.ok(!e.commands.some(command => command.tool === 'tesseract' || command.args.includes('click')), 'Post-import drift prevents OCR/consent acceptance');
     if (consentDrift) assert.ok(!e.commands.some(command => command.args.includes('click')), 'Post-OCR identity drift prevents any synthetic consent click');
+    if (noInitialTerms || lostPersistence) {
+      assert.equal(clicks, 0); assert.deepEqual(keys, []);
+      assert.equal(saved.guiTerms[label].acknowledged, false);
+      assert.equal(saved.checks.find(check => check.name === 'candidate-gui').status, 'failed');
+    }
     if (!cleanupPasses) assert.ok(saved.failures.some(failure => failure.phase === 'candidate-cleanup'));
     if (originalFailure === true) assert.ok(saved.failures.some(failure => failure.phase === 'candidate-gui' && failure.message === original.message));
   });
 }
+
+function keyboardProof() {
+  return { schemaVersion: 1, status: 'passed', releaseReady: false, playwrightVersion: '1.63.0',
+    engine: 'Playwright WebKit', nativeGnomeAcceptance: false, githubRunId: '12345', harnessCommit: HARNESS,
+    sourceCommit: SOURCE, cleanupPassed: true, sourceHashes: termsSourceHashes(),
+    cases: KEYBOARD_CASES.map(name => ({ name, passed: true, keys: ['Tab', 'Return'],
+      pointerLabelClicks: name === 'disabled-no-submit' ? 0 : 1,
+      nativeAcceptCalls: name === 'disabled-no-submit' ? 0 : 1,
+      tabFocus: name === 'disabled-no-submit' ? 'checkbox' : 'continue',
+      checkedCheckboxFocused: true, uniqueEnabledButton: true, appRemainsLocked: true })) };
+}
+for (const fault of [null, 'missing', 'failed', 'cleanup', 'source', 'run', 'harness', 'hash', 'version',
+  'duplicate-case', 'extra-key', 'extra-accept', 'unchecked-focus', 'unlocked-failure']) {
+  test(`native keyboard requires exact current-run WebKit receipt: ${fault}`, t => {
+    const root = temporary(t); fs.mkdirSync(path.join(root, 'evidence'));
+    const prior = { run: process.env.GITHUB_RUN_ID, harness: process.env.VALIDATION_HARNESS_COMMIT };
+    process.env.GITHUB_RUN_ID = '12345'; process.env.VALIDATION_HARNESS_COMMIT = HARNESS;
+    t.after(() => {
+      for (const [key, value] of [['GITHUB_RUN_ID', prior.run], ['VALIDATION_HARNESS_COMMIT', prior.harness]]) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    });
+    const proof = keyboardProof();
+    if (fault === 'failed') proof.status = 'failed';
+    if (fault === 'cleanup') proof.cleanupPassed = false;
+    if (fault === 'source') proof.sourceCommit = MERGE;
+    if (fault === 'run') proof.githubRunId = '54321';
+    if (fault === 'harness') proof.harnessCommit = SOURCE;
+    if (fault === 'hash') proof.sourceHashes['usage-terms.js'] = '0'.repeat(64);
+    if (fault === 'version') proof.playwrightVersion = '1.62.0';
+    if (fault === 'duplicate-case') proof.cases[2] = proof.cases[0];
+    if (fault === 'extra-key') proof.cases[0].keys.push('Tab');
+    if (fault === 'extra-accept') proof.cases[0].nativeAcceptCalls = 2;
+    if (fault === 'unchecked-focus') proof.cases[0].checkedCheckboxFocused = false;
+    if (fault === 'unlocked-failure') proof.cases[2].appRemainsLocked = false;
+    if (fault !== 'missing') fs.writeFileSync(path.join(root, 'evidence/terms-keyboard-contract.json'), JSON.stringify(proof));
+    const e = new Experiment(root, initialReport(), () => { throw Error('No native command is allowed in receipt validation'); });
+    e.report.request = requestIdentity(options());
+    if (!fault) assert.deepEqual(e.keyboardContract(), proof);
+    else assert.throws(() => e.keyboardContract());
+    assert.equal(e.commands.length, 0); assert.equal(e.report.releaseReady, false);
+  });
+}
+
+for (const fault of [null, 'foreign-before', 'foreign-after', 'nonzero', 'hang']) {
+  test(`single native keyboard sequence fails closed on focus/command error: ${fault}`, async t => {
+    const root = temporary(t); fs.mkdirSync(path.join(root, 'evidence'));
+    let checks = 0, focusChecks = 0; const sent = [];
+    const e = new Experiment(root, initialReport(), (tool, args) => {
+      assert.equal(tool, 'xdotool');
+      if (args[0] === 'getwindowfocus') {
+        focusChecks++;
+        return { status: 0, stdout: (fault === 'foreign-before' || (fault === 'foreign-after' && focusChecks === 2)) ? '999\n' : '987\n', stderr: '' };
+      }
+      assert.deepEqual(args.slice(0, 2), ['key', '--clearmodifiers']); sent.push(args[2]);
+      if (fault === 'nonzero') return { status: 1, stdout: '', stderr: 'synthetic input failure' };
+      if (fault === 'hang') return { status: null, stdout: '', stderr: '', error: { code: 'ETIMEDOUT', message: 'synthetic input timeout' } };
+      return { status: 0, stdout: '', stderr: '' };
+    });
+    e.report.guiTerms = { candidate: { keys: [] } };
+    const sequence = () => {
+      e.nativeKey('candidate', '987', 'Tab', () => checks++);
+      e.nativeKey('candidate', '987', 'Return', () => checks++);
+    };
+    if (!fault) {
+      await e.phase('candidate-gui', sequence);
+      assert.deepEqual(sent, ['Tab', 'Return']); assert.equal(checks, 4);
+      assert.throws(() => e.nativeKey('candidate', '987', 'Return', () => checks++), /no input retries/);
+    } else {
+      await assert.rejects(e.phase('candidate-gui', sequence), /foreground|xdotool.*failed/);
+      assert.deepEqual(sent, fault === 'foreign-before' ? [] : ['Tab']);
+      const saved = JSON.parse(fs.readFileSync(path.join(root, 'evidence/report.json')));
+      assert.equal(saved.checks.find(check => check.name === 'candidate-gui').status, 'failed');
+      assert.equal(saved.releaseReady, false);
+    }
+    assert.throws(() => e.nativeKey('candidate', '987', 'space', () => checks++), /single Tab\/Return/);
+  });
+}
+
+test('WebKit opt-in alone cannot launch or install on the local machine', t => {
+  const root = path.join(temporary(t), 'never-created');
+  const env = { ...process.env, GITHUB_ACTIONS: 'false', FLATPAK_WEBKIT_CONTRACT: '1', VALIDATION_ROOT: root };
+  delete env.NODE_TEST_CONTEXT; // The subprocess must be a standalone runner, not the parent's test worker.
+  const result = spawnSync(process.execPath, ['--test', '--test-name-pattern=^disposable WebKit keyboard contract$', __filename], {
+    env,
+    encoding: 'utf8', windowsHide: true, timeout: 10000,
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout + result.stderr, /Only disposable GitHub-hosted Linux x86_64/);
+  assert.equal(fs.existsSync(root), false);
+});
+
+test('workflow installs pinned WebKit only after binding and gates native input on its opt-in contract', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/flatpak-maintenance-validation.yml'), 'utf8');
+  assert.match(workflow, /npm ci --ignore-scripts --no-audit --no-fund/);
+  assert.match(workflow, /equal\(require\('@playwright\/test\/package.json'\)\.version, '1\.63\.0'\)/);
+  assert.match(workflow, /node node_modules\/playwright\/cli.js install --with-deps webkit/);
+  assert.match(workflow, /FLATPAK_WEBKIT_CONTRACT: '1'/);
+  assert.match(workflow, /node --test --test-name-pattern='disposable WebKit keyboard contract'/);
+  assert.ok(workflow.indexOf('Recheck binding before provisioning tools') < workflow.indexOf('npm ci'));
+  assert.ok(workflow.indexOf('--test-name-pattern=') < workflow.indexOf('Build, install, capture native pixels'));
+  assert.match(workflow, /evidence\/terms-keyboard-contract.json/);
+  const source = fs.readFileSync(__filename, 'utf8');
+  const contract = source.slice(source.indexOf("test('disposable WebKit keyboard contract'"), source.indexOf("test('CLI is strict"));
+  assert.ok(contract.indexOf('hostedRoot(') < contract.indexOf("require('@playwright/test')"));
+  assert.doesNotMatch(contract, /\.focus\(|\.check\(|localStorage\.|sessionStorage\.|force:\s*true|dispatchEvent|setInputFiles|--no-sandbox|DISABLE_SANDBOX/);
+  assert.equal((contract.match(/page\.keyboard\.press\('Tab'\)/g) || []).length, 1);
+  assert.equal((contract.match(/page\.keyboard\.press\('Enter'\)/g) || []).length, 1);
+});
 
 test('workflow uses explicit dispatch instead of repeating expensive native runs on every PR push', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/flatpak-maintenance-validation.yml'), 'utf8');

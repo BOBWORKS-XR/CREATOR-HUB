@@ -289,6 +289,12 @@ function termsChoice(lines, expression) {
   return choices[0];
 }
 
+const KEYBOARD_CASES = Object.freeze(['enabled-single-submit', 'disabled-no-submit', 'native-write-failure']);
+function termsSourceHashes() {
+  return Object.fromEntries(['index.html', 'usage-terms.js'].map(file => [file,
+    sha256(fs.readFileSync(path.join(__dirname, '../src', file)))]));
+}
+
 const FIXTURE_TRANSFORM = `
 import configparser, io, json, sys
 data = json.load(sys.stdin)
@@ -554,6 +560,45 @@ class Experiment {
       }
     } catch (error) { result.failure = error.message; this.save(); throw error; }
   }
+  keyboardContract() {
+    const filename = path.join(this.evidence, 'terms-keyboard-contract.json');
+    noLinks(filename);
+    const proof = readJson(filename, 16384);
+    requireThat(proof.schemaVersion === 1 && proof.status === 'passed' && proof.releaseReady === false
+      && proof.playwrightVersion === '1.63.0' && proof.engine === 'Playwright WebKit'
+      && proof.nativeGnomeAcceptance === false && proof.githubRunId === process.env.GITHUB_RUN_ID
+      && /^[0-9]+$/.test(proof.githubRunId || '') && /^[a-f0-9]{40}$/.test(proof.harnessCommit || '')
+      && proof.harnessCommit === process.env.VALIDATION_HARNESS_COMMIT
+      && proof.sourceCommit === this.report.request?.sourceCommit && proof.cleanupPassed === true
+      && proof.cases?.length === KEYBOARD_CASES.length
+      && KEYBOARD_CASES.every(name => proof.cases.some(item => item.name === name && item.passed === true
+        && JSON.stringify(item.keys) === '["Tab","Return"]'
+        && item.nativeAcceptCalls === (name === 'disabled-no-submit' ? 0 : 1)
+        && item.pointerLabelClicks === (name === 'disabled-no-submit' ? 0 : 1)
+        && (name === 'disabled-no-submit' ? item.tabFocus === 'checkbox'
+          : item.checkedCheckboxFocused === true && item.uniqueEnabledButton === true && item.tabFocus === 'continue')
+        && (name === 'enabled-single-submit' || item.appRemainsLocked === true))),
+    'No complete current-run disposable WebKit keyboard contract; no native keyboard submission');
+    assert.deepEqual(proof.sourceHashes, termsSourceHashes(), 'Terms markup/module changed after keyboard proof');
+    this.report.keyboardContract = proof; this.save();
+    return proof;
+  }
+  nativeKey(label, window, key, identityCheck) {
+    const keys = this.report.guiTerms[label].keys;
+    requireThat((keys.length === 0 && key === 'Tab') || (keys.length === 1 && keys[0] === 'Tab' && key === 'Return'),
+      'Only the reviewed single Tab/Return sequence is allowed; no input retries');
+    const foreground = () => {
+      identityCheck();
+      // xdotool resolves focus subwindows to their WM_CLASS top-level; it must be the exact XRes-owned capture window.
+      const focused = this.command('xdotool', ['getwindowfocus'], { timeout: 10000 }).stdout.trim();
+      requireThat(focused === window, 'Native keyboard foreground window differs from the exact owned XRes window');
+    };
+    foreground();
+    // Focused XTEST events, not --window/XSendEvent, which toolkits may ignore. Never activate/force focus.
+    keys.push(key); this.save(); // Record attempted input even if the command or post-input identity check fails.
+    this.command('xdotool', ['key', '--clearmodifiers', key], { timeout: 10000 });
+    foreground();
+  }
   async gui(label) {
     await this.awaitGuiIdle(label);
     // flatpak-run(1), including upstream 1.14.6: parent death kills the entire owned sandbox.
@@ -612,15 +657,25 @@ class Experiment {
         if (lines.some(line => /Updates are managed by Flatpak/i.test(line.text))) break;
         await sleep(1000);
       }
-      if (lines.some(line => TERMS_CHECKBOX.test(line.text))) {
-        // Exercise the real checkbox/button. Never seed acceptance storage or inject into the WebKit page.
-        for (const expression of [TERMS_CHECKBOX, /^Accept and continue$/]) {
-          const choice = termsChoice(lines, expression);
-          identityCheck();
-          this.command('xdotool', ['mousemove', '--window', window, String(Math.round(choice.x)), String(Math.round(choice.y)), 'click', '1']);
-          await sleep(1000);
-          lines = capture(window);
-        }
+      const observed = lines.some(line => TERMS_CHECKBOX.test(line.text));
+      const terms = (this.report.guiTerms ||= {})[label] = { observed, acknowledged: false, keys: [] };
+      requireThat(label !== 'candidate' || observed,
+        'Fresh isolated candidate has no initial terms dialog; fresh consent is unproven and no input is allowed');
+      if (label !== 'candidate' && this.report.guiTerms.candidate?.acknowledged) {
+        requireThat(!observed, 'Native terms acknowledgement was not retained across the same-profile deployment/relaunch');
+        terms.persistedFromCandidate = true;
+      }
+      if (observed) {
+        this.keyboardContract();
+        // The real pointer click must establish checkbox focus. Never seed state or call page-side focus/submit.
+        const choice = termsChoice(lines, TERMS_CHECKBOX);
+        identityCheck();
+        this.command('xdotool', ['mousemove', '--window', window, String(Math.round(choice.x)), String(Math.round(choice.y)), 'click', '1']);
+        await sleep(1000);
+        lines = capture(window);
+        this.nativeKey(label, window, 'Tab', identityCheck);
+        this.nativeKey(label, window, 'Return', identityCheck);
+        terms.keyboardSubmissionSent = true;
       }
       for (let end = Date.now() + 60000; Date.now() < end;) {
         lines = capture(window);
@@ -631,15 +686,19 @@ class Experiment {
       requireThat(/Creator Hub/.test(text) && /0\.1\.13/.test(text)
         && /Updates are managed by Flatpak/i.test(text) && /Native installers cannot/i.test(text), 'Native rendered identity/Flatpak updater refusal not observed');
       requireThat(/App management is not supported on Linux/i.test(text.replace(/\s+/g, ' ')), 'Linux unsupported management state not observed (no forever-checking acceptance)');
+      requireThat(!lines.some(line => line.text === 'Terms of use and risk acknowledgement'), 'Terms dialog remains visible after native input');
       const pixels = JSON.parse(this.command('/usr/bin/python3', ['-c',
         'from PIL import Image, ImageStat; import json,sys; im=Image.open(sys.argv[1]).convert("RGB"); s=ImageStat.Stat(im); print(json.dumps({"width":im.width,"height":im.height,"stddev":s.stddev,"colors":len(im.resize((160,120)).getcolors(19200) or [])}))',
         path.join(this.evidence, `${label}.png`)]).stdout);
       requireThat(pixels.width >= 560 && pixels.height >= 480 && pixels.colors > 50 && pixels.stddev.some(value => value > 10), 'Blank/unframed native pixels');
       identityCheck();
       requireThat(this.commit(APP) === expected.appCommit && this.commit(runtimeRef) === expected.runtimeCommit, 'Installed refs changed during GUI capture');
+      terms.acknowledged = observed; terms.dialogGone = true;
       return { instance, screenshot: `${label}.png`, pixels, nativeVersionObserved: '0.1.13',
         renderedFlatpakRefusal: true, directUpdaterInvocationTested: false,
-        linuxManagementUnsupportedObserved: true, syntheticTermsFixture: true,
+        linuxManagementUnsupportedObserved: true,
+        syntheticTermsFixture: terms.observed && terms.keyboardSubmissionSent === true && terms.dialogGone === true,
+        terms,
         contextFile: `${label}-context.txt`,
         windowIdentity: this.report.guiIdentity[label], resources: this.resources(),
         scope: 'XRes-bound X11 native WebKit window + OCR/pixels, not trusted IPC/full product acceptance' };
@@ -901,7 +960,7 @@ async function main(options) {
 
 module.exports = { parseArgs, hostedRoot, requestIdentity, validateBinding, initialReport, finalizeReport,
   inventorySnapshot, parsePs, processSnapshot, verifyProcessBinding, executableSnapshot, verifyInstanceIdentity,
-  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, TERMS_CHECKBOX, termsChoice,
+  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, TERMS_CHECKBOX, termsChoice, KEYBOARD_CASES, termsSourceHashes,
   fixtureMetadata, permissionMetadata, EXTRACT_DEB, Experiment, PHASES,
   PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS, REVIEWED_CANDIDATE, REPO, APP, PLATFORM, SDK, FIXTURE_RUNTIME };
 if (require.main === module) {

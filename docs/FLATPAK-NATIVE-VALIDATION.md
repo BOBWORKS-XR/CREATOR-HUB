@@ -165,8 +165,9 @@ the immutable SHA-pinned Flatpak inputs.
   dimensions/color variance, OCR, launch diagnostics and namespace context.
   Require native `0.1.13`, rendered Flatpak-managed update/refusal text, and the
   completed explicit Linux-unsupported management state, not forever checking.
-- If terms appear, use only the visible real checkbox and button, with bounded
-  unambiguous OCR targeting. This is an explicitly synthetic VM acknowledgement,
+- If terms appear, click only the unique visible checkbox label under the exact
+  title/revision. Submit with one Tab and one Return only after the current-run
+  WebKit keyboard-contract receipt below passes. This is a synthetic VM acknowledgement,
   **not real user terms consent**. No storage seeding, DOM injection, parent-key
   change, private authority override or disabled WebKit sandbox is used.
 - Make a second deployment from the finished candidate tree, retaining its
@@ -268,7 +269,7 @@ above. Original artifact `11829913045` is retained locally under
   There were zero click commands. Both later GUI phases therefore timed out at
   the terms modal, not a demonstrated updater or WebKit sandbox failure. The
   harness now recognizes only that captured `I`/`|` first-glyph alternative,
-  requiring the exact terms title/revision and unique checkbox/continue labels.
+  requiring the exact terms title/revision and unique checkbox label.
   XRes identity is still rechecked before each visible synthetic consent click;
   no storage, native-consent or parent-policy override is used.
 
@@ -279,6 +280,73 @@ filesystem diff in the export repository. Its overall phase still failed at GUI
 acceptance. Native updater refusal, completed unsupported management and real
 terms persistence remain unaccepted. The failed report stays failed with
 `releaseReady=false`; the two new harness fixes require a disposable rerun.
+
+### Actual Run 38432096221
+
+[Run 38432096221](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38432096221)
+used harness `8da7c3db7b3277052a3b3783e15291f267c85cac` and the same source-288
+package. Original evidence remains in `artifacts/flatpak-run-38432096221`.
+Candidate preflight passed after 33 snapshots. All three GUI cases had six
+successful XRes identity rechecks and passed owned-instance cleanup.
+
+**Confirmed broken, submit OCR:** the single checkbox-label click succeeded;
+the retained PNG shows a checked checkbox and enabled Continue button. The
+post-click TSV contains a high-confidence blank token for the button region,
+not an `Accept and continue` label. The harness refused ambiguous targeting and
+sent no submit click. No native terms-write error was rendered; this run never
+exercised native acceptance, persistence or post-terms updater refusal. The
+failed report remains failed. No further OCR/threshold tuning is authorized.
+
+### Runner-Only Keyboard Contract
+
+The existing test file contains an opt-in diagnostic guarded by `hostedRoot`
+before imports, outputs or server/browser launch. The disposable workflow alone
+sets `FLATPAK_WEBKIT_CONTRACT=1`, after source/artifact binding. It uses `npm ci
+--ignore-scripts` and the installed Playwright **1.63.0** CLI to install only
+WebKit plus its system dependencies. No local browser/SDK installation or test
+launch is needed. The [official browser installation contract](https://playwright.dev/docs/browsers#install-system-dependencies)
+supports browser-specific CI provisioning; browser binaries are version-bound.
+
+The test serves the exact source page/module using the existing static server
+and a fresh browser context per case. Only the native bridge is a synthetic
+fixture, as in the existing terms UI tests; storage and focus are never seeded
+or forced. Each case sends exactly one Tab and one Return, without input retries:
+
+- Enabled: one actual pointer click inside the unique label must check and focus
+  the checkbox, enabling the only dialog button. Tab must focus Continue; Return
+  must cause exactly one native-bridge acceptance with the exact policy/arguments,
+  close the modal and allow app startup.
+- Disabled: the modal's initially focused copy panel must tab to the unchecked
+  checkbox. Return must leave Continue disabled, make zero native accept calls,
+  and keep the dialog and application lock intact.
+- Native-write failure: the same checked/focused/enabled sequence makes exactly
+  one native call which fails. The exact visible storage error, open modal,
+  inert application and absence of app startup are mandatory. No retry follows.
+
+`terms-keyboard-contract.json` records cases, focus/input observations, engine
+version, run/harness/source binding, and SHA256 of `index.html`/`usage-terms.js`.
+Any case or browser/server cleanup failure prevents a passed receipt; original
+errors are retained. Native input requires the complete same-run receipt with
+unchanged source hashes. Before and after each native key, XRes/process/start-time/
+executable/deployment identity is rechecked and `xdotool getwindowfocus` must be
+the exact owned window. Focus is never activated or forced; input is focused
+XTEST, not `--window` XSendEvent. A foreign window, command timeout/nonzero exit,
+or attempted extra key fails without a Return retry.
+
+The HTML standard makes [click focus UA-dependent](https://html.spec.whatwg.org/multipage/interaction.html#click-focusable).
+Playwright WebKit is **not the pinned actual GNOME50 WebKitGTK runtime**. Passing
+this diagnostic is only permission to attempt the bounded native sequence,
+not proof of native focus, saving, consent or product acceptance. The real GUI
+must still pass terms disappearance, same-profile relaunch persistence, pixels,
+version, unsupported management, native updater-refusal, ownership and protected
+data checks. `init` refuses an existing root and creates an empty isolated home;
+the five beforeimage fixtures seed only preservation/project/AI sentinels, not
+valid terms records. Therefore the first candidate must visibly present terms;
+absence fails before any input. `syntheticTermsFixture` is true only for a case
+that actually observed terms, sent the bounded submission and removed the dialog.
+Later phases must retain candidate acknowledgement without another terms prompt.
+`releaseReady=false` remains unconditional. Actual keyboard-contract
+and native GNOME results are pending the next main-owned disposable run.
 
 ### XRes Window Ownership Contract
 
