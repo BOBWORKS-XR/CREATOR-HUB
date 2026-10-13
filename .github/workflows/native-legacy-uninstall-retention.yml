@@ -1,0 +1,46 @@
+name: Published legacy uninstall retention (disposable only)
+
+on:
+  push:
+    branches: ['validation/legacy-retention-014']
+    paths: ['.github/workflows/native-legacy-uninstall-retention.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  retention:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/legacy-retention-014'
+    runs-on: windows-2025
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        product: [mcp, setup]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Pure guards, filesystem fixtures and structural regressions only
+        shell: pwsh
+        run: node --test scripts/native-legacy-uninstall-retention.test.cjs
+      - name: Install exact published baseline, seed synthetic stores, uninstall and prove retention
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREATOR_LEGACY_RETENTION_EXPERIMENT: '1'
+        run: |
+          & ./scripts/native-legacy-uninstall-retention.ps1 -Product '${{ matrix.product }}' -OutputDirectory (Join-Path $env:RUNNER_TEMP 'legacy-retention-${{ matrix.product }}')
+      - name: Preserve official bytes, generated uninstaller provenance, synthetic before-images and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: legacy-retention-${{ matrix.product }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/legacy-retention-${{ matrix.product }}/
+          retention-days: 7
+          if-no-files-found: warn
+          include-hidden-files: true

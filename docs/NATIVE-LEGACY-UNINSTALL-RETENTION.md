@@ -1,0 +1,160 @@
+# Disposable Legacy Uninstall Retention
+
+This fixture installs the exact public Windows MCP 2.7.7 or Setup 0.3.7 installer,
+seeds synthetic persistent data, and tests the real generated uninstaller. It
+does not build a new product or implement Hub's migration/install coordinator.
+`releaseReady`, `productAccepted` and `migrationAccepted` remain false. A passed
+retention receipt is not full single-installation-flow acceptance or permission
+to uninstall an arbitrary app on the user's PC.
+
+## Pinned Provenance
+
+Primary release metadata, tag references and actual downloaded bytes must all
+match; filenames, registry labels and publisher strings alone are not proof.
+
+| Product | Public Source | Release / Asset IDs | Installer Bytes |
+| --- | --- | --- | --- |
+| MCP 2.7.7 | `9cd12e28d1dd05057b84166d4718a5d6369eff93` | `402569194` / `608030196` | `27059109` |
+| Setup 0.3.7 | `4a76945272560f9e0d2b93296a5223bf3e891eb2` | `402568854` / `608029072` | `2961298` |
+
+Exact SHA256 values, independently checked against fetched bytes in memory:
+
+~~~text
+MCP:   fa0b0ebc39043bf276de73763d380c001c84d1efd24dca9f9c2427b120a5afe0
+Setup: 223bbc00bf7f861efe1760310a4be4cbedfc9829c4d3841fae0a84038bc7e47b
+~~~
+
+The source pins and values are enforced against current primary
+[MCP release](https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/tag/v2.7.7),
+[Setup release](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/tag/v0.3.7)
+and GitHub's [release asset API](https://docs.github.com/en/rest/releases/assets).
+Drafts, prereleases, moved tags, changed asset IDs/URLs/digests/sizes, duplicate
+matching assets and a different repository refuse. No source/hash override flag
+or private signing credential is admitted.
+
+## Source Contract
+
+The retained MCP Windows acceptance workflow pins Tauri CLI 2.9.6; Setup's lock
+pins 2.11.4. The exact CLI used for every published MCP package is not established
+by that acceptance workflow alone. Both reviewed
+[2.9.6](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.9.6/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi)
+and [2.11.4](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi)
+templates delete bundle-ID app data only when the confirm-page checkbox is
+selected. NSIS [silent-mode callbacks](https://nsis.sourceforge.io/Docs/Chapter4.html#silent)
+skip page callbacks, so source predicts retention under `/S`; the actual native
+fixture must demonstrate it. The pinned Creator hooks replace the default
+running-app force-kill path with refusal. Older unreviewed uninstallers are not
+covered by these source claims or this finite test.
+
+Source app identities are `com.creatorworks.unitymcp.preview` and
+`com.creatorworks.projectsetup`. Current-user installation defaults to
+`%LOCALAPPDATA%\Creator Works MCP` / `Creator Project Setup`, with generated
+`uninstall.exe` and product-named HKCU uninstall registration. The test checks
+both registry views and rejects machine registrations; identical HKCU read-view
+aliases are accepted only with the exact version/publisher/location/uninstall
+path, after both views were absent before this job's installation.
+
+## Native Test Scope
+
+Admission requires live Windows X64/PowerShell 7+, GitHub-hosted runner context,
+repository `BOBWORKS-XR/CREATOR-HUB`, dedicated validation branch and explicit
+`CREATOR_LEGACY_RETENTION_EXPERIMENT=1`, before profile/registry/process inspection.
+Output must be new and strictly under canonical `RUNNER_TEMP`. Local/self-hosted
+operation refuses; never fake the environment to operate a real PC installation.
+There is no production native-context injection or test bypass CLI.
+
+The test refuses any existing target install root, product/manufacturer registry
+record, selected store or running target app. It installs only the pinned old
+installer with `/S`, without launching its GUI. Existing runner tools `gh`,
+`7z.exe`, Node and PowerShell are used; no SDK, compiler, dependency install or
+rebuild is needed. The launcher is extracted separately and must hash-match the
+installed launcher. Installer/uninstaller child environments are rebuilt from a
+finite Windows/profile allowlist, without workflow tokens, signing variables,
+Node overrides or inherited PATH/PowerShell-module overrides. Only `gh` gets
+the short-lived read-only workflow token, with a new empty config directory.
+
+After the verified install, the generated uninstaller's exact path, SHA256,
+length/timestamps, PE version fields (which may be empty) and exact registered
+product version are captured. Its original bytes and complete installed file
+inventory are retained before removal. This binds the uninstaller to a controlled
+fresh installation in this job, not a pre-existing local registry entry.
+
+Synthetic stores, required to be absent before installation and seeding:
+
+- MCP: `%APPDATA%\creator-works-mcp`, `%APPDATA%\banter-mcp`,
+  `%LOCALAPPDATA%\creator-works-mcp`, and both Roaming/Local bundle-ID stores.
+- Setup: `%LOCALAPPDATA%\CreatorProjectSetup` and both bundle-ID stores.
+
+These custom paths come from pinned MCP `main.rs` config/persistent-server
+resolution and Setup `bootstrap.rs` Editor-roots/log resolution. Nested opaque
+fixture bytes and JSON are synthetic, not real browser data, Editor installs,
+AI accounts, private configuration or actual SDK acceptance. Only those created
+fixture stores are inventoried/copied, never the full home/profile.
+
+The uninstaller path is fixed to that captured installation. The process API
+executes it directly with **raw** `/S _?=EXACT_DIR`, without shell execution or
+using the registry command. `_?=` is last and unquoted even with spaces, as
+[NSIS specifies](https://nsis.sourceforge.io/Docs/Chapter3.html#installerusage).
+It prevents the usual temporary-copy handoff, making normal exit waiting valid.
+ArgumentList autoquoting is deliberately not used for this one command. No
+`/UPDATE`, data-removal flag, `/NCRC`, retry or process kill is added.
+
+Success requires normal process exit zero with fully drained logs, absent app
+registration/executable and absent known installed payload files. A residual
+`uninstall.exe` is removed only after immediate canonical-path, original root
+owner/creation identity and complete original file-proof rechecks. Only that
+literal file may be deleted, followed by its original root **if empty**. Changed
+files, redirected roots or other remaining entries fail; no recursive or forced
+cleanup is permitted. NSIS itself is the only source of registry changes.
+
+Directory mtime is intentionally not an identity field: deleting children
+changes it. Original directory creation time/owner and seeded file
+creation/last-write times and bytes are independently checked. This is a
+controlled, newly owned runner fixture, not an adversarial-filesystem lock or
+production uninstaller authorization based only on timestamps.
+
+All synthetic store paths/bytes/file timestamps and root identities are checked
+in `finally`. Retention failures override apparent success and retain the
+original error. Tool timeouts record the exact owned PID and possible surviving
+process, fail without signalling/retrying, and rely on disposable job lifetime
+teardown. Stores, downloaded originals, before-images, logs and partial state
+are retained, including after failure. The workflow uploads only the new output
+scope, never source credentials or unrelated profile data.
+
+## Review And Execution
+
+Dedicated workflow: `.github/workflows/native-legacy-uninstall-retention.yml`,
+Windows 2025 matrix `mcp` / `setup`. Push admission is limited to
+`validation/legacy-retention-014` and changing the exact new workflow path.
+Manual dispatch also requires that branch. No default-branch merge, new PR or
+product build is required. Main reviews and dispatches; nothing was dispatched
+by this implementation.
+
+Workflow-native command (not for the user's PC):
+
+~~~powershell
+$env:CREATOR_LEGACY_RETENTION_EXPERIMENT = '1'
+# GH_TOKEN comes from github.token in the workflow step only.
+./scripts/native-legacy-uninstall-retention.ps1 -Product mcp -OutputDirectory (Join-Path $env:RUNNER_TEMP 'legacy-retention-mcp')
+~~~
+
+Local pure unit/structural checks:
+
+~~~sh
+node --test scripts/native-legacy-uninstall-retention.test.cjs
+~~~
+
+Local fixtures use only newly owned temporary files and pure injected metadata;
+they never install/uninstall an app or access the real registry. Native retention
+proof is pending the disposable workflow. Root still needs native end-to-end
+transfer validation, backups/recovery and client/runtime reference checks before
+removing old applications: retaining settings alone does not keep deleted old
+installed server paths working. Main owns that product integration and admission.
+
+The focused suite has 14 tests, including original-error/preservation-failure
+precedence, nonzero/hang/log-drain refusal, canonical residual cleanup plans and
+the directory-mtime versus creation/owner contract. These checks do not produce
+native uninstaller pins; those come only from the retained workflow receipts.
+Pure unit PowerShell spawns have a 60-second deadline to tolerate parallel-suite
+load. This does not change the actual native tool waits (120 seconds normally,
+180 seconds for each installer/uninstaller) or the 15-minute disposable job limit.
