@@ -60,7 +60,8 @@ for (const [name, change] of [
   ['head equals label', b => b.run.head_sha=smoke.MERGE], ['attempt', b => b.run.run_attempt=2],
   ['repository', b => b.run.repository.id++], ['fork', b => b.run.head_repository.id++],
   ['workflow', b => b.run.path='.github/workflows/other.yml'], ['PR', b => b.run.pull_requests[0].number=23],
-  ['PR head', b => b.run.pull_requests[0].head.sha=smoke.MERGE], ['source', b => b.source.sha=smoke.MERGE],
+  ['PR head repository', b => b.run.pull_requests[0].head.repo.id++],
+  ['malformed live PR head', b => b.run.pull_requests[0].head.sha='invalid'], ['source', b => b.source.sha=smoke.MERGE],
   ['source tree', b => b.source.tree='0'.repeat(40)], ['merge tree', b => b.merge.tree='0'.repeat(40)],
   ['merge parents', b => b.merge.parents.reverse()], ['merge label', b => b.merge.sha=smoke.SOURCE],
   ['artifact id', b => b.artifact.id++], ['artifact name', b => b.artifact.name=`hub-development-Linux-X64-${smoke.SOURCE}`],
@@ -73,6 +74,30 @@ for (const [name, change] of [
     const value = binding(); change(value); assert.throws(() => smoke.validateBinding(value));
   });
 }
+
+test('actual 38448524827 binding failure: live PR head advanced but immutable cef6 build identity did not', () => {
+  // Redacted actual GET /actions/runs/38442820243 fields captured after dispatch; no token or private payload.
+  const actualRun = {
+    id: 38442820243, status: 'completed', conclusion: 'success', run_attempt: 1,
+    head_sha: 'cef6f60310e88349e57951a2bbe0213e86fd05e7',
+    repository: { id: 1364807512, full_name: 'BOBWORKS-XR/CREATOR-HUB' },
+    head_repository: { id: 1364807512, full_name: 'BOBWORKS-XR/CREATOR-HUB' },
+    pull_requests: [{ number: 22,
+      head: { sha: '23f93c2e5b7089a2b2621345f44431a58205fb92', repo: { id: 1364807512 } },
+      base: { repo: { id: 1364807512 } } }],
+  };
+  const value = binding(); Object.assign(value.run, actualRun);
+  assert.notEqual(value.run.pull_requests[0].head.sha, smoke.SOURCE);
+  assert.equal(smoke.validateBinding(value).source, smoke.SOURCE);
+  // A mutable PR association never substitutes for any immutable source identity.
+  for (const change of [b => b.run.head_sha=actualRun.pull_requests[0].head.sha,
+    b => b.artifact.workflow_run.head_sha=actualRun.pull_requests[0].head.sha,
+    b => b.merge.parents[1]=actualRun.pull_requests[0].head.sha,
+    b => b.source.sha=actualRun.pull_requests[0].head.sha,
+    b => b.source.tree='0'.repeat(40), b => b.artifact.digest='sha256:'+'0'.repeat(64)]) {
+    const changed = structuredClone(value); change(changed); assert.throws(() => smoke.validateBinding(changed));
+  }
+});
 
 test('all three downloaded package hashes are pinned without enabling an RPM runtime lane', () => {
   assert.deepEqual(Object.keys(smoke.PINS), ['appimage','deb']);

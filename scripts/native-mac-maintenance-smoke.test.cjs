@@ -410,6 +410,18 @@ test('legacy preference lane observes old OFF, quits twice, then requires first 
   assert.equal(report.syntheticPreference.actions[0].targetVersion, '0.1.12');
 });
 
+test('baseline download and native installation share the same strict lane selection', () => {
+  assert.deepEqual(mac.versionsForLane('fresh'), ['0.1.13']);
+  for (const lane of ['manual-upgrade', 'legacy-preferences']) {
+    assert.deepEqual(mac.versionsForLane(lane), ['0.1.12', '0.1.13']);
+  }
+  for (const lane of ['', 'anything', undefined, 'version-fixture']) assert.throws(() => mac.versionsForLane(lane));
+  const source = fs.readFileSync(require.resolve('./native-mac-maintenance-smoke.cjs'), 'utf8');
+  assert.match(source, /if \(versionsForLane\(input.lane\)\.includes\('0.1.12'\)\) \{/);
+  assert.match(source, /const versions = versionsForLane\(input.lane\)/);
+  assert.doesNotMatch(source, /if \(input.lane === 'manual-upgrade'\) \{/);
+});
+
 test('legacy preference loss at new first launch is a failure, not repaired by clicking the new checkbox', async () => {
   const events = [], report = mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'legacy-preferences' }));
   const ops = operations(events), original = ops.snapshot;

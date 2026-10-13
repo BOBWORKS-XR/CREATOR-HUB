@@ -56,6 +56,11 @@ const REVIEWED_TEST_ONLY_FILES = Object.freeze([
 ]);
 const TREE_EXCLUSIONS = Object.freeze([...PROBE_FILES, ...REVIEWED_TEST_ONLY_FILES]);
 
+function versionsForLane(lane) {
+  assert.ok(['fresh', 'manual-upgrade', 'legacy-preferences'].includes(lane), 'Unknown native Mac validation lane');
+  return lane === 'fresh' ? ['0.1.13'] : ['0.1.12', '0.1.13'];
+}
+
 function options(env = process.env) {
   const input = { runId: env.CREATOR_MAC_CANDIDATE_RUN_ID, headSha: env.CREATOR_MAC_HEAD_SHA,
     sourceSha: env.CREATOR_MAC_SOURCE_SHA,
@@ -69,7 +74,7 @@ function options(env = process.env) {
   if (input.executableSha256 !== null) assert.match(input.executableSha256, /^[a-f0-9]{64}$/);
   assert.ok(Object.hasOwn(BASELINES, input.architecture), 'Only Mac Intel and ARM are admitted');
   assert.equal(input.dmgSha256, CANDIDATE.artifacts[input.architecture].dmgSha256, 'Unreviewed DMG hash');
-  assert.ok(['fresh', 'manual-upgrade', 'legacy-preferences'].includes(input.lane));
+  versionsForLane(input.lane);
   return input;
 }
 
@@ -281,7 +286,7 @@ async function prepare(out, input, report) {
   assert.equal(digest(bytes), input.dmgSha256, 'Candidate DMG hash differs from reviewed input');
   fs.writeFileSync(candidate, bytes, { flag: 'wx', mode: 0o600 });
   let baseline = null;
-  if (input.lane === 'manual-upgrade') {
+  if (versionsForLane(input.lane).includes('0.1.12')) {
     const release = await api('releases/tags/v0.1.12');
     assert.equal(release.draft, false);
     assert.equal(release.prerelease, false);
@@ -696,7 +701,7 @@ async function runLane(report, ops) {
     report.blockers.push(...guiBlockers(report.capability));
     await ops.preflight();
     const legacyPreferences = input.lane === 'legacy-preferences';
-    const versions = input.lane === 'fresh' ? ['0.1.13'] : ['0.1.12', '0.1.13'];
+    const versions = versionsForLane(input.lane);
     for (const version of versions) {
       report.currentPhase = `install-${version}`;
       const installed = await ops.install(version);
@@ -1001,7 +1006,7 @@ async function main() {
 }
 
 module.exports = { BASELINES, BASELINE_SOURCE, CANDIDATE, TERMS, AUTO_DOWNLOAD, PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS,
-  options, guard, contained, noLinks, digest, validateBinding, AUTO_DOWNLOAD_KEY, WEBKIT_ROOT, ITEM_SCHEMA, captureWebKitPreference,
+  options, versionsForLane, guard, contained, noLinks, digest, validateBinding, AUTO_DOWNLOAD_KEY, WEBKIT_ROOT, ITEM_SCHEMA, captureWebKitPreference,
   parseLocalTree, verifyProductTree,
   validateSource, zipEntry, validateBundle, atLeast, sentinelFiles, seedSentinels, verifySentinels,
   termsState, bodyKind, validateBody, termsControl, autoDownloadControl, preferenceSnapshot, preferenceReceipt,

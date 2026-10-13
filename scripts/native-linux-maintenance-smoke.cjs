@@ -28,7 +28,8 @@ function validateBinding(binding) {
     && r.path === '.github/workflows/ci.yml' && r.repository.id === BUILD.repositoryId
     && r.repository.full_name === BUILD.repository && r.head_repository.id === BUILD.repositoryId
     && r.head_repository.full_name === BUILD.repository, 'Native run/source/repository/attempt binding differs');
-  assert.ok(r.pull_requests.some(p => p.number === 22 && p.head.sha === SOURCE
+  // The run API's nested PR head follows the live PR; immutable run/artifact/merge source checks bind the built bytes.
+  assert.ok(r.pull_requests.some(p => p.number === 22 && /^[a-f0-9]{40}$/.test(p.head.sha)
     && p.head.repo.id === BUILD.repositoryId && p.base.repo.id === BUILD.repositoryId), 'Native PR22 binding differs');
   assert.ok(s.sha === SOURCE && s.tree === BUILD.tree && m.sha === MERGE && m.tree === BUILD.tree
     && m.message === `Merge ${SOURCE} into ${BUILD.base}`, 'Native source/merge tree binding differs');
