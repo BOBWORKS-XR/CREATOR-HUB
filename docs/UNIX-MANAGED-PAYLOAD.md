@@ -68,6 +68,15 @@ verify that proof and raw hashes before invoking the existing `prepare` and
 metadata hashes, source, target, mode and `privateKeyIncluded=false`/
 `releaseReady=false`. Do not add provenance fields to the strict runtime schema.
 
+`scripts/unix-payload-binding.cjs` now validates supplied independent pins and
+fresh API responses for this exact preparation workflow. It binds one successful
+native job/attempt, artifact identity/digest/size/creation interval, source/tree,
+target and the complete unsigned preparation map. Its 29 synthetic cases pass,
+including stale-attempt, foreign-source, wrong-mode and missing-Setup refusal.
+It neither fetches the API nor verifies/extracts a transfer, signs metadata,
+activates a router or completes assembly. The caller must acquire fresh proof
+and verify the actual downloaded bytes separately.
+
 The native assembler must independently pin and verify that envelope with the
 existing offline production-key CLI, not `Store::installed` or a key override:
 

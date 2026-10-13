@@ -197,7 +197,7 @@ pins, not Hub or a product launcher. It executes via `/proc/self/fd/N`, not the
 product's Rust `execveat` implementation. It never sets fake GitHub runner flags,
 loads GI/X11 or drives user GUI. This proves kernel mechanics only.
 
-Current focused results: Windows 37 tests (35 passed, 2 Linux-only skips); existing
+Initial focused results: Windows 37 tests (35 passed, 2 Linux-only skips); existing
 WSL `AndroidXR-Build`/Python 3.12.3 with kernel opt-in, 37 passed, no skips. No
 dependencies were installed. WSL emitted a systemd user-session startup warning;
 the kernel suite nevertheless exited zero. These results are not packaged-backend GUI proof.
@@ -205,8 +205,8 @@ The caller still needs an actual producer/owned-launch receipt and disposable
 packaged Hub/backend run, including private-pipe admission, real dialogs,
 decline/retry/operation evidence, preservation and exact normal exits.
 
-The Python ctypes XRes/X11 ABI and actual GTK/AT-SPI/native-dialog roles still
-need the first disposable native run.
+At that initial checkpoint, the ctypes XRes/X11 ABI and actual GTK/AT-SPI
+dialog roles still needed their first disposable native run.
 Existing maintenance C/XRes and Linux preference helpers were read-only references;
 neither their checkout nor any workflow, builder, app or hosting probe was edited.
 
@@ -216,8 +216,17 @@ the helper requested the wrong case-sensitive `libXres.so.1` soname. The
 uses `libXRes.so.1`. The original failed receipt is retained at
 `artifacts/linux-gtk-38468935010`; fixture EOF cleanup exited 75, not a passed
 normal close. A focused library-selection regression fails before the correction.
-The corrected helper and fixture still need their native rerun; pure fixtures
-cannot prove that all native ctypes/AT-SPI calls are valid.
+The corrected rerun
+[38469450169](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38469450169)
+passed all six actual helper phases: dialog snapshot, decline, retry snapshot,
+approval, frame snapshot and normal WM close. GTK callbacks and the exact child
+exit0 were verified; `normalExitVerified=true`. The retained report remains
+`productGuiAccepted=false`, `hostingAccepted=false`, `sealedBackendAccepted=false`
+and `releaseReady=false`. This verifies the synthetic GTK/X11/AT-SPI ABI path,
+not the real packaged Hub/backend, native migration or signed updating.
+Current Windows helper results are 36 passed / 2 Linux-only skips (38 total),
+plus eight fixture-driver tests. Both Mac helper jobs also passed compilation/
+pure fixtures in that rerun, without establishing actual Mac AX operation.
 
 Primary contracts: [AT-SPI action-name API](https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/method.Action.get_action_name.html),
 [GTK3 native button actions](https://github.com/GNOME/gtk/blob/gtk-3-24/gtk/a11y/gtkbuttonaccessible.c),
