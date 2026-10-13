@@ -22,7 +22,7 @@ const BLOCKERS = [
   { id: 'product-review-capture', classification: 'missing-capture', evidence: 'modules/mcp/launcher/src-tauri/src/settings_review_admission.rs',
     detail: 'Product review shares the implemented experimental admission; native dialog/workflow/router/ownership and preservation acceptance is still uncaptured.' },
   { id: 'native-gui-driver', classification: 'missing-capture', evidence: 'scripts/native-builtin-smoke.cjs',
-    detail: 'The full built-in harness/native dialog helper is Windows-only. No reusable Unix owned-window action contract exists here.' },
+    detail: 'The full built-in acceptance harness remains Windows-only. Native Linux and Mac owned-window helper contracts exist and their fixtures pass, but they are not yet integrated with an accepted packaged GUI/migration/update run.' },
 ];
 
 function runner(env = process.env, platform = process.platform, arch = process.arch) {

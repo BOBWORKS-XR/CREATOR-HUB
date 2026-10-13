@@ -30,8 +30,11 @@ Implemented source contracts, not native acceptance:
   This admission implementation is not native acceptance. No direct
   `Plan::apply`/settings-writer call may stand in for the native commands.
 - The existing full `native-builtin-smoke.cjs` and `native-window.ps1` are
-  Windows-only. There is no reusable Unix built-in GUI/native-dialog adapter in
-  this worktree. The separate-app maintenance helpers are not a built-in driver.
+  Windows-only. Test-only owned-window helpers now exist for Linux and Mac;
+  see [Linux helper](LINUX-NATIVE-WINDOW.md) and
+  [Mac helper](MACOS-NATIVE-WINDOW.md). Their pure/kernel/compilation fixtures
+  are not full packaged built-in GUI or migration acceptance. The separate-app
+  maintenance helpers are not a built-in driver.
 
 ## Delivered Probe
 
