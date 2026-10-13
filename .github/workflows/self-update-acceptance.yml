@@ -47,7 +47,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Public self-update baseline selection failed.' }
           $baseline = $selected | ConvertFrom-Json
           "version=$($baseline.version)" >> $env:GITHUB_OUTPUT
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         if: ${{ inputs.hosted_fixture }}
       - name: Build test-only version fixture from current runtime source
         if: ${{ inputs.hosted_fixture && inputs.fixture_run == '' }}

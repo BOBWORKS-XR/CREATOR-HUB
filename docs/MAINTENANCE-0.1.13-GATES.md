@@ -176,6 +176,18 @@ the runner's default. Native companion management, exact native installation,
 GUI, signed update/restart and Flatpak host integration remain unaccepted.
 Unification remains deferred to 0.1.14 or later.
 
+### First Native CI Findings
+
+Run `38392823489` at `ef254db` passed frontend/script checks but Linux and
+Apple Silicon stopped on the existing Unix `while let` iterator loop under
+Rust 1.99 Clippy. The original failed logs are retained; this is not native
+update acceptance. Replace it with the equivalent borrowed `for` iterator and
+test repeated enumeration, skipped unreadable/non-PID entries and exhaustion.
+Pin Rust 1.99.0 in the repository and CI so the local and runner lint versions
+match instead of silently following different `stable` installations. Neither
+lint warnings nor install/process guards are disabled. The follow-up native
+matrix must pass before its package artifacts can be assessed further.
+
 ## Files Written by This Port
 
 - `scripts/native-hub-descriptor.cjs`
