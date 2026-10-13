@@ -291,6 +291,10 @@ test('public metadata never claims update acceptance or signature verification',
   assert.doesNotMatch(bootstrap, /console\.log\((?:control|input|report|config)|JSON\.stringify\((?:control|report|config)\)/);
 });
 
+test('helper sets an explicit caller exit code for success as well as refusal', () => {
+  assert.match(source, /if \(\$failed -or -not \$cleanupVerified\) \{ exit 1 \}\r?\nexit 0\s*$/);
+});
+
 test('failure diagnostics expose only allowlisted phase, exception class, numeric code and line', { skip: !hasPwsh }, () => {
   const output = isolatedFunctions(['Get-LabFailure'], `
     try { throw 'NEVER-LOG-SECRET-CONTROL-FRAME' } catch { $record=$_ }

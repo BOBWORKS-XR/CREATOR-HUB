@@ -70,11 +70,15 @@ jobs:
       - name: Unit refusal and lifecycle checks
         run: node --test scripts/native-self-update-lab.test.cjs scripts/self-update-lab-feed.test.cjs scripts/self-update-lab-target.test.cjs
       - name: Actual old-app signed update, native cancellation, restart and managed reconnect
-        # Exact public-only test root lives in the disposable VM administrator store, never the user's PC.
+        # Explicit script success exit code must accompany the independent actual app receipt.
         shell: pwsh
         run: |
           ./scripts/native-self-update-lab.ps1 -ContractPath (Join-Path $PWD artifacts/signed-update-lab/lab-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/signed-update-lab/baseline.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/signed-update-lab/lifecycle-public-metadata.jsonl
           if ($LASTEXITCODE -ne 0) { throw 'Signed lab update failed; public/native release readiness is not established.' }
+          $reports = @(Get-ChildItem artifacts/native-suite-* -Filter self-update-report.json)
+          if ($reports.Count -ne 1) { throw 'Expected one actual app update receipt.' }
+          $receipt = Get-Content -LiteralPath $reports[0].FullName -Raw | ConvertFrom-Json
+          if ($receipt.passed -ne $true -or $receipt.selfUpdateTested -ne $true -or $receipt.managedRouteReconnectTested -ne $true -or $receipt.policyRestored -ne $true -or $receipt.publicDiscovery -ne $false -or $receipt.releaseReady -ne $false) { throw 'Actual controlled-feed update receipt is incomplete.' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

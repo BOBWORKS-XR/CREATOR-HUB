@@ -490,3 +490,4 @@ try {
     servedRouteCount=$(if ($feedResult) { $feedResult.servedRouteCount } else { $null });
     rejectedRequestCount=$(if ($feedResult) { $feedResult.rejectedRequestCount } else { $null })} | ConvertTo-Json -Depth 4 -Compress
 if ($failed -or -not $cleanupVerified) { exit 1 }
+exit 0
