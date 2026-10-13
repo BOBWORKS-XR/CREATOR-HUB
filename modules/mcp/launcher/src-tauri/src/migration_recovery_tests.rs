@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "migration_recovery_unix_tests.rs"]
+mod unix_tests;
 #[cfg(windows)]
 use std::io::Write;
 
@@ -218,7 +221,7 @@ fn cooperative_lock_refuses_competing_hub_writer_without_claiming_cas() {
     f.originals();
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 #[test]
 fn unverified_platform_publication_fails_closed() {
     let f = Fixture::new(1);
@@ -230,7 +233,7 @@ fn unverified_platform_publication_fails_closed() {
     f.originals();
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[test]
 fn publication_faults_recover_only_from_proven_evidence_and_preserve_every_image() {
     for boundary in [
@@ -318,7 +321,14 @@ fn external_replace(path: &Path, bytes: &[u8]) {
     );
 }
 
-#[cfg(windows)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn external_replace(path: &Path, bytes: &[u8]) {
+    let replacement = path.with_extension("external");
+    fs::write(&replacement, bytes).unwrap();
+    fs::rename(replacement, path).unwrap();
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[test]
 fn real_concurrent_path_replacement_at_publication_is_retained_and_quarantined() {
     use std::sync::mpsc;
@@ -417,7 +427,7 @@ fn active_writer_and_native_failure_never_fallback_to_an_overwriting_rename() {
     assert!(!t.capture(0).join("displaced.bin").exists());
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[test]
 fn partially_applied_batch_resumes_without_rewriting_completed_members() {
     let f = Fixture::new(3);
@@ -459,7 +469,7 @@ fn identical_after_images_without_any_journal_are_refused() {
     assert_eq!(fs::read(&f.paths[0]).unwrap(), Fixture::after(0));
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[test]
 fn external_edit_after_first_member_or_after_completion_never_rolls_back_or_republishes() {
     let f = Fixture::new(2);
@@ -487,7 +497,7 @@ fn external_edit_after_first_member_or_after_completion_never_rolls_back_or_repu
     assert_eq!(fs::read(&f.paths[0]).unwrap(), b"edit after completion");
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[test]
 fn native_partial_failure_shape_missing_target_keeps_displaced_and_refuses_recreation() {
     let f = Fixture::new(1);

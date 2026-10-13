@@ -16,6 +16,11 @@ npm run build:unified -- UNIQUE-NAME --experimental-unix --installer
 - Linux x64/ARM64: AppImage, DEB and RPM. `NO_STRIP=1` is supplied; integrity
   validation still refuses any changed module bytes regardless of that setting.
 - macOS Intel/Apple silicon: `.app` and DMG with existing ad-hoc app signing.
+  Hub and its MCP backend now declare macOS 13.5 minimum, matching the pinned
+  [Node 24.17.0 runtime requirements](https://github.com/nodejs/node/blob/v24.17.0/BUILDING.md#platform-list).
+  The earlier native candidate's Info.plist incorrectly declared 10.13 on both
+  architectures. This correction does not prove the reported Apple-silicon
+  launch problem's cause or replace native GUI acceptance.
 - Without `--installer`, only the staged backends/resources and raw Hub are
   produced. This is not a complete runnable native package/layout claim.
 - Without `--experimental-unix`, Unix refuses before building or selecting a key.

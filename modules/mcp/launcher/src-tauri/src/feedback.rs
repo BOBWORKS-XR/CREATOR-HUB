@@ -58,6 +58,30 @@ impl Drop for Lock {
 }
 
 pub fn write(project: &str, enabled: bool, check_ins: bool) -> Result<Value, String> {
+    let protected = option_env!("CREATOR_HUB_INTERNAL_MODULE") == Some("1");
+    write_using(
+        project,
+        enabled,
+        check_ins,
+        protected,
+        |path, before, after| {
+            crate::hosted_commands::product_settings::commit_document(
+                "MCP feedback preferences",
+                path,
+                before,
+                after,
+            )
+        },
+    )
+}
+
+pub(crate) fn write_using(
+    project: &str,
+    enabled: bool,
+    check_ins: bool,
+    protected: bool,
+    publish: impl Fn(&Path, Option<&[u8]>, &str) -> Result<(), String>,
+) -> Result<Value, String> {
     let folder = folder(project)?;
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let lock_path = folder.join(".write-lock");
@@ -71,6 +95,26 @@ pub fn write(project: &str, enabled: bool, check_ins: bool) -> Result<Value, Str
     let _lock = Lock(lock_path);
     drop(lock_file);
     read(project)?;
+    let settings_path = folder.join("settings.json");
+    let check_ins_path = folder.join("check-ins.json");
+    let settings_before = if protected {
+        crate::settings_backup::read_bytes(&settings_path)?
+    } else {
+        None
+    };
+    let check_ins_before = if protected {
+        crate::settings_backup::read_bytes(&check_ins_path)?
+    } else {
+        None
+    };
+    if settings_before
+        .as_ref()
+        .is_some_and(|bytes| bytes.len() > 16384)
+    {
+        return Err("Feedback settings are too large; originals were kept.".into());
+    }
+    let mut settings = preference_document(settings_before.as_deref())?;
+    let mut check_ins_state = preference_document(check_ins_before.as_deref())?;
     let journal = folder.join("MCP_FEEDBACK.md");
     if enabled && !journal.exists() {
         let mut file = fs::OpenOptions::new()
@@ -92,16 +136,39 @@ pub fn write(project: &str, enabled: bool, check_ins: bool) -> Result<Value, Str
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_millis();
-    super::atomic_write(
-        &folder.join("check-ins.json"),
-        &json!({"lastPromptAt": now, "tasks": 0}).to_string(),
+    check_ins_state["lastPromptAt"] = json!(now);
+    check_ins_state["tasks"] = json!(0);
+    settings["feedbackEnabled"] = json!(enabled);
+    settings["usageCheckInsEnabled"] = json!(enabled && check_ins);
+    if protected && settings.to_string().len() > 16384 {
+        return Err(
+            "Feedback settings would exceed the existing size limit. No preferences were saved."
+                .into(),
+        );
+    }
+    publish(
+        &check_ins_path,
+        check_ins_before.as_deref(),
+        &check_ins_state.to_string(),
     )?;
-    super::atomic_write(
-        &folder.join("settings.json"),
-        &json!({"feedbackEnabled": enabled, "usageCheckInsEnabled": enabled && check_ins})
-            .to_string(),
+    publish(
+        &settings_path,
+        settings_before.as_deref(),
+        &settings.to_string(),
     )?;
     read(project)
+}
+
+fn preference_document(before: Option<&[u8]>) -> Result<Value, String> {
+    let value = before
+        .map(serde_json::from_slice)
+        .transpose()
+        .map_err(|_| "Invalid feedback preference document; originals were kept.")?
+        .unwrap_or_else(|| json!({}));
+    if !value.is_object() {
+        return Err("Feedback preference documents must be objects; originals were kept.".into());
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

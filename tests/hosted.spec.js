@@ -64,6 +64,8 @@ async function open(page, options = {}) {
               if (options.pendingStartup) await new Promise(resolve => { window.finishMcpStartup = resolve; });
               return structuredClone(mcpConfig);
             case 'save_config': mcpConfig = structuredClone(args.args.config); return null;
+            case 'product_settings_status': return { status: 'current', backups: [], recovery: [] };
+            case 'review_product_settings': return { status: 'current', backups: [], recovery: [] };
             case 'review_existing_client_connection':
               if (options.migrationError) throw 'Codex: Client settings changed after review. Nothing was changed.';
               return { client: args.args.client, status: options.cancelMigration ? 'cancelled' : (args.args.client === 'codex' ? 'migrated' : 'unchanged') };

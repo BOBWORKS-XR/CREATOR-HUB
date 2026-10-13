@@ -11,6 +11,16 @@ const { nativePlan, packageEnvironment, verifyHostedBinding, verifyResources, ve
   verifyLinuxHub, extract, validatePackages } = require('./unix-package-payload.cjs');
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
+test('Mac Hub and bundled MCP declare the minimum supported by their pinned Node runtime', () => {
+  const root = path.join(__dirname, '..');
+  const runtime = fs.readFileSync(path.join(root, 'modules/mcp/scripts/stage-node-runtime.mjs'), 'utf8');
+  assert.match(runtime, /const DEFAULT_VERSION = "24\.17\.0"/);
+  for (const file of ['src-tauri/tauri.conf.json', 'modules/mcp/launcher/src-tauri/tauri.conf.json']) {
+    const config = JSON.parse(fs.readFileSync(path.join(root, file), 'utf8'));
+    assert.equal(config.bundle.macOS.minimumSystemVersion, '13.5');
+  }
+});
+
 function fixture(platform = 'linux', managed = false) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'creator-unix-package-')));
   const output = path.join(root, 'candidate');

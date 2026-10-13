@@ -74,9 +74,67 @@ The passing call used a rebuilt source bundle and the candidate's private Node,
 temporary client overrides and an ephemeral read-only session. It was not an
 installed stable-router/signed-update or live Unity Editor acceptance test.
 
+The exact packaged server and private Node in Windows candidate
+`managed-route-20261013-02` passed the same actual Codex call without a rebuilt
+bundle override (`artifacts/live-clients-20261013-04`). The installer SHA-256 is
+`c3195b2e3e59889881fef7e82500f391015aea99a9b0574585f6e0bc17301c19`;
+the extracted installed executable is
+`1a89967a4c972fcd2fa01e1dee8e413b0dc5c074f1ca2dc30174059988861e8d`.
+Its runtime/router metadata is signed, its NSIS installer is unsigned and its
+version remains 0.1.12. It has not replaced the user's installed apps.
+
+Native runtime CI at source `7edf6fb` passed on Windows, Linux x64, macOS Intel
+and Apple silicon. Retained Unix JSON verifies exact server/runtime consumption,
+tamper refusal, owned cleanup and actual SDK transport against the real server
+bundle. These are execution component checks, not native GUI/install/update or
+authenticated AI-client acceptance. Mac native app-exchange and read-only
+resource staging tests also passed in the Hub lane before the MCP lint failure.
+Platform-only lint failures were corrected separately in `dc60489`; the failed
+runs remain failed and are not counted as passing full CI.
+
+The self-update workflow's stale 0.1.10 fixture setting now matches its native
+0.1.11 baseline, with a regression check. This only repairs that existing test
+harness; a next-version candidate still needs a separately pinned previous
+public stable baseline and exact signed installed-update acceptance.
+
 Claude Code connected to the candidate server, but its existing OAuth session
 expired before a model/tool call. Claude Desktop opens at sign-in. User login
 is required; credentials were not read, copied, transferred or automated.
+
+## Combined Source Follow-Up
+
+The hosted launcher now checks exact form and backend-operation snapshots before
+saving. One-click setup, managed-entry removal, project launcher preferences and
+feedback preferences use snapshot-bound publication too. Current/legacy data
+locations are reused, with explicit backup/conflict/recovery review; no separate
+Hub preference copy, automatic legacy uninstall or schema guess was introduced.
+
+Native Unix existing-file publication uses same-volume kernel exchange and
+no-replace retention of the actual displaced object. Ambiguous outcomes retain
+evidence and stop without rollback. Linux headless fixtures passed 64 tests on
+the earlier 1.92 compiler; new CI runs these on pinned 1.99 and both Mac
+architectures. This does not close the GUI executable-use or consent acceptance
+gaps. See PRODUCT-SETTINGS-PRESERVATION.md and MCP-UNIX-HOSTING-BOUNDARY-AUDIT.md.
+
+Combined local checks on Rust 1.99: Hub 153 passed / 11 opt-in ignored, MCP 239
+passed / 7 ignored, strict all-target Clippy passed, browser 275 passed. Root
+scripts passed 93 / 1 Unix-permission skip before the additional minimum-OS
+regression, which passed separately. An old atomic-write fixture initially
+failed because built-in saves intentionally retain a backup; it now verifies
+the exact old bytes and absence of temporary files instead of forbidding the
+backup directory. The original failed log remains retained.
+
+The retained RPM passed native metadata/digest checks, but rpm2cpio 4.17 exited
+unsuccessfully. Direct libarchive extraction passed all ten resource hashes in
+run 38326950306, using the same package hash. This is extraction, not installed
+RPM or full AppImage acceptance. The original packaging run 38324292677 remains
+failed on Linux; both Mac packages passed integrity/signature checks. Their
+Info.plist declared 10.13 despite the pinned Node runtime's 13.5 requirement;
+source now explicitly declares 13.5 and needs fresh package verification.
+
+Rust is pinned to 1.99 locally and in the build workflows. Test workflows cancel
+superseded per-branch runs; publishing has no new cancellation behavior. The
+temporary RPM pull-request diagnostic trigger was removed after capture.
 
 ## Remaining Release Gates
 

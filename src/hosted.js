@@ -6,6 +6,7 @@
   });
   const mcpWritable = new Set([
     'begin_ui_operation', 'finish_ui_operation', 'load_config', 'save_config',
+    'product_settings_status', 'review_product_settings',
     'discover_unity_projects', 'get_onboarding_status', 'add_project', 'one_click_setup', 'review_existing_client_connection',
     'pending_client_recovery', 'recover_client_connection',
     'review_existing_client_connections',

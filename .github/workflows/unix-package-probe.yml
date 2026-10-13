@@ -1,10 +1,5 @@
 name: Retained Linux package diagnostic (no build or install)
 on:
-  # One-off branch diagnostic for the retained failed candidate; remove after capture.
-  pull_request:
-    paths:
-      - '.github/workflows/unix-package-probe.yml'
-      - 'scripts/native-rpm-probe.cjs'
   workflow_dispatch:
     inputs:
       candidate_run:
@@ -14,6 +9,9 @@ on:
 permissions:
   contents: read
   actions: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 jobs:
   rpm:
     runs-on: ubuntu-22.04
@@ -28,7 +26,7 @@ jobs:
       - run: npm ci
       - name: Check exact run identifier
         env:
-          CANDIDATE_RUN: ${{ inputs.candidate_run || '38324292677' }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
         run: '[[ "$CANDIDATE_RUN" =~ ^[0-9]+$ ]]'
       - run: sudo apt-get update
       - run: sudo apt-get install -y --no-install-recommends rpm libarchive-tools
@@ -38,10 +36,10 @@ jobs:
           path: artifacts/retained-linux
           merge-multiple: true
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.candidate_run || '38324292677' }}
+          run-id: ${{ inputs.candidate_run }}
       - name: Capture native parser outcomes without installing the RPM
         env:
-          CANDIDATE_RUN: ${{ inputs.candidate_run || '38324292677' }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
         run: node scripts/native-rpm-probe.cjs artifacts/retained-linux artifacts/rpm-probe.json
       - uses: actions/upload-artifact@v4
         if: always()

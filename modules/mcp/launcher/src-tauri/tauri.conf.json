@@ -53,7 +53,8 @@
     "shortDescription": "Creator Works MCP Launcher",
     "targets": "all",
     "macOS": {
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "minimumSystemVersion": "13.5"
     },
     "windows": {
       "certificateThumbprint": null,

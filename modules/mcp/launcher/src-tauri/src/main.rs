@@ -1325,15 +1325,23 @@ fn build_codex_mcp_config(
 #[tauri::command]
 fn remove_claude_mcp_config() -> Result<(), String> {
     let config_path = get_claude_config_path();
+    remove_claude_mcp_config_at(&config_path, |path, before, after| {
+        client_setup_write::commit("Claude Code", path, Some(before), after)
+    })
+}
 
+fn remove_claude_mcp_config_at(
+    config_path: &Path,
+    publish: impl FnOnce(&Path, &[u8], &str) -> Result<(), String>,
+) -> Result<(), String> {
     if !config_path.exists() {
         return Ok(());
     }
 
-    let content = fs::read_to_string(&config_path)
+    let before = fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read Claude config: {}", e))?;
 
-    let mut config: serde_json::Value = serde_json::from_str(&content)
+    let mut config: serde_json::Value = serde_json::from_str(&before)
         .map_err(|e| format!("Failed to parse Claude config: {}", e))?;
 
     if !client_ownership::guard_json(&config, None, false)? {
@@ -1350,8 +1358,7 @@ fn remove_claude_mcp_config() -> Result<(), String> {
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Claude config: {}", e))?;
 
-    settings_backup::retain(&config_path)?;
-    atomic_write(&config_path, &content)
+    publish(config_path, before.as_bytes(), &content)
 }
 
 /// Update Codex MCP configuration for a channel
@@ -1397,12 +1404,20 @@ fn update_codex_mcp_config(
 #[tauri::command]
 fn remove_codex_mcp_config() -> Result<(), String> {
     let config_path = get_codex_config_path();
+    remove_codex_mcp_config_at(&config_path, |path, before, after| {
+        client_setup_write::commit("Codex", path, Some(before), after)
+    })
+}
 
+fn remove_codex_mcp_config_at(
+    config_path: &Path,
+    publish: impl FnOnce(&Path, &[u8], &str) -> Result<(), String>,
+) -> Result<(), String> {
     if !config_path.exists() {
         return Ok(());
     }
 
-    let existing = fs::read_to_string(&config_path)
+    let existing = fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read Codex config: {}", e))?;
     if !client_ownership::guard_toml(&existing, None)? {
         return Ok(());
@@ -1412,8 +1427,7 @@ fn remove_codex_mcp_config() -> Result<(), String> {
         LEGACY_MCP_CLIENT_ID,
     )?;
 
-    settings_backup::retain(&config_path)?;
-    atomic_write(&config_path, &content)
+    publish(config_path, existing.as_bytes(), &content)
 }
 
 /// Read the current Antigravity MCP configuration (returns an empty object if
@@ -1534,17 +1548,25 @@ fn update_antigravity_mcp_config(
 #[tauri::command]
 fn remove_antigravity_mcp_config() -> Result<(), String> {
     let config_path = get_antigravity_config_path();
+    remove_antigravity_mcp_config_at(&config_path, |path, before, after| {
+        client_setup_write::commit("Antigravity", path, Some(before), after)
+    })
+}
 
+fn remove_antigravity_mcp_config_at(
+    config_path: &Path,
+    publish: impl FnOnce(&Path, &[u8], &str) -> Result<(), String>,
+) -> Result<(), String> {
     if !config_path.exists() {
         return Ok(());
     }
 
-    let content = fs::read_to_string(&config_path)
+    let before = fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read Antigravity config: {}", e))?;
-    if content.trim().is_empty() {
+    if before.trim().is_empty() {
         return Ok(());
     }
-    let mut config: serde_json::Value = serde_json::from_str(&content)
+    let mut config: serde_json::Value = serde_json::from_str(&before)
         .map_err(|e| format!("Failed to parse Antigravity config: {}", e))?;
 
     if !client_ownership::guard_json(&config, None, false)? {
@@ -1561,8 +1583,7 @@ fn remove_antigravity_mcp_config() -> Result<(), String> {
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Antigravity config: {}", e))?;
 
-    settings_backup::retain(&config_path)?;
-    atomic_write(&config_path, &content)
+    publish(config_path, before.as_bytes(), &content)
 }
 
 /// Read the current OpenCode MCP configuration. OpenCode stores its config
@@ -1696,19 +1717,27 @@ fn update_opencode_mcp_config(
 #[tauri::command]
 fn remove_opencode_mcp_config() -> Result<(), String> {
     let config_path = get_opencode_config_path();
+    remove_opencode_mcp_config_at(&config_path, |path, before, after| {
+        client_setup_write::commit("OpenCode", path, Some(before), after)
+    })
+}
+
+fn remove_opencode_mcp_config_at(
+    config_path: &Path,
+    publish: impl FnOnce(&Path, &[u8], &str) -> Result<(), String>,
+) -> Result<(), String> {
     if !config_path.exists() {
         return Ok(());
     }
-    let content = fs::read_to_string(&config_path)
+    let before = fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read OpenCode config: {}", e))?;
-    if !client_ownership::guard_json(&parse_opencode_config(&content)?, None, true)? {
+    if !client_ownership::guard_json(&parse_opencode_config(&before)?, None, true)? {
         return Ok(());
     }
     let content =
-        jsonc::remove_managed_entries(&content, "mcp", MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID)
+        jsonc::remove_managed_entries(&before, "mcp", MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID)
             .map_err(|e| format!("Failed to update OpenCode config: {}", e))?;
-    settings_backup::retain(&config_path)?;
-    atomic_write(&config_path, &content)
+    publish(config_path, before.as_bytes(), &content)
 }
 
 fn remove_toml_table_block(content: &str, table_name: &str) -> Result<String, String> {
@@ -2439,7 +2468,7 @@ fn one_click_setup(
         }
     }
 
-    let mut config = load_config(app.clone())?;
+    let (mut config, settings_operation) = hosted_commands::product_settings::load_operation(&app)?;
     let key = project_path_key(Path::new(&candidate.unity_project_path));
     let channel = if let Some(existing) = config
         .channels
@@ -2470,7 +2499,7 @@ fn one_click_setup(
         }
     }
     let allow_all_tests = config.allow_all_tests;
-    save_config(config)?;
+    hosted_commands::product_settings::save_operation(config, settings_operation)?;
 
     install_unity_extension(app.clone(), channel.unity_project_path.clone())?;
     set_unity_custom_scripts(channel.unity_project_path.clone(), enable_custom_scripts)?;
@@ -2831,6 +2860,24 @@ fn update_unity_launcher_settings<F>(unity_project_path: &str, update: F) -> Res
 where
     F: FnOnce(&mut serde_json::Value),
 {
+    update_unity_launcher_settings_using(unity_project_path, update, |path, before, after| {
+        hosted_commands::product_settings::commit_document(
+            "MCP project launcher settings",
+            path,
+            before,
+            after,
+        )
+    })
+}
+
+fn update_unity_launcher_settings_using<F>(
+    unity_project_path: &str,
+    update: F,
+    publish: impl FnOnce(&Path, Option<&[u8]>, &str) -> Result<(), String>,
+) -> Result<(), String>
+where
+    F: FnOnce(&mut serde_json::Value),
+{
     let state_dir = PathBuf::from(unity_project_path)
         .join(".bantworks-mcp")
         .join("state");
@@ -2839,11 +2886,10 @@ where
         .map_err(|e| format!("Failed to create MCP state directory: {}", e))?;
 
     let settings_path = state_dir.join("launcher-settings.json");
+    let before = client_setup_write::snapshot(&settings_path)?;
 
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path)
-            .map_err(|e| format!("Failed to read launcher settings: {}", e))?;
-        serde_json::from_str(&content)
+    let mut settings: serde_json::Value = if let Some(content) = &before {
+        serde_json::from_str(content)
             .map_err(|e| format!("Invalid launcher settings; preserving existing file: {}", e))?
     } else {
         serde_json::json!({})
@@ -2859,7 +2905,11 @@ where
     let content = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
-    atomic_write(&settings_path, &content)?;
+    publish(
+        &settings_path,
+        before.as_deref().map(str::as_bytes),
+        &content,
+    )?;
 
     Ok(())
 }
@@ -3466,7 +3516,17 @@ mod tests {
         atomic_write(&path, "new").unwrap();
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let backups = root.join(".creator-hub-settings-backups");
+        if option_env!("CREATOR_HUB_INTERNAL_MODULE") == Some("1") {
+            use sha2::{Digest, Sha256};
+            let backup = backups.join(format!("config.json.{:x}.bak", Sha256::digest(b"old")));
+            assert_eq!(fs::read(backup).unwrap(), b"old");
+            assert_eq!(fs::read_dir(backups).unwrap().count(), 1);
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        } else {
+            assert!(!backups.exists());
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

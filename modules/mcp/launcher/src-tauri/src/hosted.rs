@@ -11,6 +11,10 @@ use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_shell::ShellExt;
 
+#[cfg(unix)]
+#[path = "hosted_unix.rs"]
+mod unix_boundary;
+
 const MAX_REQUEST: usize = 64 * 1024;
 const MAX_RESPONSE: usize = 2 * 1024 * 1024;
 const MAX_CONFIG: usize = 256 * 1024;
@@ -89,6 +93,17 @@ struct Permission {
 }
 
 impl Permission {
+    fn ensure_current(&self) -> Result<(), String> {
+        #[cfg(unix)]
+        unix_boundary::ensure_owner(
+            self.writable,
+            self._owner
+                .as_ref()
+                .is_some_and(|owner| owner.ensure_current().is_ok()),
+        )?;
+        Ok(())
+    }
+
     fn read_only() -> Self {
         Self {
             writable: false,
@@ -311,6 +326,8 @@ fn serve_authorized(
                 args.managed_routing,
             )
         };
+    #[cfg(unix)]
+    unix_boundary::require_managed_route(writable, managed)?;
     let mut permission = match approve(writable) {
         Ok(permission) if permission.writable == writable => permission,
         Ok(_) => return Err("Hosting permission does not match the requested mode.".into()),
@@ -319,6 +336,10 @@ fn serve_authorized(
             return Ok(());
         }
     };
+    if let Err(error) = permission.ensure_current() {
+        send(output, &hello.session, 0, Err(error))?;
+        return Ok(());
+    }
     if managed {
         if let Err(error) = call("bind_managed_route", json!({})) {
             send(output, &hello.session, 0, Err(error))?;
@@ -376,6 +397,12 @@ fn serve_authorized(
                 .write_all(&native_session.event()?)
                 .and_then(|_| output.flush())
                 .map_err(|_| "Host disconnected before dispatch; command was not invoked.")?;
+        }
+        // Event delivery can wait; check advisory ownership after it, before
+        // recording acceptance or invoking any command (including read helpers).
+        if let Err(error) = permission.ensure_current() {
+            send(output, &hello.session, request.id, Err(error))?;
+            return Ok(());
         }
         let changes = crate::hosted_commands::needs_workflow(&request.command);
         if changes {
@@ -497,33 +524,7 @@ fn parent_host() -> Result<String, String> {
 
 #[cfg(target_os = "linux")]
 fn parent_host() -> Result<String, String> {
-    unsafe {
-        let mut stat_in: libc::stat = std::mem::zeroed();
-        let mut stat_out: libc::stat = std::mem::zeroed();
-        if libc::fstat(0, &mut stat_in) != 0 || libc::fstat(1, &mut stat_out) != 0 {
-            return Err("Cannot inspect hosted streams.".into());
-        }
-        if (stat_in.st_mode & libc::S_IFMT) != libc::S_IFIFO
-            || (stat_out.st_mode & libc::S_IFMT) != libc::S_IFIFO
-        {
-            return Err("Hosted mode requires private inherited input and output pipes.".into());
-        }
-        let ppid = libc::getppid();
-        if ppid <= 1 {
-            return Err("Cannot verify the parent process.".into());
-        }
-        let exe_link = format!("/proc/{ppid}/exe");
-        let path = std::fs::read_link(&exe_link)
-            .map_err(|_| String::from("Cannot verify Creator Hub's process."))?;
-        let valid_name = path.file_name().is_some_and(|name| {
-            let n = name.to_string_lossy();
-            n.eq_ignore_ascii_case("creator-hub") || n.eq_ignore_ascii_case("creator-hub.exe")
-        });
-        if !valid_name {
-            return Err("Hosted mode must be launched directly by Creator Hub.".into());
-        }
-        Ok(path.to_string_lossy().into_owned())
-    }
+    unix_boundary::parent_host()
 }
 
 #[cfg(target_os = "macos")]
@@ -537,6 +538,10 @@ fn parent_host() -> Result<String, String> {
 }
 
 pub fn run() -> Result<(), String> {
+    #[cfg(unix)]
+    let parent = Some(unsafe { libc::getppid() });
+    #[cfg(not(unix))]
+    let parent = None;
     let host = parent_host()?;
     let (host_image, host_hash) = crate::hosted_payload::lock_image(Path::new(&host))?;
     let mut context = tauri::generate_context!();
@@ -553,7 +558,7 @@ pub fn run() -> Result<(), String> {
                     &mut std::io::stdin().lock(),
                     &mut std::io::stdout().lock(),
                     files,
-                    |writable| authorize(&app, &host, &host_hash, writable),
+                    |writable| authorize(&app, &host, &host_hash, writable, parent),
                     |command, args| dispatch(&app, command, args),
                 );
                 if let Err(error) = &result {
@@ -574,6 +579,7 @@ fn authorize(
     host: &str,
     host_hash: &str,
     writable: bool,
+    _parent: Option<i32>,
 ) -> Result<Permission, String> {
     let image_binding = if cfg!(windows) {
         "Its exact running image is locked for this session; the fingerprint is not a publisher signature."
@@ -649,9 +655,13 @@ fn authorize(
     {
         // Recheck direct-parent/private-pipe admission after the native dialog.
         // Snapshot methods bind later resource reads; no advisory lock claim.
-        if parent_host()? != host {
-            return Err("Creator Hub's direct-parent identity changed during consent.".into());
-        }
+        let ensure_host = || -> Result<(), String> {
+            if Some(unsafe { libc::getppid() }) != _parent || parent_host()? != host {
+                return Err("Creator Hub's direct-parent identity changed during consent.".into());
+            }
+            Ok(())
+        };
+        ensure_host()?;
         let root = app
             .path()
             .resource_dir()
@@ -682,8 +692,14 @@ fn authorize(
                         .into(),
                 );
             }
+            ensure_host()?;
+            owner.ensure_current().map_err(|_| "MCP settings ownership changed during outcome review. No acknowledgement was saved.")?;
             journal.acknowledge_unknowns()?;
         }
+        ensure_host()?;
+        owner
+            .ensure_current()
+            .map_err(|_| "MCP settings ownership changed before authorization completed.")?;
         if !app.manage(payload) {
             return Err("Hosted resource authority already exists.".into());
         }
@@ -702,10 +718,32 @@ fn authorize(
 mod tests {
     use super::*;
 
+    fn writable_permission(root: &Path) -> Permission {
+        let mut permission = Permission::read_only();
+        permission.writable = true;
+        #[cfg(any(windows, unix))]
+        {
+            permission._owner = Some(crate::gui_owner::GuiWriteOwner::fixture(root).unwrap());
+        }
+        permission
+    }
+
+    fn writable_hello() -> String {
+        request(0, "initialize").replace(
+            "\"args\":{}",
+            &format!(
+                "\"args\":{}",
+                json!({"hostingRevision":2,"requestedMode":"writable","managedRouting":cfg!(unix)})
+            ),
+        )
+    }
+
     #[test]
     fn managed_binding_happens_only_after_permission_and_never_from_read_only() {
         use std::cell::Cell;
         let approved = Cell::new(false);
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
         let input = request(0, "initialize").replace("\"args\":{}", "\"args\":{\"hostingRevision\":2,\"requestedMode\":\"writable\",\"managedRouting\":true}");
         let mut output = vec![];
         serve_authorized(
@@ -715,9 +753,7 @@ mod tests {
             |writable| {
                 assert!(writable);
                 approved.set(true);
-                let mut permission = Permission::read_only();
-                permission.writable = true;
-                Ok(permission)
+                Ok(writable_permission(&root))
             },
             |command, _| {
                 assert!(approved.get());
@@ -847,10 +883,7 @@ mod tests {
 
     #[test]
     fn writable_negotiation_requires_explicit_native_permission() {
-        let hello = request(0, "initialize").replace(
-            "\"args\":{}",
-            "\"args\":{\"hostingRevision\":2,\"requestedMode\":\"writable\"}",
-        );
+        let hello = writable_hello();
         let mut output = Vec::new();
         serve_authorized(
             &mut hello.as_bytes(),
@@ -879,10 +912,9 @@ mod tests {
 
     #[test]
     fn writable_transport_requires_its_own_workflow_before_mutation() {
-        let hello = request(0, "initialize").replace(
-            "\"args\":{}",
-            "\"args\":{\"hostingRevision\":2,\"requestedMode\":\"writable\"}",
-        );
+        let hello = writable_hello();
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
         // Never acquire production configuration ownership in a unit test.
         let input = hello
             + &request(1, "save_config")
@@ -894,13 +926,11 @@ mod tests {
             &mut input.as_bytes(),
             &mut output,
             BTreeMap::new(),
-            |_| {
-                let mut permission = Permission::read_only();
-                permission.writable = true;
-                Ok(permission)
-            },
+            |_| Ok(writable_permission(&root)),
             |command, _| {
-                calls.push(command.to_owned());
+                if command != "bind_managed_route" {
+                    calls.push(command.to_owned());
+                }
                 Ok(Value::Null)
             },
         )
@@ -914,6 +944,116 @@ mod tests {
         assert!(frames
             .iter()
             .any(|frame| frame["id"] == 3 && frame["ok"] == true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_unix_writable_route_refuses_before_prompt_or_binding() {
+        let input = request(0, "initialize").replace(
+            "\"args\":{}",
+            "\"args\":{\"hostingRevision\":2,\"requestedMode\":\"writable\"}",
+        );
+        assert!(serve_authorized(
+            &mut input.as_bytes(),
+            &mut vec![],
+            BTreeMap::new(),
+            |_| panic!("Direct Unix route must not prompt"),
+            |_, _| panic!("Direct Unix route must not bind or dispatch")
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_or_changed_owner_never_binds_managed_routing() {
+        for changed in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().canonicalize().unwrap();
+            let mut output = vec![];
+            serve_authorized(
+                &mut writable_hello().as_bytes(),
+                &mut output,
+                BTreeMap::new(),
+                |_| {
+                    let mut permission = if changed {
+                        writable_permission(&root)
+                    } else {
+                        Permission::read_only()
+                    };
+                    permission.writable = true;
+                    if changed {
+                        std::fs::remove_file(root.join("launcher-gui.lock")).unwrap();
+                        std::fs::write(root.join("launcher-gui.lock"), b"replacement").unwrap();
+                    }
+                    Ok(permission)
+                },
+                |_, _| panic!("Invalid owner must not bind or dispatch"),
+            )
+            .unwrap();
+            let frames = replies(&output);
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0]["ok"], false);
+            assert!(frames[0]["error"].as_str().unwrap().contains("ownership"));
+            assert!(!root.join("hosted-operation-outcomes.json").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_changed_during_busy_delivery_refuses_before_journal_or_dispatch() {
+        struct ChangeOwner {
+            output: Vec<u8>,
+            writes: usize,
+            marker: std::path::PathBuf,
+        }
+        impl Write for ChangeOwner {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.writes += 1;
+                if self.writes == 6 {
+                    // save_config busy event, after begin_ui_operation completed.
+                    std::fs::write(&self.marker, b"external marker change")?;
+                }
+                self.output.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let input = writable_hello()
+            + &request(1, "begin_ui_operation")
+            + &request(2, "save_config")
+            + &request(3, "save_config");
+        let mut output = ChangeOwner {
+            output: vec![],
+            writes: 0,
+            marker: root.join("launcher-gui.lock"),
+        };
+        let mut calls = Vec::new();
+        serve_authorized(
+            &mut input.as_bytes(),
+            &mut output,
+            BTreeMap::new(),
+            |_| {
+                let mut permission = writable_permission(&root);
+                permission.journal = Some(crate::hosted_journal::Journal::open(&root).unwrap());
+                Ok(permission)
+            },
+            |command, _| {
+                calls.push(command.to_owned());
+                Ok(Value::Null)
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, ["bind_managed_route"]);
+        assert!(!root.join("hosted-operation-outcomes.json").exists());
+        let frames = replies(&output.output);
+        assert!(frames
+            .iter()
+            .any(|frame| frame["id"] == 2 && frame["ok"] == false));
+        assert!(!frames.iter().any(|frame| frame["id"] == 3));
     }
 
     #[test]

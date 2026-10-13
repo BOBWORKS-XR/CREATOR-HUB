@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   runtime-router:
     name: MCP runtime router (${{ matrix.os }})
@@ -22,10 +26,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: native/mcp-router
+          workspaces: |
+            native/mcp-router
+            native/mcp-router/tests/hosted-boundary
       - run: cargo fmt --manifest-path native/mcp-router/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path native/mcp-router/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --release --locked --manifest-path native/mcp-router/Cargo.toml
+      - name: Format native Unix recovery fixtures
+        if: runner.os != 'Windows'
+        run: cargo fmt --manifest-path native/mcp-router/tests/hosted-boundary/Cargo.toml --check
+      - name: Lint native Unix recovery fixtures
+        if: runner.os != 'Windows'
+        env:
+          CREATOR_HUB_INTERNAL_MODULE: '1'
+        run: cargo clippy --release --locked --manifest-path native/mcp-router/tests/hosted-boundary/Cargo.toml --all-targets -- -D warnings
+      - name: Native Unix publication and recovery fixtures (no GUI acceptance)
+        if: runner.os != 'Windows'
+        env:
+          CREATOR_HUB_INTERNAL_MODULE: '1'
+        run: cargo test --release --locked --manifest-path native/mcp-router/tests/hosted-boundary/Cargo.toml
       - uses: actions/setup-node@v6
         if: runner.os != 'Windows'
         with:
@@ -112,6 +131,8 @@ jobs:
     name: Built-in modules (clean Windows)
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      CREATOR_HUB_INTERNAL_MODULE: '1'
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -196,7 +217,9 @@ jobs:
       - name: Lint native Project Setup
         run: cargo clippy --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target-dir src-tauri/target --all-targets -- -D warnings
       - name: Test native MCP settings and Unix ownership guards
-        run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target
+        env:
+          CREATOR_HUB_INTERNAL_MODULE: '1'
+        run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target --features experimental-unix-hosting
       - name: Test native Project Setup guards and repairs
         run: cargo test --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target-dir src-tauri/target
       - name: Build Linux AppImage, DEB, and RPM bundle
@@ -247,7 +270,9 @@ jobs:
       - name: Lint native Project Setup
         run: cargo clippy --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target-dir src-tauri/target --all-targets -- -D warnings
       - name: Test native MCP settings and Unix ownership guards
-        run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target
+        env:
+          CREATOR_HUB_INTERNAL_MODULE: '1'
+        run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --target-dir src-tauri/target --features experimental-unix-hosting
       - name: Test native Project Setup guards and repairs
         run: cargo test --release --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target-dir src-tauri/target
       - name: Build macOS DMG bundle

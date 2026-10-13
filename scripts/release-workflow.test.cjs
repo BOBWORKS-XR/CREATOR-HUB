@@ -16,6 +16,16 @@ test('repository and native build workflows use the same explicit Rust compiler'
   }
 });
 
+test('superseded branch test builds cancel without adding cancellation to publishing', () => {
+  const root = path.join(__dirname, '..', '.github', 'workflows');
+  for (const name of ['ci', 'unified-installed-candidate', 'unified-unix-candidate', 'unix-package-probe']) {
+    const workflow = fs.readFileSync(path.join(root, `${name}.yml`), 'utf8');
+    assert.match(workflow, /group: \$\{\{ github\.workflow \}\}-\$\{\{ github\.head_ref \|\| github\.ref_name \}\}/);
+    assert.match(workflow, /cancel-in-progress: true/);
+  }
+  assert.doesNotMatch(fs.readFileSync(path.join(root, 'release.yml'), 'utf8'), /cancel-in-progress: true/);
+});
+
 test('browser failures retain screenshots and traces without enabling automatic retries', () => {
   const config = require('../playwright.config.js');
   assert.equal(config.use.trace, 'retain-on-failure');

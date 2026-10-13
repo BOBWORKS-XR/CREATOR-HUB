@@ -3,7 +3,7 @@
 use std::{fs, path::Path};
 
 pub(crate) fn protected() -> bool {
-    cfg!(windows) && option_env!("CREATOR_HUB_INTERNAL_MODULE") == Some("1")
+    cfg!(any(windows, unix)) && option_env!("CREATOR_HUB_INTERNAL_MODULE") == Some("1")
 }
 
 pub(crate) fn snapshot(path: &Path) -> Result<Option<String>, String> {
@@ -24,7 +24,7 @@ pub(crate) fn commit(
     before: Option<&[u8]>,
     after: &str,
 ) -> Result<(), String> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     if protected() {
         crate::client_recovery_ui::require_no_pending_adjacent(path)?;
         return commit_reviewed_with(
@@ -42,7 +42,7 @@ pub(crate) fn commit(
     crate::atomic_write(path, after)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Boundary {
     Prepared,
@@ -50,7 +50,7 @@ enum Boundary {
     Created,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn commit_reviewed_with(
     client: &str,
     path: &Path,
@@ -96,14 +96,17 @@ fn commit_reviewed_with(
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn create_new_with(
     path: &Path,
     after: &[u8],
     hook: &mut impl FnMut(Boundary) -> Result<(), String>,
 ) -> Result<(), String> {
     use crate::settings_backup as storage;
-    use std::{io::Write, os::windows::ffi::OsStrExt};
+    use std::io::Write;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStrExt;
+    #[cfg(windows)]
     use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
     if !path.is_absolute()
         || path
@@ -135,16 +138,31 @@ fn create_new_with(
     .map_err(|_| "Cannot stage new client settings. Nothing was published.")?;
     hook(Boundary::CreateStaged)?;
     storage::reject_links(&path)?;
-    // MoveFileExW without REPLACE_EXISTING/COPY_ALLOWED is create-if-absent on
-    // this volume. A preceding absence check is not used as authority to replace.
-    staged.publish(|source| {
-        let source: Vec<_> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-        let destination: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
-            return Err(std::io::Error::last_os_error());
+    let publish = |source: &Path| {
+        #[cfg(windows)]
+        {
+            let source: Vec<_> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+            let destination: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            if unsafe {
+                MoveFileExW(
+                    source.as_ptr(),
+                    destination.as_ptr(),
+                    MOVEFILE_WRITE_THROUGH,
+                )
+            } == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
         }
-        Ok(())
-    }).map_err(|error| format!("New client settings were not confirmed ({error}). An appeared file was not replaced; inspect {} before retrying.", path.display()))?;
+        #[cfg(unix)]
+        {
+            storage::durable_move(source, &path)
+        }
+    };
+    // Native create-if-absent only: MoveFileExW on Windows, link+durable unlink
+    // on Unix. Never turn an absence check into authority to replace a new file.
+    staged.publish(publish).map_err(|error| format!("New client settings were not confirmed ({error}). An appeared file was not replaced; inspect {} before retrying.", path.display()))?;
     hook(Boundary::Created).map_err(|error| {
         format!(
             "{error} New settings may already exist at {}; no rollback was attempted.",
@@ -159,7 +177,7 @@ fn create_new_with(
     Ok(())
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux", target_os = "macos")))]
 pub(crate) fn commit_fixture(
     client: &str,
     path: &Path,
@@ -521,5 +539,107 @@ mod standalone_tests {
             .unwrap()
             .join(".creator-hub-migrations")
             .exists());
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod unix_tests {
+    use super::*;
+
+    #[test]
+    fn native_existing_setup_retains_before_images_and_stale_review_never_overwrites() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let path = root.join("config");
+        let journals = root.join("journals");
+        fs::write(&path, b"reviewed\r\n").unwrap();
+        commit_fixture(
+            "Fixture",
+            &path,
+            Some(b"reviewed\r\n"),
+            "after\n",
+            &journals,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"after\n");
+        commit_fixture(
+            "Fixture",
+            &path,
+            Some(b"reviewed\r\n"),
+            "after\n",
+            &journals,
+        )
+        .unwrap();
+        fs::write(&path, b"external edit\r\n").unwrap();
+        assert!(commit_fixture("Fixture", &path, Some(b"after\n"), "next", &journals).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"external edit\r\n");
+        let journal = fs::read_dir(&journals)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_dir())
+            .unwrap();
+        let report = crate::client_migration::recovery::Transaction::open(&journal, &[path])
+            .unwrap()
+            .inspect()
+            .unwrap();
+        assert!(report.historical_completed);
+        assert_eq!(
+            fs::read(&report.files[0].before_backup).unwrap(),
+            b"reviewed\r\n"
+        );
+        assert_eq!(
+            fs::read(&report.files[0].displaced).unwrap(),
+            b"reviewed\r\n"
+        );
+    }
+
+    #[test]
+    fn native_creation_never_replaces_an_appeared_file_even_with_matching_proposed_bytes() {
+        for external in ["external\r\n", "after\n"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().canonicalize().unwrap();
+            let path = root.join("config");
+            let result = commit_reviewed_with(
+                "Fixture",
+                &path,
+                None,
+                "after\n",
+                &root.join("journals"),
+                &mut |at| {
+                    if at == Boundary::CreateStaged {
+                        fs::write(&path, external).unwrap();
+                    }
+                    Ok(())
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), external);
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn native_new_file_and_published_fault_preserve_bytes_without_rollback_or_adoption() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let path = root.join("config");
+        let result = commit_reviewed_with(
+            "Fixture",
+            &path,
+            None,
+            "after",
+            &root.join("journals"),
+            &mut |at| {
+                if at == Boundary::Created {
+                    Err("injected post-publication fault".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"after");
+        assert!(commit_fixture("Fixture", &path, None, "after", &root.join("journals")).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"after");
     }
 }

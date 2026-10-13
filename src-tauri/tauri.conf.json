@@ -34,7 +34,8 @@
       "nsis": { "installMode": "currentUser", "installerHooks": "windows/installer-hooks.nsh" }
     },
     "macOS": {
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "minimumSystemVersion": "13.5"
     }
   }
 }

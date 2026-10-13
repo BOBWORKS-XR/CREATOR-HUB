@@ -35,6 +35,11 @@ pub(crate) fn reject_links(path: &Path) -> Result<(), String> {
 pub(crate) fn protected_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;

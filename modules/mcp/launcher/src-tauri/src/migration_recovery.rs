@@ -10,6 +10,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "unix_publication.rs"]
+mod unix_publication;
+
 const SCHEMA: u32 = 1;
 const MAX_FILES: usize = 16;
 
@@ -91,6 +95,8 @@ pub(crate) struct FileReport {
     pub after_image: PathBuf,
     pub before_backup: PathBuf,
     pub displaced: PathBuf,
+    /// May hold proposed bytes OR actual displaced bytes after an interrupted Unix swap.
+    pub stage: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,21 +127,23 @@ enum Boundary {
     BeforeImage(usize),
     AfterImage(usize),
     Pending,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     Stage(usize),
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     Intent(usize),
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     BeforePublish(usize),
-    #[cfg(windows)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Swapped(usize),
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     Published(usize),
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     NativeRecorded(usize),
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     DisplacedSealed(usize),
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     Captured(usize),
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     Outcome(usize),
     Completed,
 }
@@ -594,6 +602,7 @@ impl Transaction {
                 displaced: self
                     .displaced(index)
                     .unwrap_or_else(|_| self.capture(index).join("displaced.bin")),
+                stage: self.capture(index).join("stage.bin"),
             });
         }
         let completed = record::<Pending>(&self.directory.join("completed.json"))?;
@@ -756,10 +765,77 @@ impl Transaction {
         index: usize,
         hook: &mut impl FnMut(Boundary) -> Result<(), String>,
     ) -> Result<(), String> {
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             let _ = hook;
             self.outcome(index, Status::Unsupported, None)?;
+            Ok(())
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let entry = &self.pending.files[index];
+            let capture = self.capture(index);
+            storage::private_directory(&capture)?;
+            let stage = capture.join("stage.bin");
+            let displaced = capture.join("displaced.bin");
+            if fs::symlink_metadata(&displaced).is_ok()
+                || fs::symlink_metadata(capture.join("retained.bin")).is_ok()
+            {
+                return Err("Unexplained displaced file; no publication attempted.".into());
+            }
+            let after = storage::read_bytes(&self.image(index, "after"))?.unwrap();
+            storage::durable_image(&stage, &after)?;
+            hook(Boundary::Stage(index))?;
+            if storage::read_bytes(&entry.path)?
+                .as_deref()
+                .map(digest)
+                .as_ref()
+                != Some(&entry.before_sha256)
+            {
+                self.outcome(index, Status::ExternalChange, None)?;
+                return Ok(());
+            }
+            let mut publisher = unix_publication::Capture::prepare(
+                &entry.path,
+                &stage,
+                &displaced,
+                &entry.after_sha256,
+            )
+            .map_err(|error| {
+                format!("Cannot prepare Unix capture ({error}); no publication attempted.")
+            })?;
+            put(&self.evidence(index, "intent"), &self.intent(index))?;
+            hook(Boundary::Intent(index))?;
+            hook(Boundary::BeforePublish(index))?;
+            let result = match publisher.exchange() {
+                Ok(()) => {
+                    hook(Boundary::Swapped(index))?;
+                    publisher.retain()
+                }
+                Err(error) => Err(error),
+            };
+            let native_error = result.as_ref().err().and_then(std::io::Error::raw_os_error);
+            hook(Boundary::Published(index))?;
+            put(
+                &self.evidence(index, "native"),
+                &NativeResult {
+                    schema: SCHEMA,
+                    success: result.is_ok(),
+                    error: native_error,
+                },
+            )?;
+            hook(Boundary::NativeRecorded(index))?;
+            let status = self.status(index)?;
+            if fs::symlink_metadata(&displaced).is_ok_and(|metadata| metadata.is_file()) {
+                self.seal_displaced(index)?;
+            }
+            hook(Boundary::DisplacedSealed(index))?;
+            if status == Status::Applied {
+                self.flush_evidence(index)?;
+            }
+            hook(Boundary::Captured(index))?;
+            self.outcome(index, status, native_error)?;
+            hook(Boundary::Outcome(index))?;
             Ok(())
         }
         #[cfg(windows)]

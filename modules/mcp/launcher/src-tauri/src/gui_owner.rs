@@ -24,6 +24,11 @@ pub enum OwnershipError {
 }
 
 impl GuiWriteOwner {
+    #[cfg(test)]
+    pub(crate) fn fixture(settings_directory: &Path) -> Result<Self, OwnershipError> {
+        Self::acquire(settings_directory)
+    }
+
     pub fn current_user() -> Result<Self, OwnershipError> {
         let root = dirs::config_dir().ok_or(OwnershipError::Unavailable)?;
         Self::acquire(&root.join(crate::APP_CONFIG_DIR))

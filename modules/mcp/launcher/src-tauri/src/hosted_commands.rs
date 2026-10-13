@@ -2,11 +2,16 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+#[path = "product_settings.rs"]
+pub(crate) mod product_settings;
+
 pub const COMMANDS: &[&str] = &[
     "begin_ui_operation",
     "finish_ui_operation",
     "load_config",
     "save_config",
+    "product_settings_status",
+    "review_product_settings",
     "discover_unity_projects",
     "get_onboarding_status",
     "add_project",
@@ -45,6 +50,7 @@ pub fn needs_workflow(command: &str) -> bool {
                 | "get_project_sdk_profile"
                 | "get_unity_extension_status"
                 | "get_project_feedback_settings"
+                | "product_settings_status"
         )
 }
 
@@ -62,6 +68,15 @@ fn encoded(value: impl serde::Serialize) -> Result<Value, String> {
 
 pub fn dispatch(app: &tauri::AppHandle, command: &str, value: Value) -> Result<Value, String> {
     match command {
+        "product_settings_status" | "review_product_settings" => {
+            args!(value, {});
+            let base = dirs::config_dir().ok_or("Cannot locate MCP configuration directory.")?;
+            encoded(if command == "product_settings_status" {
+                product_settings::inspect(&base)?
+            } else {
+                product_settings::native_review(app, &base)?
+            })
+        }
         "review_existing_client_connections" => {
             let a = args!(value, {clients: Vec<String>});
             encoded(crate::review_existing_client_connections(
@@ -84,7 +99,7 @@ pub fn dispatch(app: &tauri::AppHandle, command: &str, value: Value) -> Result<V
         }
         "load_config" => {
             args!(value, {});
-            encoded(crate::load_config(app.clone())?)
+            encoded(product_settings::load_form(app)?)
         }
         "review_existing_client_connection" => {
             let a = args!(value, {client: String});
@@ -95,7 +110,7 @@ pub fn dispatch(app: &tauri::AppHandle, command: &str, value: Value) -> Result<V
         }
         "save_config" => {
             let a = args!(value, {config: crate::LauncherConfig});
-            crate::save_config(a.config)?;
+            product_settings::save(a.config)?;
             Ok(Value::Null)
         }
         "discover_unity_projects" => {
@@ -219,6 +234,7 @@ mod tests {
             "install_unity_extension",
             "remove_codex_mcp_config",
             "set_project_feedback_settings",
+            "review_product_settings",
         ] {
             assert!(needs_workflow(command), "{command}");
         }
@@ -227,6 +243,7 @@ mod tests {
             "finish_ui_operation",
             "get_project_sdk_profile",
             "get_onboarding_status",
+            "product_settings_status",
         ] {
             assert!(!needs_workflow(command));
         }

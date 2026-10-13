@@ -28,7 +28,9 @@ const env = { PATH: process.env.PATH, HOME: profile, XDG_CONFIG_HOME: profile,
   XDG_DATA_HOME: profile, TMPDIR: out, CREATOR_WORKS_LAUNCHER_CONFIG: path.join(profile, 'never-created.json') };
 const owned = new Set();
 const clients = new Set();
-const report = { platform, arch, nodeSha256: hash(fs.readFileSync(node)), checks: [], passed: false };
+const report = { platform, arch, nodeSha256: hash(fs.readFileSync(node)), checks: [], passed: false,
+  cleanupScope: process.platform === 'linux' ? 'subreaper-including-detached-helpers' : 'owned-process-group-only',
+  helperDeliberatelyDetached: process.platform === 'linux', writableGuiAccepted: false, releaseReady: false };
 let sentinel;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const script = id => Buffer.from(`
