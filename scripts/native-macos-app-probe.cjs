@@ -245,10 +245,10 @@ do {
                 if AXObserverAddNotification(observer, item, notification as CFString, nil) == .success { supported.append(notification) }
             }
         }
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), kCFRunLoopDefaultMode)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), CFRunLoopMode.defaultMode)
     }
     defer {
-        if let observer = observer { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), kCFRunLoopDefaultMode) }
+        if let observer = observer { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), CFRunLoopMode.defaultMode) }
     }
     readiness = ["rootWebAreaObserved": false, "notificationsSupported": supported, "observerStatus": observerStatus.rawValue,
                  "changesOnly": true, "rootNativeCFReferencePreserved": true]
@@ -303,7 +303,7 @@ do {
         try check(!supported.isEmpty, "root-readiness-notifications-unavailable")
         let remaining = readinessDeadline - ProcessInfo.processInfo.systemUptime
         if remaining <= 0 { break }
-        let outcome = CFRunLoopRunInMode(kCFRunLoopDefaultMode, remaining, true)
+        let outcome = CFRunLoopRunInMode(CFRunLoopMode.defaultMode, remaining, true)
         try check(outcome != .finished && outcome != .stopped, "root-readiness-runloop-unavailable")
     }
     readiness["changedSnapshotCount"] = changedSnapshots.count

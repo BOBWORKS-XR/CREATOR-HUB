@@ -89,7 +89,7 @@ jobs:
             if(!report.packageIntegrityTested) throw Error(report.error||'Exact native package verification failed');
             core.exportVariable('APP_PATH',path.join(output,'extracted','Creator Hub.app'));
             core.exportVariable('HUB_SHA256',report.package.hubSha256);
-      - name: Check the actual Mac sampler compilation and refusal contracts
+      - name: Check current Swift sampler compilation and refusal contracts before launching
         env:
           CREATOR_MACOS_OWNED_GUI_TEST: '1'
         run: node --test scripts/native-macos-app-probe.test.cjs scripts/native-macos-window.test.cjs
