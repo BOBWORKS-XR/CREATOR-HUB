@@ -223,13 +223,17 @@ test('mocked Root cleanup preserves unrelated trust, is idempotent and refuses f
   assert.equal(output, 'unrelated-trust-preserved');
 });
 
-test('source requires ephemeral keys and disposal before public-only CurrentUser Root insertion', () => {
+test('source requires VM/admin guard and ephemeral keys disposed before public-only machine Root insertion', () => {
   assert.match(source, /\$caKey = \[Security\.Cryptography\.RSACng\]::new\(2048\)/);
   assert.match(source, /-not \$caKey\.Key\.IsEphemeral -or -not \$leafKey\.Key\.IsEphemeral/);
-  assert.match(source, /X509Store\]::new\('Root', 'CurrentUser'\)/);
+  assert.match(source, /X509Store\]::new\('Root', 'LocalMachine'\)/);
+  assert.match(source, /IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]::Administrator\)/);
+  assert.ok(source.indexOf('Disposable runner administrator token required.') < source.indexOf("X509Store]::new('Root', 'LocalMachine')"));
+  assert.doesNotMatch(source, /-Verb\s+RunAs|runas\.exe|UNPROTECTED_FLAG/);
+  assert.match(source, /trustScope='disposable-vm-local-machine'/);
   assert.match(source, /X509Certificate2\]::new\(\$ca\.RawData\)/);
   assert.ok(source.indexOf('$caKey.Dispose(); $caKey = $null') < source.indexOf('$rootStore.Add($publicRoot)'));
-  assert.doesNotMatch(source, /New-SelfSignedCertificate|Import-PfxCertificate|PersistKeySet|MachineKeySet|LocalMachine|WriteAll|Set-Content|Out-File|Remove-Item/);
+  assert.doesNotMatch(source, /New-SelfSignedCertificate|Import-PfxCertificate|PersistKeySet|MachineKeySet|WriteAll|Set-Content|Out-File|Remove-Item/);
   assert.match(source, /\$san\.AddDnsName\('github\.com'\); \$san\.AddDnsName\('api\.github\.com'\)/);
   assert.equal((source.match(/AddDnsName\(/g) || []).length, 2);
   assert.match(source, /'1\.3\.6\.1\.5\.5\.7\.3\.1'/);

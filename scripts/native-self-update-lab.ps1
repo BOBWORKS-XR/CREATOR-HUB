@@ -125,7 +125,14 @@ function Stop-LabProcess($Record) {
 }
 
 function Open-LabRootStore {
-    $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'CurrentUser')
+    # The disposable VM administrator store avoids CurrentUser protected-root interaction.
+    # Never request elevation or run this helper outside its literal hosted-runner guard.
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Disposable runner administrator token required.' }
+    } finally { $identity.Dispose() }
+    $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
     $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite -bor [Security.Cryptography.X509Certificates.OpenFlags]::OpenExistingOnly)
     return $store
 }
@@ -414,7 +421,7 @@ try {
     Test-LabSystemTls $ready.proxyUrl 'github.com' $leafThumbprint
     Test-LabSystemTls $ready.proxyUrl 'api.github.com' $leafThumbprint
     $systemTlsVerified = $true
-    [ordered]@{kind='lab-lifecycle-ready'; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; systemTlsVerified=$true;
+    [ordered]@{kind='lab-lifecycle-ready'; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; systemTlsVerified=$true; trustScope='disposable-vm-local-machine';
         proxyUrl=$ready.proxyUrl; rootThumbprint=$publicRoot.Thumbprint; leafThumbprint=$leafThumbprint; proxy=$proxyRecord; cleanupWatcher=$watcherRecord} | ConvertTo-Json -Depth 4 -Compress
 
     Set-LabPhase 'driver-start'
@@ -478,7 +485,7 @@ try {
     foreach ($resource in @($leaf, $unsignedLeaf, $ca, $leafKey, $caKey, $publicRoot, $rootStore, $driver, $proxy, $validator, $watcher)) { if ($resource) { $resource.Dispose() } }
 }
 [ordered]@{kind='lab-lifecycle-result'; lifecycleSucceeded=(-not $failed -and $cleanupVerified); cleanupVerified=$cleanupVerified;
-    systemTlsVerified=$systemTlsVerified; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; releaseReady=$false;
+    systemTlsVerified=$systemTlsVerified; trustScope='disposable-vm-local-machine'; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; releaseReady=$false;
     driverExitCode=$driverExitCode; failureDetails=$failureDetails; processIdentityFailure=$script:processIdentityFailure; rootThumbprint=$rootThumbprint; leafThumbprint=$leafThumbprint; driver=$driverRecord; proxy=$proxyRecord; cleanupWatcher=$watcherRecord;
     servedRouteCount=$(if ($feedResult) { $feedResult.servedRouteCount } else { $null });
     rejectedRequestCount=$(if ($feedResult) { $feedResult.rejectedRequestCount } else { $null })} | ConvertTo-Json -Depth 4 -Compress
