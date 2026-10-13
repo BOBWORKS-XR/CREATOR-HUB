@@ -1,5 +1,8 @@
 name: Signed native Unix Hub assembly (not acceptance)
 on:
+  push:
+    branches: [validation/unix-assembly-014]
+    paths: ['.github/workflows/unix-managed-assembly.yml']
   workflow_dispatch:
     inputs:
       signed_inputs:
@@ -17,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.signed_inputs) }}
+        include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":638480560,"zipBytes":55641716,"zipSha256":"ef2d074c04e42b931b71c83648b8f3aee0d9d6502efb94406e6224056d2f97c7","handoffSha256":"c8ef2b73992a790c1dcf3510a182f313f2240d19ce70afe14e033132508d454d"},{"target":"macos-arm64","os":"macos-latest","assetId":638480548,"zipBytes":48320677,"zipSha256":"54ce0a782f97e25394bd707e77872c6c68e54d34da59f2e92c153a24590762f8","handoffSha256":"521961ea3c530d71e47e5654d0f1e53d3fcfecbd6dec2113dedc660df84abf8d"},{"target":"macos-intel","os":"macos-15-intel","assetId":638480553,"zipBytes":50207293,"zipSha256":"54295942aa0033488b2d05acd940c5eab0ea710571c0f5d144881bfe5b559bfe","handoffSha256":"265d0e4723949978fe4d8ab1d7bf374daf7486727e90822580016842cc68e238"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -56,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.signed_inputs) }}
+        include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":638480560,"zipBytes":55641716,"zipSha256":"ef2d074c04e42b931b71c83648b8f3aee0d9d6502efb94406e6224056d2f97c7","handoffSha256":"c8ef2b73992a790c1dcf3510a182f313f2240d19ce70afe14e033132508d454d"},{"target":"macos-arm64","os":"macos-latest","assetId":638480548,"zipBytes":48320677,"zipSha256":"54ce0a782f97e25394bd707e77872c6c68e54d34da59f2e92c153a24590762f8","handoffSha256":"521961ea3c530d71e47e5654d0f1e53d3fcfecbd6dec2113dedc660df84abf8d"},{"target":"macos-intel","os":"macos-15-intel","assetId":638480553,"zipBytes":50207293,"zipSha256":"54295942aa0033488b2d05acd940c5eab0ea710571c0f5d144881bfe5b559bfe","handoffSha256":"265d0e4723949978fe4d8ab1d7bf374daf7486727e90822580016842cc68e238"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 65
     env:
