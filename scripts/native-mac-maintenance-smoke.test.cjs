@@ -306,6 +306,14 @@ function operations(events, renderedSnapshot = visible) {
         controlTitle: mac.AUTO_DOWNLOAD, beforeValue: '1', requestedValue: '0', targetVersion: current,
         syntheticTestOnly: true, customerConsent: false, userMachineUsed: false };
     },
+    pressLegacyAutoDownloadOff: launched => {
+      assert.equal(current, '0.1.12');
+      events.push(`preference:off:${current}:${launched.pid}`);
+      autoDownload = false;
+      return { ...launched, action: 'test-legacy-auto-download-off', axAction: 'AXPress', controlRole: 'AXCheckBox',
+        controlTitle: mac.AUTO_DOWNLOAD, beforeValue: '1', requestedValue: '0', targetVersion: current,
+        syntheticTestOnly: true, customerConsent: false, userMachineUsed: false };
+    },
     capture: (launched, label, kind) => {
       events.push(`capture:${label}`);
       mac.validateBody(snapshot(), kind);
@@ -382,6 +390,53 @@ test('new report never claims effective preference persistence before observed t
   assert.equal(report.releaseReady, false);
   assert.equal(report.otherBrowserPreferencesTested, false);
   assert.deepEqual(report.syntheticPreference.actions, []);
+});
+
+test('legacy preference lane observes old OFF, quits twice, then requires first and relaunched new GUI OFF without another toggle', async () => {
+  const events = [], report = mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'legacy-preferences' }));
+  assert.equal(report.legacyAutoDownloadMigrationTested, false);
+  await mac.runLane(report, operations(events));
+  assert.equal(report.passed, true);
+  assert.equal(report.legacyAutoDownloadMigrationTested, true);
+  assert.equal(report.effectivePreferencesTested, true);
+  assert.equal(report.manualUpgradeTermsPreserved, true);
+  assert.equal(report.releaseReady, false);
+  assert.equal(report.updater.tested, false);
+  assert.equal(report.sourceKind, 'unmodified-public-0.1.12-manual-dmg-upgrade');
+  assert.equal(report.effectivePreferencesScope, 'public-0.1.12-auto-download-off-migration-and-0.1.13-relaunch');
+  assert.deepEqual(events.filter(e => e.startsWith('preference:')), ['preference:off:0.1.12:101']);
+  assert.ok(events.indexOf('quit:102') < events.indexOf('install:0.1.13'));
+  assert.ok(report.launches.every(row => row.autoDownloadOffVerified));
+  assert.equal(report.syntheticPreference.actions[0].targetVersion, '0.1.12');
+});
+
+test('legacy preference loss at new first launch is a failure, not repaired by clicking the new checkbox', async () => {
+  const events = [], report = mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'legacy-preferences' }));
+  const ops = operations(events), original = ops.snapshot;
+  ops.snapshot = launched => {
+    const snapshot = original(launched);
+    if (launched.pid === 103) snapshot.axNodes.find(node => node.AXTitle === mac.AUTO_DOWNLOAD).AXValue = '1';
+    return snapshot;
+  };
+  await mac.runLane(report, ops);
+  assert.equal(report.passed, false);
+  assert.equal(report.legacyAutoDownloadMigrationTested, false);
+  assert.equal(report.effectivePreferencesTested, false);
+  assert.equal(report.failures[0].phase, 'auto-download-0.1.13-initial');
+  assert.deepEqual(events.filter(e => e.startsWith('preference:')), ['preference:off:0.1.12:101']);
+  assert.ok(events.includes('quit:103'));
+});
+
+test('legacy preference receipt rejects target-13 actions and all other target versions', () => {
+  const launched = { pid: 100, bundleIdentifier: 'com.creatorworks.hub', bundlePath: '/owned/Creator Hub.app',
+    executablePath: '/owned/Creator Hub.app/Contents/MacOS/creator-hub' };
+  const receipt = { ...launched, action: 'test-legacy-auto-download-off', axAction: 'AXPress', controlRole: 'AXCheckBox',
+    controlTitle: mac.AUTO_DOWNLOAD, beforeValue: '1', requestedValue: '0', targetVersion: '0.1.12',
+    syntheticTestOnly: true, customerConsent: false, userMachineUsed: false };
+  assert.doesNotThrow(() => mac.preferenceReceipt(receipt, launched, '0.1.12'));
+  assert.throws(() => mac.preferenceReceipt({ ...receipt, action: 'test-auto-download-off' }, launched, '0.1.12'));
+  assert.throws(() => mac.preferenceReceipt({ ...receipt, targetVersion: '0.1.13' }, launched, '0.1.12'));
+  assert.throws(() => mac.preferenceReceipt(receipt, launched, '0.1.14'));
 });
 
 const preferenceFaults = {
@@ -1011,14 +1066,15 @@ test('Gatekeeper rejection and bundle/executable minimum mismatch stay blocked',
   assert.equal(report.releaseReady, false);
 });
 
-test('workflow retains pinned manual dispatch, two architectures/four lanes, no build or publication', () => {
+test('workflow retains pinned manual dispatch and bounded current or legacy migration lanes, no build or publication', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/mac-maintenance-validation.yml'), 'utf8');
   const triggers = workflow.match(/^on:\r?\n([\s\S]*?)\r?\n# Read\/download/m)?.[1];
   assert.ok(triggers);
   assert.deepEqual([...triggers.matchAll(/^  ([a-z_]+):/gm)].map(m => m[1]), ['workflow_dispatch']);
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /arch: \[X64, ARM64\]/);
-  assert.match(workflow, /lane: \[fresh, manual-upgrade\]/);
+  assert.match(workflow, /options: \[current, legacy-preferences, all\]/);
+  assert.ok(workflow.includes(`lane: \${{ fromJSON(inputs.validation_scope == 'legacy-preferences' && '["legacy-preferences"]' || inputs.validation_scope == 'all' && '["fresh","manual-upgrade","legacy-preferences"]' || '["fresh","manual-upgrade"]') }}`));
   assert.match(workflow, /macos-15-intel/);
   assert.match(workflow, /macos-latest/);
   assert.match(workflow, /node-version: 24/);
@@ -1034,7 +1090,7 @@ test('workflow retains pinned manual dispatch, two architectures/four lanes, no 
   assert.doesNotMatch(workflow, /pull_request_target|npm (?:ci|run build)|cargo build|gh (?:release|workflow)|contents: write|TAURI_SIGNING|APPLE_(?:ID|PASSWORD|CERTIFICATE)/);
 });
 
-test('Swift helper permits only guarded exact terms/target-13 preference AXPress, preflight and owned normal lifecycle', () => {
+test('Swift helper permits only guarded exact terms/target-12-or-13 preference AXPress, preflight and owned normal lifecycle', () => {
   const swift = fs.readFileSync(path.join(__dirname, 'native-mac-window.swift'), 'utf8');
   assert.match(swift, /AXIsProcessTrusted\(\)/);
   assert.match(swift, /CGPreflightScreenCaptureAccess\(\)/);
@@ -1053,12 +1109,16 @@ test('Swift helper permits only guarded exact terms/target-13 preference AXPress
   for (const title of Object.values(mac.TERMS)) assert.ok(swift.includes(`"${title}"`));
   assert.ok(swift.includes(`"${mac.AUTO_DOWNLOAD}"`));
   assert.match(swift, /env.*CREATOR_MAC_SYNTHETIC_PREFERENCE_TEST|environment\["CREATOR_MAC_SYNTHETIC_PREFERENCE_TEST"\] == "1"/);
-  assert.match(swift, /guard preferenceScope\(\), target13\(\), AXIsProcessTrusted\(\), CGPreflightScreenCaptureAccess\(\)/);
-  assert.match(swift, /CFBundleShortVersionString"\) as\? String == "0\.1\.13"/);
-  assert.match(swift, /CFBundleVersion"\) as\? String == "0\.1\.13"/);
+  assert.match(swift, /guard preferenceScope\(\), preferenceTarget\(version\), AXIsProcessTrusted\(\), CGPreflightScreenCaptureAccess\(\)/);
+  assert.match(swift, /guard \["0\.1\.12", "0\.1\.13"\]\.contains\(version\) else/);
+  assert.match(swift, /CFBundleShortVersionString"\) as\? String == version/);
+  assert.match(swift, /CFBundleVersion"\) as\? String == version/);
   assert.match(swift, /attribute\(selected, kAXValueAttribute\) as\? NSNumber\)\?\.intValue == 1/);
   assert.match(swift, /result\["requestedValue"\] = "0"/);
   assert.match(swift, /case "test-auto-download-off":/);
+  assert.match(swift, /case "test-legacy-auto-download-off":/);
+  assert.match(swift, /preferenceTarget\("0\.1\.12"\)/);
+  assert.match(swift, /preferenceTarget\("0\.1\.13"\)/);
   assert.match(swift, /image\.height \* 60 \/ 100/);
   assert.match(swift, /AXUIElementSetMessagingTimeout\(element, 0\.25\)/);
   assert.match(swift, /\$0\[kAXRoleAttribute\] == "AXWebArea"/);

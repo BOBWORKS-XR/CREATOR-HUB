@@ -59,6 +59,33 @@ historical old-12 failures remain separate, unmodified evidence. WebKit candidat
 key diagnostics remain active-store-unbound; the native preference path means a
 missing browser key alone does not establish a native preference failure.
 
+## Current Native Preference Results
+
+[38446601180](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38446601180)
+reused the exact `cef6` packages above, with test-only execution source `d24455e`.
+All four lanes completed rendered native WebKit, synthetic terms retention,
+automatic-download OFF before and after normal quit/relaunch, sentinel
+preservation and normal owned cleanup. Each reports zero functional failures,
+`packageAndManualChecksPassed=true`, `termsPersistenceTested=true` and
+`autoDownloadPreferencePersistenceTested=true`.
+
+The workflow remains **blocked**, not a successful release receipt: every lane
+retains Gatekeeper assessment status 3 for the not-notarized ad-hoc app. The
+ARM upgrade also retains the old public-12 bundle minimum mismatch. Current
+candidate minima cover their executable minima on both architectures. No
+security policy was changed. Per-app quarantine approval, signed in-app updating
+and companion operation remain untested by this run.
+
+This test changed the switch in 13 after installation. It did **not** prove
+migration of an OFF choice made in public 12. A separate `legacy-preferences`
+lane now changes only that exact old checkbox, requires OFF after normal old-app
+relaunch, then requires OFF on the new app's first open and relaunch without
+clicking its switch. The native helper has separate fixed 12 and 13 actions;
+all existing ownership, capability, no-security-prompt and single-action guards
+remain. `validation_scope=legacy-preferences` runs just the two new architecture
+lanes and reuses the same packages, without building another app. Native results
+for this additional migration case remain pending.
+
 ## Historical Original Binding
 
 Read-only GitHub API queries on 2026-10-13 established that

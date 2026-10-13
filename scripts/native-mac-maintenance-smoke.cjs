@@ -69,7 +69,7 @@ function options(env = process.env) {
   if (input.executableSha256 !== null) assert.match(input.executableSha256, /^[a-f0-9]{64}$/);
   assert.ok(Object.hasOwn(BASELINES, input.architecture), 'Only Mac Intel and ARM are admitted');
   assert.equal(input.dmgSha256, CANDIDATE.artifacts[input.architecture].dmgSha256, 'Unreviewed DMG hash');
-  assert.ok(['fresh', 'manual-upgrade'].includes(input.lane));
+  assert.ok(['fresh', 'manual-upgrade', 'legacy-preferences'].includes(input.lane));
   return input;
 }
 
@@ -601,13 +601,14 @@ function preferenceSnapshot(snapshot, launched, expectedValue) {
   autoDownloadControl(snapshot, expectedValue);
 }
 
-function preferenceReceipt(result, launched) {
+function preferenceReceipt(result, launched, version = '0.1.13') {
+  assert.ok(['0.1.12', '0.1.13'].includes(version));
   for (const key of ['pid', 'bundleIdentifier', 'bundlePath', 'executablePath']) {
     assert.equal(result[key], launched[key], `Preference action ownership mismatch: ${key}`);
   }
-  for (const [key, value] of Object.entries({ action: 'test-auto-download-off', axAction: 'AXPress',
+  for (const [key, value] of Object.entries({ action: version === '0.1.12' ? 'test-legacy-auto-download-off' : 'test-auto-download-off', axAction: 'AXPress',
     controlRole: 'AXCheckBox', controlTitle: AUTO_DOWNLOAD, beforeValue: '1', requestedValue: '0',
-    targetVersion: '0.1.13', syntheticTestOnly: true, customerConsent: false, userMachineUsed: false })) {
+    targetVersion: version, syntheticTestOnly: true, customerConsent: false, userMachineUsed: false })) {
     assert.equal(result[key], value, `Preference action receipt mismatch: ${key}`);
   }
 }
@@ -664,14 +665,15 @@ function newReport(input) {
       blockers: ['gatekeeper-assessment-not-accepted-no-policy-bypass',
         ...(input.architecture === 'ARM64' ? ['declared-bundle-minimum-below-executable-minimum'] : []),
         'legal-acknowledgement-requires-human-no-acceptance-performed'] }],
-    sourceKind: input.lane === 'manual-upgrade' ? 'unmodified-public-0.1.12-manual-dmg-upgrade' : 'exact-ci-0.1.13-fresh-dmg-install',
+    sourceKind: input.lane === 'fresh' ? 'exact-ci-0.1.13-fresh-dmg-install' : 'unmodified-public-0.1.12-manual-dmg-upgrade',
     updater: { tested: false, publicDiscovery: false, nativeCancellation: false, consent: false,
       automaticRestart: false, reason: 'Public 0.1.12 native in-app updater is Windows-only; manual launches are not updater restart proof.' },
     syntheticTerms: { testOnly: true, customerConsent: false, actions: [] }, termsPersistenceTested: false,
     syntheticPreference: { testOnly: true, customerConsent: false, controlTitle: AUTO_DOWNLOAD, actions: [] },
     webkitPreferenceDiagnostics: { acceptanceEvidence: false, activeStoreBound: false, rootCause: 'unknown', captures: [] },
     autoDownloadPreferencePersistenceTested: false,
-    effectivePreferencesScope: '0.1.13-auto-download-normal-quit-relaunch-only', otherBrowserPreferencesTested: false,
+    effectivePreferencesScope: input.lane === 'legacy-preferences' ? 'public-0.1.12-auto-download-off-migration-and-0.1.13-relaunch' : '0.1.13-auto-download-normal-quit-relaunch-only',
+    legacyAutoDownloadMigrationTested: false, otherBrowserPreferencesTested: false,
     aiWorkflowTested: false, unityWorkflowTested: false,
     effectivePreferencesTested: false, realCompanionInstallsTested: false, liveClientReconnectTested: false,
     blockers: [], failures: [], launches: [], mounts: [], cleanup: [] };
@@ -693,7 +695,8 @@ async function runLane(report, ops) {
     report.capability = await ops.probe();
     report.blockers.push(...guiBlockers(report.capability));
     await ops.preflight();
-    const versions = input.lane === 'manual-upgrade' ? ['0.1.12', '0.1.13'] : ['0.1.13'];
+    const legacyPreferences = input.lane === 'legacy-preferences';
+    const versions = input.lane === 'fresh' ? ['0.1.13'] : ['0.1.12', '0.1.13'];
     for (const version of versions) {
       report.currentPhase = `install-${version}`;
       const installed = await ops.install(version);
@@ -754,14 +757,14 @@ async function runLane(report, ops) {
           await capture('body');
           row.renderedBodyVerified = true;
           row.persistedSyntheticTerms = !freshTerms;
-          if (version === '0.1.13' && (purpose === 'initial' || report.launches.some(previous =>
+          if ((version === '0.1.13' || legacyPreferences) && (purpose === 'initial' || report.launches.some(previous =>
             previous.version === version && previous.purpose === 'initial' && previous.autoDownloadOffVerified === true))) {
             report.currentPhase = `auto-download-${version}-${purpose}`;
-            if (purpose === 'initial') {
+            if (purpose === 'initial' && (!legacyPreferences || version === '0.1.12')) {
               preferenceSnapshot(snapshot, launched, '1');
               row.beforeAutoDownloadSnapshot = snapshot;
-              const result = await ops.pressAutoDownloadOff(launched);
-              preferenceReceipt(result, launched);
+              const result = legacyPreferences ? await ops.pressLegacyAutoDownloadOff(launched) : await ops.pressAutoDownloadOff(launched);
+              preferenceReceipt(result, launched, version);
               report.syntheticPreference.actions.push({ version, ...result });
               snapshot = await ops.waitSnapshot(launched, 'auto-download-off');
               row.afterAutoDownloadSnapshot = snapshot;
@@ -791,7 +794,10 @@ async function runLane(report, ops) {
       && ['initial', 'relaunch'].every(purpose => report.launches.some(row => row.version === '0.1.13'
         && row.purpose === purpose && row.autoDownloadOffVerified === true));
     report.effectivePreferencesTested = report.autoDownloadPreferencePersistenceTested;
-    if (input.lane === 'manual-upgrade') report.manualUpgradeTermsPreserved = report.termsPersistenceTested
+    report.legacyAutoDownloadMigrationTested = legacyPreferences && report.autoDownloadPreferencePersistenceTested
+      && report.syntheticPreference.actions[0]?.version === '0.1.12'
+      && report.launches.length === 4 && report.launches.every(row => row.autoDownloadOffVerified === true);
+    if (input.lane !== 'fresh') report.manualUpgradeTermsPreserved = report.termsPersistenceTested
       && report.launches.filter(row => row.version === '0.1.13').every(row => row.persistedSyntheticTerms === true);
     report.packageAndManualChecksPassed = true;
   } catch (error) {
@@ -902,7 +908,7 @@ function nativeOperations(out, binding, report) {
       activeMounts.pop();
       return { version, dmgSha256: expectedHash, appPath: app,
         executablePath: path.join(app, 'Contents', 'MacOS', 'creator-hub'), bundle: after,
-        method: version === '0.1.13' && binding.input.lane === 'manual-upgrade' ? 'manual-dmg-replacement-old-app-retained' : 'fresh-dmg-copy',
+        method: version === '0.1.13' && binding.input.lane !== 'fresh' ? 'manual-dmg-replacement-old-app-retained' : 'fresh-dmg-copy',
         rollback: 'Original app retained; a failed replacement is not hidden or retried automatically' };
     },
     seed: () => seedSentinels(home),
@@ -918,6 +924,10 @@ function nativeOperations(out, binding, report) {
     pressAutoDownloadOff: launched => {
       guard();
       return window(['test-auto-download-off', String(launched.pid), app, launched.executablePath], 'preference');
+    },
+    pressLegacyAutoDownloadOff: launched => {
+      guard();
+      return window(['test-legacy-auto-download-off', String(launched.pid), app, launched.executablePath], 'preference');
     },
     capture: (launched, label, kind) => {
       const snapshot = window(['snapshot', String(launched.pid), app, launched.executablePath]);

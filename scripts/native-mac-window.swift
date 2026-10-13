@@ -23,10 +23,11 @@ func preferenceScope() -> Bool {
     return ciScope() && ProcessInfo.processInfo.environment["CREATOR_MAC_SYNTHETIC_PREFERENCE_TEST"] == "1"
 }
 
-func target13() -> Bool {
+func preferenceTarget(_ version: String) -> Bool {
+    guard ["0.1.12", "0.1.13"].contains(version) else { return false }
     guard let bundle = Bundle(url: installedURL()) else { return false }
-    return bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == "0.1.13"
-        && bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String == "0.1.13"
+    return bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == version
+        && bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String == version
 }
 
 func installedURL() -> URL {
@@ -215,10 +216,10 @@ func pressSyntheticTerms(_ app: NSRunningApplication, _ action: String) {
     emit(result)
 }
 
-func pressSyntheticAutoDownloadOff(_ app: NSRunningApplication) {
-    guard preferenceScope(), target13(), AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(),
+func pressSyntheticAutoDownloadOff(_ app: NSRunningApplication, version: String, action: String) {
+    guard preferenceScope(), preferenceTarget(version), AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(),
           !NSScreen.screens.isEmpty, app.isActive else {
-        emit(["error": "Synthetic preference test requires target 0.1.13, exact hosted CI, existing capabilities and the active owned app"])
+        emit(["error": "Synthetic preference test requires the exact target version, hosted CI, existing capabilities and the active owned app"])
         return
     }
     let tree = inspectAX(app)
@@ -246,7 +247,7 @@ func pressSyntheticAutoDownloadOff(_ app: NSRunningApplication) {
           attribute(selected, kAXTitleAttribute) as? String == autoDownloadCheckbox,
           (attribute(selected, kAXValueAttribute) as? NSNumber)?.intValue == 1,
           (attribute(selected, kAXEnabledAttribute) as? NSNumber)?.boolValue == true,
-          preferenceScope(), target13(), AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(),
+          preferenceScope(), preferenceTarget(version), AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(),
           !NSScreen.screens.isEmpty, app.isActive,
           target()?.processIdentifier == app.processIdentifier,
           AXUIElementPerformAction(selected, kAXPressAction as CFString) == .success else {
@@ -254,13 +255,13 @@ func pressSyntheticAutoDownloadOff(_ app: NSRunningApplication) {
         return
     }
     var result = appIdentity(app)
-    result["action"] = "test-auto-download-off"
+    result["action"] = action
     result["axAction"] = "AXPress"
     result["controlRole"] = kAXCheckBoxRole
     result["controlTitle"] = autoDownloadCheckbox
     result["beforeValue"] = "1"
     result["requestedValue"] = "0"
-    result["targetVersion"] = "0.1.13"
+    result["targetVersion"] = version
     result["syntheticTestOnly"] = true
     result["customerConsent"] = false
     result["userMachineUsed"] = false
@@ -349,9 +350,13 @@ case "test-terms-checkbox", "test-terms-accept":
     guard let app = target() else { emit(["error": "Synthetic terms PID/bundle/executable ownership mismatch"]); exit(0) }
     pressSyntheticTerms(app, args[0])
 case "test-auto-download-off":
-    guard preferenceScope(), target13() else { emit(["error": "Synthetic preference requires opted-in hosted CI and target 0.1.13"]); exit(0) }
+    guard preferenceScope(), preferenceTarget("0.1.13") else { emit(["error": "Synthetic preference requires opted-in hosted CI and target 0.1.13"]); exit(0) }
     guard let app = target() else { emit(["error": "Synthetic preference PID/bundle/executable ownership mismatch"]); exit(0) }
-    pressSyntheticAutoDownloadOff(app)
+    pressSyntheticAutoDownloadOff(app, version: "0.1.13", action: "test-auto-download-off")
+case "test-legacy-auto-download-off":
+    guard preferenceScope(), preferenceTarget("0.1.12") else { emit(["error": "Synthetic legacy preference requires opted-in hosted CI and target 0.1.12"]); exit(0) }
+    guard let app = target() else { emit(["error": "Synthetic preference PID/bundle/executable ownership mismatch"]); exit(0) }
+    pressSyntheticAutoDownloadOff(app, version: "0.1.12", action: "test-legacy-auto-download-off")
 case "pixels" where args.count == 2:
     imagePixels(args[1])
 case "quit" where args.count == 4:

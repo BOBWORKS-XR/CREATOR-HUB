@@ -3,6 +3,12 @@ name: macOS 0.1.13 bounded maintenance validation
 on:
   workflow_dispatch:
     inputs:
+      validation_scope:
+        description: Reuse the exact packages for current preferences or old-version preference migration
+        required: true
+        default: current
+        type: choice
+        options: [current, legacy-preferences, all]
       candidate_run_id:
         description: Existing reviewed successful CI run, not a new build
         required: true
@@ -51,7 +57,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [X64, ARM64]
-        lane: [fresh, manual-upgrade]
+        lane: ${{ fromJSON(inputs.validation_scope == 'legacy-preferences' && '["legacy-preferences"]' || inputs.validation_scope == 'all' && '["fresh","manual-upgrade","legacy-preferences"]' || '["fresh","manual-upgrade"]') }}
         include:
           - arch: X64
             os: macos-15-intel
