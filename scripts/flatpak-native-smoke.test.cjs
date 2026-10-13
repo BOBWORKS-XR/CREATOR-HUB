@@ -9,7 +9,7 @@ const { EventEmitter } = require('node:events');
 const { spawn, spawnSync, execFileSync } = require('node:child_process');
 const { parseArgs, hostedRoot, requestIdentity, validateBinding, initialReport, finalizeReport,
   inventorySnapshot, parsePs, processSnapshot, verifyProcessBinding, executableSnapshot, verifyInstanceIdentity,
-  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, TERMS_CHECKBOX, termsChoice, KEYBOARD_CASES, termsSourceHashes,
+  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, TERMS_CHECKBOX, termsChoice, KEYBOARD_CASES, termsSourceHashes, managerWindow,
   fixtureMetadata, permissionMetadata, EXTRACT_DEB,
   Experiment, PHASES, PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS, REVIEWED_CANDIDATE,
   REPO, APP, PLATFORM, FIXTURE_RUNTIME } = require('./flatpak-native-smoke.cjs');
@@ -694,6 +694,59 @@ function fakeLauncher({ exited = false, hang = false } = {}) {
       return true;
     } });
   return child;
+}
+
+test('window-manager readiness accepts only the named EWMH property', () => {
+  assert.equal(managerWindow('_NET_SUPPORTING_WM_CHECK:  no such atom on any window.\n'), null);
+  assert.equal(managerWindow('_NET_SUPPORTING_WM_CHECK:  not found.\n'), null);
+  assert.equal(managerWindow('_NET_SUPPORTING_WM_CHECK(WINDOW): window id # 0x800001\n'), '8388609');
+  for (const value of ['', '_NET_SUPPORTING_WM_CHECK(WINDOW): window id # 0x0',
+    '_NET_ACTIVE_WINDOW(WINDOW): window id # 0x800001', '_NET_SUPPORTING_WM_CHECK(WINDOW): window id # 0x100000000']) {
+    assert.throws(() => managerWindow(value));
+  }
+});
+
+for (const fault of [null, 'preexisting', 'wrong-owner', 'handshake', 'identity-drift', 'nonzero-exit']) {
+  test(`owned ordinary window-manager readiness and normal shutdown: ${fault}`, async t => {
+    const root = temporary(t); fs.mkdirSync(path.join(root, 'evidence'));
+    const child = fakeLauncher(); let launched = false; let start = '1000'; let rootQueries = 0; let signals = 0;
+    const io = { readFileSync: () => {
+      const fields = Array(20).fill('0'); fields[0] = 'S'; fields[1] = String(process.pid); fields[19] = start;
+      return `456 (openbox) ${fields.join(' ')}`;
+    }, readlinkSync: name => name.endsWith('/pid') ? 'pid:[10]' : 'mnt:[11]' };
+    child.kill = signal => {
+      signals += 1; assert.equal(signal, 'SIGTERM');
+      child.exitCode = fault === 'nonzero-exit' ? 3 : 0;
+      child.emit('exit', child.exitCode, null); return true;
+    };
+    const property = '_NET_SUPPORTING_WM_CHECK(WINDOW): window id # 0x800001\n';
+    const e = new Experiment(root, initialReport(), (tool, args) => {
+      if (tool === 'xprop') {
+        if (args[0] === '-root' && rootQueries++ === 0 && fault !== 'preexisting') {
+          return { status: 0, stdout: '_NET_SUPPORTING_WM_CHECK:  no such atom on any window.\n' };
+        }
+        return { status: 0, stdout: args[0] === '-id' && fault === 'handshake'
+          ? property.replace('0x800001', '0x800002') : property };
+      }
+      assert.ok(tool.endsWith('flatpak-xres-window-pid'));
+      return { status: 0, stdout: JSON.stringify({ window: '8388609', pid: fault === 'wrong-owner' ? 999 : 456,
+        selfTest: false, xresMajor: 1, xresMinor: 2 }) };
+    }, (tool, args) => { launched = true; assert.equal(tool, '/usr/bin/openbox'); assert.deepEqual(args, ['--sm-disable']); return child; }, io);
+    if (fault === 'preexisting') {
+      await assert.rejects(e.startWindowManager(), /Existing window manager/);
+      assert.equal(launched, false); return;
+    }
+    if (['wrong-owner', 'handshake'].includes(fault)) await assert.rejects(e.startWindowManager());
+    else { await e.startWindowManager(); assert.equal(e.report.windowManager.ready, true); }
+    if (fault === 'identity-drift') start = '2000';
+    if (['identity-drift', 'nonzero-exit'].includes(fault)) {
+      await assert.rejects(e.stopWindowManager());
+      assert.equal(e.report.windowManager.cleanupPassed, false);
+      assert.equal(e.report.failures.at(-1).phase, 'window-manager-cleanup');
+      assert.equal(signals, fault === 'identity-drift' ? 0 : 1);
+    } else { await e.stopWindowManager(); assert.equal(e.report.windowManager.cleanupPassed, true); }
+    assert.equal(e.report.releaseReady, false);
+  });
 }
 
 test('GUI refuses an unsupported runner lifetime option before launching anything', async t => {

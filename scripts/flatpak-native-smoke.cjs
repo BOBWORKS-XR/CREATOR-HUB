@@ -40,7 +40,7 @@ const REVIEWED_TEST_ONLY_FILES = Object.freeze([
 ]);
 const TREE_EXCLUSIONS = Object.freeze([...PROBE_FILES, ...REVIEWED_TEST_ONLY_FILES]);
 const PHASES = ['harness-source-tree', 'binding', 'native-package', 'native-beforeimage', 'runtime', 'build-export',
-  'install', 'sandbox', 'candidate-gui', 'app-update', 'fixture-gui', 'runtime-generation', 'preservation'];
+  'install', 'sandbox', 'window-manager', 'candidate-gui', 'app-update', 'fixture-gui', 'runtime-generation', 'preservation'];
 const BLOCKERS = [
   { id: 'linux-companion-management', classification: 'Correct as-is',
     evidence: 'This candidate explicitly has unsupported Linux MCP/Setup management (supported:false); the GUI must finish with a clear unsupported state, not check forever. No Linux management is claimed.' },
@@ -290,6 +290,14 @@ function termsChoice(lines, expression) {
 }
 
 const KEYBOARD_CASES = Object.freeze(['enabled-single-submit', 'disabled-no-submit', 'native-write-failure']);
+function managerWindow(text) {
+  if (/^_NET_SUPPORTING_WM_CHECK:\s+(?:no such atom on any window|not found)\.\s*$/.test(text)) return null;
+  const match = /^_NET_SUPPORTING_WM_CHECK\(WINDOW\): window id # (0x[0-9a-f]+)\s*$/i.exec(text);
+  requireThat(match, 'Unknown window-manager readiness property; no adoption');
+  const id = Number.parseInt(match[1], 16);
+  requireThat(Number.isSafeInteger(id) && id > 1 && id <= 0xffffffff, 'Invalid window-manager check window');
+  return String(id);
+}
 function termsSourceHashes() {
   return Object.fromEntries(['index.html', 'usage-terms.js'].map(file => [file,
     sha256(fs.readFileSync(path.join(__dirname, '../src', file)))]));
@@ -583,6 +591,56 @@ class Experiment {
     this.report.keyboardContract = proof; this.save();
     return proof;
   }
+  async startWindowManager() {
+    requireThat(managerWindow(this.command('xprop', ['-root', '_NET_SUPPORTING_WM_CHECK']).stdout) === null,
+      'Existing window manager; no adoption or replacement');
+    const log = fs.openSync(path.join(this.evidence, 'window-manager.log'), 'wx', 0o600);
+    let child;
+    try { child = this.launch('/usr/bin/openbox', ['--sm-disable'], { env: this.env, stdio: ['ignore', log, log] }); }
+    finally { fs.closeSync(log); }
+    this.windowManager = { child };
+    const receipt = this.report.windowManager = { pid: child.pid, ready: false, cleanupPassed: false, focusForced: false };
+    child.on('error', error => { receipt.spawnError = error.message; });
+    requireThat(Number.isSafeInteger(child.pid) && child.pid > 1, 'Owned window manager did not start');
+    const identity = this.windowManager.identity = processSnapshot(child.pid, this.hostFs);
+    requireThat(identity.parentPid === process.pid, 'Window manager is not the directly owned child');
+    receipt.identity = identity;
+    for (const end = Date.now() + 10000; ; ) {
+      requireThat(!receipt.spawnError && child.exitCode === null && child.signalCode === null, 'Owned window manager exited before readiness');
+      assert.deepEqual(processSnapshot(child.pid, this.hostFs), identity, 'Window-manager process identity changed');
+      const window = managerWindow(this.command('xprop', ['-root', '_NET_SUPPORTING_WM_CHECK']).stdout);
+      if (window) {
+        requireThat(managerWindow(this.command('xprop', ['-id', window, '_NET_SUPPORTING_WM_CHECK']).stdout) === window,
+          'Window-manager root/check-window handshake differs');
+        const owner = JSON.parse(this.command(this.xresHelper, [window]).stdout);
+        requireThat(owner.window === window && owner.pid === child.pid && owner.selfTest === false
+          && owner.xresMajor === 1 && owner.xresMinor >= 2, 'Readiness window is not owned by the launched manager');
+        assert.deepEqual(processSnapshot(child.pid, this.hostFs), identity, 'Window-manager process changed during readiness');
+        receipt.window = window; receipt.owner = owner; receipt.ready = true; this.save(); return receipt;
+      }
+      requireThat(Date.now() < end, 'Owned window manager readiness timed out');
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  async stopWindowManager() {
+    if (!this.windowManager) return;
+    const { child, identity } = this.windowManager;
+    const receipt = this.report.windowManager;
+    try {
+      requireThat(identity && child.exitCode === null && child.signalCode === null, 'Owned window manager exited unexpectedly; no cleanup claim');
+      assert.deepEqual(processSnapshot(child.pid, this.hostFs), identity, 'Window-manager identity changed; no signal sent');
+      requireThat(child.kill('SIGTERM'), 'Owned window manager refused normal termination');
+      receipt.normalStopRequested = true;
+      await waitForLauncherExit(child, 10000);
+      receipt.exitCode = child.exitCode; receipt.signalCode = child.signalCode;
+      requireThat(child.exitCode === 0 && child.signalCode === null, 'Owned window manager did not exit normally');
+      receipt.cleanupPassed = true;
+    } catch (error) {
+      receipt.cleanupError = error.message;
+      this.report.failures.push({ phase: 'window-manager-cleanup', message: error.message });
+      throw error;
+    } finally { this.save(); }
+  }
   nativeKey(label, window, key, identityCheck) {
     const keys = this.report.guiTerms[label].keys;
     requireThat((keys.length === 0 && key === 'Tab') || (keys.length === 1 && keys[0] === 'Tab' && key === 'Return'),
@@ -850,6 +908,7 @@ class Experiment {
         return { hostProjectPathDenied: true, nativeDataPathDenied: true, hostSentinelNotVisible: true,
           xdgIsolated: true, dependenciesResolved: true, hostLaunchAttempted: false, xresTool: this.report.xresTool };
       });
+      await this.phase('window-manager', () => this.startWindowManager());
       // GUI failure is retained but does not prevent the independent, integrity-bound repository trial.
       try { await this.phase('candidate-gui', () => this.gui('candidate')); } catch { /* Recorded by phase. */ }
       await this.phase('app-update', () => {
@@ -906,6 +965,7 @@ class Experiment {
       } finally {
         if (sentinel?.exitCode === null) sentinel.kill('SIGTERM');
         if (fs.existsSync(this.env.GNUPGHOME)) this.command('gpgconf', ['--kill', 'gpg-agent'], { allowFailure: true });
+        await this.stopWindowManager();
       }
     }
   }
@@ -960,7 +1020,7 @@ async function main(options) {
 
 module.exports = { parseArgs, hostedRoot, requestIdentity, validateBinding, initialReport, finalizeReport,
   inventorySnapshot, parsePs, processSnapshot, verifyProcessBinding, executableSnapshot, verifyInstanceIdentity,
-  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, TERMS_CHECKBOX, termsChoice, KEYBOARD_CASES, termsSourceHashes,
+  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, TERMS_CHECKBOX, termsChoice, KEYBOARD_CASES, termsSourceHashes, managerWindow,
   fixtureMetadata, permissionMetadata, EXTRACT_DEB, Experiment, PHASES,
   PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS, REVIEWED_CANDIDATE, REPO, APP, PLATFORM, SDK, FIXTURE_RUNTIME };
 if (require.main === module) {

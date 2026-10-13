@@ -350,6 +350,23 @@ and native GNOME results are pending the next main-owned disposable run.
 
 ### XRes Window Ownership Contract
 
+Run `38438607991` passed all three disposable Playwright WebKit keyboard
+contract cases. Native input correctly stopped at the foreground guard: bare
+Xvfb returned focus window 1 and then BadWindow; no keys were sent. The checked
+terms dialog and original failures remain retained. This is not native consent,
+persistence or updater-refusal acceptance.
+
+The next probe adds an ordinary Openbox session only on the disposable runner.
+It refuses an existing window manager, waits for the
+[EWMH root/check-window handshake](https://specifications.freedesktop.org/wm/1.5/ar01s03.html),
+and binds the check window through XRes to its directly launched child PID.
+Before shutdown it rechecks that process identity, sends only normal SIGTERM
+and requires exit zero within ten seconds. Startup and cleanup failures remain
+release blockers; no process adoption, forced focus, sandbox permission or
+WebKit security-policy change is introduced. Application foreground/XRes
+checks and the single reviewed Tab/Return sequence are unchanged. Source tests
+are not native window-manager acceptance; the disposable rerun is required.
+
 XRes 1.2's [protocol specification](https://sources.debian.org/src/xorgproto/2025.1-1/resproto.txt/)
 allows selecting a client by its window resource ID and requesting its local
 PID. Missing identification is permitted by the protocol, so absence is a

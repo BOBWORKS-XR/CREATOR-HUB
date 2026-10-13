@@ -159,7 +159,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             flatpak flatpak-builder ostree gnupg dbus-x11 xvfb xauth \
-            xdotool x11-utils imagemagick tesseract-ocr python3-pil \
+            xdotool x11-utils openbox imagemagick tesseract-ocr python3-pil \
             gcc libc6-dev libx11-dev libxres-dev
       - name: Compile runner-only XRes identity helper (no product or SDK changes)
         run: |
@@ -189,6 +189,7 @@ jobs:
             ${{ runner.temp }}/creator-flatpak-validation/evidence/source-binding.json
             ${{ runner.temp }}/creator-flatpak-validation/evidence/terms-keyboard-contract.json
             ${{ runner.temp }}/creator-flatpak-validation/evidence/commands.json
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/window-manager.log
             ${{ runner.temp }}/creator-flatpak-validation/evidence/beforeimage.json
             ${{ runner.temp }}/creator-flatpak-validation/evidence/afterimage.json
             ${{ runner.temp }}/creator-flatpak-validation/evidence/runtime-metadata.txt
