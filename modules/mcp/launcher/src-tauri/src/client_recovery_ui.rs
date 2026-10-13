@@ -19,6 +19,20 @@ fn supported() -> bool {
     crate::settings_review_admission::enabled()
 }
 
+fn recovery_clients(os: &str) -> Result<&'static [&'static str], String> {
+    match os {
+        "linux" => Ok(&["codex", "claude", "antigravity", "opencode"]),
+        "windows" | "macos" => Ok(&[
+            "codex",
+            "claude",
+            "claudeDesktop",
+            "antigravity",
+            "opencode",
+        ]),
+        _ => Err("Client recovery is unavailable on this platform.".into()),
+    }
+}
+
 fn operation_valid(value: &str) -> bool {
     value.len() == 64
         && value
@@ -123,13 +137,7 @@ pub(crate) fn pending_client_recovery() -> Result<Vec<Pending>, String> {
     let mut records = Vec::new();
     let mut clients = Vec::new();
     let mut paths = Vec::new();
-    for client in [
-        "codex",
-        "claude",
-        "claudeDesktop",
-        "antigravity",
-        "opencode",
-    ] {
+    for &client in recovery_clients(std::env::consts::OS)? {
         let (name, path, _) = crate::client_target(client)?;
         records.extend(collect(client, name, &path)?);
         clients.push(client.to_owned());
@@ -196,6 +204,72 @@ pub(crate) fn recover_client_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_recovery_inventory_excludes_only_unsupported_desktop() {
+        assert_eq!(
+            recovery_clients("linux").unwrap(),
+            ["codex", "claude", "antigravity", "opencode"]
+        );
+    }
+
+    #[test]
+    fn windows_and_macos_recovery_inventory_keeps_all_five_clients() {
+        for os in ["windows", "macos"] {
+            assert_eq!(
+                recovery_clients(os).unwrap(),
+                [
+                    "codex",
+                    "claude",
+                    "claudeDesktop",
+                    "antigravity",
+                    "opencode"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_inventory_refuses_unknown_platforms() {
+        for os in ["", "freebsd", "unknown"] {
+            assert!(recovery_clients(os).is_err());
+        }
+        assert_eq!(
+            recovery_clients(std::env::consts::OS).unwrap().len(),
+            if cfg!(target_os = "linux") { 4 } else { 5 }
+        );
+    }
+
+    #[test]
+    fn supported_client_unknown_recovery_storage_still_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let config = base.join("settings.json");
+        fs::write(&config, b"original").unwrap();
+        fs::create_dir_all(base.join(".creator-hub-migrations/unrecognized")).unwrap();
+        assert!(collect("codex", "Codex", &config)
+            .err()
+            .unwrap()
+            .contains("Unexpected recovery storage"));
+        assert_eq!(fs::read(config).unwrap(), b"original");
+    }
+
+    #[test]
+    fn supported_client_uninspectable_recovery_storage_still_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let config = base.join("settings.json");
+        fs::write(&config, b"original").unwrap();
+        let root = base.join(".creator-hub-migrations");
+        fs::write(&root, b"not a directory").unwrap();
+        assert!(collect("codex", "Codex", &config)
+            .err()
+            .unwrap()
+            .contains("Cannot inspect retained migrations"));
+        assert_eq!(fs::read(config).unwrap(), b"original");
+        assert_eq!(fs::read(root).unwrap(), b"not a directory");
+    }
+
     #[test]
     fn unit_tests_cannot_select_the_real_client_recovery_store() {
         assert!(central_root()
