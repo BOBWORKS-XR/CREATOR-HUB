@@ -208,6 +208,30 @@ test('failed package integrity retains failure evidence, never rewrites descript
   } finally { f.cleanup(); }
 });
 
+test('package evidence records explicit writable mode without claiming GUI acceptance', () => {
+  const f = fixture('linux', true);
+  try {
+    const bundle = path.join(f.root, 'bundle');
+    for (const [format, ext] of [['deb', '.deb'], ['rpm', '.rpm'], ['appimage', '.AppImage']]) {
+      fs.mkdirSync(path.join(bundle, format), { recursive: true });
+      fs.writeFileSync(path.join(bundle, format, `candidate${ext}`), 'container fixture');
+    }
+    const execute = (file, _args, options) => {
+      f.layout(options.cwd, file === 'dpkg-deb' ? 'deb' : file === 'bsdtar' ? 'rpm' : 'appimage');
+      return Buffer.from('');
+    };
+    const options = { output: f.output, bundleDirectory: bundle, manifest: f.manifest,
+      productName: 'Creator Hub', rawHub: f.rawHub, execute, mcpMode: 'writable' };
+    assert.throws(() => validatePackages({ ...options, mcpMode: 'enabled' }), /known mode/);
+    assert.throws(() => validatePackages({ ...options, manifest: { ...f.manifest, managedRouting: undefined } }), /signed managed/);
+    assert.equal(fs.existsSync(path.join(f.output, 'native-packages')), false);
+    const result = validatePackages(options);
+    assert.equal(result.mcpMode, 'writable');
+    assert.equal(result.writableGuiAccepted, false);
+    assert.equal(result.releaseReady, false);
+  } finally { f.cleanup(); }
+});
+
 test('DMG attaches read-only/no-open and detaches its own mount on partial failure', () => {
   const f = fixture('macos');
   try {

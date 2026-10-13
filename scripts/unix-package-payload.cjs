@@ -187,13 +187,16 @@ function one(directory, extension) {
   return file;
 }
 
-function validatePackages({ output, bundleDirectory, manifest, productName, rawHub, archiveDecoder, execute = execFileSync }) {
+function validatePackages({ output, bundleDirectory, manifest, productName, rawHub, archiveDecoder, execute = execFileSync, mcpMode = 'read-only' }) {
   if (!['linux', 'macos'].includes(manifest.platform)) throw Error('Unix package validation requires a Unix manifest.');
+  if (!['read-only', 'writable'].includes(mcpMode) || (mcpMode === 'writable' && !manifest.managedRouting)) {
+    throw Error('Package evidence requires a known mode and signed managed routing for writable experiments.');
+  }
   verifyProductName(productName);
   const destination = path.join(output, 'native-packages');
   fs.mkdirSync(destination); // A repeated validation cannot replace retained bytes.
   const report = { schemaVersion: 1, platform: manifest.platform, arch: manifest.arch,
-    experimental: true, mcpMode: 'read-only', writableGuiAccepted: false, releaseReady: false, packages: [] };
+    experimental: true, mcpMode, writableGuiAccepted: false, releaseReady: false, packages: [] };
   const reportFile = path.join(output, 'unix-package-integrity.json');
   let appHub;
   try {

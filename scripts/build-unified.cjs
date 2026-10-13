@@ -177,7 +177,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
     verifyStage(path.join(output, 'modules'), manifest);
     if (installer) unix.validatePackages({ output, bundleDirectory, manifest,
       productName: JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'))).productName,
-      rawHub: path.join(output, 'creator-hub'), archiveDecoder });
+      rawHub: path.join(output, 'creator-hub'), archiveDecoder, mcpMode: plan.mcpMode });
     fs.writeFileSync(path.join(output, 'experimental-unix.json'), JSON.stringify({ schemaVersion: 1,
       platform, arch, mcpMode: plan.mcpMode, writableGuiAccepted: false, releaseReady: false,
       packages: plan.bundles, managedRoutingIncluded: managed }, null, 2), { flag: 'wx' });
