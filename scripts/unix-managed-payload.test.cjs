@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { build, parseBuildOptions } = require('./build-unified.cjs');
-const { checkSplitOptions, prepareAdmission, snapshot, ASSEMBLER_BLOCKER } = require('./unix-managed-payload.cjs');
+const { checkSplitOptions, prepareAdmission, snapshot } = require('./unix-managed-payload.cjs');
 const routing = require('./managed-router-package.cjs');
 
 const options = { prepareManagedUnix: true, managed: true, experimentalUnix: true, experimentalWritable: true };
@@ -191,13 +191,13 @@ test('dirty initial source or source/run mismatch refuses before generation or o
   } finally { cleanup(f); }
 });
 
-test('signed input stays blocked without inspection or any recompilation/signing fallback', () => {
+test('signed input requires its separate native workflow before inspection or any recompilation/signing fallback', () => {
   const f = fixture();
   try {
     const input = path.join(f.root, 'absent-signed-input');
     const parsed = parseBuildOptions(['--signed-unix-input', input, '--managed', '--experimental-unix', '--experimental-unix-writable']);
-    assert.throws(() => build('refused', parsed, f.context), { message: ASSEMBLER_BLOCKER });
-    assert.throws(() => build('refused', { ...options, signedUnixInput: input }, f.context), { message: ASSEMBLER_BLOCKER });
+    assert.throws(() => build('refused', parsed, f.context), /Explicit native assembly workflow/);
+    assert.throws(() => build('refused', { ...options, signedUnixInput: input }, f.context), /Signed Unix assembly requires/);
     assert.deepEqual(f.calls, []);
     assert.equal(fs.existsSync(path.join(f.root, 'artifacts')), false);
   } finally { cleanup(f); }

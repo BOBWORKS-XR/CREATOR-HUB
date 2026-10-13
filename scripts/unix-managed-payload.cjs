@@ -10,12 +10,15 @@ const REPOSITORY_ID = 1364807512;
 const WORKFLOW = '.github/workflows/unix-managed-payload.yml';
 const MAX_FILE = 256 * 1024 * 1024;
 const MAX_TOTAL = 512 * 1024 * 1024;
-const ASSEMBLER_BLOCKER = 'Signed Unix assembly is not implemented: a provenance-bound bounded transfer and signed handoff must be verified by the offline production-key verifier before any Hub build.';
 
 function checkSplitOptions(options) {
   if (options.signedUnixInput !== null && options.signedUnixInput !== undefined) {
     if (!path.isAbsolute(options.signedUnixInput)) throw Error('Signed Unix staging must be absolute.');
-    throw Error(ASSEMBLER_BLOCKER);
+    if (!['linux', 'macos'].includes(options.platform) || options.managed !== true
+      || options.experimentalUnix !== true || options.experimentalWritable !== true || options.prepareManagedUnix) {
+      throw Error('Signed Unix assembly requires native Unix, --managed, --experimental-unix and --experimental-unix-writable, without preparation.');
+    }
+    return;
   }
   if (!options.prepareManagedUnix) return;
   if (!['linux', 'macos'].includes(options.platform) || options.installer
@@ -172,4 +175,4 @@ function finishPreparation(output, manifest, router, hubVersion, source, root, e
   return receipt;
 }
 
-module.exports = { checkSplitOptions, prepareAdmission, outputAdmission, fileMode, snapshot, finishPreparation, ASSEMBLER_BLOCKER };
+module.exports = { checkSplitOptions, prepareAdmission, outputAdmission, fileMode, snapshot, finishPreparation };

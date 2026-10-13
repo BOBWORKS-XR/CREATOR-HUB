@@ -62,6 +62,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   const arch = context.arch || { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
   const payload = require('./unix-managed-payload.cjs');
   payload.checkSplitOptions({ platform, installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput });
+  if (signedUnixInput) return buildSignedUnix(label, { installer, signedUnixInput }, context);
   const unix = require('./unix-package-payload.cjs');
   const plan = unix.nativePlan(platform, arch, { installer, experimentalUnix, experimentalWritable, managed });
   const nativeTargetArgs = plan.rustTarget ? ['--target', plan.rustTarget] : [];
@@ -199,6 +200,68 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   console.log(`Local unified candidate: ${output}. Not a release or migration acceptance.`);
   return output;
 }
+function buildSignedUnix(label, { installer, signedUnixInput }, context = {}) {
+  const root = context.root || repositoryRoot;
+  const execute = context.execute || execFileSync;
+  const environment = context.env || process.env;
+  const platform = context.platform || { darwin: 'macos', linux: 'linux' }[process.platform];
+  const arch = context.arch || { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
+  const output = path.join(root, 'artifacts', 'unified', label);
+  const result = require('./assemble-unix-payload.cjs').assemble(signedUnixInput, output, platform, arch,
+    { root, env: environment, execute });
+  const manifest = result.manifest;
+  const preWrapper = structuredClone(manifest);
+  const unix = require('./unix-package-payload.cjs');
+  const plan = unix.nativePlan(platform, arch, { installer, managed: true, experimentalUnix: true, experimentalWritable: true });
+  const env = { ...unix.packageEnvironment(environment, platform, 'writable'),
+    CREATOR_BUILTIN_MANIFEST: path.join(output, 'builtin-manifest.json'),
+    CARGO_TARGET_DIR: path.join(output, 'hub-target') };
+  const npm = environment.npm_execpath;
+  if (!npm || !fs.existsSync(npm)) throw Error('Run this builder through npm run build:unified. Verified inputs are retained.');
+  const resources = Object.fromEntries(Object.keys(result.manifest.modules.mcp.files)
+    .concat(Object.keys(result.manifest.modules.setup.files), Object.keys(result.manifest.managedRouting.files))
+    .map(name => [path.join(output, 'modules', name), `modules/${name}`]));
+  let archiveDecoder;
+  if (platform === 'linux') {
+    const archive = require('./module-archive.cjs');
+    const decoderTarget = path.join(output, 'archive-decoder-target');
+    execute('cargo', ['build', '--release', '--locked', '--manifest-path', path.join(root, 'native/module-archive/Cargo.toml')], {
+      env: { ...env, CARGO_TARGET_DIR: decoderTarget }, stdio: 'inherit', windowsHide: true,
+    });
+    archiveDecoder = path.join(decoderTarget, 'release/creator-hub-module-archive');
+    const file = path.join(output, archive.FILE);
+    manifest.payloadArchive = archive.create(path.join(output, 'modules'), manifest, file);
+    archive.verify(file, manifest, archiveDecoder);
+    for (const name of Object.keys(resources)) delete resources[name];
+    resources[file] = archive.FILE;
+  }
+  writeAssemblyManifests(output, preWrapper, manifest);
+  const overlay = path.join(output, 'tauri-unified.json');
+  fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources } }, null, 2), { flag: 'wx' });
+  const cli = path.join(root, 'node_modules/@tauri-apps/cli/tauri.js');
+  execute(process.execPath, [cli, 'build', '--target', plan.rustTarget,
+    ...(installer ? ['--bundles', plan.bundles.join(',')] : ['--no-bundle']), '--config', overlay, '--', '--locked'],
+    { cwd: root, env, stdio: 'inherit', windowsHide: true });
+  const release = path.join(env.CARGO_TARGET_DIR, plan.rustTarget, 'release');
+  fs.copyFileSync(path.join(release, 'creator-hub'), path.join(output, 'creator-hub'), fs.constants.COPYFILE_EXCL);
+  verifyStage(path.join(output, 'modules'), manifest);
+  if (installer) unix.validatePackages({ output, bundleDirectory: path.join(release, 'bundle'), manifest,
+    productName: JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'))).productName,
+    rawHub: path.join(output, 'creator-hub'), archiveDecoder, mcpMode: 'writable' });
+  fs.writeFileSync(path.join(output, 'signed-unix-assembly.json'), JSON.stringify({ schemaVersion: 1,
+    product: 'com.creatorworks.hub.unix-signed-assembly', platform, arch, hubVersion: '0.1.14',
+    assemblyCommit: environment.GITHUB_SHA, privateSource: result.source, handoffSha256: result.handoffSha256,
+    mcpMode: 'writable', privateModulesRecompiled: false, privateModulesResigned: false,
+    nativeGuiAccepted: false, releaseReady: false }, null, 2), { flag: 'wx' });
+  console.log(`Signed native Unix candidate: ${output}. Not migration or release acceptance.`);
+  return output;
+}
+function writeAssemblyManifests(output, signedManifest, finalManifest) {
+  const original = path.join(output, 'builtin-manifest.json');
+  fs.copyFileSync(original, path.join(output, 'builtin-manifest.preparation.json'), fs.constants.COPYFILE_EXCL);
+  fs.writeFileSync(path.join(output, 'builtin-manifest.pre-wrapper.json'), JSON.stringify(signedManifest, null, 2), { flag: 'wx' });
+  fs.writeFileSync(original, JSON.stringify(finalManifest, null, 2));
+}
 function parseBuildOptions(args) {
   const options = {};
   const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix.';
@@ -218,7 +281,7 @@ function parseBuildOptions(args) {
   }
   return options;
 }
-module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, build, parseBuildOptions };
+module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, build, parseBuildOptions, writeAssemblyManifests };
 if (require.main === module) {
   try {
     if (!process.argv[2]) throw Error('Provide one build name.');
