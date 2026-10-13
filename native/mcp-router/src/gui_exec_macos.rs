@@ -24,6 +24,11 @@ const CS_OPS_STATUS: u32 = 0;
 const CS_OPS_CDHASH: u32 = 5;
 
 extern "C" {
+    // The supported macOS SDK exports this, but older consumer libc locks omit it.
+    fn posix_spawn_file_actions_addchdir_np(
+        actions: *mut libc::posix_spawn_file_actions_t,
+        path: *const libc::c_char,
+    ) -> libc::c_int;
     fn csops(
         pid: libc::pid_t,
         operation: u32,
@@ -339,9 +344,7 @@ fn spawn_suspended(
     spawn_result(unsafe { libc::posix_spawnattr_setflags(&mut attributes.0, flags as i16) })?;
     spawn_result(unsafe { libc::posix_spawnattr_setsigmask(&mut attributes.0, &mask) })?;
     spawn_result(unsafe { libc::posix_spawnattr_setsigdefault(&mut attributes.0, &defaults) })?;
-    spawn_result(unsafe {
-        libc::posix_spawn_file_actions_addchdir_np(&mut actions.0, cwd.as_ptr())
-    })?;
+    spawn_result(unsafe { posix_spawn_file_actions_addchdir_np(&mut actions.0, cwd.as_ptr()) })?;
     for (source, destination) in [
         (stdin_read.as_raw_fd(), 0),
         (stdout_write.as_raw_fd(), 1),
@@ -535,7 +538,7 @@ mod tests {
                 && metadata.st_ino == inode
         });
         println!(
-            "GUI_FIXTURE:{}",
+            "\nGUI_FIXTURE:{}",
             serde_json::json!({
                 "argv": std::env::args_os().map(|arg| arg.as_bytes().to_vec()).collect::<Vec<_>>(),
                 "environment": environment,
