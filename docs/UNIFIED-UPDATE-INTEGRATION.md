@@ -225,6 +225,35 @@ the GUI executable binding guarantee. Source integration does not lift the
 Unix writable or publication gates. Installation/update/GUI acceptance must
 refer to the final 0.1.13 package hashes, not the previous 0.1.12 candidates.
 
+## Prepublication Windows Update Acceptance
+
+The exact locally built managed 0.1.13 candidate passed native fresh20 and
+guarded `/UPDATE /S /NS` upgrade24 checks in
+[38376581718](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38376581718).
+Installer SHA-256 is
+`c1a259f27283b5b3cc27e2fc2cbf54d7fc4318fb5828e171d62658106adbebdb`;
+installed Hub SHA-256 is
+`8d52cef4052d064c1ededeaaaaf45c5a403c4c97838617c375e4126679b47f90`.
+Candidate product source is `d59c030eb7567bbd5a93c005830d407acfc81b1d`.
+
+[Signed lab acceptance 38384922196](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38384922196)
+then used the unmodified public 0.1.12 installer and executable. Its actual
+Update Hub button discovered the signed target through a controlled five-route
+feed. Native cancellation preserved the running old app; approval installed
+the exact candidate and restarted it automatically without a manual launch.
+Footer/registry, saved browser preference and unmanaged content checks passed.
+Both included backends opened after native consent, and the signed managed
+router connected/reconnected with the official MCP SDK, including Creator docs.
+System TLS verification and exact temporary VM-root cleanup passed.
+
+This is controlled-feed prepublication acceptance, not public GitHub discovery,
+live AI/model or live Editor acceptance, outgoing-update view restoration, Unix
+writable operation or release readiness. The user requires all platforms released
+together. Original failed/cancelled harness runs remain unchanged, including
+38384247618: its app/lifecycle receipts passed but the workflow falsely failed
+because the helper had no explicit success exit. The corrected rerun verifies
+the independent app receipt as well as the process exit code.
+
 ## Remaining Release Gates
 
 - Full accepted product-settings convergence and conflict review, without legacy
