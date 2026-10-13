@@ -3,17 +3,18 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const { spawnSync, spawn } = require('node:child_process');
 const { generate, sha256, FINISH_ARGS } = require('./flatpak-package.cjs');
 
 const REPO = 'BOBWORKS-XR/CREATOR-HUB';
 // Reviewed workflow defaults only; exact explicit CLI pins and binding checks remain mandatory.
 const REVIEWED_CANDIDATE = Object.freeze({
-  runId: 38407664529, sourceCommit: 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e',
-  buildCommit: '15f69917f827cac51af67ca027b460c142030379', sourceTree: 'c56aee874eb51c7bc4b6205233995a2f8eb67124',
-  artifactId: 11820885281, artifactBytes: 96940104,
-  artifactSha256: 'c226e6739a924e59feb32eedd28e03489c2d744036e324f0739bcd6f4fb7d68b',
-  debBytes: 5975056, debSha256: '950392f2ded56017a5553e702dc76f2c296bfea2b6809a9e56e05b2030b7916f',
+  runId: 38423134520, sourceCommit: '288d3d60a8108d6ff41729b63705af3598721f60',
+  buildCommit: 'da87dfb1f815653f23737a98766b5eaa8a525dc4', sourceTree: '52ebe386502913c583cb897f00e2d83c9703b404',
+  artifactId: 11827776708, artifactBytes: 97015435,
+  artifactSha256: '5de4080ab8be4b46ef053af21e6d9985adbf77533b89f4d91d2e4d27bbc2e39e',
+  debBytes: 6004284, debSha256: 'b95d71ab62ae75b38d2e653eee3d21eacba4869027d2c1fa01495065c429b3e0',
 });
 const ID = 'com.creatorworks.hub';
 const APP = `app/${ID}/x86_64/experimental`;
@@ -21,7 +22,7 @@ const PLATFORM = 'runtime/org.gnome.Platform/x86_64/50';
 const SDK = 'runtime/org.gnome.Sdk/x86_64/50';
 const FIXTURE_RUNTIME = 'runtime/org.gnome.Platform/x86_64/50-validation-fixture';
 const PROBE_FILES = Object.freeze(['scripts/flatpak-native-smoke.cjs', 'scripts/flatpak-native-smoke.test.cjs',
-  '.github/workflows/flatpak-maintenance-validation.yml', 'docs/FLATPAK-NATIVE-VALIDATION.md']);
+  'scripts/flatpak-xres-window-pid.c', '.github/workflows/flatpak-maintenance-validation.yml', 'docs/FLATPAK-NATIVE-VALIDATION.md']);
 const REVIEWED_TEST_ONLY_FILES = Object.freeze([
   'scripts/native-linux-maintenance-smoke.cjs', 'scripts/native-linux-maintenance-smoke.test.cjs',
   'scripts/native-linux-window.py', '.github/workflows/linux-maintenance-validation.yml',
@@ -31,6 +32,11 @@ const REVIEWED_TEST_ONLY_FILES = Object.freeze([
   'scripts/Test-InstalledCandidate.ps1', 'scripts/self-update-baselines.test.cjs',
   'scripts/native-self-update-lab.ps1', 'scripts/native-self-update-lab.test.cjs',
   'scripts/native-self-update-smoke.cjs', 'scripts/maintenance-signed-update.test.cjs',
+  '.github/workflows/maintenance-signed-update-lab.yml',
+  'tests/fixtures/maintenance-signed-update/README.md',
+  'tests/fixtures/maintenance-signed-update/creator-hub-windows-x86_64.json',
+  'tests/fixtures/maintenance-signed-update/creator-hub-windows-x86_64.json.minisig',
+  'tests/fixtures/maintenance-signed-update/latest.json',
 ]);
 const TREE_EXCLUSIONS = Object.freeze([...PROBE_FILES, ...REVIEWED_TEST_ONLY_FILES]);
 const PHASES = ['harness-source-tree', 'binding', 'native-package', 'native-beforeimage', 'runtime', 'build-export',
@@ -165,11 +171,82 @@ function inventorySnapshot(files) {
 }
 
 function parsePs(text) {
-  return text.trim().split('\n').filter(Boolean).map(line => {
-    const [instance, application, pid, childPid] = line.trim().split(/\s+/);
-    requireThat(/^[0-9]+$/.test(instance) && /^[0-9]+$/.test(pid) && /^[0-9]+$/.test(childPid), 'Unexpected flatpak ps columns');
+  return text.split(/\r?\n/).filter(line => line.trim() !== '').map(line => {
+    // Non-interactive Flatpak output is TSV; runtime-only sandboxes have an empty application column.
+    const fields = line.split('\t');
+    const [instance, application, pid, childPid] = fields;
+    requireThat(fields.length === 4 && /^[0-9]+$/.test(instance) && /^[A-Za-z0-9_.-]*$/.test(application)
+      && /^[0-9]+$/.test(pid) && /^[0-9]+$/.test(childPid)
+      && Number.isSafeInteger(Number(pid)) && Number.isSafeInteger(Number(childPid)), 'Unexpected flatpak ps columns');
     return { instance, application, pid: Number(pid), childPid: Number(childPid) };
   });
+}
+
+function processSnapshot(pid, io = fs) {
+  requireThat(Number.isSafeInteger(pid) && pid > 0, 'Invalid host process PID');
+  const stat = io.readFileSync(`/proc/${pid}/stat`, 'utf8');
+  const end = stat.lastIndexOf(') ');
+  requireThat(stat.length <= 8192 && stat.startsWith(`${pid} (`) && end > 0, 'Malformed host process stat');
+  // comm may contain spaces and parentheses; fields after its last delimiter start at state (3).
+  const fields = stat.slice(end + 2).trim().split(/\s+/);
+  requireThat(fields.length >= 20 && /^[RSDTIWPK]$/.test(fields[0]) && /^[0-9]+$/.test(fields[1])
+    && /^[1-9][0-9]*$/.test(fields[19]) && Number.isSafeInteger(Number(fields[1])), 'Dead or malformed host process stat');
+  const pidNamespace = io.readlinkSync(`/proc/${pid}/ns/pid`);
+  const mountNamespace = io.readlinkSync(`/proc/${pid}/ns/mnt`);
+  requireThat(/^pid:\[[0-9]+\]$/.test(pidNamespace) && /^mnt:\[[0-9]+\]$/.test(mountNamespace), 'Missing process namespace identity');
+  return { pid, parentPid: Number(fields[1]), startTime: fields[19], pidNamespace, mountNamespace };
+}
+
+function verifyProcessBinding(client, sandbox, outer, instance, launcher) {
+  requireThat(instance.application === ID && instance.pid === launcher.pid && outer.pid === launcher.pid
+    && outer.startTime === launcher.startTime && sandbox.pid === instance.childPid
+    && sandbox.parentPid === outer.pid, 'Flatpak process no longer belongs to the exact owned launcher');
+  // Bubblewrap may insert a reaper as child-pid. Accept only its immediate child, not arbitrary descendants.
+  requireThat((client.pid === sandbox.pid || client.parentPid === sandbox.pid)
+    && client.pidNamespace === sandbox.pidNamespace && client.mountNamespace === sandbox.mountNamespace,
+  'XRes client is outside the exact Flatpak sandbox/initial-child relationship');
+}
+
+function executableSnapshot(pid, appPath, expectedSha256, io = fs) {
+  const descriptor = io.openSync(`/proc/${pid}/exe`, 'r');
+  try {
+    const executable = io.fstatSync(descriptor, { bigint: true });
+    const installed = io.statSync(path.join(appPath, 'bin/creator-hub'), { bigint: true });
+    const inContainer = io.statSync(`/proc/${pid}/root/app/bin/creator-hub`, { bigint: true });
+    requireThat(executable.isFile() && executable.size > 0n && executable.size <= 64n * 1024n * 1024n
+      && [installed, inContainer].every(item => item.dev === executable.dev && item.ino === executable.ino
+        && item.size === executable.size), 'XRes client executable is not the exact installed /app/bin/creator-hub');
+    const hash = createHash('sha256');
+    const buffer = Buffer.alloc(1024 * 1024);
+    let total = 0;
+    for (;;) {
+      const count = io.readSync(descriptor, buffer, 0, buffer.length, null);
+      if (!count) break;
+      total += count;
+      requireThat(BigInt(total) <= executable.size, 'Running executable grew during identity proof');
+      hash.update(buffer.subarray(0, count));
+    }
+    const digest = hash.digest('hex');
+    requireThat(BigInt(total) === executable.size && digest === expectedSha256, 'Running executable SHA256 does not match native inventory');
+    return { sha256: digest, byteLength: total, device: String(executable.dev), inode: String(executable.ino) };
+  } finally { io.closeSync(descriptor); }
+}
+
+const INSTANCE_IDENTITY = `
+import configparser, json, sys
+p = configparser.ConfigParser(interpolation=None, strict=True)
+p.read_string(sys.stdin.read(65537))
+print(json.dumps({
+    'name': p['Application']['name'], 'runtime': p['Application']['runtime'],
+    **{k: p['Instance'][k] for k in ('instance-id', 'app-path', 'app-commit', 'runtime-commit', 'arch', 'branch')}
+}))
+`;
+
+function verifyInstanceIdentity(info, instance, expected) {
+  requireThat(info.name === ID && info['instance-id'] === instance.instance && info.arch === 'x86_64'
+    && info.branch === 'experimental' && info['app-path'] === expected.appPath
+    && info['app-commit'] === expected.appCommit && info['runtime-commit'] === expected.runtimeCommit
+    && info.runtime === expected.runtimeRef, 'Running Flatpak instance metadata/deployment drift');
 }
 
 function waitForLauncherExit(child, timeout) {
@@ -290,11 +367,13 @@ with zipfile.ZipFile(archive) as z:
 `;
 
 class Experiment {
-  constructor(root, report, run = spawnSync, launch = spawn) {
+  constructor(root, report, run = spawnSync, launch = spawn, hostFs = fs) {
     this.root = root;
     this.report = report;
     this.run = run;
     this.launch = launch;
+    this.hostFs = hostFs;
+    this.xresHelper = path.join(root, 'flatpak-xres-window-pid');
     this.evidence = path.join(root, 'evidence');
     this.home = path.join(root, 'home');
     this.userRepo = path.join(this.home, '.local/share/flatpak/repo');
@@ -377,10 +456,44 @@ class Experiment {
     this.flat(['build-update-repo', ...this.signing, this.repo], { timeout: 600000 });
     return this.command('ostree', [`--repo=${this.repo}`, 'rev-parse', FIXTURE_RUNTIME]).stdout.trim();
   }
-  identicalRuntime(first, second) {
-    const difference = this.command('ostree', [`--repo=${this.userRepo}`, 'diff', '--fs-diff', first, second]).stdout.trim();
+  identicalRuntime(first, second, repository = this.userRepo) {
+    requireThat(repository === this.userRepo || repository === this.repo, 'Runtime proof must use an owned repository');
+    const difference = this.command('ostree', [`--repo=${repository}`, 'diff', '--fs-diff', first, second]).stdout.trim();
     requireThat(difference === '', 'Fixture runtime filesystem changed; cannot claim an identical-content generation');
-    return { first, second, filesystemDiffEmpty: true };
+    return { first, second, repository, filesystemDiffEmpty: true };
+  }
+  windowIdentity(label, window, instance, launcher, expected) {
+    const evidence = (this.report.guiIdentity ||= {})[label] ||= { rechecks: 0 };
+    try {
+      const rows = parsePs(this.flat(['ps', '--columns=instance,application,pid,child-pid'])).filter(row => row.application === ID);
+      requireThat(rows.length === 1 && JSON.stringify(rows[0]) === JSON.stringify(instance), 'Flatpak instance/PID tuple changed before window proof');
+      const query = JSON.parse(this.command(this.xresHelper, [window], { timeout: 10000 }).stdout);
+      evidence.lastQuery = query;
+      requireThat(query.window === window && query.selfTest === false && query.xresMajor === 1
+        && Number.isSafeInteger(query.xresMinor) && query.xresMinor >= 2
+        && Number.isSafeInteger(query.pid) && query.pid > 0 && typeof query.client === 'string'
+        && /^[1-9][0-9]*$/.test(query.client) && Number(query.client) <= 0xffffffff, 'Invalid XRes local-client PID receipt');
+      const outer = processSnapshot(instance.pid, this.hostFs);
+      const sandbox = processSnapshot(instance.childPid, this.hostFs);
+      const client = processSnapshot(query.pid, this.hostFs);
+      verifyProcessBinding(client, sandbox, outer, instance, launcher);
+      const metadata = this.hostFs.readFileSync(`/proc/${query.pid}/root/.flatpak-info`, 'utf8');
+      requireThat(Buffer.byteLength(metadata) <= 65536, 'Oversized running Flatpak metadata');
+      const info = JSON.parse(this.command('/usr/bin/python3', ['-c', INSTANCE_IDENTITY], { input: metadata, timeout: 10000 }).stdout);
+      verifyInstanceIdentity(info, instance, expected);
+      const executable = executableSnapshot(query.pid, expected.appPath, expected.executableSha256, this.hostFs);
+      for (const snapshot of [outer, sandbox, client]) {
+        assert.deepEqual(processSnapshot(snapshot.pid, this.hostFs), snapshot, 'Process identity changed during executable/metadata proof');
+      }
+      const identity = { window, clientId: query.client, outer, sandbox, client, executable, deployment: info };
+      if (evidence.baseline) assert.deepEqual(identity, evidence.baseline, 'Window/process/deployment identity changed during GUI capture');
+      else evidence.baseline = identity;
+      evidence.last = identity; evidence.rechecks += 1;
+      this.save();
+      return identity;
+    } catch (error) {
+      evidence.failure = error.message; this.save(); throw error;
+    }
   }
   async cleanupGui(label, child, instance, launchError, timeout = 5000) {
     const result = { passed: false, instance: instance?.instance || null,
@@ -427,33 +540,44 @@ class Experiment {
     child.on('error', error => { launchError = error; });
     let instance;
     let originalError;
+    let identityCheck;
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const capture = window => {
       const filename = path.join(this.evidence, `${label}.png`);
+      identityCheck();
       this.command('import', ['-window', window, filename]);
+      identityCheck();
       const tsv = this.command('tesseract', [filename, 'stdout', 'tsv']).stdout;
       const lines = ocrLines(tsv);
       fs.writeFileSync(path.join(this.evidence, `${label}-ocr.txt`), lines.map(line => line.text).join('\n'));
       return lines;
     };
     try {
+      const launcher = processSnapshot(child.pid, this.hostFs);
       let window;
       for (let end = Date.now() + 60000; Date.now() < end;) {
         requireThat(!launchError && child.exitCode === null, `Native GUI exited before capture: ${launchError?.message || child.exitCode}`);
         const matches = parsePs(this.flat(['ps', '--columns=instance,application,pid,child-pid'])).filter(row => row.application === ID);
         requireThat(matches.length <= 1, 'Multiple experimental instances; refusing ambiguous GUI/cleanup');
-        instance = matches[0];
+        if (matches[0]) {
+          requireThat(matches[0].pid === child.pid, 'Flatpak instance does not match the owned launcher; no adoption or kill');
+          instance = matches[0];
+        }
         const windows = this.command('xdotool', ['search', '--onlyvisible', '--name', '^Creator Hub'], { allowFailure: true });
-        if (instance && windows.status === 0 && /^[0-9]+\s*$/.test(windows.stdout)) { window = windows.stdout.trim(); break; }
+        if (instance?.childPid > 0 && windows.status === 0 && /^[0-9]+\s*$/.test(windows.stdout)) { window = windows.stdout.trim(); break; }
         await sleep(500);
       }
       requireThat(window && instance, 'No unique native Creator Hub window/Flatpak instance');
       const info = this.flat(['enter', instance.instance, 'cat', '/.flatpak-info']);
       requireThat(info.includes(`name=${ID}`), 'Window capture has no matching Flatpak instance');
       fs.writeFileSync(path.join(this.evidence, `${label}-context.txt`), info);
-      const windowPid = / = ([0-9]+)\s*$/.exec(this.command('xprop', ['-id', window, '_NET_WM_PID']).stdout)?.[1];
-      requireThat(windowPid, 'Native window has no process identity');
-      this.flat(['enter', instance.instance, 'sh', '-c', `test "$(readlink /proc/${windowPid}/exe)" = /app/bin/creator-hub`]);
+      const resources = this.resources();
+      const runtimeRef = `runtime/${this.flat(['info', '--user', '--show-runtime', APP])}`;
+      requireThat([PLATFORM, FIXTURE_RUNTIME].includes(runtimeRef), 'Unexpected running app runtime ref');
+      const expected = { appPath: path.join(resources.location, 'files'), executableSha256: resources.executableSha256,
+        appCommit: this.commit(APP), runtimeCommit: this.commit(runtimeRef), runtimeRef };
+      identityCheck = () => this.windowIdentity(label, window, instance, launcher, expected);
+      identityCheck();
       this.command('xdotool', ['windowsize', window, '1100', '1000']);
       let lines;
       for (let end = Date.now() + 30000; Date.now() < end;) {
@@ -468,6 +592,7 @@ class Experiment {
           const choices = lines.filter(line => expression.test(line.text));
           requireThat(choices.length === 1, 'Consent control OCR is ambiguous; no guessed clicks');
           const choice = choices[0];
+          identityCheck();
           this.command('xdotool', ['mousemove', '--window', window, String(Math.round(choice.x)), String(Math.round(choice.y)), 'click', '1']);
           await sleep(1000);
           lines = capture(window);
@@ -486,11 +611,14 @@ class Experiment {
         'from PIL import Image, ImageStat; import json,sys; im=Image.open(sys.argv[1]).convert("RGB"); s=ImageStat.Stat(im); print(json.dumps({"width":im.width,"height":im.height,"stddev":s.stddev,"colors":len(im.resize((160,120)).getcolors(19200) or [])}))',
         path.join(this.evidence, `${label}.png`)]).stdout);
       requireThat(pixels.width >= 560 && pixels.height >= 480 && pixels.colors > 50 && pixels.stddev.some(value => value > 10), 'Blank/unframed native pixels');
+      identityCheck();
+      requireThat(this.commit(APP) === expected.appCommit && this.commit(runtimeRef) === expected.runtimeCommit, 'Installed refs changed during GUI capture');
       return { instance, screenshot: `${label}.png`, pixels, nativeVersionObserved: '0.1.13',
         renderedFlatpakRefusal: true, directUpdaterInvocationTested: false,
         linuxManagementUnsupportedObserved: true, syntheticTermsFixture: true,
         contextFile: `${label}-context.txt`,
-        resources: this.resources(), scope: 'X11 native WebKit window + OCR/pixels, not trusted IPC/full product acceptance' };
+        windowIdentity: this.report.guiIdentity[label], resources: this.resources(),
+        scope: 'XRes-bound X11 native WebKit window + OCR/pixels, not trusted IPC/full product acceptance' };
     } catch (error) { originalError = error; throw error; }
     finally {
       let cleanupError;
@@ -622,6 +750,10 @@ class Experiment {
         return { ...this.resources(), permissions: permissionMetadata(metadata) };
       });
       await this.phase('sandbox', () => {
+        const xres = JSON.parse(this.command(this.xresHelper, ['--self-test'], { timeout: 10000 }).stdout);
+        requireThat(xres.selfTest === true && xres.xresMajor === 1 && xres.xresMinor >= 2, 'XRes credential/forged-hint/destroyed-window regression failed');
+        this.report.xresTool = { selfTest: xres, sourceSha256: sha256(fs.readFileSync(path.join(__dirname, 'flatpak-xres-window-pid.c'))),
+          executableSha256: sha256(fs.readFileSync(this.xresHelper)) };
         const pid = sentinel.pid;
         const probe = this.flat(['run', '--user', '--command=sh', APP, '-c',
           'set -eu; test "$FLATPAK_ID" = com.creatorworks.hub; test -f /.flatpak-info; ' +
@@ -633,7 +765,7 @@ class Experiment {
         requireThat(probe.includes(`/.var/app/${ID}/config`) && probe.includes(`/.var/app/${ID}/data`), 'Unexpected sandbox XDG paths');
         fs.writeFileSync(path.join(this.evidence, 'sandbox-probe.txt'), probe);
         return { hostProjectPathDenied: true, nativeDataPathDenied: true, hostSentinelNotVisible: true,
-          xdgIsolated: true, dependenciesResolved: true, hostLaunchAttempted: false };
+          xdgIsolated: true, dependenciesResolved: true, hostLaunchAttempted: false, xresTool: this.report.xresTool };
       });
       // GUI failure is retained but does not prevent the independent, integrity-bound repository trial.
       try { await this.phase('candidate-gui', () => this.gui('candidate')); } catch { /* Recorded by phase. */ }
@@ -672,7 +804,8 @@ class Experiment {
         this.flat(['update', '--user', '-y', '--noninteractive', '--no-related', '--no-deps', FIXTURE_RUNTIME], { timeout: 600000 });
         requireThat(this.commit(FIXTURE_RUNTIME) === second && this.commit(APP) === this.report.fixtureCommit, 'Runtime update changed the wrong deployment');
         requireThat(this.commit(PLATFORM) === this.report.runtime.platformCommit && this.commit(SDK) === this.report.runtime.sdkCommit, 'Official GNOME50 refs changed');
-        const runtimePayloadProof = this.identicalRuntime(this.report.fixtureRuntimeCommit, second);
+        // Flatpak prunes old installed commits; compare the same verified hashes in our unpruned export repository.
+        const runtimePayloadProof = this.identicalRuntime(this.report.fixtureRuntimeCommit, second, this.repo);
         this.report.runtimeGeneration = { before: this.report.fixtureRuntimeCommit, after: second,
           runtimePayloadChanged: false, runtimePayloadProof, officialRefsUnchanged: true };
         return { ...this.report.runtimeGeneration, gui: await this.gui('runtime-generation'),
@@ -743,7 +876,8 @@ async function main(options) {
 }
 
 module.exports = { parseArgs, hostedRoot, requestIdentity, validateBinding, initialReport, finalizeReport,
-  inventorySnapshot, parsePs, waitForLauncherExit, ocrLines, fixtureMetadata, permissionMetadata, EXTRACT_DEB, Experiment, PHASES,
+  inventorySnapshot, parsePs, processSnapshot, verifyProcessBinding, executableSnapshot, verifyInstanceIdentity,
+  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, fixtureMetadata, permissionMetadata, EXTRACT_DEB, Experiment, PHASES,
   PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS, REVIEWED_CANDIDATE, REPO, APP, PLATFORM, SDK, FIXTURE_RUNTIME };
 if (require.main === module) {
   main(parseArgs(process.argv.slice(2))).catch(error => { console.error(`Flatpak native validation refused: ${error.message}`); process.exitCode = 1; });

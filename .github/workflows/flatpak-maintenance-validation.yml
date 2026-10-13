@@ -7,37 +7,37 @@ on:
         description: Exact successful PR22 CI run (no latest lookup)
         type: string
         required: true
-        default: '38407664529'
+        default: '38423134520'
       source_commit:
         description: Exact PR22 source head, not the artifact merge SHA
         type: string
         required: true
-        default: 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e'
+        default: '288d3d60a8108d6ff41729b63705af3598721f60'
       artifact_id:
         description: Exact Linux X64 artifact ID from that run
         type: string
         required: true
-        default: '11820885281'
+        default: '11827776708'
       artifact_sha256:
         description: Reviewed artifact ZIP digest (not the DEB digest)
         type: string
         required: true
-        default: 'c226e6739a924e59feb32eedd28e03489c2d744036e324f0739bcd6f4fb7d68b'
+        default: '5de4080ab8be4b46ef053af21e6d9985adbf77533b89f4d91d2e4d27bbc2e39e'
       deb_sha256:
         description: Separately reviewed exact native 0.1.13 amd64 DEB SHA256
         type: string
         required: true
-        default: '950392f2ded56017a5553e702dc76f2c296bfea2b6809a9e56e05b2030b7916f'
+        default: 'b95d71ab62ae75b38d2e653eee3d21eacba4869027d2c1fa01495065c429b3e0'
       deb_bytes:
         description: Reviewed native DEB byte length
         type: string
         required: true
-        default: '5975056'
+        default: '6004284'
       artifact_bytes:
         description: Reviewed Linux artifact ZIP byte length
         type: string
         required: true
-        default: '96940104'
+        default: '97015435'
 
 permissions:
   contents: read
@@ -53,13 +53,13 @@ jobs:
     timeout-minutes: 80
     env:
       VALIDATION_HARNESS_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
-      SOURCE_RUN: ${{ inputs.source_run || '38407664529' }}
-      SOURCE_COMMIT: ${{ inputs.source_commit || 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e' }}
-      SOURCE_ARTIFACT: ${{ inputs.artifact_id || '11820885281' }}
-      ARTIFACT_SHA256: ${{ inputs.artifact_sha256 || 'c226e6739a924e59feb32eedd28e03489c2d744036e324f0739bcd6f4fb7d68b' }}
-      ARTIFACT_BYTES: ${{ inputs.artifact_bytes || '96940104' }}
-      DEB_SHA256: ${{ inputs.deb_sha256 || '950392f2ded56017a5553e702dc76f2c296bfea2b6809a9e56e05b2030b7916f' }}
-      DEB_BYTES: ${{ inputs.deb_bytes || '5975056' }}
+      SOURCE_RUN: ${{ inputs.source_run || '38423134520' }}
+      SOURCE_COMMIT: ${{ inputs.source_commit || '288d3d60a8108d6ff41729b63705af3598721f60' }}
+      SOURCE_ARTIFACT: ${{ inputs.artifact_id || '11827776708' }}
+      ARTIFACT_SHA256: ${{ inputs.artifact_sha256 || '5de4080ab8be4b46ef053af21e6d9985adbf77533b89f4d91d2e4d27bbc2e39e' }}
+      ARTIFACT_BYTES: ${{ inputs.artifact_bytes || '97015435' }}
+      DEB_SHA256: ${{ inputs.deb_sha256 || 'b95d71ab62ae75b38d2e653eee3d21eacba4869027d2c1fa01495065c429b3e0' }}
+      DEB_BYTES: ${{ inputs.deb_bytes || '6004284' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -146,7 +146,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             flatpak flatpak-builder ostree gnupg dbus-x11 xvfb xauth \
-            xdotool x11-utils imagemagick tesseract-ocr python3-pil
+            xdotool x11-utils imagemagick tesseract-ocr python3-pil \
+            gcc libc6-dev libx11-dev libxres-dev
+      - name: Compile runner-only XRes identity helper (no product or SDK changes)
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror \
+            scripts/flatpak-xres-window-pid.c -o "$VALIDATION_ROOT/flatpak-xres-window-pid" \
+            -lXRes -lX11
       - name: Build, install, capture native pixels, and update isolated Flatpak deployments
         run: |
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x1200x24' \

@@ -8,34 +8,35 @@ const os = require('node:os');
 const { EventEmitter } = require('node:events');
 const { spawnSync, execFileSync } = require('node:child_process');
 const { parseArgs, hostedRoot, requestIdentity, validateBinding, initialReport, finalizeReport,
-  inventorySnapshot, parsePs, waitForLauncherExit, ocrLines, fixtureMetadata, permissionMetadata, EXTRACT_DEB,
+  inventorySnapshot, parsePs, processSnapshot, verifyProcessBinding, executableSnapshot, verifyInstanceIdentity,
+  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, fixtureMetadata, permissionMetadata, EXTRACT_DEB,
   Experiment, PHASES, PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS, REVIEWED_CANDIDATE,
   REPO, APP, PLATFORM, FIXTURE_RUNTIME } = require('./flatpak-native-smoke.cjs');
 
 const PYTHON = process.platform === 'win32' ? 'python' : 'python3';
-const SOURCE = 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e';
-const MERGE = '15f69917f827cac51af67ca027b460c142030379';
-const TREE = 'c56aee874eb51c7bc4b6205233995a2f8eb67124';
-const HARNESS = '6bf977e299fa29ef1d129278f0a9ea18810c7a7d';
-const ARCHIVE_SHA = 'c226e6739a924e59feb32eedd28e03489c2d744036e324f0739bcd6f4fb7d68b';
-const DEB_SHA = '950392f2ded56017a5553e702dc76f2c296bfea2b6809a9e56e05b2030b7916f';
+const SOURCE = '288d3d60a8108d6ff41729b63705af3598721f60';
+const MERGE = 'da87dfb1f815653f23737a98766b5eaa8a525dc4';
+const TREE = '52ebe386502913c583cb897f00e2d83c9703b404';
+const HARNESS = 'f'.repeat(40); // Synthetic newer test-only ref, not an accepted real product commit.
+const ARCHIVE_SHA = '5de4080ab8be4b46ef053af21e6d9985adbf77533b89f4d91d2e4d27bbc2e39e';
+const DEB_SHA = 'b95d71ab62ae75b38d2e653eee3d21eacba4869027d2c1fa01495065c429b3e0';
 function options() {
-  return { 'source-run': '38407664529', 'source-commit': SOURCE, 'artifact-id': '11820885281',
-    'artifact-sha256': ARCHIVE_SHA, 'artifact-bytes': '96940104', 'deb-sha256': DEB_SHA, 'deb-bytes': '5975056' };
+  return { 'source-run': '38423134520', 'source-commit': SOURCE, 'artifact-id': '11827776708',
+    'artifact-sha256': ARCHIVE_SHA, 'artifact-bytes': '97015435', 'deb-sha256': DEB_SHA, 'deb-bytes': '6004284' };
 }
 function binding() {
   return {
-    run: { id: 38407664529, repository: { id: 1364807512, full_name: REPO },
+    run: { id: 38423134520, repository: { id: 1364807512, full_name: REPO },
       head_repository: { full_name: REPO }, event: 'pull_request', path: '.github/workflows/ci.yml',
       status: 'completed', conclusion: 'success', head_sha: SOURCE, head_branch: 'fix/hub-013-platform-flatpak',
-      run_attempt: 1, pull_requests: [{ number: 22, base: { repo: { id: 1364807512 } }, head: { repo: { id: 1364807512 } } }] },
-    artifact: { id: 11820885281, name: `hub-development-Linux-X64-${MERGE}`, digest: `sha256:${ARCHIVE_SHA}`,
-      size_in_bytes: 96940104, expired: false, workflow_run: { id: 38407664529, head_sha: SOURCE,
+      run_attempt: 2, pull_requests: [{ number: 22, base: { repo: { id: 1364807512 } }, head: { repo: { id: 1364807512 } } }] },
+    artifact: { id: 11827776708, name: `hub-development-Linux-X64-${MERGE}`, digest: `sha256:${ARCHIVE_SHA}`,
+      size_in_bytes: 97015435, expired: false, workflow_run: { id: 38423134520, head_sha: SOURCE,
         repository_id: 1364807512, head_repository_id: 1364807512 } },
     commit: { sha: MERGE, parents: [{ sha: '35a16a45814d821d65b5d203628478449174cd55' }, { sha: SOURCE }],
       commit: { message: `Merge ${SOURCE} into 35a16a45814d821d65b5d203628478449174cd55`, tree: { sha: TREE } } },
     source: { sha: SOURCE, commit: { tree: { sha: TREE } } },
-    linuxJob: { name: 'Hub (Linux)', conclusion: 'success', run_id: 38407664529, run_attempt: 1 },
+    linuxJob: { name: 'Hub (Linux)', conclusion: 'success', run_id: 38423134520, run_attempt: 2 },
   };
 }
 function temporary(t) {
@@ -54,7 +55,7 @@ test('CLI is strict and all artifact/native pins are independently mandatory', (
   for (const args of [[], ['install'], ['run', '--root'], ['run', '--force', 'yes'],
     ['run', '--root', 'a', '--root', 'b'], ['run', '--root', '--force']]) assert.throws(() => parseArgs(args));
   const requested = requestIdentity(options());
-  assert.equal(requested.debBytes, 5975056);
+  assert.equal(requested.debBytes, 6004284);
   for (const key of Object.keys(options())) {
     for (const value of [undefined, '', 'invalid', '-1', `${options()[key]}\n`]) {
       assert.throws(() => requestIdentity({ ...options(), [key]: value }), key);
@@ -94,6 +95,7 @@ test('exact reviewed run accepts its different PR merge SHA only with matching s
   assert.notEqual(receipt.sourceCommit, receipt.buildCommit);
   assert.equal(receipt.sourceTree, TREE);
   assert.equal(receipt.artifactDigest, `sha256:${ARCHIVE_SHA}`);
+  assert.equal(receipt.runAttempt, 2);
 });
 
 for (const [label, mutate] of [
@@ -113,6 +115,7 @@ for (const [label, mutate] of [
   ['merge message', b => { b.commit.commit.message = 'unrelated'; }],
   ['product tree drift', b => { b.commit.commit.tree.sha = 'a'.repeat(40); }],
   ['Linux failed', b => { b.linuxJob.conclusion = 'failure'; }], ['wrong attempt', b => { b.linuxJob.run_attempt++; }],
+  ['stale Linux attempt', b => { b.linuxJob.run_attempt = 1; }],
 ]) {
   test(`binding fails closed: ${label}`, () => {
     const b = binding(); mutate(b);
@@ -154,7 +157,7 @@ test('command failures/timeouts and phase exceptions are written before propagat
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'evidence/commands.json')))[0].stdout.length, 65536);
 });
 
-test('6bf harness and reviewed cleanup-only changes preserve b4 product binding without admitting terms/runtime edits', t => {
+test('newer test-only harness preserves source288 product binding without admitting terms/runtime edits', t => {
   const root = temporary(t);
   fs.mkdirSync(path.join(root, 'evidence'));
   const old = process.env.VALIDATION_HARNESS_COMMIT;
@@ -169,10 +172,16 @@ test('6bf harness and reviewed cleanup-only changes preserve b4 product binding 
     'scripts/Test-InstalledCandidate.ps1', 'scripts/self-update-baselines.test.cjs',
     'scripts/native-self-update-lab.ps1', 'scripts/native-self-update-lab.test.cjs',
     'scripts/native-self-update-smoke.cjs', 'scripts/maintenance-signed-update.test.cjs',
+    '.github/workflows/maintenance-signed-update-lab.yml',
+    'tests/fixtures/maintenance-signed-update/README.md',
+    'tests/fixtures/maintenance-signed-update/creator-hub-windows-x86_64.json',
+    'tests/fixtures/maintenance-signed-update/creator-hub-windows-x86_64.json.minisig',
+    'tests/fixtures/maintenance-signed-update/latest.json',
   ];
-  assert.equal(PROBE_FILES.length, 4, 'Do not widen the workflow trigger scope');
+  assert.equal(PROBE_FILES.length, 5, 'Only the exact runner-only XRes helper is added');
+  assert.ok(PROBE_FILES.includes('scripts/flatpak-xres-window-pid.c'));
   assert.deepEqual(TREE_EXCLUSIONS, coexistenceFixture);
-  assert.equal(new Set(TREE_EXCLUSIONS).size, 20);
+  assert.equal(new Set(TREE_EXCLUSIONS).size, 26);
   assert.ok(TREE_EXCLUSIONS.every(file => !/[?*]/.test(file)), 'No directory or wildcard exclusions');
   for (const files of [PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS]) assert.ok(Object.isFrozen(files));
   let changed = coexistenceFixture.join('\n');
@@ -202,6 +211,10 @@ test('6bf harness and reviewed cleanup-only changes preserve b4 product binding 
     'scripts/flatpak-package.cjs', 'packaging/flatpak/payload.py', 'packaging/flatpak/runtime-50-evidence.json',
     '.github/workflows/ci.yml', 'scripts/native-linux-unreviewed-helper.py',
     '.github/workflows/mac-maintenance-validation.yml/unreviewed',
+    '.github/workflows/maintenance-signed-update-lab.yml/unreviewed',
+    'tests/fixtures/maintenance-signed-update/unreviewed.json',
+    'tests/fixtures/maintenance-signed-update/latest.json/unreviewed',
+    'tests/fixtures/maintenance-signed-update/nested/README.md',
   ]) {
     changed = [...coexistenceFixture, file].join('\n');
     assert.throws(() => e.tree(), /outside the finite test-only exclusions/, file);
@@ -236,6 +249,24 @@ test('runtime generation claims require actual empty OSTree filesystem differenc
   assert.equal(runner.identicalRuntime('a'.repeat(64), 'b'.repeat(64)).filesystemDiffEmpty, true);
   difference = 'M /files/lib/changed.so';
   assert.throws(() => runner.identicalRuntime('a'.repeat(64), 'b'.repeat(64)), /filesystem changed/);
+});
+
+test('post-update runtime diff uses retained export objects when the old installed commit was pruned', t => {
+  const root = temporary(t); fs.mkdirSync(path.join(root, 'evidence'));
+  const first = '245c6d9ef405eb146298b12accd480606c899f1f1995303ec7ec803f5ae17877';
+  const second = 'b4a434bff83e0a2af74d6d9354eac7775cddd21bdf7da20e7f2e69c864e6a7b8';
+  const retained = path.join(root, 'experimental-repo');
+  const e = new Experiment(root, initialReport(), (tool, args) => {
+    assert.equal(tool, 'ostree'); assert.deepEqual(args.slice(1), ['diff', '--fs-diff', first, second]);
+    return args[0] === `--repo=${retained}` ? { status: 0, stdout: '', stderr: '' }
+      : { status: 1, stdout: '', stderr: `error: No such metadata object ${first}.commit` };
+  });
+  assert.throws(() => e.identicalRuntime(first, second), /ostree failed/);
+  assert.deepEqual(e.identicalRuntime(first, second, e.repo), { first, second, repository: retained, filesystemDiffEmpty: true });
+  assert.throws(() => e.identicalRuntime(first, second, root), /owned repository/);
+  const source = fs.readFileSync(require.resolve('./flatpak-native-smoke.cjs'), 'utf8');
+  assert.match(source, /identicalRuntime\(this\.report\.fixtureRuntimeCommit, second, this\.repo\)/);
+  assert.match(source, /this\.commit\(FIXTURE_RUNTIME\) === second && this\.commit\(APP\) === this\.report\.fixtureCommit/);
 });
 
 test('fixture changes only runtime selection, keeps metadata/XML version13 and has no native14 bytes', () => {
@@ -326,6 +357,141 @@ test('namespace/process and OCR contracts refuse ambiguity without guessed autho
   assert.deepEqual(ocrLines(tsv), [{ text: 'Accept and continue', x: 30, y: 25 }]);
 });
 
+test('captured Flatpak TSV preserves empty runtime application columns without shifting PIDs', () => {
+  const rows = parsePs('3265388458\t\t4157\t4177\n1482866180\tcom.creatorworks.hub\t4226\t4230\n829695343\t\t4179\t4191\n\r\n');
+  assert.deepEqual(rows[0], { instance: '3265388458', application: '', pid: 4157, childPid: 4177 });
+  assert.equal(rows.filter(row => row.application === 'com.creatorworks.hub').length, 1);
+  assert.equal(parsePs('123\tcom.creatorworks.hub\t456\t0\r\n')[0].childPid, 0, 'Documented startup state is not a shifted/missing column');
+  for (const text of ['123 app 456 457', '123\t456\t457', '123\t\t456\t457\textra',
+    '123\t\t\t457', '123\t\t456\t', '123\t\t9007199254740992\t457', '123\tapp name\t456\t457']) {
+    assert.throws(() => parsePs(text), /Unexpected flatpak ps columns/, text);
+  }
+});
+
+function identityFixture(root) {
+  const instance = { instance: '123', application: 'com.creatorworks.hub', pid: 456, childPid: 457 };
+  const processes = {
+    456: { parentPid: 100, startTime: '1000', pidNamespace: 'pid:[10]', mountNamespace: 'mnt:[20]' },
+    457: { parentPid: 456, startTime: '1001', pidNamespace: 'pid:[30]', mountNamespace: 'mnt:[40]' },
+    458: { parentPid: 457, startTime: '1002', pidNamespace: 'pid:[30]', mountNamespace: 'mnt:[40]' },
+  };
+  const location = path.join(root, 'installed-candidate');
+  const appPath = path.join(location, 'files');
+  const bytes = Buffer.from('synthetic exact native executable');
+  const digest = require('./flatpak-package.cjs').sha256(bytes);
+  const info = { name: instance.application, runtime: PLATFORM, 'instance-id': instance.instance,
+    'app-path': appPath, 'app-commit': 'a'.repeat(64), 'runtime-commit': 'b'.repeat(64), arch: 'x86_64', branch: 'experimental' };
+  const metadata = `[Application]\nname=${info.name}\nruntime=${info.runtime}\n[Instance]\n`
+    + Object.entries(info).filter(([key]) => !['name', 'runtime'].includes(key)).map(([key, value]) => `${key}=${value}`).join('\n');
+  const executable = { dev: 8n, ino: 9007199254740993n, size: BigInt(bytes.length), isFile: () => true };
+  let offset = 0;
+  const io = {
+    readFileSync(file) {
+      if (file === '/proc/458/root/.flatpak-info') return metadata;
+      const pid = /^\/proc\/([0-9]+)\/stat$/.exec(file)?.[1];
+      assert.ok(processes[pid], `Unexpected process read: ${file}`);
+      const p = processes[pid]; const fields = Array(20).fill('0');
+      fields[0] = p.state || 'S'; fields[1] = p.parentPid; fields[19] = p.startTime;
+      return `${pid} (own app ) (fixture) ${fields.join(' ')}\n`;
+    },
+    readlinkSync(file) {
+      const [, pid, type] = /^\/proc\/([0-9]+)\/ns\/(pid|mnt)$/.exec(file) || [];
+      assert.ok(processes[pid]); return processes[pid][type === 'pid' ? 'pidNamespace' : 'mountNamespace'];
+    },
+    openSync(file, flags) { assert.equal(file, '/proc/458/exe'); assert.equal(flags, 'r'); offset = 0; return 42; },
+    fstatSync(fd, options) { assert.equal(fd, 42); assert.deepEqual(options, { bigint: true }); return executable; },
+    statSync(file, options) {
+      assert.deepEqual(options, { bigint: true });
+      assert.ok([path.join(appPath, 'bin/creator-hub'), '/proc/458/root/app/bin/creator-hub'].includes(file));
+      return { ...executable };
+    },
+    readSync(fd, buffer) { assert.equal(fd, 42); const remaining = bytes.subarray(offset); remaining.copy(buffer); offset = bytes.length; return remaining.length; },
+    closeSync(fd) { assert.equal(fd, 42); },
+  };
+  return { io, processes, instance, info, executable, expected: { appPath, executableSha256: digest,
+    appCommit: info['app-commit'], runtimeCommit: info['runtime-commit'], runtimeRef: PLATFORM },
+  resources: { location, executableSha256: digest, entriesVerified: 1 },
+  query: { window: '987', pid: 458, client: '2097152', xresMajor: 1, xresMinor: 2, selfTest: false } };
+}
+
+test('host process binding accepts only the exact child or its immediate reaper child', () => {
+  const f = identityFixture('/synthetic');
+  const outer = processSnapshot(456, f.io), sandbox = processSnapshot(457, f.io), client = processSnapshot(458, f.io);
+  verifyProcessBinding(client, sandbox, outer, f.instance, outer);
+  verifyProcessBinding(sandbox, sandbox, outer, f.instance, outer);
+  assert.equal(client.startTime, '1002', 'Spaces and parentheses in comm do not shift starttime');
+  for (const change of [{ parentPid: 999 }, { pidNamespace: 'pid:[999]' }, { mountNamespace: 'mnt:[999]' }]) {
+    assert.throws(() => verifyProcessBinding({ ...client, ...change }, sandbox, outer, f.instance, outer), /outside the exact/);
+  }
+  assert.throws(() => verifyProcessBinding(client, sandbox, outer, f.instance, { ...outer, startTime: '9' }), /owned launcher/);
+  assert.throws(() => verifyProcessBinding(client, sandbox, outer, { ...f.instance, pid: 999 }, outer), /owned launcher/);
+  for (const state of ['Z', 'X']) {
+    f.processes[458].state = state; assert.throws(() => processSnapshot(458, f.io), /Dead or malformed/);
+  }
+  assert.throws(() => processSnapshot(-1, f.io), /Invalid host/);
+});
+
+test('running executable proof checks exact inode, container path and native inventory SHA', () => {
+  const f = identityFixture('/synthetic');
+  assert.equal(executableSnapshot(458, f.expected.appPath, f.expected.executableSha256, f.io).inode, '9007199254740993');
+  assert.throws(() => executableSnapshot(458, f.expected.appPath, 'f'.repeat(64), f.io), /SHA256/);
+  const stat = f.io.statSync;
+  f.io.statSync = (...args) => ({ ...stat(...args), ino: 9007199254740992n });
+  assert.throws(() => executableSnapshot(458, f.expected.appPath, f.expected.executableSha256, f.io), /not the exact installed/);
+});
+
+test('running metadata parser and verifier bind exact instance/app/runtime rather than names alone', () => {
+  const f = identityFixture('/synthetic');
+  const parsed = spawnSync(PYTHON, ['-c', INSTANCE_IDENTITY], { input: f.io.readFileSync('/proc/458/root/.flatpak-info'), encoding: 'utf8' });
+  assert.equal(parsed.status, 0, parsed.stderr);
+  assert.deepEqual(JSON.parse(parsed.stdout), f.info);
+  verifyInstanceIdentity(f.info, f.instance, f.expected);
+  for (const key of Object.keys(f.info)) assert.throws(() => verifyInstanceIdentity({ ...f.info, [key]: 'wrong' }, f.instance, f.expected), /deployment drift/);
+});
+
+for (const fault of [null, 'unavailable', 'timeout', 'foreign-client', 'starttime-reuse', 'exe-drift', 'namespace-drift',
+  'instance-drift', 'invalid-receipt', 'wrong-window', 'unsafe-pid', 'old-protocol', 'runtime-drift', 'reuse-during-hash']) {
+  test(`XRes identity receipt remains fail-closed across capture rechecks: ${fault}`, async t => {
+    const root = temporary(t); fs.mkdirSync(path.join(root, 'evidence'));
+    const f = identityFixture(root);
+    const run = (tool, args) => {
+      if (tool === 'flatpak') return { status: 0, stdout: `123\t${f.instance.application}\t456\t${fault === 'instance-drift' ? 999 : 457}\n` };
+      if (tool.endsWith('flatpak-xres-window-pid')) {
+        if (fault === 'unavailable') return { status: 5, stderr: 'No local XRes PID' };
+        if (fault === 'timeout') return { status: null, error: { code: 'ETIMEDOUT', message: 'bounded helper timeout' } };
+        const invalid = { 'invalid-receipt': { selfTest: true }, 'wrong-window': { window: '111' },
+          'unsafe-pid': { pid: 9007199254740992 }, 'old-protocol': { xresMinor: 1 } };
+        return { status: 0, stdout: JSON.stringify({ ...f.query, ...invalid[fault] }) };
+      }
+      assert.equal(tool, '/usr/bin/python3'); assert.equal(args[1], INSTANCE_IDENTITY);
+      return { status: 0, stdout: JSON.stringify(f.info) };
+    };
+    const e = new Experiment(root, initialReport(), run, undefined, f.io);
+    const launcher = processSnapshot(456, f.io);
+    if (fault === 'foreign-client') f.processes[458].parentPid = 999;
+    if (fault === 'exe-drift') f.expected.executableSha256 = 'f'.repeat(64);
+    if (fault === 'runtime-drift') f.info['runtime-commit'] = 'c'.repeat(64);
+    if (fault === 'reuse-during-hash') {
+      const read = f.io.readSync;
+      f.io.readSync = (...args) => { f.processes[458].startTime = '2000'; return read(...args); };
+    }
+    const prove = () => e.windowIdentity('candidate', '987', f.instance, launcher, f.expected);
+    if (['starttime-reuse', 'namespace-drift'].includes(fault)) {
+      prove();
+      if (fault === 'starttime-reuse') f.processes[458].startTime = '9999';
+      else f.processes[458].mountNamespace = 'mnt:[999]';
+    }
+    if (fault) await assert.rejects(e.phase('candidate-gui', prove));
+    else { prove(); prove(); assert.equal(e.report.guiIdentity.candidate.rechecks, 2); }
+    const report = JSON.parse(fs.readFileSync(path.join(root, 'evidence/report.json')));
+    assert.equal(report.releaseReady, false);
+    if (fault) {
+      assert.equal(report.checks.find(check => check.name === 'candidate-gui').status, 'failed');
+      assert.ok(report.guiIdentity.candidate.failure);
+    }
+  });
+}
+
 function fakeLauncher({ exited = false, hang = false } = {}) {
   const child = new EventEmitter();
   Object.assign(child, { pid: 456, exitCode: exited ? 137 : null, signalCode: null,
@@ -371,7 +537,7 @@ for (const fault of [null, 'kill-nonzero', 'kill-hang', 'launcher-hang', 'instan
       } else assert.deepEqual(args, ['ps', '--columns=instance,application,pid,child-pid']);
       // A foreign instance must survive, and must never become a kill target.
       const alive = fault === 'instance-survives' || fault === 'unknown-instance-survives';
-      return { status: 0, stdout: args[0] === 'ps' ? `${alive ? '123 com.creatorworks.hub 455 456\n' : ''}999 org.example.Foreign 700 701\n` : '', stderr: '' };
+      return { status: 0, stdout: args[0] === 'ps' ? `${alive ? '123\tcom.creatorworks.hub\t455\t456\n' : ''}999\torg.example.Foreign\t700\t701\n` : '', stderr: '' };
     });
     const cleanup = () => e.cleanupGui('candidate', child, fault === 'unknown-instance-survives' ? null : own, null, 10);
     if (!fault) {
@@ -390,44 +556,69 @@ for (const fault of [null, 'kill-nonzero', 'kill-hang', 'launcher-hang', 'instan
   });
 }
 
-for (const originalFailure of [false, true]) {
+for (const originalFailure of [false, true, 'xres-unavailable', 'no-net-wm-pid', 'identity-drift-after-import', 'identity-drift-before-consent']) {
   test(`GUI cleanup invalidates capture and retains the original error: ${originalFailure}`, async t => {
     // Entire GUI/launcher/command surface is synthetic; never launch Flatpak or capture a host window.
     const root = temporary(t); fs.mkdirSync(path.join(root, 'evidence'));
-    const child = fakeLauncher(); let psCalls = 0;
+    const f = identityFixture(root);
+    const child = fakeLauncher(); let psCalls = 0; let killed = false;
+    const missingXres = originalFailure === 'xres-unavailable';
+    const passed = originalFailure === 'no-net-wm-pid';
+    const identityDrift = originalFailure === 'identity-drift-after-import';
+    const consentDrift = originalFailure === 'identity-drift-before-consent';
+    const cleanupPasses = missingXres || passed || identityDrift || consentDrift;
     const original = Error('original namespace diagnostic');
-    const text = ['Creator Hub 0.1.13', 'Updates are managed by Flatpak', 'Native installers cannot', 'App management is not supported on Linux'];
+    const text = consentDrift ? ['I have read and agree', 'Accept and continue']
+      : ['Creator Hub 0.1.13', 'Updates are managed by Flatpak', 'Native installers cannot', 'App management is not supported on Linux'];
     const tsv = 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'
       + text.map((line, i) => `5\t1\t1\t1\t${i + 1}\t1\t10\t20\t50\t10\t90\t${line}`).join('\n');
     const e = new Experiment(root, initialReport(), (tool, args) => {
       let stdout = '';
       if (tool === 'flatpak' && args[0] === 'kill') {
-        child.exitCode = 137; child.emit('exit', 137);
-        return { status: 1, stdout, stderr: 'synthetic cleanup failure' };
+        killed = true; child.exitCode = 137; child.emit('exit', 137);
+        return { status: cleanupPasses ? 0 : 1, stdout, stderr: cleanupPasses ? '' : 'synthetic cleanup failure' };
       }
-      if (tool === 'flatpak' && args[0] === 'ps') stdout = ++psCalls === 2 ? '123 com.creatorworks.hub 455 456\n' : '';
+      if (tool === 'flatpak' && args[0] === 'ps') stdout = ++psCalls >= 2 && !killed ? '123\tcom.creatorworks.hub\t456\t457\n' : '';
       if (tool === 'flatpak' && args[0] === 'run') stdout = '--die-with-parent';
       if (tool === 'flatpak' && args[0] === 'enter' && args[2] === 'cat') stdout = 'name=com.creatorworks.hub';
+      if (tool === 'flatpak' && args[0] === 'info') stdout = args.includes('--show-runtime') ? PLATFORM.slice(8)
+        : args.at(-1) === APP ? f.expected.appCommit : f.expected.runtimeCommit;
       if (tool === 'xdotool' && args[0] === 'search') stdout = '987\n';
-      if (tool === 'xprop') stdout = '_NET_WM_PID(CARDINAL) = 456\n';
-      if (tool === 'tesseract') stdout = tsv;
-      if (tool === '/usr/bin/python3') stdout = JSON.stringify({ width: 1100, height: 1000, colors: 100, stddev: [20, 20, 20] });
+      assert.notEqual(tool, 'xprop', 'Neither absent nor spoofed window PID properties grant identity');
+      if (tool.endsWith('flatpak-xres-window-pid')) {
+        if (missingXres) return { status: 5, stdout: '', stderr: 'No unique live local XRes PID' };
+        stdout = JSON.stringify(f.query);
+      }
+      if (tool === 'import' && identityDrift) f.processes[458].startTime = '2000';
+      if (tool === 'tesseract') {
+        stdout = tsv;
+        if (consentDrift) f.processes[458].startTime = '2000';
+      }
+      if (tool === '/usr/bin/python3') stdout = args[1] === INSTANCE_IDENTITY ? JSON.stringify(f.info)
+        : JSON.stringify({ width: 1100, height: 1000, colors: 100, stddev: [20, 20, 20] });
       return { status: 0, stdout, stderr: '' };
     }, (tool, args) => {
       assert.equal(tool, 'flatpak'); assert.deepEqual(args, ['run', '--user', '--die-with-parent', APP]); return child;
-    });
-    e.resources = () => ({ syntheticUnitInventory: true });
-    if (originalFailure) {
+    }, f.io);
+    e.resources = () => f.resources;
+    if (originalFailure === true) {
       const flat = e.flat.bind(e);
       e.flat = (args, opts) => { if (args[0] === 'enter') throw original; return flat(args, opts); };
     }
-    await assert.rejects(e.phase('candidate-gui', () => e.gui('candidate')), error =>
-      originalFailure ? error === original : /GUI cleanup failed/.test(error.message));
+    const execute = () => e.phase('candidate-gui', () => e.gui('candidate'));
+    if (passed) {
+      await execute(); assert.ok(e.report.guiIdentity.candidate.rechecks >= 4);
+    } else await assert.rejects(execute, error => originalFailure === true ? error === original : missingXres
+      ? /flatpak-xres-window-pid.*failed/.test(error.message) : identityDrift || consentDrift
+        ? /identity changed during GUI capture/.test(error.message) : /GUI cleanup failed/.test(error.message));
     const saved = JSON.parse(fs.readFileSync(path.join(root, 'evidence/report.json')));
-    assert.equal(saved.checks.find(check => check.name === 'candidate-gui').status, 'failed');
-    assert.equal(saved.guiCleanup.candidate.passed, false); assert.equal(saved.releaseReady, false);
-    assert.ok(saved.failures.some(failure => failure.phase === 'candidate-cleanup'));
-    if (originalFailure) assert.ok(saved.failures.some(failure => failure.phase === 'candidate-gui' && failure.message === original.message));
+    assert.equal(saved.checks.find(check => check.name === 'candidate-gui').status, passed ? 'passed' : 'failed');
+    assert.equal(saved.guiCleanup.candidate.passed, cleanupPasses); assert.equal(saved.releaseReady, false);
+    if (missingXres) assert.ok(!e.commands.some(command => command.tool === 'import' || command.tool === 'tesseract'), 'No unowned pixel/consent capture after identity failure');
+    if (identityDrift) assert.ok(!e.commands.some(command => command.tool === 'tesseract' || command.args.includes('click')), 'Post-import drift prevents OCR/consent acceptance');
+    if (consentDrift) assert.ok(!e.commands.some(command => command.args.includes('click')), 'Post-OCR identity drift prevents any synthetic consent click');
+    if (!cleanupPasses) assert.ok(saved.failures.some(failure => failure.phase === 'candidate-cleanup'));
+    if (originalFailure === true) assert.ok(saved.failures.some(failure => failure.phase === 'candidate-gui' && failure.message === original.message));
   });
 }
 
@@ -461,12 +652,36 @@ test('workflow uses explicit dispatch instead of repeating expensive native runs
   }
 });
 
+test('runner-only XRes helper queries one live resource with no PID-hint or namespace fallback', () => {
+  const helper = fs.readFileSync(path.join(__dirname, 'flatpak-xres-window-pid.c'), 'utf8');
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/flatpak-maintenance-validation.yml'), 'utf8');
+  const source = fs.readFileSync(require.resolve('./flatpak-native-smoke.cjs'), 'utf8');
+  assert.match(helper, /XResClientIdSpec spec = \{ window, XRES_CLIENT_ID_PID_MASK \}/);
+  assert.match(helper, /XResQueryClientIds\(display, 1, &spec, &count, &values\)/);
+  assert.match(helper, /status == Success && count == 1/);
+  assert.match(helper, /XResGetClientPid\(&values\[0\]\)/);
+  assert.match(helper, /XResClientIdsDestroy\(count, values\)/);
+  assert.match(helper, /XGetWindowAttributes/);
+  assert.match(helper, /address.sun_family != AF_UNIX/);
+  assert.match(helper, /major != 1 \|\| minor < 2/);
+  assert.doesNotMatch(helper, /XGetWindowProperty|setns|kill\(|exec|system\(|getenv\(/);
+  assert.match(helper, /XChangeProperty[\s\S]*pid == getpid\(\)/);
+  assert.match(helper, /XDestroyWindow[\s\S]*!query_pid/);
+  assert.match(workflow, /gcc libc6-dev libx11-dev libxres-dev/);
+  assert.match(workflow, /cc -std=c11 -O2 -Wall -Wextra -Werror[\s\S]*scripts\/flatpak-xres-window-pid.c[\s\S]*-lXRes -lX11/);
+  assert.ok(workflow.indexOf('Recheck binding before provisioning tools') < workflow.indexOf('libxres-dev'));
+  assert.match(source, /command\(this.xresHelper, \['--self-test'\]/);
+  assert.match(source, /identityCheck\(\);\s+this.command\('import'[\s\S]*?identityCheck\(\);/);
+  assert.match(source, /identityCheck\(\);\s+this.command\('xdotool', \['mousemove'/);
+});
+
 test('runner program cannot widen sandbox, access production signing material or silently install locally', () => {
   const source = fs.readFileSync(require.resolve('./flatpak-native-smoke.cjs'), 'utf8');
   assert.match(source, /hostedRoot\(\{ root: this.root \}\)/);
   assert.match(source, /https:\/\/dl.flathub.org\/repo\/flathub.flatpakrepo/);
   assert.equal(/--no-gpg-verify|--filesystem=|--socket=(session|system)-bus|flatpak-spawn|--no-sandbox|rejectUnauthorized|SIGNING_KEY_PATH|auth\.json|list-secret-keys|export-secret/.test(source), false);
-  assert.match(source, /readlink \/proc\/\$\{windowPid\}\/exe/);
+  assert.doesNotMatch(source, /windowPid|_NET_WM_PID|\/proc\/.*environ|\/proc\/.*cmdline/);
+  assert.match(source, /verifyProcessBinding\(client, sandbox, outer, instance, launcher\)/);
   assert.match(source, /\['run', '--user', '--die-with-parent', APP\]/);
   assert.match(source, /flat\(\['run', '--help'\]\)\.includes\('--die-with-parent'\)/);
   assert.match(source, /same-version OSTree generation update/);

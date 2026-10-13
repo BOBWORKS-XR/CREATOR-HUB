@@ -12,34 +12,37 @@ existing workflows, release feeds or signing inputs.
 | Identity | Value |
 | --- | --- |
 | Repository / source PR | `BOBWORKS-XR/CREATOR-HUB`, PR22 |
-| Successful CI run / attempt | `38393759689` / `1` |
-| Source head | `6d47bd0790cfc5c3560495bbd92c37b3cd06df14` |
-| CI artifact build / PR merge | `cb7499b592b4260f6733b7ff5ef7c670f74233a0` |
-| Source and merge tree | `8b1deb17843f753f7b6fe5cf3560412ed8b541d9` |
-| Linux artifact ID | `11810908524` |
-| Artifact name | `hub-development-Linux-X64-cb7499b592b4260f6733b7ff5ef7c670f74233a0` |
-| Artifact ZIP bytes | `96940196` |
-| Artifact ZIP SHA256 | `681ef6fcb50f77f588f6f9e88a13fbbf9545b56ba6473f4fe749c3a6a22f44d1` |
+| Successful CI run / attempt | `38423134520` / `2` |
+| Source head | `288d3d60a8108d6ff41729b63705af3598721f60` |
+| CI artifact build / PR merge | `da87dfb1f815653f23737a98766b5eaa8a525dc4` |
+| Source and merge tree | `52ebe386502913c583cb897f00e2d83c9703b404` |
+| Linux artifact ID | `11827776708` |
+| Artifact name | `hub-development-Linux-X64-da87dfb1f815653f23737a98766b5eaa8a525dc4` |
+| Artifact ZIP bytes | `97015435` |
+| Artifact ZIP SHA256 | `5de4080ab8be4b46ef053af21e6d9985adbf77533b89f4d91d2e4d27bbc2e39e` |
 | Native DEB | `Creator Hub_0.1.13_amd64.deb` |
-| Native DEB bytes | `5975036` |
-| Native DEB SHA256 | `57ff363701a49c8d603efb677a3720ddc5c2b2443a9b019f0afd5be922ac5374` |
+| Native DEB bytes | `6004284` |
+| Native DEB SHA256 | `b95d71ab62ae75b38d2e653eee3d21eacba4869027d2c1fa01495065c429b3e0` |
 
-The user supplied the reviewed DEB hash/size. Public GitHub metadata was checked
-on 2026-10-13 for the successful run, source head, repository, artifact ID,
-artifact digest/size, merge parents and equal source/merge trees. No native
-installation, Flatpak build or remote workflow dispatch was performed locally.
-The workflow repeats these checks against live metadata and downloaded bytes;
-this dated table is not proof that an artifact remains available indefinitely.
-See [the exact CI run](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38393759689).
+The user supplied the reviewed tuple. Live API checks on 2026-10-13 confirmed
+run success on attempt 2, all five successful attempt-2 jobs, repository,
+artifact ID/digest/size, merge parents and equal source/merge trees. The existing
+local DEB under `artifacts/native-288-Linux-38423134520` independently matched
+the reviewed byte count and SHA256. ZIP metadata is not local byte verification;
+the workflow must download and hash it again. No native installation, Flatpak
+build or remote workflow dispatch was performed locally. The new XRes probe
+has not yet accepted these bytes; the older run below used a different candidate.
+This dated table is not proof that an artifact remains available indefinitely.
+See [the exact CI run](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38423134520).
 
 ## Before-Merge Execution
 
-The new workflow runs on `pull_request` changes limited to the four probe files,
-so it does not need an early default-branch merge or a potentially unavailable
-new `workflow_dispatch` endpoint. Pull-request runs use the exact reviewed
-defaults above, not a latest-success lookup. Manual dispatch remains available
-once GitHub exposes the workflow; explicit inputs select another separately
-reviewed PR22 run/head/artifact/ZIP hash+size/DEB hash+size.
+The current workflow uses explicit `workflow_dispatch` instead of repeating
+expensive installation runs on every PR push. Its reviewed defaults above are
+not a latest-success lookup. Explicit inputs select another separately reviewed
+PR22 run/head/artifact/ZIP hash+size/DEB hash+size. Main owns commits and dispatch;
+this sidecar does neither. Before-merge workflow availability must be checked,
+not solved by an early product merge.
 
 Checkout uses the harness PR head, not its merge ref. Before provisioning:
 
@@ -47,8 +50,8 @@ Checkout uses the harness PR head, not its merge ref. Before provisioning:
 2. Check actual `HEAD^{commit}` against the workflow's requested harness ref.
 3. Diff that source against harness HEAD with renames disabled. Accept only the
    finite reviewed test-only exclusions below, including coexisting platform
-   probes and the Windows baseline acceptance edits. Workflow triggers remain
-   limited to the original four Flatpak probe files.
+   probes and the Windows baseline acceptance edits. The runner-only XRes helper
+   is one explicit filename, not a new directory exemption.
 4. Refuse a dirty checkout, ref mismatch or any difference outside those exact
    paths. Product/resource/packaging/runtime changes and existing build CI changes
    still fail. Newer harness source is not silently treated as the binary's source.
@@ -60,8 +63,9 @@ An expired artifact or mismatched ref stops the run. Update the reviewed pins
 explicitly; do not fall back to another release, run, artifact or renamed DEB.
 The artifact label is deliberately **not** equated with the run's head SHA.
 
-`PROBE_FILES` remains the four Flatpak paths. `REVIEWED_TEST_ONLY_FILES` adds
-exactly these twelve paths to the frozen `TREE_EXCLUSIONS`, with no directory
+`PROBE_FILES` contains the four original Flatpak paths plus exactly
+`scripts/flatpak-xres-window-pid.c`. `REVIEWED_TEST_ONLY_FILES` adds
+exactly these twenty-one paths to the frozen `TREE_EXCLUSIONS`, with no directory
 or filename-pattern exemptions:
 
 - `scripts/native-linux-maintenance-smoke.cjs`
@@ -76,12 +80,25 @@ or filename-pattern exemptions:
 - `.github/workflows/windows-candidate.yml`
 - `scripts/Test-InstalledCandidate.ps1`
 - `scripts/self-update-baselines.test.cjs`
+- `scripts/native-self-update-lab.ps1`
+- `scripts/native-self-update-lab.test.cjs`
+- `scripts/native-self-update-smoke.cjs`
+- `scripts/maintenance-signed-update.test.cjs`
+- `.github/workflows/maintenance-signed-update-lab.yml`
+- `tests/fixtures/maintenance-signed-update/README.md`
+- `tests/fixtures/maintenance-signed-update/creator-hub-windows-x86_64.json`
+- `tests/fixtures/maintenance-signed-update/creator-hub-windows-x86_64.json.minisig`
+- `tests/fixtures/maintenance-signed-update/latest.json`
 
-The regression fixture accepts all sixteen reviewed paths against source
-`6d47bd0790cfc5c3560495bbd92c37b3cd06df14`, then rejects product code/resources,
+The regression fixture accepts all twenty-six reviewed paths against source
+`288d3d60a8108d6ff41729b63705af3598721f60`, then rejects product code/resources,
 package inputs, runtime evidence, build CI, and unreviewed probe paths when each
 is added to that same coexistence fixture. Dirty checkout and exact-ref refusal
 are retained. These exclusions authorize test coexistence, not new product bytes.
+The Windows fixture exclusions cover public test-signature fixtures only, not
+any signing key or issuer change. Neighboring and nested fixture paths remain
+rejected. New native candidate pins require main's completed exact artifact
+tuple; a building/retried run does not replace the reviewed defaults.
 
 ## Runner Scope
 
@@ -141,8 +158,9 @@ the immutable SHA-pinned Flatpak inputs.
 - Capture actual `/.flatpak-info`, sandbox XDG paths, denied native-data/project
   paths, hidden host sentinel process, and `ldd` results inside GNOME50. Missing
   dependencies are blockers, not authorization to copy guessed libraries.
-- Launch the actual packaged native WebKit window. Bind its X11 window PID to
-  `/app/bin/creator-hub` inside the unique Flatpak instance. Capture window pixels,
+- Launch the actual packaged native WebKit window. Bind its X11 resource ID via
+  local XRes socket credentials to the exact owned instance and executable using
+  the checks below. Capture window pixels,
   dimensions/color variance, OCR, launch diagnostics and namespace context.
   Require native `0.1.13`, rendered Flatpak-managed update/refusal text, and the
   completed explicit Linux-unsupported management state, not forever checking.
@@ -175,6 +193,107 @@ integrity-bound local update trial may continue; the final job still fails for
 failed checks.
 
 ## Evidence And Remaining Gates
+
+### Actual Run 38419016632
+
+[The failed rerun](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38419016632)
+used harness `1e85a70b8de38541afe09bff483025ca9401ad1d` with source
+`b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e`, run `38407664529`, artifact
+`11820885281`, not the new defaults above. Its original evidence is retained locally under
+`artifacts/flatpak-run-38419016632`; earlier failure evidence is unchanged.
+Binding, native inventory/beforeimage, GPG-verified GNOME50 provisioning,
+build/export, installed permissions/resources, sandbox path/process isolation,
+resolved libraries, actual same-version app update and preservation passed.
+This is partial experiment evidence, not GUI or product acceptance.
+
+- **Confirmed broken, harness parser:** non-interactive `flatpak ps` emitted
+  literal TSV with empty application cells for runtime-only sandboxes. Whitespace
+  splitting collapsed those cells and failed before candidate launch. The parser
+  now preserves all four fields and still rejects malformed columns. See the
+  [Flatpak table printer](https://github.com/flatpak/flatpak/blob/1.14.6/app/flatpak-table-printer.c#L642-L661)
+  and [nullable application contract](https://github.com/flatpak/flatpak/blob/1.14.6/common/flatpak-instance.c#L122-L139).
+- **Confirmed broken, runtime-history proof:** the second scoped runtime update
+  succeeded and exact installed/runtime/app/official-ref checks passed, but the
+  old installed commit was absent when diffing. Flatpak
+  [prunes during update](https://github.com/flatpak/flatpak/blob/1.14.6/common/flatpak-transaction.c#L4830-L4834).
+  The historical diff now uses those same verified hashes in the harness-owned
+  export repository, which is not pruned. Installed deployment checks remain
+  mandatory; an empty filesystem diff still must pass. This change awaits a
+  disposable rerun and is not new runtime-payload acceptance.
+- **Correct as-is, GTK; unknown identity capture contract:** a visible fixture
+  window lacked `_NET_WM_PID`. GTK
+  [deliberately omits that hint in a sandbox](https://github.com/GNOME/gtk/blob/gtk-3-24/gdk/x11/gdkwindow-x11.c#L885-L896)
+  because namespace PIDs would mislead the window manager. That run failed before
+  pixel/consent capture; the new XRes contract below is ready for a disposable
+  rerun, not retroactive acceptance. No guessed PID mapping, extra bus/home
+  permission or disabled WebKit sandbox is introduced. Retained launch
+  warnings concern AT-SPI and DRI3; they do not prove a WebKit security denial.
+
+Neither GUI capture passed; visible updater/management/consent and direct trusted
+updater-command refusal remain unaccepted. Fixture cleanup confirmed launcher
+exit and instance disappearance. Overall status remains failed and
+`releaseReady=false`. Tests exercise these failures without installing anything.
+The new defaults bind source `288`, which includes the reviewed native-consent
+product changes. Any newer product changes still require another separately
+reviewed matching artifact; testing-path exclusions cannot admit them.
+
+### XRes Window Ownership Contract
+
+XRes 1.2's [protocol specification](https://sources.debian.org/src/xorgproto/2025.1-1/resproto.txt/)
+allows selecting a client by its window resource ID and requesting its local
+PID. Missing identification is permitted by the protocol, so absence is a
+blocker, not a zero/default PID. GNOME's
+[PID-namespace fix](https://lists.gnome.org/archives/commits-list/2022-March/msg10404.html)
+uses `XResQueryClientIds` / `XResGetClientPid` for this purpose. The X server's
+[client identification](https://github.com/XQuartz/xorg-server/blob/master/os/client.c#L89-L106)
+and [Linux socket credentials](https://github.com/XQuartz/xorg-server/blob/master/os/access.c#L1171-L1180)
+trace that PID to `SO_PEERCRED`, not a writable window property.
+
+The runner compiles the single-purpose C helper with `libxres-dev`, `libx11-dev`
+and ordinary C tooling, only after source/artifact binding. No local SDK/tool
+installation is authorized. The helper requires a local Unix-socket display,
+XRes version 1.2 or later within major version 1, a live window before/after the
+query, and exactly one PID result. It queries one resource, never all clients,
+and does not read `_NET_WM_PID` as authority. Its runner-only self-test creates
+its own window, checks the actual process PID with missing and forged PID hints,
+then requires refusal after destroying that window. Compilation or self-test
+failure fails the workflow and is retained by normal report finalization.
+
+Before pixels or synthetic consent input, the harness requires:
+
+- No preexisting Hub instance, one new exact instance, and its outer PID equal
+  to the owned non-background launcher's PID with unchanged host `/proc` start
+  time. [Flatpak's launch implementation](https://github.com/flatpak/flatpak/blob/1.14.6/common/flatpak-run.c#L4377-L4394)
+  preserves this PID when executing bubblewrap.
+- The XRes host client PID is exactly `flatpak ps`'s `child-pid`, or its immediate
+  child. This bounded alternative handles bubblewrap's
+  [namespace reaper](https://github.com/containers/bubblewrap/blob/v0.9.0/bubblewrap.c#L3080-L3110).
+  It is not guessed namespace-PID arithmetic, an arbitrary descendant walk or
+  kill authority. The child must belong to the exact outer process; both sandbox
+  and X client must share PID and mount namespace identities.
+- The client's `/proc/PID/root/.flatpak-info`, parsed with strict ConfigParser,
+  matches the exact instance ID, app name, architecture, branch, installed app
+  path and pinned app/runtime commits. No process environment or command-line
+  dump is collected.
+- A held `/proc/PID/exe` descriptor has the same device/inode/size as both the
+  installed inventory executable and that process's `/app/bin/creator-hub`.
+  Its bounded SHA256 must match the native inventory. Host process start times
+  and namespace identities must remain stable across this proof.
+- The entire binding is rechecked before and after each window import, before
+  each consent click and before acceptance; the installed app/runtime refs are
+  rechecked at completion. Changed identity, vanished processes/windows,
+  inaccessible host `/proc`, missing XRes or timeout refuses acceptance. There
+  is no title-only, PID-hint, namespace-guess, extra-permission or sandbox bypass
+  fallback. Only the already owned experimental sandbox is a cleanup target.
+
+Bounded `report.guiIdentity` records the initial/last proof, recheck count,
+last XRes receipt and any failure; `commands.json` retains helper status/stderr.
+`report.xresTool` binds the source/helper hashes and real self-test receipt.
+Local tests use synthetic process/filesystem fixtures, including PID reuse,
+foreign processes, changed namespace/hash/deployment, missing/invalid XRes,
+timeout, drift after image capture and drift before consent. Real C/XRes,
+Flatpak `/proc` access and GUI pixels remain unverified until the disposable
+workflow runs. `releaseReady=false` and direct trusted updater IPC remain separate.
 
 `evidence/report.json` exists before provisioning. `finally` and workflow
 `always()` finalization retain original phase errors, label unreached phases
