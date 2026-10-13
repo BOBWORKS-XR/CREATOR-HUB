@@ -15,6 +15,7 @@ mod mac_update;
 mod manager;
 mod mcp_runtime;
 mod platform;
+mod preferences;
 mod projects;
 mod self_update;
 mod update_target;
@@ -280,7 +281,7 @@ fn open_resource(resource: String) -> Result<(), String> {
 }
 
 fn shell_initialization(shell_key: &str) -> String {
-    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); Object.defineProperty(window, '__CREATOR_HUB_TERMS_PROTOCOL__', {{value: 1}}); }}", shell_key, env!("CARGO_PKG_VERSION"))
+    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); Object.defineProperty(window, '__CREATOR_HUB_TERMS_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_PREFERENCES_PROTOCOL__', {{value: 1}}); }}", shell_key, env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(target_os = "linux")]
@@ -320,6 +321,8 @@ fn main() {
     let commands: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
         usage_terms::usage_terms_status,
         usage_terms::accept_usage_terms,
+        preferences::hub_preferences_status,
+        preferences::set_hub_preference,
         open_resource,
         community_catalogue,
         community_projects,

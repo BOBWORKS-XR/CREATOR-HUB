@@ -295,6 +295,36 @@ Flatpak installed/update testing, native signed Unix update/restart, Unix
 companion operation and final public discovery remain open. No tag, release or
 latest promotion has been performed. Unification stays at 0.1.14 or later.
 
+## Preference Persistence Follow-Up
+
+Mac runs `38431032337` and `38436159250` confirmed that both manual-upgrade
+lanes showed automatic downloads off, then on after a normal quit/relaunch.
+Both fresh lanes retained the off setting. The second run captured only the
+expected Hub-owned WebKit store candidates after normal exit: fresh lanes had
+UTF-16 `false`; manual lanes had no key. There were no source-file changes or
+capture errors. The active store is not independently attested, so the exact
+WebKit failure remains unknown; write-then-loss is not claimed.
+
+The corrective candidate moves the existing three switches to a bounded native
+`preferences/hub-preferences.json` record. Legacy browser choices migrate only
+for unset fields; a saved native `false` wins. Native writes serialize, preserve
+other flags, use atomic promotion and verify readback. Invalid, future,
+oversized or linked records are refused without replacement. Startup loads
+preferences before background downloads; pending/failed saves cannot silently
+enable automatic downloads. Save failures remain visible per control.
+
+Local verification: 217 browser tests passed against the pinned companion
+sources; 156 main Rust tests passed, 11 live tests were explicitly ignored, and
+33 verifier-example tests passed. All-target strict Clippy and formatting passed.
+These are component results, not installed or signed-update acceptance.
+
+This product change requires new native packages, extracted-executable hashes,
+Windows candidate acceptance, signatures and update/restart tests. Earlier
+Windows runs `38423123336` and `38427549645` accepted source `288d3d6`, not these
+new bytes. Do not transfer those receipts to the preference candidate. Unix
+companion operation, Flatpak host integration and public discovery remain open.
+The release stays held; unification remains deferred to 0.1.14 or later.
+
 ## Files Written by This Port
 
 - `scripts/native-hub-descriptor.cjs`

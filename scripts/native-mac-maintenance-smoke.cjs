@@ -844,8 +844,11 @@ function nativeOperations(out, binding, report) {
       if (!report.capability.accessibilityTrusted) return snapshot;
       if (snapshot.finishedLaunching && snapshot.windows.length === 1 && snapshot.axReadable && !snapshot.axTruncated) {
         const kind = bodyKind(snapshot);
-        if (wanted === 'either' && ['terms', 'body'].includes(kind)) return snapshot;
-        if (wanted === 'body' && kind === 'body') return snapshot;
+        const preferences = snapshot.axNodes.filter(node => node.AXRole === 'AXCheckBox' && node.AXTitle === AUTO_DOWNLOAD);
+        const bodyReady = kind === 'body' && preferences.length === 1 && preferences[0].AXEnabled === 'true'
+          && ['0', '1'].includes(preferences[0].AXValue);
+        if (wanted === 'either' && (kind === 'terms' || bodyReady)) return snapshot;
+        if (wanted === 'body' && bodyReady) return snapshot;
         if (wanted === 'checked') {
           try { termsControl(snapshot, 'test-terms-accept'); return snapshot; } catch {}
         }

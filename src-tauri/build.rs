@@ -7,6 +7,8 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "usage_terms_status",
             "accept_usage_terms",
+            "hub_preferences_status",
+            "set_hub_preference",
             "open_resource",
             "community_catalogue",
             "open_community_link",
