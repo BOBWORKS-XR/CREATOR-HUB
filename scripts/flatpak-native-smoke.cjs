@@ -7,6 +7,14 @@ const { spawnSync, spawn } = require('node:child_process');
 const { generate, sha256, FINISH_ARGS } = require('./flatpak-package.cjs');
 
 const REPO = 'BOBWORKS-XR/CREATOR-HUB';
+// Reviewed workflow defaults only; exact explicit CLI pins and binding checks remain mandatory.
+const REVIEWED_CANDIDATE = Object.freeze({
+  runId: 38407664529, sourceCommit: 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e',
+  buildCommit: '15f69917f827cac51af67ca027b460c142030379', sourceTree: 'c56aee874eb51c7bc4b6205233995a2f8eb67124',
+  artifactId: 11820885281, artifactBytes: 96940104,
+  artifactSha256: 'c226e6739a924e59feb32eedd28e03489c2d744036e324f0739bcd6f4fb7d68b',
+  debBytes: 5975056, debSha256: '950392f2ded56017a5553e702dc76f2c296bfea2b6809a9e56e05b2030b7916f',
+});
 const ID = 'com.creatorworks.hub';
 const APP = `app/${ID}/x86_64/experimental`;
 const PLATFORM = 'runtime/org.gnome.Platform/x86_64/50';
@@ -21,6 +29,8 @@ const REVIEWED_TEST_ONLY_FILES = Object.freeze([
   'scripts/native-mac-window.swift', '.github/workflows/mac-maintenance-validation.yml',
   'docs/MAC-MAINTENANCE-VALIDATION.md', '.github/workflows/windows-candidate.yml',
   'scripts/Test-InstalledCandidate.ps1', 'scripts/self-update-baselines.test.cjs',
+  'scripts/native-self-update-lab.ps1', 'scripts/native-self-update-lab.test.cjs',
+  'scripts/native-self-update-smoke.cjs', 'scripts/maintenance-signed-update.test.cjs',
 ]);
 const TREE_EXCLUSIONS = Object.freeze([...PROBE_FILES, ...REVIEWED_TEST_ONLY_FILES]);
 const PHASES = ['harness-source-tree', 'binding', 'native-package', 'native-beforeimage', 'runtime', 'build-export',
@@ -162,6 +172,22 @@ function parsePs(text) {
   });
 }
 
+function waitForLauncherExit(child, timeout) {
+  const exited = () => child.exitCode != null || child.signalCode != null;
+  if (exited()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const finish = error => {
+      clearTimeout(timer); child.removeListener('exit', onExit); child.removeListener('error', onError);
+      if (error) reject(error); else resolve();
+    };
+    const onExit = () => finish();
+    const onError = error => finish(error);
+    const timer = setTimeout(() => finish(Error('Owned Flatpak launcher exit timed out')), timeout);
+    child.once('exit', onExit); child.once('error', onError);
+    if (exited()) finish();
+  });
+}
+
 function ocrLines(tsv) {
   const groups = new Map();
   for (const row of tsv.trim().split('\n').slice(1)) {
@@ -261,10 +287,11 @@ with zipfile.ZipFile(archive) as z:
 `;
 
 class Experiment {
-  constructor(root, report, run = spawnSync) {
+  constructor(root, report, run = spawnSync, launch = spawn) {
     this.root = root;
     this.report = report;
     this.run = run;
+    this.launch = launch;
     this.evidence = path.join(root, 'evidence');
     this.home = path.join(root, 'home');
     this.userRepo = path.join(this.home, '.local/share/flatpak/repo');
@@ -352,15 +379,51 @@ class Experiment {
     requireThat(difference === '', 'Fixture runtime filesystem changed; cannot claim an identical-content generation');
     return { first, second, filesystemDiffEmpty: true };
   }
+  async cleanupGui(label, child, instance, launchError, timeout = 5000) {
+    const result = { passed: false, instance: instance?.instance || null,
+      launcherExited: Boolean(launchError && !child.pid), instanceGone: false, errors: [] };
+    const failed = (phase, error) => result.errors.push({ phase, message: error.message });
+    if (instance) {
+      try { this.command('flatpak', ['kill', instance.instance], { timeout: 10000 }); }
+      catch (error) { failed('instance-kill', error); }
+    }
+    if (!result.launcherExited) {
+      try { await waitForLauncherExit(child, timeout); result.launcherExited = true; }
+      catch (error) {
+        failed('launcher-exit', error);
+        try {
+          requireThat(child.kill('SIGTERM'), 'Owned Flatpak launcher termination refused');
+          await waitForLauncherExit(child, timeout); result.launcherExited = true;
+        } catch (fallback) { failed('launcher-fallback-exit', fallback); }
+      }
+    }
+    try {
+      for (const end = Date.now() + timeout; ; ) {
+        const rows = parsePs(this.flat(['ps', '--columns=instance,application,pid,child-pid'], { timeout: 10000 }));
+        const alive = rows.some(row => instance ? row.instance === instance.instance : row.application === ID);
+        if (!alive) { result.instanceGone = true; break; }
+        requireThat(Date.now() < end, 'Owned Flatpak instance survived cleanup');
+        await new Promise(resolve => setTimeout(resolve, Math.min(100, timeout)));
+      }
+    } catch (error) { failed('instance-exit', error); }
+    result.passed = result.errors.length === 0 && result.launcherExited && result.instanceGone;
+    (this.report.guiCleanup ||= {})[label] = result;
+    requireThat(result.passed, `Flatpak GUI cleanup failed: ${result.errors.map(error => `${error.phase}: ${error.message}`).join('; ')}`);
+    return result;
+  }
   async gui(label) {
     requireThat(parsePs(this.flat(['ps', '--columns=instance,application,pid,child-pid']))
       .every(instance => instance.application !== ID), 'Existing Flatpak app instance; no capture/adoption or broad kill');
+    // flatpak-run(1), including upstream 1.14.6: parent death kills the entire owned sandbox.
+    requireThat(this.flat(['run', '--help']).includes('--die-with-parent'), 'Runner lacks documented Flatpak lifetime protection');
     const log = fs.openSync(path.join(this.evidence, `${label}-launch.log`), 'wx', 0o600);
-    const child = spawn('flatpak', ['run', '--user', APP], { env: this.env, stdio: ['ignore', log, log] });
-    fs.closeSync(log);
+    let child;
+    try { child = this.launch('flatpak', ['run', '--user', '--die-with-parent', APP], { env: this.env, stdio: ['ignore', log, log] }); }
+    finally { fs.closeSync(log); }
     let launchError;
     child.on('error', error => { launchError = error; });
     let instance;
+    let originalError;
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const capture = window => {
       const filename = path.join(this.evidence, `${label}.png`);
@@ -425,20 +488,28 @@ class Experiment {
         linuxManagementUnsupportedObserved: true, syntheticTermsFixture: true,
         contextFile: `${label}-context.txt`,
         resources: this.resources(), scope: 'X11 native WebKit window + OCR/pixels, not trusted IPC/full product acceptance' };
-    } finally {
-      if (instance) this.command('flatpak', ['kill', instance.instance], { allowFailure: true });
-      if (child.exitCode === null && !launchError) {
-        await Promise.race([new Promise(resolve => child.once('exit', resolve)), sleep(5000)]);
-        if (child.exitCode === null) child.kill('SIGTERM');
+    } catch (error) { originalError = error; throw error; }
+    finally {
+      let cleanupError;
+      try { await this.cleanupGui(label, child, instance, launchError); }
+      catch (error) { cleanupError = error; }
+      try {
+        const logFile = path.join(this.evidence, `${label}-launch.log`);
+        const size = fs.statSync(logFile).size;
+        if (size > 65536) {
+          const descriptor = fs.openSync(logFile, 'r');
+          const tail = Buffer.alloc(65536);
+          try { fs.readSync(descriptor, tail, 0, tail.length, size - tail.length); }
+          finally { fs.closeSync(descriptor); }
+          fs.writeFileSync(logFile, tail);
+        }
+      } catch (error) {
+        this.report.failures.push({ phase: `${label}-log-cleanup`, message: error.message });
+        cleanupError ||= error;
       }
-      const logFile = path.join(this.evidence, `${label}-launch.log`);
-      const size = fs.statSync(logFile).size;
-      if (size > 65536) {
-        const descriptor = fs.openSync(logFile, 'r');
-        const tail = Buffer.alloc(65536);
-        try { fs.readSync(descriptor, tail, 0, tail.length, size - tail.length); }
-        finally { fs.closeSync(descriptor); }
-        fs.writeFileSync(logFile, tail);
+      if (cleanupError) {
+        this.report.failures.push({ phase: `${label}-cleanup`, message: cleanupError.message });
+        if (!originalError) throw cleanupError;
       }
     }
   }
@@ -669,8 +740,8 @@ async function main(options) {
 }
 
 module.exports = { parseArgs, hostedRoot, requestIdentity, validateBinding, initialReport, finalizeReport,
-  inventorySnapshot, parsePs, ocrLines, fixtureMetadata, permissionMetadata, EXTRACT_DEB, Experiment, PHASES,
-  PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS, REPO, APP, PLATFORM, SDK, FIXTURE_RUNTIME };
+  inventorySnapshot, parsePs, waitForLauncherExit, ocrLines, fixtureMetadata, permissionMetadata, EXTRACT_DEB, Experiment, PHASES,
+  PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS, REVIEWED_CANDIDATE, REPO, APP, PLATFORM, SDK, FIXTURE_RUNTIME };
 if (require.main === module) {
   main(parseArgs(process.argv.slice(2))).catch(error => { console.error(`Flatpak native validation refused: ${error.message}`); process.exitCode = 1; });
 }

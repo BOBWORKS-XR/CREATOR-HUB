@@ -7,37 +7,37 @@ on:
         description: Exact successful PR22 CI run (no latest lookup)
         type: string
         required: true
-        default: '38393759689'
+        default: '38407664529'
       source_commit:
         description: Exact PR22 source head, not the artifact merge SHA
         type: string
         required: true
-        default: '6d47bd0790cfc5c3560495bbd92c37b3cd06df14'
+        default: 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e'
       artifact_id:
         description: Exact Linux X64 artifact ID from that run
         type: string
         required: true
-        default: '11810908524'
+        default: '11820885281'
       artifact_sha256:
         description: Reviewed artifact ZIP digest (not the DEB digest)
         type: string
         required: true
-        default: '681ef6fcb50f77f588f6f9e88a13fbbf9545b56ba6473f4fe749c3a6a22f44d1'
+        default: 'c226e6739a924e59feb32eedd28e03489c2d744036e324f0739bcd6f4fb7d68b'
       deb_sha256:
         description: Separately reviewed exact native 0.1.13 amd64 DEB SHA256
         type: string
         required: true
-        default: '57ff363701a49c8d603efb677a3720ddc5c2b2443a9b019f0afd5be922ac5374'
+        default: '950392f2ded56017a5553e702dc76f2c296bfea2b6809a9e56e05b2030b7916f'
       deb_bytes:
         description: Reviewed native DEB byte length
         type: string
         required: true
-        default: '5975036'
+        default: '5975056'
       artifact_bytes:
         description: Reviewed Linux artifact ZIP byte length
         type: string
         required: true
-        default: '96940196'
+        default: '96940104'
 
 permissions:
   contents: read
@@ -53,13 +53,13 @@ jobs:
     timeout-minutes: 80
     env:
       VALIDATION_HARNESS_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
-      SOURCE_RUN: ${{ inputs.source_run || '38393759689' }}
-      SOURCE_COMMIT: ${{ inputs.source_commit || '6d47bd0790cfc5c3560495bbd92c37b3cd06df14' }}
-      SOURCE_ARTIFACT: ${{ inputs.artifact_id || '11810908524' }}
-      ARTIFACT_SHA256: ${{ inputs.artifact_sha256 || '681ef6fcb50f77f588f6f9e88a13fbbf9545b56ba6473f4fe749c3a6a22f44d1' }}
-      ARTIFACT_BYTES: ${{ inputs.artifact_bytes || '96940196' }}
-      DEB_SHA256: ${{ inputs.deb_sha256 || '57ff363701a49c8d603efb677a3720ddc5c2b2443a9b019f0afd5be922ac5374' }}
-      DEB_BYTES: ${{ inputs.deb_bytes || '5975036' }}
+      SOURCE_RUN: ${{ inputs.source_run || '38407664529' }}
+      SOURCE_COMMIT: ${{ inputs.source_commit || 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e' }}
+      SOURCE_ARTIFACT: ${{ inputs.artifact_id || '11820885281' }}
+      ARTIFACT_SHA256: ${{ inputs.artifact_sha256 || 'c226e6739a924e59feb32eedd28e03489c2d744036e324f0739bcd6f4fb7d68b' }}
+      ARTIFACT_BYTES: ${{ inputs.artifact_bytes || '96940104' }}
+      DEB_SHA256: ${{ inputs.deb_sha256 || '950392f2ded56017a5553e702dc76f2c296bfea2b6809a9e56e05b2030b7916f' }}
+      DEB_BYTES: ${{ inputs.deb_bytes || '5975056' }}
     steps:
       - uses: actions/checkout@v6
         with:

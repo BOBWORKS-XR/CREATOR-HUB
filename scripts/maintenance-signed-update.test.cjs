@@ -6,12 +6,14 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
+const { spawnSync } = require('node:child_process');
 const baseline = require('./self-update-baselines.cjs');
 const pins = require('./prerelease-apps.json');
 const source = fs.readFileSync(path.join(__dirname, 'native-self-update-smoke.cjs'), 'utf8');
 const win = path.win32;
 
 function traceSmoke({ labMode = true, fault = null, fixture = null } = {}) {
+  const fails = name => Array.isArray(fault) ? fault.includes(name) : fault === name;
   const env = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows',
     LOCALAPPDATA: 'C:\\runner\\Local', APPDATA: 'C:\\runner\\Roaming',
     CREATOR_SELF_UPDATE_TARGET_VERSION: '0.1.13', CREATOR_SELF_UPDATE_INSTALLER_SHA256: 'c'.repeat(64),
@@ -24,7 +26,7 @@ function traceSmoke({ labMode = true, fault = null, fixture = null } = {}) {
   const apps = { setup: win.join(env.LOCALAPPDATA, 'Creator Project Setup', 'creator-project-setup.exe'),
     mcp: win.join(env.LOCALAPPDATA, 'Creator Works MCP', 'creator-works-mcp-launcher.exe') };
   const config = win.join(env.APPDATA, 'creator-works-mcp', 'launcher-config.json');
-  const files = new Map(), events = [], children = [], records = [];
+  const files = new Map(), events = [], children = [], records = [], closeCommands = [];
   const data = { oldInstaller: 'synthetic-public-12-installer', oldExe: 'synthetic-public-12-exe',
     newExe: 'synthetic-exact-13-exe', setupInstaller: 'synthetic-setup-installer', mcpInstaller: 'synthetic-mcp-installer',
     setupExe: 'synthetic-setup-exe', mcpExe: 'synthetic-mcp-exe' };
@@ -53,7 +55,7 @@ function traceSmoke({ labMode = true, fault = null, fixture = null } = {}) {
     writeFileSync(file, bytes, options) {
       if (options?.flag === 'wx') assert.ok(!files.has(file), `Mock exclusive write collision: ${file}`);
       put(file, bytes);
-      if (file.endsWith('stop-unrelated-runtime')) { events.push('cooperative-runtime-stop'); unrelated.exitCode = 0; }
+      if (file.endsWith('stop-unrelated-runtime')) { events.push('cooperative-runtime-stop'); if (!fails('runtime-hang')) unrelated.exitCode = 0; }
     },
   };
   const mockCrypto = { createHash() {
@@ -67,8 +69,8 @@ function traceSmoke({ labMode = true, fault = null, fixture = null } = {}) {
     if (action !== 'button') return '{}';
     events.push(value);
     if (value === 'Not now') {
-      if (fault === 'cancel-companion') put(apps.mcp, 'changed-companion');
-      if (fault === 'cancel-sentinel') {
+      if (fails('cancel-companion')) put(apps.mcp, 'changed-companion');
+      if (fails('cancel-sentinel')) {
         const sentinel = [...files.keys()].find(file => file.endsWith('ci-self-update-sentinel.txt'));
         put(sentinel, 'changed-unmanaged-content');
       }
@@ -77,8 +79,8 @@ function traceSmoke({ labMode = true, fault = null, fixture = null } = {}) {
       original.exitCode = 0; upgraded = true; put(hub, data.newExe);
       records.length = 0;
       if (labMode) { backend('setup'); backend('mcp'); }
-      if (fault === 'restart-companion') put(apps.setup, 'changed-companion');
-      if (fault === 'restart-storage') preference = 'lost-storage';
+      if (fails('restart-companion')) put(apps.setup, 'changed-companion');
+      if (fails('restart-storage')) preference = 'lost-storage';
       events.push('simulated-native-auto-restart');
     }
     if (value === 'Close view') {
@@ -112,10 +114,25 @@ function traceSmoke({ labMode = true, fault = null, fixture = null } = {}) {
       }
       if (exe === 'reg.exe') return 'DisplayVersion    REG_SZ    0.1.13';
       assert.equal(exe, 'powershell.exe');
-      if (args.includes('-Command')) return JSON.stringify(records);
+      if (args.includes('-Command')) {
+        const command = args[args.indexOf('-Command') + 1];
+        if (!command.includes('CREATOR_OWNED_HUB_EXIT')) return JSON.stringify(records);
+        closeCommands.push(command);
+        events.push('normal-owned-close');
+        if (fails('hub-close')) throw Error('Owned Hub close failed.');
+        if (fails('hub-exit-hang')) throw Error('Owned Hub close timed out.');
+        if (fails('hub-exit-nonzero')) throw Error('Owned Hub exit was nonzero.');
+        if (!upgraded) original.exitCode = 0;
+        events.push('owned-hub-exit-zero');
+        return JSON.stringify({ pid: currentPid(), startTimeTicks: 'synthetic-unit-identity', exitCode: 0, normalCloseVerified: true });
+      }
       const script = args[args.indexOf('-File') + 1];
       if (script.endsWith('native-window.ps1')) return nativeAction(args);
-      if (script.endsWith('native-webview-policy.ps1')) { events.push(args[args.indexOf('-Action') + 1]); return '{}'; }
+      if (script.endsWith('native-webview-policy.ps1')) {
+        const action = args[args.indexOf('-Action') + 1]; events.push(action);
+        if (action === 'Restore' && fails('policy-restore')) throw Error('Policy restore failed.');
+        return '{}';
+      }
       assert.ok(script.endsWith('native-startup-diagnostics.ps1'));
       return JSON.stringify({ listeners: [{ LocalAddress: '127.0.0.1' }],
         processes: [{ ProcessId: currentPid(), ExecutablePath: hub }] });
@@ -139,7 +156,7 @@ function traceSmoke({ labMode = true, fault = null, fixture = null } = {}) {
       if (code.includes('app_inventory')) {
         events.push('public-companion-catalog');
         return { supported: true, apps: Object.keys(apps).map(app => ({ app, installed: true,
-          trusted: fault !== 'untrusted-public-catalog', installedVersion: pins[app].version, installedPath: apps[app] })) };
+          trusted: !fails('untrusted-public-catalog'), installedVersion: pins[app].version, installedPath: apps[app] })) };
       }
       if (code.includes('hub_update_status')) return { currentVersion: '0.1.12', availableVersion: '0.1.13', installBlocked: null, warning: null };
       if (code.includes('localStorage.setItem')) { preference = value; return; }
@@ -174,7 +191,7 @@ function traceSmoke({ labMode = true, fault = null, fixture = null } = {}) {
     setTimeout(callback, ms) { clock += ms; return setImmediate(callback); },
     require(name) { assert.ok(Object.hasOwn(dependencies, name), `Forbidden source-test import: ${name}`); return dependencies[name]; } },
   { timeout: 1000 });
-  return { completion, events, files, process: processMock, from, report() {
+  return { completion, events, files, closeCommands, process: processMock, from, report() {
     const entry = [...files].find(([file]) => file.endsWith('self-update-report.json'));
     assert.ok(entry, 'Mock driver must retain its report'); return JSON.parse(entry[1]);
   } };
@@ -198,6 +215,11 @@ test('lab trace retains unmodified old12, native cancel/approval, automatic rest
   assert.equal(trace.events.filter(e => Array.isArray(e) && e[0] === 'spawn' && e[1].endsWith('creator-hub.exe')).length, 2);
   assert.ok(!trace.events.includes('public-discovery'));
   assert.ok(trace.events.includes('Restore') && trace.events.includes('cooperative-runtime-stop'));
+  assert.equal(report.cleanup.passed, true);
+  assert.equal(report.hubShutdown.pid, report.restartedPid);
+  assert.equal(report.hubShutdown.exitCode, 0);
+  assert.equal(report.hubShutdown.normalCloseVerified, true);
+  assert.ok(trace.events.indexOf('owned-hub-exit-zero') < trace.events.indexOf('Restore'));
   assert.ok(!JSON.stringify(report.checks).includes('signed public target'));
   assert.equal(report.managedRouteReconnectTested, undefined);
 });
@@ -233,6 +255,47 @@ for (const fault of ['cancel-companion', 'cancel-sentinel', 'restart-companion',
   });
 }
 
+for (const fault of ['hub-close', 'hub-exit-hang', 'hub-exit-nonzero', 'policy-restore', 'runtime-hang']) {
+  test(`completed functional update cannot pass failed cleanup: ${fault}`, async () => {
+    const trace = traceSmoke({ fault }); await trace.completion;
+    const report = trace.report();
+    assert.equal(report.selfUpdateTested, true, 'Retain the completed functional update separately');
+    assert.equal(report.hostedViewsUpdateTested, true);
+    assert.equal(report.passed, false); assert.equal(report.cleanup.passed, false);
+    assert.equal(report.releaseReady, false); assert.equal(trace.process.exitCode, 1);
+    assert.ok(report.cleanup.errors.length);
+    assert.equal(report.error, undefined, 'Cleanup must not manufacture/replace a primary error');
+    assert.ok(trace.events.includes('Restore') && trace.events.includes('cooperative-runtime-stop'));
+    if (fault.startsWith('hub-')) {
+      assert.equal(report.hubShutdown, undefined);
+      assert.equal(report.cleanup.errors[0].phase, 'hub-close');
+      assert.equal(report.cleanup.disposableJobTeardownRequired, true);
+    }
+  });
+}
+
+test('cleanup failure retains the original storage failure and adds separate teardown evidence', async () => {
+  const trace = traceSmoke({ fault: ['restart-storage', 'hub-close'] }); await trace.completion;
+  const report = trace.report();
+  assert.equal(report.passed, false); assert.equal(report.cleanup.passed, false);
+  assert.match(report.error, /lost-storage/);
+  assert.match(report.cleanup.errors[0].message, /Owned Hub close failed/);
+  assert.equal(report.cleanup.errors[0].phase, 'hub-close');
+  assert.equal(trace.process.exitCode, 1);
+});
+
+test('owned close command parses without executing any native action and holds its handle before close', async t => {
+  const trace = traceSmoke(); await trace.completion;
+  const command = trace.closeCommands[0];
+  assert.ok(command.indexOf('[void]$owned.Handle') < command.indexOf('-Action close'));
+  const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+    "$tokens=$null; $errors=$null; [void][System.Management.Automation.Language.Parser]::ParseInput([Console]::In.ReadToEnd(),[ref]$tokens,[ref]$errors); if ($errors.Count) { $errors | ForEach-Object { $_.Message }; exit 1 }"], {
+    input: command, env: { ...process.env, GITHUB_ACTIONS: 'false' }, encoding: 'utf8', timeout: 10000, windowsHide: true,
+  });
+  if (result.error?.code === 'ENOENT') { t.skip('Existing PowerShell 7 parser unavailable; no provisioning'); return; }
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
 test('lab and version-only fixture cannot combine or override immutable old12 pins', () => {
   assert.throws(() => traceSmoke({ fixture: { testOnly: true, fromVersion: '0.1.12', toVersion: '0.1.13',
     installerSha256: 'a'.repeat(64), executableSha256: 'b'.repeat(64) } }), /unmodified public baseline/);
@@ -244,7 +307,7 @@ test('maintenance driver uses only classic separate-app routes and preserves nat
     'checkBaseline(lab, installer, hub)', 'assert.equal(hash(sentinel), sentinelHash);',
     "preserveCompanions('native-cancel')", "preserveCompanions('automatic-restart')",
     'await retry(() => assert.equal(hash(hub), to.exe), 180);', 'Do not manually launch the replacement',
-    "localStorage.getItem('creator-hub.ci-self-update')", "DisplayVersion\\s+REG_SZ", 'native(ownedPid, \'close\')']) {
+    "localStorage.getItem('creator-hub.ci-self-update')", "DisplayVersion\\s+REG_SZ", 'report.hubShutdown = closeOwnedHub()']) {
     assert.ok(source.includes(statement), `Missing original maintenance safeguard: ${statement}`);
   }
   assert.doesNotMatch(source, /native-managed-target|checkUpdatedBuiltIns|managedLocations|Enable managed routing|managedRouteReconnectTested|@modelcontextprotocol\/sdk/);
@@ -253,6 +316,12 @@ test('maintenance driver uses only classic separate-app routes and preserves nat
   assert.match(source, /if \(!fixture && !lab\) execFileSync\('curl.exe'/);
   assert.match(source, /if \(!lab\) execFileSync\('curl.exe'/);
   assert.match(source, /Synthetic disposable test acknowledged/);
+  assert.match(source, /GetProcessById\(\$\{ownedPid\}\)/);
+  assert.match(source, /\$owned\.MainModule\.FileName/);
+  assert.match(source, /\$owned\.WaitForExit\(30000\)/);
+  assert.match(source, /\$owned\.ExitCode -ne 0/);
+  assert.match(source, /cleanupFailed\('hub-close', error\)/);
+  assert.doesNotMatch(source, /taskkill|Stop-Process|\.Kill\(|\.kill\(/);
   assert.doesNotMatch(source, /rejectUnauthorized|NODE_TLS_REJECT_UNAUTHORIZED|--ignore-certificate|signer.*sign/);
   const consumer = fs.readFileSync(path.join(__dirname, '../src-tauri/src/self_update.rs'), 'utf8');
   assert.match(consumer, /verify_signed|verify_signature|Signature::decode/);

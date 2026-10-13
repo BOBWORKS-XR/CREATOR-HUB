@@ -160,6 +160,24 @@ function Read-LabLine($Reader, [int]$Milliseconds = 10000) {
     return $line
 }
 
+function Complete-LabProxy($Proxy) {
+    $Proxy.StandardInput.Close()
+    if (-not $Proxy.WaitForExit(5000)) { throw 'Proxy shutdown timed out.' }
+    if ($Proxy.ExitCode -ne 0) { throw 'Proxy shutdown failed.' }
+    $result = Read-LabLine $Proxy.StandardOutput 1000 | ConvertFrom-Json
+    if ($result.kind -cne 'lab-feed-stopped') { throw 'Missing transport result.' }
+    return $result
+}
+
+function Get-LabDriverRecovery($Driver) {
+    if (-not $Driver) { return @{ status='not-started'; verified=$true; disposableJobTeardownRequired=$false } }
+    if ($Driver.HasExited -and $Driver.ExitCode -eq 0) {
+        return @{ status='driver-exited-zero'; verified=$true; disposableJobTeardownRequired=$false }
+    }
+    # No descendant/policy recovery contract exists. Preserve the driver, never kill it indirectly via the watcher.
+    return @{ status='unsupported-descendant-and-policy-recovery'; verified=$false; disposableJobTeardownRequired=$true }
+}
+
 function Get-LabFailure([string]$Phase, $Record) {
     $allowed = @('timeout', 'baseline', 'contract', 'feed-path', 'driver-path', 'node-path', 'pwsh-path',
         'validator-start', 'validator-result', 'certificates', 'root-store', 'watcher-start', 'watcher-arm',
@@ -322,6 +340,7 @@ $validator = $null; $watcher = $null; $proxy = $null; $driver = $null
 $validatorRecord = $null; $proxyRecord = $null; $driverRecord = $null; $watcherRecord = $null
 $trustOwned = $false; $failed = $false; $cleanupVerified = $true; $systemTlsVerified = $false
 $driverExitCode = $null; $feedResult = $null; $rootThumbprint = $null; $leafThumbprint = $null
+$driverRecovery = $null; $cleanupFailures = [Collections.Generic.List[string]]::new()
 $phase = 'timeout'; $failureDetails = $null
 $script:processIdentityFailure = $null
 try {
@@ -435,10 +454,7 @@ try {
     [void]$driver.Start(); $driverRecord = Get-LabProcessRecord $driver $nodePath
     $driverOutputDrain = $driver.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
     $driverErrorDrain = $driver.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
-    Set-LabPhase 'driver-register'
-    $watcher.StandardInput.WriteLine(($driverRecord | ConvertTo-Json -Compress)); $watcher.StandardInput.Flush()
-    $registered = Read-LabLine $watcher.StandardOutput | ConvertFrom-Json
-    if ($registered.kind -cne 'lab-process-registered') { throw 'Driver ownership not registered.' }
+    # Only the leaf proxy is registered for forced cleanup; a driver may own unregistered native descendants.
     $driver.StandardInput.Close()
     Set-LabPhase 'driver-wait'
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -453,22 +469,22 @@ try {
     [Console]::Error.WriteLine('Lab lifecycle refused or failed; no native/public acceptance established.')
 } finally {
     Set-LabPhase 'cleanup-driver'
-    foreach ($record in @($driverRecord, $validatorRecord)) {
-        if ($record) { try { Stop-LabProcess $record } catch { $cleanupVerified = $false } }
+    try {
+        $driverRecovery = Get-LabDriverRecovery $driver
+        if (-not $driverRecovery.verified) { $cleanupVerified = $false; $cleanupFailures.Add('unsupported-driver-recovery-disposable-job-teardown-required') }
+    } catch {
+        $cleanupVerified = $false; $cleanupFailures.Add('driver-recovery-unverified')
+        $driverRecovery = @{status='unsupported-descendant-and-policy-recovery'; verified=$false; disposableJobTeardownRequired=$true}
     }
+    if ($validatorRecord) { try { Stop-LabProcess $validatorRecord } catch { $cleanupVerified = $false; $cleanupFailures.Add('validator-cleanup-failed') } }
     Set-LabPhase 'cleanup-proxy'
     if ($proxy) {
         try {
-            $proxy.StandardInput.Close()
-            if (-not $proxy.WaitForExit(5000)) { Stop-LabProcess $proxyRecord }
-            if ($proxy.ExitCode -eq 0) {
-                $feedResult = Read-LabLine $proxy.StandardOutput 1000 | ConvertFrom-Json
-                if ($feedResult.kind -cne 'lab-feed-stopped') { throw 'Missing transport result.' }
-            }
-        } catch { $cleanupVerified = $false; if ($proxyRecord) { try { Stop-LabProcess $proxyRecord } catch { $cleanupVerified = $false } } }
+            $feedResult = Complete-LabProxy $proxy
+        } catch { $cleanupVerified = $false; $cleanupFailures.Add('proxy-shutdown-unverified'); if ($proxyRecord) { try { Stop-LabProcess $proxyRecord } catch { $cleanupVerified = $false; $cleanupFailures.Add('proxy-cleanup-failed') } } }
     }
     Set-LabPhase 'cleanup-root'
-    if ($trustOwned) { try { Remove-LabRoot $rootStore $publicRoot } catch { $cleanupVerified = $false } }
+    if ($trustOwned) { try { Remove-LabRoot $rootStore $publicRoot } catch { $cleanupVerified = $false; $cleanupFailures.Add('root-cleanup-unverified') } }
     Set-LabPhase 'cleanup-watcher'
     if ($watcher) {
         try {
@@ -476,7 +492,7 @@ try {
             if (-not $watcher.WaitForExit(10000)) { throw 'Cleanup watcher did not finish.' }
             $cleaned = Read-LabLine $watcher.StandardOutput 1000 | ConvertFrom-Json
             if ($cleaned.kind -cne 'lab-cleanup-finished' -or $cleaned.cleanupVerified -ne $true -or $watcher.ExitCode -ne 0) { throw 'Watcher cleanup unverified.' }
-        } catch { $cleanupVerified = $false }
+        } catch { $cleanupVerified = $false; $cleanupFailures.Add('watcher-cleanup-unverified') }
     }
     Set-LabPhase 'cleanup-resources'
     if ($pfx) { [Array]::Clear($pfx, 0, $pfx.Length) }
@@ -487,6 +503,7 @@ try {
 [ordered]@{kind='lab-lifecycle-result'; lifecycleSucceeded=(-not $failed -and $cleanupVerified); cleanupVerified=$cleanupVerified;
     systemTlsVerified=$systemTlsVerified; trustScope='disposable-vm-local-machine'; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; releaseReady=$false;
     driverExitCode=$driverExitCode; failureDetails=$failureDetails; processIdentityFailure=$script:processIdentityFailure; rootThumbprint=$rootThumbprint; leafThumbprint=$leafThumbprint; driver=$driverRecord; proxy=$proxyRecord; cleanupWatcher=$watcherRecord;
+    driverRecovery=$driverRecovery; cleanupFailures=@($cleanupFailures.ToArray());
     servedRouteCount=$(if ($feedResult) { $feedResult.servedRouteCount } else { $null });
     rejectedRequestCount=$(if ($feedResult) { $feedResult.rejectedRequestCount } else { $null })} | ConvertTo-Json -Depth 4 -Compress
 if ($failed -or -not $cleanupVerified) { exit 1 }

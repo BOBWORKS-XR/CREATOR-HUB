@@ -24,7 +24,7 @@ function powershell(command, env = process.env) {
 
 function isolatedFunctions(names, body) {
   // Parse/extract only whitelisted pure or mocked functions; never execute the script body.
-  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Resolve-LabNode', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure', 'Get-LabProcessRecord', 'Get-LabImagePath', 'Set-LabPhase'].includes(name)));
+  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Resolve-LabNode', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure', 'Get-LabProcessRecord', 'Get-LabImagePath', 'Set-LabPhase', 'Read-LabLine', 'Complete-LabProxy', 'Get-LabDriverRecovery'].includes(name)));
   const result = powershell(`$ErrorActionPreference='Stop'; $PSScriptRoot='${__dirname.replaceAll("'", "''")}'; $tokens=$null; $errors=$null;
     $ast=[System.Management.Automation.Language.Parser]::ParseFile('${helper.replaceAll("'", "''")}',[ref]$tokens,[ref]$errors);
     foreach ($name in @(${names.map(name => `'${name}'`).join(',')})) {
@@ -282,6 +282,58 @@ test('only recorded own PID/image/start-time identities may be stopped; no runti
   assert.match(source, /\$process\.Kill\(\)/);
   assert.doesNotMatch(source, /Kill\(\$true\)|taskkill|Stop-Process|Get-Process -Name|GetProcessesByName/i);
   assert.match(source, /TimeoutSeconds -gt 480/);
+});
+
+test('proxy shutdown requires zero exit and a complete stopped frame, including timeout refusal', { skip: !hasPwsh }, () => {
+  const start = source.indexOf("Set-LabPhase 'cleanup-proxy'");
+  const cleanup = source.slice(source.indexOf('if ($proxy)', start), source.indexOf("Set-LabPhase 'cleanup-root'", start));
+  const output = isolatedFunctions(['Read-LabLine', 'Complete-LabProxy'], `
+    function Proxy($code,$exits,$frame) {
+      $input=[pscustomobject]@{Closed=$false}; $input | Add-Member ScriptMethod Close { $this.Closed=$true };
+      $proxy=[pscustomobject]@{ExitCode=$code;Exits=$exits;StandardInput=$input;StandardOutput=[IO.StringReader]::new($frame);Waits=0};
+      $proxy | Add-Member ScriptMethod WaitForExit { param($ms); if ($ms -ne 5000) { throw 'Unbounded wait' }; $this.Waits++; return $this.Exits };
+      return $proxy
+    }
+    $frame='{"kind":"lab-feed-stopped","servedRouteCount":5}';
+    $proxy=Proxy 0 $true $frame; $result=Complete-LabProxy $proxy;
+    if ($result.servedRouteCount -ne 5 -or -not $proxy.StandardInput.Closed -or $proxy.Waits -ne 1) { throw 'Successful handshake missing' }
+    foreach ($bad in @((Proxy 1 $true $frame),(Proxy -1 $true $frame),(Proxy 0 $false $frame),(Proxy 0 $true '{}'),(Proxy 0 $true ''))) {
+      $refused=$false; try { [void](Complete-LabProxy $bad) } catch { $refused=$true };
+      if (-not $refused -or -not $bad.StandardInput.Closed -or $bad.Waits -ne 1) { throw 'Failed/hung/incomplete proxy accepted' }
+      $proxy=$bad; $proxyRecord=@{pid=77}; $cleanupVerified=$true; $cleanupFailures=[Collections.Generic.List[string]]::new();
+      $feedResult=$null; $failed=$false; $failureDetails='original-primary-failure';
+      function Stop-LabProcess($Record) { if ($Record.pid -ne 77) { throw 'Unowned cleanup' } }
+      ${cleanup}
+      if ($cleanupVerified -or -not ($failed -or -not $cleanupVerified) -or $feedResult -or $failureDetails -cne 'original-primary-failure') { throw 'Helper exit gate or original error lost' }
+      if (-not $cleanupFailures.Contains('proxy-shutdown-unverified')) { throw 'Failure evidence missing' }
+    }
+    'proxy-failures-refused'`);
+  assert.equal(output, 'proxy-failures-refused');
+  assert.match(source, /\$feedResult = Complete-LabProxy \$proxy/);
+  assert.match(source, /catch \{ \$cleanupVerified = \$false; \$cleanupFailures\.Add\('proxy-shutdown-unverified'\)/);
+});
+
+test('unsupported driver recovery fails cleanup without terminating the driver or enrolling it in the watcher', { skip: !hasPwsh }, () => {
+  const output = isolatedFunctions(['Get-LabDriverRecovery'], `
+    if (-not (Get-LabDriverRecovery $null).verified) { throw 'No driver is not a recovery failure' }
+    foreach ($state in @(@{HasExited=$false;ExitCode=$null},@{HasExited=$true;ExitCode=1},@{HasExited=$true;ExitCode=0})) {
+      $driver=[pscustomobject]$state; $driver | Add-Member ScriptMethod Kill { throw 'Driver must be preserved' };
+      $result=Get-LabDriverRecovery $driver; $expected=$driver.HasExited -and $driver.ExitCode -eq 0;
+      if ($result.verified -ne $expected -or $result.disposableJobTeardownRequired -eq $expected) { throw 'Recovery classification differs' }
+      if (-not $expected -and $result.status -cne 'unsupported-descendant-and-policy-recovery') { throw 'Unsupported recovery hidden' }
+    }
+    'driver-preserved-recovery-unsupported'`);
+  assert.equal(output, 'driver-preserved-recovery-unsupported');
+});
+
+test('neither helper nor watcher forces driver termination and original failure metadata is retained', () => {
+  assert.doesNotMatch(source, /Stop-LabProcess \$driverRecord|@\(\$driverRecord,\s*\$validatorRecord\)|WriteLine\(\(\$driverRecord/);
+  assert.match(source, /\$driverRecovery = Get-LabDriverRecovery \$driver/);
+  assert.match(source, /if \(-not \$driverRecovery\.verified\) \{ \$cleanupVerified = \$false/);
+  assert.match(source, /driverRecovery=\$driverRecovery; cleanupFailures=/);
+  const cleanup = source.slice(source.indexOf("Set-LabPhase 'cleanup-driver'"));
+  assert.doesNotMatch(cleanup, /\$failureDetails\s*=/);
+  assert.match(source, /lifecycleSucceeded=\(-not \$failed -and \$cleanupVerified\)/);
 });
 
 test('public metadata never claims update acceptance or signature verification', () => {

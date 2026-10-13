@@ -53,6 +53,32 @@ function powershell(script, args = []) {
 function native(pid, action, value = '') { return powershell('scripts/native-window.ps1', ['-TargetPid', String(pid), '-ExpectedExecutable', hub, '-Action', action, '-Value', value]); }
 function policy(action) { return powershell('scripts/native-webview-policy.ps1', ['-Action', action, '-StateFile', policyState]); }
 function diagnostics() { return JSON.parse(powershell('scripts/native-startup-diagnostics.ps1').replace(/^\uFEFF/, '')); }
+function closeOwnedHub() {
+  assert.ok(Number.isSafeInteger(ownedPid) && ownedPid > 0, 'Owned Hub PID required');
+  const quote = value => `'${value.replaceAll("'", "''")}'`;
+  // Hold the exact process handle across WM_CLOSE and exit observation, including an automatic restart.
+  const command = `# CREATOR_OWNED_HUB_EXIT
+    $ErrorActionPreference='Stop'; $owned=[Diagnostics.Process]::GetProcessById(${ownedPid});
+    try {
+      [void]$owned.Handle;
+      $expected=${quote(hub)};
+      if ([IO.Path]::GetFullPath($owned.MainModule.FileName) -ine [IO.Path]::GetFullPath($expected)) { throw 'Hub process identity changed.' }
+      $started=$owned.StartTime.ToUniversalTime().Ticks.ToString();
+      $LASTEXITCODE=0;
+      [void](& ${quote(path.resolve('scripts/native-window.ps1'))} -TargetPid $owned.Id -ExpectedExecutable $expected -Action close);
+      if ($LASTEXITCODE -ne 0) { throw 'Owned Hub close failed.' }
+      if (-not $owned.WaitForExit(30000)) { throw 'Owned Hub close timed out.' }
+      if ($owned.ExitCode -ne 0) { throw 'Owned Hub exit was nonzero.' }
+      @{ pid=$owned.Id; startTimeTicks=$started; exitCode=$owned.ExitCode; normalCloseVerified=$true } | ConvertTo-Json -Compress
+    } finally { $owned.Dispose() }`;
+  const result = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-Command', command], {
+    encoding: 'utf8', timeout: 40000, windowsHide: true,
+  }).replace(/^\uFEFF/, ''));
+  assert.equal(result.pid, ownedPid);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.normalCloseVerified, true);
+  return result;
+}
 async function retry(fn, seconds = 30) {
   let last;
   for (const end = Date.now() + seconds * 1000; Date.now() < end;) {
@@ -341,15 +367,25 @@ async function warmPublicCompanionCatalog() {
     try { if (ownedPid) fs.writeFileSync(path.join(out, 'dialogs.json'), native(ownedPid, 'snapshot')); } catch (error) { report.dialogError = String(error); }
     try { if (page) await page.screenshot({ path: path.join(out, 'failure.png') }); } catch {}
   }
-  try { if (ownedPid) native(ownedPid, 'close'); } catch {}
-  if (browser) await browser.close().catch(() => {});
-  try { policy('Restore'); report.policyRestored = true; } catch (error) { report.policyError = String(error); report.passed = false; process.exitCode = 1; }
+  report.cleanup = { passed: false, errors: [] };
+  const cleanupFailed = (phase, error) => {
+    report.cleanup.errors.push({ phase, message: String(error.stack || error) });
+    report.passed = false; process.exitCode = 1;
+  };
+  try { if (ownedPid) report.hubShutdown = closeOwnedHub(); }
+  catch (error) { cleanupFailed('hub-close', error); report.cleanup.disposableJobTeardownRequired = true; }
+  try { if (browser) await browser.close(); } catch (error) { cleanupFailed('browser-close', error); }
+  try { policy('Restore'); report.policyRestored = true; }
+  catch (error) { report.policyError = String(error); cleanupFailed('policy-restore', error); }
+  // A failed close is evidence, not authority to kill a process tree. The disposable job owns recovery.
   if (child?.exitCode === null) child.unref();
   if (unrelatedRuntime?.exitCode === null) {
-    fs.writeFileSync(runtimeStop, 'exit', { flag: 'wx' });
-    try { await retry(() => assert.equal(unrelatedRuntime.exitCode, 0)); }
-    catch (error) { report.runtimeCleanupError = String(error); report.passed = false; process.exitCode = 1; }
+    try {
+      fs.writeFileSync(runtimeStop, 'exit', { flag: 'wx' });
+      await retry(() => assert.equal(unrelatedRuntime.exitCode, 0));
+    } catch (error) { report.runtimeCleanupError = String(error); cleanupFailed('runtime-stop', error); report.cleanup.disposableJobTeardownRequired = true; }
   }
+  report.cleanup.passed = report.cleanup.errors.length === 0;
   fs.writeFileSync(path.join(out, 'self-update-report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ out, ...report }, null, 2));
 });

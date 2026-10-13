@@ -5,35 +5,37 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { EventEmitter } = require('node:events');
 const { spawnSync, execFileSync } = require('node:child_process');
 const { parseArgs, hostedRoot, requestIdentity, validateBinding, initialReport, finalizeReport,
-  inventorySnapshot, parsePs, ocrLines, fixtureMetadata, permissionMetadata, EXTRACT_DEB,
-  Experiment, PHASES, PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS,
+  inventorySnapshot, parsePs, waitForLauncherExit, ocrLines, fixtureMetadata, permissionMetadata, EXTRACT_DEB,
+  Experiment, PHASES, PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS, REVIEWED_CANDIDATE,
   REPO, APP, PLATFORM, FIXTURE_RUNTIME } = require('./flatpak-native-smoke.cjs');
 
 const PYTHON = process.platform === 'win32' ? 'python' : 'python3';
-const SOURCE = '6d47bd0790cfc5c3560495bbd92c37b3cd06df14';
-const MERGE = 'cb7499b592b4260f6733b7ff5ef7c670f74233a0';
-const TREE = '8b1deb17843f753f7b6fe5cf3560412ed8b541d9';
-const ARCHIVE_SHA = '681ef6fcb50f77f588f6f9e88a13fbbf9545b56ba6473f4fe749c3a6a22f44d1';
-const DEB_SHA = '57ff363701a49c8d603efb677a3720ddc5c2b2443a9b019f0afd5be922ac5374';
+const SOURCE = 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e';
+const MERGE = '15f69917f827cac51af67ca027b460c142030379';
+const TREE = 'c56aee874eb51c7bc4b6205233995a2f8eb67124';
+const HARNESS = '6bf977e299fa29ef1d129278f0a9ea18810c7a7d';
+const ARCHIVE_SHA = 'c226e6739a924e59feb32eedd28e03489c2d744036e324f0739bcd6f4fb7d68b';
+const DEB_SHA = '950392f2ded56017a5553e702dc76f2c296bfea2b6809a9e56e05b2030b7916f';
 function options() {
-  return { 'source-run': '38393759689', 'source-commit': SOURCE, 'artifact-id': '11810908524',
-    'artifact-sha256': ARCHIVE_SHA, 'artifact-bytes': '96940196', 'deb-sha256': DEB_SHA, 'deb-bytes': '5975036' };
+  return { 'source-run': '38407664529', 'source-commit': SOURCE, 'artifact-id': '11820885281',
+    'artifact-sha256': ARCHIVE_SHA, 'artifact-bytes': '96940104', 'deb-sha256': DEB_SHA, 'deb-bytes': '5975056' };
 }
 function binding() {
   return {
-    run: { id: 38393759689, repository: { id: 1364807512, full_name: REPO },
+    run: { id: 38407664529, repository: { id: 1364807512, full_name: REPO },
       head_repository: { full_name: REPO }, event: 'pull_request', path: '.github/workflows/ci.yml',
       status: 'completed', conclusion: 'success', head_sha: SOURCE, head_branch: 'fix/hub-013-platform-flatpak',
       run_attempt: 1, pull_requests: [{ number: 22, base: { repo: { id: 1364807512 } }, head: { repo: { id: 1364807512 } } }] },
-    artifact: { id: 11810908524, name: `hub-development-Linux-X64-${MERGE}`, digest: `sha256:${ARCHIVE_SHA}`,
-      size_in_bytes: 96940196, expired: false, workflow_run: { id: 38393759689, head_sha: SOURCE,
+    artifact: { id: 11820885281, name: `hub-development-Linux-X64-${MERGE}`, digest: `sha256:${ARCHIVE_SHA}`,
+      size_in_bytes: 96940104, expired: false, workflow_run: { id: 38407664529, head_sha: SOURCE,
         repository_id: 1364807512, head_repository_id: 1364807512 } },
     commit: { sha: MERGE, parents: [{ sha: '35a16a45814d821d65b5d203628478449174cd55' }, { sha: SOURCE }],
       commit: { message: `Merge ${SOURCE} into 35a16a45814d821d65b5d203628478449174cd55`, tree: { sha: TREE } } },
     source: { sha: SOURCE, commit: { tree: { sha: TREE } } },
-    linuxJob: { name: 'Hub (Linux)', conclusion: 'success', run_id: 38393759689, run_attempt: 1 },
+    linuxJob: { name: 'Hub (Linux)', conclusion: 'success', run_id: 38407664529, run_attempt: 1 },
   };
 }
 function temporary(t) {
@@ -52,7 +54,7 @@ test('CLI is strict and all artifact/native pins are independently mandatory', (
   for (const args of [[], ['install'], ['run', '--root'], ['run', '--force', 'yes'],
     ['run', '--root', 'a', '--root', 'b'], ['run', '--root', '--force']]) assert.throws(() => parseArgs(args));
   const requested = requestIdentity(options());
-  assert.equal(requested.debBytes, 5975036);
+  assert.equal(requested.debBytes, 5975056);
   for (const key of Object.keys(options())) {
     for (const value of [undefined, '', 'invalid', '-1', `${options()[key]}\n`]) {
       assert.throws(() => requestIdentity({ ...options(), [key]: value }), key);
@@ -152,11 +154,11 @@ test('command failures/timeouts and phase exceptions are written before propagat
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'evidence/commands.json')))[0].stdout.length, 65536);
 });
 
-test('coexisting reviewed platform probes and Windows baselines preserve the exact 6d47 product binding', t => {
+test('6bf harness and reviewed cleanup-only changes preserve b4 product binding without admitting terms/runtime edits', t => {
   const root = temporary(t);
   fs.mkdirSync(path.join(root, 'evidence'));
   const old = process.env.VALIDATION_HARNESS_COMMIT;
-  process.env.VALIDATION_HARNESS_COMMIT = MERGE;
+  process.env.VALIDATION_HARNESS_COMMIT = HARNESS;
   t.after(() => { if (old === undefined) delete process.env.VALIDATION_HARNESS_COMMIT; else process.env.VALIDATION_HARNESS_COMMIT = old; });
   const coexistenceFixture = [...PROBE_FILES,
     'scripts/native-linux-maintenance-smoke.cjs', 'scripts/native-linux-maintenance-smoke.test.cjs',
@@ -165,17 +167,20 @@ test('coexisting reviewed platform probes and Windows baselines preserve the exa
     'scripts/native-mac-window.swift', '.github/workflows/mac-maintenance-validation.yml',
     'docs/MAC-MAINTENANCE-VALIDATION.md', '.github/workflows/windows-candidate.yml',
     'scripts/Test-InstalledCandidate.ps1', 'scripts/self-update-baselines.test.cjs',
+    'scripts/native-self-update-lab.ps1', 'scripts/native-self-update-lab.test.cjs',
+    'scripts/native-self-update-smoke.cjs', 'scripts/maintenance-signed-update.test.cjs',
   ];
   assert.equal(PROBE_FILES.length, 4, 'Do not widen the workflow trigger scope');
   assert.deepEqual(TREE_EXCLUSIONS, coexistenceFixture);
-  assert.equal(new Set(TREE_EXCLUSIONS).size, 16);
+  assert.equal(new Set(TREE_EXCLUSIONS).size, 20);
+  assert.ok(TREE_EXCLUSIONS.every(file => !/[?*]/.test(file)), 'No directory or wildcard exclusions');
   for (const files of [PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS]) assert.ok(Object.isFrozen(files));
   let changed = coexistenceFixture.join('\n');
   let dirty = '';
   const run = (_tool, args) => {
     const command = args[2];
     let stdout = '';
-    if (command === 'rev-parse') stdout = args[3] === 'HEAD^{commit}' ? MERGE : args[3].endsWith('^{tree}') ? TREE : SOURCE;
+    if (command === 'rev-parse') stdout = args[3] === 'HEAD^{commit}' ? HARNESS : args[3].endsWith('^{tree}') ? TREE : SOURCE;
     if (command === 'diff') stdout = changed;
     if (command === 'status') stdout = dirty;
     return { status: 0, stdout, stderr: '' };
@@ -183,12 +188,16 @@ test('coexisting reviewed platform probes and Windows baselines preserve the exa
   const e = new Experiment(root, initialReport(requestIdentity(options())), run);
   const accepted = e.tree();
   assert.equal(accepted.productTreeMatches, true);
+  assert.equal(accepted.harnessCommit, HARNESS);
+  assert.notEqual(accepted.harnessCommit, SOURCE);
   assert.equal(accepted.candidateCommit, SOURCE);
   assert.equal(accepted.sourceTree, TREE);
   assert.deepEqual(accepted.harnessOnlyChanges, coexistenceFixture);
   assert.deepEqual(accepted.excludedPaths, coexistenceFixture);
   for (const file of [
     'src/app.js', 'src-tauri/src/self_update.rs', 'src/icons/creator-plugins.png',
+    'src/usage-terms.js', 'src-tauri/src/main.rs', 'src-tauri/src/usage_terms.rs',
+    'src-tauri/src/update_target.rs', 'src/runtime/unreviewed.js', 'tests/usage-terms.spec.js',
     'src-tauri/tauri.conf.json', 'src-tauri/Cargo.lock', 'package.json', 'package-lock.json',
     'scripts/flatpak-package.cjs', 'packaging/flatpak/payload.py', 'packaging/flatpak/runtime-50-evidence.json',
     '.github/workflows/ci.yml', 'scripts/native-linux-unreviewed-helper.py',
@@ -293,6 +302,111 @@ test('namespace/process and OCR contracts refuse ambiguity without guessed autho
   assert.deepEqual(ocrLines(tsv), [{ text: 'Accept and continue', x: 30, y: 25 }]);
 });
 
+function fakeLauncher({ exited = false, hang = false } = {}) {
+  const child = new EventEmitter();
+  Object.assign(child, { pid: 456, exitCode: exited ? 137 : null, signalCode: null,
+    kill(signal) {
+      assert.equal(signal, 'SIGTERM'); this.fallbackSignals = (this.fallbackSignals || 0) + 1;
+      if (!hang) { this.signalCode = signal; this.emit('exit', null, signal); }
+      return true;
+    } });
+  return child;
+}
+
+test('GUI refuses an unsupported runner lifetime option before launching anything', async t => {
+  const root = temporary(t); fs.mkdirSync(path.join(root, 'evidence'));
+  const e = new Experiment(root, initialReport(), () => ({ status: 0, stdout: '', stderr: '' }),
+    () => { throw Error('Must not launch'); });
+  await assert.rejects(e.phase('candidate-gui', () => e.gui('candidate')), /lacks documented Flatpak lifetime protection/);
+  assert.equal(fs.existsSync(path.join(root, 'evidence/candidate-launch.log')), false);
+  assert.equal(e.report.checks.find(check => check.name === 'candidate-gui').status, 'failed');
+});
+
+test('launcher exit handshake handles signals/already-exited children and rejects a hang without leaking listeners', async () => {
+  const child = fakeLauncher();
+  const done = waitForLauncherExit(child, 1000);
+  child.kill('SIGTERM'); await done;
+  await waitForLauncherExit(fakeLauncher({ exited: true }), 10);
+  const hung = fakeLauncher({ hang: true });
+  await assert.rejects(waitForLauncherExit(hung, 10), /exit timed out/);
+  assert.equal(hung.listenerCount('exit'), 0); assert.equal(hung.listenerCount('error'), 0);
+});
+
+for (const fault of [null, 'kill-nonzero', 'kill-hang', 'launcher-hang', 'instance-survives', 'unknown-instance-survives']) {
+  test(`Flatpak cleanup requires kill/launcher/instance handshakes: ${fault || 'success'}`, async t => {
+    const root = temporary(t); fs.mkdirSync(path.join(root, 'evidence'));
+    const child = fakeLauncher({ hang: fault === 'launcher-hang', exited: fault === 'unknown-instance-survives' });
+    const own = { instance: '123', application: 'com.creatorworks.hub', pid: 455, childPid: 456 };
+    const e = new Experiment(root, initialReport(), (tool, args) => {
+      assert.equal(tool, 'flatpak');
+      if (args[0] === 'kill') {
+        assert.deepEqual(args, ['kill', own.instance]);
+        if (fault !== 'launcher-hang') { child.exitCode = 137; child.emit('exit', 137); }
+        if (fault === 'kill-nonzero') return { status: 1, stdout: '', stderr: 'synthetic kill failure' };
+        if (fault === 'kill-hang') return { status: null, stdout: '', stderr: 'synthetic timeout', error: { code: 'ETIMEDOUT', message: 'timeout' } };
+      } else assert.deepEqual(args, ['ps', '--columns=instance,application,pid,child-pid']);
+      // A foreign instance must survive, and must never become a kill target.
+      const alive = fault === 'instance-survives' || fault === 'unknown-instance-survives';
+      return { status: 0, stdout: args[0] === 'ps' ? `${alive ? '123 com.creatorworks.hub 455 456\n' : ''}999 org.example.Foreign 700 701\n` : '', stderr: '' };
+    });
+    const cleanup = () => e.cleanupGui('candidate', child, fault === 'unknown-instance-survives' ? null : own, null, 10);
+    if (!fault) {
+      const result = await cleanup();
+      assert.equal(result.passed, true); assert.equal(result.launcherExited, true); assert.equal(result.instanceGone, true);
+    } else {
+      await assert.rejects(e.phase('candidate-gui', cleanup), /GUI cleanup failed/);
+      const saved = JSON.parse(fs.readFileSync(path.join(root, 'evidence/report.json')));
+      assert.equal(saved.releaseReady, false); assert.equal(saved.guiCleanup.candidate.passed, false);
+      assert.equal(saved.checks.find(check => check.name === 'candidate-gui').status, 'failed');
+      assert.ok(saved.guiCleanup.candidate.errors.length);
+      if (fault === 'launcher-hang') assert.equal(saved.guiCleanup.candidate.launcherExited, false);
+      if (fault.endsWith('survives')) assert.equal(saved.guiCleanup.candidate.instanceGone, false);
+    }
+    assert.ok(e.commands.filter(c => c.args[0] === 'kill').every(c => c.args[1] === own.instance));
+  });
+}
+
+for (const originalFailure of [false, true]) {
+  test(`GUI cleanup invalidates capture and retains the original error: ${originalFailure}`, async t => {
+    // Entire GUI/launcher/command surface is synthetic; never launch Flatpak or capture a host window.
+    const root = temporary(t); fs.mkdirSync(path.join(root, 'evidence'));
+    const child = fakeLauncher(); let psCalls = 0;
+    const original = Error('original namespace diagnostic');
+    const text = ['Creator Hub 0.1.13', 'Updates are managed by Flatpak', 'Native installers cannot', 'App management is not supported on Linux'];
+    const tsv = 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'
+      + text.map((line, i) => `5\t1\t1\t1\t${i + 1}\t1\t10\t20\t50\t10\t90\t${line}`).join('\n');
+    const e = new Experiment(root, initialReport(), (tool, args) => {
+      let stdout = '';
+      if (tool === 'flatpak' && args[0] === 'kill') {
+        child.exitCode = 137; child.emit('exit', 137);
+        return { status: 1, stdout, stderr: 'synthetic cleanup failure' };
+      }
+      if (tool === 'flatpak' && args[0] === 'ps') stdout = ++psCalls === 2 ? '123 com.creatorworks.hub 455 456\n' : '';
+      if (tool === 'flatpak' && args[0] === 'run') stdout = '--die-with-parent';
+      if (tool === 'flatpak' && args[0] === 'enter' && args[2] === 'cat') stdout = 'name=com.creatorworks.hub';
+      if (tool === 'xdotool' && args[0] === 'search') stdout = '987\n';
+      if (tool === 'xprop') stdout = '_NET_WM_PID(CARDINAL) = 456\n';
+      if (tool === 'tesseract') stdout = tsv;
+      if (tool === '/usr/bin/python3') stdout = JSON.stringify({ width: 1100, height: 1000, colors: 100, stddev: [20, 20, 20] });
+      return { status: 0, stdout, stderr: '' };
+    }, (tool, args) => {
+      assert.equal(tool, 'flatpak'); assert.deepEqual(args, ['run', '--user', '--die-with-parent', APP]); return child;
+    });
+    e.resources = () => ({ syntheticUnitInventory: true });
+    if (originalFailure) {
+      const flat = e.flat.bind(e);
+      e.flat = (args, opts) => { if (args[0] === 'enter') throw original; return flat(args, opts); };
+    }
+    await assert.rejects(e.phase('candidate-gui', () => e.gui('candidate')), error =>
+      originalFailure ? error === original : /GUI cleanup failed/.test(error.message));
+    const saved = JSON.parse(fs.readFileSync(path.join(root, 'evidence/report.json')));
+    assert.equal(saved.checks.find(check => check.name === 'candidate-gui').status, 'failed');
+    assert.equal(saved.guiCleanup.candidate.passed, false); assert.equal(saved.releaseReady, false);
+    assert.ok(saved.failures.some(failure => failure.phase === 'candidate-cleanup'));
+    if (originalFailure) assert.ok(saved.failures.some(failure => failure.phase === 'candidate-gui' && failure.message === original.message));
+  });
+}
+
 test('workflow uses explicit dispatch instead of repeating expensive native runs on every PR push', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/flatpak-maintenance-validation.yml'), 'utf8');
   assert.doesNotMatch(workflow, /pull_request:\s+paths:/);
@@ -304,7 +418,14 @@ test('workflow uses explicit dispatch instead of repeating expensive native runs
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /ref: \$\{\{ github.event.pull_request.head.sha \|\| github.sha \}\}/);
   assert.match(workflow, /git fetch --no-tags --depth=1/);
-  for (const value of [SOURCE, ARCHIVE_SHA, DEB_SHA, '5975036', '96940196', '38393759689', '11810908524']) assert.ok(workflow.includes(value));
+  assert.ok(Object.isFrozen(REVIEWED_CANDIDATE));
+  assert.deepEqual(REVIEWED_CANDIDATE, { ...requestIdentity(options()), buildCommit: MERGE, sourceTree: TREE });
+  for (const [input, value] of Object.entries(options())) {
+    const name = input.replaceAll('-', '_');
+    assert.match(workflow, new RegExp(`${name}:\\s+[\\s\\S]*?default: '${value}'`));
+    assert.ok(workflow.includes(`inputs.${name} || '${value}'`), `Fallback pin differs: ${name}`);
+  }
+  assert.doesNotMatch(workflow, /38393759689|6d47bd0790cfc5c3560495bbd92c37b3cd06df14|11810908524|681ef6fcb50f77f588f6f9e88a13fbbf9545b56ba6473f4fe749c3a6a22f44d1|57ff363701a49c8d603efb677a3720ddc5c2b2443a9b019f0afd5be922ac5374/);
   assert.match(workflow, /const receipt = validateBinding\(binding, request\)/);
   assert.match(workflow, /createHash\('sha256'\)/);
   assert.match(workflow, /flatpak-native-smoke.cjs finalize[\s\S]*--job-status/);
@@ -322,6 +443,8 @@ test('runner program cannot widen sandbox, access production signing material or
   assert.match(source, /https:\/\/dl.flathub.org\/repo\/flathub.flatpakrepo/);
   assert.equal(/--no-gpg-verify|--filesystem=|--socket=(session|system)-bus|flatpak-spawn|--no-sandbox|rejectUnauthorized|SIGNING_KEY_PATH|auth\.json|list-secret-keys|export-secret/.test(source), false);
   assert.match(source, /readlink \/proc\/\$\{windowPid\}\/exe/);
+  assert.match(source, /\['run', '--user', '--die-with-parent', APP\]/);
+  assert.match(source, /flat\(\['run', '--help'\]\)\.includes\('--die-with-parent'\)/);
   assert.match(source, /same-version OSTree generation update/);
   assert.match(source, /directUpdaterInvocationTested: false/);
   assert.match(source, /linuxManagementUnsupportedObserved: true/);
