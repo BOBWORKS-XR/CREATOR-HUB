@@ -35,6 +35,9 @@ impl Target {
     }
 
     pub fn native() -> Result<Self, String> {
+        if flatpak() {
+            return Err("Flatpak manages this Hub installation. Use your Software app or Flatpak to update it; native installers cannot run inside this sandbox.".into());
+        }
         Self::select(
             std::env::consts::OS,
             std::env::consts::ARCH,
@@ -73,6 +76,24 @@ impl Target {
     }
 }
 
+pub fn flatpak() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        flatpak_context(
+            std::env::consts::OS,
+            std::env::var_os("FLATPAK_ID").is_some(),
+            std::path::Path::new("/.flatpak-info").is_file(),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    false
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn flatpak_context(os: &str, has_id: bool, has_info: bool) -> bool {
+    os == "linux" && (has_id || has_info)
+}
+
 #[cfg(any(target_os = "macos", test))]
 pub fn mac_application(exe: &Path, home: &Path) -> Result<PathBuf, String> {
     let suffix = Path::new("Creator Hub.app/Contents/MacOS/creator-hub");
@@ -101,12 +122,59 @@ pub fn appimage_location(exe: &Path, appdir: &Path, image: &Path) -> Result<Path
     {
         return Err("Cannot identify the running Hub AppImage. Open the original AppImage file before updating.".into());
     }
-    Ok(image.to_path_buf())
+    // APPIMAGE and APPDIR are inherited strings, not backing-file identity.
+    // Until the running container can be bound to its outer file, refuse the
+    // destructive path rather than replacing an unrelated inherited image.
+    Err("Automatic AppImage updates are not enabled for this build because the running container cannot be verified. Download the latest AppImage and replace it after closing Hub; your app data is kept separately.".into())
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn verify_restart_target(installed: &Path, restart: &Path) -> Result<(), String> {
+    if installed != restart {
+        return Err("A launcher passed a different AppImage restart location to Hub. Close Hub and open the installed package directly before updating. No installer was started.".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_flatpak_repacked_from_deb_cannot_use_the_native_installer() {
+        assert!(flatpak_context("linux", true, false));
+        assert!(flatpak_context("linux", false, true));
+        assert!(flatpak_context("linux", true, true));
+        assert!(!flatpak_context("linux", false, false));
+        assert!(!flatpak_context("windows", true, true));
+        assert!(!flatpak_context("macos", true, true));
+    }
+
+    #[test]
+    fn inherited_appimage_and_appdir_cannot_authorize_an_unrelated_outer_file() {
+        let root = tempfile::tempdir().unwrap();
+        let appdir = root.path().join(".mount_Hub");
+        let exe = appdir.join("usr/bin/creator-hub");
+        let unrelated = root.path().join("Unrelated.AppImage");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"running Hub fixture").unwrap();
+        std::fs::write(&unrelated, b"unrelated outer file").unwrap();
+        assert!(appimage_location(&exe, &appdir, &unrelated).is_err());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"unrelated outer file");
+    }
+
+    #[test]
+    fn inherited_appdir_cannot_claim_an_extracted_hub_is_a_running_container() {
+        let root = tempfile::tempdir().unwrap();
+        let extracted = root.path().join("extracted-package");
+        let exe = extracted.join("usr/bin/creator-hub");
+        let image = root.path().join("Claimed.AppImage");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"ordinary extracted executable").unwrap();
+        std::fs::write(&image, b"unbound container").unwrap();
+        assert!(appimage_location(&exe, &extracted, &image).is_err());
+        assert_eq!(std::fs::read(&image).unwrap(), b"unbound container");
+    }
+
     #[test]
     fn each_installed_package_has_a_distinct_descriptor_and_updater_target() {
         for (os, arch, bundle, package, extension, descriptor, updater) in [
@@ -202,14 +270,41 @@ mod tests {
         }
     }
     #[test]
-    fn appimage_updates_replace_the_outer_file_not_the_read_only_mount() {
+    fn unproven_appimage_paths_cannot_authorize_replacement_of_an_outer_file() {
         let root = std::env::temp_dir();
         let dir = root.join(".mount_Hub");
         let exe = dir.join("usr/bin/creator-hub");
         let image = root.join("Creator_Hub.AppImage");
-        assert_eq!(appimage_location(&exe, &dir, &image).unwrap(), image);
+        assert!(appimage_location(&exe, &dir, &image)
+            .unwrap_err()
+            .contains("running container cannot be verified"));
+        assert!(appimage_location(&exe, &dir, &root.join("Unrelated.AppImage")).is_err());
         assert!(appimage_location(&root.join("usr/bin/creator-hub"), &dir, &image).is_err());
         assert!(appimage_location(&exe, &dir, &dir.join("bad.AppImage")).is_err());
         assert!(appimage_location(&exe, &dir, Path::new("relative.AppImage")).is_err());
+    }
+
+    #[test]
+    fn inherited_appimage_cannot_redirect_a_deb_or_rpm_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("usr/bin/creator-hub");
+        assert!(verify_restart_target(&installed, &installed).is_ok());
+        let unrelated = root.path().join("Another-App.AppImage");
+        assert!(verify_restart_target(&installed, &unrelated)
+            .unwrap_err()
+            .contains("No installer was started"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tauri_inherited_restart_selection_is_refused_for_system_packages() {
+        let installed = Path::new("/usr/bin/creator-hub");
+        let unrelated = Path::new("/tmp/Another-App.AppImage");
+        let mut env = tauri::Env::default();
+        env.appimage = Some(unrelated.as_os_str().to_owned());
+        env.appdir = Some("/usr".into());
+        let restart = tauri::process::current_binary(&env).unwrap();
+        assert_eq!(restart, unrelated);
+        assert!(verify_restart_target(installed, &restart).is_err());
     }
 }

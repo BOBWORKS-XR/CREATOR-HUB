@@ -37,8 +37,9 @@ required.
 - **Confirmed missing:** visible current/legacy conflict and interrupted product
   save review. Different documents are not a proven merge contract.
 - **Likely wrong, not failure-proven here:** Setup editor-root remembering uses
-  a direct `fs::write` and an unreadable roots file is treated as an empty cache.
-  No speculative cache rewrite was made.
+  a direct `fs::write`. Its read-failure replacement defect is now separately
+  reproduced and patched below; atomic publication and concurrent external
+  writers are not claimed by that narrow change.
 - **Unknown / needs capture:** final installed signed-update preservation of
   Setup's editor cache, native WebView preference storage, native Mac/Linux
   writable operation, every product writer, and actual client reconnect.
@@ -134,3 +135,26 @@ acceptance remains required.
 No installed app/client configuration, credential, terms acknowledgement, project
 or legacy installation was changed by these tests. The five original dirty
 Cargo/schema files were hash-rechecked unchanged during the work.
+
+## Unified 0.1.14 Follow-Up
+
+The target is 0.1.14; unpublished 0.1.13 packages are not a migration prerequisite.
+Existing Hub 0.1.12 remains the pinned public Windows update baseline. Historical
+package hashes and earlier acceptance receipts do not accept newly rebuilt bytes.
+
+**Confirmed broken:** the prior Setup cache writer replaced an invalid existing
+`editor-roots.json` with a new one-root list. The isolated regression
+`remembering_an_editor_does_not_overwrite_an_invalid_existing_cache` failed before
+the patch (1 passed / 1 failed). No real user files were used. The writer now reads
+the existing bounded array strictly before saving; unreadable, invalid, oversized
+and relative-path documents remain unchanged. Discovery still tolerates an
+unavailable cache. The complete bootstrap rerun passed 23 tests, with two opt-in
+disposable Unity installation tests ignored. This is not an atomic/CAS writer.
+
+The disposable Windows installed harness now checks byte-for-byte preservation
+of Setup's existing Editor cache and the inactive legacy MCP config after the
+installer, declined permission, actual embedded operation, view closure and
+payload-failure/retry. Fresh profiles must leave these stores absent. It also
+tests reviewed Claude Desktop JSON connection migration alongside Codex and
+Claude Code. These added native checks are pending an actual 0.1.14 candidate run;
+synthetic client configurations are not authenticated AI-app acceptance.

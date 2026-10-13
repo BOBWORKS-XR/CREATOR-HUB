@@ -82,8 +82,12 @@ fn roots_file() -> Option<PathBuf> {
 
 pub(crate) fn known_editor_roots() -> Vec<PathBuf> {
     roots_file()
-        .and_then(|path| File::open(path).ok())
-        .and_then(|file| serde_json::from_reader::<_, Vec<PathBuf>>(file.take(16384)).ok())
+        .map(|path| known_editor_roots_at(&path))
+        .unwrap_or_default()
+}
+
+fn known_editor_roots_at(path: &Path) -> Vec<PathBuf> {
+    read_editor_roots_at(path)
         .unwrap_or_default()
         .into_iter()
         .filter(|path| path.is_absolute())
@@ -91,9 +95,38 @@ pub(crate) fn known_editor_roots() -> Vec<PathBuf> {
         .collect()
 }
 
+fn read_editor_roots_at(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(_) => return Err("Cannot read the saved Editor locations; they were kept.".into()),
+    };
+    let mut bytes = Vec::new();
+    file.take(16385)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read the saved Editor locations; they were kept.")?;
+    if bytes.len() > 16384 {
+        return Err("The saved Editor locations exceed the supported size; they were kept.".into());
+    }
+    let roots: Vec<PathBuf> = serde_json::from_slice(&bytes).map_err(|_| {
+        "The saved Editor locations use an invalid or unsupported format; they were kept."
+    })?;
+    if roots.iter().any(|root| !root.is_absolute()) {
+        return Err(
+            "The saved Editor locations contain an unsupported path; they were kept.".into(),
+        );
+    }
+    Ok(roots)
+}
+
 fn remember_root(root: &Path) -> Result<(), String> {
     let path = roots_file().ok_or("Local application data is unavailable.")?;
-    let mut roots = known_editor_roots();
+    remember_root_at(&path, root)
+}
+
+fn remember_root_at(path: &Path, root: &Path) -> Result<(), String> {
+    // Discovery may ignore an unreadable cache, but a save must not replace it.
+    let mut roots = read_editor_roots_at(path)?;
     let parent = root
         .parent()
         .ok_or("Invalid Editor directory.")?
@@ -970,6 +1003,53 @@ fn ensure_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remembering_an_editor_does_not_overwrite_an_invalid_existing_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("editor-roots.json");
+        let original = b"{future-cache-format: keep this}";
+        fs::write(&path, original).unwrap();
+        let editor = temp.path().join("editors").join(EDITOR_VERSION);
+        assert!(remember_root_at(&path, &editor).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn remembering_an_editor_keeps_other_discovered_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("editor-roots.json");
+        let previous = temp.path().join("previous-editors");
+        fs::write(&path, serde_json::to_vec(&vec![&previous]).unwrap()).unwrap();
+        let parent = temp.path().join("current-editors");
+        remember_root_at(&path, &parent.join(EDITOR_VERSION)).unwrap();
+        assert_eq!(known_editor_roots_at(&path), vec![parent, previous]);
+    }
+
+    #[test]
+    fn remembering_an_editor_preserves_unsupported_and_oversized_caches() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("editor-roots.json");
+        let editor = temp.path().join("editors").join(EDITOR_VERSION);
+        for original in [b"[\"relative-editor\"]".to_vec(), vec![b' '; 16385]] {
+            fs::write(&path, &original).unwrap();
+            assert!(remember_root_at(&path, &editor).is_err());
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn remembering_an_editor_handles_fresh_and_unreadable_cache_locations() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cache").join("editor-roots.json");
+        let editor = temp.path().join("editors").join(EDITOR_VERSION);
+        remember_root_at(&path, &editor).unwrap();
+        assert_eq!(known_editor_roots_at(&path), vec![editor.parent().unwrap()]);
+        let unreadable = temp.path().join("not-a-file");
+        fs::create_dir(&unreadable).unwrap();
+        assert!(remember_root_at(&unreadable, &editor).is_err());
+        assert!(unreadable.is_dir());
+    }
 
     #[test]
     fn captured_fresh_install_preview_allows_only_known_dependency_prelude() {

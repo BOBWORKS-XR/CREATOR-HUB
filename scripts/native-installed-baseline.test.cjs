@@ -54,3 +54,16 @@ test('upgrade acceptance executes the actual guarded NSIS update arguments', () 
   assert.match(source, /execFileSync\(installer, installerArguments/);
   assert.match(source, /report.installerScope = mode === 'upgrade' \? 'guarded-nsis-update-default-location-no-msi'/);
 });
+
+test('installed migration coverage keeps Setup/legacy settings and includes the Desktop adapter', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-builtin-smoke.cjs'), 'utf8');
+  assert.match(source, /'banter-mcp', 'launcher-config.json'/);
+  assert.match(source, /'CreatorProjectSetup', 'editor-roots.json'/);
+  assert.match(source, /id: 'claudeDesktop'.*'Claude', 'claude_desktop_config.json'/);
+  assert.match(source, /verifyRetainedStores\('Real installer'\)/);
+  assert.match(source, /verifyRetainedStores\(`\$\{app\} consent declined`\)/);
+  assert.match(source, /verifyRetainedStores\(`\$\{app\} embedded operation`\)/);
+  assert.match(source, /verifyRetainedStores\('Closing module views'\)/);
+  assert.match(source, /verifyRetainedStores\('Failed payload and recovered retry'\)/);
+  assert.match(source, /fresh profiles remain absent/);
+});

@@ -87,10 +87,29 @@ async function verifyMigratedJsonConnection(entry) {
   const settings = path.join(process.env.APPDATA, 'creator-works-mcp', 'launcher-config.json');
   assert.equal(fs.existsSync(settings), false);
   const settingsBytes = () => fs.existsSync(settings) ? fs.readFileSync(settings) : null;
+  const retainedStores = [
+    { name: 'inactive legacy MCP settings', path: path.join(process.env.APPDATA, 'banter-mcp', 'launcher-config.json'),
+      bytes: installedMode === 'upgrade' ? Buffer.from('{"legacySetting":"keep separate; current settings win"}') : null },
+    { name: 'Setup Editor locations', path: path.join(process.env.LOCALAPPDATA, 'CreatorProjectSetup', 'editor-roots.json'),
+      bytes: installedMode === 'upgrade' ? Buffer.from(JSON.stringify([path.join(out, 'Existing Editors')])) : null },
+  ];
+  const verifyRetainedStores = phase => {
+    for (const store of retainedStores) {
+      const actual = fs.existsSync(store.path) ? fs.readFileSync(store.path) : null;
+      assert.deepEqual(actual, store.bytes, `${phase}: ${store.name} must stay byte-for-byte unchanged (including absence)`);
+    }
+  };
   const oldConfig = installedMode === 'fresh' ? null : Buffer.from(JSON.stringify({ channels: [], active_channel_id: null,
     mcp_server_path: 'C:/old-install/banter-mcp.mjs', auto_start: false, tool_groups: 'full',
     migrationGuard: 'Preserve unknown fields and exact bytes when opening the built-in view' }));
   const seed = () => {
+    for (const store of retainedStores) {
+      assert.equal(fs.existsSync(store.path), false, 'Runner must not contain preexisting module settings');
+      if (store.bytes) {
+        fs.mkdirSync(path.dirname(store.path), { recursive: true });
+        fs.writeFileSync(store.path, store.bytes, { flag: 'wx' });
+      }
+    }
     if (oldConfig) {
       fs.mkdirSync(path.dirname(settings), { recursive: true });
       fs.writeFileSync(settings, oldConfig, { flag: 'wx' });
@@ -106,6 +125,7 @@ async function verifyMigratedJsonConnection(entry) {
       legacyClients = [
         { id: 'codex', path: path.join(process.env.USERPROFILE, '.codex/config.toml'), content: `# Keep the existing model and other server\nmodel='keep'\n[mcp_servers.other]\ncommand='keep'\n[mcp_servers.creator-works]\ncommand=${JSON.stringify(node.replaceAll('\\', '/'))}\nargs=[${JSON.stringify(server)}]\ntimeout=37\n[mcp_servers.creator-works.env]\nUNITY_PROJECT_PATH=${JSON.stringify(project)}\nCREATOR_WORKS_TOOL_GROUPS='read'\nCUSTOM_SETTING='keep'\n` },
         { id: 'claude', path: path.join(process.env.USERPROFILE, '.claude.json'), content: JSON.stringify({ preferences: { keep: true }, mcpServers: { other: { command: 'keep' }, 'creator-works': entry } }) },
+        { id: 'claudeDesktop', path: path.join(process.env.APPDATA, 'Claude', 'claude_desktop_config.json'), content: JSON.stringify({ preferences: { keep: true }, mcpServers: { other: { command: 'keep' }, 'creator-works': entry } }) },
       ];
       for (const client of legacyClients) {
         fs.mkdirSync(path.dirname(client.path), { recursive: true });
@@ -127,6 +147,7 @@ async function verifyMigratedJsonConnection(entry) {
   if (installedMode !== 'upgrade') for (const app of ['Creator Works MCP', 'Creator Project Setup']) assert.equal(fs.existsSync(path.join(process.env.LOCALAPPDATA, app)), false);
   let expectedConfig = oldConfig;
   assert.deepEqual(settingsBytes(), oldConfig, 'Real installer must preserve existing or absent MCP settings');
+  verifyRetainedStores('Real installer');
   for (const client of legacyClients) assert.equal(fs.readFileSync(client.path, 'utf8'), client.content, 'Installation must not silently adopt legacy client entries');
   for (const module of Object.values(descriptor.modules)) {
     const file = path.join(directory, 'modules', module.executable);
@@ -223,6 +244,7 @@ async function verifyMigratedJsonConnection(entry) {
     assert.deepEqual(settingsBytes(), oldConfig, 'Declined startup must not change or create MCP settings');
     await page.screenshot({ path: path.join(out, `${app}-declined.png`) });
     report.checks.push(`${app}: real native consent decline shows retry, exits the backend and preserves legacy settings`);
+    verifyRetainedStores(`${app} consent declined`);
     await page.locator('#builtin-open').click();
     const previousExecutable = executable;
     ({ ProcessId: pid, ExecutablePath: executable } = await backendFor(app));
@@ -305,6 +327,7 @@ async function verifyMigratedJsonConnection(entry) {
     const windows = JSON.parse(native(pid, executable, 'snapshot'));
     assert.equal(windows.filter(w => w.title === (app === 'setup' ? 'Creator Project Setup' : 'Creator Works MCP')).length, 0);
     report.checks.push(`${app}: approved retry opens actual private backend and embedded interface; no standalone window`);
+    verifyRetainedStores(`${app} embedded operation`);
   }
   await page.locator('#suite-trigger').click();
   await page.locator('#suite-menu [data-view="setup"]').click();
@@ -320,6 +343,8 @@ async function verifyMigratedJsonConnection(entry) {
   }
   registrations();
   assert.deepEqual(fs.readFileSync(settings), expectedConfig, 'Closing built-in MCP must preserve the explicitly saved config');
+  verifyRetainedStores('Closing module views');
+  report.checks.push('Installer, declined consent, embedded operations and closing preserve Setup Editor cache and inactive legacy MCP bytes; fresh profiles remain absent');
   report.checks.push('Built-in startup preserves legacy settings; closing preserves the explicitly saved settings byte-for-byte');
   report.checks.push('Graceful module close; no separate product registrations created');
 
@@ -371,6 +396,7 @@ async function verifyMigratedJsonConnection(entry) {
   await protocolClient.close();
   protocolClient = null;
   assert.deepEqual(fs.readFileSync(settings), expectedConfig);
+  verifyRetainedStores('Failed payload and recovered retry');
   report.checks.push('Corrupt packaged candidate refuses startup without changing settings or disrupting an active SDK stdio client on the retained generation');
   report.checks.push('Restoring exact candidate bytes permits a successful embedded retry on the same retained generation; active stdio client remains usable. This is failure recovery, not signed-update acceptance');
   report.passed = true;

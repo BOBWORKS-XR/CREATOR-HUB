@@ -21,7 +21,7 @@ test('registry retains exact public 0.1.11 and 0.1.12 artifact pins', () => {
 });
 
 test('stable targets select the highest pinned version strictly below the target', () => {
-  for (const [target, expected] of [['0.1.12', '0.1.11'], ['0.1.13', '0.1.12'], ['0.1.20', '0.1.12'], ['1.0.0', '0.1.12']]) {
+  for (const [target, expected] of [['0.1.12', '0.1.11'], ['0.1.13', '0.1.12'], ['0.1.14', '0.1.12'], ['0.1.20', '0.1.12'], ['1.0.0', '0.1.12']]) {
     assert.equal(selectBaseline(target).version, expected, target);
   }
 });
