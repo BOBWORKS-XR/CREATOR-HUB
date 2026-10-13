@@ -47,5 +47,22 @@ test('native lab driver retains exact old-app hashes, native cancel, signatures,
   assert.match(source, /'button', 'Update Hub'/);
   assert.match(source, /assert.equal\(hash\(hub\), to.exe\)/);
   assert.match(source, /Do not manually launch the replacement/);
+  assert.match(source, /if \(lab\) await checkUpdatedBuiltIns\(\)/);
+  assert.match(source, /managedRouteReconnectTested = true/);
   assert.doesNotMatch(source, /danger_accept_invalid|rejectUnauthorized|NODE_TLS_REJECT_UNAUTHORIZED|--ignore-certificate/);
+});
+
+test('lab workflow uses pinned public signatures, keeps import privileges separate and stages baseline before trust', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../.github/workflows/signed-update-lab.yml'), 'utf8');
+  const importing = source.slice(source.indexOf('  stage-input:'), source.indexOf('  update:'));
+  const native = source.slice(source.indexOf('  update:'));
+  assert.match(importing, /contents: write/);
+  assert.match(importing, /releases\/assets\/636561523/);
+  assert.match(importing, /Invoke-WebRequest -Method Get/);
+  assert.doesNotMatch(importing, /npm ci|actions\/checkout|native-self-update-lab.ps1/);
+  assert.doesNotMatch(native, /contents: write|GH_TOKEN|signing_key|signer sign/);
+  assert.match(source, /61f76d75123dfd3ff2436153fbe19313121def99f86dd817054a9d0bc35b1c73/);
+  assert.ok(native.indexOf('Public baseline differs') < native.indexOf('./scripts/native-self-update-lab.ps1'));
+  assert.match(native, /BaselineInstallerPath/);
+  assert.doesNotMatch(source, /gh release (create|edit|upload)|rejectUnauthorized|ignore-certificate/);
 });

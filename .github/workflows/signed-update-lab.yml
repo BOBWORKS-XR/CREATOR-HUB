@@ -1,0 +1,90 @@
+name: Unmodified stable signed update lab (not public discovery)
+on:
+  push:
+    branches: [validation/unified-update-lab]
+    paths: ['.github/workflows/signed-update-lab.yml']
+permissions:
+  contents: read
+jobs:
+  stage-input:
+    # Reading a private draft needs push access; no repository/dependency/app
+    # code is executed while this narrowly used token is available.
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Get the exact public-signature-only input
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path signed-input | Out-Null
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/octet-stream'; 'X-GitHub-Api-Version' = '2026-03-10' }
+          Invoke-WebRequest -Method Get -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/636561523' -Headers $headers -OutFile signed-input/signed-update-input.zip -MaximumRedirection 5 -TimeoutSec 180
+          if ((Get-FileHash signed-input/signed-update-input.zip).Hash.ToLowerInvariant() -ne '61f76d75123dfd3ff2436153fbe19313121def99f86dd817054a9d0bc35b1c73') { throw 'Signed input archive differs.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-update-lab-input
+          path: signed-input/signed-update-input.zip
+          retention-days: 7
+          if-no-files-found: error
+  update:
+    needs: stage-input
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - run: npx playwright install chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-update-lab-input
+          path: artifacts/signed-update-lab
+      - name: Validate inputs and stage the unmodified public baseline before proxy setup
+        shell: pwsh
+        run: |
+          $root = Join-Path $PWD artifacts/signed-update-lab
+          $zip = Join-Path $root signed-update-input.zip
+          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne '61f76d75123dfd3ff2436153fbe19313121def99f86dd817054a9d0bc35b1c73') { throw 'Signed input archive differs.' }
+          $candidate = Join-Path $root candidate
+          Expand-Archive -LiteralPath $zip -DestinationPath $candidate
+          $config = @{ schemaVersion=1; targetVersion='0.1.13'; directory=$candidate; pins=@{
+            descriptor='73e6aed62824f8a0a8b2b5eeef9d560dbe61819d3ddeb67ed061009b889d6c2e'
+            descriptorSignature='08fcd87f29ca9a60ac854afb2123499a64013e6480789ab8be5177e36831fb99'
+            installer='c1a259f27283b5b3cc27e2fc2cbf54d7fc4318fb5828e171d62658106adbebdb'
+            manifest='bf4f780aa01e1d39d1106e2531530d024c46520593878cddccc45a3b0a4c5de7'
+            executable='8d52cef4052d064c1ededeaaaaf45c5a403c4c97838617c375e4126679b47f90'
+          }}
+          $config | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root lab-config.json) -Encoding utf8NoBOM
+          node -e "const fs=require('fs');require('./scripts/self-update-lab-feed.cjs').loadContract(JSON.parse(fs.readFileSync(process.argv[1],'utf8')));console.log('Pinned lab contract accepted; not native update acceptance.')" (Join-Path $root lab-config.json)
+          if ($LASTEXITCODE -ne 0) { throw 'Lab contract refused.' }
+          Invoke-WebRequest -Uri 'https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.12/Creator.Hub_0.1.12_x64-setup.exe' -OutFile (Join-Path $root baseline.exe) -TimeoutSec 180
+          if ((Get-FileHash (Join-Path $root baseline.exe)).Hash.ToLowerInvariant() -ne '0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18') { throw 'Public baseline differs.' }
+      - name: Unit refusal and lifecycle checks
+        run: node --test scripts/native-self-update-lab.test.cjs scripts/self-update-lab-feed.test.cjs scripts/self-update-lab-target.test.cjs
+      - name: Actual old-app signed update, native cancellation, restart and managed reconnect
+        shell: pwsh
+        run: |
+          ./scripts/native-self-update-lab.ps1 -ContractPath (Join-Path $PWD artifacts/signed-update-lab/lab-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/signed-update-lab/baseline.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/signed-update-lab/lifecycle-public-metadata.jsonl
+          if ($LASTEXITCODE -ne 0) { throw 'Signed lab update failed; public/native release readiness is not established.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unmodified-stable-signed-update-lab
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/native-suite-*/self-update-report.json
+            artifacts/native-suite-*/*.png
+            artifacts/native-suite-*/startup.json
+            artifacts/native-suite-*/dialogs.json
+            artifacts/native-suite-*/webview-policy.json
+            artifacts/signed-update-lab/lifecycle-public-metadata.jsonl
+            artifacts/signed-update-lab/lab-config.json

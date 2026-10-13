@@ -11,6 +11,7 @@ const { chromium } = require('@playwright/test');
 const { checkLive } = require('./check-release-feed.cjs');
 const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
 const { selectBaseline, assertPreviousStable } = require('./self-update-baselines.cjs');
+const { managedLocations } = require('./native-managed-target.cjs');
 const to = {
   version: process.env.CREATOR_SELF_UPDATE_TARGET_VERSION || require('../package.json').version,
   installer: process.env.CREATOR_SELF_UPDATE_INSTALLER_SHA256,
@@ -118,6 +119,50 @@ async function readyFrame(app) {
   });
   if (app === 'setup') await frames[app].locator('#requirements .requirement').first().waitFor({ timeout: 90000 });
   else await frames[app].waitForFunction(() => !document.querySelector('#workspaceControls').disabled);
+}
+async function checkUpdatedBuiltIns() {
+  const inventory = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
+  assert.equal(inventory.supported, true);
+  assert.equal(inventory.apps.length, 2);
+  assert.ok(inventory.apps.every(app => app.builtIn && app.trusted && !app.issue));
+  for (const app of ['setup', 'mcp']) {
+    await showApp(app);
+    if (app === 'mcp') await retry(() => native(ownedPid, 'button', 'Enable managed routing'));
+    const backend = await retry(() => {
+      const matches = processes().filter(process => process.ParentProcessId === ownedPid);
+      const name = app === 'mcp' ? 'creator-works-mcp-launcher.exe' : 'creator-project-setup.exe';
+      const found = matches.filter(process => path.basename(process.ExecutablePath || '').toLowerCase() === name);
+      assert.equal(found.length, 1); return found[0];
+    });
+    apps[app] = backend.ExecutablePath;
+    backends[app] = backend.ProcessId;
+    await retry(() => powershell('scripts/native-window.ps1', ['-TargetPid', String(backend.ProcessId),
+      '-ExpectedExecutable', backend.ExecutablePath, '-Action', 'button', '-Value', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub']));
+    await readyFrame(app);
+    if (app === 'mcp') await frames[app].locator('#connection-guide-close').click();
+  }
+  const sdk = require('node:module').createRequire(path.resolve('modules/mcp/package.json'));
+  const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = sdk('@modelcontextprotocol/sdk/client/stdio.js');
+  const command = managedLocations(process.env.LOCALAPPDATA).command;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const client = new Client({ name: 'signed-update-managed-reconnect', version: '1' });
+    const transport = new StdioClientTransport({ command, args: [], stderr: 'pipe' });
+    try {
+      await client.connect(transport);
+      assert.ok((await client.listTools()).tools.some(tool => tool.name === 'get_mcp_reference'));
+      const response = await client.callTool({ name: 'get_mcp_reference', arguments: { source: 'creator-docs', query: 'PersistFileBridge', limit: 1 } });
+      assert.equal(JSON.parse(response.content[0].text).success, true);
+    } finally { await client.close(); }
+  }
+  report.managedRouteReconnectTested = true;
+  report.checks.push('After signed installation/restart, actual built-in Setup/MCP open through native consent; signed managed router connects and reconnects with the official SDK and serves bundled Creator docs. Not live AI/model or Editor acceptance.');
+  for (const app of ['setup', 'mcp']) {
+    await showApp(app);
+    await page.locator('#hosted-stop').click();
+    await retry(() => native(ownedPid, 'button', 'Close view'));
+    await retry(() => assert.ok(!processes().some(process => process.ProcessId === backends[app])));
+  }
 }
 async function installCompanions() {
   const pins = require('./prerelease-apps.json');
@@ -266,6 +311,7 @@ async function installCompanions() {
   await page.locator('#suite-menu').waitFor({ state: 'hidden' });
   await page.screenshot({ path: path.join(out, 'updated-plugins-icon.png') });
   report.checks.push('Restarted app opens Apps and renders the exact accepted transparent Plugins icon');
+  if (lab) await checkUpdatedBuiltIns();
   report.checks.push(`Actual in-app consent downloads/verifies, exits ${from.version}, installs exact ${to.version} and automatically restarts without a manual launch`);
   report.checks.push(`Restarted footer and uninstall registry show ${to.version}; browser preference and unmanaged installation file survive`);
   if (fixture) {
