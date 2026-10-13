@@ -6,7 +6,32 @@ on:
 permissions:
   contents: read
 jobs:
+  stage-input:
+    # GitHub requires push access to read draft assets. Keep that token out of
+    # dependency installation and all candidate/native execution jobs.
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read only the exact private draft asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path managed-native-input | Out-Null
+          $zip = 'managed-native-input/managed-candidate.zip'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/octet-stream'; 'X-GitHub-Api-Version' = '2026-03-10' }
+          Invoke-WebRequest -Method Get -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/636510488' -Headers $headers -OutFile $zip -MaximumRedirection 5 -TimeoutSec 180
+          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne 'eee2b101c888db32be8e1fb3751717ce57e4ff7fd7a74aa6d5a179467129e5a0') { throw 'Managed candidate archive hash differs.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: managed-signed-input
+          path: managed-native-input/managed-candidate.zip
+          retention-days: 7
+          if-no-files-found: error
   installed:
+    needs: stage-input
     strategy:
       fail-fast: false
       matrix:
@@ -23,15 +48,14 @@ jobs:
       - run: npm ci
       - run: npm --prefix modules/mcp ci
       - run: npx playwright install chromium
-      - name: Download immutable public-only signed routing test input
+      - uses: actions/download-artifact@v4
+        with:
+          name: managed-signed-input
+          path: artifacts/managed-native-input
+      - name: Verify immutable public-only signed routing test input
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          New-Item -ItemType Directory -Path artifacts/managed-native-input | Out-Null
           $zip = 'artifacts/managed-native-input/managed-candidate.zip'
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/octet-stream'; 'X-GitHub-Api-Version' = '2026-03-10' }
-          Invoke-WebRequest -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/636510488' -Headers $headers -OutFile $zip -MaximumRedirection 5 -TimeoutSec 180
           if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne 'eee2b101c888db32be8e1fb3751717ce57e4ff7fd7a74aa6d5a179467129e5a0') { throw 'Managed candidate archive hash differs.' }
           Expand-Archive -LiteralPath $zip -DestinationPath artifacts/managed-native-input/candidate
           $proof = Get-Content artifacts/managed-native-input/candidate/candidate-source.json -Raw | ConvertFrom-Json
