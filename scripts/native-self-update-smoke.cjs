@@ -146,8 +146,9 @@ async function installCompanions() {
 (async () => {
   report.feed = lab ? require('./self-update-lab-target.cjs').discoveryScope(lab) : await checkLive(to.version);
   assertPreviousStable(report.feed.previousStable, from);
-  const installer = fixture ? fixture.installerPath : path.join(out, `Creator-Hub-${from.version}-Windows-setup.exe`);
-  if (!fixture) execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '120', '--output', installer,
+  const installer = fixture ? fixture.installerPath : lab ? process.env.CREATOR_SELF_UPDATE_LAB_BASELINE : path.join(out, `Creator-Hub-${from.version}-Windows-setup.exe`);
+  if (lab) assert.ok(typeof installer === 'string' && path.isAbsolute(installer), 'Pre-download the pinned public baseline before enabling the lab proxy');
+  if (!fixture && !lab) execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '120', '--output', installer,
     `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v${from.version}/${from.asset}`], { windowsHide: true, timeout: 130000 });
   assert.equal(hash(installer), from.installer);
   const setup = spawn(installer, ['/S', '/NS'], { windowsHide: true, stdio: 'ignore' });

@@ -39,6 +39,8 @@ test('lab discovery report cannot represent public publication or native baselin
 test('native lab driver retains exact old-app hashes, native cancel, signatures, restart and public feed path', () => {
   const source = fs.readFileSync(require.resolve('./native-self-update-smoke.cjs'), 'utf8');
   assert.match(source, /checkBaseline\(lab, installer, hub\)/);
+  assert.match(source, /CREATOR_SELF_UPDATE_LAB_BASELINE/);
+  assert.match(source, /if \(!fixture && !lab\) execFileSync\('curl.exe'/);
   assert.match(source, /: await checkLive\(to.version\)/);
   assert.match(source, /assertPreviousStable\(report.feed.previousStable, from\)/);
   assert.match(source, /'button', 'Not now'/);

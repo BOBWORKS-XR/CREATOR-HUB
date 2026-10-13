@@ -29,9 +29,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Path artifacts/managed-native-input | Out-Null
-          gh release download v0.1.13-validation --repo BOBWORKS-XR/CREATOR-HUB --pattern managed-candidate.zip --dir artifacts/managed-native-input
-          if ($LASTEXITCODE -ne 0) { throw 'Managed candidate download failed.' }
           $zip = 'artifacts/managed-native-input/managed-candidate.zip'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/octet-stream'; 'X-GitHub-Api-Version' = '2026-03-10' }
+          Invoke-WebRequest -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/636510488' -Headers $headers -OutFile $zip -MaximumRedirection 5 -TimeoutSec 180
           if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne 'eee2b101c888db32be8e1fb3751717ce57e4ff7fd7a74aa6d5a179467129e5a0') { throw 'Managed candidate archive hash differs.' }
           Expand-Archive -LiteralPath $zip -DestinationPath artifacts/managed-native-input/candidate
           $proof = Get-Content artifacts/managed-native-input/candidate/candidate-source.json -Raw | ConvertFrom-Json

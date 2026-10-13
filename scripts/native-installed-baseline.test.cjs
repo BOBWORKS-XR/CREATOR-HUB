@@ -18,7 +18,7 @@ test('installed acceptance pins all three public installers and separates direct
   for (const baseline of baselines) assert.match(baseline.sha256, /^[a-f0-9]{64}$/);
   const source = fs.readFileSync(path.join(__dirname, 'native-installed-baseline.cjs'), 'utf8');
   assert.match(source, /not signed in-app updater acceptance/);
-  assert.ok(source.indexOf('seedBeforeInstall();') < source.indexOf("execFileSync(installer, ['/S']", source.indexOf('seedBeforeInstall();')));
+  assert.ok(source.indexOf('seedBeforeInstall();') < source.indexOf('execFileSync(installer, installerArguments', source.indexOf('seedBeforeInstall();')));
 });
 
 test('PowerShell registration arrays preserve empty, one and three item counts', { skip: process.platform !== 'win32' }, () => {
@@ -46,4 +46,11 @@ test('migration acceptance parses TOML and compares real paths rather than encod
   assert.match(targets, /fs.realpathSync\(entry.command\)/);
   assert.match(targets, /assert.deepEqual\(entry.args, \[\]/);
   assert.doesNotMatch(source, /content.includes\(report.runtimeGeneration/);
+});
+
+test('upgrade acceptance executes the actual guarded NSIS update arguments', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-installed-baseline.cjs'), 'utf8');
+  assert.match(source, /mode === 'upgrade' \? \['\/UPDATE', '\/S', '\/NS'\] : \['\/S'\]/);
+  assert.match(source, /execFileSync\(installer, installerArguments/);
+  assert.match(source, /report.installerScope = mode === 'upgrade' \? 'guarded-nsis-update-default-location-no-msi'/);
 });

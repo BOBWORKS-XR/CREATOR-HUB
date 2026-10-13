@@ -53,7 +53,10 @@ function install(mode, candidate, out, seedBeforeInstall = () => {}) {
   const manifest = JSON.parse(fs.readFileSync(path.join(candidate, 'builtin-manifest.json')));
   const expectedExecutable = require('./installer-payload.cjs').extract(installer, path.join(out, 'expected-installer-payload'), path.join(candidate, 'creator-hub.exe'), manifest);
   if (metadata.installedExecutableSha256) assert.equal(sha256(expectedExecutable), metadata.installedExecutableSha256);
-  execFileSync(installer, ['/S'], { windowsHide: true, timeout: 180000, stdio: 'pipe' });
+  const installerArguments = mode === 'upgrade' ? ['/UPDATE', '/S', '/NS'] : ['/S'];
+  execFileSync(installer, installerArguments, { windowsHide: true, timeout: 180000, stdio: 'pipe' });
+  report.installerArguments = installerArguments;
+  report.installerScope = mode === 'upgrade' ? 'guarded-nsis-update-default-location-no-msi' : 'fresh-nsis-default-location';
   const directory = installs[0].directory;
   assert.equal(sha256(path.join(directory, 'creator-hub.exe')), sha256(expectedExecutable), 'Installed Hub must match the exact packaged candidate');
   if (mode === 'upgrade') {

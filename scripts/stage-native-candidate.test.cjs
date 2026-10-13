@@ -45,6 +45,8 @@ test('managed native workflow retains exact candidate pins and cannot publish', 
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/managed-candidate-acceptance.yml'), 'utf8');
   assert.match(workflow, /validation\/unified-managed-input/);
   assert.match(workflow, /contents: read/);
+  assert.match(workflow, /releases\/assets\/636510488/);
+  assert.doesNotMatch(workflow, /gh release download/);
   assert.match(workflow, /eee2b101c888db32be8e1fb3751717ce57e4ff7fd7a74aa6d5a179467129e5a0/);
   assert.match(workflow, /sourceRevision -ne 'd59c030eb7567bbd5a93c005830d407acfc81b1d'/);
   assert.match(workflow, /matrix:\s*\n\s*mode: \[fresh, upgrade\]/);
