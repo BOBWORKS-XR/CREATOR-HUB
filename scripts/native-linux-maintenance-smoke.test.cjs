@@ -313,12 +313,18 @@ class Node:
     def contains(self, state): return state in self.states
     def get_action_iface(self): return self
     def get_n_actions(self): return self.actions
-    def get_name(self, i=None): return self.label if i is None else self.verb
+    def get_name(self): return self.label
+    def get_action_name(self, i):
+        assert i == 0
+        return self.verb
     def do_action(self, i):
         assert i == 0
         self.calls += 1
         return self.accept
 faults = ('success', 'disabled', 'insensitive', 'unchecked', 'hidden', 'busy', 'defunct', 'mixed', 'duplicate', 'wrong-label', 'wrong-role', 'wrong-action', 'multiple-actions', 'refused', 'pre-drift', 'post-drift', 'pre-state-drift', 'pre-name-drift')
+try: Node().get_name(0)
+except TypeError: pass
+else: raise AssertionError('fixture must preserve real Accessible.get_name/Action.get_action_name collision')
 for fault in faults:
     n = Node(); label = m.AUTO_DOWNLOAD; checks = [0]
     for f, state in (('disabled','ENABLED'),('insensitive','SENSITIVE'),('unchecked','CHECKED'),('hidden','SHOWING')):

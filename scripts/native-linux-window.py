@@ -49,7 +49,8 @@ def auto_download_off(nodes, atspi, identity_check):
     interface = node.get_action_iface()
     # WebKit exposes one default checkbox action; its nonlocalized verb is "uncheck" when checked.
     # https://github.com/WebKit/WebKit/blob/main/Source/WebCore/accessibility/AccessibilityObject.cpp
-    require(interface and interface.get_n_actions() == 1 and interface.get_name(0) == "uncheck",
+    # Accessible.get_name is the label API; Action.get_action_name avoids that GI collision.
+    require(interface and interface.get_n_actions() == 1 and interface.get_action_name(0) == "uncheck",
             "Expected the unique native checkbox uncheck action")
     identity_check()
     require(auto_download_control(nodes, atspi).get_state_set().contains(atspi.StateType.CHECKED),
