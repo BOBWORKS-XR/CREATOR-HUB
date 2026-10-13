@@ -24,7 +24,7 @@ function powershell(command, env = process.env) {
 
 function isolatedFunctions(names, body) {
   // Parse/extract only whitelisted pure or mocked functions; never execute the script body.
-  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Resolve-LabNode', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure'].includes(name)));
+  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Resolve-LabNode', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure', 'Get-LabProcessRecord'].includes(name)));
   const result = powershell(`$ErrorActionPreference='Stop'; $PSScriptRoot='${__dirname.replaceAll("'", "''")}'; $tokens=$null; $errors=$null;
     $ast=[System.Management.Automation.Language.Parser]::ParseFile('${helper.replaceAll("'", "''")}',[ref]$tokens,[ref]$errors);
     foreach ($name in @(${names.map(name => `'${name}'`).join(',')})) {
@@ -300,6 +300,21 @@ test('failure diagnostics expose only allowlisted phase, exception class, numeri
     if ($json -match 'NEVER-LOG|CONTROL-FRAME') { throw 'Secret exposed' }
     'safe-failure-diagnostics'`);
   assert.equal(output, 'safe-failure-diagnostics');
+});
+
+test('image mismatch diagnostic preserves refusal and includes only PID and executable paths', { skip: !hasPwsh }, () => {
+  const output = isolatedFunctions(['Get-LabProcessRecord'], `
+    $process=[pscustomobject]@{Id=123;MainModule=@{FileName='C:\\other\\pwsh.exe'};CommandLine='NEVER-LOG-SECRET';StartTime=[DateTime]::UtcNow};
+    $script:processIdentityFailure=$null; $refused=$false;
+    try { [void](Get-LabProcessRecord $process 'C:\\reviewed\\pwsh.exe') } catch { $refused=$true }
+    if (-not $refused -or $script:processIdentityFailure.actualImage -cne 'C:\\other\\pwsh.exe') { throw 'Mismatch accepted or uncaptured' }
+    if (($script:processIdentityFailure.Keys | Sort-Object) -join ',' -cne 'actualImage,expectedImage,pid') { throw 'Unwanted diagnostic fields' }
+    if (($script:processIdentityFailure | ConvertTo-Json -Compress) -match 'NEVER-LOG-SECRET') { throw 'Command material exposed' }
+    $script:processIdentityFailure=$null; $process.MainModule.FileName='C:\\REVIEWED\\PWSH.EXE';
+    $record=Get-LabProcessRecord $process 'C:\\reviewed\\pwsh.exe';
+    if ($record.pid -ne 123 -or $null -ne $script:processIdentityFailure) { throw 'Valid image refused' }
+    'image-mismatch-remains-refused'`);
+  assert.equal(output, 'image-mismatch-remains-refused');
 });
 
 test('adapter refuses every bad runner before requiring modules or reading contract', () => {

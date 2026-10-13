@@ -65,7 +65,12 @@ function New-LabStartInfo([string]$Executable, [string[]]$Arguments, [string]$Pr
 }
 
 function Get-LabProcessRecord($Process, [string]$ExpectedPath) {
-    if (-not [string]::Equals($Process.MainModule.FileName, $ExpectedPath, [StringComparison]::OrdinalIgnoreCase)) { throw 'Owned process image mismatch.' }
+    $actualPath = $Process.MainModule.FileName
+    if (-not [string]::Equals($actualPath, $ExpectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+        # Only executable identity, never argv/environment or private transport material.
+        $script:processIdentityFailure = [ordered]@{pid=$Process.Id; expectedImage=$ExpectedPath; actualImage=$actualPath}
+        throw 'Owned process image mismatch.'
+    }
     return [ordered]@{ pid = $Process.Id; executablePath = $ExpectedPath; startTimeTicks = $Process.StartTime.ToUniversalTime().Ticks.ToString() }
 }
 
@@ -276,6 +281,7 @@ $validatorRecord = $null; $proxyRecord = $null; $driverRecord = $null; $watcherR
 $trustOwned = $false; $failed = $false; $cleanupVerified = $true; $systemTlsVerified = $false
 $driverExitCode = $null; $feedResult = $null; $rootThumbprint = $null; $leafThumbprint = $null
 $phase = 'timeout'; $failureDetails = $null
+$script:processIdentityFailure = $null
 try {
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 480) { throw 'Driver timeout must be 1..480 seconds.' }
     # The exact five-route proxy cannot bootstrap public 0.1.12. Stage it publicly beforehand.
@@ -430,7 +436,7 @@ try {
 }
 [ordered]@{kind='lab-lifecycle-result'; lifecycleSucceeded=(-not $failed -and $cleanupVerified); cleanupVerified=$cleanupVerified;
     systemTlsVerified=$systemTlsVerified; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; releaseReady=$false;
-    driverExitCode=$driverExitCode; failureDetails=$failureDetails; rootThumbprint=$rootThumbprint; leafThumbprint=$leafThumbprint; driver=$driverRecord; proxy=$proxyRecord; cleanupWatcher=$watcherRecord;
+    driverExitCode=$driverExitCode; failureDetails=$failureDetails; processIdentityFailure=$script:processIdentityFailure; rootThumbprint=$rootThumbprint; leafThumbprint=$leafThumbprint; driver=$driverRecord; proxy=$proxyRecord; cleanupWatcher=$watcherRecord;
     servedRouteCount=$(if ($feedResult) { $feedResult.servedRouteCount } else { $null });
     rejectedRequestCount=$(if ($feedResult) { $feedResult.rejectedRequestCount } else { $null })} | ConvertTo-Json -Depth 4 -Compress
 if ($failed -or -not $cleanupVerified) { exit 1 }
