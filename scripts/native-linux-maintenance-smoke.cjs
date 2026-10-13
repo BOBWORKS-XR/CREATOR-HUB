@@ -146,6 +146,7 @@ async function gui(file, expected, version, profile, output, freshTerms) {
   }
   const ready = await retry(() => {
     const current = probe('snapshot');
+    fs.writeFileSync(path.join(output, `last-accessibility-${version}.json`), JSON.stringify(current, null, 2));
     assert.doesNotMatch(text(current), /Terms of use and risk acknowledgement/, 'Terms gate is still visible');
     assert.match(text(current), /Creator Works MCP/);
     assert.match(text(current), new RegExp(version.replaceAll('.', '\\.')));
@@ -164,6 +165,12 @@ async function gui(file, expected, version, profile, output, freshTerms) {
     failure = error;
     throw error;
   } finally {
+    if (failure && !launchError && child.exitCode === null) {
+      try {
+        assert.equal(hash(`/proc/${child.pid}/exe`), expected);
+        command('import', ['-window', window(), path.join(output, `failed-gui-${version}.png`)]);
+      } catch (error) { failure.message += `; failure capture unavailable: ${error.message}`; }
+    }
     // Close only the fingerprinted owned window, including when capture fails.
     try { if (!launchError) await closeOwned(child, expected, window); }
     catch (error) {

@@ -58,7 +58,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 80
     env:
-      VALIDATION_ROOT: ${{ runner.temp }}/creator-flatpak-validation
       VALIDATION_HARNESS_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
       SOURCE_RUN: ${{ inputs.source_run || '38393759689' }}
       SOURCE_COMMIT: ${{ inputs.source_commit || '6d47bd0790cfc5c3560495bbd92c37b3cd06df14' }}
@@ -74,6 +73,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Initialize failure-proof report and reject non-disposable environments
         run: |
+          export VALIDATION_ROOT="$RUNNER_TEMP/creator-flatpak-validation"
+          printf 'VALIDATION_ROOT=%s\n' "$VALIDATION_ROOT" >> "$GITHUB_ENV"
           node scripts/flatpak-native-smoke.cjs init --root "$VALIDATION_ROOT" \
             --source-run "$SOURCE_RUN" --source-commit "$SOURCE_COMMIT" \
             --artifact-id "$SOURCE_ARTIFACT" --artifact-sha256 "$ARTIFACT_SHA256" \

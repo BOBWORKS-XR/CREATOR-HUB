@@ -116,10 +116,11 @@ function validateBinding(run, artifact, input, headCommit, sourceCommit) {
   if (input.sourceSha !== input.headSha) {
     assert.equal(run.event, 'pull_request', 'Different checkout SHA requires an exact PR merge');
     assert.equal(sourceCommit.parents?.length, 2);
-    const prs = run.pull_requests.filter(pr => pr.head.sha === input.headSha
+    // GitHub returns the PR's current head here, not the historical run head.
+    const prs = run.pull_requests.filter(pr => pr.number === 22
       && pr.head.repo?.id === run.repository.id && pr.base.repo?.id === run.repository.id);
     assert.equal(prs.length, 1, 'PR head/base binding missing or ambiguous');
-    assert.deepEqual(sourceCommit.parents.map(p => p.sha), [prs[0].base.sha, input.headSha], 'PR merge parents mismatch');
+    assert.deepEqual(sourceCommit.parents.map(p => p.sha), [BASELINE_SOURCE, input.headSha], 'PR merge parents mismatch');
   }
   assert.equal(artifact.name, `hub-development-macOS-${input.architecture}-${input.sourceSha}`);
   assert.equal(artifact.expired, false);

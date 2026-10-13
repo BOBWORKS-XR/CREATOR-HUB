@@ -23,7 +23,7 @@ function bindingFixture(architecture = 'X64') {
     head_repository: { full_name: 'BOBWORKS-XR/CREATOR-HUB' }, path: '.github/workflows/ci.yml',
     status: 'completed', conclusion: 'success', event: 'pull_request', run_attempt: 1,
     html_url: `https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/${input.runId}`,
-    pull_requests: [{ head: { sha: input.headSha, repo: { id: 1364807512 } }, base: { sha: mac.BASELINE_SOURCE, repo: { id: 1364807512 } } }] };
+    pull_requests: [{ number: 22, head: { sha: input.headSha, repo: { id: 1364807512 } }, base: { sha: mac.BASELINE_SOURCE, repo: { id: 1364807512 } } }] };
   const artifact = { id: pin.id, name: `hub-development-macOS-${architecture}-${input.sourceSha}`,
     expired: false, digest: `sha256:${pin.sha256}`, size_in_bytes: pin.size,
     workflow_run: { id: run.id, head_sha: input.headSha, repository_id: run.repository.id, head_repository_id: run.repository.id } };
@@ -97,12 +97,21 @@ const invalidBindings = {
   'wrong merge parents': f => { f.source.parents.reverse(); },
   'different merge tree': f => { f.source.tree = { sha: 'a'.repeat(40) }; },
   'missing PR context': f => { f.run.pull_requests = []; },
+  'other PR': f => { f.run.pull_requests[0].number = 21; },
 };
 for (const [name, change] of Object.entries(invalidBindings)) {
   test(`binding refuses ${name}`, () => {
     const f = clone(bindingFixture()); change(f); assert.throws(() => validateFixture(f));
   });
 }
+
+test('historical run binding survives a later PR head without weakening artifact or merge identity', () => {
+  const f = bindingFixture();
+  f.run.pull_requests[0].head.sha = '7ee1cab7278ed4dbb48542ce26305f74b989b9d3';
+  assert.equal(validateFixture(f).headSha, mac.CANDIDATE.headSha);
+  f.run.head_sha = f.run.pull_requests[0].head.sha;
+  assert.throws(() => validateFixture(f));
+});
 
 test('product tree comparison excludes only finite reviewed testing paths and includes modes, submodules and all other bytes', () => {
   const remote = [{ path: 'src', type: 'tree', sha: 'a'.repeat(40), mode: '040000' },

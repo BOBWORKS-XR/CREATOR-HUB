@@ -297,6 +297,9 @@ test('workflow is runnable on a path-limited PR before default-branch merge', ()
   assert.match(workflow, /workflow_dispatch:/);
   for (const file of PROBE_FILES) assert.ok(workflow.includes(`- ${file}`));
   assert.match(workflow, /runs-on: ubuntu-24\.04/);
+  const jobEnvironment = workflow.slice(workflow.indexOf('    env:'), workflow.indexOf('    steps:'));
+  assert.doesNotMatch(jobEnvironment, /runner\./, 'Runner context is unavailable in job-level env');
+  assert.match(workflow, /export VALIDATION_ROOT="\$RUNNER_TEMP\/creator-flatpak-validation"/);
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /ref: \$\{\{ github.event.pull_request.head.sha \|\| github.sha \}\}/);
   assert.match(workflow, /git fetch --no-tags --depth=1/);
