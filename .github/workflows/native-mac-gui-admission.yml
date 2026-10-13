@@ -1,6 +1,11 @@
 name: Native Mac GUI admission (component only)
 on:
   workflow_dispatch:
+  push:
+    branches: [validation/unified-mac-gui]
+    paths:
+      - '.github/workflows/native-mac-gui-admission.yml'
+      - 'native/mcp-router/src/gui_exec_macos.rs'
 permissions:
   contents: read
 jobs:
