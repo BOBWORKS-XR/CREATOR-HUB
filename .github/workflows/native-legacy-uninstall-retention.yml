@@ -25,7 +25,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24.17.0
-      - name: Pure guards, filesystem fixtures and structural regressions only
+      - name: Pure guards, .NET-canonical filesystem fixtures and structural regressions only
         shell: pwsh
         run: node --test scripts/native-legacy-uninstall-retention.test.cjs
       - name: Install exact published baseline, seed synthetic stores, uninstall and prove retention

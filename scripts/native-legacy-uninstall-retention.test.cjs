@@ -22,8 +22,12 @@ function Refuses([scriptblock]$Action) {
     if (-not $rejected) { throw 'Fixture unexpectedly accepted a forbidden case.' }
 }
 `;
+function canonicalUnitPath(value) {
+  return JSON.parse(powershell('[IO.Path]::GetFullPath($env:LEGACY_UNIT_PATH) | ConvertTo-Json -Compress', { LEGACY_UNIT_PATH: value }));
+}
 function temporary(t) {
-  const parent = fs.realpathSync(os.tmpdir());
+  // Node realpath alone does not establish the .NET guard's Windows spelling.
+  const parent = fs.realpathSync(canonicalUnitPath(fs.realpathSync(os.tmpdir())));
   const root = fs.realpathSync(fs.mkdtempSync(path.join(parent, 'legacy-retention-unit-')));
   t.after(() => {
     assert.equal(fs.realpathSync(root), root); assert.equal(path.dirname(root), parent);
@@ -205,6 +209,19 @@ test('unit-only filesystem before-image detects modified/missing/hidden files an
   `, { LEGACY_UNIT_ROOT: root });
   const target = path.join(root, 'target'), link = path.join(root, 'link'); fs.mkdirSync(target); fs.symlinkSync(target, link, 'junction');
   powershell(expectRefusal + "Refuses { Assert-LegacyPath (Join-Path $env:LEGACY_UNIT_ROOT 'link\\file') $env:LEGACY_UNIT_ROOT }", { LEGACY_UNIT_ROOT: root });
+});
+
+test('unit fixture canonicalizes its parent with .NET without relaxing strict native path guards', windowsOnly, t => {
+  const root = temporary(t), store = path.join(root, 'store'); fs.mkdirSync(store);
+  const alias = root.replaceAll('\\', '/');
+  assert.equal(canonicalUnitPath(alias), root);
+  powershell(expectRefusal + String.raw`
+    $alias=$env:LEGACY_UNIT_PATH;$canonical=[IO.Path]::GetFullPath($alias)
+    $store=Join-Path $canonical 'store'
+    Refuses { Assert-LegacyPath $store $alias }
+    Assert-LegacyPath $store $canonical
+    Get-LegacyInventory $canonical | Out-Null
+  `, { LEGACY_UNIT_PATH: alias });
 });
 
 test('PowerShell AST parses and native workflow stays scoped, build-free and failure-preserving', windowsOnly, () => {

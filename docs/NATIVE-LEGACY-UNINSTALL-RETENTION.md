@@ -151,10 +151,25 @@ transfer validation, backups/recovery and client/runtime reference checks before
 removing old applications: retaining settings alone does not keep deleted old
 installed server paths working. Main owns that product integration and admission.
 
-The focused suite has 14 tests, including original-error/preservation-failure
+The focused suite has 15 tests, including original-error/preservation-failure
 precedence, nonzero/hang/log-drain refusal, canonical residual cleanup plans and
 the directory-mtime versus creation/owner contract. These checks do not produce
 native uninstaller pins; those come only from the retained workflow receipts.
 Pure unit PowerShell spawns have a 60-second deadline to tolerate parallel-suite
 load. This does not change the actual native tool waits (120 seconds normally,
 180 seconds for each installer/uninstaller) or the 15-minute disposable job limit.
+
+First native run `38485572714` (source `75bd47ef9eb80e0c8da22ee4ec06594a95c899f7`)
+failed the same unit filesystem fixture in both jobs, before any installer step:
+13/14 passed, with `Path must remain strictly inside its exact canonical fixture
+root`. Original job logs are preserved in
+`artifacts/legacy-retention-failure-38485572714/115598272679.log` and
+`115598272910.log`. This is a fixture failure, not product-retention evidence.
+The fixture had used Node `realpath` to establish a path spelling checked by
+.NET `Path.GetFullPath`. The unit temp parent now uses the latter contract before
+creating its owned directory; a noncanonical-spelling regression verifies that
+the production guard still refuses the raw alias. The original logs do not
+record the actual temp-path spelling, so a specific 8.3 alias is not confirmed.
+Microsoft documents short-name expansion in
+[Path.GetFullPath](https://learn.microsoft.com/en-us/dotnet/api/system.io.path.getfullpath).
+No production path/reparse/ownership guard or native timeout was relaxed.
