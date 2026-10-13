@@ -165,6 +165,15 @@ function Get-LabFailure([string]$Phase, $Record) {
         scriptLine=[int]$Record.InvocationInfo.ScriptLineNumber}
 }
 
+function Set-LabPhase {
+    param([ValidateSet('timeout', 'baseline', 'contract', 'feed-path', 'driver-path', 'node-path', 'pwsh-path',
+        'validator-start', 'validator-result', 'certificates', 'root-store', 'watcher-start', 'watcher-arm',
+        'root-add', 'proxy-start', 'proxy-register', 'proxy-ready', 'system-tls', 'driver-start', 'driver-register', 'driver-wait',
+        'cleanup-driver', 'cleanup-proxy', 'cleanup-root', 'cleanup-watcher', 'cleanup-resources')][string]$Value)
+    $script:phase = $Value
+    [ordered]@{kind='lab-lifecycle-phase'; phase=$Value} | ConvertTo-Json -Compress
+}
+
 # The watcher receives only public DER and verified process identities, never the PFX/password.
 # Arm it before adding trust so helper termination still removes exactly its newly owned root.
 if ($CleanupWatch) {
@@ -309,33 +318,34 @@ $driverExitCode = $null; $feedResult = $null; $rootThumbprint = $null; $leafThum
 $phase = 'timeout'; $failureDetails = $null
 $script:processIdentityFailure = $null
 try {
+    Set-LabPhase 'timeout'
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 480) { throw 'Driver timeout must be 1..480 seconds.' }
     # The exact five-route proxy cannot bootstrap public 0.1.12. Stage it publicly beforehand.
-    $phase = 'baseline'
+    Set-LabPhase 'baseline'
     $BaselineInstallerPath = Resolve-LabBaseline $BaselineInstallerPath
-    $phase = 'contract'
+    Set-LabPhase 'contract'
     $ContractPath = Resolve-LabFile $ContractPath
-    $phase = 'feed-path'
+    Set-LabPhase 'feed-path'
     $feedPath = Resolve-LabFile (Join-Path $PSScriptRoot 'self-update-lab-feed.cjs')
-    $phase = 'driver-path'
+    Set-LabPhase 'driver-path'
     $driverPath = Resolve-LabFile (Join-Path $PSScriptRoot 'native-self-update-smoke.cjs')
-    $phase = 'node-path'
+    Set-LabPhase 'node-path'
     $nodePath = Resolve-LabNode
-    $phase = 'pwsh-path'
+    Set-LabPhase 'pwsh-path'
     $pwshPath = Resolve-LabFile (Join-Path $PSHOME 'pwsh.exe')
     # Compile the image-query adapter before any short-lived child is launched.
     $ownerProcess = [Diagnostics.Process]::GetCurrentProcess()
     try { $owner = Get-LabProcessRecord $ownerProcess $pwshPath } finally { $ownerProcess.Dispose() }
-    $phase = 'validator-start'
+    Set-LabPhase 'validator-start'
     $validator = [Diagnostics.Process]::new()
     $validator.StartInfo = New-LabStartInfo $nodePath @('-e', $proxyBootstrap, $feedPath, $ContractPath, 'validate')
     [void]$validator.Start(); $validatorRecord = Get-LabProcessRecord $validator $nodePath
     $validatorErrorDrain = $validator.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
-    $phase = 'validator-result'
+    Set-LabPhase 'validator-result'
     $validated = Read-LabLine $validator.StandardOutput | ConvertFrom-Json
     if ($validated.kind -cne 'lab-contract-validated' -or -not $validator.WaitForExit(10000) -or $validator.ExitCode -ne 0) { throw 'Reviewed contract refused.' }
 
-    $phase = 'certificates'
+    Set-LabPhase 'certificates'
     $caKey = [Security.Cryptography.RSACng]::new(2048)
     $leafKey = [Security.Cryptography.RSACng]::new(2048)
     if (-not $caKey.Key.IsEphemeral -or -not $leafKey.Key.IsEphemeral) { throw 'Persistent private keys refused.' }
@@ -366,30 +376,30 @@ try {
     $leaf.Dispose(); $leaf = $null; $unsignedLeaf.Dispose(); $unsignedLeaf = $null
     $ca.Dispose(); $ca = $null; $leafKey.Dispose(); $leafKey = $null; $caKey.Dispose(); $caKey = $null
 
-    $phase = 'root-store'
+    Set-LabPhase 'root-store'
     $rootStore = Open-LabRootStore
     Assert-LabRootAbsent $rootStore $publicRoot
-    $phase = 'watcher-start'
+    Set-LabPhase 'watcher-start'
     $watcher = [Diagnostics.Process]::new()
     $watcher.StartInfo = New-LabStartInfo $pwshPath @('-NoProfile', '-NonInteractive', '-File', $PSCommandPath, '-CleanupWatch')
     [void]$watcher.Start(); $watcherRecord = Get-LabProcessRecord $watcher $pwshPath
     $watcherErrorDrain = $watcher.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
     $watcher.StandardInput.WriteLine((@{rootDer=[Convert]::ToBase64String($publicRoot.RawData); owner=$owner; timeoutSeconds=($TimeoutSeconds + 60)} | ConvertTo-Json -Depth 4 -Compress))
     $watcher.StandardInput.Flush()
-    $phase = 'watcher-arm'
+    Set-LabPhase 'watcher-arm'
     $armed = Read-LabLine $watcher.StandardOutput | ConvertFrom-Json
     if ($armed.kind -cne 'lab-cleanup-armed') { throw 'Cleanup watcher unavailable.' }
     Assert-LabRootAbsent $rootStore $publicRoot
     $trustOwned = $true
-    $phase = 'root-add'
+    Set-LabPhase 'root-add'
     $rootStore.Add($publicRoot)
 
-    $phase = 'proxy-start'
+    Set-LabPhase 'proxy-start'
     $proxy = [Diagnostics.Process]::new()
     $proxy.StartInfo = New-LabStartInfo $nodePath @('-e', $proxyBootstrap, $feedPath, $ContractPath, 'serve')
     [void]$proxy.Start(); $proxyRecord = Get-LabProcessRecord $proxy $nodePath
     $proxyErrorDrain = $proxy.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
-    $phase = 'proxy-register'
+    Set-LabPhase 'proxy-register'
     $watcher.StandardInput.WriteLine(($proxyRecord | ConvertTo-Json -Compress)); $watcher.StandardInput.Flush()
     $registered = Read-LabLine $watcher.StandardOutput | ConvertFrom-Json
     if ($registered.kind -cne 'lab-process-registered') { throw 'Proxy ownership not registered.' }
@@ -397,17 +407,17 @@ try {
     $proxy.StandardInput.WriteLine($tlsControl); $proxy.StandardInput.Flush()
     [Array]::Clear($pfx, 0, $pfx.Length); $pfx = $null
     [Array]::Clear($passwordBytes, 0, $passwordBytes.Length); $passwordBytes = $null; $password = $null; $tlsControl = $null
-    $phase = 'proxy-ready'
+    Set-LabPhase 'proxy-ready'
     $ready = Read-LabLine $proxy.StandardOutput | ConvertFrom-Json
     if ($ready.kind -cne 'lab-feed-ready' -or $ready.proxyUrl -cnotmatch '^http://127\.0\.0\.1:[1-9][0-9]{0,4}$' -or ([uri]$ready.proxyUrl).Port -gt 65535) { throw 'Proxy readiness refused.' }
-    $phase = 'system-tls'
+    Set-LabPhase 'system-tls'
     Test-LabSystemTls $ready.proxyUrl 'github.com' $leafThumbprint
     Test-LabSystemTls $ready.proxyUrl 'api.github.com' $leafThumbprint
     $systemTlsVerified = $true
     [ordered]@{kind='lab-lifecycle-ready'; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; systemTlsVerified=$true;
         proxyUrl=$ready.proxyUrl; rootThumbprint=$publicRoot.Thumbprint; leafThumbprint=$leafThumbprint; proxy=$proxyRecord; cleanupWatcher=$watcherRecord} | ConvertTo-Json -Depth 4 -Compress
 
-    $phase = 'driver-start'
+    Set-LabPhase 'driver-start'
     $driver = [Diagnostics.Process]::new()
     $driver.StartInfo = New-LabStartInfo $nodePath @($driverPath) $ready.proxyUrl
     $driver.StartInfo.Environment['CREATOR_SELF_UPDATE_LAB_CONFIG'] = $ContractPath
@@ -418,12 +428,12 @@ try {
     [void]$driver.Start(); $driverRecord = Get-LabProcessRecord $driver $nodePath
     $driverOutputDrain = $driver.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
     $driverErrorDrain = $driver.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
-    $phase = 'driver-register'
+    Set-LabPhase 'driver-register'
     $watcher.StandardInput.WriteLine(($driverRecord | ConvertTo-Json -Compress)); $watcher.StandardInput.Flush()
     $registered = Read-LabLine $watcher.StandardOutput | ConvertFrom-Json
     if ($registered.kind -cne 'lab-process-registered') { throw 'Driver ownership not registered.' }
     $driver.StandardInput.Close()
-    $phase = 'driver-wait'
+    Set-LabPhase 'driver-wait'
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while (-not $driver.WaitForExit(200)) {
         if ($proxy.HasExited -or $watcher.HasExited -or [DateTime]::UtcNow -ge $deadline) { throw 'Transport/driver lifetime ended.' }
@@ -435,9 +445,11 @@ try {
     $failureDetails = Get-LabFailure $phase $_
     [Console]::Error.WriteLine('Lab lifecycle refused or failed; no native/public acceptance established.')
 } finally {
+    Set-LabPhase 'cleanup-driver'
     foreach ($record in @($driverRecord, $validatorRecord)) {
         if ($record) { try { Stop-LabProcess $record } catch { $cleanupVerified = $false } }
     }
+    Set-LabPhase 'cleanup-proxy'
     if ($proxy) {
         try {
             $proxy.StandardInput.Close()
@@ -448,7 +460,9 @@ try {
             }
         } catch { $cleanupVerified = $false; if ($proxyRecord) { try { Stop-LabProcess $proxyRecord } catch { $cleanupVerified = $false } } }
     }
+    Set-LabPhase 'cleanup-root'
     if ($trustOwned) { try { Remove-LabRoot $rootStore $publicRoot } catch { $cleanupVerified = $false } }
+    Set-LabPhase 'cleanup-watcher'
     if ($watcher) {
         try {
             $watcher.StandardInput.Close()
@@ -457,6 +471,7 @@ try {
             if ($cleaned.kind -cne 'lab-cleanup-finished' -or $cleaned.cleanupVerified -ne $true -or $watcher.ExitCode -ne 0) { throw 'Watcher cleanup unverified.' }
         } catch { $cleanupVerified = $false }
     }
+    Set-LabPhase 'cleanup-resources'
     if ($pfx) { [Array]::Clear($pfx, 0, $pfx.Length) }
     if ($passwordBytes) { [Array]::Clear($passwordBytes, 0, $passwordBytes.Length) }
     $password = $null; $tlsControl = $null

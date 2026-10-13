@@ -24,7 +24,7 @@ function powershell(command, env = process.env) {
 
 function isolatedFunctions(names, body) {
   // Parse/extract only whitelisted pure or mocked functions; never execute the script body.
-  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Resolve-LabNode', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure', 'Get-LabProcessRecord', 'Get-LabImagePath'].includes(name)));
+  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Resolve-LabNode', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure', 'Get-LabProcessRecord', 'Get-LabImagePath', 'Set-LabPhase'].includes(name)));
   const result = powershell(`$ErrorActionPreference='Stop'; $PSScriptRoot='${__dirname.replaceAll("'", "''")}'; $tokens=$null; $errors=$null;
     $ast=[System.Management.Automation.Language.Parser]::ParseFile('${helper.replaceAll("'", "''")}',[ref]$tokens,[ref]$errors);
     foreach ($name in @(${names.map(name => `'${name}'`).join(',')})) {
@@ -300,6 +300,17 @@ test('failure diagnostics expose only allowlisted phase, exception class, numeri
     if ($json -match 'NEVER-LOG|CONTROL-FRAME') { throw 'Secret exposed' }
     'safe-failure-diagnostics'`);
   assert.equal(output, 'safe-failure-diagnostics');
+});
+
+test('live phase capture emits only allowlisted stage without command, path or control material', { skip: !hasPwsh }, () => {
+  const output = isolatedFunctions(['Set-LabPhase'], `
+    $phaseJson=Set-LabPhase 'root-add'; $record=$phaseJson | ConvertFrom-Json;
+    if ($record.kind -cne 'lab-lifecycle-phase' -or $record.phase -cne 'root-add' -or $script:phase -cne 'root-add') { throw 'Missing phase' }
+    if (($record.PSObject.Properties.Name | Sort-Object) -join ',' -cne 'kind,phase') { throw 'Unexpected phase data' }
+    $refused=$false; try { [void](Set-LabPhase 'NEVER-LOG-SECRET') } catch { $refused=$true };
+    if (-not $refused -or $script:phase -cne 'root-add') { throw 'Invalid phase admitted' }
+    'safe-phase-capture'`);
+  assert.equal(output, 'safe-phase-capture');
 });
 
 test('image mismatch diagnostic preserves refusal and includes only PID and executable paths', { skip: !hasPwsh }, () => {
