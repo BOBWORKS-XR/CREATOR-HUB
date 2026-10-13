@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Creator Hub (Flatpak Experiment)
+Comment=Experimental package; host integrations are not accepted
+Exec=creator-hub
+Icon=com.creatorworks.hub
+Terminal=false
+Categories=Development;

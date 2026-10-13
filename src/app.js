@@ -242,6 +242,7 @@
     byId('preview-channel').disabled = busy;
     byId('hub-update-button').disabled = busy || !hubUpdate?.availableVersion || Boolean(hubUpdate?.installBlocked);
     byId('hub-update-status').textContent = !hubUpdate ? 'Hub update check is unavailable. Try Check for updates.'
+      : hubUpdate.updateSource === 'flatpak' ? `You are using Hub ${hubUpdate.currentVersion}. Updates are managed by Flatpak.`
       : hubUpdate.availableVersion ? `Version ${hubUpdate.availableVersion}${hubUpdate.downloaded ? ' is ready to install.' : ' is available.'}`
       : hubUpdate.warning ? 'Could not check for a Hub update.' : `You are using Hub ${hubUpdate.currentVersion}. No newer update was found.`;
     byId('hub-update-warning').textContent = hubUpdate?.installBlocked || hubUpdate?.warning || '';
