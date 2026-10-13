@@ -122,6 +122,13 @@ The retained original payload passed the native archive/extraction pipe with
 all ten raw hashes unchanged and private Node 24.17.0 runnable. Fresh complete
 Linux packages remain required; that pipe is not AppImage acceptance.
 
+The first full archive build (38331254224) refused the JavaScript server's
+inherited executable mode before Hub compilation. Linux staging now explicitly
+sets executable copies to 0755 and data copies to 0644; source files and raw
+content hashes are unchanged. The native pipe regression starts data at 0755
+and checks the real staging policy before archive creation. Windows/Mac policy
+is unchanged. The original failed log is retained, not relabeled as passing.
+
 ## Checks And Scope
 
 ```sh

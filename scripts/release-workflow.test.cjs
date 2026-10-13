@@ -37,6 +37,8 @@ test('native archive changes trigger packaging and required Linux tools are test
   assert.match(workflow, /cargo build --release --locked --manifest-path native\/module-archive\/Cargo.toml/);
   assert.match(workflow, /node --test scripts\/module-archive-native\.test\.cjs scripts\/linux-hub-runpath\.test\.cjs/);
   assert.match(workflow, /patchelf build-essential file rpm libarchive-tools/);
+  const packageStep = workflow.slice(workflow.indexOf('      - name: Build and inspect real included payloads'));
+  assert.match(packageStep, /CARGO_TARGET_DIR: \$\{\{ github\.workspace \}\}\/src-tauri\/target/);
 });
 
 test('browser failures retain screenshots and traces without enabling automatic retries', () => {

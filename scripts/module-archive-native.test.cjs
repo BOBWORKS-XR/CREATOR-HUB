@@ -25,7 +25,10 @@ test('native GNU tar producer pipes exact raw modules/routing through the same R
     for (const name of Object.keys(archive.rawFiles(manifest))) {
       const file = path.join(modules, name);
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, name, { mode: archive.modeFor(manifest, name) });
+      fs.writeFileSync(file, name, { mode: 0o755 });
+      build.stageFileMode(file, 'linux', archive.modeFor(manifest, name) === 0o755);
+      assert.equal(fs.statSync(file).mode & 0o7777, archive.modeFor(manifest, name));
+      assert.equal(fs.readFileSync(file, 'utf8'), name);
     }
     const original = structuredClone(manifest);
     const file = path.join(root, archive.FILE);

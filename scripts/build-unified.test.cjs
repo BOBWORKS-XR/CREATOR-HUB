@@ -4,7 +4,18 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { relativeFile, moduleFiles, verifyStage } = require('./build-unified.cjs');
+const { relativeFile, moduleFiles, verifyStage, stageFileMode } = require('./build-unified.cjs');
+
+test('Linux staged data and executables get canonical archive modes without changing other platform policy', () => {
+  const writes = [];
+  const chmod = (file, mode) => writes.push({ file, mode });
+  stageFileMode('server.mjs', 'linux', false, chmod);
+  stageFileMode('node', 'linux', true, chmod);
+  stageFileMode('server.mjs', 'macos', false, chmod);
+  stageFileMode('node', 'macos', true, chmod);
+  stageFileMode('node.exe', 'windows', true, chmod);
+  assert.deepEqual(writes, [{ file: 'server.mjs', mode: 0o644 }, { file: 'node', mode: 0o755 }, { file: 'node', mode: 0o755 }]);
+});
 
 test('native built-in acceptance refuses the user PC before inspecting apps', () => {
   const result = require('node:child_process').spawnSync(process.execPath, [path.join(__dirname, 'native-builtin-smoke.cjs')], {

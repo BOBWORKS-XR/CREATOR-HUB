@@ -6,6 +6,11 @@ const semver = require('semver');
 
 const root = path.resolve(__dirname, '..');
 const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+function stageFileMode(file, platform, executable, chmod = fs.chmodSync) {
+  // The shebang server runs through private Node; archive data is not executable.
+  if (platform === 'linux') chmod(file, executable ? 0o755 : 0o644);
+  else if (platform === 'macos' && executable) chmod(file, 0o755);
+}
 function relativeFile(name) {
   return typeof name === 'string' && /^[a-zA-Z0-9_./-]+$/.test(name)
     && !name.startsWith('/') && !name.split('/').some(part => ['', '.', '..'].includes(part));
@@ -83,7 +88,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
       const dest = path.join(output, 'modules', name);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(sourceFile, dest, fs.constants.COPYFILE_EXCL);
-      if (platform !== 'windows' && (name.endsWith(binary) || name.endsWith('/runtime/node'))) fs.chmodSync(dest, 0o755);
+      stageFileMode(dest, platform, name.endsWith(binary) || name.endsWith('/runtime/node'));
       // Node is already signed in the pinned archive and its bytes were hashed
       // by MCP's build.rs. Re-sign only Rust backends before manifest binding.
       if (platform === 'macos' && name === `${id}/${binary}`) {
@@ -179,7 +184,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   console.log(`Local unified candidate: ${output}. Not a release or migration acceptance.`);
   return output;
 }
-module.exports = { relativeFile, moduleFiles, verifyStage, build };
+module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, build };
 if (require.main === module) {
   try {
     const flags = process.argv.slice(3);

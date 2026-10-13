@@ -36,7 +36,7 @@ function create(root, manifest, destination, execute = execFileSync) {
   require('./build-unified.cjs').verifyStage(root, manifest);
   const files = Object.fromEntries(Object.keys(rawFiles(manifest)).sort().map(name => {
     const stat = fs.lstatSync(path.join(root, name));
-    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o7777) !== modeFor(manifest, name)) throw Error(`Invalid raw module archive mode: ${name}`);
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o7777) !== modeFor(manifest, name)) throw Error(`Invalid raw module archive mode: ${name}; actual ${(stat.mode & 0o7777).toString(8)}, expected ${modeFor(manifest, name).toString(8)}`);
     return [name, { size: stat.size, mode: modeFor(manifest, name) }];
   }));
   const tar = execute('tar', ['--format=ustar', '--owner=0', '--group=0', '--numeric-owner', '--mtime=@0', '--no-recursion',
