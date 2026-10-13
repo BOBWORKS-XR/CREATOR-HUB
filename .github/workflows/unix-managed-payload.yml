@@ -1,6 +1,9 @@
 name: Unsigned native Unix payload preparation (not acceptance)
 
 on:
+  push:
+    branches: [validation/unix-payload-014]
+    paths: ['.github/workflows/unix-managed-payload.yml']
   workflow_dispatch:
     inputs:
       platform:

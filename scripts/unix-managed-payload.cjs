@@ -38,9 +38,12 @@ function git(root, args, execute) {
 function prepareAdmission(root, platform, arch, env, execute = execFileSync) {
   const os = { linux: 'Linux', macos: 'macOS' }[platform];
   const cpu = { x86_64: 'X64', aarch64: 'ARM64' }[arch];
+  const validationPush = env.GITHUB_EVENT_NAME === 'push'
+    && env.GITHUB_REF === 'refs/heads/validation/unix-payload-014'
+    && env.GITHUB_WORKFLOW_REF === `${REPOSITORY}/${WORKFLOW}@${env.GITHUB_REF}`;
   if (!os || !cpu || env.GITHUB_ACTIONS !== 'true' || env.RUNNER_ENVIRONMENT !== 'github-hosted'
     || env.RUNNER_OS !== os || env.RUNNER_ARCH !== cpu || env.GITHUB_REPOSITORY !== REPOSITORY
-    || env.GITHUB_REPOSITORY_ID !== String(REPOSITORY_ID) || env.GITHUB_EVENT_NAME !== 'workflow_dispatch'
+    || env.GITHUB_REPOSITORY_ID !== String(REPOSITORY_ID) || !(env.GITHUB_EVENT_NAME === 'workflow_dispatch' || validationPush)
     || typeof env.GITHUB_WORKFLOW_REF !== 'string'
     || !env.GITHUB_WORKFLOW_REF.startsWith(`${REPOSITORY}/${WORKFLOW}@refs/heads/`)) {
     throw Error('Managed Unix preparation requires its explicit native GitHub-hosted workflow dispatch.');
@@ -65,7 +68,7 @@ function prepareAdmission(root, platform, arch, env, execute = execFileSync) {
     throw Error('Checkout does not match the dispatched source commit/tree.');
   }
   return { repository: REPOSITORY, repositoryId: REPOSITORY_ID, workflow: WORKFLOW,
-    sourceCommit: buildCommit, buildCommit, sourceTree, runId, runAttempt };
+    event: env.GITHUB_EVENT_NAME, sourceCommit: buildCommit, buildCommit, sourceTree, runId, runAttempt };
 }
 
 function fileMode(manifest, name, executable) {

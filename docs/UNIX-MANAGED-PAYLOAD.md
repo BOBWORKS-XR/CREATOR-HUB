@@ -13,7 +13,8 @@ npm run build:unified -- unique-name --prepare-managed-unix --managed --experime
 ```
 
 It requires the matching native Linux/macOS architecture, GitHub-hosted runner,
-canonical repository identity, exact workflow dispatch, positive run/attempt IDs,
+canonical repository identity, exact workflow dispatch (or the explicitly pushed
+`validation/unix-payload-014` branch), positive run/attempt IDs,
 `HEAD == GITHUB_SHA`, and a clean initial checkout including untracked source.
 Signing credential environment variables refuse before Git inspection. These
 are runner/environment guards, not cryptographic attestation. `--installer`
@@ -61,7 +62,7 @@ pinned ZIP or preserve Unix filesystem modes on a Windows signing host.
 The next narrowly reviewed stage must bind the actual bounded transfer contents
 to fresh GitHub API proof: repository/workflow/run/attempt, artifact ID/name/size/
 digest, source/build/tree and any supported exact merge-parent relationship.
-Dispatch preparation currently supports no PR merge lane. A local signer must
+Preparation currently supports no PR merge lane. A local signer must
 verify that proof and raw hashes before invoking the existing `prepare` and
 `signDetached`, then sign a separate envelope covering Setup, MCP, router,
 metadata hashes, source, target, mode and `privateKeyIncluded=false`/

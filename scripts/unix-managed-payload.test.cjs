@@ -112,7 +112,7 @@ for (const [platform, arch] of [['linux', 'x86_64'], ['linux', 'aarch64'], ['mac
       assert.equal(receipt.nativeConsentTested, false);
       assert.equal(receipt.mcpMode, 'writable');
       assert.deepEqual(receipt.source, { repository: 'BOBWORKS-XR/CREATOR-HUB', repositoryId: 1364807512,
-        workflow: '.github/workflows/unix-managed-payload.yml', sourceCommit: commit, buildCommit: commit, sourceTree: tree, runId: 123, runAttempt: 2 });
+        workflow: '.github/workflows/unix-managed-payload.yml', event: 'workflow_dispatch', sourceCommit: commit, buildCommit: commit, sourceTree: tree, runId: 123, runAttempt: 2 });
       assert.ok(receipt.files['modules/setup/creator-project-setup']);
       assert.ok(receipt.files['router-for-package']);
       for (const [name, record] of Object.entries(receipt.files)) {
@@ -159,6 +159,20 @@ test('native admission rejects local/self-hosted/foreign/PR/architecture and cre
       assert.throws(() => prepareAdmission(f.root, 'linux', 'x86_64', { ...f.env, ...change }, f.execute), /requires|refuses/);
     }
     assert.deepEqual(f.calls, []);
+  } finally { cleanup(f); }
+});
+
+test('only the explicit validation push can substitute for a workflow dispatch', () => {
+  const f = fixture();
+  try {
+    const ref = 'refs/heads/validation/unix-payload-014';
+    const env = { ...f.env, GITHUB_EVENT_NAME: 'push', GITHUB_REF: ref,
+      GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/.github/workflows/unix-managed-payload.yml@${ref}` };
+    assert.equal(prepareAdmission(f.root, 'linux', 'x86_64', env, f.execute).event, 'push');
+    for (const change of [{ GITHUB_REF: 'refs/heads/feature/unified-creator-hub' },
+      { GITHUB_WORKFLOW_REF: f.env.GITHUB_WORKFLOW_REF }, { GITHUB_EVENT_NAME: 'pull_request' }]) {
+      assert.throws(() => prepareAdmission(f.root, 'linux', 'x86_64', { ...env, ...change }, f.execute), /requires/);
+    }
   } finally { cleanup(f); }
 });
 
