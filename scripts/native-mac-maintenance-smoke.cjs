@@ -20,16 +20,16 @@ const BASELINES = Object.freeze({
 });
 const LIMIT = 512 * 1024 * 1024;
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
-const CANDIDATE = Object.freeze({ runId: '38393759689',
-  headSha: '6d47bd0790cfc5c3560495bbd92c37b3cd06df14',
-  sourceSha: 'cb7499b592b4260f6733b7ff5ef7c670f74233a0',
+const CANDIDATE = Object.freeze({ runId: '38407664529',
+  headSha: 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e',
+  sourceSha: '15f69917f827cac51af67ca027b460c142030379',
   artifacts: Object.freeze({
-    X64: Object.freeze({ id: 11811084737, size: 5430330, dmgSize: 5462525,
-      dmgSha256: '9697ba880b8c5169ebfae7b8d09ae03a94f367dcad6816e6295a2c9ed3d84128',
-      sha256: '907c757a41d5ea051b30dc91ee188896d9415dd86fad8f070e48a9c384bf87cf' }),
-    ARM64: Object.freeze({ id: 11810464108, size: 5133821, dmgSize: 5161483,
-      dmgSha256: 'd023fe401c6cf1edb340e0eb9f06dabce988f5168e9b9d9ebb1ddd08a8c2728a',
-      sha256: 'd50be98f6d950eadf8191df762f8efc1840436a94a2538956781dfc9620a8057' }),
+    X64: Object.freeze({ id: 11819847905, size: 5430323, dmgSize: 5462532,
+      dmgSha256: 'e5efa060a776d325723a40dbddf79f198366db4374bffe41bc5de53fe865464e',
+      sha256: 'e68ab4993d7c8d50dd8649d74be8a36f6190bddcddff27e73ff46415e6911825' }),
+    ARM64: Object.freeze({ id: 11819379798, size: 5133859, dmgSize: 5161503,
+      dmgSha256: '9cf7377c0e7ee37eda87213e098886fbb073cb106f9157857488025f15dadb53',
+      sha256: '650a85b57369bc84049f9e0c49374cccb482f13d1c1cbd3757829bf5b756b917' }),
   }),
 });
 const PROBE_FILES = Object.freeze(['scripts/native-mac-maintenance-smoke.cjs',
@@ -247,6 +247,11 @@ async function prepare(out, input, report) {
   report.artifact = artifact;
   const source = validateSource(JSON.parse(await sourceFile('src-tauri/tauri.conf.json', input.sourceSha)),
     JSON.parse(await sourceFile('package.json', input.sourceSha)), await sourceFile('rust-toolchain.toml', input.sourceSha));
+  if (input.architecture === 'ARM64') {
+    const overlay = JSON.parse(await sourceFile('src-tauri/tauri.arm64.conf.json', input.sourceSha));
+    assert.deepEqual(overlay, { bundle: { macOS: { minimumSystemVersion: '11.0' } } }, 'Unreviewed ARM minimum override');
+    source.configuredMinimumSystemVersion = overlay.bundle.macOS.minimumSystemVersion;
+  }
   const sourceTree = await api(`git/trees/${artifact.treeSha}?recursive=1`);
   assert.equal(sourceTree.truncated, false, 'Product tree comparison must not be truncated');
   assert.equal(sourceTree.sha, artifact.treeSha);

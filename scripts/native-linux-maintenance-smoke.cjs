@@ -5,12 +5,12 @@ const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const { spawn, execFileSync } = require('node:child_process');
 
-const SOURCE = '6d47bd0790cfc5c3560495bbd92c37b3cd06df14';
-const MERGE = 'cb7499b592b4260f6733b7ff5ef7c670f74233a0';
+const SOURCE = 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e';
+const MERGE = '15f69917f827cac51af67ca027b460c142030379';
 const PINS = Object.freeze({
-  appimage: Object.freeze({ name: 'Creator Hub_0.1.13_amd64.AppImage', sha256: '67b382d2337a93e74d2baf967f0e9f4632b80cb94cd2220245ddcf168956636b', bytes: 85748216,
+  appimage: Object.freeze({ name: 'Creator Hub_0.1.13_amd64.AppImage', sha256: '374cd60922dbef9664d2f4ff2b5a3a53fb0f09fcc50714c1a9d69f6d490c26ad', bytes: 85748216,
     oldName: 'Creator.Hub_0.1.12_amd64.AppImage', oldSha256: 'b2d161cc9fc98522d25a11d1c649994fed591c07a2d0ad3e89976fe985f454c4' }),
-  deb: Object.freeze({ name: 'Creator Hub_0.1.13_amd64.deb', sha256: '57ff363701a49c8d603efb677a3720ddc5c2b2443a9b019f0afd5be922ac5374', bytes: 5975036,
+  deb: Object.freeze({ name: 'Creator Hub_0.1.13_amd64.deb', sha256: '950392f2ded56017a5553e702dc76f2c296bfea2b6809a9e56e05b2030b7916f', bytes: 5975056,
     oldName: 'Creator.Hub_0.1.12_amd64.deb', oldSha256: 'a1d20fb23544356d90ab2314b6d430b274220e97d9129815eea731ac39c7ffd2' }),
 });
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -134,6 +134,10 @@ async function gui(file, expected, version, profile, output, freshTerms) {
   try {
   const ownedWindow = await retry(window);
   assert.equal(hash(`/proc/${child.pid}/exe`), expected);
+  fs.writeFileSync(path.join(output, `mountinfo-${version}.txt`), fs.readFileSync(`/proc/${child.pid}/mountinfo`));
+  if (fs.existsSync(`/proc/${child.pid}/fdinfo/1023`)) {
+    fs.writeFileSync(path.join(output, `runtime-dir-fdinfo-${version}.txt`), fs.readFileSync(`/proc/${child.pid}/fdinfo/1023`));
+  }
   command('xdotool', ['windowsize', ownedWindow, '1100', '860']);
   const snapshot = await retry(() => {
     assert.equal(launchError, undefined, 'Owned GUI failed to launch');
@@ -191,7 +195,7 @@ async function main() {
   const packageFile = path.join(directory, PINS[kind].name);
   const pin = candidate(packageFile, kind);
   fs.mkdirSync(output);
-  const report = { passed: false, releaseReady: false, source: SOURCE, mergeSource: MERGE, sourceRun: '38393759689',
+  const report = { passed: false, releaseReady: false, source: SOURCE, mergeSource: MERGE, sourceRun: '38407664529',
     kind, nativeGuiTested: false, manualUpgradeTested: false, signedUpdateTested: false,
     automaticRestartTested: false, nativeCompanionManagementTested: false, userMachineUsed: false, phases: [] };
   try {

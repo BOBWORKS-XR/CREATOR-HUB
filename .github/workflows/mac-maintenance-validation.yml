@@ -6,22 +6,22 @@ on:
       candidate_run_id:
         description: Existing reviewed successful CI run, not a new build
         required: true
-        default: '38393759689'
+        default: '38407664529'
         type: string
       candidate_head_sha:
         description: Reviewed PR head (full SHA)
         required: true
-        default: '6d47bd0790cfc5c3560495bbd92c37b3cd06df14'
+        default: 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e'
         type: string
       artifact_source_sha:
         description: Artifact checkout PR merge SHA (tree and parents must bind to head)
         required: true
-        default: 'cb7499b592b4260f6733b7ff5ef7c670f74233a0'
+        default: '15f69917f827cac51af67ca027b460c142030379'
         type: string
       intel_dmg_sha256:
         description: Reviewed exact 0.1.13 Intel DMG SHA256 (not ZIP digest)
         required: true
-        default: '9697ba880b8c5169ebfae7b8d09ae03a94f367dcad6816e6295a2c9ed3d84128'
+        default: 'e5efa060a776d325723a40dbddf79f198366db4374bffe41bc5de53fe865464e'
         type: string
       intel_executable_sha256:
         description: Optional independently reviewed Intel executable SHA256, else derive from pinned DMG
@@ -30,7 +30,7 @@ on:
       arm_dmg_sha256:
         description: Reviewed exact 0.1.13 ARM DMG SHA256 (not ZIP digest)
         required: true
-        default: 'd023fe401c6cf1edb340e0eb9f06dabce988f5168e9b9d9ebb1ddd08a8c2728a'
+        default: '9cf7377c0e7ee37eda87213e098886fbb073cb106f9157857488025f15dadb53'
         type: string
       arm_executable_sha256:
         description: Optional independently reviewed ARM executable SHA256, else derive from pinned DMG
@@ -59,10 +59,10 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     env:
-      CREATOR_MAC_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id || '38393759689' }}
-      CREATOR_MAC_HEAD_SHA: ${{ inputs.candidate_head_sha || '6d47bd0790cfc5c3560495bbd92c37b3cd06df14' }}
-      CREATOR_MAC_SOURCE_SHA: ${{ inputs.artifact_source_sha || 'cb7499b592b4260f6733b7ff5ef7c670f74233a0' }}
-      CREATOR_MAC_DMG_SHA256: ${{ matrix.arch == 'X64' && (inputs.intel_dmg_sha256 || '9697ba880b8c5169ebfae7b8d09ae03a94f367dcad6816e6295a2c9ed3d84128') || (inputs.arm_dmg_sha256 || 'd023fe401c6cf1edb340e0eb9f06dabce988f5168e9b9d9ebb1ddd08a8c2728a') }}
+      CREATOR_MAC_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id || '38407664529' }}
+      CREATOR_MAC_HEAD_SHA: ${{ inputs.candidate_head_sha || 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e' }}
+      CREATOR_MAC_SOURCE_SHA: ${{ inputs.artifact_source_sha || '15f69917f827cac51af67ca027b460c142030379' }}
+      CREATOR_MAC_DMG_SHA256: ${{ matrix.arch == 'X64' && (inputs.intel_dmg_sha256 || 'e5efa060a776d325723a40dbddf79f198366db4374bffe41bc5de53fe865464e') || (inputs.arm_dmg_sha256 || '9cf7377c0e7ee37eda87213e098886fbb073cb106f9157857488025f15dadb53') }}
       CREATOR_MAC_EXECUTABLE_SHA256: ${{ matrix.arch == 'X64' && inputs.intel_executable_sha256 || matrix.arch == 'ARM64' && inputs.arm_executable_sha256 || '' }}
       CREATOR_MAC_LANE: ${{ matrix.lane }}
     steps:

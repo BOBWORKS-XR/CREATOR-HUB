@@ -24,7 +24,7 @@ test('only exact separately built AppImage/DEB candidates are admitted', t => {
   fs.writeFileSync(file, 'wrong');
   assert.throws(() => smoke.candidate(file, 'deb'));
   assert.throws(() => smoke.candidate(file, 'rpm'), /Unsupported/);
-  assert.equal(smoke.SOURCE, '6d47bd0790cfc5c3560495bbd92c37b3cd06df14');
+  assert.equal(smoke.SOURCE, 'b4a0cd874b2ad1fd53f0c24db8c0d7aec0bb2e8e');
   assert.ok(Object.isFrozen(smoke.PINS) && Object.values(smoke.PINS).every(Object.isFrozen));
 });
 test('native evidence cannot turn manual installer/GUI smoke into signed update acceptance', () => {
