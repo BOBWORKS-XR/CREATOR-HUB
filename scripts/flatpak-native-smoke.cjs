@@ -231,8 +231,11 @@ p.optionxform = str
 p.read_string(sys.stdin.read())
 c = p['Context']
 assert set(c) <= {'shared','sockets','devices','filesystems','features'}
-for key, values in {'shared':{'ipc','network'}, 'sockets':{'wayland','fallback-x11'}, 'devices':{'dri'}}.items():
+for key, values in {'shared':{'ipc','network'}, 'devices':{'dri'}}.items():
     assert set(filter(None, c.get(key,'').split(';'))) == values, key
+# Flatpak 1.14.6 option_socket_cb adds x11 for fallback-x11; fallback still governs runtime access.
+sockets = set(filter(None, c.get('sockets','').split(';')))
+assert sockets in ({'wayland','fallback-x11'}, {'x11','wayland','fallback-x11'}), 'sockets'
 assert not c.get('filesystems','') and not c.get('features','')
 for section in ('Session Bus Policy','System Bus Policy','Environment'):
     assert not dict(p[section]) if p.has_section(section) else True, section

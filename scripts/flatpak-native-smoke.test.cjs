@@ -257,6 +257,30 @@ test('installed minimal permissions are parsed structurally, not accepted by sub
   assert.throws(() => permissionMetadata(metadata.replace('wayland;fallback-x11;', 'session-bus;')));
 });
 
+test('captured Flatpak 1.14.6 fallback-x11 serialization is accepted without admitting unconditional X11', () => {
+  // Captured metadata from failed run 38417415256; embedding it avoids a CI artifact dependency.
+  const metadata = '[Application]\nname=com.creatorworks.hub\nruntime=org.gnome.Platform/x86_64/50\n'
+    + 'sdk=org.gnome.Sdk/x86_64/50\ncommand=creator-hub\n\n[Context]\n'
+    + 'shared=network;ipc;\nsockets=x11;wayland;fallback-x11;\ndevices=dri;\n';
+  assert.deepEqual(permissionMetadata(metadata), {
+    shared: 'network;ipc;', sockets: 'x11;wayland;fallback-x11;', devices: 'dri;',
+  }, 'Retain raw serialized evidence; do not rewrite installed permissions');
+  for (const sockets of ['x11;', 'x11;wayland;', 'x11;fallback-x11;', 'fallback-x11;', 'wayland;', '',
+    'x11;wayland;!fallback-x11;', 'x11;wayland;fallback-x11;session-bus;',
+    'x11;wayland;fallback-x11;system-bus;', 'x11;wayland;fallback-x11;ssh-auth;',
+    'x11;wayland;fallback-x11;gpg-agent;']) {
+    assert.throws(() => permissionMetadata(metadata.replace('x11;wayland;fallback-x11;', sockets)), /minimal GUI\/network contract/, sockets);
+  }
+  for (const addition of ['filesystems=home;\n', 'features=devel;\n',
+    '[Session Bus Policy]\norg.freedesktop.Flatpak=talk\n', '[System Bus Policy]\norg.example.Host=talk\n',
+    '[Environment]\nWEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1\n']) {
+    assert.throws(() => permissionMetadata(metadata + addition));
+  }
+  const { FINISH_ARGS } = require('./flatpak-package.cjs');
+  assert.deepEqual(FINISH_ARGS, ['--socket=wayland', '--socket=fallback-x11', '--share=ipc', '--device=dri', '--share=network']);
+  assert.ok(!FINISH_ARGS.includes('--socket=x11'), 'No manifest permission expansion');
+});
+
 function zipFixture(filename, entries) {
   execFileSync(PYTHON, ['-B', '-c', `
 import json, stat, sys, zipfile

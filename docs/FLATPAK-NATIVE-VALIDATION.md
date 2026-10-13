@@ -123,6 +123,21 @@ the immutable SHA-pinned Flatpak inputs.
   and Unix modes against the native inventory. Structurally parse installed
   permissions: exactly GUI sockets, IPC, DRI and network, with no additional
   filesystem, full bus, environment or host-spawn grants.
+- Flatpak `1.14.6-1ubuntu0.1` in actual run `38417415256` serialized the existing
+  Wayland/fallback manifest as `sockets=x11;wayland;fallback-x11;`. Upstream
+  [option parsing](https://github.com/flatpak/flatpak/blob/1.14.6/common/flatpak-context.c#L999-L1016)
+  adds the X11 bit for `fallback-x11`;
+  [metadata serialization](https://github.com/flatpak/flatpak/blob/1.14.6/common/flatpak-context.c#L1782-L1805)
+  saves that socket mask. The
+  [runtime selection](https://github.com/flatpak/flatpak/blob/1.14.6/common/flatpak-run.c#L1657-L1667)
+  lets fallback mode govern X11 availability; the
+  [official permission contract](https://docs.flatpak.org/en/latest/sandbox-permissions.html)
+  confirms this overrides ordinary X11 permission. The validator accepts only
+  the original two-socket set or that exact three-socket serialization, retaining
+  raw metadata as evidence. Standalone X11, X11/Wayland without fallback, missing
+  Wayland, extra sockets, filesystem/bus/environment grants remain rejected. The
+  manifest is unchanged. The old failed report is preserved; sandbox, GUI and
+  local update phases from that run were not reached and still require a rerun.
 - Capture actual `/.flatpak-info`, sandbox XDG paths, denied native-data/project
   paths, hidden host sentinel process, and `ldd` results inside GNOME50. Missing
   dependencies are blockers, not authorization to copy guessed libraries.
