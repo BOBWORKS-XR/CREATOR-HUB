@@ -3,9 +3,10 @@ use crate::settings_backup as storage;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(windows)]
+use std::io;
 use std::{
     fs::{self, File, OpenOptions},
-    io,
     path::{Path, PathBuf},
 };
 
@@ -120,13 +121,21 @@ enum Boundary {
     BeforeImage(usize),
     AfterImage(usize),
     Pending,
+    #[cfg(windows)]
     Stage(usize),
+    #[cfg(windows)]
     Intent(usize),
+    #[cfg(windows)]
     BeforePublish(usize),
+    #[cfg(windows)]
     Published(usize),
+    #[cfg(windows)]
     NativeRecorded(usize),
+    #[cfg(windows)]
     DisplacedSealed(usize),
+    #[cfg(windows)]
     Captured(usize),
+    #[cfg(windows)]
     Outcome(usize),
     Completed,
 }
@@ -751,7 +760,7 @@ impl Transaction {
         {
             let _ = hook;
             self.outcome(index, Status::Unsupported, None)?;
-            return Ok(());
+            Ok(())
         }
         #[cfg(windows)]
         {

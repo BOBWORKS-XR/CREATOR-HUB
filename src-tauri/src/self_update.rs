@@ -198,7 +198,7 @@ fn raw_installed_location(_handle: &tauri::AppHandle) -> Result<PathBuf, String>
             );
             crate::update_target::appimage_location(&exe, &appdir, &image)?
         } else {
-            if exe != PathBuf::from("/usr/bin/creator-hub") {
+            if exe != std::path::Path::new("/usr/bin/creator-hub") {
                 return Err("Open the installed Hub package before updating.".into());
             }
             exe

@@ -306,7 +306,7 @@ fn edit_json_entry(
     } else {
         json_insert(source, &object, env_key, &entry[env_key], &mut edits)?;
     }
-    edits.sort_by(|a, b| b.0.start.cmp(&a.0.start));
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.0.start));
     let mut after = source.to_owned();
     for (range, text) in edits {
         after.replace_range(range, &text);

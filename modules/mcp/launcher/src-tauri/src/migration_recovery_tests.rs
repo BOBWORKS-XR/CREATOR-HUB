@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(windows)]
 use std::io::Write;
 
 struct Fixture {
