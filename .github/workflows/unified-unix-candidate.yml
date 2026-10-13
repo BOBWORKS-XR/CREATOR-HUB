@@ -2,11 +2,24 @@ name: Experimental unified Unix packaging (not release)
 
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Native packaging target; pull requests always check all targets
+        type: choice
+        default: all
+        options: [all, linux, macos-arm64, macos-intel]
   pull_request:
     paths:
       - '.github/workflows/unified-unix-candidate.yml'
       - 'scripts/build-unified.cjs'
       - 'scripts/unix-package-payload*'
+      - 'scripts/module-archive*'
+      - 'scripts/linux-hub-runpath.test.cjs'
+      - 'scripts/fixtures/linux-runpath.rs'
+      - 'native/module-archive/**'
+      - 'src-tauri/src/builtin.rs'
+      - 'src-tauri/src/module_archive.rs'
+      - 'src-tauri/build.rs'
       - 'rust-toolchain.toml'
 
 permissions:
@@ -21,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest, macos-15-intel]
+        os: ${{ fromJSON(inputs.platform == 'linux' && '["ubuntu-22.04"]' || inputs.platform == 'macos-arm64' && '["macos-latest"]' || inputs.platform == 'macos-intel' && '["macos-15-intel"]' || '["ubuntu-22.04","macos-latest","macos-15-intel"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     steps:
@@ -37,6 +50,7 @@ jobs:
             src-tauri
             modules/mcp/launcher/src-tauri
             modules/project-setup/src-tauri
+            native/module-archive
           cache-on-failure: true
       - name: Install disposable Linux build and extraction tools
         if: runner.os == 'Linux'
@@ -54,6 +68,19 @@ jobs:
         run: |
           npm run check:sources
           node --test scripts/unix-package-payload.test.cjs scripts/build-unified.test.cjs
+      - name: Check the shared archive decoder
+        run: |
+          cargo fmt --manifest-path native/module-archive/Cargo.toml --check
+          cargo clippy --release --locked --manifest-path native/module-archive/Cargo.toml --all-targets -- -D warnings
+          cargo test --release --locked --manifest-path native/module-archive/Cargo.toml
+      - name: Native Linux archive and RUNPATH regression tests
+        if: runner.os == 'Linux'
+        env:
+          CREATOR_NATIVE_ARCHIVE_TESTS: '1'
+          CREATOR_TEST_ARCHIVE_DECODER: ${{ github.workspace }}/native/module-archive/target/release/creator-hub-module-archive
+        run: |
+          cargo build --release --locked --manifest-path native/module-archive/Cargo.toml
+          node --test scripts/module-archive-native.test.cjs scripts/linux-hub-runpath.test.cjs
       - name: Build and inspect real included payloads (MCP deliberately read-only)
         run: npm run build:unified -- ci-native-package --experimental-unix --installer
       - name: Retain package/integrity evidence without any release upload

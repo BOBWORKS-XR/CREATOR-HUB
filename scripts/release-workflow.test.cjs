@@ -26,6 +26,19 @@ test('superseded branch test builds cancel without adding cancellation to publis
   assert.doesNotMatch(fs.readFileSync(path.join(root, 'release.yml'), 'utf8'), /cancel-in-progress: true/);
 });
 
+test('native archive changes trigger packaging and required Linux tools are tested in that lane', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'unified-unix-candidate.yml'), 'utf8');
+  for (const trigger of ['scripts/module-archive*', 'native/module-archive/**', 'src-tauri/src/builtin.rs', 'src-tauri/src/module_archive.rs']) {
+    assert.ok(workflow.includes(`- '${trigger}'`), `${trigger} must trigger real native packages`);
+  }
+  assert.match(workflow, /options: \[all, linux, macos-arm64, macos-intel\]/);
+  assert.match(workflow, /fromJSON\(inputs\.platform == 'linux'/);
+  assert.match(workflow, /CREATOR_NATIVE_ARCHIVE_TESTS: '1'/);
+  assert.match(workflow, /cargo build --release --locked --manifest-path native\/module-archive\/Cargo.toml/);
+  assert.match(workflow, /node --test scripts\/module-archive-native\.test\.cjs scripts\/linux-hub-runpath\.test\.cjs/);
+  assert.match(workflow, /patchelf build-essential file rpm libarchive-tools/);
+});
+
 test('browser failures retain screenshots and traces without enabling automatic retries', () => {
   const config = require('../playwright.config.js');
   assert.equal(config.use.trace, 'retain-on-failure');

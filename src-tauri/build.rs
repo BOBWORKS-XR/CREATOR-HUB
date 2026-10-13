@@ -1,4 +1,11 @@
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        // linuxdeploy sets this exact RUNPATH. Emit it at link time so the
+        // packaged Hub stays identical beyond Tauri's bundle marker.
+        println!(
+            "cargo:rustc-link-arg-bin=creator-hub=-Wl,--enable-new-dtags,-rpath,$ORIGIN/../lib"
+        );
+    }
     println!("cargo:rerun-if-env-changed=CREATOR_BUILTIN_MANIFEST");
     let manifest = match std::env::var_os("CREATOR_BUILTIN_MANIFEST") {
         Some(path) => {

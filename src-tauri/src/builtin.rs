@@ -10,6 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use tauri::Manager as _;
+#[path = "module_archive.rs"]
+mod archive;
 
 const MANIFEST: &str = include_str!(concat!(env!("OUT_DIR"), "/builtin-manifest.json"));
 #[derive(Deserialize)]
@@ -21,6 +23,8 @@ struct Manifest {
     modules: BTreeMap<String, Module>,
     #[serde(default)]
     managed_routing: Option<Routing>,
+    #[serde(default)]
+    payload_archive: Option<archive::Binding>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,40 +76,55 @@ fn manifest() -> Result<Manifest, String> {
         || value.platform != platform
         || value.arch != std::env::consts::ARCH
         || value.modules.keys().map(String::as_str).collect::<Vec<_>>() != ["mcp", "setup"]
+        || (value.payload_archive.is_some() && !cfg!(target_os = "linux"))
     {
         return Err("Built-in modules do not match this Hub platform.".into());
     }
     Ok(value)
 }
-fn verify(root: &Path, id: &str, entry: Module) -> Result<Candidate, String> {
-    let binary = if id == "mcp" {
-        "creator-works-mcp-launcher"
+fn validate_module(id: &str, entry: &Module) -> Result<(), String> {
+    if id == "routing" {
+        let required = routing_names();
+        if entry.executable != required.0
+            || entry.files.keys().cloned().collect::<Vec<_>>() != required.1
+        {
+            return Err("Invalid managed router package identity.".into());
+        }
+    } else if !matches!(id, "mcp" | "setup") {
+        return Err("Invalid built-in module identity.".into());
     } else {
-        "creator-project-setup"
-    };
-    let expected = format!("{id}/{binary}{}", if cfg!(windows) { ".exe" } else { "" });
-    let mut required = vec![expected.clone()];
-    if id == "mcp" {
-        required.extend([
-            "mcp/server/creator-works-mcp.mjs".to_owned(),
-            format!(
-                "mcp/server/runtime/node{}",
-                if cfg!(windows) { ".exe" } else { "" }
-            ),
-            "mcp/server/runtime/LICENSE".to_owned(),
-            "mcp/server/runtime/VERSION".to_owned(),
-            "mcp/server/unity-extension/Editor/BanterMCPBridge.cs".to_owned(),
-            "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png".to_owned(),
-            "mcp/server/LICENSE".to_owned(),
-            "mcp/server/THIRD_PARTY_NOTICES.md".to_owned(),
-        ]);
+        let binary = if id == "mcp" {
+            "creator-works-mcp-launcher"
+        } else {
+            "creator-project-setup"
+        };
+        let expected = format!("{id}/{binary}{}", if cfg!(windows) { ".exe" } else { "" });
+        let mut required = vec![expected.clone()];
+        if id == "mcp" {
+            required.extend([
+                "mcp/server/creator-works-mcp.mjs".to_owned(),
+                format!(
+                    "mcp/server/runtime/node{}",
+                    if cfg!(windows) { ".exe" } else { "" }
+                ),
+                "mcp/server/runtime/LICENSE".to_owned(),
+                "mcp/server/runtime/VERSION".to_owned(),
+                "mcp/server/unity-extension/Editor/BanterMCPBridge.cs".to_owned(),
+                "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png".to_owned(),
+                "mcp/server/LICENSE".to_owned(),
+                "mcp/server/THIRD_PARTY_NOTICES.md".to_owned(),
+            ]);
+        }
+        required.sort();
+        if entry.executable != expected
+            || semver::Version::parse(&entry.version).is_err()
+            || entry.files.keys().cloned().collect::<Vec<_>>() != required
+        {
+            return Err("Invalid or incomplete built-in module identity.".into());
+        }
     }
-    required.sort();
-    if entry.executable != expected
-        || semver::Version::parse(&entry.version).is_err()
-        || entry.files.keys().cloned().collect::<Vec<_>>() != required
-    {
-        return Err("Invalid or incomplete built-in module identity.".into());
+    if semver::Version::parse(&entry.version).is_err() {
+        return Err("Invalid built-in module version.".into());
     }
     for (name, hash) in &entry.files {
         if !relative_file(name)
@@ -114,56 +133,131 @@ fn verify(root: &Path, id: &str, entry: Module) -> Result<Candidate, String> {
         {
             return Err("Invalid built-in module file.".into());
         }
-        let file = root.join(name);
-        platform::reject_links(&file)?;
-        if crate::manager::file_hash(&file)? != *hash {
-            return Err(format!(
-                "Built-in {id} payload changed: {name}. Reinstall this Hub; nothing was opened."
-            ));
-        }
     }
-    Ok(Candidate {
-        path: root.join(&entry.executable),
-        hash: entry.files[&entry.executable].clone(),
-        version: entry.version,
-    })
-}
-pub fn candidate(handle: &tauri::AppHandle, app: AppId) -> Result<Option<Candidate>, String> {
-    if !enabled() {
-        return Ok(None);
-    }
-    let id = if app == AppId::Mcp { "mcp" } else { "setup" };
-    let entry = manifest()?
-        .modules
-        .remove(id)
-        .ok_or("Missing built-in module.")?;
-    let root = handle
-        .path()
-        .resource_dir()
-        .map_err(|_| "Cannot locate Hub resources.")?
-        .join("modules");
-    verify(&root, id, entry).map(Some)
+    Ok(())
 }
 
-// Only startup stages payloads. Inventory remains read-only, and no generation
-// is repaired or deleted: an existing AI connection may still depend on it.
-pub fn hosting_candidate(
-    handle: &tauri::AppHandle,
-    app: AppId,
-) -> Result<Option<Candidate>, String> {
-    if !enabled() || app != AppId::Mcp {
-        return candidate(handle, app);
+enum Source {
+    Directory(PathBuf),
+    Archive(archive::Snapshot),
+}
+
+impl Source {
+    fn load(resources: &Path, manifest: &Manifest) -> Result<Self, String> {
+        let Some(binding) = &manifest.payload_archive else {
+            return Ok(Self::Directory(resources.join("modules")));
+        };
+        if manifest.platform != "linux" {
+            return Err("Archive payloads are Linux-only.".into());
+        }
+        let mut expected = BTreeMap::new();
+        for (id, entry) in &manifest.modules {
+            validate_module(id, entry)?;
+            for (name, hash) in &entry.files {
+                let mode = if name == &entry.executable || name == "mcp/server/runtime/node" {
+                    0o755
+                } else {
+                    0o644
+                };
+                expected.insert(name.clone(), (hash.clone(), mode));
+            }
+        }
+        if let Some(routing) = &manifest.managed_routing {
+            let (binary, names) = routing_names();
+            if routing.protocol != 1 || routing.files.keys().cloned().collect::<Vec<_>>() != names {
+                return Err("Invalid managed router package identity.".into());
+            }
+            for (name, hash) in &routing.files {
+                expected.insert(
+                    name.clone(),
+                    (hash.clone(), if *name == binary { 0o755 } else { 0o644 }),
+                );
+            }
+        }
+        binding.validate(&expected)?;
+        let file = resources.join(&binding.file);
+        platform::reject_links(&file)?;
+        archive::read(&file, binding, &expected).map(Self::Archive)
     }
-    let entry = manifest()?
-        .modules
-        .remove("mcp")
-        .ok_or("Missing MCP module.")?;
-    let source = handle
-        .path()
-        .resource_dir()
-        .map_err(|_| "Cannot locate Hub resources.")?
-        .join("modules");
-    let generations = dirs::data_local_dir()
+
+    fn verify(&self, root: &Path, id: &str, entry: Module) -> Result<Candidate, String> {
+        validate_module(id, &entry)?;
+        for (name, hash) in &entry.files {
+            let actual = match self {
+                Self::Directory(source) => {
+                    let file = source.join(name);
+                    platform::reject_links(&file)?;
+                    crate::manager::file_hash(&file)?
+                }
+                Self::Archive(snapshot) => {
+                    use sha2::{Digest, Sha256};
+                    let member = snapshot
+                        .0
+                        .get(name)
+                        .ok_or("Missing verified archive member.")?;
+                    format!("{:x}", Sha256::digest(&member.bytes))
+                }
+            };
+            if actual != *hash {
+                return Err(format!(
+                "Built-in {id} payload changed: {name}. Reinstall this Hub; nothing was opened."
+            ));
+            }
+        }
+        Ok(Candidate {
+            path: root.join(&entry.executable),
+            hash: entry.files[&entry.executable].clone(),
+            version: entry.version,
+        })
+    }
+
+    fn copy(&self, name: &str, to: &Path) -> Result<(), String> {
+        match self {
+            Self::Directory(root) => {
+                let from = root.join(name);
+                platform::reject_links(&from)?;
+                std::fs::copy(from, to)
+                    .map_err(|_| format!("Cannot stage runtime file: {name}"))?;
+                Ok(())
+            }
+            Self::Archive(snapshot) => snapshot.write(name, to),
+        }
+    }
+
+    fn verify_generation(&self, root: &Path, id: &str, entry: Module) -> Result<Candidate, String> {
+        let candidate = verify(root, id, entry.clone())?;
+        if let Self::Archive(snapshot) = self {
+            for name in entry.files.keys() {
+                let member = snapshot
+                    .0
+                    .get(name)
+                    .ok_or("Missing verified archive member.")?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = std::fs::metadata(root.join(name))
+                        .map_err(|_| "Cannot inspect retained module mode.")?
+                        .permissions()
+                        .mode()
+                        & 0o7777;
+                    if mode != member.mode {
+                        return Err("Retained module mode changed. Nothing was opened.".into());
+                    }
+                }
+                #[cfg(not(unix))]
+                let _ = member;
+            }
+        }
+        Ok(candidate)
+    }
+}
+
+fn verify(root: &Path, id: &str, entry: Module) -> Result<Candidate, String> {
+    Source::Directory(root.to_owned()).verify(root, id, entry)
+}
+
+fn generations() -> Result<PathBuf, String> {
+    Ok(dirs::data_local_dir()
         .ok_or("Local app data is unavailable.")?
         .join("creator-hub")
         .join("runtime-generations")
@@ -171,26 +265,10 @@ pub fn hosting_candidate(
             "{}-{}",
             std::env::consts::OS,
             std::env::consts::ARCH
-        ));
-    prepare_generation(&source, &generations, entry).map(Some)
+        )))
 }
 
-pub fn managed_route(
-    handle: &tauri::AppHandle,
-) -> Result<Option<creator_hub_mcp_router::Router>, String> {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-    if !enabled() {
-        return Ok(None);
-    }
-    let manifest = manifest()?;
-    let Some(routing) = manifest.managed_routing else {
-        return Ok(None);
-    };
-    let root = handle
-        .path()
-        .resource_dir()
-        .map_err(|_| "Cannot locate signed routing resources.")?
-        .join("modules");
+fn routing_names() -> (String, Vec<String>) {
     let binary = format!(
         "routing/creator-hub-mcp-router{}",
         if cfg!(windows) { ".exe" } else { "" }
@@ -203,17 +281,108 @@ pub fn managed_route(
         "routing/runtime.minisig".into(),
     ];
     names.sort();
+    (binary, names)
+}
+pub fn candidate(handle: &tauri::AppHandle, app: AppId) -> Result<Option<Candidate>, String> {
+    if !enabled() {
+        return Ok(None);
+    }
+    let id = if app == AppId::Mcp { "mcp" } else { "setup" };
+    let manifest = manifest()?;
+    let entry = manifest
+        .modules
+        .get(id)
+        .ok_or("Missing built-in module.")?
+        .clone();
+    let resources = handle
+        .path()
+        .resource_dir()
+        .map_err(|_| "Cannot locate Hub resources.")?;
+    let source = Source::load(&resources, &manifest)?;
+    let root = match &source {
+        Source::Directory(root) => root.clone(),
+        Source::Archive(_) => generations()?.join(generation_id(&entry)?),
+    };
+    if manifest.payload_archive.is_some() && root.exists() {
+        source.verify_generation(&root, id, entry).map(Some)
+    } else {
+        source.verify(&root, id, entry).map(Some)
+    }
+}
+
+// Only startup stages payloads. Inventory remains read-only, and no generation
+// is repaired or deleted: an existing AI connection may still depend on it.
+pub fn hosting_candidate(
+    handle: &tauri::AppHandle,
+    app: AppId,
+) -> Result<Option<Candidate>, String> {
+    if !enabled() {
+        return Ok(None);
+    }
+    let manifest = manifest()?;
+    if app != AppId::Mcp && manifest.payload_archive.is_none() {
+        return candidate(handle, app);
+    }
+    let id = if app == AppId::Mcp { "mcp" } else { "setup" };
+    let entry = manifest
+        .modules
+        .get(id)
+        .ok_or("Missing built-in module.")?
+        .clone();
+    let resources = handle
+        .path()
+        .resource_dir()
+        .map_err(|_| "Cannot locate Hub resources.")?;
+    let source = Source::load(&resources, &manifest)?;
+    prepare_generation_from(&source, &generations()?, id, entry).map(Some)
+}
+
+pub fn managed_route(
+    handle: &tauri::AppHandle,
+) -> Result<Option<creator_hub_mcp_router::Router>, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    if !enabled() {
+        return Ok(None);
+    }
+    let manifest = manifest()?;
+    let Some(routing) = &manifest.managed_routing else {
+        return Ok(None);
+    };
+    let resources = handle
+        .path()
+        .resource_dir()
+        .map_err(|_| "Cannot locate signed routing resources.")?;
+    let (binary, names) = routing_names();
     if routing.protocol != 1 || routing.files.keys().cloned().collect::<Vec<_>>() != names {
         return Err("Invalid managed router package identity.".into());
     }
-    for (name, expected) in &routing.files {
-        platform::reject_links(&root.join(name))?;
-        if !crate::catalog::hash_valid(expected)
-            || crate::manager::file_hash(&root.join(name))? != *expected
-        {
-            return Err("The signed routing package changed. Nothing was activated.".into());
+    let source = Source::load(&resources, &manifest)?;
+    let root = match &source {
+        Source::Directory(root) => root.clone(),
+        Source::Archive(_) => {
+            let entry = Module {
+                executable: binary.clone(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                files: routing.files.clone(),
+            };
+            let staged = prepare_generation_from(&source, &generations()?, "routing", entry)?;
+            staged
+                .path
+                .parent()
+                .and_then(Path::parent)
+                .ok_or("Invalid retained routing path.")?
+                .to_owned()
         }
-    }
+    };
+    source.verify(
+        &root,
+        "routing",
+        Module {
+            executable: binary.clone(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            files: routing.files.clone(),
+        },
+    )?;
     let read = |name: &str| crate::manager::bounded_read(&root.join(name), 32768);
     let bytes = read("routing/runtime.json")?;
     let signature = read("routing/runtime.minisig")?;
@@ -255,9 +424,24 @@ impl Drop for PreparationGuard {
     }
 }
 
+#[cfg(test)]
 fn prepare_generation(
     source: &Path,
     generations: &Path,
+    entry: Module,
+) -> Result<Candidate, String> {
+    prepare_generation_from(
+        &Source::Directory(source.to_owned()),
+        generations,
+        "mcp",
+        entry,
+    )
+}
+
+fn prepare_generation_from(
+    source: &Source,
+    generations: &Path,
+    id: &str,
     entry: Module,
 ) -> Result<Candidate, String> {
     use fs2::FileExt;
@@ -265,7 +449,7 @@ fn prepare_generation(
     if !generations.is_absolute() {
         return Err("Runtime storage must be an absolute path.".into());
     }
-    verify(source, "mcp", entry.clone())?;
+    source.verify(generations, id, entry.clone())?;
     platform::reject_links(generations)?;
     fs::create_dir_all(generations).map_err(|_| "Cannot create runtime storage.")?;
     platform::reject_links(generations)?;
@@ -284,31 +468,29 @@ fn prepare_generation(
     let target = generations.join(generation_id(&entry)?);
     platform::reject_links(&target)?;
     if target.exists() {
-        return verify(&target, "mcp", entry);
+        return source.verify_generation(&target, id, entry);
     }
     let staging = tempfile::Builder::new()
         .prefix(".staging-")
         .tempdir_in(generations)
         .map_err(|_| "Cannot stage the runtime generation.")?;
     for name in entry.files.keys() {
-        let from = source.join(name);
-        platform::reject_links(&from)?;
         let to = staging.path().join(name);
         fs::create_dir_all(to.parent().ok_or("Invalid runtime file path.")?)
             .map_err(|_| "Cannot create staged runtime directory.")?;
-        fs::copy(&from, &to).map_err(|_| format!("Cannot stage runtime file: {name}"))?;
+        source.copy(name, &to)?;
         OpenOptions::new()
             .write(true)
             .open(&to)
             .and_then(|f| f.sync_all())
             .map_err(|_| "Cannot flush the staged runtime.")?;
     }
-    verify(staging.path(), "mcp", entry.clone())?;
+    source.verify_generation(staging.path(), id, entry.clone())?;
     // A partial directory never becomes an executable candidate. Same-volume
     // rename publishes only a complete, byte-verified generation.
     platform::reject_links(&target)?;
     fs::rename(staging.path(), &target).map_err(|_| "Cannot publish runtime generation.")?;
-    verify(&target, "mcp", entry)
+    source.verify_generation(&target, id, entry)
 }
 pub fn inventory(handle: &tauri::AppHandle) -> Result<Option<Snapshot>, String> {
     if !enabled() {
@@ -464,6 +646,117 @@ mod tests {
             std::fs::write(file, b"fixture").unwrap();
         }
         assert!(verify(&root, "mcp", entry).is_ok());
+    }
+
+    fn archived(root: &Path, entry: &Module) -> Source {
+        Source::Archive(archive::Snapshot(
+            entry
+                .files
+                .keys()
+                .map(|name| {
+                    let mode = if name == &entry.executable
+                        || name.ends_with("/runtime/node")
+                        || name.ends_with("/runtime/node.exe")
+                    {
+                        0o755
+                    } else {
+                        0o644
+                    };
+                    (
+                        name.clone(),
+                        archive::Member {
+                            bytes: std::fs::read(root.join(name)).unwrap(),
+                            mode,
+                        },
+                    )
+                })
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn archived_inventory_is_read_only_and_startup_preserves_existing_generation_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let package = root.join("package");
+        let storage = root.join("generations");
+        let entry = mcp_fixture(&package, b"old raw runtime");
+        let source = archived(&package, &entry);
+        let predicted = storage.join(generation_id(&entry).unwrap());
+        let inventory = source.verify(&predicted, "mcp", entry.clone()).unwrap();
+        assert!(!storage.exists());
+        let prepared = prepare_generation_from(&source, &storage, "mcp", entry.clone()).unwrap();
+        assert_eq!(inventory.path, prepared.path);
+        assert_eq!(prepared.path, predicted.join(&entry.executable));
+        assert_eq!(std::fs::read(&prepared.path).unwrap(), b"old raw runtime");
+        let reused = prepare_generation_from(&source, &storage, "mcp", entry.clone()).unwrap();
+        assert_eq!(reused.path, prepared.path);
+        let next = mcp_fixture(&package, b"new raw runtime");
+        let second =
+            prepare_generation_from(&archived(&package, &next), &storage, "mcp", next).unwrap();
+        assert_ne!(prepared.path, second.path);
+        std::fs::remove_dir_all(package).unwrap();
+        assert!(source
+            .verify_generation(&predicted, "mcp", entry.clone())
+            .is_ok());
+        std::fs::write(&prepared.path, b"corrupt").unwrap();
+        assert!(prepare_generation_from(&source, &storage, "mcp", entry).is_err());
+        assert_eq!(std::fs::read(prepared.path).unwrap(), b"corrupt");
+        assert_eq!(std::fs::read(second.path).unwrap(), b"new raw runtime");
+    }
+
+    #[test]
+    fn archived_setup_and_routing_are_published_only_with_complete_raw_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let package = root.join("package");
+        let storage = root.join("generations");
+        let setup = entry();
+        std::fs::create_dir_all(package.join("setup")).unwrap();
+        std::fs::write(package.join(&setup.executable), b"fixture").unwrap();
+        let result =
+            prepare_generation_from(&archived(&package, &setup), &storage, "setup", setup).unwrap();
+        assert_eq!(std::fs::read(result.path).unwrap(), b"fixture");
+        let (executable, names) = routing_names();
+        let route = Module {
+            executable,
+            version: "0.1.12".into(),
+            files: names
+                .into_iter()
+                .map(|name| {
+                    let file = package.join(&name);
+                    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    std::fs::write(file, b"fixture").unwrap();
+                    (name, format!("{:x}", Sha256::digest(b"fixture")))
+                })
+                .collect(),
+        };
+        let source = archived(&package, &route);
+        let ready = prepare_generation_from(&source, &storage, "routing", route.clone()).unwrap();
+        assert_eq!(std::fs::read(ready.path).unwrap(), b"fixture");
+        let mut partial = route;
+        partial.files.remove("routing/runtime.minisig");
+        assert!(prepare_generation_from(&source, &storage, "routing", partial.clone()).is_err());
+        assert!(!storage.join(generation_id(&partial).unwrap()).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archived_retained_generation_with_changed_mode_is_not_repaired_or_selected() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let package = root.join("package");
+        let storage = root.join("generations");
+        let entry = mcp_fixture(&package, b"fixture");
+        let source = archived(&package, &entry);
+        let ready = prepare_generation_from(&source, &storage, "mcp", entry.clone()).unwrap();
+        std::fs::set_permissions(&ready.path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(prepare_generation_from(&source, &storage, "mcp", entry).is_err());
+        assert_eq!(
+            std::fs::metadata(ready.path).unwrap().permissions().mode() & 0o7777,
+            0o644
+        );
     }
 
     #[test]

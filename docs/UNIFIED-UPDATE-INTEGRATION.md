@@ -118,8 +118,8 @@ gaps. See PRODUCT-SETTINGS-PRESERVATION.md and MCP-UNIX-HOSTING-BOUNDARY-AUDIT.m
 
 Combined local checks on Rust 1.99: Hub 153 passed / 11 opt-in ignored, MCP 239
 passed / 7 ignored, strict all-target Clippy passed, browser 275 passed. Root
-scripts passed 93 / 1 Unix-permission skip before the additional minimum-OS
-regression, which passed separately. An old atomic-write fixture initially
+scripts passed 93 / 1 Unix-permission skip including the minimum-OS
+regression. An old atomic-write fixture initially
 failed because built-in saves intentionally retain a backup; it now verifies
 the exact old bytes and absence of temporary files instead of forbidding the
 backup directory. The original failed log remains retained.
@@ -131,6 +131,24 @@ RPM or full AppImage acceptance. The original packaging run 38324292677 remains
 failed on Linux; both Mac packages passed integrity/signature checks. Their
 Info.plist declared 10.13 despite the pinned Node runtime's 13.5 requirement;
 source now explicitly declares 13.5 and needs fresh package verification.
+
+The new Apple-silicon package from run 38329321548 passed exact resource and
+ad-hoc signature integrity. Its retained Info.plist was inspected and declares
+13.5. Intel verification remains pending; neither is writable GUI, Gatekeeper,
+notarization, authenticated client or installed-update acceptance.
+
+The Linux AppImage mutation was reproduced byte-for-byte with the packager's
+patchelf operation on MCP, Setup, Node and Hub. A Linux-only opaque archive now
+binds the original module bytes before Hub compilation; both package inspection
+and Hub use the same bounded Rust TAR/gzip decoder. The retained original Linux
+payload passed the native archive/extraction pipe with every raw hash unchanged
+and private Node 24.17.0 runnable. That is not a new AppImage package result.
+
+Local integration checks after the archive changes: Hub 161 passed / 11 ignored,
+strict all-target Clippy passed, scripts 98 passed / 3 explicit native or Unix
+permission skips. Native archive/RUNPATH checks run with their prerequisites in
+the packaging lane; archive consumer changes trigger that lane. Manual dispatch
+can select one target, while pull requests continue to check all three.
 
 Rust is pinned to 1.99 locally and in the build workflows. Test workflows cancel
 superseded per-branch runs; publishing has no new cancellation behavior. The

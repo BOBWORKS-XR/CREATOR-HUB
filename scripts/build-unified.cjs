@@ -133,6 +133,20 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
     for (const name of routing.routeFiles(platform)) resources[path.join(output, 'modules', name)] = `modules/${name}`;
     verifyStage(path.join(output, 'modules'), manifest);
   }
+  let archiveDecoder;
+  if (platform === 'linux') {
+    const archive = require('./module-archive.cjs');
+    const file = path.join(output, archive.FILE);
+    const decoderTarget = path.join(output, 'archive-decoder-target');
+    execFileSync('cargo', ['build', '--release', '--locked', '--manifest-path', path.join(root, 'native/module-archive/Cargo.toml')], {
+      env: { ...buildEnv, CARGO_TARGET_DIR: decoderTarget }, stdio: 'inherit', windowsHide: true,
+    });
+    archiveDecoder = path.join(decoderTarget, 'release/creator-hub-module-archive');
+    manifest.payloadArchive = archive.create(path.join(output, 'modules'), manifest, file);
+    archive.verify(file, manifest, archiveDecoder);
+    for (const resource of Object.keys(resources)) delete resources[resource];
+    resources[file] = archive.FILE;
+  }
   const descriptor = path.join(output, 'builtin-manifest.json');
   fs.writeFileSync(descriptor, JSON.stringify(manifest, null, 2));
   const overlay = path.join(output, 'tauri-unified.json');
@@ -157,7 +171,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
     verifyStage(path.join(output, 'modules'), manifest);
     if (installer) unix.validatePackages({ output, bundleDirectory, manifest,
       productName: JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'))).productName,
-      rawHub: path.join(output, 'creator-hub') });
+      rawHub: path.join(output, 'creator-hub'), archiveDecoder });
     fs.writeFileSync(path.join(output, 'experimental-unix.json'), JSON.stringify({ schemaVersion: 1,
       platform, arch, mcpMode: 'read-only', writableGuiAccepted: false, releaseReady: false,
       packages: plan.bundles, managedRoutingIncluded: managed }, null, 2), { flag: 'wx' });

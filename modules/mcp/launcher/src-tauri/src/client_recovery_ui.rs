@@ -197,6 +197,12 @@ pub(crate) fn recover_client_connection(
 mod tests {
     use super::*;
     #[test]
+    fn unit_tests_cannot_select_the_real_client_recovery_store() {
+        assert!(central_root()
+            .unwrap_err()
+            .contains("explicit disposable migration storage"));
+    }
+    #[test]
     fn ui_cannot_supply_a_path_as_a_recovery_identifier() {
         assert!(operation_valid(&"a".repeat(64)));
         for id in ["../other", "C:\\settings", "a/b", "", "DEADBEEF"] {

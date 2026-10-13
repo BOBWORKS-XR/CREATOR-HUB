@@ -104,7 +104,7 @@ function verifyResources(directory, manifest) {
   return Object.fromEntries(seen.map(name => [name, hash(path.join(directory, name))]));
 }
 
-function verifyLayout(directory, format, manifest, productName, rawHub, appHub) {
+function verifyLayout(directory, format, manifest, productName, rawHub, appHub, archiveDecoder) {
   let resources;
   let executable;
   if (format === 'app' || format === 'dmg') {
@@ -114,13 +114,15 @@ function verifyLayout(directory, format, manifest, productName, rawHub, appHub) 
     executable = path.join(app, 'Contents/MacOS/creator-hub');
   } else {
     const tree = format === 'appimage' ? path.join(directory, 'squashfs-root') : directory;
-    resources = path.join(tree, 'usr/lib', productName, 'modules');
+    resources = path.join(tree, 'usr/lib', productName, manifest.payloadArchive ? 'modules.tar.gz' : 'modules');
     executable = path.join(tree, 'usr/bin/creator-hub');
   }
   // Ancestor redirection must not turn the expected module root into an alias.
   verifyAncestors(resources, directory);
   verifyAncestors(executable, directory);
-  const files = verifyResources(resources, manifest);
+  if (manifest.payloadArchive && manifest.platform !== 'linux') throw Error('Archive payloads are Linux-only.');
+  if (manifest.payloadArchive && fs.existsSync(path.join(path.dirname(resources), 'modules'))) throw Error('Linux archive package also exposes raw modules.');
+  const files = manifest.payloadArchive ? require('./module-archive.cjs').verify(resources, manifest, archiveDecoder) : verifyResources(resources, manifest);
   regular(executable, true);
   const bytes = fs.readFileSync(executable);
   if (format === 'dmg') {
@@ -180,7 +182,7 @@ function one(directory, extension) {
   return file;
 }
 
-function validatePackages({ output, bundleDirectory, manifest, productName, rawHub, execute = execFileSync }) {
+function validatePackages({ output, bundleDirectory, manifest, productName, rawHub, archiveDecoder, execute = execFileSync }) {
   if (!['linux', 'macos'].includes(manifest.platform)) throw Error('Unix package validation requires a Unix manifest.');
   verifyProductName(productName);
   const destination = path.join(output, 'native-packages');
@@ -210,7 +212,7 @@ function validatePackages({ output, bundleDirectory, manifest, productName, rawH
         extracted = path.join(output, `package-extracted-${format}`);
         extract(retained, format, extracted, productName, execute);
       }
-      const result = verifyLayout(extracted, format, manifest, productName, rawHub, appHub);
+      const result = verifyLayout(extracted, format, manifest, productName, rawHub, appHub, archiveDecoder);
       if (manifest.platform === 'macos') {
         const app = format === 'app' ? retained : path.join(extracted, `${productName}.app`);
         execute('codesign', ['--verify', '--deep', '--strict', app], { timeout: 30000, stdio: 'pipe' });

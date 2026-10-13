@@ -15,6 +15,11 @@ npm run build:unified -- UNIQUE-NAME --experimental-unix --installer
 
 - Linux x64/ARM64: AppImage, DEB and RPM. `NO_STRIP=1` is supplied; integrity
   validation still refuses any changed module bytes regardless of that setting.
+  Modules are transported in a precompile hash-bound `modules.tar.gz`, not raw
+  ELF resources. The package verifier and Hub share the bounded Rust TAR/gzip
+  decoder; original raw module/signature hashes and execute modes remain bound.
+  Inventory is read-only. Opening restores a complete verified generation;
+  existing corrupt generations are refused rather than overwritten.
 - macOS Intel/Apple silicon: `.app` and DMG with existing ad-hoc app signing.
   Hub and its MCP backend now declare macOS 13.5 minimum, matching the pinned
   [Node 24.17.0 runtime requirements](https://github.com/nodejs/node/blob/v24.17.0/BUILDING.md#platform-list).
@@ -107,6 +112,15 @@ redirect/unlisted-file checks. Layout follows the pinned
 [DEB generator](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/linux/debian.rs),
 [RPM generator](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/linux/rpm.rs) and
 [AppImage generator](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy.rs).
+
+The failed native AppImage was retained and its four ELF changes were reproduced
+exactly with the bundled patchelf. `NO_STRIP` did not prevent RUNPATH changes.
+The archive keeps module ELFs opaque to linuxdeploy; Hub links with the exact
+AppImage RUNPATH in advance. The strict marker-only comparison still refuses
+any other Hub difference. No packaged manifest is re-hashed to hide mutations.
+The retained original payload passed the native archive/extraction pipe with
+all ten raw hashes unchanged and private Node 24.17.0 runnable. Fresh complete
+Linux packages remain required; that pipe is not AppImage acceptance.
 
 ## Checks And Scope
 
