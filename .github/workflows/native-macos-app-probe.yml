@@ -93,7 +93,7 @@ jobs:
         env:
           CREATOR_MACOS_OWNED_GUI_TEST: '1'
         run: node --test scripts/native-macos-app-probe.test.cjs scripts/native-macos-window.test.cjs
-      - name: Capture initial owned Root AX surface and attempt normal closure
+      - name: Capture changes-only owned Root readiness and exact normal-closure diagnostics
         env:
           CREATOR_MACOS_APP_PROBE: '1'
           CREATOR_MACOS_OWNED_GUI_TEST: '1'

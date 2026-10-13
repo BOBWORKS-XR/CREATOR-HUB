@@ -80,6 +80,28 @@ test('window binding and traversal stay explicit and bounded', () => {
   assert.doesNotMatch(hitTest, /kAXChildrenAttribute|emit\(/);
 });
 
+test('first foreign Root child diagnostic never enters its subtree or relaxes action ownership', () => {
+  assert.match(source, /func foreignChildDiagnostic/);
+  const diagnostic = source.split('func foreignChildDiagnostic')[1].split('func observe')[0];
+  assert.doesNotMatch(diagnostic, /children\(|kAXChildrenAttribute|kAXTitleAttribute|kAXValueAttribute|PerformAction|CreateSystemWide/);
+  assert.match(diagnostic, /CREATOR_MACOS_APP_PROBE/);
+  assert.match(diagnostic, /parentMatchesTraversalParent/);
+  assert.match(diagnostic, /windowMatchesRoot/);
+  assert.match(diagnostic, /rootStillOwned/);
+  assert.match(source, /throw Refusal\("foreign-ax-element", diagnostic:/);
+  assert.match(source, /try axPID\(target, owner.process.pid\)/);
+  assert.equal(source.match(/AXUIElementPerformAction\(/g)?.length, 1);
+});
+
+test('post-close process status is diagnostic only and cannot replace post-identity verification', () => {
+  assert.match(source, /func postProcessStatus/);
+  assert.match(source, /bytes == 0 && code == ESRCH/);
+  assert.match(source, /"different-process"/);
+  assert.match(source, /failure\["postProcessStatus"\]/);
+  assert.match(source, /"postIdentityVerified": false/);
+  assert.match(source, /exit\(attempted \? 3 : 2\)/);
+});
+
 test('SDK compatibility uses the exact kernel path bound and public AX sheet hierarchy', () => {
   assert.match(source, /let processPathBufferBytes = 4096\b/);
   assert.match(source, /\[CChar\]\(repeating: 0, count: processPathBufferBytes\)/);

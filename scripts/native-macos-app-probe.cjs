@@ -83,10 +83,25 @@ function privateProfile(output) {
   return { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: home, CFFIXED_USER_HOME: home, TMPDIR: path.join(home, 'tmp') + '/',
     XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local/share'), XDG_CACHE_HOME: path.join(home, '.cache') };
 }
-function acceptedExit(close, exit) {
+function acceptedExit(close, exit, owner) {
+  const before = close?.before, after = close?.after;
+  const bound = !!owner && isDeepStrictEqual(before?.process, owner.process) && isDeepStrictEqual(before?.window, owner.window)
+    && before.accessibilityTrusted === true && before.active === true && before.truncated === false
+    && isDeepStrictEqual(after?.process, owner.process) && after.accessibilityTrusted === true && after.truncated === false
+    && (isDeepStrictEqual(after.window, owner.window) || after.window === null && after.windowMissingVerified === true);
   return close?.action === 'close-window' && close.axAction === 'AXPress' && close.actionAttempted === true
     && close.postIdentityVerified === true && close.forceKillPerformed === false && close.permissionRequestsPerformed === false
-    && exit?.code === 0 && exit.signal === null;
+    && !close.error && !close.postProcessStatus && bound && exit?.pid === owner.process.pid
+    && exit.code === 0 && exit.signal === null && !exit.error;
+}
+function closeAssessment(close, exit, owner) {
+  const p = owner?.process, status = close?.postProcessStatus;
+  const callerOwnedExit0 = !!p && exit?.pid === p.pid && exit.code === 0 && exit.signal === null && !exit.error;
+  const bound = !!p && status?.pid === p.pid && status.expectedStartSeconds === p.startSeconds
+    && status.expectedStartMicroseconds === p.startMicroseconds;
+  return { callerOwnedExit0, helperPostIdentityVerified: close?.postIdentityVerified === true,
+    postProcessState: bound && ['absent', 'same-kernel-process', 'different-process', 'unavailable'].includes(status.state) ? status.state : 'unknown',
+    closeAccepted: callerOwnedExit0 && acceptedExit(close, exit, owner), diagnosticOnly: true };
 }
 
 // A separate read-only sampler is needed because the unchanged action helper emits only fixed consent controls.
@@ -98,6 +113,8 @@ import Darwin
 import CryptoKit
 struct Denied: Error { let reason: String; init(_ reason: String) { self.reason = reason } }
 var rows = [[String: Any]]()
+var changedSnapshots = [[String: Any]](), readiness = [String: Any](), rootRevision = 0
+var nativeRootSnapshot = [String: Any]()
 func check(_ condition: Bool, _ reason: String) throws { if !condition { throw Denied(reason) } }
 func emit(_ input: [String: Any]) {
     var value = input
@@ -215,8 +232,26 @@ do {
         return try bounds(item) == expected
     }
     try check(matches.count == 1, "ax-root-window-ambiguous")
-    let window = matches[0], deadline = ProcessInfo.processInfo.systemUptime + 4
+    let window = matches[0], readinessDeadline = ProcessInfo.processInfo.systemUptime + 20
+    nativeRootSnapshot = ["process": p, "window": w, "rootNativeCFReferencePinned": true]
+    var deadline = ProcessInfo.processInfo.systemUptime + 4
     var seen = [AXUIElement]()
+    var observer: AXObserver?
+    let observerStatus = AXObserverCreate(pid, { _, _, _, _ in rootRevision += 1 }, &observer)
+    var supported = [String]()
+    if observerStatus == .success, let observer = observer {
+        for item in [root, window] {
+            for notification in [kAXLayoutChangedNotification, kAXCreatedNotification] {
+                if AXObserverAddNotification(observer, item, notification as CFString, nil) == .success { supported.append(notification) }
+            }
+        }
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), kCFRunLoopDefaultMode)
+    }
+    defer {
+        if let observer = observer { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), kCFRunLoopDefaultMode) }
+    }
+    readiness = ["rootWebAreaObserved": false, "notificationsSupported": supported, "observerStatus": observerStatus.rawValue,
+                 "changesOnly": true, "rootNativeCFReferencePreserved": true]
     let labelRoles = Set(["AXWindow", "AXWebArea", "AXGroup", "AXHeading", "AXStaticText", "AXButton", "AXCheckBox", "AXRadioButton", "AXLink", "AXTab", "AXTabGroup"])
     func visit(_ item: AXUIElement, _ depth: Int, _ path: String) throws {
         try check(depth <= 16 && seen.count < 512 && ProcessInfo.processInfo.systemUptime < deadline, "ax-surface-incomplete")
@@ -241,11 +276,45 @@ do {
         rows.append(row)
         for (index, child) in try children(item, kAXChildrenAttribute).enumerated() { try visit(child, depth + 1, path + "/" + String(index)) }
     }
-    try visit(window, 0, "root-window")
-    try fence(p, parent); try checkCG(); try check(AXIsProcessTrusted() && ProcessInfo.processInfo.systemUptime < deadline, "post-capture-unverified")
-    emit(["complete": true, "readOnly": true, "nodes": rows, "window": w, "process": p, "actionAttempted": false, "permissionRequestsPerformed": false])
+    var previousSnapshot: Data?, observedRevision = -1, observationCount = 0
+    while ProcessInfo.processInfo.systemUptime < readinessDeadline {
+        if observedRevision != rootRevision {
+            try check(observationCount < 32, "root-readiness-change-limit")
+            observationCount += 1
+            deadline = min(readinessDeadline, ProcessInfo.processInfo.systemUptime + 4)
+            try fence(p, parent); try checkCG()
+            let current = try children(root, kAXWindowsAttribute).filter { item in
+                try pidMatches(item, pid)
+                return try bounds(item) == expected
+            }
+            let unchanged = current.count == 1 && CFEqual(current[0], window)
+            readiness["rootNativeCFReferencePreserved"] = unchanged
+            try check(unchanged, "root-native-cf-reference-drift")
+            rows = []; seen = []; try visit(window, 0, "root-window")
+            try fence(p, parent); try checkCG(); try check(AXIsProcessTrusted() && ProcessInfo.processInfo.systemUptime < deadline, "post-capture-unverified")
+            let snapshot = try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys])
+            if snapshot != previousSnapshot {
+                changedSnapshots.append(["revision": rootRevision, "nodes": rows, "rootNativeCFReferencePreserved": true])
+                previousSnapshot = snapshot
+            }
+            observedRevision = rootRevision
+            if rows.contains(where: { $0["role"] as? String == "AXWebArea" }) { readiness["rootWebAreaObserved"] = true; break }
+        }
+        try check(!supported.isEmpty, "root-readiness-notifications-unavailable")
+        let remaining = readinessDeadline - ProcessInfo.processInfo.systemUptime
+        if remaining <= 0 { break }
+        let outcome = CFRunLoopRunInMode(kCFRunLoopDefaultMode, remaining, true)
+        try check(outcome != .finished && outcome != .stopped, "root-readiness-runloop-unavailable")
+    }
+    readiness["changedSnapshotCount"] = changedSnapshots.count
+    readiness["observationCount"] = observationCount
+    readiness["deadlineExpired"] = readiness["rootWebAreaObserved"] as? Bool != true
+    try check(readiness["rootWebAreaObserved"] as? Bool == true, "root-web-area-readiness-unverified")
+    emit(["complete": true, "readOnly": true, "nodes": rows, "snapshots": changedSnapshots, "readiness": readiness, "nativeRootSnapshot": nativeRootSnapshot,
+          "window": w, "process": p, "actionAttempted": false, "permissionRequestsPerformed": false])
 } catch {
-    emit(["complete": false, "readOnly": true, "nodes": rows, "error": (error as? Denied)?.reason ?? "surface-unverified", "actionAttempted": false, "permissionRequestsPerformed": false]); exit(2)
+    emit(["complete": false, "readOnly": true, "nodes": rows, "snapshots": changedSnapshots, "readiness": readiness, "nativeRootSnapshot": nativeRootSnapshot,
+          "error": (error as? Denied)?.reason ?? "surface-unverified", "actionAttempted": false, "permissionRequestsPerformed": false]); exit(2)
 }
 `;
 
@@ -265,6 +334,12 @@ async function probe(args, env) {
     childPid: null, ownedChildExit: null, tools: [] };
   const write = (name, data) => fs.writeFileSync(path.join(output, name), typeof data === 'string' || Buffer.isBuffer(data) ? data : JSON.stringify(data, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
   let child, owner, ownerImage, closeReceipt, ownedExit = null, toolUncertain = false, sequence = 0;
+  function retainForeign(receipt, label) {
+    if (receipt?.foreignElement && !report.foreignElementReceipt) {
+      report.foreignElementReceipt = path.join(output, 'foreign-element.json');
+      write('foreign-element.json', { sourceLabel: label, foreignElement: receipt.foreignElement, diagnosticOnly: true, ...acceptance });
+    }
+  }
   const toolEnv = { ...env, RUNNER_TEMP: temporary };
   async function command(file, argv, label, ms = 15000, expectedImage) {
     if (expectedImage) requireThat(sameImage(pin(file).image, expectedImage), 'compiled-tool-image-drift');
@@ -340,12 +415,14 @@ async function probe(args, env) {
     const ownerPath = path.join(output, 'owner.json');
     ownerImage = pin(ownerPath, 8192).image;
     const inspected = await command(helper, ['inspect', ownerPath], 'inspect-before', 15000, helperImage);
+    retainForeign(JSON.parse(inspected.text), 'inspect-before');
     requireThat(inspected.exitCode === 0, 'owned-root-inspection-refused');
     validateOwner({ process: JSON.parse(inspected.text).observation.process, window: JSON.parse(inspected.text).observation.window }, expected);
     requireThat(sameImage(pin(ownerPath, 8192).image, ownerImage), 'owner-file-drift');
-    const sampled = await command(sampler, [ownerPath, String(process.pid)], 'surface', 15000, samplerImage);
+    const sampled = await command(sampler, [ownerPath, String(process.pid)], 'surface', 30000, samplerImage);
     const surface = JSON.parse(sampled.text); write('surface.json', { ...surface, ...acceptance });
-    requireThat(sampled.exitCode === 0 && surface.complete === true && surface.readOnly === true && surface.actionAttempted === false, 'root-surface-capture-unverified');
+    requireThat(sampled.exitCode === 0 && surface.complete === true && surface.readOnly === true && surface.actionAttempted === false
+      && surface.readiness?.rootWebAreaObserved === true && surface.readiness.rootNativeCFReferencePreserved === true, 'root-surface-capture-unverified');
     validateOwner({ process: surface.process, window: surface.window }, expected);
     requireThat(Array.isArray(surface.nodes) && surface.nodes.length > 0 && surface.nodes.length <= 512, 'root-surface-node-count-unverified');
     report.surfaceSummary = { nodeCount: surface.nodes.length, rootWebAreaObserved: surface.nodes.some(node => node.role === 'AXWebArea'),
@@ -364,12 +441,14 @@ async function probe(args, env) {
         requireThat(ownerImage && sameImage(pin(path.join(output, 'owner.json'), 8192).image, ownerImage), 'owner-file-drift-no-close-attempted');
         const close = await command(helper.path, ['close', path.join(output, 'owner.json')], 'normal-close', 15000, helper.image);
         closeReceipt = JSON.parse(close.text);
+        retainForeign(closeReceipt, 'normal-close');
         requireThat(close.exitCode === 0, 'normal-close-refused-or-post-identity-unverified');
       } catch (error) { report.closeError = error.message; }
     }
     if (child) await waitExit(15000);
     report.ownedChildExit = ownedExit;
-    report.acceptedExit = acceptedExit(closeReceipt, ownedExit) && !report.closeError;
+    report.closeAssessment = closeAssessment(closeReceipt, ownedExit, owner);
+    report.acceptedExit = acceptedExit(closeReceipt, ownedExit, owner) && !report.closeError;
     report.cleanupUncertain = toolUncertain || !!child && !ownedExit;
     report.passed = report.captureCompleted && report.acceptedExit && !report.error && !report.cleanupUncertain;
     write('report.json', report);
@@ -384,4 +463,4 @@ if (require.main === module) {
     console.log(JSON.stringify(result)); process.exitCode = result.passed ? 0 : 2;
   }).catch(error => { console.log(JSON.stringify({ error: error.message, passed: false, ...acceptance })); process.exitCode = 2; });
 }
-module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, acceptance, surfaceSource };
+module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, closeAssessment, acceptance, surfaceSource };

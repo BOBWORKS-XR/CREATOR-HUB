@@ -116,14 +116,60 @@ test('fresh profile cannot inherit accounts, client settings, app injection vari
 });
 
 test('capture and accepted exit require more than a successful close call or exit zero', () => {
+  const { owner } = ownership();
+  const observation = { process: owner.process, window: owner.window, accessibilityTrusted: true, active: true, truncated: false };
   const close = { action: 'close-window', axAction: 'AXPress', actionAttempted: true, postIdentityVerified: true,
-    forceKillPerformed: false, permissionRequestsPerformed: false };
-  assert.equal(probe.acceptedExit(close, { code: 0, signal: null }), true);
-  for (const pair of [[null, { code: 0, signal: null }], [close, null], [close, { code: 1, signal: null }],
-    [close, { code: 0, signal: 'SIGTERM' }], [{ ...close, postIdentityVerified: false }, { code: 0, signal: null }],
-    [{ ...close, actionAttempted: false }, { code: 0, signal: null }]]) assert.equal(probe.acceptedExit(...pair), false);
+    forceKillPerformed: false, permissionRequestsPerformed: false, before: observation, after: observation };
+  const exit = { pid: owner.process.pid, code: 0, signal: null };
+  assert.equal(probe.acceptedExit(close, exit, owner), true);
+  assert.equal(probe.acceptedExit({ ...close, after: { ...observation, window: null, windowMissingVerified: true } }, exit, owner), true);
+  for (const pair of [[null, exit], [close, null], [close, { ...exit, code: 1 }],
+    [close, { ...exit, signal: 'SIGTERM' }], [{ ...close, postIdentityVerified: false }, exit],
+    [{ ...close, actionAttempted: false }, exit]]) assert.equal(probe.acceptedExit(...pair, owner), false);
   assert.match(source, /report.passed = report.captureCompleted && report.acceptedExit && !report.error && !report.cleanupUncertain/);
   for (const value of Object.values(probe.acceptance)) assert.equal(value, false);
+});
+
+test('ARM refusal contract keeps close acceptance false while reporting only the exact caller-owned exit0 fact', () => {
+  // Minimal portable shape of the retained ARM receipt; not native runtime proof.
+  const { owner } = ownership();
+  const receipt = { error: 'process-start-drift', actionAttempted: true, postIdentityVerified: false,
+    forceKillPerformed: false, permissionRequestsPerformed: false, before: { process: owner.process, window: owner.window } };
+  const exit = { pid: owner.process.pid, code: 0, signal: null };
+  assert.equal(probe.acceptedExit(receipt, exit), false);
+  const result = probe.closeAssessment(receipt, exit, owner);
+  assert.equal(result.callerOwnedExit0, true);
+  assert.equal(result.helperPostIdentityVerified, false);
+  assert.equal(result.postProcessState, 'unknown');
+  assert.equal(result.closeAccepted, false);
+  assert.equal(probe.closeAssessment(receipt, { ...exit, pid: exit.pid + 1 }, owner).callerOwnedExit0, false);
+  assert.equal(probe.closeAssessment(receipt, { ...exit, signal: 'SIGTERM' }, owner).callerOwnedExit0, false);
+  for (const state of ['absent', 'different-process', 'unavailable']) {
+    const changed = { ...receipt, postProcessStatus: { state, pid: owner.process.pid,
+      expectedStartSeconds: owner.process.startSeconds, expectedStartMicroseconds: owner.process.startMicroseconds } };
+    assert.equal(probe.closeAssessment(changed, exit, owner).closeAccepted, false);
+  }
+});
+
+test('successful-shaped close output cannot accept a reused PID, unknown post-identity or a different Root', () => {
+  const { owner } = ownership(), exit = { pid: owner.process.pid, code: 0, signal: null };
+  const close = { action: 'close-window', axAction: 'AXPress', actionAttempted: true, postIdentityVerified: true,
+    forceKillPerformed: false, permissionRequestsPerformed: false };
+  assert.equal(probe.acceptedExit(close, exit, owner), false);
+  const observation = { process: owner.process, window: owner.window, accessibilityTrusted: true, active: true, truncated: false };
+  const valid = { ...close, before: observation, after: observation };
+  assert.equal(probe.acceptedExit(valid, { ...exit, pid: exit.pid + 1 }, owner), false);
+  assert.equal(probe.acceptedExit({ ...valid, after: { ...observation, process: { ...owner.process, startSeconds: owner.process.startSeconds + 1 } } }, exit, owner), false);
+  assert.equal(probe.acceptedExit({ ...valid, postProcessStatus: { state: 'different-process' } }, exit, owner), false);
+});
+
+test('Root readiness polling preserves the native CF window and stores changes only, never sleeping to guess readiness', () => {
+  assert.match(probe.surfaceSource, /AXObserverAddNotification/);
+  assert.match(probe.surfaceSource, /CFRunLoopRunInMode/);
+  assert.match(probe.surfaceSource, /snapshot != previousSnapshot/);
+  assert.match(probe.surfaceSource, /CFEqual\(current\[0\], window\)/);
+  assert.match(probe.surfaceSource, /rootWebAreaObserved/);
+  assert.doesNotMatch(probe.surfaceSource, /Thread.sleep|usleep\(|sleep\(/);
 });
 
 test('orchestrator uses one unchanged pinned helper, one Root spawn and one normal close without fallback', () => {

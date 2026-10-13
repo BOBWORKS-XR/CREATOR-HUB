@@ -2,7 +2,10 @@ import Foundation
 
 struct Refusal: Error, CustomStringConvertible {
     let description: String
-    init(_ message: String) { description = message }
+    let diagnostic: [String: Any]?
+    init(_ message: String, diagnostic: [String: Any]? = nil) {
+        description = message; self.diagnostic = diagnostic
+    }
 }
 
 struct ImageIdentity: Codable, Equatable {
@@ -390,6 +393,75 @@ struct NativeObservation {
     let axWindow: AXUIElement?
 }
 
+func postProcessStatus(_ expected: ProcessIdentity) -> [String: Any] {
+    var info = proc_bsdinfo()
+    errno = 0
+    let bytes = proc_pidinfo(expected.pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+    let code = errno
+    let state: String
+    if bytes == 0 && code == ESRCH { state = "absent" }
+    else if bytes == Int32(MemoryLayout<proc_bsdinfo>.size) {
+        state = info.pbi_pid == UInt32(expected.pid) && info.pbi_uid == expected.image.uid
+            && info.pbi_ruid == expected.image.uid && info.pbi_start_tvsec == expected.startSeconds
+            && info.pbi_start_tvusec == expected.startMicroseconds ? "same-kernel-process" : "different-process"
+    } else { state = "unavailable" }
+    return ["state": state, "pid": expected.pid, "kernelBytes": bytes, "errno": code,
+            "expectedStartSeconds": expected.startSeconds, "expectedStartMicroseconds": expected.startMicroseconds,
+            "diagnosticOnly": true, "postIdentityVerified": false]
+}
+
+func foreignChildDiagnostic(_ item: AXUIElement, parent: AXUIElement?, path: String,
+                            owner: Owner, rootWindow: AXUIElement) -> [String: Any]? {
+    guard ProcessInfo.processInfo.environment["CREATOR_MACOS_APP_PROBE"] == "1",
+          owner.process.bundleIdentifier == "com.creatorworks.hub", let parent = parent else { return nil }
+    var result: [String: Any] = ["path": path, "diagnosticOnly": true, "subtreeEntered": false,
+                                "rootStillOwned": false, "root": (try? object(owner)) ?? NSNull()]
+    do {
+        let before = try observe(owner, controls: false)
+        guard let native = before.axWindow, CFEqual(native, rootWindow),
+              before.value.process == owner.process, before.value.window == owner.window else {
+            throw Refusal("diagnostic-root-reference-drift")
+        }
+        var pid: pid_t = 0
+        let status = AXUIElementGetPid(item, &pid)
+        result["pidStatus"] = status.rawValue
+        if status == .success { result["pid"] = pid }
+        if let role = attribute(item, kAXRoleAttribute) as? String, role.utf8.count <= 128 { result["role"] = role }
+        func linkage(_ key: String, _ expected: AXUIElement, _ matches: String) -> [String: Any] {
+            var link: [String: Any] = ["available": false, matches: false]
+            guard let raw = attribute(item, key), CFGetTypeID(raw) == AXUIElementGetTypeID() else { return link }
+            let element = raw as! AXUIElement
+            var linkedPID: pid_t = 0
+            link["available"] = true; link[matches] = CFEqual(element, expected)
+            let linkedStatus = AXUIElementGetPid(element, &linkedPID)
+            link["pidStatus"] = linkedStatus.rawValue
+            if linkedStatus == .success { link["pid"] = linkedPID }
+            if let role = attribute(element, kAXRoleAttribute) as? String, role.utf8.count <= 128 { link["role"] = role }
+            return link
+        }
+        result["nativeParent"] = linkage(kAXParentAttribute, parent, "parentMatchesTraversalParent")
+        result["nativeWindow"] = linkage(kAXWindowAttribute, rootWindow, "windowMatchesRoot")
+        if status == .success && pid > 0 {
+            var info = proc_bsdinfo()
+            errno = 0
+            let bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+            var kernel: [String: Any] = ["bytes": bytes, "errno": errno]
+            if bytes == Int32(MemoryLayout<proc_bsdinfo>.size), info.pbi_pid == UInt32(pid) {
+                kernel["parentPID"] = info.pbi_ppid; kernel["uid"] = info.pbi_uid
+                kernel["startSeconds"] = info.pbi_start_tvsec; kernel["startMicroseconds"] = info.pbi_start_tvusec
+            }
+            result["kernelProcess"] = kernel
+        }
+        let after = try observe(owner, controls: false)
+        guard let native = after.axWindow, CFEqual(native, rootWindow),
+              after.value.process == owner.process, after.value.window == owner.window else {
+            throw Refusal("diagnostic-root-reference-drift")
+        }
+        result["rootStillOwned"] = true; result["rootNativeCFReferenceUnchanged"] = true
+    } catch { result["rootFenceError"] = String(describing: error) }
+    return result
+}
+
 func observe(_ owner: Owner, controls: Bool = true, allowGone: Bool = false) throws -> NativeObservation {
     let identity = try process(owner.process)
     guard identity == owner.process else { throw Refusal("process-identity-drift") }
@@ -440,10 +512,12 @@ func observe(_ owner: Owner, controls: Bool = true, allowGone: Bool = false) thr
                              pressSupported: names.contains(kAXPressAction)))
         native[path] = item
     }
-    func visit(_ item: AXUIElement, _ depth: Int, _ path: String, _ dialog: String?, _ web: Bool) throws {
+    func visit(_ item: AXUIElement, _ depth: Int, _ path: String, _ dialog: String?, _ web: Bool, _ parent: AXUIElement?) throws {
         guard depth <= 16, seen.count < 512, ProcessInfo.processInfo.systemUptime < deadline else { throw Refusal("ax-incomplete") }
         if seen.contains(where: { CFEqual($0, item) }) { return }
-        seen.append(item); try axPID(item, identity.pid)
+        seen.append(item)
+        do { try axPID(item, identity.pid) }
+        catch { throw Refusal("foreign-ax-element", diagnostic: foreignChildDiagnostic(item, parent: parent, path: path, owner: owner, rootWindow: axWindow)) }
         guard let role = attribute(item, kAXRoleAttribute) as? String else { throw Refusal("ax-role-unreadable") }
         let inWeb = web || role == "AXWebArea"
         let nativeDialog = !inWeb && (role == kAXSheetRole || attribute(item, kAXSubroleAttribute) as? String == "AXDialog")
@@ -454,9 +528,9 @@ func observe(_ owner: Owner, controls: Bool = true, allowGone: Bool = false) thr
         }
         // Public AXChildren includes contained sheets; identify them by kAXSheetRole.
         let descendants = try children(item, kAXChildrenAttribute)
-        for (index, child) in descendants.enumerated() { try visit(child, depth + 1, path + "/" + String(index), scope, inWeb) }
+        for (index, child) in descendants.enumerated() { try visit(child, depth + 1, path + "/" + String(index), scope, inWeb, item) }
     }
-    try visit(axWindow, 0, "window", nil, false)
+    try visit(axWindow, 0, "window", nil, false, nil)
     if let value = attribute(axWindow, kAXCloseButtonAttribute) {
         let close = try element(value)
         try axPID(close, identity.pid)
@@ -497,6 +571,8 @@ func nativeMain() {
     var afterEvidence: Any?
     var actionStarted: Double?
     var actionReturned: Double?
+    var closeOwner: Owner?
+    var axResult: Int32?
     do {
         // Admission precedes all file, process, AX, display, and window inspection.
         try admission()
@@ -555,8 +631,10 @@ func nativeMain() {
         }
         try admission(); try trustedAX()
         actionStarted = ProcessInfo.processInfo.systemUptime
+        if action == .closeWindow { closeOwner = owner }
         attempted = true
         let result = AXUIElementPerformAction(target, kAXPressAction as CFString)
+        axResult = result.rawValue
         actionReturned = ProcessInfo.processInfo.systemUptime
         // Capture real identity immediately after the action even if AXPress refused.
         let after = try observe(owner, controls: false, allowGone: true)
@@ -576,6 +654,12 @@ func nativeMain() {
         if let after = afterEvidence { failure["after"] = after }
         if let started = actionStarted { failure["actionStartedUptime"] = started }
         if let returned = actionReturned { failure["actionReturnedUptime"] = returned }
+        if let diagnostic = (error as? Refusal)?.diagnostic { failure["foreignElement"] = diagnostic }
+        if attempted, let owner = closeOwner {
+            failure["action"] = "close-window"; failure["axAction"] = "AXPress"
+            if let result = axResult { failure["axResult"] = result }
+            failure["postProcessStatus"] = postProcessStatus(owner.process)
+        }
         emit(failure)
         exit(attempted ? 3 : 2)
     }

@@ -15,6 +15,14 @@ Existing AX trust is required for `identify`, `inspect`, `press`, and `close`;
 absence refuses without requesting permission. `availability` only reports the
 existing trust Boolean after the same CI/architecture admission.
 
+For `CREATOR_MACOS_APP_PROBE=1` Root captures only, the first foreign AX child
+refusal may carry diagnostic PID/role/path, one-level parent/window linkage and
+kernel parent metadata. Root identity/native CF window are fenced before/after;
+no foreign subtree or editable content is inspected. Same-PID input checks still
+refuse. Post-close failures may carry `postProcessStatus`, but remain exit3 with
+`postIdentityVerified=false`; absence is not post-identity success. See
+[actual Root receipts and the next capture](MACOS-NATIVE-APP-PROBE.md#actual-run-and-diagnostic-follow-up).
+
 ## Read-Only Availability Probe
 
 Before building a full GUI acceptance harness, the main-owned

@@ -54,10 +54,11 @@ when sampling reached that stage, final `report.json`, and numbered tool
 `.json`/`.stdout`/`.stderr` files. Intermediate reports and original refusal
 output are immutable. `report.json` separates `captureCompleted`, `acceptedExit`,
 `ownedChildExit`, `closeError`, `cleanupUncertain` and overall `passed`.
-`surfaceSummary` records role counts and whether an AXWebArea was observed. Its
-absence or missing HTML labels is a snapshot limitation, not a claim that the
-frontend was ready or inaccessible on every run. `captureCompleted` means this
-bounded Root-window snapshot completed, not that terms/menu targets were accepted.
+`surfaceSummary` records role counts and whether an AXWebArea was observed.
+`captureCompleted` now also requires an owned Root AXWebArea and preserved native
+CF window reference in the readiness receipt. It does not accept terms/menu
+targets or product GUI flow. Partial snapshots remain in `surface.json` and
+original tool output on timeout/refusal.
 All final report product flags remain false: `nativeGuiAccepted`, `mcpAccepted`,
 `migrationAccepted`, `updateAccepted`, `releaseReady`.
 
@@ -70,13 +71,13 @@ stdout in main's separate job log when no output directory could be created.
 
 ## Capture And Cleanup Contract
 
-At runtime the probe compiles a byte-exact copy of the existing
+At runtime the probe compiles a byte-exact copy of the current
 `native-macos-window.swift` into the new output, with no fixture define or source
 edits. That one pinned binary handles availability, identification, before/after
 inspection and the single normal-close attempt. It is never recompiled during
 the probe. Compiling tools is not building the Hub package.
 
-The existing helper intentionally reports only fixed native-consent controls.
+The action helper intentionally reports only fixed native-consent controls.
 An embedded, separately compiled **read-only** Swift sampler therefore records
 Root roles and bounded AXTitle/AXDescription labels; it contains no action API.
 It must independently have existing AX trust; trust from another binary is not
@@ -97,7 +98,16 @@ Native identity binds the app bundle ID/path, executable/Info.plist file pins,
 PID/start stamp/UID and CG window ID/bounds. The sampler additionally verifies
 the kernel parent is the probe process. Every visited AX element must belong
 to that PID and descend from the uniquely bounds-matched Root window. Capture
-is bounded to 512 elements, depth 16, four seconds and 2048 bytes per label.
+is bounded to 512 elements, depth 16, four seconds per observation and 2048 bytes
+per label. Readiness waits at most 20 seconds and 32 observations. A Root-only
+AXObserver watches public layout/creation notifications. The run loop waits on
+notifications or the deadline, not a guessed settle sleep. Only changed node
+snapshots are retained. The original Root window CF reference stays held and
+must compare equal to the uniquely bounds-matched window on every observation.
+`nativeRootSnapshot` retains that initial process/window pin in success or
+partial failure output; it is not a claim of current identity after failure.
+Unsupported notifications, missing owned AXWebArea, foreign PID or changed
+Root reference remain failures; no readiness condition authorizes an action.
 Labels are emitted only for noneditable roles with positive bounds inside Root;
 editable values, AXValue, other apps and the global AX tree are never read.
 Missing titles/descriptions are observed limitations, not invented labels.
@@ -105,7 +115,7 @@ WebKit elements exposing a different PID refuse: do not relax ownership to
 obtain a prettier capture. This first capture does not assert that terms/menu
 labels or future action targets exist.
 
-Only the unchanged helper's `close` command may attempt cleanup, once, with
+Only the helper's `close` command may attempt cleanup, once, with
 the pinned owner and binary. No activation, clicks, terms approval, signals,
 kill, terminate, AppleScript, TCC/Gatekeeper change or fallback is available.
 If terms block closure, the app is inactive, the helper refuses/post-identity is
@@ -117,6 +127,46 @@ runner lifecycle; no automatic retry or termination is attempted.
 Primary contracts: [Apple AX children](https://developer.apple.com/documentation/applicationservices/kaxchildrenattribute),
 [AX trust](https://developer.apple.com/documentation/applicationservices/1460720-axisprocesstrusted),
 and [XNU parent/start identity](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info.h).
+
+## Actual Run And Diagnostic Follow-Up
+
+Original run `38477465791` remains failed on both architectures, retained under
+`artifacts/mac-root-probe-38477465791-arm/root-app-probe` and the corresponding
+`-intel` directory. Both tools compiled and both availability checks passed.
+ARM captured eight native shell nodes, no AXWebArea, then child6406 exited0
+without a signal. Close returned exit3, `actionAttempted=true`,
+`postIdentityVerified=false`, `process-start-drift`. This establishes the exact
+owned child's exit, not verified post-close identity or Root HTML GUI flow.
+Intel inspect/close returned exit2 `foreign-ax-element`, no action/surface and
+uncertain cleanup. Its missing PID/role cannot establish WebKit attribution.
+
+Under the explicit Root probe opt-in only, the first refused element already
+returned by Root AXChildren gets diagnostic PID/role/path, one-level AXParent/
+AXWindow linkage and that PID's kernel parent/UID/start metadata. No foreign
+children, titles, values or global discovery are queried; traversal stops.
+Root process/window/native CF reference are independently fenced before/after.
+`rootStillOwned=false` means that fence is unverified. Original refusal output
+is retained; the caller additionally retains only the first diagnostic in
+`foreign-element.json`. This does not grant input authority.
+[AXUIElementGetPid](https://developer.apple.com/documentation/applicationservices/axuielement_h)
+reports an object's associated PID, not permission to act on another process.
+
+Post-close failures still return exit3. New `postProcessStatus` distinguishes
+ESRCH absence, the same kernel start/UID, a different/reused process and an
+unavailable observation. The old generic `process-start-drift` stays `unknown`.
+See [Apple's libproc wrapper](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c).
+`report.closeAssessment.callerOwnedExit0` separately requires the exact spawned
+PID's exit0/no-signal event. Absence or exit0 cannot promote an exit3 receipt.
+Successful close acceptance now also binds complete before/after Root identities
+and the owned exit. Unknown output, PID reuse, partial identities and refusals
+cannot pass. No blind close retry is added.
+
+Smallest next native test: run the same pinned Root once per architecture into
+fresh output. Keep `foreign-element.json` if emitted, original inspect/close
+stdout and tool exit codes, `surface.json` with changed snapshots/notification
+readiness, and `report.json` with exact child exit/separate close assessment.
+ARM should explain readiness or retain its bounded failure; Intel should identify
+the first refused child without entering it. All product flags remain false.
 
 ## Tests And Remaining Gates
 
