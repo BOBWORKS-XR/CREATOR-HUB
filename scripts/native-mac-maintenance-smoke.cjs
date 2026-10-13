@@ -533,10 +533,22 @@ function nativeOperations(out, binding, report) {
     launch: () => window(['launch', app]),
     snapshot: async launched => {
       let snapshot;
-      for (let index = 0; index < 20; index++) {
+      for (let index = 0; index < 80; index++) {
         snapshot = window(['snapshot', String(launched.pid), app, launched.executablePath]);
-        if (snapshot.finishedLaunching && snapshot.windows.length) break;
+        const body = JSON.stringify(snapshot.axNodes || []);
+        if (snapshot.finishedLaunching && snapshot.windows.length
+          && /Terms of use and risk acknowledgement|Creator Works MCP/.test(body)) break;
+        if (!report.capability.accessibilityTrusted) break;
         await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      if (report.capability.accessibilityTrusted) {
+        assert.match(JSON.stringify(snapshot.axNodes || []), /Terms of use and risk acknowledgement|Creator Works MCP/,
+          'Native WebKit body is not available; window chrome is not rendered-app acceptance');
+      }
+      if (report.capability.screenCaptureAllowed && snapshot.windows.length === 1) {
+        const screenshot = path.join(out, `owned-gui-${report.launches.at(-1).version}.png`);
+        command('/usr/sbin/screencapture', ['-x', '-l', String(snapshot.windows[0].id), screenshot]);
+        report.launches.at(-1).screenshot = path.basename(screenshot);
       }
       return snapshot;
     },

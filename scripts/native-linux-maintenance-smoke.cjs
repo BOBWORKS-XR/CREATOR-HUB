@@ -132,6 +132,9 @@ async function gui(file, expected, version, profile, output, freshTerms) {
     return ids[0];
   };
   try {
+  const ownedWindow = await retry(window);
+  assert.equal(hash(`/proc/${child.pid}/exe`), expected);
+  command('xdotool', ['windowsize', ownedWindow, '1100', '860']);
   const snapshot = await retry(() => {
     assert.equal(launchError, undefined, 'Owned GUI failed to launch');
     assert.equal(child.exitCode, null);

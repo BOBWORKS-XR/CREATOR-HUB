@@ -106,3 +106,4 @@ jobs:
             ${{ env.CREATOR_MAC_WORK_DIR }}/download-report.json
             ${{ env.CREATOR_MAC_WORK_DIR }}/native-report.json
             ${{ env.CREATOR_MAC_WORK_DIR }}/binding.json
+            ${{ env.CREATOR_MAC_WORK_DIR }}/owned-gui-*.png

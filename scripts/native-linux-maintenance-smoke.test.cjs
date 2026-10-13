@@ -76,6 +76,7 @@ test('failed capture has normal owned cleanup and terms readiness is bounded', (
   const source = fs.readFileSync(require.resolve('./native-linux-maintenance-smoke.cjs'), 'utf8');
   assert.match(source, /finally \{[\s\S]*closeOwned\(child, expected, window\)/);
   assert.match(source, /snapshot = await retry\([\s\S]*if \(freshTerms\) assert\.match/);
+  assert.match(source, /windowsize', ownedWindow, '1100', '860'/);
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/linux-maintenance-validation.yml'), 'utf8');
   assert.match(workflow, /git diff --exit-code[^\n]*\bunity\b/);
 });
