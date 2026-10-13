@@ -29,18 +29,40 @@ function values(value, visit) {
 function summarizeClient(stdout, project) {
   let toolCalled = false, completed = false, fixtureReturned = false, connected = false;
   let failure = null;
+  const healthCallIds = new Set();
+  const inspectPayload = text => {
+    if (typeof text !== 'string') return;
+    try {
+      const payload = JSON.parse(text);
+      if (payload.ready === false && payload.project?.path === project) fixtureReturned = true;
+    } catch { /* Only structured tool-result content is evidence. */ }
+  };
+  const consumeResult = result => {
+    connected = true; completed = true;
+    values(result, value => {
+      if (typeof value === 'string') inspectPayload(value);
+      else if (value?.ready === false && value.project?.path === project) fixtureReturned = true;
+    });
+  };
   for (const line of stdout.split(/\r?\n/).filter(Boolean)) {
     let event;
     try { event = JSON.parse(line); } catch { continue; }
     values(event, value => {
       if (!value || typeof value !== 'object') return;
       if (value.name === 'acceptance' && value.status === 'connected') connected = true;
-      if ((value.type === 'mcp_tool_call' && value.tool === 'get_bridge_status' && value.server === 'acceptance') || (value.type === 'tool_use' && value.name === 'mcp__acceptance__get_bridge_status')) toolCalled = true;
-      if ((value.type === 'mcp_tool_call' && value.status === 'completed') || (value.type === 'result' && value.is_error === false)) completed = true;
-      if (value.error === 'authentication_failed') failure = 'client-authentication-failed';
-      if (typeof value.text === 'string') {
-        try { const payload = JSON.parse(value.text); if (payload.ready === false && payload.project?.path === project) fixtureReturned = true; } catch { /* Other client text is not a tool payload. */ }
+      if (value.type === 'mcp_tool_call' && value.tool === 'get_bridge_status' && value.server === 'acceptance') {
+        toolCalled = true;
+        if (value.status === 'completed' && value.error == null && value.result
+          && [undefined, false].includes(value.result.isError)) consumeResult(value.result);
       }
+      if (value.type === 'tool_use' && value.name === 'mcp__acceptance__get_bridge_status') {
+        toolCalled = true;
+        if (typeof value.id === 'string' && value.id) healthCallIds.add(value.id);
+      }
+      if (value.type === 'tool_result' && healthCallIds.has(value.tool_use_id)
+        && [undefined, false].includes(value.is_error)) consumeResult(value.content);
+      if (value.error === 'authentication_failed') failure = 'client-authentication-failed';
+      if (!failure && value.api_error === 'usage_limit_reached') failure = 'client-provider-usage-limit';
     });
   }
   return { connected, toolCalled, completed, fixtureReturned, failure };

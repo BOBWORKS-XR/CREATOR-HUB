@@ -156,5 +156,7 @@ of Setup's existing Editor cache and the inactive legacy MCP config after the
 installer, declined permission, actual embedded operation, view closure and
 payload-failure/retry. Fresh profiles must leave these stores absent. It also
 tests reviewed Claude Desktop JSON connection migration alongside Codex and
-Claude Code. These added native checks are pending an actual 0.1.14 candidate run;
-synthetic client configurations are not authenticated AI-app acceptance.
+Claude Code. These native checks passed in 0.1.14 fresh/upgrade
+[38463811138](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38463811138)
+(21/27 checks). Synthetic client configurations are not authenticated AI-app
+acceptance; Mac/Linux native settings flows still require separate acceptance.
