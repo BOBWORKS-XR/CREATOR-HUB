@@ -21,7 +21,7 @@ function run(command, args, capture = false) {
     ...(capture ? { stdout: result.stdout?.toString('utf8').slice(-4096) || '' } : {}),
     stderr: result.stderr?.toString('utf8').slice(-4096) || '' };
 }
-const report = { scope: 'Retained RPM parsing only; not installation, GUI or release acceptance.',
+const report = { scope: 'Retained RPM parsing and resource extraction; not installation, GUI or release acceptance.',
   sourceRevision: process.env.GITHUB_SHA, packageRun: process.env.CANDIDATE_RUN,
   package: packages[0], sha256: crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),
   rpmVersion: run('rpm', ['--version'], true),
@@ -29,6 +29,17 @@ const report = { scope: 'Retained RPM parsing only; not installation, GUI or rel
   rpmIntegrity: run('rpm', ['--checksig', '--nosignature', file], true),
   rpm2cpio: run('rpm2cpio', [file]),
   bsdtar: run('bsdtar', ['-tf', file]) };
+try {
+  const { extract, verifyResources } = require('./unix-package-payload.cjs');
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'builtin-manifest.json'), 'utf8'));
+  if (manifest.platform !== 'linux' || manifest.arch !== 'x86_64') throw Error('Unexpected retained native target.');
+  const output = `${reportFile}.extracted`;
+  extract(file, 'rpm', output, 'Creator Hub');
+  const files = verifyResources(path.join(output, 'usr/lib/Creator Hub/modules'), manifest);
+  report.extraction = { passed: true, resourceCount: Object.keys(files).length };
+} catch (error) {
+  report.extraction = { passed: false, error: error.message };
+}
 fs.writeFileSync(reportFile, JSON.stringify(report, null, 2), { flag: 'wx' });
 console.log(JSON.stringify(report, null, 2));
-if (report.rpm2cpio.exitCode !== 0 || report.bsdtar.exitCode !== 0) process.exitCode = 1;
+if (report.rpmQuery.exitCode !== 0 || report.rpmIntegrity.exitCode !== 0 || report.bsdtar.exitCode !== 0 || !report.extraction.passed) process.exitCode = 1;

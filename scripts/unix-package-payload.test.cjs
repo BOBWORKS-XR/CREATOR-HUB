@@ -141,16 +141,16 @@ test('Linux extraction uses no installers/scripts and retains hashes without rea
     const calls = [];
     const execute = (file, args, options) => {
       calls.push([file, args]);
-      if (file === 'rpm2cpio') return Buffer.from('cpio fixture');
       if (file === 'dpkg-deb') { assert.equal(args[0], '--extract'); f.layout(options.cwd, 'deb'); }
-      else if (file === 'bsdtar') { assert.deepEqual(args.slice(0, 2), ['-xf', '-']); assert.equal(options.input.toString(), 'cpio fixture'); f.layout(options.cwd, 'rpm'); }
+      else if (file === 'bsdtar') { assert.equal(args[0], '-xf'); assert.ok(args[1].endsWith('.rpm')); assert.equal(options.input, undefined); f.layout(options.cwd, 'rpm'); }
       else { assert.equal(args[0], '--appimage-extract'); f.layout(options.cwd, 'appimage'); }
       return Buffer.from('');
     };
     const result = validatePackages({ output: f.output, bundleDirectory: bundle, manifest: f.manifest, productName: 'Creator Hub', rawHub: f.rawHub, execute });
     assert.equal(result.integrityPassed, true); assert.equal(result.writableGuiAccepted, false); assert.equal(result.releaseReady, false); assert.equal(result.mcpMode, 'read-only');
     assert.deepEqual(result.packages.map(entry => entry.format), ['deb', 'rpm', 'appimage']);
-    assert.equal(calls.length, 4);
+    assert.equal(calls.length, 3);
+    assert.equal(calls.some(([command]) => command === 'rpm2cpio'), false);
     for (const entry of result.packages) assert.equal(entry.sha256, hash(fs.readFileSync(path.join(f.output, entry.path))));
     assert.throws(() => validatePackages({ output: f.output, bundleDirectory: bundle, manifest: f.manifest, productName: 'Creator Hub', rawHub: f.rawHub, execute }), /EEXIST/);
   } finally { f.cleanup(); }

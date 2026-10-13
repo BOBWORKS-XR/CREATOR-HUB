@@ -60,7 +60,7 @@ Native output API:
   package maintainer scripts run. AppImage uses only its extraction-mode runtime
   for this just-built local artifact; it is not a general untrusted-file scanner.
 
-Linux validation needs dpkg-deb, rpm2cpio and bsdtar (libarchive-tools). AppImage
+Linux validation needs dpkg-deb and bsdtar (libarchive-tools). AppImage
 extraction needs no FUSE installation. Mac uses a unique read-only/no-open DMG
 mount, copies its app, attempts owned detach even after partial attach failure,
 and verifies app code signatures without a signing identity/keychain lookup.

@@ -146,8 +146,7 @@ function extract(file, format, output, productName, execute = execFileSync) {
   const options = { cwd: output, timeout: 180000, stdio: 'pipe', maxBuffer: 512 * 1024 * 1024 };
   if (format === 'deb') execute('dpkg-deb', ['--extract', file, output], options);
   else if (format === 'rpm') {
-    const archive = execute('rpm2cpio', [file], options);
-    execute('bsdtar', ['-xf', '-', '-C', output], { ...options, input: archive });
+    execute('bsdtar', ['-xf', file, '-C', output], options);
   } else if (format === 'appimage') {
     // Executes only the extraction mode of this just-built, retained runtime;
     // never launches the application or requires FUSE/mount installation.
