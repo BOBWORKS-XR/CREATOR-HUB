@@ -9,7 +9,8 @@ const { EventEmitter } = require('node:events');
 const { spawnSync, execFileSync } = require('node:child_process');
 const { parseArgs, hostedRoot, requestIdentity, validateBinding, initialReport, finalizeReport,
   inventorySnapshot, parsePs, processSnapshot, verifyProcessBinding, executableSnapshot, verifyInstanceIdentity,
-  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, fixtureMetadata, permissionMetadata, EXTRACT_DEB,
+  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, TERMS_CHECKBOX, termsChoice,
+  fixtureMetadata, permissionMetadata, EXTRACT_DEB,
   Experiment, PHASES, PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS, REVIEWED_CANDIDATE,
   REPO, APP, PLATFORM, FIXTURE_RUNTIME } = require('./flatpak-native-smoke.cjs');
 
@@ -368,6 +369,58 @@ test('captured Flatpak TSV preserves empty runtime application columns without s
   }
 });
 
+test('captured terms OCR permits only the proven I/pipe glyph under the exact title and revision', () => {
+  const title = { text: 'Terms of use and risk acknowledgement' };
+  const revision = { text: 'Creator Suite Terms v2026-09-28. This saved on this device.' };
+  const button = { text: 'Accept and continue', x: 500, y: 715 };
+  for (const glyph of ['I', '|']) {
+    const checkbox = { text: `${glyph} have read and agree to these terms, including the risk assumption and liability limitations`, x: 293, y: 651 };
+    const lines = [title, revision, checkbox, button];
+    assert.equal(termsChoice(lines, TERMS_CHECKBOX), checkbox);
+    assert.equal(termsChoice(lines, /^Accept and continue$/), button);
+    for (const invalid of [[revision, checkbox, button], [title, checkbox, button],
+      [title, { text: 'Creator Suite Terms v2099-01-01.' }, checkbox, button], [title, title, revision, checkbox, button]]) {
+      assert.throws(() => termsChoice(invalid, TERMS_CHECKBOX), /exact dialog title\/revision/);
+    }
+    assert.throws(() => termsChoice([...lines, checkbox], TERMS_CHECKBOX), /ambiguous/);
+    assert.throws(() => termsChoice([...lines, button], /^Accept and continue$/), /ambiguous/);
+  }
+  for (const text of ['l have read and agree to these terms,', 'Have read and agree',
+    'I have read and agree to different terms,', 'Other I have read and agree to these terms,']) assert.equal(TERMS_CHECKBOX.test(text), false);
+});
+
+for (const fault of [null, 'survives', 'ps-fails', 'malformed']) {
+  test(`preflight waits for natural instance-record disappearance without adoption or kill: ${fault}`, async t => {
+    const root = temporary(t); fs.mkdirSync(path.join(root, 'evidence'));
+    const captured = '1537671295\tcom.creatorworks.hub\t4375\t4379\n'
+      + '4239702824\tcom.creatorworks.hub\t4363\t4367\n3425279159\t\t4316\t4328\n'
+      + '3718219621\tcom.creatorworks.hub\t4381\t4385\n1223727281\t\t4294\t4314\n'
+      + '3240843254\tcom.creatorworks.hub\t4357\t4361\n3838992486\tcom.creatorworks.hub\t4627\t4639\n'
+      + '4196549178\tcom.creatorworks.hub\t4369\t4373\n';
+    let snapshots = 0;
+    const e = new Experiment(root, initialReport(), (tool, args) => {
+      assert.equal(tool, 'flatpak'); assert.deepEqual(args, ['ps', '--columns=instance,application,pid,child-pid']);
+      snapshots += 1;
+      if (fault === 'ps-fails') return { status: 1, stderr: 'original preflight diagnostic' };
+      return { status: 0, stdout: fault === 'malformed' ? 'bad row' : snapshots <= 2 || fault === 'survives'
+        ? captured : '999\torg.example.Foreign\t700\t701\n' };
+    }, () => assert.fail('No launcher before strict empty-instance preflight'));
+    if (!fault) {
+      const result = await e.awaitGuiIdle('candidate', 1000);
+      assert.equal(result.passed, true); assert.equal(result.first.length, 6); assert.deepEqual(result.last, []);
+      assert.equal(result.snapshots, 3);
+    } else {
+      e.awaitGuiIdle = label => Experiment.prototype.awaitGuiIdle.call(e, label, 0);
+      await assert.rejects(e.phase('candidate-gui', () => e.gui('candidate')));
+      assert.equal(e.report.guiPreflight.candidate.passed, false);
+      assert.ok(e.report.guiPreflight.candidate.failure);
+      assert.equal(e.report.checks.find(check => check.name === 'candidate-gui').status, 'failed');
+      assert.equal(fs.existsSync(path.join(root, 'evidence/candidate-launch.log')), false);
+    }
+    assert.equal(e.report.releaseReady, false);
+  });
+}
+
 function identityFixture(root) {
   const instance = { instance: '123', application: 'com.creatorworks.hub', pid: 456, childPid: 457 };
   const processes = {
@@ -556,21 +609,24 @@ for (const fault of [null, 'kill-nonzero', 'kill-hang', 'launcher-hang', 'instan
   });
 }
 
-for (const originalFailure of [false, true, 'xres-unavailable', 'no-net-wm-pid', 'identity-drift-after-import', 'identity-drift-before-consent']) {
+for (const originalFailure of [false, true, 'xres-unavailable', 'no-net-wm-pid', 'identity-drift-after-import',
+  'identity-drift-before-consent', 'captured-pipe-terms']) {
   test(`GUI cleanup invalidates capture and retains the original error: ${originalFailure}`, async t => {
     // Entire GUI/launcher/command surface is synthetic; never launch Flatpak or capture a host window.
     const root = temporary(t); fs.mkdirSync(path.join(root, 'evidence'));
     const f = identityFixture(root);
-    const child = fakeLauncher(); let psCalls = 0; let killed = false;
+    const child = fakeLauncher(); let psCalls = 0; let killed = false; let clicks = 0;
     const missingXres = originalFailure === 'xres-unavailable';
-    const passed = originalFailure === 'no-net-wm-pid';
+    const pipeTerms = originalFailure === 'captured-pipe-terms';
+    const passed = originalFailure === 'no-net-wm-pid' || pipeTerms;
     const identityDrift = originalFailure === 'identity-drift-after-import';
     const consentDrift = originalFailure === 'identity-drift-before-consent';
     const cleanupPasses = missingXres || passed || identityDrift || consentDrift;
     const original = Error('original namespace diagnostic');
-    const text = consentDrift ? ['I have read and agree', 'Accept and continue']
-      : ['Creator Hub 0.1.13', 'Updates are managed by Flatpak', 'Native installers cannot', 'App management is not supported on Linux'];
-    const tsv = 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'
+    const rendered = ['Creator Hub 0.1.13', 'Updates are managed by Flatpak', 'Native installers cannot', 'App management is not supported on Linux'];
+    const terms = ['Terms of use and risk acknowledgement', 'Creator Suite Terms v2026-09-28.',
+      `${pipeTerms ? '|' : 'I'} have read and agree to these terms, including the risk assumption and liability limitations`, 'Accept and continue'];
+    const tsv = text => 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'
       + text.map((line, i) => `5\t1\t1\t1\t${i + 1}\t1\t10\t20\t50\t10\t90\t${line}`).join('\n');
     const e = new Experiment(root, initialReport(), (tool, args) => {
       let stdout = '';
@@ -584,6 +640,7 @@ for (const originalFailure of [false, true, 'xres-unavailable', 'no-net-wm-pid',
       if (tool === 'flatpak' && args[0] === 'info') stdout = args.includes('--show-runtime') ? PLATFORM.slice(8)
         : args.at(-1) === APP ? f.expected.appCommit : f.expected.runtimeCommit;
       if (tool === 'xdotool' && args[0] === 'search') stdout = '987\n';
+      if (tool === 'xdotool' && args.includes('click')) clicks += 1;
       assert.notEqual(tool, 'xprop', 'Neither absent nor spoofed window PID properties grant identity');
       if (tool.endsWith('flatpak-xres-window-pid')) {
         if (missingXres) return { status: 5, stdout: '', stderr: 'No unique live local XRes PID' };
@@ -591,7 +648,7 @@ for (const originalFailure of [false, true, 'xres-unavailable', 'no-net-wm-pid',
       }
       if (tool === 'import' && identityDrift) f.processes[458].startTime = '2000';
       if (tool === 'tesseract') {
-        stdout = tsv;
+        stdout = tsv(consentDrift || (pipeTerms && clicks < 2) ? terms : rendered);
         if (consentDrift) f.processes[458].startTime = '2000';
       }
       if (tool === '/usr/bin/python3') stdout = args[1] === INSTANCE_IDENTITY ? JSON.stringify(f.info)
@@ -608,6 +665,7 @@ for (const originalFailure of [false, true, 'xres-unavailable', 'no-net-wm-pid',
     const execute = () => e.phase('candidate-gui', () => e.gui('candidate'));
     if (passed) {
       await execute(); assert.ok(e.report.guiIdentity.candidate.rechecks >= 4);
+      if (pipeTerms) assert.equal(clicks, 2, 'Only the visible checkbox and continue control are used');
     } else await assert.rejects(execute, error => originalFailure === true ? error === original : missingXres
       ? /flatpak-xres-window-pid.*failed/.test(error.message) : identityDrift || consentDrift
         ? /identity changed during GUI capture/.test(error.message) : /GUI cleanup failed/.test(error.message));

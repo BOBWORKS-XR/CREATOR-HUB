@@ -30,8 +30,9 @@ artifact ID/digest/size, merge parents and equal source/merge trees. The existin
 local DEB under `artifacts/native-288-Linux-38423134520` independently matched
 the reviewed byte count and SHA256. ZIP metadata is not local byte verification;
 the workflow must download and hash it again. No native installation, Flatpak
-build or remote workflow dispatch was performed locally. The new XRes probe
-has not yet accepted these bytes; the older run below used a different candidate.
+build or remote workflow dispatch was performed locally. The XRes probe below
+captured these bytes but did not pass complete GUI acceptance; the earlier run
+used a different candidate.
 This dated table is not proof that an artifact remains available indefinitely.
 See [the exact CI run](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38423134520).
 
@@ -237,6 +238,48 @@ The new defaults bind source `288`, which includes the reviewed native-consent
 product changes. Any newer product changes still require another separately
 reviewed matching artifact; testing-path exclusions cannot admit them.
 
+### Actual Run 38428685642
+
+[Run 38428685642](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38428685642)
+used harness `d4654f3da961089c3c3eee703ece82bfe596f66e` and the source-288 tuple
+above. Original artifact `11829913045` is retained locally under
+`artifacts/flatpak-run-38428685642`; earlier reports are unchanged.
+
+- **Correct as-is / actual partial proof:** the C helper compiled, and its real
+  XRes 1.2 missing/forged-hint/destroyed-window self-test passed. Fixture GUI
+  identity passed 81 rechecks; runtime-generation GUI identity passed 79. Both
+  bound the owned outer process, immediate reaper child, PID/mount namespaces,
+  running metadata and exact native executable SHA256
+  `de680b633fafed5ab6f3f56c320d1c1c2bfa7d129b63fcf096ce709bae8e92c0`.
+  Both retained images are 1100x890, with 797 measured colors and RGB standard
+  deviations above 29. Read-only image inspection found the visible unchecked
+  terms dialog, not accepted updater/management content. Both cleanup receipts
+  confirmed launcher exit and instance disappearance with no cleanup errors.
+- **Confirmed broken, immediate preflight assumption:** candidate capture never
+  launched because `ps` still listed six Hub-labelled tool records after the
+  successful sandbox probe. A later snapshot was empty. Flatpak's
+  [normal instance GC](https://github.com/flatpak/flatpak/blob/1.14.6/common/flatpak-instance.c#L1016-L1036)
+  deliberately retains unused records until their lock files are older than
+  three seconds. Preflight now polls for at most ten seconds and still requires
+  no Hub records before launch. It does not ignore, adopt or kill any existing
+  record; persistence, malformed output or command failure still fails.
+- **Confirmed broken, exact OCR glyph mismatch:** retained OCR read the native
+  checkbox label as `| have read and agree to these terms, ...`, not `I have ...`.
+  There were zero click commands. Both later GUI phases therefore timed out at
+  the terms modal, not a demonstrated updater or WebKit sandbox failure. The
+  harness now recognizes only that captured `I`/`|` first-glyph alternative,
+  requiring the exact terms title/revision and unique checkbox/continue labels.
+  XRes identity is still rechecked before each visible synthetic consent click;
+  no storage, native-consent or parent-policy override is used.
+
+Binding, authenticated runtime, build/export, install/resource/permission,
+sandbox and preservation phases passed. Actual same-version app update passed;
+the second runtime update retained exact installed-ref checks and an empty
+filesystem diff in the export repository. Its overall phase still failed at GUI
+acceptance. Native updater refusal, completed unsupported management and real
+terms persistence remain unaccepted. The failed report stays failed with
+`releaseReady=false`; the two new harness fixes require a disposable rerun.
+
 ### XRes Window Ownership Contract
 
 XRes 1.2's [protocol specification](https://sources.debian.org/src/xorgproto/2025.1-1/resproto.txt/)
@@ -292,8 +335,10 @@ last XRes receipt and any failure; `commands.json` retains helper status/stderr.
 Local tests use synthetic process/filesystem fixtures, including PID reuse,
 foreign processes, changed namespace/hash/deployment, missing/invalid XRes,
 timeout, drift after image capture and drift before consent. Real C/XRes,
-Flatpak `/proc` access and GUI pixels remain unverified until the disposable
-workflow runs. `releaseReady=false` and direct trusted updater IPC remain separate.
+Flatpak `/proc` access and owned nonblank pixels now have the partial actual
+evidence above, but complete native GUI acceptance remains failed. Local tests
+do not replace the required rerun. `releaseReady=false` and direct trusted
+updater IPC remain separate.
 
 `evidence/report.json` exists before provisioning. `finally` and workflow
 `always()` finalization retain original phase errors, label unreached phases

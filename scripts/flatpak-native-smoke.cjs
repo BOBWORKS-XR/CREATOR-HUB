@@ -279,6 +279,16 @@ function ocrLines(tsv) {
     x: words[0].left + Math.min(words[0].width / 2, 20), y: words[0].top + words[0].height / 2 }));
 }
 
+const TERMS_CHECKBOX = /^(?:I|\|) have read and agree to these terms,/;
+function termsChoice(lines, expression) {
+  requireThat(lines.filter(line => line.text === 'Terms of use and risk acknowledgement').length === 1
+    && lines.filter(line => line.text.startsWith('Creator Suite Terms v2026-09-28.')).length === 1,
+  'Synthetic terms fixture has no unique exact dialog title/revision; no consent clicks');
+  const choices = lines.filter(line => expression.test(line.text));
+  requireThat(choices.length === 1, 'Consent control OCR is ambiguous; no guessed clicks');
+  return choices[0];
+}
+
 const FIXTURE_TRANSFORM = `
 import configparser, io, json, sys
 data = json.load(sys.stdin)
@@ -527,9 +537,25 @@ class Experiment {
     requireThat(result.passed, `Flatpak GUI cleanup failed: ${result.errors.map(error => `${error.phase}: ${error.message}`).join('; ')}`);
     return result;
   }
+  async awaitGuiIdle(label, timeout = 10000) {
+    requireThat(Number.isInteger(timeout) && timeout >= 0 && timeout <= 10000, 'Invalid preflight quiescence bound');
+    const result = (this.report.guiPreflight ||= {})[label] = { passed: false, snapshots: 0 };
+    try {
+      for (const end = Date.now() + timeout; ; ) {
+        // Flatpak 1.14.6 retains unlocked instance records for at least three seconds before normal GC.
+        const rows = parsePs(this.flat(['ps', '--columns=instance,application,pid,child-pid'], { timeout: 10000 }))
+          .filter(instance => instance.application === ID);
+        requireThat(rows.length <= 32, 'Unexpected number of preexisting Hub instances');
+        result.first ||= rows; result.last = rows; result.snapshots += 1;
+        if (rows.length === 0) { result.passed = true; this.save(); return result; }
+        this.save();
+        requireThat(Date.now() < end, 'Existing Flatpak app instance did not disappear; no capture/adoption or broad kill');
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    } catch (error) { result.failure = error.message; this.save(); throw error; }
+  }
   async gui(label) {
-    requireThat(parsePs(this.flat(['ps', '--columns=instance,application,pid,child-pid']))
-      .every(instance => instance.application !== ID), 'Existing Flatpak app instance; no capture/adoption or broad kill');
+    await this.awaitGuiIdle(label);
     // flatpak-run(1), including upstream 1.14.6: parent death kills the entire owned sandbox.
     requireThat(this.flat(['run', '--help']).includes('--die-with-parent'), 'Runner lacks documented Flatpak lifetime protection');
     const log = fs.openSync(path.join(this.evidence, `${label}-launch.log`), 'wx', 0o600);
@@ -582,16 +608,14 @@ class Experiment {
       let lines;
       for (let end = Date.now() + 30000; Date.now() < end;) {
         lines = capture(window);
-        if (lines.some(line => /I have read and agree/.test(line.text))) break;
+        if (lines.some(line => TERMS_CHECKBOX.test(line.text))) break;
         if (lines.some(line => /Updates are managed by Flatpak/i.test(line.text))) break;
         await sleep(1000);
       }
-      if (lines.some(line => /I have read and agree/.test(line.text))) {
+      if (lines.some(line => TERMS_CHECKBOX.test(line.text))) {
         // Exercise the real checkbox/button. Never seed acceptance storage or inject into the WebKit page.
-        for (const expression of [/I have read and agree/, /Accept and continue/]) {
-          const choices = lines.filter(line => expression.test(line.text));
-          requireThat(choices.length === 1, 'Consent control OCR is ambiguous; no guessed clicks');
-          const choice = choices[0];
+        for (const expression of [TERMS_CHECKBOX, /^Accept and continue$/]) {
+          const choice = termsChoice(lines, expression);
           identityCheck();
           this.command('xdotool', ['mousemove', '--window', window, String(Math.round(choice.x)), String(Math.round(choice.y)), 'click', '1']);
           await sleep(1000);
@@ -877,7 +901,8 @@ async function main(options) {
 
 module.exports = { parseArgs, hostedRoot, requestIdentity, validateBinding, initialReport, finalizeReport,
   inventorySnapshot, parsePs, processSnapshot, verifyProcessBinding, executableSnapshot, verifyInstanceIdentity,
-  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, fixtureMetadata, permissionMetadata, EXTRACT_DEB, Experiment, PHASES,
+  INSTANCE_IDENTITY, waitForLauncherExit, ocrLines, TERMS_CHECKBOX, termsChoice,
+  fixtureMetadata, permissionMetadata, EXTRACT_DEB, Experiment, PHASES,
   PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS, REVIEWED_CANDIDATE, REPO, APP, PLATFORM, SDK, FIXTURE_RUNTIME };
 if (require.main === module) {
   main(parseArgs(process.argv.slice(2))).catch(error => { console.error(`Flatpak native validation refused: ${error.message}`); process.exitCode = 1; });
