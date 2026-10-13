@@ -9,6 +9,8 @@ test('native acceptance uses the real terms prompt without replacing app globals
   assert.match(source, /#usage-terms-checkbox'\)\.check\(\)/);
   assert.match(source, /#usage-terms-continue'\)\.click\(\)/);
   assert.doesNotMatch(source, /Object\.defineProperty\(window, ['"]CreatorUsageTerms['"]/);
+  assert.match(source, /termsError: document\.querySelector\('#usage-terms-error'\)\?\.textContent\?\.slice\(0, 1000\)/,
+    'A blocked consent command must be captured explicitly, not only as a timeout');
 });
 
 test('real suite install test refuses local and self-hosted machines before reading pins or paths', () => {

@@ -270,6 +270,27 @@ installed sockets `x11;wayland;fallback-x11`; GUI and update phases were not
 reached. Determine whether this is fallback serialization or genuinely excess
 permission before changing the validator. No host-access permission was added.
 
+The owner confirmed no Apple Developer ID/notarization account is available.
+Mac distribution remains explicitly **not notarized**, as with earlier builds.
+This expected publisher-trust warning is distinct from invalid code seals,
+incorrect architecture/minimum OS or application failures. Apple's documented
+[per-app Open Anyway option](https://support.apple.com/102445) is a user decision
+for a trusted download, not a request to disable Gatekeeper globally. Reports
+retain their raw assessment results and incomplete quarantine/approval coverage;
+CI does not bypass security policy or claim notarized/default-trusted launch.
+
+Build `38419143362` passed all five compile/test/package jobs for the native
+consent change, but Windows candidate acceptance `38419133695` correctly failed
+all four native lanes. Its screenshot records `accept_usage_terms not allowed
+by ACL`: the new handler entries were absent from `build.rs` and the main-window
+capability. The follow-up adds exactly those two command grants. The pre-build
+test now compares every invoke-handler entry against generated permissions and
+main-window grants, and rejects mismatches, duplicates, remote or extra grants.
+The test first reproduced the omission, then passed with the two registrations.
+Consent errors are now captured as bounded text in the native suite report.
+These corrections still require fresh installed acceptance; no failed candidate
+was signed for publication or advertised as ready.
+
 Flatpak installed/update testing, native signed Unix update/restart, Unix
 companion operation and final public discovery remain open. No tag, release or
 latest promotion has been performed. Unification stays at 0.1.14 or later.

@@ -117,6 +117,65 @@ LaunchServices, security policy or consent. A refused quit stops replacement;
 failed replacement is recorded with the original bundle retained, not hidden by
 automatic retries or a fabricated success.
 
+## Target 13 Auto-Download Persistence Addon
+
+This bounded diagnostic tests only the effective **Download verified updates
+automatically** preference in 0.1.13 across an owned normal quit and relaunch.
+It changes no product runtime/UI behavior, workflow, consent record or artifact
+pin. The owner must rebind the unchanged pins to accepted candidate CI before
+native execution; this worker does not accept or dispatch the pending builds.
+
+The original capture at
+`artifacts/mac-b4-intel-fresh-38413382537/native-report.json`,
+`launches[0].afterTermsSnapshot.axNodes`, contains exactly one enabled control:
+`AXRole=AXCheckBox`, `AXTitle=Download verified updates automatically`,
+`AXValue=1`, `AXEnabled=true`. That observation is an available control, **not
+preference persistence proof**. The original report stays blocked with
+`releaseReady: false`, `effectivePreferencesTested: false` and returning Terms
+on normal relaunch. The corresponding ARM fresh report retains Terms across
+relaunch but also has `effectivePreferencesTested: false`; neither report
+establishes persistence of other browser preferences. Both original reports and
+their Gatekeeper rejections are retained, not overwritten or promoted.
+
+On the initial rendered 0.1.13 body only, the addon requires that exact unique
+enabled checkbox at value `1`, then performs **one** normal `AXPress` requesting
+`0`. The Swift helper requires a separate command-only opt-in,
+`CREATOR_MAC_SYNTHETIC_PREFERENCE_TEST=1`, exact hosted CI/repository, matching
+owned PID/bundle/executable, both installed bundle version fields equal to
+`0.1.13`, an active app, existing AX and screen capabilities, a display, one
+visible window, a complete WebKit MCP body and no Terms/security/privacy prompt.
+It rechecks the role, exact title, enabled state and value immediately before
+the press. No arbitrary action, other checkbox, old-12 preference mutation,
+permission grant, JavaScript/localStorage injection or direct storage write is
+permitted. This synthetic test is **not customer consent**.
+
+The action receipt binds identity, role/title, `beforeValue=1`,
+`requestedValue=0`, `targetVersion=0.1.13` and the synthetic/no-customer/no-user-PC
+flags. A successful receipt alone cannot establish the result: an actual owned
+post-action AX snapshot must show `0`. The first PID then has to quit normally;
+the normal LaunchServices relaunch must have a distinct PID and show the same
+exact enabled checkbox at `0`, without another press. Its normal quit is also
+required. An uncertain press is never repeated, and a returning `1`, missing,
+ambiguous or disabled checkbox is recorded as failure, not repaired by the probe.
+
+Reports retain `beforeAutoDownloadSnapshot`, `afterAutoDownloadSnapshot` and
+`relaunchedAutoDownloadSnapshot` in the target launch rows. All new reports
+start with `autoDownloadPreferencePersistenceTested: false` and
+`effectivePreferencesTested: false`; both become true only after the full
+observed target pair and normal lifecycle checks complete. The explicit
+`effectivePreferencesScope` is `0.1.13-auto-download-normal-quit-relaunch-only`;
+`otherBrowserPreferencesTested` stays false. A blocked initial target body
+leaves the addon untested, rather than assuming an off state on relaunch.
+Old-12 baseline problems and original Terms failures remain separate blockers;
+a narrower target preference result cannot make them pass or make the release
+ready. `releaseReady` always stays false.
+
+Gatekeeper assessment/rejection and ad-hoc, unsigned/not-notarized publisher
+status are unchanged. These are not relabelled as damaged seals, runtime or
+preference failures. The addon grants no OS approval and changes no policy;
+the actual quarantined per-app approval flow remains unverified here. Optional
+native Terms-file read/hash capture is not added by this preference-only addon.
+
 ## Preservation and GUI Boundaries
 
 Opaque random byte sentinels cover Hub storage/adoption/projects, current and
@@ -128,17 +187,19 @@ No existing config, auth file, terms-acceptance record or signed app bundle is
 edited. The root choices are preservation probes, not proof of every companion's
 actual runtime data contract.
 
-These sentinels prove **opaque file preservation only**. The separate GUI
-relaunch check tests persistence of the app's own synthetic terms acknowledgement,
-not arbitrary WebKit/localStorage preferences, account identity, real saved/adopted
-project semantics, actual companion installs, live-client settings or reconnect.
+These sentinels prove **opaque file preservation only**. Separate GUI relaunch
+checks test the app's own synthetic Terms acknowledgement and the one target-13
+auto-download preference above, not arbitrary WebKit/localStorage preferences,
+account identity, real saved/adopted project semantics, actual companion installs,
+live-client settings or reconnect.
 
 The compiled Swift helper probes existing
 [AX trust](https://developer.apple.com/documentation/applicationservices/axisprocesstrusted())
 and [screen-capture access](https://developer.apple.com/documentation/coregraphics/cgpreflightscreencaptureaccess()).
 It never requests permissions. Bounded AX/window snapshots target only the owned
 app PID. Missing capability, missing visible window, incomplete AX capture or a
-possible privacy/security prompt is blocked. The only mutation is an explicitly
+possible privacy/security prompt is blocked. Mutations are limited to the
+separately opted-in target-13 preference action above and this explicitly
 opted-in **synthetic disposable CI terms test**, using normal
 [AXPress](https://developer.apple.com/documentation/applicationservices/kaxpressaction)
 on these exact controls, in order:
@@ -159,7 +220,7 @@ injection, auth mutation or key logging is used. All action receipts have
 `syntheticTestOnly: true`, `customerConsent: false`, `userMachineUsed: false`.
 No user machine, real customer consent or OS security/privacy prompt is eligible.
 
-Each GUI phase requires WebKit AX body evidence and a PNG of the exact owned
+Each existing body/Terms GUI phase requires WebKit AX evidence and a PNG of the exact owned
 window. The initial Terms PNG precedes either press. Post-acknowledgement and
 persisted-body PNGs require `Creator Works MCP` in the complete AX tree, not
 only title-bar chrome. The state/window are rechecked on both sides of capture.
@@ -210,6 +271,16 @@ the disposable native jobs run. Existing native snapshots do not establish the
 new actions. Local Node **24.19.0** verification: **67 harness tests passed,
 0 failed, 0 skipped**. Both CJS files pass `node --check`; Swift/workflow assertions
 are structural only. These source/unit results are not native GUI acceptance.
+
+The preference addon retains that 67-test baseline. Local Node 24 verification
+now passes **98 harness tests, 0 failed, 0 skipped** (31 added). Pure injected-ops
+faults cover missing/ambiguous/disabled checkbox state, already-off/near-match
+controls, privacy prompts, action and snapshot identity mismatches, a receipt
+without an observed off state, returning on after normal relaunch, uncertain
+presses, absent capabilities, returning Terms and refused normal quits. The
+existing old-12 blocker/normal-cleanup tests still pass. A simulated report is
+an orchestration test, not an actual native preference result; Swift compilation
+and target-13 preference persistence remain unverified until Mac CI runs.
 
 All existing source/run/artifact pins above remain unchanged. The owner's ARM
 minimum-OS configuration and other product/build-bound changes require a new

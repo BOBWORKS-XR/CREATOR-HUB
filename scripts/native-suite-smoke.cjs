@@ -564,6 +564,7 @@ async function closeHosted(app) {
         compatibility: document.querySelector('#compatibility-status')?.textContent,
         detail: document.querySelector('#compatibility-detail')?.textContent,
         error: document.querySelector('#action-error')?.textContent,
+        termsError: document.querySelector('#usage-terms-error')?.textContent?.slice(0, 1000),
         operation: document.querySelector('#operation-progress')?.textContent,
         buttons: Object.fromEntries(['host-mcp-button', 'host-setup-button', 'release-button', 'check-updates']
           .map(id => { const button = document.getElementById(id); return [id, button && { disabled: button.disabled, hidden: button.classList.contains('hidden'), text: button.textContent }]; })),

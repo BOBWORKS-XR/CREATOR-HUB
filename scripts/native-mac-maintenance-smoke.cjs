@@ -11,6 +11,7 @@ const REPO = 'BOBWORKS-XR/CREATOR-HUB';
 const TERMS = Object.freeze({ title: 'Terms of use and risk acknowledgement',
   checkbox: 'I have read and agree to these terms, including the risk assumption and liability limitations above.',
   continue: 'Accept and continue' });
+const AUTO_DOWNLOAD = 'Download verified updates automatically';
 const BASELINE_SOURCE = '35a16a45814d821d65b5d203628478449174cd55';
 const BASELINES = Object.freeze({
   X64: Object.freeze({ name: 'Creator.Hub_0.1.12_x64.dmg', size: 5397091,
@@ -417,6 +418,35 @@ function termsControl(snapshot, action) {
   assert.equal((action === 'test-terms-checkbox' ? checks[0] : buttons[0]).AXEnabled, 'true', 'Terms control is not enabled');
 }
 
+function autoDownloadControl(snapshot, expectedValue) {
+  assert.ok(['1', '0'].includes(expectedValue));
+  validateBody(snapshot, 'body');
+  assert.deepEqual(guiBlockers({ accessibilityTrusted: true, screenCaptureAllowed: true, hasDisplay: true }, snapshot), [],
+    'Possible terms/security/privacy prompt prevents synthetic preference interaction');
+  const matches = snapshot.axNodes.filter(n => n.AXRole === 'AXCheckBox' && n.AXTitle === AUTO_DOWNLOAD);
+  assert.equal(matches.length, 1, 'Exact auto-download checkbox is missing or ambiguous');
+  assert.equal(matches[0].AXEnabled, 'true', 'Auto-download checkbox is not enabled');
+  assert.equal(matches[0].AXValue, expectedValue, 'Unexpected auto-download checkbox state');
+}
+
+function preferenceSnapshot(snapshot, launched, expectedValue) {
+  for (const key of ['pid', 'bundleIdentifier', 'bundlePath', 'executablePath']) {
+    assert.equal(snapshot[key], launched[key], `Preference snapshot ownership mismatch: ${key}`);
+  }
+  autoDownloadControl(snapshot, expectedValue);
+}
+
+function preferenceReceipt(result, launched) {
+  for (const key of ['pid', 'bundleIdentifier', 'bundlePath', 'executablePath']) {
+    assert.equal(result[key], launched[key], `Preference action ownership mismatch: ${key}`);
+  }
+  for (const [key, value] of Object.entries({ action: 'test-auto-download-off', axAction: 'AXPress',
+    controlRole: 'AXCheckBox', controlTitle: AUTO_DOWNLOAD, beforeValue: '1', requestedValue: '0',
+    targetVersion: '0.1.13', syntheticTestOnly: true, customerConsent: false, userMachineUsed: false })) {
+    assert.equal(result[key], value, `Preference action receipt mismatch: ${key}`);
+  }
+}
+
 function validatePixels(pixels) {
   for (const key of ['width', 'height', 'sampledPixels', 'distinctColors', 'nonBackgroundSamples']) {
     assert.ok(Number.isSafeInteger(pixels[key]) && pixels[key] >= 0, `Invalid PNG pixel metric: ${key}`);
@@ -453,7 +483,7 @@ function guiBlockers(capability, snapshot, syntheticFreshTerms = false) {
 }
 
 function newReport(input) {
-  return { schemaVersion: 1, scope: 'macos-hub-native-install-manual-upgrade-synthetic-terms-rendering-and-relaunch',
+  return { schemaVersion: 1, scope: 'macos-hub-native-install-manual-upgrade-synthetic-terms-rendering-and-auto-download-relaunch',
     releaseLine: 'separate-apps', input, passed: false, releaseReady: false, userMachineUsed: false,
     executionSourceSha: process.env.GITHUB_SHA || null,
     historicalFailures: [{ runUrl: `https://github.com/${REPO}/actions/runs/38392823489`,
@@ -470,6 +500,9 @@ function newReport(input) {
     updater: { tested: false, publicDiscovery: false, nativeCancellation: false, consent: false,
       automaticRestart: false, reason: 'Public 0.1.12 native in-app updater is Windows-only; manual launches are not updater restart proof.' },
     syntheticTerms: { testOnly: true, customerConsent: false, actions: [] }, termsPersistenceTested: false,
+    syntheticPreference: { testOnly: true, customerConsent: false, controlTitle: AUTO_DOWNLOAD, actions: [] },
+    autoDownloadPreferencePersistenceTested: false,
+    effectivePreferencesScope: '0.1.13-auto-download-normal-quit-relaunch-only', otherBrowserPreferencesTested: false,
     aiWorkflowTested: false, unityWorkflowTested: false,
     effectivePreferencesTested: false, realCompanionInstallsTested: false, liveClientReconnectTested: false,
     blockers: [], failures: [], launches: [], mounts: [], cleanup: [] };
@@ -543,6 +576,23 @@ async function runLane(report, ops) {
           await capture('body');
           row.renderedBodyVerified = true;
           row.persistedSyntheticTerms = !freshTerms;
+          if (version === '0.1.13' && (purpose === 'initial' || report.launches.some(previous =>
+            previous.version === version && previous.purpose === 'initial' && previous.autoDownloadOffVerified === true))) {
+            report.currentPhase = `auto-download-${version}-${purpose}`;
+            if (purpose === 'initial') {
+              preferenceSnapshot(snapshot, launched, '1');
+              row.beforeAutoDownloadSnapshot = snapshot;
+              const result = await ops.pressAutoDownloadOff(launched);
+              preferenceReceipt(result, launched);
+              report.syntheticPreference.actions.push({ version, ...result });
+              snapshot = await ops.waitSnapshot(launched, 'auto-download-off');
+              row.afterAutoDownloadSnapshot = snapshot;
+            } else {
+              row.relaunchedAutoDownloadSnapshot = snapshot;
+            }
+            preferenceSnapshot(snapshot, launched, '0');
+            row.autoDownloadOffVerified = true;
+          }
         }
         report.currentPhase = `normal-quit-${version}-${purpose}`;
         launched.quitAttempted = true;
@@ -558,6 +608,10 @@ async function runLane(report, ops) {
     }
     report.termsPersistenceTested = versions.every(version => report.launches.some(row =>
       row.version === version && row.purpose === 'relaunch' && row.renderedBodyVerified === true));
+    report.autoDownloadPreferencePersistenceTested = report.syntheticPreference.actions.length === 1
+      && ['initial', 'relaunch'].every(purpose => report.launches.some(row => row.version === '0.1.13'
+        && row.purpose === purpose && row.autoDownloadOffVerified === true));
+    report.effectivePreferencesTested = report.autoDownloadPreferencePersistenceTested;
     if (input.lane === 'manual-upgrade') report.manualUpgradeTermsPreserved = report.termsPersistenceTested
       && report.launches.filter(row => row.version === '0.1.13').every(row => row.persistedSyntheticTerms === true);
     report.packageAndManualChecksPassed = true;
@@ -594,9 +648,11 @@ function nativeOperations(out, binding, report) {
   const app = contained(applications, path.join(applications, 'Creator Hub.app'));
   const helper = path.join(out, 'native-mac-window');
   const activeMounts = [];
-  const window = (args, synthetic = false) => {
+  const window = (args, synthetic = '') => {
+    assert.ok(['', 'terms', 'preference'].includes(synthetic));
     const result = JSON.parse(command(helper, args, false,
-      { CREATOR_MAC_SYNTHETIC_TERMS_TEST: synthetic ? '1' : '' }).stdout);
+      { CREATOR_MAC_SYNTHETIC_TERMS_TEST: synthetic === 'terms' ? '1' : '',
+        CREATOR_MAC_SYNTHETIC_PREFERENCE_TEST: synthetic === 'preference' ? '1' : '' }).stdout);
     if (result.error) throw Error(`Native Mac helper: ${result.error}`);
     return result;
   };
@@ -611,6 +667,9 @@ function nativeOperations(out, binding, report) {
         if (wanted === 'body' && kind === 'body') return snapshot;
         if (wanted === 'checked') {
           try { termsControl(snapshot, 'test-terms-accept'); return snapshot; } catch {}
+        }
+        if (wanted === 'auto-download-off') {
+          try { preferenceSnapshot(snapshot, launched, '0'); return snapshot; } catch {}
         }
       }
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -667,7 +726,11 @@ function nativeOperations(out, binding, report) {
     pressTerms: (launched, action) => {
       guard();
       assert.ok(['test-terms-checkbox', 'test-terms-accept'].includes(action));
-      return window([action, String(launched.pid), app, launched.executablePath], true);
+      return window([action, String(launched.pid), app, launched.executablePath], 'terms');
+    },
+    pressAutoDownloadOff: launched => {
+      guard();
+      return window(['test-auto-download-off', String(launched.pid), app, launched.executablePath], 'preference');
     },
     capture: (launched, label, kind) => {
       const snapshot = window(['snapshot', String(launched.pid), app, launched.executablePath]);
@@ -732,9 +795,10 @@ async function main() {
   process.exitCode = report.failures.length ? 1 : report.blockers.length ? 2 : report.passed ? 0 : 1;
 }
 
-module.exports = { BASELINES, BASELINE_SOURCE, CANDIDATE, TERMS, PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS,
+module.exports = { BASELINES, BASELINE_SOURCE, CANDIDATE, TERMS, AUTO_DOWNLOAD, PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS,
   options, guard, contained, noLinks, digest, validateBinding,
   parseLocalTree, verifyProductTree,
   validateSource, zipEntry, validateBundle, atLeast, sentinelFiles, seedSentinels, verifySentinels,
-  bodyKind, validateBody, termsControl, validatePixels, guiBlockers, newReport, runLane };
+  bodyKind, validateBody, termsControl, autoDownloadControl, preferenceSnapshot, preferenceReceipt,
+  validatePixels, guiBlockers, newReport, runLane };
 if (require.main === module) main().catch(error => { console.error(String(error.stack || error)); process.exitCode = 1; });

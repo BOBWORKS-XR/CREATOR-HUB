@@ -223,7 +223,8 @@ test('path checks refuse symbolic links or Windows junctions', t => {
 const capability = { accessibilityTrusted: true, screenCaptureAllowed: true, hasDisplay: true };
 const visible = { finishedLaunching: true, windows: [{ id: 123 }], axReadable: true,
   axNodes: [{ AXRole: 'AXWebArea', AXDescription: 'Creator Hub' },
-    { AXRole: 'AXStaticText', AXValue: 'Creator Works MCP' }], axTruncated: false };
+    { AXRole: 'AXStaticText', AXValue: 'Creator Works MCP' },
+    { AXRole: 'AXCheckBox', AXTitle: mac.AUTO_DOWNLOAD, AXValue: '1', AXEnabled: 'true' }], axTruncated: false };
 function termsSnapshot(checked = false) {
   return { ...clone(visible), axNodes: [{ AXRole: 'AXWebArea', AXDescription: 'Creator Hub' },
     { AXRole: 'AXHeading', AXTitle: mac.TERMS.title },
@@ -233,22 +234,34 @@ function termsSnapshot(checked = false) {
 const renderedPixels = { width: 940, height: 580, bodyCrop: { x: 56, y: 116, width: 827, height: 348 },
   sampledPixels: 71949, distinctColors: 128, nonBackgroundSamples: 8500, chromeExcluded: true };
 function operations(events) {
-  let current = null, pid = 100, accepted = false, checked = false;
-  const snapshot = () => accepted ? clone(visible) : termsSnapshot(checked);
+  let current = null, pid = 100, accepted = false, checked = false, autoDownload = true, launched;
+  const snapshot = () => {
+    const result = accepted ? clone(visible) : termsSnapshot(checked);
+    if (accepted) result.axNodes.find(n => n.AXTitle === mac.AUTO_DOWNLOAD).AXValue = autoDownload ? '1' : '0';
+    return { ...result, ...launched };
+  };
   return {
     probe: () => clone(capability), preflight: () => events.push('preflight'),
     install: version => { current = version; events.push(`install:${version}`); return { version, appPath: '/owned/Creator Hub.app',
       executablePath: '/owned/Creator Hub.app/Contents/MacOS/creator-hub',
       bundle: { gatekeeper: { status: 0 }, bundleMinimumCoversExecutable: true } }; },
     seed: () => { events.push('seed'); return []; },
-    launch: () => { events.push(`launch:${current}`); return { pid: ++pid, bundleIdentifier: 'com.creatorworks.hub',
-      bundlePath: '/owned/Creator Hub.app', executablePath: '/owned/Creator Hub.app/Contents/MacOS/creator-hub' }; },
+    launch: () => { events.push(`launch:${current}`); launched = { pid: ++pid, bundleIdentifier: 'com.creatorworks.hub',
+      bundlePath: '/owned/Creator Hub.app', executablePath: '/owned/Creator Hub.app/Contents/MacOS/creator-hub' }; return { ...launched }; },
     snapshot, waitSnapshot: snapshot,
     pressTerms: (launched, action) => {
       events.push(`press:${action}`);
       if (action === 'test-terms-checkbox') checked = true;
       else accepted = true;
       return { ...launched, action, axAction: 'AXPress', syntheticTestOnly: true, customerConsent: false, userMachineUsed: false };
+    },
+    pressAutoDownloadOff: launched => {
+      assert.equal(current, '0.1.13');
+      events.push(`preference:off:${current}:${launched.pid}`);
+      autoDownload = false;
+      return { ...launched, action: 'test-auto-download-off', axAction: 'AXPress', controlRole: 'AXCheckBox',
+        controlTitle: mac.AUTO_DOWNLOAD, beforeValue: '1', requestedValue: '0', targetVersion: current,
+        syntheticTestOnly: true, customerConsent: false, userMachineUsed: false };
     },
     capture: (launched, label, kind) => {
       events.push(`capture:${label}`);
@@ -268,7 +281,11 @@ test('synthetic manual lane proves terms/body/relaunch, then preserves terms thr
   assert.equal(report.releaseReady, false);
   assert.equal(report.updater.tested, false);
   assert.equal(report.updater.automaticRestart, false);
-  assert.equal(report.effectivePreferencesTested, false);
+  assert.equal(report.effectivePreferencesTested, true);
+  assert.equal(report.autoDownloadPreferencePersistenceTested, true);
+  assert.equal(report.effectivePreferencesScope, '0.1.13-auto-download-normal-quit-relaunch-only');
+  assert.equal(report.otherBrowserPreferencesTested, false);
+  assert.deepEqual(events.filter(e => e.startsWith('preference:')), ['preference:off:0.1.13:103']);
   assert.equal(report.aiWorkflowTested, false);
   assert.equal(report.unityWorkflowTested, false);
   assert.equal(report.termsPersistenceTested, true);
@@ -301,6 +318,175 @@ test('fresh lane never installs or launches the old app', async () => {
   assert.equal(report.termsPersistenceTested, true);
   assert.equal(report.manualUpgradeTermsPreserved, undefined);
   assert.equal(report.sourceKind, 'exact-ci-0.1.13-fresh-dmg-install');
+  assert.equal(report.effectivePreferencesTested, true);
+  assert.equal(report.autoDownloadPreferencePersistenceTested, true);
+  assert.deepEqual(events.filter(e => e.startsWith('preference:')), ['preference:off:0.1.13:101']);
+  assert.ok(events.indexOf('preference:off:0.1.13:101') < events.indexOf('quit:101'));
+  assert.ok(events.indexOf('quit:101') < events.lastIndexOf('launch:0.1.13'));
+  assert.equal(report.syntheticPreference.actions.length, 1);
+  assert.equal(report.syntheticPreference.actions[0].customerConsent, false);
+  assert.ok(report.launches.every(row => row.autoDownloadOffVerified));
+  mac.autoDownloadControl(report.launches[0].beforeAutoDownloadSnapshot, '1');
+  mac.autoDownloadControl(report.launches[0].afterAutoDownloadSnapshot, '0');
+  mac.autoDownloadControl(report.launches[1].relaunchedAutoDownloadSnapshot, '0');
+});
+
+test('new report never claims effective preference persistence before observed target relaunch', () => {
+  const report = mac.newReport(mac.options(environment()));
+  assert.equal(report.effectivePreferencesTested, false);
+  assert.equal(report.autoDownloadPreferencePersistenceTested, false);
+  assert.equal(report.releaseReady, false);
+  assert.equal(report.otherBrowserPreferencesTested, false);
+  assert.deepEqual(report.syntheticPreference.actions, []);
+});
+
+const preferenceFaults = {
+  missing: s => { s.axNodes = s.axNodes.filter(n => n.AXTitle !== mac.AUTO_DOWNLOAD); },
+  ambiguous: s => { s.axNodes.push(clone(s.axNodes.find(n => n.AXTitle === mac.AUTO_DOWNLOAD))); },
+  disabled: s => { s.axNodes.find(n => n.AXTitle === mac.AUTO_DOWNLOAD).AXEnabled = 'false'; },
+  'missing enabled state': s => { delete s.axNodes.find(n => n.AXTitle === mac.AUTO_DOWNLOAD).AXEnabled; },
+  'missing value': s => { delete s.axNodes.find(n => n.AXTitle === mac.AUTO_DOWNLOAD).AXValue; },
+  'wrong role': s => { s.axNodes.find(n => n.AXTitle === mac.AUTO_DOWNLOAD).AXRole = 'AXButton'; },
+  'near-match title': s => { s.axNodes.find(n => n.AXTitle === mac.AUTO_DOWNLOAD).AXTitle += ' '; },
+  'already off': s => { s.axNodes.find(n => n.AXTitle === mac.AUTO_DOWNLOAD).AXValue = '0'; },
+  'privacy prompt': s => { s.axNodes.push({ AXTitle: 'Allow access to private data' }); },
+};
+for (const [name, change] of Object.entries(preferenceFaults)) {
+  test(`preference refuses ${name} target checkbox before any preference press`, async () => {
+    const events = [], ops = operations(events), original = ops.waitSnapshot;
+    ops.waitSnapshot = (launched, wanted) => {
+      const snapshot = original(launched, wanted);
+      if (wanted === 'body') change(snapshot);
+      return snapshot;
+    };
+    const input = mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' });
+    const report = await mac.runLane(mac.newReport(input), ops);
+    assert.equal(report.status, 'failed');
+    assert.equal(report.effectivePreferencesTested, false);
+    assert.equal(report.autoDownloadPreferencePersistenceTested, false);
+    assert.ok(!events.some(e => e.startsWith('preference:')));
+    assert.ok(events.includes('quit:101'));
+    assert.equal(report.releaseReady, false);
+  });
+}
+
+for (const change of [{ pid: 999 }, { bundleIdentifier: 'other' }, { bundlePath: '/other' },
+  { executablePath: '/other' }, { action: 'other' }, { axAction: 'AXSetValue' },
+  { controlRole: 'AXButton' }, { controlTitle: 'other' }, { beforeValue: '0' }, { requestedValue: '1' },
+  { targetVersion: '0.1.12' }, { syntheticTestOnly: false }, { customerConsent: true }, { userMachineUsed: true }]) {
+  test(`preference receipt refuses mismatched ${Object.keys(change)[0]}`, async () => {
+    const events = [], ops = operations(events), original = ops.pressAutoDownloadOff;
+    ops.pressAutoDownloadOff = launched => ({ ...original(launched), ...change });
+    const input = mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' });
+    const report = await mac.runLane(mac.newReport(input), ops);
+    assert.equal(report.status, 'failed');
+    assert.equal(report.effectivePreferencesTested, false);
+    assert.equal(report.syntheticPreference.actions.length, 0);
+    assert.equal(events.filter(e => e.startsWith('preference:')).length, 1);
+    assert.ok(events.includes('quit:101'));
+    assert.equal(report.releaseReady, false);
+  });
+}
+
+test('AXPress receipt alone cannot prove off when the actual post-press snapshot still returns on', async () => {
+  const events = [], ops = operations(events), original = ops.waitSnapshot;
+  ops.waitSnapshot = (launched, wanted) => {
+    const snapshot = original(launched, wanted);
+    if (wanted === 'auto-download-off') snapshot.axNodes.find(n => n.AXTitle === mac.AUTO_DOWNLOAD).AXValue = '1';
+    return snapshot;
+  };
+  const report = await mac.runLane(mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' })), ops);
+  assert.equal(report.status, 'failed');
+  assert.match(report.failures[0].error, /Unexpected auto-download checkbox state/);
+  assert.equal(report.syntheticPreference.actions.length, 1);
+  assert.equal(report.effectivePreferencesTested, false);
+  assert.equal(report.launches[0].autoDownloadOffVerified, undefined);
+  assert.equal(report.launches.length, 1);
+  assert.equal(events.filter(e => e.startsWith('preference:')).length, 1);
+});
+
+test('target normal relaunch returning on preserves the observed failure, never toggles again or claims persistence', async () => {
+  const events = [], ops = operations(events), original = ops.snapshot;
+  ops.snapshot = () => {
+    const snapshot = original();
+    if (snapshot.pid === 102) snapshot.axNodes.find(n => n.AXTitle === mac.AUTO_DOWNLOAD).AXValue = '1';
+    return snapshot;
+  };
+  const report = await mac.runLane(mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' })), ops);
+  assert.equal(report.status, 'failed');
+  assert.equal(report.failures[0].phase, 'auto-download-0.1.13-relaunch');
+  assert.match(report.failures[0].error, /Unexpected auto-download checkbox state/);
+  assert.equal(report.launches[0].autoDownloadOffVerified, true);
+  mac.autoDownloadControl(report.launches[1].relaunchedAutoDownloadSnapshot, '1');
+  assert.equal(report.effectivePreferencesTested, false);
+  assert.equal(report.autoDownloadPreferencePersistenceTested, false);
+  assert.equal(events.filter(e => e.startsWith('preference:')).length, 1);
+  assert.ok(events.includes('quit:101') && events.includes('quit:102'));
+  assert.ok(events.includes('preserve'));
+  assert.equal(report.releaseReady, false);
+});
+
+test('post-toggle snapshot from another process cannot prove preference state', async () => {
+  const events = [], ops = operations(events), original = ops.waitSnapshot;
+  ops.waitSnapshot = (launched, wanted) => ({ ...original(launched, wanted), ...(wanted === 'auto-download-off' ? { pid: 999 } : {}) });
+  const report = await mac.runLane(mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' })), ops);
+  assert.equal(report.status, 'failed');
+  assert.match(report.failures[0].error, /Preference snapshot ownership mismatch: pid/);
+  assert.equal(report.effectivePreferencesTested, false);
+  assert.equal(events.filter(e => e.startsWith('preference:')).length, 1);
+});
+
+test('uncertain preference AXPress is not retried and remains untested', async () => {
+  const events = [], ops = operations(events);
+  ops.pressAutoDownloadOff = () => { events.push('uncertain-preference'); throw Error('Preference AXPress outcome uncertain'); };
+  const report = await mac.runLane(mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' })), ops);
+  assert.equal(report.status, 'failed');
+  assert.match(report.failures[0].error, /Preference AXPress outcome uncertain/);
+  assert.equal(events.filter(e => e === 'uncertain-preference').length, 1);
+  assert.equal(report.effectivePreferencesTested, false);
+  assert.equal(report.syntheticPreference.actions.length, 0);
+  assert.ok(events.includes('quit:101'));
+});
+
+test('each absent existing capability prevents preference presses and persistence claims', async () => {
+  for (const name of ['accessibilityTrusted', 'screenCaptureAllowed', 'hasDisplay']) {
+    const events = [], ops = operations(events);
+    ops.probe = () => ({ ...capability, [name]: false });
+    const report = await mac.runLane(mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' })), ops);
+    assert.equal(report.status, 'blocked');
+    assert.equal(report.effectivePreferencesTested, false);
+    assert.equal(report.autoDownloadPreferencePersistenceTested, false);
+    assert.ok(!events.some(e => e.startsWith('preference:')));
+  }
+});
+
+test('target returning terms blocks the preference relaunch proof without repeating terms or preference actions', async () => {
+  const events = [], ops = operations(events), original = ops.snapshot;
+  ops.snapshot = () => original().pid === 102 ? termsSnapshot() : original();
+  const report = await mac.runLane(mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' })), ops);
+  assert.equal(report.status, 'blocked');
+  assert.equal(report.effectivePreferencesTested, false);
+  assert.equal(report.autoDownloadPreferencePersistenceTested, false);
+  assert.equal(report.syntheticTerms.actions.length, 2);
+  assert.equal(events.filter(e => e.startsWith('preference:')).length, 1);
+  assert.equal(report.releaseReady, false);
+});
+
+test('refused or non-normal target quit cannot establish preference persistence even after observed off snapshots', async () => {
+  for (const at of [1, 2]) {
+    const events = [], ops = operations(events), original = ops.quit;
+    let calls = 0;
+    ops.quit = launched => ({ ...original(launched), ...(++calls === at ? { exited: false } : {}) });
+    const report = await mac.runLane(mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' })), ops);
+    assert.equal(report.status, 'failed');
+    assert.match(report.failures[0].error, /did not quit normally/);
+    assert.equal(report.effectivePreferencesTested, false);
+    assert.equal(report.autoDownloadPreferencePersistenceTested, false);
+    assert.equal(report.launches.length, at);
+    assert.equal(events.filter(e => e.startsWith('quit:')).length, at);
+    assert.equal(events.filter(e => e.startsWith('preference:')).length, 1);
+    assert.equal(report.releaseReady, false);
+  }
 });
 
 test('missing existing permissions remains blocked while preserving bounded manual-install evidence', async () => {
@@ -387,6 +573,9 @@ for (const resetAt of [2, 3]) {
     assert.equal(events.filter(e => e.startsWith('press:')).length, 2);
     assert.equal(report.launches[resetAt - 1].renderedBodyVerified, undefined);
     assert.equal(report.manualUpgradeTermsPreserved, false);
+    assert.equal(report.effectivePreferencesTested, resetAt === 2);
+    assert.equal(report.autoDownloadPreferencePersistenceTested, resetAt === 2);
+    if (resetAt === 3) assert.ok(!events.some(e => e.startsWith('preference:')));
     assert.ok(report.blockers.includes('legal-acknowledgement-requires-human-no-acceptance-performed'));
   });
 }
@@ -523,7 +712,7 @@ test('workflow retains pinned manual dispatch, two architectures/four lanes, no 
   assert.doesNotMatch(workflow, /pull_request_target|npm (?:ci|run build)|cargo build|gh (?:release|workflow)|contents: write|TAURI_SIGNING|APPLE_(?:ID|PASSWORD|CERTIFICATE)/);
 });
 
-test('Swift helper permits only guarded exact synthetic terms AXPress, preflight, normal open and owned normal quit', () => {
+test('Swift helper permits only guarded exact terms/target-13 preference AXPress, preflight and owned normal lifecycle', () => {
   const swift = fs.readFileSync(path.join(__dirname, 'native-mac-window.swift'), 'utf8');
   assert.match(swift, /AXIsProcessTrusted\(\)/);
   assert.match(swift, /CGPreflightScreenCaptureAccess\(\)/);
@@ -536,10 +725,18 @@ test('Swift helper permits only guarded exact synthetic terms AXPress, preflight
   assert.match(swift, /env\["CREATOR_MAC_SYNTHETIC_TERMS_TEST"\] == "1"/);
   assert.match(swift, /guard ciScope\(true\), AXIsProcessTrusted\(\), CGPreflightScreenCaptureAccess\(\), app\.isActive/);
   assert.match(swift, /target\(\)\?\.processIdentifier == app\.processIdentifier/);
-  assert.equal((swift.match(/AXUIElementPerformAction\(/g) || []).length, 1);
+  assert.equal((swift.match(/AXUIElementPerformAction\(/g) || []).length, 2);
   assert.match(swift, /AXUIElementPerformAction\(selected, kAXPressAction as CFString\)/);
   assert.match(swift, /result\["customerConsent"\] = false/);
   for (const title of Object.values(mac.TERMS)) assert.ok(swift.includes(`"${title}"`));
+  assert.ok(swift.includes(`"${mac.AUTO_DOWNLOAD}"`));
+  assert.match(swift, /env.*CREATOR_MAC_SYNTHETIC_PREFERENCE_TEST|environment\["CREATOR_MAC_SYNTHETIC_PREFERENCE_TEST"\] == "1"/);
+  assert.match(swift, /guard preferenceScope\(\), target13\(\), AXIsProcessTrusted\(\), CGPreflightScreenCaptureAccess\(\)/);
+  assert.match(swift, /CFBundleShortVersionString"\) as\? String == "0\.1\.13"/);
+  assert.match(swift, /CFBundleVersion"\) as\? String == "0\.1\.13"/);
+  assert.match(swift, /attribute\(selected, kAXValueAttribute\) as\? NSNumber\)\?\.intValue == 1/);
+  assert.match(swift, /result\["requestedValue"\] = "0"/);
+  assert.match(swift, /case "test-auto-download-off":/);
   assert.match(swift, /image\.height \* 60 \/ 100/);
   assert.match(swift, /AXUIElementSetMessagingTimeout\(element, 0\.25\)/);
   assert.match(swift, /\$0\[kAXRoleAttribute\] == "AXWebArea"/);

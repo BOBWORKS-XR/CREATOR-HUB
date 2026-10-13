@@ -4,11 +4,12 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
-// CI-only exact terms controls, read-only GUI inspection, and normal owned-process lifecycle.
+// CI-only exact synthetic controls, read-only GUI inspection, and owned normal lifecycle.
 let bundleID = "com.creatorworks.hub"
 let termsTitle = "Terms of use and risk acknowledgement"
 let termsCheckbox = "I have read and agree to these terms, including the risk assumption and liability limitations above."
 let termsContinue = "Accept and continue"
+let autoDownloadCheckbox = "Download verified updates automatically"
 let args = Array(CommandLine.arguments.dropFirst())
 
 func ciScope(_ synthetic: Bool = false) -> Bool {
@@ -16,6 +17,16 @@ func ciScope(_ synthetic: Bool = false) -> Bool {
     return env["GITHUB_ACTIONS"] == "true" && env["RUNNER_ENVIRONMENT"] == "github-hosted"
         && env["RUNNER_OS"] == "macOS" && env["GITHUB_REPOSITORY"] == "BOBWORKS-XR/CREATOR-HUB"
         && (!synthetic || env["CREATOR_MAC_SYNTHETIC_TERMS_TEST"] == "1")
+}
+
+func preferenceScope() -> Bool {
+    return ciScope() && ProcessInfo.processInfo.environment["CREATOR_MAC_SYNTHETIC_PREFERENCE_TEST"] == "1"
+}
+
+func target13() -> Bool {
+    guard let bundle = Bundle(url: installedURL()) else { return false }
+    return bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == "0.1.13"
+        && bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String == "0.1.13"
 }
 
 func installedURL() -> URL {
@@ -185,6 +196,58 @@ func pressSyntheticTerms(_ app: NSRunningApplication, _ action: String) {
     emit(result)
 }
 
+func pressSyntheticAutoDownloadOff(_ app: NSRunningApplication) {
+    guard preferenceScope(), target13(), AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(),
+          !NSScreen.screens.isEmpty, app.isActive else {
+        emit(["error": "Synthetic preference test requires target 0.1.13, exact hosted CI, existing capabilities and the active owned app"])
+        return
+    }
+    let tree = inspectAX(app)
+    let text = tree.nodes.flatMap { [$0[kAXTitleAttribute] ?? "", $0[kAXDescriptionAttribute] ?? "", $0[kAXValueAttribute] ?? ""] }.joined(separator: "\n")
+    let security = try! NSRegularExpression(pattern: "privacy|security|permission|allow access|damaged|cannot be opened|unidentified developer", options: [.caseInsensitive])
+    guard visibleWindows(app).count == 1, tree.windows == 1, !tree.truncated,
+          tree.nodes.contains(where: { $0[kAXRoleAttribute] == "AXWebArea" }),
+          text.contains("Creator Works MCP"), !text.contains(termsTitle),
+          security.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) == nil else {
+        emit(["error": "Refusing incomplete/non-body tree or possible terms/security/privacy prompt"])
+        return
+    }
+    let matches = tree.nodes.indices.filter {
+        tree.nodes[$0][kAXRoleAttribute] == kAXCheckBoxRole && tree.nodes[$0][kAXTitleAttribute] == autoDownloadCheckbox
+    }
+    guard matches.count == 1 else {
+        emit(["error": "Exact auto-download checkbox is missing or ambiguous"])
+        return
+    }
+    let selected = tree.elements[matches[0]]
+    var names: CFArray?
+    guard AXUIElementCopyActionNames(selected, &names) == .success,
+          (names as? [String])?.contains(kAXPressAction) == true,
+          attribute(selected, kAXRoleAttribute) as? String == kAXCheckBoxRole,
+          attribute(selected, kAXTitleAttribute) as? String == autoDownloadCheckbox,
+          (attribute(selected, kAXValueAttribute) as? NSNumber)?.intValue == 1,
+          (attribute(selected, kAXEnabledAttribute) as? NSNumber)?.boolValue == true,
+          preferenceScope(), target13(), AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(),
+          !NSScreen.screens.isEmpty, app.isActive,
+          target()?.processIdentifier == app.processIdentifier,
+          AXUIElementPerformAction(selected, kAXPressAction as CFString) == .success else {
+        emit(["error": "Auto-download 1-to-0 AXPress refused or uncertain; no repeat attempted"])
+        return
+    }
+    var result = appIdentity(app)
+    result["action"] = "test-auto-download-off"
+    result["axAction"] = "AXPress"
+    result["controlRole"] = kAXCheckBoxRole
+    result["controlTitle"] = autoDownloadCheckbox
+    result["beforeValue"] = "1"
+    result["requestedValue"] = "0"
+    result["targetVersion"] = "0.1.13"
+    result["syntheticTestOnly"] = true
+    result["customerConsent"] = false
+    result["userMachineUsed"] = false
+    emit(result)
+}
+
 func imagePixels(_ file: String) {
     guard ciScope(), let temp = ProcessInfo.processInfo.environment["RUNNER_TEMP"] else {
         emit(["error": "Screenshot inspection requires the hosted CI evidence directory"]); return
@@ -266,6 +329,10 @@ case "test-terms-checkbox", "test-terms-accept":
     guard ciScope(true) else { emit(["error": "Synthetic terms require explicitly opted-in hosted CI"]); exit(0) }
     guard let app = target() else { emit(["error": "Synthetic terms PID/bundle/executable ownership mismatch"]); exit(0) }
     pressSyntheticTerms(app, args[0])
+case "test-auto-download-off":
+    guard preferenceScope(), target13() else { emit(["error": "Synthetic preference requires opted-in hosted CI and target 0.1.13"]); exit(0) }
+    guard let app = target() else { emit(["error": "Synthetic preference PID/bundle/executable ownership mismatch"]); exit(0) }
+    pressSyntheticAutoDownloadOff(app)
 case "pixels" where args.count == 2:
     imagePixels(args[1])
 case "quit" where args.count == 4:
@@ -284,5 +351,5 @@ case "quit" where args.count == 4:
     while !app.isTerminated && Date() < end { tick() }
     emit(["normalQuitRequested": requested, "exited": app.isTerminated, "forceKillPerformed": false])
 default:
-    emit(["error": "Expected probe/inventory, launch APP, snapshot/quit/test-terms-* PID APP EXECUTABLE, or pixels OWNED_PNG"])
+    emit(["error": "Expected probe/inventory, launch APP, snapshot/quit/test-terms-*/test-auto-download-off PID APP EXECUTABLE, or pixels OWNED_PNG"])
 }
