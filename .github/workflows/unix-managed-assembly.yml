@@ -9,13 +9,58 @@ on:
 permissions:
   contents: read
 jobs:
+  stage-input:
+    # Draft assets need push permission. No checkout, dependency installation,
+    # candidate decoding or application execution runs with this token.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.signed_inputs) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Read only the pinned public-signature-only validation asset
+        uses: actions/github-script@v8
+        env:
+          ASSET_ID: ${{ matrix.assetId }}
+          ZIP_BYTES: ${{ matrix.zipBytes }}
+          ZIP_SHA256: ${{ matrix.zipSha256 }}
+          HANDOFF_SHA256: ${{ matrix.handoffSha256 }}
+          TARGET: ${{ matrix.target }}
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            assert.ok(['linux','macos-arm64','macos-intel'].includes(process.env.TARGET));
+            const id=Number(process.env.ASSET_ID),size=Number(process.env.ZIP_BYTES),digest=process.env.ZIP_SHA256;
+            assert.ok(Number.isSafeInteger(id)&&id>0&&Number.isSafeInteger(size)&&size>0&&size<=300*1024*1024);
+            assert.match(digest,/^[a-f0-9]{64}$/);assert.match(process.env.HANDOFF_SHA256,/^[a-f0-9]{64}$/);
+            const {data:release}=await github.rest.repos.getRelease({...context.repo,release_id:411494394});
+            assert.equal(release.draft,true);assert.equal(release.tag_name,'v0.1.13-validation');
+            const assets=await github.paginate(github.rest.repos.listReleaseAssets,{...context.repo,release_id:release.id,per_page:100});
+            const matches=assets.filter(a=>a.id===id);assert.equal(matches.length,1);
+            const asset=matches[0];assert.equal(asset.size,size);assert.equal(asset.digest,`sha256:${digest}`);
+            assert.ok(asset.name.startsWith(`signed-unix-handoff-0.1.14-${process.env.TARGET}-`)&&asset.name.endsWith('.zip'));
+            const {data}=await github.rest.repos.getReleaseAsset({...context.repo,asset_id:id,headers:{accept:'application/octet-stream'}});
+            const bytes=Buffer.from(data);assert.equal(bytes.length,size);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),digest);
+            fs.writeFileSync(path.join(fs.realpathSync(process.env.RUNNER_TEMP),'signed-unix-handoff.zip'),bytes,{flag:'wx',mode:0o600});
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-unix-input-${{ matrix.target }}
+          path: ${{ runner.temp }}/signed-unix-handoff.zip
+          retention-days: 7
+          if-no-files-found: error
   assembly:
+    needs: stage-input
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(inputs.signed_inputs) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 65
+    env:
+      CREATOR_UNIX_HANDOFF_SHA256: ${{ matrix.handoffSha256 }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -43,40 +88,23 @@ jobs:
         run: |
           node --test scripts/assemble-unix-payload.test.cjs scripts/sign-unix-payload.test.cjs scripts/unix-managed-payload.test.cjs
           python3 -B scripts/stage-signed-unix-handoff.test.py
-      - name: Obtain only the explicitly pinned public-signature validation ZIP
-        uses: actions/github-script@v8
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-unix-input-${{ matrix.target }}
+          path: ${{ runner.temp }}/assembly-signed-input
+      - name: Stage exactly nine bounded files without executing any candidate payload
         env:
-          ASSET_ID: ${{ matrix.assetId }}
           ZIP_BYTES: ${{ matrix.zipBytes }}
           ZIP_SHA256: ${{ matrix.zipSha256 }}
-          HANDOFF_SHA256: ${{ matrix.handoffSha256 }}
-          TARGET: ${{ matrix.target }}
-        with:
-          script: |
-            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
-            const targets={'linux':['Linux','X64'],'macos-arm64':['macOS','ARM64'],'macos-intel':['macOS','X64']};
-            assert.deepEqual([process.env.RUNNER_OS,process.env.RUNNER_ARCH],targets[process.env.TARGET]);
-            const id=Number(process.env.ASSET_ID),size=Number(process.env.ZIP_BYTES),digest=process.env.ZIP_SHA256;
-            assert.ok(Number.isSafeInteger(id)&&id>0&&Number.isSafeInteger(size)&&size>0&&size<=300*1024*1024);
-            assert.match(digest,/^[a-f0-9]{64}$/);assert.match(process.env.HANDOFF_SHA256,/^[a-f0-9]{64}$/);
-            const {data:release}=await github.rest.repos.getReleaseByTag({...context.repo,tag:'v0.1.13-validation'});
-            assert.equal(release.draft,true);
-            const assets=await github.paginate(github.rest.repos.listReleaseAssets,{...context.repo,release_id:release.id,per_page:100});
-            const matches=assets.filter(a=>a.id===id);assert.equal(matches.length,1);
-            const asset=matches[0];assert.equal(asset.size,size);assert.equal(asset.digest,`sha256:${digest}`);
-            assert.ok(asset.name.startsWith(`signed-unix-handoff-0.1.14-${process.env.TARGET}-`)&&asset.name.endsWith('.zip'));
-            const {data}=await github.rest.repos.getReleaseAsset({...context.repo,asset_id:id,headers:{accept:'application/octet-stream'}});
-            const bytes=Buffer.from(data);assert.equal(bytes.length,size);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),digest);
-            const temp=fs.realpathSync(process.env.RUNNER_TEMP);
-            fs.writeFileSync(path.join(temp,'signed-unix-handoff.zip'),bytes,{flag:'wx',mode:0o600});
-            core.exportVariable('SIGNED_INPUT',path.join(temp,'signed-unix-input'));
-            core.exportVariable('SIGNED_ZIP',path.join(temp,'signed-unix-handoff.zip'));
-            core.exportVariable('SIGNED_ZIP_BYTES',String(size));core.exportVariable('SIGNED_ZIP_SHA256',digest);
-            core.exportVariable('CREATOR_UNIX_HANDOFF_SHA256',process.env.HANDOFF_SHA256);
-      - name: Stage exactly nine bounded files without executing any candidate payload
-        run: python3 -B scripts/stage-signed-unix-handoff.py "$SIGNED_ZIP" "$SIGNED_ZIP_SHA256" "$SIGNED_ZIP_BYTES" "$SIGNED_INPUT"
+        run: |
+          set -euo pipefail
+          temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          python3 -B scripts/stage-signed-unix-handoff.py "$temp/assembly-signed-input/signed-unix-handoff.zip" "$ZIP_SHA256" "$ZIP_BYTES" "$temp/signed-unix-input"
       - name: Verify trusted handoff and compile only the outer native Hub
-        run: npm run build:unified -- ci-signed-unix-hub --managed --experimental-unix --experimental-unix-writable --signed-unix-input "$SIGNED_INPUT"
+        run: |
+          set -euo pipefail
+          temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          npm run build:unified -- ci-signed-unix-hub --managed --experimental-unix --experimental-unix-writable --signed-unix-input "$temp/signed-unix-input"
       - name: Retain signed build evidence, not publication or migration acceptance
         if: always()
         uses: actions/upload-artifact@v4
