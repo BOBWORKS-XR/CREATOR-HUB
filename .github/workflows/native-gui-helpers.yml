@@ -1,0 +1,28 @@
+name: Native owned GUI helpers (not product acceptance)
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'scripts/native-macos-window*'
+      - 'scripts/native-unix-window*'
+      - '.github/workflows/native-gui-helpers.yml'
+permissions:
+  contents: read
+jobs:
+  helper:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Compile both Swift branches and test pure ownership/refusal cases
+        if: runner.os == 'macOS'
+        run: node --test scripts/native-macos-window.test.cjs
