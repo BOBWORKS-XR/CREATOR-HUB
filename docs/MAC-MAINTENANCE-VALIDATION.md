@@ -9,6 +9,8 @@ installer or Flatpak file. Follow [maintenance gates](MAINTENANCE-0.1.13-GATES.m
 [publication checklist](HUB-PUBLICATION-CHECKLIST.md).
 
 The report always has `releaseReady: false` and `updater.tested: false`.
+AI/Unity workflows, real companion installs and live-client reconnect also stay
+untested. Synthetic CI terms acknowledgement is explicitly **not customer consent**.
 Public 0.1.12 `self_update.rs::installed_location` refuses non-Windows managed
 updates: [exact public source](https://github.com/BOBWORKS-XR/CREATOR-HUB/blob/35a16a45814d821d65b5d203628478449174cd55/src-tauri/src/self_update.rs).
 Copying a DMG app into Applications and manually launching it is **not** native
@@ -65,11 +67,13 @@ and artifact byte binding are unchanged by this testing-path admission.
 
 ## Workflow and Native Lanes
 
-`.github/workflows/mac-maintenance-validation.yml` has a paths-limited
-`pull_request` trigger for only these five files, plus independent manual
-dispatch. This lets the probe run on draft PR22 after the owner commits/pushes
-the reviewed files, without merging merely to register a dispatch-only workflow.
-No remote dispatch, commit or push was performed by this implementation.
+The workflow owner has changed
+`.github/workflows/mac-maintenance-validation.yml` to **manual dispatch only**,
+after registration of the earlier paths-limited PR probe. The structural test
+requires that sole trigger; this worker did not edit the workflow. The owner
+reported successful dispatch registration while PR22 remained draft. No merge
+is needed solely for registration. No remote dispatch, commit or push was
+performed by this implementation.
 The evidence directory is allocated canonically in a runner step, not through
 the unavailable job-level `runner` context; see
 [GitHub context availability](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability).
@@ -94,11 +98,21 @@ or notarization proof. `spctl --assess` is read-only; rejection remains a blocke
 A bundle minimum below its Mach-O minimum also remains a blocker. Testing on
 current runners does not establish operation on the declared oldest supported OS.
 
+The fresh lane requires the actual 0.1.13 Terms screen, acknowledges it through
+the synthetic controls below, captures the rendered MCP body, quits normally
+and relaunches. The body must return without a second acknowledgement.
+
 In the manual lane the unchanged public 0.1.12 app is installed/launched first.
-After its owned PID quits normally, the old bundle is retained in the owned
-runner evidence directory, then 0.1.13 is copied to the same Applications path.
+It undergoes the same first-run acknowledgement, body capture and normal
+quit/relaunch persistence check. After the relaunched old PID quits normally,
+the old bundle is retained in the owned runner evidence directory, then 0.1.13
+is copied to the same Applications path. Both the first 0.1.13 open and its
+normal relaunch must render the body with the old acknowledgement preserved.
+Returning terms are blocked, never silently acknowledged again. No version-only
+fixture is substituted for the public old app.
+
 Each normal LaunchServices open records the actual PID, bundle path and executable
-path, with distinct old/new PIDs. No direct-executable launch fallback bypasses
+path, with distinct PIDs for all phases. No direct-executable launch fallback bypasses
 LaunchServices, security policy or consent. A refused quit stops replacement;
 failed replacement is recorded with the original bundle retained, not hidden by
 automatic retries or a fabricated success.
@@ -114,20 +128,45 @@ No existing config, auth file, terms-acceptance record or signed app bundle is
 edited. The root choices are preservation probes, not proof of every companion's
 actual runtime data contract.
 
-This proves **opaque file preservation only**. It does not assert effective
-WebKit/localStorage preferences, account identity, real saved/adopted project
-semantics, actual companion installs, live-client settings or reconnect.
+These sentinels prove **opaque file preservation only**. The separate GUI
+relaunch check tests persistence of the app's own synthetic terms acknowledgement,
+not arbitrary WebKit/localStorage preferences, account identity, real saved/adopted
+project semantics, actual companion installs, live-client settings or reconnect.
 
 The compiled Swift helper probes existing
 [AX trust](https://developer.apple.com/documentation/applicationservices/axisprocesstrusted())
 and [screen-capture access](https://developer.apple.com/documentation/coregraphics/cgpreflightscreencaptureaccess()).
-It never requests permissions. Read-only, bounded AX/window snapshots target
-only the owned app PID. Missing capability, missing visible window, incomplete
-AX capture, legal acknowledgement or a possible privacy/security prompt is
-reported as `blocked`. No legal acknowledgement is accepted or seeded by this
-probe, even on disposable runners. Any later synthetic test acknowledgement
-would need explicit fixture labelling and still would not be real-user consent.
-No OS security/privacy prompt may be accepted by the harness.
+It never requests permissions. Bounded AX/window snapshots target only the owned
+app PID. Missing capability, missing visible window, incomplete AX capture or a
+possible privacy/security prompt is blocked. The only mutation is an explicitly
+opted-in **synthetic disposable CI terms test**, using normal
+[AXPress](https://developer.apple.com/documentation/applicationservices/kaxpressaction)
+on these exact controls, in order:
+
+- `AXCheckBox`, exact `AXTitle`: `I have read and agree to these terms, including the risk assumption and liability limitations above.`
+- `AXButton`, exact `AXTitle`: `Accept and continue`.
+
+The helper requires `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted`,
+`RUNNER_OS=macOS`, exact `GITHUB_REPOSITORY=BOBWORKS-XR/CREATOR-HUB` and
+`CREATOR_MAC_SYNTHETIC_TERMS_TEST=1`. The opt-in is passed only to the two helper
+commands, not injected into the installed app. PID, bundle ID, canonical installed
+bundle/executable paths, active app, existing AX/screen capability, exactly one
+window, complete WebKit Terms tree, unique roles/titles, enabled state and checkbox
+value are checked before pressing. Each press occurs at most once; an uncertain
+result is retained as failure, never retried. The app creates its own acceptance
+record through its actual UI. No terms storage seed, CDP, JavaScript console
+injection, auth mutation or key logging is used. All action receipts have
+`syntheticTestOnly: true`, `customerConsent: false`, `userMachineUsed: false`.
+No user machine, real customer consent or OS security/privacy prompt is eligible.
+
+Each GUI phase requires WebKit AX body evidence and a PNG of the exact owned
+window. The initial Terms PNG precedes either press. Post-acknowledgement and
+persisted-body PNGs require `Creator Works MCP` in the complete AX tree, not
+only title-bar chrome. The state/window are rechecked on both sides of capture.
+PNG SHA-256, phase/PID and decoded pixel metrics are recorded. Pixel sampling
+excludes 6% at each side and 20% at both top and bottom, checks bounded dimensions,
+color diversity and non-background samples. Pixel variation alone is not
+semantic, AI, Unity or updater acceptance.
 
 Only the exact owned PID/bundle/executable may receive
 [normal quit](https://developer.apple.com/documentation/appkit/nsrunningapplication/terminate()).
@@ -142,6 +181,21 @@ remains referenced and is not overwritten or reclassified by a later pass.
 
 ## Local Verification and Next Evidence
 
+The existing native reports from
+[Mac body probe 38402267985](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38402267985)
+were inspected locally at
+`artifacts/mac-body-intel-38402267985/native-report.json` and
+`artifacts/mac-body-arm-38402267985/native-report.json`. Both report existing AX
+trust, screen-capture access and a display, and contain the actual owned WebKit
+Terms tree with the two exact controls. Their `owned-gui-0.1.13.png` captures
+show the first-run terms screen. Neither report proves acknowledgement or a
+post-terms MCP body. Both retain Gatekeeper rejection (exit 3) and the previous
+no-acknowledgement blocker; ARM additionally retains the bundle/Mach-O minimum
+mismatch. These reports are historical evidence, not overwritten or promoted by
+the new synthetic test. `historicalNativeReports` retains the original blocked
+status, scope, zero-failure count and architecture-specific blockers, separately
+from the original failed component CI in `historicalFailures`.
+
 Synthetic tests run only against temporary files and injected lifecycle
 operations. They exercise the real validators/orchestration and Windows native
 refusal; text checks on Swift/workflow are not a compiled Mac test.
@@ -150,24 +204,30 @@ refusal; text checks on Swift/workflow are not a compiled Mac test.
 & 'C:\Users\bobman\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' --test --test-reporter=spec scripts/native-mac-maintenance-smoke.test.cjs
 ```
 
-The local host has no Swift compiler/macOS SDK, so helper compilation, native
-installation, GUI snapshots and OS policy behavior remain unverified until the
-four disposable native jobs actually run. A green component CI is not that run.
-Local Node **24.19.0** verification: **42 harness tests passed, 0 failed, 0 skipped**;
-with unchanged `scripts/macos-signing.test.cjs`, **43 passed, 0 failed, 0 skipped**.
-Both CJS files pass `node --check`. Workflow assertions are structural only;
-no installed YAML parser was available locally and GitHub has not executed this
-new workflow. These results are not native installation or GUI acceptance.
+The local host has no Swift compiler/macOS SDK. Compilation and execution of
+the new AXPress, body-pixel and persisted-terms checks remain unverified until
+the disposable native jobs run. Existing native snapshots do not establish the
+new actions. Local Node **24.19.0** verification: **67 harness tests passed,
+0 failed, 0 skipped**. Both CJS files pass `node --check`; Swift/workflow assertions
+are structural only. These source/unit results are not native GUI acceptance.
+
+All existing source/run/artifact pins above remain unchanged. The owner's ARM
+minimum-OS configuration and other product/build-bound changes require a new
+successful CI baseline before pins are reviewed/refreshed and the native lanes
+run. They are not added to a broader tree-exclusion allowlist. Gatekeeper exit 3
+and minimum mismatch remain blockers, with no policy bypass.
 Remaining source of acceptance is the preserved native reports plus a separately
 reviewed macOS updater lab with exact signed descriptor/archive bytes, real
 native cancel/consent, outgoing owned-process shutdown, automatic restart,
 effective settings preservation and live companion/client reconnect. Those lab
 inputs are not available in this bounded probe; release readiness stays false.
 
-## Files Owned
+## Files Owned by This Worker
 
 - `scripts/native-mac-maintenance-smoke.cjs`
 - `scripts/native-mac-maintenance-smoke.test.cjs`
 - `scripts/native-mac-window.swift`
-- `.github/workflows/mac-maintenance-validation.yml`
 - `docs/MAC-MAINTENANCE-VALIDATION.md`
+
+The workflow is owned separately. Its path remains one of the five historical
+Mac testing-only tree exclusions; this task edits only the four files above.

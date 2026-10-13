@@ -66,6 +66,54 @@ function manifest(files) {
   };
 }
 
+function parseSnapshot(native, parent, expectedHash, invoke) {
+  const directory = fs.mkdtempSync(path.join(parent, '.flatpak-native-snapshot-'));
+  const filename = path.join(directory, 'native.deb');
+  let failure;
+  try {
+    noLinks(directory);
+    fs.chmodSync(directory, 0o700);
+    fs.writeFileSync(filename, native, { flag: 'wx', mode: 0o400 });
+    fs.chmodSync(directory, 0o500);
+    const verify = () => {
+      noLinks(filename);
+      const stat = fs.statSync(filename);
+      if (!stat.isFile() || stat.size !== native.length || stat.size > MAX_DEB
+          || sha256(fs.readFileSync(filename)) !== expectedHash) {
+        throw new Error('Hashed native parser snapshot changed');
+      }
+    };
+    const parse = (args, limit) => {
+      verify();
+      const result = invoke('dpkg-deb', [...args, filename], undefined, limit);
+      verify();
+      return result;
+    };
+    // --show reads only the control member; piping the entire DEB can produce EPIPE.
+    // Both commands open the same sealed copy, never the mutable caller's filename.
+    return {
+      metadata: parseMetadata(parse(['--show', '--showformat=${Package}\n${Version}\n${Architecture}\n'], 4096)),
+      data: parse(['--fsys-tarfile'], MAX_TAR),
+    };
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      noLinks(filename);
+      fs.chmodSync(directory, 0o700);
+      if (fs.existsSync(filename)) {
+        fs.chmodSync(filename, 0o600);
+        fs.unlinkSync(filename);
+      }
+      fs.rmdirSync(directory);
+    } catch (error) {
+      if (!failure) throw error;
+      failure.message += `; snapshot cleanup refused: ${error.message}`;
+    }
+  }
+}
+
 function generate(options, { run = execFileSync, python = process.platform === 'win32' ? 'python' : 'python3' } = {}) {
   if (!options || typeof options.deb !== 'string' || !path.isAbsolute(options.deb)
       || typeof options.output !== 'string' || !path.isAbsolute(options.output)
@@ -87,15 +135,24 @@ function generate(options, { run = execFileSync, python = process.platform === '
     fs.closeSync(fd);
   }
   if (native.length > MAX_DEB || sha256(native) !== options.sha256) throw new Error('Native DEB SHA256 mismatch');
-  // Every parser receives the same hashed snapshot, not a mutable filename.
-  const invoke = (tool, args, input, limit) => run(tool, args, {
-    input, maxBuffer: limit, timeout: 120000, windowsHide: true,
-    env: { ...process.env, LC_ALL: 'C' },
-  });
-  const metadata = parseMetadata(invoke('dpkg-deb', [
-    '--show', '--showformat=${Package}\n${Version}\n${Architecture}\n', '-',
-  ], native, 4096));
-  const data = invoke('dpkg-deb', ['--fsys-tarfile', '-'], native, MAX_TAR);
+  const invoke = (tool, args, input, limit) => {
+    try {
+      return run(tool, args, {
+        input, maxBuffer: limit, timeout: 120000, windowsHide: true,
+        stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+        env: { ...process.env, LC_ALL: 'C' },
+      });
+    } catch (error) {
+      if (tool === 'dpkg-deb') {
+        const stderr = Buffer.isBuffer(error.stderr) ? error.stderr.toString('utf8') : String(error.stderr || '');
+        // The native harness records error.message; retain diagnostics without input/stdout/env dumps.
+        error.message = `${JSON.stringify([tool, ...args])} failed (${error.code || error.status || 'unknown'}): `
+          + `${error.message.slice(0, 2048)}; stderr: ${stderr.slice(0, 8192)}`;
+      }
+      throw error;
+    }
+  };
+  const { metadata, data } = parseSnapshot(native, path.dirname(options.output), options.sha256, invoke);
   const helper = fs.readFileSync(path.join(ASSETS, 'payload.py'));
   const inspect = args => invoke(python, ['-B', '-c', helper.toString('utf8'), ...args], data, MAX_TAR);
   const inventory = inspect(['inspect']);

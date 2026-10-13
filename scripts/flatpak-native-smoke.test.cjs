@@ -293,11 +293,10 @@ test('namespace/process and OCR contracts refuse ambiguity without guessed autho
   assert.deepEqual(ocrLines(tsv), [{ text: 'Accept and continue', x: 30, y: 25 }]);
 });
 
-test('workflow is runnable on a path-limited PR before default-branch merge', () => {
+test('workflow uses explicit dispatch instead of repeating expensive native runs on every PR push', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/flatpak-maintenance-validation.yml'), 'utf8');
-  assert.match(workflow, /pull_request:\s+paths:/);
+  assert.doesNotMatch(workflow, /pull_request:\s+paths:/);
   assert.match(workflow, /workflow_dispatch:/);
-  for (const file of PROBE_FILES) assert.ok(workflow.includes(`- ${file}`));
   assert.match(workflow, /runs-on: ubuntu-24\.04/);
   const jobEnvironment = workflow.slice(workflow.indexOf('    env:'), workflow.indexOf('    steps:'));
   assert.doesNotMatch(jobEnvironment, /runner\./, 'Runner context is unavailable in job-level env');

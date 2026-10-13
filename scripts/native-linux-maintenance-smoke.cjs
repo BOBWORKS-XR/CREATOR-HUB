@@ -220,6 +220,7 @@ async function main() {
     unchanged(before);
     report.manualUpgradeTested = true;
     report.passed = true;
+    console.log(JSON.stringify(report));
   } catch (error) {
     report.failure = String(error.message).slice(0, 2000);
     throw error;

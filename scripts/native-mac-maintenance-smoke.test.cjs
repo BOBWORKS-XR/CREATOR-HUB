@@ -222,23 +222,46 @@ test('path checks refuse symbolic links or Windows junctions', t => {
 
 const capability = { accessibilityTrusted: true, screenCaptureAllowed: true, hasDisplay: true };
 const visible = { finishedLaunching: true, windows: [{ id: 123 }], axReadable: true,
-  axNodes: [{ AXRole: 'AXWebArea', AXTitle: 'Creator Hub' }], axTruncated: false };
+  axNodes: [{ AXRole: 'AXWebArea', AXDescription: 'Creator Hub' },
+    { AXRole: 'AXStaticText', AXValue: 'Creator Works MCP' }], axTruncated: false };
+function termsSnapshot(checked = false) {
+  return { ...clone(visible), axNodes: [{ AXRole: 'AXWebArea', AXDescription: 'Creator Hub' },
+    { AXRole: 'AXHeading', AXTitle: mac.TERMS.title },
+    { AXRole: 'AXCheckBox', AXTitle: mac.TERMS.checkbox, AXValue: checked ? '1' : '0', AXEnabled: 'true' },
+    { AXRole: 'AXButton', AXTitle: mac.TERMS.continue, AXEnabled: checked ? 'true' : 'false' }] };
+}
+const renderedPixels = { width: 940, height: 580, bodyCrop: { x: 56, y: 116, width: 827, height: 348 },
+  sampledPixels: 71949, distinctColors: 128, nonBackgroundSamples: 8500, chromeExcluded: true };
 function operations(events) {
-  let current = null;
+  let current = null, pid = 100, accepted = false, checked = false;
+  const snapshot = () => accepted ? clone(visible) : termsSnapshot(checked);
   return {
     probe: () => clone(capability), preflight: () => events.push('preflight'),
     install: version => { current = version; events.push(`install:${version}`); return { version, appPath: '/owned/Creator Hub.app',
       executablePath: '/owned/Creator Hub.app/Contents/MacOS/creator-hub',
       bundle: { gatekeeper: { status: 0 }, bundleMinimumCoversExecutable: true } }; },
     seed: () => { events.push('seed'); return []; },
-    launch: () => { events.push(`launch:${current}`); return { pid: current === '0.1.12' ? 101 : 202,
+    launch: () => { events.push(`launch:${current}`); return { pid: ++pid, bundleIdentifier: 'com.creatorworks.hub',
       bundlePath: '/owned/Creator Hub.app', executablePath: '/owned/Creator Hub.app/Contents/MacOS/creator-hub' }; },
-    snapshot: () => clone(visible), quit: launched => { events.push(`quit:${launched.pid}`); return { exited: true, forceKillPerformed: false }; },
+    snapshot, waitSnapshot: snapshot,
+    pressTerms: (launched, action) => {
+      events.push(`press:${action}`);
+      if (action === 'test-terms-checkbox') checked = true;
+      else accepted = true;
+      return { ...launched, action, axAction: 'AXPress', syntheticTestOnly: true, customerConsent: false, userMachineUsed: false };
+    },
+    capture: (launched, label, kind) => {
+      events.push(`capture:${label}`);
+      mac.validateBody(snapshot(), kind);
+      return { pid: launched.pid, bodyKind: kind, screenshot: `owned-gui-${label}-${launched.pid}.png`,
+        sha256: 'a'.repeat(64), pixels: clone(renderedPixels) };
+    },
+    quit: launched => { events.push(`quit:${launched.pid}`); return { normalQuitRequested: true, exited: true, forceKillPerformed: false }; },
     preserve: () => { events.push('preserve'); return []; }, detach: () => events.push('detach'),
   };
 }
 
-test('manual lane uses old and new real-shaped distinct PIDs, normal quit before replacement; never claims updater proof', async () => {
+test('synthetic manual lane proves terms/body/relaunch, then preserves terms through replacement without updater claims', async () => {
   const events = [], report = mac.newReport(mac.options(environment()));
   await mac.runLane(report, operations(events));
   assert.equal(report.passed, true);
@@ -246,9 +269,26 @@ test('manual lane uses old and new real-shaped distinct PIDs, normal quit before
   assert.equal(report.updater.tested, false);
   assert.equal(report.updater.automaticRestart, false);
   assert.equal(report.effectivePreferencesTested, false);
+  assert.equal(report.aiWorkflowTested, false);
+  assert.equal(report.unityWorkflowTested, false);
+  assert.equal(report.termsPersistenceTested, true);
+  assert.equal(report.manualUpgradeTermsPreserved, true);
+  assert.equal(report.syntheticTerms.testOnly, true);
+  assert.equal(report.syntheticTerms.customerConsent, false);
+  assert.equal(report.syntheticTerms.actions.length, 2);
+  assert.deepEqual(report.syntheticTerms.actions.map(a => a.version), ['0.1.12', '0.1.12']);
   assert.ok(report.historicalFailures[0].retained);
-  assert.ok(events.indexOf('quit:101') < events.indexOf('install:0.1.13'));
-  assert.deepEqual(report.launches.map(p => p.pid), [101, 202]);
+  assert.equal(report.historicalNativeReports[0].status, 'blocked');
+  assert.equal(report.historicalNativeReports[0].failureCount, 0);
+  assert.equal(report.historicalNativeReports[0].replacedByThisReport, false);
+  assert.notEqual(report.historicalNativeReports[0].scope, report.scope);
+  assert.equal(report.historicalNativeReports[0].blockers.length, 2);
+  assert.equal(mac.newReport(mac.options(environment('ARM64'))).historicalNativeReports[0].blockers.length, 3);
+  assert.ok(events.indexOf('quit:102') < events.indexOf('install:0.1.13'));
+  assert.deepEqual(report.launches.map(p => p.pid), [101, 102, 103, 104]);
+  assert.deepEqual(report.launches.map(p => p.captures.map(c => c.kind)), [['terms', 'body'], ['body'], ['body'], ['body']]);
+  assert.ok(report.launches.every(p => p.renderedBodyVerified));
+  assert.ok(report.launches.slice(1).every(p => p.persistedSyntheticTerms));
 });
 
 test('fresh lane never installs or launches the old app', async () => {
@@ -256,18 +296,24 @@ test('fresh lane never installs or launches the old app', async () => {
   const report = await mac.runLane(mac.newReport(input), operations(events));
   assert.equal(report.passed, true);
   assert.equal(events.filter(e => e.startsWith('install:')).length, 1);
+  assert.equal(report.launches.length, 2);
+  assert.equal(report.syntheticTerms.actions.length, 2);
+  assert.equal(report.termsPersistenceTested, true);
+  assert.equal(report.manualUpgradeTermsPreserved, undefined);
   assert.equal(report.sourceKind, 'exact-ci-0.1.13-fresh-dmg-install');
 });
 
 test('missing existing permissions remains blocked while preserving bounded manual-install evidence', async () => {
   const events = [], ops = operations(events);
   ops.probe = () => ({ accessibilityTrusted: false, screenCaptureAllowed: false, hasDisplay: false });
+  ops.snapshot = () => ({ ...clone(visible), axReadable: false, axNodes: [] });
   const report = await mac.runLane(mac.newReport(mac.options(environment())), ops);
   assert.equal(report.status, 'blocked');
   assert.equal(report.passed, false);
   assert.equal(report.packageAndManualChecksPassed, true);
   assert.equal(report.releaseReady, false);
   assert.equal(report.blockers.length, 3);
+  assert.ok(!events.some(e => e.startsWith('press:') || e.startsWith('capture:')));
 });
 
 test('terms, possible privacy prompts and incomplete AX reads are blockers, not implicit consent', () => {
@@ -276,11 +322,148 @@ test('terms, possible privacy prompts and incomplete AX reads are blockers, not 
   }
   assert.ok(mac.guiBlockers(capability, { ...visible, axTruncated: true }).length);
   assert.ok(mac.guiBlockers(capability, { ...visible, axReadable: false }).length);
+  assert.deepEqual(mac.guiBlockers(capability, termsSnapshot(), true), []);
+  assert.ok(mac.guiBlockers(capability, { ...termsSnapshot(), axNodes: [...termsSnapshot().axNodes,
+    { AXTitle: 'Allow access to private data' }] }, true).includes('possible-security-privacy-prompt-no-interaction-performed'));
+});
+
+test('exact synthetic controls require unique roles/titles, enabled state and the expected normal toggle sequence', () => {
+  assert.doesNotThrow(() => mac.termsControl(termsSnapshot(), 'test-terms-checkbox'));
+  assert.doesNotThrow(() => mac.termsControl(termsSnapshot(true), 'test-terms-accept'));
+  assert.throws(() => mac.termsControl(termsSnapshot(), 'test-terms-accept'));
+  assert.throws(() => mac.termsControl(termsSnapshot(true), 'test-terms-checkbox'));
+  assert.throws(() => mac.termsControl(termsSnapshot(), 'accept-security-prompt'));
+  for (const change of [
+    s => { s.axNodes[2].AXTitle += ' '; },
+    s => { s.axNodes[2].AXRole = 'AXButton'; },
+    s => { delete s.axNodes[2].AXValue; },
+    s => { s.axNodes[2].AXEnabled = 'false'; },
+    s => { s.axNodes[3].AXTitle = 'Allow'; },
+    s => { s.axNodes.push(clone(s.axNodes[2])); },
+    s => { s.axNodes.push(clone(s.axNodes[3])); },
+    s => { s.axNodes.push({ AXTitle: 'Security permission required' }); },
+    s => { s.axTruncated = true; },
+    s => { s.windows.push({ id: 124 }); },
+  ]) {
+    const s = termsSnapshot(); change(s);
+    assert.throws(() => mac.termsControl(s, 'test-terms-checkbox'));
+  }
+  const disabled = termsSnapshot(true); disabled.axNodes[3].AXEnabled = 'false';
+  assert.throws(() => mac.termsControl(disabled, 'test-terms-accept'));
+});
+
+test('body inspection distinguishes actual observed terms, rendered MCP content and chrome-only windows', () => {
+  assert.equal(mac.bodyKind(termsSnapshot()), 'terms');
+  assert.equal(mac.bodyKind(visible), 'body');
+  assert.doesNotThrow(() => mac.validateBody(visible, 'body'));
+  const chrome = { ...clone(visible), axNodes: [{ AXRole: 'AXWindow', AXTitle: 'Creator Hub' }] };
+  assert.equal(mac.bodyKind(chrome), 'chrome-or-unready');
+  for (const s of [chrome, termsSnapshot(), { ...clone(visible), axTruncated: true },
+    { ...clone(visible), axReadable: false }, { ...clone(visible), finishedLaunching: false }]) {
+    assert.throws(() => mac.validateBody(s, 'body'));
+  }
+});
+
+test('body-only pixel evidence rejects blank, insufficient, misframed or unbounded PNG samples', () => {
+  assert.doesNotThrow(() => mac.validatePixels(renderedPixels));
+  for (const change of [{ width: 0 }, { height: 4097 }, { chromeExcluded: false }, { distinctColors: 1 },
+    { distinctColors: 72000 }, { nonBackgroundSamples: 0 }, { nonBackgroundSamples: 72000 },
+    { sampledPixels: 1000 }, { sampledPixels: 300001 }, { sampledPixels: 1200.5 },
+    { bodyCrop: { x: 0, y: 0, width: 940, height: 580 } }]) {
+    assert.throws(() => mac.validatePixels({ ...renderedPixels, ...change }));
+  }
+});
+
+for (const resetAt of [2, 3]) {
+  test(`terms returning on ${resetAt === 2 ? 'normal relaunch' : 'manual replacement'} block without repeat acknowledgement`, async () => {
+    const events = [], ops = operations(events), original = ops.snapshot;
+    let launches = 0;
+    ops.snapshot = () => ++launches === resetAt ? termsSnapshot() : original();
+    const report = await mac.runLane(mac.newReport(mac.options(environment())), ops);
+    assert.equal(report.status, 'blocked');
+    assert.equal(report.passed, false);
+    assert.equal(report.releaseReady, false);
+    assert.equal(report.syntheticTerms.actions.length, 2);
+    assert.equal(events.filter(e => e.startsWith('press:')).length, 2);
+    assert.equal(report.launches[resetAt - 1].renderedBodyVerified, undefined);
+    assert.equal(report.manualUpgradeTermsPreserved, false);
+    assert.ok(report.blockers.includes('legal-acknowledgement-requires-human-no-acceptance-performed'));
+  });
+}
+
+test('possible OS security/privacy prompt blocks before any synthetic press or screenshot', async () => {
+  const events = [], ops = operations(events);
+  ops.snapshot = () => ({ ...termsSnapshot(), axNodes: [...termsSnapshot().axNodes, { AXTitle: 'Unidentified developer cannot be opened' }] });
+  const report = await mac.runLane(mac.newReport(mac.options(environment())), ops);
+  assert.equal(report.status, 'blocked');
+  assert.ok(!events.some(e => e.startsWith('press:') || e.startsWith('capture:')));
+});
+
+test('possible security prompt after the checkbox blocks continue, with normal owned cleanup', async () => {
+  const events = [], ops = operations(events);
+  ops.waitSnapshot = () => ({ ...termsSnapshot(true), axNodes: [...termsSnapshot(true).axNodes, { AXTitle: 'Privacy permission required' }] });
+  const report = await mac.runLane(mac.newReport(mac.options(environment())), ops);
+  assert.equal(report.status, 'failed');
+  assert.match(report.failures[0].error, /security\/privacy/);
+  assert.deepEqual(events.filter(e => e.startsWith('press:')), ['press:test-terms-checkbox']);
+  assert.ok(events.includes('quit:101'));
+});
+
+test('uncertain AXPress is never retried or counted as customer consent', async () => {
+  const events = [], ops = operations(events);
+  ops.pressTerms = () => { events.push('uncertain-action'); throw Error('AXPress outcome uncertain'); };
+  const report = await mac.runLane(mac.newReport(mac.options(environment())), ops);
+  assert.equal(report.status, 'failed');
+  assert.match(report.failures[0].error, /AXPress outcome uncertain/);
+  assert.equal(events.filter(e => e === 'uncertain-action').length, 1);
+  assert.equal(report.syntheticTerms.customerConsent, false);
+  assert.equal(report.syntheticTerms.actions.length, 0);
+  assert.ok(events.includes('quit:101'));
+});
+
+for (const change of [{ pid: 999 }, { action: 'other' }, { bundleIdentifier: 'other' }, { bundlePath: '/other' },
+  { executablePath: '/other' }, { axAction: 'AXSetValue' }, { syntheticTestOnly: false },
+  { customerConsent: true }, { userMachineUsed: true }]) {
+  test(`synthetic action receipt refuses mismatched ${Object.keys(change)[0]}`, async () => {
+    const events = [], ops = operations(events), original = ops.pressTerms;
+    ops.pressTerms = (launched, action) => ({ ...original(launched, action), ...change });
+    const report = await mac.runLane(mac.newReport(mac.options(environment())), ops);
+    assert.equal(report.status, 'failed');
+    assert.equal(report.syntheticTerms.actions.length, 0);
+    assert.equal(events.filter(e => e.startsWith('press:')).length, 1);
+    assert.equal(report.releaseReady, false);
+  });
+}
+
+for (const change of [{ pid: 999 }, { bodyKind: 'chrome' }, { sha256: 'invalid' }, { screenshot: '../unrelated.png' },
+  { pixels: { ...renderedPixels, nonBackgroundSamples: 0 } }]) {
+  test(`render receipt refuses mismatched ${Object.keys(change)[0]} before accepting terms`, async () => {
+    const events = [], ops = operations(events), original = ops.capture;
+    ops.capture = (launched, label, kind) => ({ ...original(launched, label, kind), ...change });
+    const report = await mac.runLane(mac.newReport(mac.options(environment())), ops);
+    assert.equal(report.status, 'failed');
+    assert.equal(report.syntheticTerms.actions.length, 0);
+    assert.ok(events.includes('quit:101'));
+    assert.equal(report.releaseReady, false);
+  });
+}
+
+test('already exited/crashed, unrequested or forced quit is not normal quit, and the old app is not replaced', async () => {
+  for (const receipt of [{ alreadyExited: true, exited: true, forceKillPerformed: false },
+    { normalQuitRequested: true, alreadyExited: true, exited: true, forceKillPerformed: false },
+    { normalQuitRequested: false, exited: true, forceKillPerformed: false },
+    { normalQuitRequested: true, exited: true, forceKillPerformed: true }]) {
+    const events = [], ops = operations(events);
+    ops.quit = () => receipt;
+    const report = await mac.runLane(mac.newReport(mac.options(environment())), ops);
+    assert.equal(report.status, 'failed');
+    assert.ok(!events.includes('install:0.1.13'));
+  }
 });
 
 test('refused normal quit keeps original failure and never installs replacement or repeats consent', async () => {
   const events = [], ops = operations(events);
-  ops.quit = p => { events.push(`quit:${p.pid}`); return { exited: false, forceKillPerformed: false }; };
+  ops.quit = p => { events.push(`quit:${p.pid}`); return { normalQuitRequested: true, exited: false, forceKillPerformed: false }; };
   const report = await mac.runLane(mac.newReport(mac.options(environment())), ops);
   assert.equal(report.status, 'failed');
   assert.ok(report.failures[0].error.includes('did not quit normally'));
@@ -309,16 +492,19 @@ test('new PID identity mismatch is not treated as ownership or a successful laun
 
 test('Gatekeeper rejection and bundle/executable minimum mismatch stay blocked', async () => {
   const events = [], ops = operations(events), original = ops.install;
-  ops.install = version => ({ ...original(version), bundle: { gatekeeper: { status: 1 }, bundleMinimumCoversExecutable: false } });
+  ops.install = version => ({ ...original(version), bundle: { gatekeeper: { status: 3 }, bundleMinimumCoversExecutable: false } });
   const report = await mac.runLane(mac.newReport(mac.options(environment())), ops);
   assert.equal(report.status, 'blocked');
   assert.equal(report.blockers.length, 2);
+  assert.equal(report.termsPersistenceTested, true);
+  assert.equal(report.releaseReady, false);
 });
 
-test('workflow can run draft PR probes with pinned defaults, two architectures/four lanes, no build or publication', () => {
+test('workflow retains pinned manual dispatch, two architectures/four lanes, no build or publication', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/mac-maintenance-validation.yml'), 'utf8');
-  assert.match(workflow, /pull_request:\s+paths:/);
-  for (const file of mac.PROBE_FILES) assert.ok(workflow.includes(`- ${file}`));
+  const triggers = workflow.match(/^on:\r?\n([\s\S]*?)\r?\n# Read\/download/m)?.[1];
+  assert.ok(triggers);
+  assert.deepEqual([...triggers.matchAll(/^  ([a-z_]+):/gm)].map(m => m[1]), ['workflow_dispatch']);
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /arch: \[X64, ARM64\]/);
   assert.match(workflow, /lane: \[fresh, manual-upgrade\]/);
@@ -337,12 +523,25 @@ test('workflow can run draft PR probes with pinned defaults, two architectures/f
   assert.doesNotMatch(workflow, /pull_request_target|npm (?:ci|run build)|cargo build|gh (?:release|workflow)|contents: write|TAURI_SIGNING|APPLE_(?:ID|PASSWORD|CERTIFICATE)/);
 });
 
-test('Swift helper is limited to preflight/read-only inspection, normal open and exact owned PID normal quit', () => {
+test('Swift helper permits only guarded exact synthetic terms AXPress, preflight, normal open and owned normal quit', () => {
   const swift = fs.readFileSync(path.join(__dirname, 'native-mac-window.swift'), 'utf8');
   assert.match(swift, /AXIsProcessTrusted\(\)/);
   assert.match(swift, /CGPreflightScreenCaptureAccess\(\)/);
   assert.match(swift, /NSWorkspace.shared.openApplication/);
   assert.match(swift, /app\.terminate\(\)/);
   assert.match(swift, /canonical\(executable\).*args\[3\]/);
-  assert.doesNotMatch(swift, /forceTerminate|CGRequestScreenCaptureAccess|AXIsProcessTrustedWithOptions|AXUIElementPerformAction|AXUIElementSetAttributeValue|kill\(/);
+  assert.match(swift, /canonical\(bundle\) == canonical\(installedURL\(\)\)/);
+  assert.match(swift, /env\["GITHUB_REPOSITORY"\] == "BOBWORKS-XR\/CREATOR-HUB"/);
+  assert.match(swift, /env\["RUNNER_ENVIRONMENT"\] == "github-hosted"/);
+  assert.match(swift, /env\["CREATOR_MAC_SYNTHETIC_TERMS_TEST"\] == "1"/);
+  assert.match(swift, /guard ciScope\(true\), AXIsProcessTrusted\(\), CGPreflightScreenCaptureAccess\(\), app\.isActive/);
+  assert.match(swift, /target\(\)\?\.processIdentifier == app\.processIdentifier/);
+  assert.equal((swift.match(/AXUIElementPerformAction\(/g) || []).length, 1);
+  assert.match(swift, /AXUIElementPerformAction\(selected, kAXPressAction as CFString\)/);
+  assert.match(swift, /result\["customerConsent"\] = false/);
+  for (const title of Object.values(mac.TERMS)) assert.ok(swift.includes(`"${title}"`));
+  assert.match(swift, /image\.height \* 60 \/ 100/);
+  assert.match(swift, /AXUIElementSetMessagingTimeout\(element, 0\.25\)/);
+  assert.match(swift, /\$0\[kAXRoleAttribute\] == "AXWebArea"/);
+  assert.doesNotMatch(swift, /forceTerminate|CGRequestScreenCaptureAccess|AXIsProcessTrustedWithOptions|AXUIElementSetAttributeValue|CGEvent|kill\(|evaluateJavaScript|osascript|tccutil|spctl/);
 });

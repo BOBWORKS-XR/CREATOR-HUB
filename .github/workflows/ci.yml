@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: creator-hub-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   frontend:
     name: Frontend & script tests
@@ -22,6 +26,17 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - name: Validate workflow structure before native builds
+        run: |
+          set -euo pipefail
+          lint="$RUNNER_TEMP/creator-actionlint"
+          mkdir "$lint"
+          curl --fail --location --silent --show-error --max-time 120 \
+            'https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz' \
+            --output "$lint/actionlint.tar.gz"
+          node -e 'const fs=require("fs"),c=require("crypto");if(c.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex")!=="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8")throw Error("Workflow linter archive differs")' "$lint/actionlint.tar.gz"
+          tar --extract --gzip --file "$lint/actionlint.tar.gz" --directory "$lint" actionlint
+          "$lint/actionlint" -shellcheck= -pyflakes=
       - name: Read accepted app source revisions
         id: apps
         run: |
@@ -53,6 +68,7 @@ jobs:
 
   hub-windows:
     name: Hub (Windows)
+    needs: frontend
     runs-on: windows-latest
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
@@ -83,6 +99,7 @@ jobs:
 
   hub-linux:
     name: Hub (Linux)
+    needs: frontend
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
@@ -126,6 +143,7 @@ jobs:
 
   hub-macos:
     name: Hub (macOS ${{ matrix.label }})
+    needs: frontend
     strategy:
       fail-fast: false
       matrix:
@@ -153,7 +171,14 @@ jobs:
       - run: cargo clippy --release --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml --all-targets
       - name: Build macOS DMG bundle
-        run: npm run build -- --bundles dmg
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_ARCH" = ARM64 ]; then
+            npm run build -- --bundles dmg --config src-tauri/tauri.arm64.conf.json
+          else
+            npm run build -- --bundles dmg
+          fi
       - name: Verify ad-hoc signed app inside macOS DMG
         shell: bash
         run: |
@@ -170,6 +195,9 @@ jobs:
           hdiutil attach "${images[0]}" -readonly -nobrowse -quiet -mountpoint "$mountpoint"
           app="$(find "$mountpoint" -maxdepth 2 -type d -name '*.app' -print -quit)"
           test -n "$app"
+          if [ "$RUNNER_ARCH" = ARM64 ]; then
+            test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = '11.0'
+          fi
           codesign --verify --deep --strict --verbose=2 "$app"
           details="$(codesign --display --verbose=4 "$app" 2>&1)"
           printf '%s\n' "$details"

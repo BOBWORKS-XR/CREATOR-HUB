@@ -27,7 +27,7 @@ jobs:
             args: --bundles appimage,deb,rpm
           - os: macos-latest
             label: macOS Apple silicon
-            args: --bundles dmg
+            args: --bundles dmg --config src-tauri/tauri.arm64.conf.json
           - os: macos-15-intel
             label: macOS Intel
             args: --bundles dmg

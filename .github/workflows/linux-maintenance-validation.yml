@@ -1,10 +1,5 @@
 name: Native Linux maintenance validation
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/linux-maintenance-validation.yml'
-      - 'scripts/native-linux-maintenance-smoke*'
-      - 'scripts/native-linux-window.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -63,7 +58,17 @@ jobs:
         with:
           name: linux-native-${{ matrix.package }}-${{ github.run_id }}
           path: |
-            artifacts/native-linux/
+            artifacts/native-linux/${{ matrix.package }}/report.json
+            artifacts/native-linux/${{ matrix.package }}/*.json
+            artifacts/native-linux/${{ matrix.package }}/*.png
+            artifacts/native-linux/${{ matrix.package }}/*.log
+            artifacts/native-linux/${{ matrix.package }}/old-gui/*.json
+            artifacts/native-linux/${{ matrix.package }}/old-gui/*.png
+            artifacts/native-linux/${{ matrix.package }}/old-gui/*.log
+            artifacts/native-linux/${{ matrix.package }}/upgraded-gui/*.json
+            artifacts/native-linux/${{ matrix.package }}/upgraded-gui/*.png
+            artifacts/native-linux/${{ matrix.package }}/upgraded-gui/*.log
+            artifacts/native-linux/fluxbox.log
             native-run.json
           if-no-files-found: warn
           retention-days: 7

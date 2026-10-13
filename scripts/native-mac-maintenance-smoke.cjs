@@ -8,6 +8,9 @@ const { pipeline } = require('node:stream/promises');
 const { Readable } = require('node:stream');
 
 const REPO = 'BOBWORKS-XR/CREATOR-HUB';
+const TERMS = Object.freeze({ title: 'Terms of use and risk acknowledgement',
+  checkbox: 'I have read and agree to these terms, including the risk assumption and liability limitations above.',
+  continue: 'Accept and continue' });
 const BASELINE_SOURCE = '35a16a45814d821d65b5d203628478449174cd55';
 const BASELINES = Object.freeze({
   X64: Object.freeze({ name: 'Creator.Hub_0.1.12_x64.dmg', size: 5397091,
@@ -177,9 +180,9 @@ function verifyProductTree(remote, local) {
     excludedPaths: TREE_EXCLUSIONS, comparedFiles: product(remote).length };
 }
 
-function command(exe, args, allowFailure = false) {
+function command(exe, args, allowFailure = false, extraEnv = {}) {
   const child = spawnSync(exe, args, { encoding: 'utf8', timeout: 60000, maxBuffer: 4 * 1024 * 1024,
-    env: { ...process.env, GH_TOKEN: '', GITHUB_TOKEN: '' } });
+    env: { ...process.env, ...extraEnv, GH_TOKEN: '', GITHUB_TOKEN: '' } });
   const result = { status: child.status ?? -1, stdout: String(child.stdout || ''),
     stderr: String(child.stderr || child.error?.message || '') };
   if (result.status !== 0 && !allowFailure) throw Error(`${exe} failed: ${JSON.stringify(result)}`);
@@ -380,7 +383,50 @@ function verifySentinels(sentinels) {
   return sentinels.map(s => ({ label: s.label, sha256: s.sha256, unchanged: true }));
 }
 
-function guiBlockers(capability, snapshot) {
+function bodyKind(snapshot) {
+  const nodes = snapshot.axNodes || [];
+  const text = nodes.map(n => `${n.AXTitle || ''}\n${n.AXValue || ''}`).join('\n');
+  if (text.includes(TERMS.title)) return 'terms';
+  return nodes.some(n => n.AXRole === 'AXWebArea') && /\bCreator Works MCP\b/.test(text) ? 'body' : 'chrome-or-unready';
+}
+
+function validateBody(snapshot, kind) {
+  assert.equal(snapshot.finishedLaunching, true);
+  assert.equal(snapshot.windows?.length, 1, 'Exactly one owned visible app window is required');
+  assert.equal(snapshot.axReadable, true);
+  assert.equal(snapshot.axTruncated, false, 'Incomplete AX trees cannot establish body/terms state');
+  assert.ok(snapshot.axNodes.some(n => n.AXRole === 'AXWebArea'), 'Window chrome is not a WebKit body');
+  assert.equal(bodyKind(snapshot), kind, kind === 'body' ? 'Terms returned or rendered MCP body is absent' : 'Fresh synthetic terms gate is absent');
+}
+
+function termsControl(snapshot, action) {
+  assert.ok(['test-terms-checkbox', 'test-terms-accept'].includes(action));
+  validateBody(snapshot, 'terms');
+  assert.equal(guiBlockers({ accessibilityTrusted: true, screenCaptureAllowed: true, hasDisplay: true }, snapshot, true).length, 0,
+    'Possible security/privacy prompt prevents synthetic terms interaction');
+  const checks = snapshot.axNodes.filter(n => n.AXRole === 'AXCheckBox' && n.AXTitle === TERMS.checkbox);
+  const buttons = snapshot.axNodes.filter(n => n.AXRole === 'AXButton' && n.AXTitle === TERMS.continue);
+  assert.equal(checks.length, 1, 'Exact terms checkbox is missing or ambiguous');
+  assert.equal(buttons.length, 1, 'Exact terms continue button is missing or ambiguous');
+  assert.equal(checks[0].AXValue, action === 'test-terms-checkbox' ? '0' : '1', 'Unexpected synthetic terms check state');
+  assert.equal((action === 'test-terms-checkbox' ? checks[0] : buttons[0]).AXEnabled, 'true', 'Terms control is not enabled');
+}
+
+function validatePixels(pixels) {
+  for (const key of ['width', 'height', 'sampledPixels', 'distinctColors', 'nonBackgroundSamples']) {
+    assert.ok(Number.isSafeInteger(pixels[key]) && pixels[key] >= 0, `Invalid PNG pixel metric: ${key}`);
+  }
+  assert.ok(pixels.width >= 560 && pixels.height >= 400 && pixels.width <= 4096 && pixels.height <= 4096);
+  assert.equal(pixels.chromeExcluded, true, 'Title chrome must not establish body rendering');
+  assert.deepEqual(pixels.bodyCrop, { x: Math.floor(pixels.width * 6 / 100), y: Math.floor(pixels.height * 20 / 100),
+    width: Math.floor(pixels.width * 88 / 100), height: Math.floor(pixels.height * 60 / 100) }, 'Unexpected body crop');
+  assert.ok(pixels.sampledPixels > 1000 && pixels.sampledPixels <= 300000);
+  assert.ok(pixels.distinctColors > 32 && pixels.distinctColors <= pixels.sampledPixels);
+  assert.ok(pixels.nonBackgroundSamples > 1000 && pixels.nonBackgroundSamples <= pixels.sampledPixels,
+    'Rendered body PNG is blank or insufficiently framed');
+}
+
+function guiBlockers(capability, snapshot, syntheticFreshTerms = false) {
   const reasons = [];
   if (!capability.accessibilityTrusted) reasons.push('existing-accessibility-capability-absent');
   if (!capability.screenCaptureAllowed) reasons.push('existing-screen-capture-capability-absent');
@@ -391,7 +437,7 @@ function guiBlockers(capability, snapshot) {
       reasons.push('owned-AX-tree-unreadable-or-incomplete');
     }
     const text = JSON.stringify(snapshot.axNodes || []);
-    if (/terms of use|risk acknowledgement|accept and continue|agree to these terms/i.test(text)) {
+    if (!syntheticFreshTerms && /terms of use|risk acknowledgement|accept and continue|agree to these terms/i.test(text)) {
       reasons.push('legal-acknowledgement-requires-human-no-acceptance-performed');
     }
     if (/privacy|security|permission|allow access|damaged|cannot be opened|unidentified developer/i.test(text)) {
@@ -402,15 +448,24 @@ function guiBlockers(capability, snapshot) {
 }
 
 function newReport(input) {
-  return { schemaVersion: 1, scope: 'macos-hub-native-install-manual-upgrade-and-read-only-gui-probe',
+  return { schemaVersion: 1, scope: 'macos-hub-native-install-manual-upgrade-synthetic-terms-rendering-and-relaunch',
     releaseLine: 'separate-apps', input, passed: false, releaseReady: false, userMachineUsed: false,
     executionSourceSha: process.env.GITHUB_SHA || null,
     historicalFailures: [{ runUrl: `https://github.com/${REPO}/actions/runs/38392823489`,
       evidence: 'docs/MAINTENANCE-0.1.13-GATES.md#first-native-ci-findings',
       retained: true, replacedByThisReport: false }],
+    historicalNativeReports: [{ runUrl: `https://github.com/${REPO}/actions/runs/38402267985`,
+      evidence: `artifacts/mac-body-${input.architecture === 'X64' ? 'intel' : 'arm'}-38402267985/native-report.json`,
+      scope: 'macos-hub-native-install-manual-upgrade-and-read-only-gui-probe',
+      status: 'blocked', failureCount: 0, releaseReady: false, retained: true, replacedByThisReport: false,
+      blockers: ['gatekeeper-assessment-not-accepted-no-policy-bypass',
+        ...(input.architecture === 'ARM64' ? ['declared-bundle-minimum-below-executable-minimum'] : []),
+        'legal-acknowledgement-requires-human-no-acceptance-performed'] }],
     sourceKind: input.lane === 'manual-upgrade' ? 'unmodified-public-0.1.12-manual-dmg-upgrade' : 'exact-ci-0.1.13-fresh-dmg-install',
     updater: { tested: false, publicDiscovery: false, nativeCancellation: false, consent: false,
       automaticRestart: false, reason: 'Public 0.1.12 native in-app updater is Windows-only; manual launches are not updater restart proof.' },
+    syntheticTerms: { testOnly: true, customerConsent: false, actions: [] }, termsPersistenceTested: false,
+    aiWorkflowTested: false, unityWorkflowTested: false,
     effectivePreferencesTested: false, realCompanionInstallsTested: false, liveClientReconnectTested: false,
     blockers: [], failures: [], launches: [], mounts: [], cleanup: [] };
 }
@@ -430,25 +485,76 @@ async function runLane(report, ops) {
       if (installed.bundle?.gatekeeper?.status !== 0) report.blockers.push('gatekeeper-assessment-not-accepted-no-policy-bypass');
       if (installed.bundle?.bundleMinimumCoversExecutable === false) report.blockers.push('declared-bundle-minimum-below-executable-minimum');
       if (!report.sentinels) report.sentinels = await ops.seed();
-      report.currentPhase = `launch-${version}`;
-      const launched = await ops.launch(version);
-      assert.ok(Number.isSafeInteger(launched.pid) && launched.pid > 0, 'Real installed GUI PID is required');
-      assert.equal(launched.bundlePath, installed.appPath);
-      assert.equal(launched.executablePath, installed.executablePath);
-      owned.push(launched);
-      report.launches.push({ version, ...launched, method: 'NSWorkspace-normal-open-not-updater-restart' });
-      if (report.launches.length > 1) assert.notEqual(launched.pid, report.launches[0].pid, 'Old and new GUI launches must have distinct PIDs');
-      const snapshot = await ops.snapshot(launched);
-      report.launches.at(-1).snapshot = snapshot;
-      report.blockers.push(...guiBlockers(report.capability, snapshot));
-      report.currentPhase = `normal-quit-${version}`;
-      launched.quitAttempted = true;
-      const stopped = await ops.quit(launched);
-      report.cleanup.push({ version, pid: launched.pid, ...stopped });
-      assert.equal(stopped.exited, true, 'Owned app did not quit normally; replacement is refused');
-      owned.pop();
-      report.preservation = await ops.preserve(report.sentinels);
+      const canInspect = report.capability.accessibilityTrusted && report.capability.screenCaptureAllowed && report.capability.hasDisplay;
+      for (const purpose of canInspect ? ['initial', 'relaunch'] : ['initial']) {
+        report.currentPhase = `launch-${version}-${purpose}`;
+        const launched = await ops.launch(version);
+        assert.ok(Number.isSafeInteger(launched.pid) && launched.pid > 0, 'Real installed GUI PID is required');
+        assert.equal(launched.bundleIdentifier, 'com.creatorworks.hub');
+        assert.equal(launched.bundlePath, installed.appPath);
+        assert.equal(launched.executablePath, installed.executablePath);
+        assert.ok(!report.launches.some(l => l.pid === launched.pid), 'Every normal open must have a distinct PID');
+        owned.push(launched);
+        const row = { version, purpose, ...launched, captures: [], method: 'NSWorkspace-normal-open-not-updater-restart' };
+        report.launches.push(row);
+        let snapshot = await ops.snapshot(launched);
+        row.snapshot = snapshot;
+        const freshTerms = version === versions[0] && purpose === 'initial';
+        const blockers = guiBlockers(report.capability, snapshot, canInspect && freshTerms);
+        report.blockers.push(...blockers);
+        if (canInspect && !blockers.length) {
+          const capture = async kind => {
+            validateBody(snapshot, kind);
+            const captured = await ops.capture(launched, `${version}-${purpose}-${kind}`, kind);
+            assert.equal(captured.pid, launched.pid);
+            assert.equal(captured.bodyKind, kind);
+            assert.match(captured.sha256, /^[a-f0-9]{64}$/);
+            assert.equal(captured.screenshot, `owned-gui-${version}-${purpose}-${kind}-${launched.pid}.png`);
+            validatePixels(captured.pixels);
+            row.captures.push({ kind, ...captured });
+          };
+          if (freshTerms) {
+            report.currentPhase = `synthetic-terms-${version}`;
+            termsControl(snapshot, 'test-terms-checkbox');
+            await capture('terms');
+            for (const action of ['test-terms-checkbox', 'test-terms-accept']) {
+              termsControl(snapshot, action);
+              const result = await ops.pressTerms(launched, action);
+              assert.equal(result.pid, launched.pid);
+              assert.equal(result.bundlePath, installed.appPath);
+              assert.equal(result.executablePath, installed.executablePath);
+              assert.equal(result.bundleIdentifier, 'com.creatorworks.hub');
+              assert.equal(result.action, action);
+              assert.equal(result.axAction, 'AXPress');
+              assert.equal(result.syntheticTestOnly, true);
+              assert.equal(result.customerConsent, false);
+              assert.equal(result.userMachineUsed, false);
+              report.syntheticTerms.actions.push({ version, ...result });
+              snapshot = await ops.waitSnapshot(launched, action === 'test-terms-checkbox' ? 'checked' : 'body');
+            }
+            row.afterTermsSnapshot = snapshot;
+          }
+          report.currentPhase = `rendered-body-${version}-${purpose}`;
+          await capture('body');
+          row.renderedBodyVerified = true;
+          row.persistedSyntheticTerms = !freshTerms;
+        }
+        report.currentPhase = `normal-quit-${version}-${purpose}`;
+        launched.quitAttempted = true;
+        const stopped = await ops.quit(launched);
+        report.cleanup.push({ version, purpose, pid: launched.pid, ...stopped });
+        assert.equal(stopped.normalQuitRequested, true, 'Owned process did not receive normal quit');
+        assert.equal(stopped.alreadyExited === true, false, 'An earlier exit is not normal-quit proof');
+        assert.equal(stopped.exited, true, 'Owned app did not quit normally; replacement is refused');
+        assert.equal(stopped.forceKillPerformed, false, 'Force termination is outside this probe');
+        owned.pop();
+        report.preservation = await ops.preserve(report.sentinels);
+      }
     }
+    report.termsPersistenceTested = versions.every(version => report.launches.some(row =>
+      row.version === version && row.purpose === 'relaunch' && row.renderedBodyVerified === true));
+    if (input.lane === 'manual-upgrade') report.manualUpgradeTermsPreserved = report.termsPersistenceTested
+      && report.launches.filter(row => row.version === '0.1.13').every(row => row.persistedSyntheticTerms === true);
     report.packageAndManualChecksPassed = true;
   } catch (error) {
     report.failures.push({ phase: report.currentPhase || 'preflight', error: String(error.stack || error) });
@@ -458,7 +564,9 @@ async function runLane(report, ops) {
       try {
         const stopped = await ops.quit(launched);
         report.cleanup.push({ pid: launched.pid, ...stopped });
-        if (!stopped.exited) report.failures.push({ phase: 'cleanup', error: 'Owned app retained because normal quit did not complete; no force kill attempted' });
+        if (!stopped.normalQuitRequested || stopped.alreadyExited || !stopped.exited || stopped.forceKillPerformed !== false) {
+          report.failures.push({ phase: 'cleanup', error: 'Owned normal-quit proof incomplete; no retry or force kill attempted' });
+        }
       } catch (error) { report.failures.push({ phase: 'cleanup', error: String(error) }); }
     }
     if (report.sentinels) {
@@ -481,10 +589,28 @@ function nativeOperations(out, binding, report) {
   const app = contained(applications, path.join(applications, 'Creator Hub.app'));
   const helper = path.join(out, 'native-mac-window');
   const activeMounts = [];
-  const window = args => {
-    const result = JSON.parse(command(helper, args).stdout);
+  const window = (args, synthetic = false) => {
+    const result = JSON.parse(command(helper, args, false,
+      { CREATOR_MAC_SYNTHETIC_TERMS_TEST: synthetic ? '1' : '' }).stdout);
     if (result.error) throw Error(`Native Mac helper: ${result.error}`);
     return result;
+  };
+  const observe = async (launched, wanted = 'either') => {
+    let snapshot;
+    for (const end = Date.now() + 60000; Date.now() < end;) {
+      snapshot = window(['snapshot', String(launched.pid), app, launched.executablePath]);
+      if (!report.capability.accessibilityTrusted) return snapshot;
+      if (snapshot.finishedLaunching && snapshot.windows.length === 1 && snapshot.axReadable && !snapshot.axTruncated) {
+        const kind = bodyKind(snapshot);
+        if (wanted === 'either' && ['terms', 'body'].includes(kind)) return snapshot;
+        if (wanted === 'body' && kind === 'body') return snapshot;
+        if (wanted === 'checked') {
+          try { termsControl(snapshot, 'test-terms-accept'); return snapshot; } catch {}
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    throw Error(`Native WebKit ${wanted} state unavailable; chrome is not rendered-app acceptance`);
   };
   return {
     probe: () => window(['probe']),
@@ -531,26 +657,28 @@ function nativeOperations(out, binding, report) {
     seed: () => seedSentinels(home),
     preserve: sentinels => verifySentinels(sentinels),
     launch: () => window(['launch', app]),
-    snapshot: async launched => {
-      let snapshot;
-      for (let index = 0; index < 80; index++) {
-        snapshot = window(['snapshot', String(launched.pid), app, launched.executablePath]);
-        const body = JSON.stringify(snapshot.axNodes || []);
-        if (snapshot.finishedLaunching && snapshot.windows.length
-          && /Terms of use and risk acknowledgement|Creator Works MCP/.test(body)) break;
-        if (!report.capability.accessibilityTrusted) break;
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-      if (report.capability.accessibilityTrusted) {
-        assert.match(JSON.stringify(snapshot.axNodes || []), /Terms of use and risk acknowledgement|Creator Works MCP/,
-          'Native WebKit body is not available; window chrome is not rendered-app acceptance');
-      }
-      if (report.capability.screenCaptureAllowed && snapshot.windows.length === 1) {
-        const screenshot = path.join(out, `owned-gui-${report.launches.at(-1).version}.png`);
-        command('/usr/sbin/screencapture', ['-x', '-l', String(snapshot.windows[0].id), screenshot]);
-        report.launches.at(-1).screenshot = path.basename(screenshot);
-      }
-      return snapshot;
+    snapshot: launched => observe(launched),
+    waitSnapshot: (launched, wanted) => observe(launched, wanted),
+    pressTerms: (launched, action) => {
+      guard();
+      assert.ok(['test-terms-checkbox', 'test-terms-accept'].includes(action));
+      return window([action, String(launched.pid), app, launched.executablePath], true);
+    },
+    capture: (launched, label, kind) => {
+      const snapshot = window(['snapshot', String(launched.pid), app, launched.executablePath]);
+      validateBody(snapshot, kind);
+      assert.deepEqual(guiBlockers(report.capability, snapshot, kind === 'terms'), [], 'Capture state has a GUI blocker');
+      assert.equal(window(['probe']).screenCaptureAllowed, true, 'Existing capture capability disappeared');
+      const screenshot = contained(out, path.join(out, `owned-gui-${label}-${launched.pid}.png`));
+      assert.equal(fs.existsSync(screenshot), false);
+      command('/usr/sbin/screencapture', ['-x', '-l', String(snapshot.windows[0].id), screenshot]);
+      const after = window(['snapshot', String(launched.pid), app, launched.executablePath]);
+      validateBody(after, kind);
+      assert.deepEqual(guiBlockers(report.capability, after, kind === 'terms'), [], 'Capture state gained a GUI blocker');
+      assert.equal(after.windows[0].id, snapshot.windows[0].id, 'Owned capture window changed');
+      const pixels = window(['pixels', screenshot]);
+      return { pid: launched.pid, bodyKind: kind, windowId: snapshot.windows[0].id,
+        screenshot: path.basename(screenshot), sha256: digest(boundedFile(screenshot, 64 * 1024 * 1024)), pixels };
     },
     quit: launched => window(['quit', String(launched.pid), app, launched.executablePath]),
     detach: () => {
@@ -599,9 +727,9 @@ async function main() {
   process.exitCode = report.failures.length ? 1 : report.blockers.length ? 2 : report.passed ? 0 : 1;
 }
 
-module.exports = { BASELINES, BASELINE_SOURCE, CANDIDATE, PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS,
+module.exports = { BASELINES, BASELINE_SOURCE, CANDIDATE, TERMS, PROBE_FILES, REVIEWED_TEST_ONLY_FILES, TREE_EXCLUSIONS,
   options, guard, contained, noLinks, digest, validateBinding,
   parseLocalTree, verifyProductTree,
   validateSource, zipEntry, validateBundle, atLeast, sentinelFiles, seedSentinels, verifySentinels,
-  guiBlockers, newReport, runLane };
+  bodyKind, validateBody, termsControl, validatePixels, guiBlockers, newReport, runLane };
 if (require.main === module) main().catch(error => { console.error(String(error.stack || error)); process.exitCode = 1; });

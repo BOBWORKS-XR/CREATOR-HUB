@@ -188,6 +188,47 @@ match instead of silently following different `stable` installations. Neither
 lint warnings nor install/process guards are disabled. The follow-up native
 matrix must pass before its package artifacts can be assessed further.
 
+## Installed Acceptance Checkpoint
+
+On 2026-10-13, native build run `38393759689` passed Windows, Linux, Intel Mac
+and Apple Silicon Rust/lint/package checks. That alone was not installed-flow
+acceptance. Later validation established:
+
+- Windows candidate run `38400543084` passed all four native lanes: clean,
+  legacy, MCP-only and the current public Hub 0.1.12 baseline. The extracted
+  installed executable hash is `2315ad9d3eed9387e5409fd448219c012ab096b64653e1dbca2939eaa5c5b8d3`.
+  It differs from the earlier raw build executable. The accepted NSIS hash is
+  `07e7356087b74a2de537b43196e104d58d521358a3ac84a2ea33ec49aa985bb4`.
+- Linux runs `38402267961` and repeated explicit dispatch `38402870683`
+  passed real AppImage/DEB fresh installation, synthetic visible Terms actions,
+  normal owned-window close, exact public 0.1.12 manual replacement and data
+  sentinel preservation. These were not signed in-app updates or restart tests.
+- Mac run `38402267985` captured actual native WebKit Terms content on both
+  architectures. It retained Gatekeeper refusal for ad-hoc packages; Apple
+  Silicon also declared 10.13 despite an observed Mach-O minimum of 11.0.
+  The new ARM-only build overlay addresses that metadata mismatch without
+  changing the Intel minimum. New package/native acceptance is still required.
+- Flatpak run `38401360519` reached the actual DEB parser and exposed `EPIPE`:
+  `dpkg-deb --show` could stop reading before the full piped archive was written.
+  Both parsers now receive one read-only, repeatedly hash-checked snapshot.
+  Hosted Linux CI automatically tests a real multi-megabyte synthetic DEB.
+  This correction still needs a successful full Flatpak deployment run.
+
+The prepublication Windows lab uses three public signature fixtures and the
+exact accepted candidate, with no issuer key on CI. Local Rust verification
+confirmed descriptor/installer/executable signatures and tamper rejection.
+The installed old app must first authenticate the real public companion catalog
+before the five-route Hub-only lab proxy is used. Signature verification is not
+native signed cancellation/update/restart acceptance; the new lab must pass.
+
+Workflow structure linting now precedes native build jobs. Superseded PR builds
+are cancelled. Expensive native GUI/Flatpak probes use explicit dispatch and
+bounded evidence uploads rather than repeating on every PR edit.
+
+Unix separate-companion management and Flatpak host Unity/client integration
+remain unaccepted and guarded. No new public release, tag or latest promotion
+is authorized by this checkpoint. Keep unification for 0.1.14 or later.
+
 ## Files Written by This Port
 
 - `scripts/native-hub-descriptor.cjs`

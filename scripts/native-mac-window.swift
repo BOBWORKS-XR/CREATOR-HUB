@@ -2,10 +2,25 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import ImageIO
 
-// Only read-only GUI inspection and normal LaunchServices open / owned-process quit.
+// CI-only exact terms controls, read-only GUI inspection, and normal owned-process lifecycle.
 let bundleID = "com.creatorworks.hub"
+let termsTitle = "Terms of use and risk acknowledgement"
+let termsCheckbox = "I have read and agree to these terms, including the risk assumption and liability limitations above."
+let termsContinue = "Accept and continue"
 let args = Array(CommandLine.arguments.dropFirst())
+
+func ciScope(_ synthetic: Bool = false) -> Bool {
+    let env = ProcessInfo.processInfo.environment
+    return env["GITHUB_ACTIONS"] == "true" && env["RUNNER_ENVIRONMENT"] == "github-hosted"
+        && env["RUNNER_OS"] == "macOS" && env["GITHUB_REPOSITORY"] == "BOBWORKS-XR/CREATOR-HUB"
+        && (!synthetic || env["CREATOR_MAC_SYNTHETIC_TERMS_TEST"] == "1")
+}
+
+func installedURL() -> URL {
+    return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Creator Hub.app")
+}
 
 func emit(_ value: [String: Any]) {
     do {
@@ -39,9 +54,30 @@ func target() -> NSRunningApplication? {
           let app = NSRunningApplication(processIdentifier: pid),
           app.bundleIdentifier == bundleID,
           let bundle = app.bundleURL, let executable = app.executableURL,
+          canonical(bundle) == canonical(installedURL()),
+          canonical(executable) == canonical(installedURL().appendingPathComponent("Contents/MacOS/creator-hub")),
           canonical(bundle) == canonical(URL(fileURLWithPath: args[2])),
           canonical(executable) == canonical(URL(fileURLWithPath: args[3])) else { return nil }
     return app
+}
+
+func axTree(_ app: NSRunningApplication) -> (elements: [AXUIElement], windows: Int, truncated: Bool) {
+    let root = AXUIElementCreateApplication(app.processIdentifier)
+    AXUIElementSetMessagingTimeout(root, 2)
+    guard let windows = attribute(root, kAXWindowsAttribute) as? [AXUIElement] else { return ([], 0, false) }
+    var elements = [AXUIElement]()
+    var truncated = false
+    let end = Date(timeIntervalSinceNow: 10)
+    func visit(_ element: AXUIElement, _ depth: Int) {
+        if depth > 18 || elements.count >= 700 || Date() >= end { truncated = true; return }
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        elements.append(element)
+        if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+            for child in children { visit(child, depth + 1) }
+        }
+    }
+    for window in windows { visit(window, 0) }
+    return (elements, windows.count, truncated)
 }
 
 func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
@@ -50,10 +86,10 @@ func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     return value
 }
 
-func windowSnapshot(_ app: NSRunningApplication) -> [String: Any] {
+func visibleWindows(_ app: NSRunningApplication) -> [[String: Any]] {
     let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
         as? [[String: Any]] ?? []
-    let windows = list.filter {
+    return list.filter {
         ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == app.processIdentifier
             && ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
     }.map { row -> [String: Any] in
@@ -61,37 +97,127 @@ func windowSnapshot(_ app: NSRunningApplication) -> [String: Any] {
                 "title": row[kCGWindowName as String] ?? "",
                 "bounds": row[kCGWindowBounds as String] as? [String: Any] ?? [:]]
     }
-    var result = appIdentity(app)
-    result["windows"] = windows
-    result["axReadable"] = false
-    result["axNodes"] = [[String: String]]()
-    result["axTruncated"] = false
-    guard AXIsProcessTrusted() else { return result }
-    let root = AXUIElementCreateApplication(app.processIdentifier)
-    AXUIElementSetMessagingTimeout(root, 2)
-    guard let axWindows = attribute(root, kAXWindowsAttribute) as? [AXUIElement] else { return result }
+}
+
+func inspectAX(_ app: NSRunningApplication) -> (elements: [AXUIElement], nodes: [[String: String]], windows: Int, truncated: Bool) {
+    guard AXIsProcessTrusted() else { return ([], [], 0, false) }
+    let tree = axTree(app)
+    var elements = [AXUIElement]()
     var nodes = [[String: String]]()
-    var truncated = false
-    let inspectionEnd = Date(timeIntervalSinceNow: 10)
-    func visit(_ element: AXUIElement, _ depth: Int) {
-        if depth > 18 || nodes.count >= 700 || Date() >= inspectionEnd { truncated = true; return }
+    var truncated = tree.truncated
+    let end = Date(timeIntervalSinceNow: 10)
+    for element in tree.elements {
+        if Date() >= end { truncated = true; break }
         var node = [String: String]()
-        for key in [kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] {
-            if let text = attribute(element, key) as? String {
+        for key in [kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute, kAXEnabledAttribute] {
+            if Date() >= end { truncated = true; break }
+            let value = attribute(element, key)
+            if let text = value as? String {
                 if text.count > 600 { truncated = true }
                 node[key] = String(text.prefix(600))
+            } else if let number = value as? NSNumber {
+                if key == kAXValueAttribute { node[key] = number.stringValue }
+                if key == kAXEnabledAttribute { node[key] = number.boolValue ? "true" : "false" }
             }
         }
+        elements.append(element)
         nodes.append(node)
-        if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
-            for child in children { visit(child, depth + 1) }
+    }
+    return (elements, nodes, tree.windows, truncated)
+}
+
+func windowSnapshot(_ app: NSRunningApplication) -> [String: Any] {
+    var result = appIdentity(app)
+    result["windows"] = visibleWindows(app)
+    let tree = inspectAX(app)
+    result["axReadable"] = tree.windows > 0
+    result["axNodes"] = tree.nodes
+    result["axTruncated"] = tree.truncated
+    return result
+}
+
+func pressSyntheticTerms(_ app: NSRunningApplication, _ action: String) {
+    guard ciScope(true), AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(), app.isActive else {
+        emit(["error": "Synthetic terms require exact hosted CI, existing capabilities and the active owned app"])
+        return
+    }
+    let tree = inspectAX(app)
+    let text = tree.nodes.flatMap { [$0[kAXTitleAttribute] ?? "", $0[kAXDescriptionAttribute] ?? "", $0[kAXValueAttribute] ?? ""] }.joined(separator: "\n")
+    let security = try! NSRegularExpression(pattern: "privacy|security|permission|allow access|damaged|cannot be opened|unidentified developer", options: [.caseInsensitive])
+    guard visibleWindows(app).count == 1, tree.windows == 1, !tree.truncated,
+          tree.nodes.contains(where: { $0[kAXRoleAttribute] == "AXWebArea" }), text.contains(termsTitle),
+          security.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) == nil else {
+        emit(["error": "Refusing incomplete/non-terms tree or possible security/privacy prompt"])
+        return
+    }
+    let role = action == "test-terms-checkbox" ? kAXCheckBoxRole : kAXButtonRole
+    let title = action == "test-terms-checkbox" ? termsCheckbox : termsContinue
+    let matches = tree.nodes.indices.filter { tree.nodes[$0][kAXRoleAttribute] == role && tree.nodes[$0][kAXTitleAttribute] == title }
+    let checks = tree.nodes.indices.filter { tree.nodes[$0][kAXRoleAttribute] == kAXCheckBoxRole && tree.nodes[$0][kAXTitleAttribute] == termsCheckbox }
+    let buttons = tree.nodes.indices.filter { tree.nodes[$0][kAXRoleAttribute] == kAXButtonRole && tree.nodes[$0][kAXTitleAttribute] == termsContinue }
+    guard matches.count == 1, checks.count == 1, buttons.count == 1,
+          let checked = attribute(tree.elements[checks[0]], kAXValueAttribute) as? NSNumber,
+          checked.intValue == (action == "test-terms-checkbox" ? 0 : 1),
+          attribute(tree.elements[checks[0]], kAXRoleAttribute) as? String == kAXCheckBoxRole,
+          attribute(tree.elements[checks[0]], kAXTitleAttribute) as? String == termsCheckbox else {
+        emit(["error": "Exact enabled terms control/check state is missing or ambiguous"])
+        return
+    }
+    let selected = tree.elements[matches[0]]
+    var names: CFArray?
+    guard AXUIElementCopyActionNames(selected, &names) == .success,
+          (names as? [String])?.contains(kAXPressAction) == true,
+          attribute(selected, kAXRoleAttribute) as? String == role,
+          attribute(selected, kAXTitleAttribute) as? String == title,
+          (attribute(selected, kAXEnabledAttribute) as? NSNumber)?.boolValue == true,
+          ciScope(true), AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(), app.isActive,
+          target()?.processIdentifier == app.processIdentifier,
+          AXUIElementPerformAction(selected, kAXPressAction as CFString) == .success else {
+        emit(["error": "Normal terms AXPress refused or uncertain; no repeat attempted"])
+        return
+    }
+    var result = appIdentity(app)
+    result["action"] = action
+    result["axAction"] = "AXPress"
+    result["syntheticTestOnly"] = true
+    result["customerConsent"] = false
+    result["userMachineUsed"] = false
+    emit(result)
+}
+
+func imagePixels(_ file: String) {
+    guard ciScope(), let temp = ProcessInfo.processInfo.environment["RUNNER_TEMP"] else {
+        emit(["error": "Screenshot inspection requires the hosted CI evidence directory"]); return
+    }
+    let url = URL(fileURLWithPath: file), root = canonical(URL(fileURLWithPath: temp)) + "/"
+    guard canonical(url).hasPrefix(root), url.lastPathComponent.hasPrefix("owned-gui-"), url.pathExtension == "png",
+          let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0, size <= 64 * 1024 * 1024,
+          let data = try? Data(contentsOf: url),
+          let source = CGImageSourceCreateWithData(data as CFData, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+          image.width <= 4096, image.height <= 4096,
+          let context = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+            bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else {
+        emit(["error": "Screenshot PNG is outside owned bounds or cannot be decoded"]); return
+    }
+    context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height)))
+    guard let bytes = context.data?.assumingMemoryBound(to: UInt8.self) else { emit(["error": "PNG pixels unavailable"]); return }
+    // Exclude title chrome, outer shadow and footer. Only sample the rendered body.
+    let x = image.width * 6 / 100, y = image.height * 20 / 100
+    let width = image.width * 88 / 100, height = image.height * 60 / 100
+    let step = max(1, Int(ceil(sqrt(Double(width * height) / 262144.0))))
+    var colors = [UInt32: Int](), samples = 0
+    for row in stride(from: y, to: y + height, by: step) {
+        for column in stride(from: x, to: x + width, by: step) {
+            let offset = (row * image.width + column) * 4
+            let color = UInt32(bytes[offset]) << 16 | UInt32(bytes[offset + 1]) << 8 | UInt32(bytes[offset + 2])
+            colors[color, default: 0] += 1; samples += 1
         }
     }
-    for window in axWindows { visit(window, 0) }
-    result["axReadable"] = !axWindows.isEmpty
-    result["axNodes"] = nodes
-    result["axTruncated"] = truncated
-    return result
+    emit(["width": image.width, "height": image.height, "bodyCrop": ["x": x, "y": y, "width": width, "height": height],
+          "sampledPixels": samples, "distinctColors": colors.count,
+          "nonBackgroundSamples": samples - (colors.values.max() ?? 0), "chromeExcluded": true])
 }
 
 func tick() {
@@ -105,9 +231,7 @@ case "inventory" where args.count == 1:
     emit(["running": NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).map(appIdentity)])
 case "launch" where args.count == 2:
     let url = URL(fileURLWithPath: args[1])
-    let expected = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Applications/Creator Hub.app")
-    guard canonical(url) == canonical(expected),
+    guard ciScope(), canonical(url) == canonical(installedURL()),
           Bundle(url: url)?.bundleIdentifier == bundleID,
           NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty else {
         emit(["error": "Refusing non-installed path or existing unowned Hub process"])
@@ -138,7 +262,14 @@ case "snapshot" where args.count == 4:
         exit(0)
     }
     emit(windowSnapshot(app))
+case "test-terms-checkbox", "test-terms-accept":
+    guard ciScope(true) else { emit(["error": "Synthetic terms require explicitly opted-in hosted CI"]); exit(0) }
+    guard let app = target() else { emit(["error": "Synthetic terms PID/bundle/executable ownership mismatch"]); exit(0) }
+    pressSyntheticTerms(app, args[0])
+case "pixels" where args.count == 2:
+    imagePixels(args[1])
 case "quit" where args.count == 4:
+    guard ciScope() else { emit(["error": "Normal owned quit requires exact hosted CI"]); exit(0) }
     // If the exact owned PID has already exited, there is nothing to terminate.
     if let pid = Int32(args[1]), NSRunningApplication(processIdentifier: pid) == nil {
         emit(["exited": true, "alreadyExited": true, "forceKillPerformed": false])
@@ -153,5 +284,5 @@ case "quit" where args.count == 4:
     while !app.isTerminated && Date() < end { tick() }
     emit(["normalQuitRequested": requested, "exited": app.isTerminated, "forceKillPerformed": false])
 default:
-    emit(["error": "Expected probe, inventory, launch APP, or snapshot/quit PID APP EXECUTABLE"])
+    emit(["error": "Expected probe/inventory, launch APP, snapshot/quit/test-terms-* PID APP EXECUTABLE, or pixels OWNED_PNG"])
 }

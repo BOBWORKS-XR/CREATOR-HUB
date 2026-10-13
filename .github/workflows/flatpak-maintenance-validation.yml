@@ -1,12 +1,6 @@
 name: Experimental Flatpak maintenance validation (never release-ready)
 
 on:
-  pull_request:
-    paths:
-      - scripts/flatpak-native-smoke.cjs
-      - scripts/flatpak-native-smoke.test.cjs
-      - .github/workflows/flatpak-maintenance-validation.yml
-      - docs/FLATPAK-NATIVE-VALIDATION.md
   workflow_dispatch:
     inputs:
       source_run:

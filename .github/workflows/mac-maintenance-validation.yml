@@ -1,13 +1,6 @@
 name: macOS 0.1.13 bounded maintenance validation
 
 on:
-  pull_request:
-    paths:
-      - scripts/native-mac-maintenance-smoke.cjs
-      - scripts/native-mac-maintenance-smoke.test.cjs
-      - scripts/native-mac-window.swift
-      - .github/workflows/mac-maintenance-validation.yml
-      - docs/MAC-MAINTENANCE-VALIDATION.md
   workflow_dispatch:
     inputs:
       candidate_run_id:

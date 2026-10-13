@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomBytes } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { gzipSync } = require('node:zlib');
 const { generate, parseArgs, parseMetadata, manifest, sha256, FINISH_ARGS } = require('./flatpak-package.cjs');
@@ -47,7 +48,7 @@ function tarFixture(entries) {
 import base64, io, json, sys, tarfile
 output = io.BytesIO()
 with tarfile.open(fileobj=output, mode='w', format=tarfile.PAX_FORMAT) as archive:
-    for item in json.loads(sys.argv[1]):
+    for item in json.load(sys.stdin):
         member = tarfile.TarInfo(item['name'])
         member.mode = item.get('mode', 0o644)
         data = base64.b64decode(item.get('data', ''))
@@ -59,7 +60,7 @@ with tarfile.open(fileobj=output, mode='w', format=tarfile.PAX_FORMAT) as archiv
         member.size = len(data)
         archive.addfile(member, io.BytesIO(data) if kind == 'file' else None)
 sys.stdout.buffer.write(output.getvalue())
-`, JSON.stringify(entries)], { maxBuffer: 2 * 1024 * 1024, windowsHide: true });
+`], { input: JSON.stringify(entries), maxBuffer: 8 * 1024 * 1024, windowsHide: true });
 }
 
 function inspect(data) {
@@ -102,9 +103,16 @@ function setup(t) {
   const calls = [];
   const run = (tool, args, opts) => {
     if (tool !== 'dpkg-deb') return execFileSync(tool, args, opts);
-    calls.push({ args, input: opts.input });
+    assert.equal(opts.input, undefined, 'DEB bytes must not be piped to dpkg-deb');
+    assert.deepEqual(opts.stdio, ['ignore', 'pipe', 'pipe']);
+    const snapshot = args.at(-1);
+    assert.notEqual(snapshot, deb, 'Never parse the mutable original filename');
+    assert.ok(path.isAbsolute(snapshot));
+    assert.equal(fs.lstatSync(snapshot).isSymbolicLink(), false);
+    const bytes = fs.readFileSync(snapshot);
+    calls.push({ args, input: opts.input, bytes });
     if (args[0] === '--show') return Buffer.from('creator-hub\n0.1.13\namd64\n');
-    assert.deepEqual(args, ['--fsys-tarfile', '-']);
+    assert.deepEqual(args, ['--fsys-tarfile', snapshot]);
     return data;
   };
   return { options, native, data, run, calls };
@@ -146,8 +154,10 @@ test('exact snapshot, resources, executable and modes survive deterministic repa
   assert.equal(receipt.native.sha256, fixture.options.sha256);
   assert.deepEqual(fs.readFileSync(path.join(fixture.options.output, 'native.deb')), fixture.native);
   assert.equal(fixture.calls.length, 2);
-  for (const call of fixture.calls) assert.deepEqual(call.input, fixture.native);
-  assert.equal(fixture.calls[0].args.at(-1), '-');
+  for (const call of fixture.calls) assert.deepEqual(call.bytes, fixture.native);
+  const snapshot = fixture.calls[0].args.at(-1);
+  assert.equal(fixture.calls[1].args.at(-1), snapshot);
+  assert.equal(fs.existsSync(path.dirname(snapshot)), false, 'Private parser snapshot cleaned after success');
   const inventory = JSON.parse(fs.readFileSync(path.join(fixture.options.output, 'inventory.json')));
   const executable = inventory.entries.find(entry => entry.path === 'bin/creator-hub');
   assert.equal(executable.mode, 0o751);
@@ -195,6 +205,79 @@ test('parser failures and malformed DEB metadata cannot emit a completed package
   assert.throws(() => generate(fixture.options, { run: () => Buffer.from('other\n0.1.13\namd64\n') }));
   assert.equal(fs.existsSync(fixture.options.output), false);
 });
+
+test('both dpkg parsers receive a sealed hash-verified snapshot with stdin closed', t => {
+  const fixture = setup(t);
+  const run = (tool, args, options) => {
+    if (tool === 'dpkg-deb') {
+      const snapshot = args.at(-1);
+      assert.equal(options.input, undefined);
+      assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
+      assert.deepEqual(fs.readFileSync(snapshot), fixture.native);
+      assert.equal(path.dirname(path.dirname(snapshot)), path.dirname(fixture.options.output));
+      if (process.platform !== 'win32') {
+        assert.equal(fs.statSync(snapshot).mode & 0o777, 0o400);
+        assert.equal(fs.statSync(path.dirname(snapshot)).mode & 0o777, 0o500);
+      }
+    }
+    return fixture.run(tool, args, options);
+  };
+  generate(fixture.options, { run });
+  assert.equal(fixture.calls.length, 2);
+  assert.equal(fs.existsSync(path.dirname(fixture.calls[0].args.at(-1))), false);
+});
+
+test('changing the sealed snapshot fails its post-parser hash before another parser or output', t => {
+  const fixture = setup(t);
+  let snapshot;
+  let calls = 0;
+  const run = (tool, args) => {
+    assert.equal(tool, 'dpkg-deb');
+    assert.equal(args[0], '--show');
+    calls++;
+    snapshot = args.at(-1);
+    fs.chmodSync(snapshot, 0o600);
+    fs.writeFileSync(snapshot, Buffer.alloc(fixture.native.length));
+    return Buffer.from('creator-hub\n0.1.13\namd64\n');
+  };
+  assert.throws(() => generate(fixture.options, { run }), /Hashed native parser snapshot changed/);
+  assert.equal(calls, 1);
+  assert.equal(fs.existsSync(fixture.options.output), false);
+  assert.equal(fs.existsSync(path.dirname(snapshot)), false);
+  assert.deepEqual(fs.readFileSync(fixture.options.deb), fixture.native);
+});
+
+for (const action of ['--show', '--fsys-tarfile']) {
+  test(`parser error ${action} retains command/stderr and cleans snapshot without publishing bytes`, t => {
+    const fixture = setup(t);
+    let snapshot;
+    const fault = Object.assign(new Error('original parser fault'), {
+      code: 'EPIPE', status: 2, stderr: Buffer.from('specific dpkg diagnostic\n' + 's'.repeat(20000)),
+      stdout: Buffer.from('BINARY_STDOUT_MUST_NOT_BE_LOGGED'),
+    });
+    const run = (tool, args, options) => {
+      if (tool === 'dpkg-deb' && args[0] === action) {
+        snapshot = args.at(-1);
+        throw fault;
+      }
+      return fixture.run(tool, args, options);
+    };
+    assert.throws(() => generate(fixture.options, { run }), error => {
+      assert.equal(error, fault);
+      assert.equal(error.code, 'EPIPE');
+      assert.equal(error.status, 2);
+      assert.match(error.message, /dpkg-deb/);
+      assert.ok(error.message.includes(action));
+      assert.match(error.message, /original parser fault/);
+      assert.match(error.message, /specific dpkg diagnostic/);
+      assert.equal(error.message.includes('BINARY_STDOUT_MUST_NOT_BE_LOGGED'), false);
+      assert.ok(error.message.length < 12000, 'Bounded report diagnostics');
+      return true;
+    });
+    assert.equal(fs.existsSync(fixture.options.output), false);
+    assert.equal(fs.existsSync(path.dirname(snapshot)), false);
+  });
+}
 
 test('changing the input filename after hashing cannot replace the parsed/output snapshot', t => {
   const fixture = setup(t);
@@ -385,9 +468,13 @@ test('real dpkg-deb integration on Linux or an explicitly selected existing WSL 
   skip: process.platform !== 'linux' && !process.env.FLATPAK_TEST_WSL_DISTRO,
 }, t => {
   const fixture = setup(t);
-  const run = (tool, args, options) => tool === 'dpkg-deb' && process.platform === 'win32'
-    ? execFileSync('wsl.exe', ['-d', process.env.FLATPAK_TEST_WSL_DISTRO, '--exec', tool, ...args], options)
-    : execFileSync(tool, args, options);
+  const run = (tool, args, options) => {
+    if (tool !== 'dpkg-deb' || process.platform !== 'win32') return execFileSync(tool, args, options);
+    const snapshot = execFileSync('wsl.exe', ['-d', process.env.FLATPAK_TEST_WSL_DISTRO,
+      '--exec', 'wslpath', '-u', args.at(-1)], { encoding: 'utf8', windowsHide: true }).trim();
+    return execFileSync('wsl.exe', ['-d', process.env.FLATPAK_TEST_WSL_DISTRO,
+      '--exec', tool, ...args.slice(0, -1), snapshot], options);
+  };
   const receipt = generate(fixture.options, { run });
   assert.equal(receipt.native.package, 'creator-hub');
   assert.equal(receipt.releaseReady, false);
@@ -406,4 +493,48 @@ test('real dpkg-deb integration on Linux or an explicitly selected existing WSL 
     linuxRun('desktop-file-validate', [linuxPath(path.join(fixture.options.output, `${ID}.desktop`))]);
     linuxRun('appstreamcli', ['validate', '--no-net', linuxPath(path.join(fixture.options.output, `${ID}.metainfo.xml`))]);
   }
+});
+
+test('disposable hosted Linux automatically parses a real multi-megabyte DEB without stdin EPIPE', {
+  skip: process.platform !== 'linux' || process.env.GITHUB_ACTIONS !== 'true'
+    || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Linux',
+}, t => {
+  // Existing CI supplies dpkg-deb/Python. Missing tools fail; this test never provisions or installs.
+  execFileSync('dpkg-deb', ['--version'], { timeout: 30000 });
+  const root = scopedTemp(t);
+  const resource = randomBytes(2 * 1024 * 1024);
+  resource[0] = 0;
+  const data = tarFixture([...members(), file('usr/lib/Creator Hub/pipe-regression.bin', resource, 0o640)]);
+  const native = debFixture(data);
+  assert.ok(native.length > 1024 * 1024, 'Incompressible DEB must exceed ordinary pipe buffering');
+  const deb = path.join(root, 'synthetic-013-amd64.deb');
+  fs.writeFileSync(deb, native);
+  const output = path.join(root, 'generated');
+  const calls = [];
+  const run = (tool, args, options) => {
+    if (tool === 'dpkg-deb') {
+      assert.equal(options.input, undefined);
+      assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
+      assert.notEqual(args.at(-1), deb);
+      assert.deepEqual(fs.readFileSync(args.at(-1)), native);
+      calls.push({ args, snapshot: args.at(-1) });
+      if (args[0] === '--show') fs.writeFileSync(deb, 'original filename changed after hashing');
+    }
+    return execFileSync(tool, args, options);
+  };
+  const receipt = generate({ deb, sha256: sha256(native), output }, { run });
+  assert.equal(receipt.releaseReady, false);
+  assert.equal(receipt.native.package, 'creator-hub');
+  assert.equal(receipt.native.version, '0.1.13');
+  assert.equal(receipt.native.architecture, 'amd64');
+  assert.equal(receipt.native.sha256, sha256(native));
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].snapshot, calls[1].snapshot);
+  assert.equal(fs.existsSync(path.dirname(calls[0].snapshot)), false);
+  assert.deepEqual(fs.readFileSync(path.join(output, 'native.deb')), native);
+  const inventory = JSON.parse(fs.readFileSync(path.join(output, 'inventory.json')));
+  const savedResource = inventory.entries.find(entry => entry.path === 'lib/Creator Hub/pipe-regression.bin');
+  assert.equal(savedResource.sha256, sha256(resource));
+  assert.equal(savedResource.byteLength, resource.length);
+  assert.equal(savedResource.mode, 0o640);
 });
