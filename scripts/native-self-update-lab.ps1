@@ -30,6 +30,13 @@ function Resolve-LabBaseline([string]$Path) {
     return $full
 }
 
+function Resolve-LabNode {
+    # Application lookup can return several PATH matches; use the first, not a joined array.
+    $matches = @(Get-Command node.exe -CommandType Application)
+    if (-not $matches.Count) { throw 'Node executable unavailable.' }
+    return Resolve-LabFile $matches[0].Source
+}
+
 function New-LabStartInfo([string]$Executable, [string[]]$Arguments, [string]$ProxyUrl = '') {
     $info = [Diagnostics.ProcessStartInfo]::new($Executable)
     $info.UseShellExecute = $false
@@ -281,7 +288,7 @@ try {
     $phase = 'driver-path'
     $driverPath = Resolve-LabFile (Join-Path $PSScriptRoot 'native-self-update-smoke.cjs')
     $phase = 'node-path'
-    $nodePath = Resolve-LabFile (Get-Command node.exe -CommandType Application).Source
+    $nodePath = Resolve-LabNode
     $phase = 'pwsh-path'
     $pwshPath = Resolve-LabFile (Join-Path $PSHOME 'pwsh.exe')
     $phase = 'validator-start'

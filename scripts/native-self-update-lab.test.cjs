@@ -24,7 +24,7 @@ function powershell(command, env = process.env) {
 
 function isolatedFunctions(names, body) {
   // Parse/extract only whitelisted pure or mocked functions; never execute the script body.
-  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure'].includes(name)));
+  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Resolve-LabNode', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure'].includes(name)));
   const result = powershell(`$ErrorActionPreference='Stop'; $PSScriptRoot='${__dirname.replaceAll("'", "''")}'; $tokens=$null; $errors=$null;
     $ast=[System.Management.Automation.Language.Parser]::ParseFile('${helper.replaceAll("'", "''")}',[ref]$tokens,[ref]$errors);
     foreach ($name in @(${names.map(name => `'${name}'`).join(',')})) {
@@ -182,6 +182,20 @@ test('isolated child environment strips credentials/bypass, scopes loopback and 
     }
     'environment-preserved'`);
   assert.equal(output, 'environment-preserved');
+});
+
+test('Node PATH lookup validates only its first application match and refuses missing/linked input', { skip: !hasPwsh }, () => {
+  const output = isolatedFunctions(['Resolve-LabNode'], `
+    $script:matches=@([pscustomobject]@{Source='C:\\first\\node.exe'},[pscustomobject]@{Source='C:\\second\\node.exe'});
+    $script:checked=[Collections.Generic.List[string]]::new();
+    function Get-Command { param($Name,$CommandType); if ($Name -cne 'node.exe' -or $CommandType -cne 'Application') { throw 'Wrong lookup' }; return $script:matches }
+    function Resolve-LabFile($Path) { $script:checked.Add($Path); if ($Path -cne 'C:\\first\\node.exe') { throw 'Invalid/linked path' }; return $Path }
+    if ((Resolve-LabNode) -cne 'C:\\first\\node.exe' -or $script:checked.Count -ne 1) { throw 'Joined or wrong Node path' }
+    $script:matches=@(); $refused=$false; try { [void](Resolve-LabNode) } catch { $refused=$true }; if (-not $refused -or $script:checked.Count -ne 1) { throw 'Missing Node admitted' }
+    $script:matches=@([pscustomobject]@{Source='C:\\linked\\node.exe'},[pscustomobject]@{Source='C:\\first\\node.exe'});
+    $refused=$false; try { [void](Resolve-LabNode) } catch { $refused=$true }; if (-not $refused -or $script:checked.Count -ne 2) { throw 'Invalid first path fell back' }
+    'first-node-path-validated'`);
+  assert.equal(output, 'first-node-path-validated');
 });
 
 test('mocked Root cleanup preserves unrelated trust, is idempotent and refuses foreign/private entries', { skip: !hasPwsh }, () => {

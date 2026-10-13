@@ -70,7 +70,7 @@ jobs:
       - name: Unit refusal and lifecycle checks
         run: node --test scripts/native-self-update-lab.test.cjs scripts/self-update-lab-feed.test.cjs scripts/self-update-lab-target.test.cjs
       - name: Actual old-app signed update, native cancellation, restart and managed reconnect
-        # Safe phase diagnostics identify harness failures without logging TLS control material.
+        # Select/validate one Node PATH match; never join multiple installations into a path.
         shell: pwsh
         run: |
           ./scripts/native-self-update-lab.ps1 -ContractPath (Join-Path $PWD artifacts/signed-update-lab/lab-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/signed-update-lab/baseline.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/signed-update-lab/lifecycle-public-metadata.jsonl
