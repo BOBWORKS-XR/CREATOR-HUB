@@ -31,6 +31,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CREATOR_MCP_HOST_WRITABLE");
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
+            "usage_terms_status",
+            "accept_usage_terms",
+            "hub_preferences_status",
+            "set_hub_preference",
             "open_resource",
             "open_plugins_website",
             "community_catalogue",

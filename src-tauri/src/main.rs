@@ -22,9 +22,11 @@ mod mcp_runtime;
 mod platform;
 #[path = "../../native/plugins_retirement.rs"]
 mod plugins_retirement;
+mod preferences;
 mod projects;
 mod self_update;
 mod update_target;
+mod usage_terms;
 use catalog::AppId;
 use tauri::{Emitter, Manager as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -289,7 +291,7 @@ fn open_resource(resource: String) -> Result<(), String> {
 }
 
 fn shell_initialization(shell_key: &str) -> String {
-    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); }}", shell_key, env!("CARGO_PKG_VERSION"))
+    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); Object.defineProperty(window, '__CREATOR_HUB_TERMS_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_PREFERENCES_PROTOCOL__', {{value: 1}}); }}", shell_key, env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(target_os = "linux")]
@@ -327,6 +329,10 @@ fn main() {
     let shell_key: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
     let initialize = shell_initialization(&shell_key);
     let commands: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        usage_terms::usage_terms_status,
+        usage_terms::accept_usage_terms,
+        preferences::hub_preferences_status,
+        preferences::set_hub_preference,
         plugins_retirement::open_plugins_website,
         open_resource,
         community_catalogue,
@@ -428,6 +434,20 @@ mod tests {
             "'__CREATOR_HUB_VERSION__', {{value: '{}'}}",
             env!("CARGO_PKG_VERSION")
         )));
+    }
+
+    #[test]
+    fn native_persistence_protocols_keep_top_window_shell_authority() {
+        let script = shell_initialization("test-key");
+        assert!(script.starts_with("if(window === window.top) {"));
+        assert!(script.contains("'__CREATOR_SHELL_KEY__', {value: 'test-key', configurable: true}"));
+        for property in [
+            "__CREATOR_HUB_TERMS_PROTOCOL__",
+            "__CREATOR_HUB_PREFERENCES_PROTOCOL__",
+        ] {
+            assert!(script.contains(&format!("'{property}', {{value: 1}}")));
+        }
+        assert!(script.ends_with(" }"));
     }
 
     #[test]
