@@ -82,6 +82,19 @@ Primary contracts: [Apple AX objects](https://developer.apple.com/documentation/
 [kernel start stamps](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info.h),
 and [kernel process paths](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c).
 
+## SDK Compatibility Failure
+
+Run `38463917232` failed compilation on both Mac architectures before any AX
+calls. The Intel SDK 15.5 could not import `PROC_PIDPATHINFO_MAXSIZE` and did not
+define `kAXSheetsAttribute`; that run remains failed, not native acceptance.
+The path buffer now uses Apple's exact 4096-byte contract (`4 * MAXPATHLEN`,
+`MAXPATHLEN = PATH_MAX = 1024`), matching `native/host_parent_macos.rs`, with
+returned-length and NUL checks. See [XNU path limits](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/syslimits.h).
+Traversal uses public [AXChildren](https://developer.apple.com/documentation/applicationservices/kaxchildrenattribute)
+and [AXSheet role](https://developer.apple.com/documentation/applicationservices/kaxsheetrole),
+not an invented sheets attribute. Native-dialog detection and close refusal,
+traversal bounds, ownership checks and permission policy are unchanged.
+
 ## Tests and Remaining Gates
 
 ```sh

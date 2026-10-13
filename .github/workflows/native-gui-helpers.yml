@@ -1,6 +1,9 @@
 name: Native owned GUI helpers (not product acceptance)
 on:
   workflow_dispatch:
+  push:
+    branches: [validation/owned-gui-014]
+    paths: ['scripts/native-macos-window*', 'scripts/native-unix-window*', '.github/workflows/native-gui-helpers.yml']
   pull_request:
     paths:
       - 'scripts/native-macos-window*'

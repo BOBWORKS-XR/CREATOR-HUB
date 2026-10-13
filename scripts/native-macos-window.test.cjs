@@ -43,6 +43,17 @@ test('window binding and traversal stay explicit and bounded', () => {
   assert.doesNotMatch(hitTest, /kAXChildrenAttribute|emit\(/);
 });
 
+test('SDK compatibility uses the exact kernel path bound and public AX sheet hierarchy', () => {
+  assert.match(source, /let processPathBufferBytes = 4096\b/);
+  assert.match(source, /\[CChar\]\(repeating: 0, count: processPathBufferBytes\)/);
+  assert.match(source, /length > 0, Int\(length\) < path.count, path\[Int\(length\)\] == 0/);
+  assert.doesNotMatch(source, /\bPROC_PIDPATHINFO_MAXSIZE\b|\bkAXSheetsAttribute\b|"AXSheets"/);
+  assert.match(source, /let descendants = try children\(item, kAXChildrenAttribute\)\s*for \(index, child\) in descendants.enumerated\(\)/);
+  assert.match(source, /let nativeDialog = !inWeb && \(role == kAXSheetRole \|\| attribute\(item, kAXSubroleAttribute\) as\? String == "AXDialog"\)/);
+  assert.match(source, /hasDialog = hasDialog \|\| nativeDialog/);
+  assert.match(source, /buttons.count == 1, !observed.hasDialog/);
+});
+
 before(() => {
   if (!nativeMac) return;
   scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-macos-window-tests-'));

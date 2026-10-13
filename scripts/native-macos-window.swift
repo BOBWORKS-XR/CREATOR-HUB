@@ -190,6 +190,8 @@ import Darwin
 let allowedBundles = ["com.creatorworks.hub", "com.creatorworks.unitymcp.preview", "com.creatorworks.projectsetup"]
 let consentLabels = Set(["Enable MCP controls", "Open read-only preview", "Open in Hub", "Not now"])
 let maxImageBytes: UInt64 = 128 * 1024 * 1024
+// XNU: 4 * MAXPATHLEN, MAXPATHLEN = PATH_MAX = 1024; matches host_parent_macos.rs.
+let processPathBufferBytes = 4096
 
 func admission() throws {
     guard hostedScope(ProcessInfo.processInfo.environment, macOS: true) else { throw Refusal("hosted-ci-opt-in-required") }
@@ -272,9 +274,10 @@ func process(_ pid: Int32, appPath: String, executable: String, expectedHash: St
           info.pbi_start_tvsec > 0, info.pbi_start_tvusec < 1000000 else {
         throw Refusal("process-absent-or-foreign")
     }
-    var path = [CChar](repeating: 0, count: Int(PROC_PIDPATHINFO_MAXSIZE))
+    var path = [CChar](repeating: 0, count: processPathBufferBytes)
     let length = path.withUnsafeMutableBytes { proc_pidpath(pid, $0.baseAddress, UInt32($0.count)) }
-    guard length > 0, String(cString: path) == executable else { throw Refusal("kernel-executable-path-unverified") }
+    guard length > 0, Int(length) < path.count, path[Int(length)] == 0,
+          String(cString: path) == executable else { throw Refusal("kernel-executable-path-unverified") }
     guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated,
           app.isFinishedLaunching else { throw Refusal("native-app-not-ready") }
     guard app.bundleIdentifier == bundle else { throw Refusal("native-bundle-id-unverified") }
@@ -440,13 +443,14 @@ func observe(_ owner: Owner, controls: Bool = true, allowGone: Bool = false) thr
         seen.append(item); try axPID(item, identity.pid)
         guard let role = attribute(item, kAXRoleAttribute) as? String else { throw Refusal("ax-role-unreadable") }
         let inWeb = web || role == "AXWebArea"
-        let nativeDialog = !inWeb && (role == "AXSheet" || attribute(item, kAXSubroleAttribute) as? String == "AXDialog")
+        let nativeDialog = !inWeb && (role == kAXSheetRole || attribute(item, kAXSubroleAttribute) as? String == "AXDialog")
         hasDialog = hasDialog || nativeDialog
         let scope = nativeDialog ? path : dialog
         if role == kAXButtonRole, let title = attribute(item, kAXTitleAttribute) as? String, consentLabels.contains(title) {
             try append(item, path: path, dialog: inWeb ? nil : scope, title: title)
         }
-        let descendants = try children(item, kAXChildrenAttribute) + children(item, kAXSheetsAttribute)
+        // Public AXChildren includes contained sheets; identify them by kAXSheetRole.
+        let descendants = try children(item, kAXChildrenAttribute)
         for (index, child) in descendants.enumerated() { try visit(child, depth + 1, path + "/" + String(index), scope, inWeb) }
     }
     try visit(axWindow, 0, "window", nil, false)
