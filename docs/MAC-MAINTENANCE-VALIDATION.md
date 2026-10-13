@@ -178,6 +178,42 @@ preference failures. The addon grants no OS approval and changes no policy;
 the actual quarantined per-app approval flow remains unverified here. Optional
 native Terms-file read/hash capture is not added by this preference-only addon.
 
+## Captured Intel AX Classifier Correction
+
+In [Mac probe 38427551219](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38427551219),
+the X64 fresh relaunch snapshot for PID `2135` retained one empty Terms-labelled
+`AXGroup`, but no Terms checkbox or Continue button. It also contained the MCP
+WebArea/body and one enabled auto-download checkbox at `0`. The prior classifier
+called this `terms` from the group title alone and skipped the relaunch PNG.
+That classification is not proof that the visible Terms dialog reappeared.
+
+The corrected Node classifier and Swift preference guard use the same rule:
+exactly one `AXCheckBox` with the full Terms checkbox title and exactly one
+`AXButton` titled `Accept and continue` establish Terms controls. Partial,
+ambiguous, wrong-role or near-match controls remain unready/refused; Terms text
+outside a group without the complete controls also remains unready. A labelled
+group alone can establish neither consent nor a body. It is tolerated only with
+the MCP WebArea/body and one enabled exact auto-download checkbox at `0` or `1`.
+Real Terms controls still prevent a preference press, even with background body
+nodes present. No pixel, PID/window identity or permission gate is relaxed.
+
+Raw snapshots retain the group; no nodes are filtered out of native reports.
+The inline frozen regression copies the relevant native nodes verbatim and
+records full-snapshot SHA-256
+`bbf2668c8ab0bcb27d47490f969c5d8c6fcbca6d2d81a2c66bd033fbd176fc37`.
+The ordinary owned relaunch body PNG must now be captured and pass the existing
+pixel gate before persistence can be reported. This corrected native capture
+and the updated Swift helper still require execution on Mac CI; local fixture
+replay does not create a new native acceptance result. Local Node 24 checks:
+**112 tests passed, 0 failed, 0 skipped**, including 14 classifier regressions.
+
+The X64 manual lane's original old-12 screenshot was viewed: its sampled body
+crop is white, with one color and zero non-background samples. Its first failure
+at `synthetic-terms-0.1.12` is preserved, target 13 was not reached, and the cause
+remains unknown. This minimal correction adds no paint delay, screenshot retry
+or late-success promotion. All original reports, Gatekeeper rejections, old-12
+minimum-OS blockers, release holds and artifact pins remain unchanged.
+
 ## Preservation and GUI Boundaries
 
 Opaque random byte sentinels cover Hub storage/adoption/projects, current and

@@ -147,6 +147,24 @@ func windowSnapshot(_ app: NSRunningApplication) -> [String: Any] {
     return result
 }
 
+func termsState(_ nodes: [[String: String]]) -> String {
+    let hints = nodes.filter {
+        let title = ($0[kAXTitleAttribute] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return title == termsCheckbox || title == termsContinue
+    }
+    if !hints.isEmpty {
+        let checks = hints.filter { $0[kAXRoleAttribute] == kAXCheckBoxRole && $0[kAXTitleAttribute] == termsCheckbox }
+        let buttons = hints.filter { $0[kAXRoleAttribute] == kAXButtonRole && $0[kAXTitleAttribute] == termsContinue }
+        return hints.count == 2 && checks.count == 1 && buttons.count == 1 ? "terms" : "incomplete"
+    }
+    let legal = try! NSRegularExpression(pattern: "terms of use|risk acknowledgement|accept and continue|agree to these terms", options: [.caseInsensitive])
+    return nodes.contains(where: { node in
+        if node[kAXRoleAttribute] == "AXGroup" { return false }
+        let text = [node[kAXTitleAttribute] ?? "", node[kAXDescriptionAttribute] ?? "", node[kAXValueAttribute] ?? ""].joined(separator: "\n")
+        return legal.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    }) ? "incomplete" : "none"
+}
+
 func pressSyntheticTerms(_ app: NSRunningApplication, _ action: String) {
     guard ciScope(true), AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(), app.isActive else {
         emit(["error": "Synthetic terms require exact hosted CI, existing capabilities and the active owned app"])
@@ -157,6 +175,7 @@ func pressSyntheticTerms(_ app: NSRunningApplication, _ action: String) {
     let security = try! NSRegularExpression(pattern: "privacy|security|permission|allow access|damaged|cannot be opened|unidentified developer", options: [.caseInsensitive])
     guard visibleWindows(app).count == 1, tree.windows == 1, !tree.truncated,
           tree.nodes.contains(where: { $0[kAXRoleAttribute] == "AXWebArea" }), text.contains(termsTitle),
+          termsState(tree.nodes) == "terms",
           security.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) == nil else {
         emit(["error": "Refusing incomplete/non-terms tree or possible security/privacy prompt"])
         return
@@ -207,7 +226,7 @@ func pressSyntheticAutoDownloadOff(_ app: NSRunningApplication) {
     let security = try! NSRegularExpression(pattern: "privacy|security|permission|allow access|damaged|cannot be opened|unidentified developer", options: [.caseInsensitive])
     guard visibleWindows(app).count == 1, tree.windows == 1, !tree.truncated,
           tree.nodes.contains(where: { $0[kAXRoleAttribute] == "AXWebArea" }),
-          text.contains("Creator Works MCP"), !text.contains(termsTitle),
+          text.contains("Creator Works MCP"), termsState(tree.nodes) == "none",
           security.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) == nil else {
         emit(["error": "Refusing incomplete/non-body tree or possible terms/security/privacy prompt"])
         return

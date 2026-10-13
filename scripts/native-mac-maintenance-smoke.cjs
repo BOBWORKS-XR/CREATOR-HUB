@@ -396,11 +396,38 @@ function verifySentinels(sentinels) {
   return sentinels.map(s => ({ label: s.label, sha256: s.sha256, unchanged: true }));
 }
 
+function termsState(snapshot) {
+  const nodes = snapshot.axNodes || [];
+  const hints = nodes.filter(n => [TERMS.checkbox, TERMS.continue].includes(n.AXTitle?.trim()));
+  if (hints.length) {
+    const checks = hints.filter(n => n.AXRole === 'AXCheckBox' && n.AXTitle === TERMS.checkbox);
+    const buttons = hints.filter(n => n.AXRole === 'AXButton' && n.AXTitle === TERMS.continue);
+    return hints.length === 2 && checks.length === 1 && buttons.length === 1 ? 'terms' : 'incomplete';
+  }
+  return nodes.some(n => n.AXRole !== 'AXGroup'
+    && /terms of use|risk acknowledgement|accept and continue|agree to these terms/i.test(
+      `${n.AXTitle || ''}\n${n.AXDescription || ''}\n${n.AXValue || ''}`)) ? 'incomplete' : 'none';
+}
+
+function hasTermsGroup(snapshot) {
+  return (snapshot.axNodes || []).some(n => n.AXRole === 'AXGroup'
+    && (n.AXTitle === TERMS.title || n.AXDescription === TERMS.title));
+}
+
 function bodyKind(snapshot) {
   const nodes = snapshot.axNodes || [];
+  const terms = termsState(snapshot);
+  if (terms === 'terms') return 'terms';
+  if (terms === 'incomplete') return 'chrome-or-unready';
   const text = nodes.map(n => `${n.AXTitle || ''}\n${n.AXValue || ''}`).join('\n');
-  if (text.includes(TERMS.title)) return 'terms';
-  return nodes.some(n => n.AXRole === 'AXWebArea') && /\bCreator Works MCP\b/.test(text) ? 'body' : 'chrome-or-unready';
+  if (!nodes.some(n => n.AXRole === 'AXWebArea') || !/\bCreator Works MCP\b/.test(text)) return 'chrome-or-unready';
+  // Intel WebKit can retain the closed dialog's empty labelled AXGroup.
+  if (hasTermsGroup(snapshot)) {
+    const preferences = nodes.filter(n => n.AXRole === 'AXCheckBox' && n.AXTitle === AUTO_DOWNLOAD);
+    if (preferences.length !== 1 || preferences[0].AXEnabled !== 'true'
+      || !['0', '1'].includes(preferences[0].AXValue)) return 'chrome-or-unready';
+  }
+  return 'body';
 }
 
 function validateBody(snapshot, kind) {
@@ -479,7 +506,10 @@ function guiBlockers(capability, snapshot, syntheticFreshTerms = false) {
       reasons.push('owned-AX-tree-unreadable-or-incomplete');
     }
     const text = JSON.stringify(snapshot.axNodes || []);
-    if (!syntheticFreshTerms && /terms of use|risk acknowledgement|accept and continue|agree to these terms/i.test(text)) {
+    const terms = termsState(snapshot);
+    if (terms === 'incomplete' || (terms === 'none' && hasTermsGroup(snapshot) && bodyKind(snapshot) !== 'body')) {
+      reasons.push('terms-controls-or-body-unready-no-interaction-performed');
+    } else if (!syntheticFreshTerms && terms === 'terms') {
       reasons.push('legal-acknowledgement-requires-human-no-acceptance-performed');
     }
     if (/privacy|security|permission|allow access|damaged|cannot be opened|unidentified developer/i.test(text)) {
@@ -806,6 +836,6 @@ module.exports = { BASELINES, BASELINE_SOURCE, CANDIDATE, TERMS, AUTO_DOWNLOAD, 
   options, guard, contained, noLinks, digest, validateBinding,
   parseLocalTree, verifyProductTree,
   validateSource, zipEntry, validateBundle, atLeast, sentinelFiles, seedSentinels, verifySentinels,
-  bodyKind, validateBody, termsControl, autoDownloadControl, preferenceSnapshot, preferenceReceipt,
+  termsState, bodyKind, validateBody, termsControl, autoDownloadControl, preferenceSnapshot, preferenceReceipt,
   validatePixels, guiBlockers, newReport, runLane };
 if (require.main === module) main().catch(error => { console.error(String(error.stack || error)); process.exitCode = 1; });

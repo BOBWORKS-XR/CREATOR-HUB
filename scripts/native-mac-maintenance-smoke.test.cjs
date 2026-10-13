@@ -225,6 +225,31 @@ const visible = { finishedLaunching: true, windows: [{ id: 123 }], axReadable: t
   axNodes: [{ AXRole: 'AXWebArea', AXDescription: 'Creator Hub' },
     { AXRole: 'AXStaticText', AXValue: 'Creator Works MCP' },
     { AXRole: 'AXCheckBox', AXTitle: mac.AUTO_DOWNLOAD, AXValue: '1', AXEnabled: 'true' }], axTruncated: false };
+function freezeFixture(value) {
+  if (value && typeof value === 'object') {
+    Object.values(value).forEach(freezeFixture);
+    Object.freeze(value);
+  }
+  return value;
+}
+// Relevant nodes copied verbatim; the complete raw snapshot remains in the original artifact.
+const intelRelaunchFixture = freezeFixture({
+  evidence: 'mac-maintenance-X64-fresh-38427551219/native-report.json launches[1].snapshot',
+  fullSnapshotSha256: 'bbf2668c8ab0bcb27d47490f969c5d8c6fcbca6d2d81a2c66bd033fbd176fc37',
+  snapshot: {
+    axNodes: [
+      { AXDescription: 'Creator Hub', AXEnabled: 'true', AXRole: 'AXWebArea', AXTitle: '', AXValue: '' },
+      { AXDescription: 'View Creator Works MCP', AXEnabled: 'true', AXRole: 'AXButton', AXTitle: 'View Creator Works MCP', AXValue: '' },
+      { AXDescription: '', AXEnabled: 'true', AXRole: 'AXCheckBox', AXTitle: 'Download verified updates automatically', AXValue: '0' },
+      { AXDescription: 'Terms of use and risk acknowledgement', AXEnabled: 'true', AXRole: 'AXGroup',
+        AXTitle: 'Terms of use and risk acknowledgement', AXValue: '' },
+    ],
+    axReadable: true, axTruncated: false, finishedLaunching: true, pid: 2135,
+    bundleIdentifier: 'com.creatorworks.hub', bundlePath: '/Users/runner/Applications/Creator Hub.app',
+    executablePath: '/Users/runner/Applications/Creator Hub.app/Contents/MacOS/creator-hub',
+    windows: [{ bounds: { Height: 580, Width: 940, X: 490, Y: 220 }, id: 41, title: 'Creator Hub - Development Preview' }],
+  },
+});
 function termsSnapshot(checked = false) {
   return { ...clone(visible), axNodes: [{ AXRole: 'AXWebArea', AXDescription: 'Creator Hub' },
     { AXRole: 'AXHeading', AXTitle: mac.TERMS.title },
@@ -233,10 +258,10 @@ function termsSnapshot(checked = false) {
 }
 const renderedPixels = { width: 940, height: 580, bodyCrop: { x: 56, y: 116, width: 827, height: 348 },
   sampledPixels: 71949, distinctColors: 128, nonBackgroundSamples: 8500, chromeExcluded: true };
-function operations(events) {
+function operations(events, renderedSnapshot = visible) {
   let current = null, pid = 100, accepted = false, checked = false, autoDownload = true, launched;
   const snapshot = () => {
-    const result = accepted ? clone(visible) : termsSnapshot(checked);
+    const result = accepted ? clone(renderedSnapshot) : termsSnapshot(checked);
     if (accepted) result.axNodes.find(n => n.AXTitle === mac.AUTO_DOWNLOAD).AXValue = autoDownload ? '1' : '0';
     return { ...result, ...launched };
   };
@@ -550,6 +575,106 @@ test('body inspection distinguishes actual observed terms, rendered MCP content 
   }
 });
 
+test('frozen actual Intel relaunch with only a stale Terms group and preference off is a body, without altering its raw nodes', () => {
+  const snapshot = intelRelaunchFixture.snapshot, before = JSON.stringify(snapshot);
+  assert.ok(Object.isFrozen(snapshot) && Object.isFrozen(snapshot.axNodes[3]));
+  assert.equal(mac.termsState(snapshot), 'none');
+  assert.equal(mac.bodyKind(snapshot), 'body');
+  assert.deepEqual(mac.guiBlockers(capability, snapshot), []);
+  assert.doesNotThrow(() => mac.preferenceSnapshot(snapshot, snapshot, '0'));
+  assert.equal(JSON.stringify(snapshot), before);
+  assert.equal(snapshot.axNodes[3].AXTitle, mac.TERMS.title);
+});
+
+test('Intel label-only relaunch reaches the unchanged body PNG gate and retains raw AX snapshots', async () => {
+  const events = [], ops = operations(events, intelRelaunchFixture.snapshot);
+  const report = await mac.runLane(mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' })), ops);
+  assert.equal(report.passed, true);
+  assert.equal(report.releaseReady, false);
+  assert.equal(report.effectivePreferencesTested, true);
+  assert.equal(report.termsPersistenceTested, true);
+  assert.deepEqual(report.launches[1].snapshot.axNodes, intelRelaunchFixture.snapshot.axNodes);
+  assert.ok(events.includes('capture:0.1.13-relaunch-body'));
+  assert.equal(report.launches[1].captures[0].screenshot, 'owned-gui-0.1.13-relaunch-body-102.png');
+  mac.validatePixels(report.launches[1].captures[0].pixels);
+  assert.equal(report.syntheticTerms.actions.length, 2);
+  assert.equal(report.syntheticPreference.actions.length, 1);
+});
+
+const partialTermsFaults = {
+  'checkbox without continue': nodes => { nodes.push(termsSnapshot().axNodes[2]); },
+  'continue without checkbox': nodes => { nodes.push(termsSnapshot().axNodes[3]); },
+  'ambiguous checkbox': nodes => { nodes.push(...termsSnapshot().axNodes.slice(2), termsSnapshot().axNodes[2]); },
+  'ambiguous continue': nodes => { nodes.push(...termsSnapshot().axNodes.slice(2), termsSnapshot().axNodes[3]); },
+  'wrong checkbox role': nodes => { const controls = termsSnapshot().axNodes.slice(2); controls[0].AXRole = 'AXButton'; nodes.push(...controls); },
+  'wrong continue role': nodes => { const controls = termsSnapshot().axNodes.slice(2); controls[1].AXRole = 'AXGroup'; nodes.push(...controls); },
+  'near-match checkbox title': nodes => { const controls = termsSnapshot().axNodes.slice(2); controls[0].AXTitle += ' '; nodes.push(...controls); },
+  'near-match continue title': nodes => { const controls = termsSnapshot().axNodes.slice(2); controls[1].AXTitle += ' '; nodes.push(...controls); },
+  'Terms heading without controls': nodes => { nodes.push(termsSnapshot().axNodes[1]); },
+};
+for (const [name, change] of Object.entries(partialTermsFaults)) {
+  test(`partial Terms refusal: ${name}, even with MCP and enabled auto-download behind the group`, async () => {
+    const snapshot = clone(intelRelaunchFixture.snapshot); change(snapshot.axNodes);
+    assert.equal(mac.termsState(snapshot), 'incomplete');
+    assert.equal(mac.bodyKind(snapshot), 'chrome-or-unready');
+    assert.throws(() => mac.validateBody(snapshot, 'body'));
+    assert.throws(() => mac.autoDownloadControl(snapshot, '0'));
+    assert.throws(() => mac.termsControl(snapshot, 'test-terms-checkbox'));
+    assert.ok(mac.guiBlockers(capability, snapshot, true).includes('terms-controls-or-body-unready-no-interaction-performed'));
+    const events = [], ops = operations(events, intelRelaunchFixture.snapshot), original = ops.snapshot;
+    ops.snapshot = () => {
+      const observed = original();
+      if (observed.pid === 102) change(observed.axNodes);
+      return observed;
+    };
+    const report = await mac.runLane(mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' })), ops);
+    assert.equal(report.status, 'blocked');
+    assert.equal(report.effectivePreferencesTested, false);
+    assert.equal(report.syntheticTerms.actions.length, 2);
+    assert.equal(report.syntheticPreference.actions.length, 1);
+    assert.equal(report.launches[1].captures.length, 0);
+    assert.equal(report.releaseReady, false);
+  });
+}
+
+test('the unique exact Terms controls still block body and preference actions despite an enabled background checkbox', () => {
+  const snapshot = clone(intelRelaunchFixture.snapshot);
+  snapshot.axNodes.push(...termsSnapshot().axNodes.slice(2));
+  assert.equal(mac.termsState(snapshot), 'terms');
+  assert.equal(mac.bodyKind(snapshot), 'terms');
+  assert.ok(mac.guiBlockers(capability, snapshot).includes('legal-acknowledgement-requires-human-no-acceptance-performed'));
+  assert.throws(() => mac.autoDownloadControl(snapshot, '0'));
+});
+
+test('a label-only group cannot establish a body without unique enabled preference state and MCP WebArea', () => {
+  for (const change of [
+    s => { s.axNodes = s.axNodes.filter(n => n.AXTitle !== mac.AUTO_DOWNLOAD); },
+    s => { s.axNodes.push(clone(s.axNodes[2])); },
+    s => { s.axNodes[2].AXEnabled = 'false'; },
+    s => { delete s.axNodes[2].AXValue; },
+    s => { s.axNodes[2].AXValue = '2'; },
+    s => { s.axNodes = s.axNodes.filter(n => n.AXRole !== 'AXWebArea'); },
+    s => { s.axNodes[1].AXTitle = 'Other app'; },
+  ]) {
+    const snapshot = clone(intelRelaunchFixture.snapshot); change(snapshot);
+    assert.equal(mac.bodyKind(snapshot), 'chrome-or-unready');
+    assert.throws(() => mac.validateBody(snapshot, 'body'));
+    assert.ok(mac.guiBlockers(capability, snapshot).includes('terms-controls-or-body-unready-no-interaction-performed'));
+  }
+});
+
+test('Intel label-only classification cannot promote a blank relaunch PNG to acceptance', async () => {
+  const events = [], ops = operations(events, intelRelaunchFixture.snapshot), original = ops.capture;
+  ops.capture = (launched, label, kind) => ({ ...original(launched, label, kind),
+    ...(label === '0.1.13-relaunch-body' ? { pixels: { ...renderedPixels, distinctColors: 1, nonBackgroundSamples: 0 } } : {}) });
+  const report = await mac.runLane(mac.newReport(mac.options({ ...environment(), CREATOR_MAC_LANE: 'fresh' })), ops);
+  assert.equal(report.status, 'failed');
+  assert.equal(report.failures[0].phase, 'rendered-body-0.1.13-relaunch');
+  assert.equal(report.effectivePreferencesTested, false);
+  assert.equal(report.termsPersistenceTested, false);
+  assert.equal(report.releaseReady, false);
+});
+
 test('body-only pixel evidence rejects blank, insufficient, misframed or unbounded PNG samples', () => {
   assert.doesNotThrow(() => mac.validatePixels(renderedPixels));
   for (const change of [{ width: 0 }, { height: 4097 }, { chromeExcluded: false }, { distinctColors: 1 },
@@ -740,5 +865,10 @@ test('Swift helper permits only guarded exact terms/target-13 preference AXPress
   assert.match(swift, /image\.height \* 60 \/ 100/);
   assert.match(swift, /AXUIElementSetMessagingTimeout\(element, 0\.25\)/);
   assert.match(swift, /\$0\[kAXRoleAttribute\] == "AXWebArea"/);
+  assert.match(swift, /func termsState\(_ nodes: \[\[String: String\]\]\) -> String/);
+  assert.match(swift, /hints\.count == 2 && checks\.count == 1 && buttons\.count == 1/);
+  assert.match(swift, /termsState\(tree\.nodes\) == "terms"/);
+  assert.match(swift, /termsState\(tree\.nodes\) == "none"/);
+  assert.doesNotMatch(swift, /!text\.contains\(termsTitle\)/);
   assert.doesNotMatch(swift, /forceTerminate|CGRequestScreenCaptureAccess|AXIsProcessTrustedWithOptions|AXUIElementSetAttributeValue|CGEvent|kill\(|evaluateJavaScript|osascript|tccutil|spctl/);
 });
