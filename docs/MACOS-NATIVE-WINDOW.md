@@ -11,7 +11,71 @@ Native commands require macOS, the matching `RUNNER_ARCH`, `GITHUB_ACTIONS=true`
 `GITHUB_REPOSITORY=BOBWORKS-XR/CREATOR-HUB`, and
 `CREATOR_MACOS_OWNED_GUI_TEST=1`. Admission precedes file/process/window inspection.
 These are environment admission checks, not cryptographic runner attestation.
-Existing AX trust is required; absence refuses without requesting permission.
+Existing AX trust is required for `identify`, `inspect`, `press`, and `close`;
+absence refuses without requesting permission. `availability` only reports the
+existing trust Boolean after the same CI/architecture admission.
+
+## Read-Only Availability Probe
+
+Before building a full GUI acceptance harness, the main-owned
+`.github/workflows/native-gui-helpers.yml` can collect this probe on its existing
+`macos-latest` and `macos-15-intel` matrix entries. No workflow change or dispatch
+is made by this sidecar. Leave GitHub's supplied runner/repository variables
+unchanged; only set the explicit helper opt-in. Compile the native branch, not
+the separate fixture branch:
+
+```sh
+set -euo pipefail
+CREATOR_MACOS_OWNED_GUI_TEST=1 node --test scripts/native-macos-window.test.cjs \
+  | tee "$RUNNER_TEMP/native-macos-window-tests-$RUNNER_ARCH.tap"
+/usr/bin/swiftc scripts/native-macos-window.swift -o "$RUNNER_TEMP/native-macos-window"
+CREATOR_MACOS_OWNED_GUI_TEST=1 "$RUNNER_TEMP/native-macos-window" availability \
+  > "$RUNNER_TEMP/native-macos-window-availability-$RUNNER_ARCH.json"
+cat "$RUNNER_TEMP/native-macos-window-availability-$RUNNER_ARCH.json"
+```
+
+Native binary path: `$RUNNER_TEMP/native-macos-window`. Exact probe command:
+`CREATOR_MACOS_OWNED_GUI_TEST=1 "$RUNNER_TEMP/native-macos-window" availability`.
+It takes no PID, app path, owner file, options, or standard-input fixture.
+The only native accessibility call in this branch is
+[Apple's AXIsProcessTrusted()](https://developer.apple.com/documentation/applicationservices/1460720-axisprocesstrusted),
+which returns the current process's trust state. No permission-request API,
+target/process/window inspection, activation, input, launch, TCC or Gatekeeper
+change is performed. It is not an action authorization or a trust-bypass switch.
+Every inspection/action command still checks trust independently.
+
+An admitted query exits 0 for either Boolean. Example shape, not observed Mac
+evidence:
+
+```json
+{"schemaVersion":1,"command":"availability","runnerArchitecture":"ARM64","accessibilityTrusted":false,"probeOnly":true,"targetInspectionPerformed":false,"actionAttempted":false,"permissionRequestsPerformed":false,"nativeGuiAccepted":false,"releaseReady":false}
+```
+
+`false` establishes that this helper invocation lacks the existing AX
+prerequisite: stop the AX GUI lane without prompting, granting trust or changing
+OS policy. `true` establishes only that prerequisite for this compiled helper;
+owned native app/window/control mapping and outcome acceptance remain untested.
+Do not transfer the result to a different binary, path, architecture or runner.
+Keep the same compiled binary for any later separately approved harness.
+Local/self-hosted, wrong repository/OS, absent opt-in, or mismatched architecture
+exit 2 before the query. Extra arguments also refuse before the query.
+
+For main's report/upload step, retain the two explicitly named TAP/JSON files
+above separately for `ARM64` and `X64`, including failures with an `always()`
+artifact step. Record source revision, runner image/architecture, native binary
+path/hash, compile/probe exit status and the unmodified Boolean; missing or
+refused evidence is unknown, never a successful false/true probe. TAP includes
+the actual native compilation diagnostic and, only under the real admitted
+environment plus opt-in, the native availability diagnostic. The test binary
+is temporary and deleted after tests; its trust result does not substitute for
+the separately compiled stable-path probe JSON. Upload only these helper
+reports, not profiles, app data, keys or account/settings material.
+
+All helper receipts, including fixtures and refusals, retain
+`releaseReady=false` and `nativeGuiAccepted=false`. Direct 0.1.14 native GUI
+acceptance remains TBD. The reported Linux Source/XRes fixture run
+`38469450169` and unchanged C44 Windows signed acceptance are separate lanes;
+neither establishes Mac AX availability or native product GUI acceptance.
 
 Compile on a Mac runner with its existing SDK:
 
@@ -107,6 +171,11 @@ frameworks/actions; fixture data cannot be injected into the native CLI.
 Fixtures cover PID/hash/start/inode/bundle drift, duplicates, missing/disabled/
 hidden controls, window mismatches, AX denial, truncation and post-action drift.
 Native admission tests deliberately refuse before any AX inspection or action.
+The native compile case runs on macOS without launching an app. The positive
+availability case requires the actual hosted CI environment, matching native
+architecture and explicit opt-in; it never fabricates successful admission.
+When actual trust is false it also confirms all four action/inspection commands
+refuse before reading a target. Fixture AX Booleans never prove native trust.
 
 Windows runs source-contract checks only and skips Swift/native cases. It is
 not Mac compilation or runtime proof. Intel and ARM Mac runners still need real

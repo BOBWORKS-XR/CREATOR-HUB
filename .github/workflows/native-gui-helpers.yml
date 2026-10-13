@@ -28,7 +28,33 @@ jobs:
           node-version: 24.17.0
       - name: Compile both Swift branches and test pure ownership/refusal cases
         if: runner.os == 'macOS'
-        run: node --test scripts/native-macos-window.test.cjs
+        env:
+          CREATOR_MACOS_OWNED_GUI_TEST: '1'
+        run: |
+          set -euo pipefail
+          node --test scripts/native-macos-window.test.cjs | tee "$RUNNER_TEMP/native-macos-window-tests-$RUNNER_ARCH.tap"
+      - name: Record actual AX availability without granting permissions or inspecting apps
+        if: runner.os == 'macOS'
+        env:
+          CREATOR_MACOS_OWNED_GUI_TEST: '1'
+        run: |
+          set -euo pipefail
+          /usr/bin/swiftc scripts/native-macos-window.swift -o "$RUNNER_TEMP/native-macos-window"
+          "$RUNNER_TEMP/native-macos-window" availability > "$RUNNER_TEMP/native-macos-window-availability-$RUNNER_ARCH.json"
+          shasum -a 256 "$RUNNER_TEMP/native-macos-window" > "$RUNNER_TEMP/native-macos-window-$RUNNER_ARCH.sha256"
+          printf 'source=%s\narchitecture=%s\n' "$GITHUB_SHA" "$RUNNER_ARCH" > "$RUNNER_TEMP/native-macos-window-$RUNNER_ARCH-source.txt"
+      - name: Retain only the Mac helper probe and test reports
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-owned-availability-${{ runner.arch }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/native-macos-window-tests-${{ runner.arch }}.tap
+            ${{ runner.temp }}/native-macos-window-availability-${{ runner.arch }}.json
+            ${{ runner.temp }}/native-macos-window-${{ runner.arch }}.sha256
+            ${{ runner.temp }}/native-macos-window-${{ runner.arch }}-source.txt
       - name: Test Linux ownership/refusal and the actual sealed-kernel fixture
         if: runner.os == 'Linux'
         env:

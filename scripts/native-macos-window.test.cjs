@@ -8,6 +8,11 @@ const { spawnSync } = require('node:child_process');
 const sourcePath = path.join(__dirname, 'native-macos-window.swift');
 const source = fs.readFileSync(sourcePath, 'utf8');
 const nativeMac = process.platform === 'darwin';
+const runnerArch = process.arch === 'arm64' ? 'ARM64' : process.arch === 'x64' ? 'X64' : null;
+const probeAdmitted = nativeMac && runnerArch !== null && process.env.RUNNER_ARCH === runnerArch
+  && process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted'
+  && process.env.RUNNER_OS === 'macOS' && process.env.GITHUB_REPOSITORY === 'BOBWORKS-XR/CREATOR-HUB'
+  && process.env.CREATOR_MACOS_OWNED_GUI_TEST === '1';
 let scratch, fixtureBinary, nativeBinary;
 
 test('native admission precedes all inspection and has no fixture dispatch', () => {
@@ -30,6 +35,38 @@ test('native actions have no permission grant, focus forcing, arbitrary click, o
   assert.match(source, /SHA256\(\)/);
   assert.match(source, /let after = try observe\(owner, controls: false, allowGone: true\)/);
   assert.match(source, /try validateIdentity\(owner, after.value, allowGone: true\)/);
+});
+
+test('availability is a target-free trust query after the unchanged hosted and architecture guards', () => {
+  const entry = source.slice(source.indexOf('func nativeMain()'));
+  const probe = entry.split('if args[0] == "availability" {')[1].split('if args[0] == "identify"')[0];
+  assert.match(entry, /try admission\(\)[\s\S]*?if args\[0\] == "availability"/);
+  assert.match(probe, /guard args.count == 1 else/);
+  assert.equal(probe.match(/AXIsProcessTrusted\(\)/g)?.length, 1);
+  assert.match(probe, /"targetInspectionPerformed": false/);
+  assert.match(probe, /"actionAttempted": false, "permissionRequestsPerformed": false/);
+  assert.match(probe, /return/);
+  assert.doesNotMatch(probe, /trustedAX|process\(|image\(|ownerFile|observe\(|cgWindows|AXUIElement|NSRunningApplication|CGWindow/);
+  assert.match(source, /#if arch\(arm64\)\s*guard ProcessInfo.processInfo.environment\["RUNNER_ARCH"\] == "ARM64"/);
+  assert.match(source, /#elseif arch\(x86_64\)\s*guard ProcessInfo.processInfo.environment\["RUNNER_ARCH"\] == "X64"/);
+  for (const [key, value] of [['GITHUB_ACTIONS', 'true'], ['RUNNER_ENVIRONMENT', 'github-hosted'],
+    ['RUNNER_OS', 'macOS'], ['GITHUB_REPOSITORY', 'BOBWORKS-XR/CREATOR-HUB'], ['CREATOR_MACOS_OWNED_GUI_TEST', '1']]) {
+    assert.ok(source.includes(`env["${key}"] == "${value}"`));
+  }
+});
+
+test('availability cannot authorize inspection or actions or expose a skip-trust option', () => {
+  assert.match(source, /func trustedAX\(\) throws \{\s*guard AXIsProcessTrusted\(\) else/);
+  assert.match(source, /if args\[0\] == "identify"[^\n]*\{\s*try trustedAX\(\)/);
+  assert.match(source, /args.count == \(args\[0\] == "press" \? 3 : 2\)[\s\S]*?try trustedAX\(\)\s*let owner = try ownerFile/);
+  assert.match(source, /try admission\(\); try trustedAX\(\)[\s\S]*?AXUIElementPerformAction/);
+  assert.doesNotMatch(source, /skip[-_]?trust|bypass[-_]?trust|allowUntrusted|AXMakeProcessTrusted|tccutil|spctl/i);
+});
+
+test('all helper receipts keep release and native GUI acceptance false, including non-Mac refusal', () => {
+  assert.match(source, /receipt\["releaseReady"\] = false/);
+  assert.match(source, /receipt\["nativeGuiAccepted"\] = false/);
+  assert.match(source, /#else\s*emit\(\["error": "native-macos-required", "actionAttempted": false\]\); exit\(2\)\s*#endif\s*$/);
 });
 
 test('window binding and traversal stay explicit and bounded', () => {
@@ -70,6 +107,44 @@ after(() => {
   assert.ok(path.basename(resolved).startsWith('creator-macos-window-tests-'));
   assert.equal(path.dirname(resolved), fs.realpathSync(os.tmpdir()));
   fs.rmSync(resolved, { recursive: true });
+});
+
+test('actual macOS SDK compiles separate native and fixture binaries without launching an app', { skip: !nativeMac }, t => {
+  assert.ok(fs.statSync(nativeBinary).size > 0);
+  assert.ok(fs.statSync(fixtureBinary).size > 0);
+  assert.notEqual(nativeBinary, fixtureBinary);
+  t.diagnostic(JSON.stringify({ nativeCompilationPassed: true, nativeBinary, fixtureBinary,
+    nativeGuiAccepted: false, releaseReady: false }));
+});
+
+test('actual admitted Mac CI availability reports existing trust without a target or action', { skip: !probeAdmitted }, t => {
+  // Never synthesize hosted-runner admission for a successful native trust query.
+  const result = spawnSync(nativeBinary, ['availability'], { env: process.env, encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message);
+  const receipt = JSON.parse(result.stdout);
+  assert.equal(receipt.schemaVersion, 1);
+  assert.equal(receipt.command, 'availability');
+  assert.equal(receipt.runnerArchitecture, runnerArch);
+  assert.equal(typeof receipt.accessibilityTrusted, 'boolean');
+  assert.equal(receipt.probeOnly, true);
+  for (const key of ['targetInspectionPerformed', 'actionAttempted', 'permissionRequestsPerformed', 'nativeGuiAccepted', 'releaseReady']) {
+    assert.equal(receipt[key], false, key);
+  }
+  assert.deepEqual(Object.keys(receipt).sort(), ['schemaVersion', 'command', 'runnerArchitecture', 'accessibilityTrusted', 'probeOnly',
+    'targetInspectionPerformed', 'actionAttempted', 'permissionRequestsPerformed', 'nativeGuiAccepted', 'releaseReady'].sort());
+  t.diagnostic(JSON.stringify({ nativeBinary, availability: receipt }));
+  if (!receipt.accessibilityTrusted) {
+    for (const args of [['identify', '42', '/unused.app', '/unused', 'a'.repeat(64), 'com.creatorworks.hub'],
+      ['inspect', '/unused-owner.json'], ['press', '/unused-owner.json', 'mcp-allow'], ['close', '/unused-owner.json']]) {
+      const refused = spawnSync(nativeBinary, args, { env: process.env, encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+      assert.equal(refused.status, 2, refused.stderr || refused.stdout);
+      const evidence = JSON.parse(refused.stdout);
+      assert.equal(evidence.error, 'accessibility-denied');
+      assert.equal(evidence.actionAttempted, false);
+      assert.equal(evidence.nativeGuiAccepted, false);
+      assert.equal(evidence.releaseReady, false);
+    }
+  }
 });
 
 function fixture(action = 'mcp-allow') {
@@ -162,6 +237,8 @@ for (const [name, mutate, error] of cases) {
     assert.equal(result.status, error ? 1 : 0, result.stderr || result.stdout);
     const receipt = JSON.parse(result.stdout);
     assert.equal(receipt.nativeActionsAvailable, false);
+    assert.equal(receipt.nativeGuiAccepted, false);
+    assert.equal(receipt.releaseReady, false);
     if (error) assert.equal(receipt.error, error); else assert.equal(receipt.fixtureAccepted, true);
   });
 }
@@ -177,4 +254,29 @@ test('native CLI refuses local, self-hosted, missing opt-in, and fixture injecti
   const injected = spawnSync(nativeBinary, ['--fixtures'], { env: admitted, encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
   assert.equal(injected.status, 2);
   assert.equal(JSON.parse(injected.stdout).error, 'unknown-native-command');
+});
+
+test('native availability refuses local, self-hosted, foreign scope, architecture drift and extra parameters', { skip: !nativeMac }, () => {
+  const admitted = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'macOS',
+    RUNNER_ARCH: runnerArch, GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', CREATOR_MACOS_OWNED_GUI_TEST: '1' };
+  for (const [env, args, error] of [
+    [{}, ['availability'], 'hosted-ci-opt-in-required'],
+    [{ ...admitted, GITHUB_ACTIONS: 'false' }, ['availability'], 'hosted-ci-opt-in-required'],
+    [{ ...admitted, RUNNER_ENVIRONMENT: 'self-hosted' }, ['availability'], 'hosted-ci-opt-in-required'],
+    [{ ...admitted, CREATOR_MACOS_OWNED_GUI_TEST: '' }, ['availability'], 'hosted-ci-opt-in-required'],
+    [{ ...admitted, RUNNER_OS: 'Linux' }, ['availability'], 'hosted-ci-opt-in-required'],
+    [{ ...admitted, GITHUB_REPOSITORY: 'foreign/repo' }, ['availability'], 'hosted-ci-opt-in-required'],
+    [{ ...admitted, RUNNER_ARCH: runnerArch === 'ARM64' ? 'X64' : 'ARM64' }, ['availability'], 'runner-architecture-mismatch'],
+    [admitted, ['availability', '42'], 'availability-takes-no-target-or-options'],
+    [admitted, ['availability', '--skip-trust'], 'availability-takes-no-target-or-options'],
+  ]) {
+    const result = spawnSync(nativeBinary, args, { env, encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+    assert.equal(result.status, 2, result.stderr || result.stdout);
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(receipt.error, error);
+    assert.equal(receipt.actionAttempted, false);
+    assert.equal(receipt.nativeGuiAccepted, false);
+    assert.equal(receipt.releaseReady, false);
+    assert.equal(Object.hasOwn(receipt, 'accessibilityTrusted'), false);
+  }
 });

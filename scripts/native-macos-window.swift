@@ -154,9 +154,12 @@ func validateAction(_ owner: Owner, _ before: Observation, _ immediate: Observat
 
 func emit(_ value: Any) {
     do {
-        let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        var receipt = value as? [String: Any] ?? ["error": "evidence-serialization-failed"]
+        receipt["releaseReady"] = false
+        receipt["nativeGuiAccepted"] = false
+        let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
         print(String(decoding: data, as: UTF8.self))
-    } catch { print("{\"error\":\"evidence-serialization-failed\"}") }
+    } catch { print("{\"error\":\"evidence-serialization-failed\",\"nativeGuiAccepted\":false,\"releaseReady\":false}") }
 }
 
 func object<T: Encodable>(_ value: T) throws -> Any {
@@ -498,7 +501,15 @@ func nativeMain() {
         // Admission precedes all file, process, AX, display, and window inspection.
         try admission()
         let args = Array(CommandLine.arguments.dropFirst())
-        guard !args.isEmpty else { throw Refusal("expected-identify-inspect-press-or-close") }
+        guard !args.isEmpty else { throw Refusal("expected-availability-identify-inspect-press-or-close") }
+        if args[0] == "availability" {
+            guard args.count == 1 else { throw Refusal("availability-takes-no-target-or-options") }
+            emit(["schemaVersion": 1, "command": "availability", "probeOnly": true,
+                  "runnerArchitecture": ProcessInfo.processInfo.environment["RUNNER_ARCH"]!,
+                  "accessibilityTrusted": AXIsProcessTrusted(), "targetInspectionPerformed": false,
+                  "actionAttempted": false, "permissionRequestsPerformed": false])
+            return
+        }
         if args[0] == "identify", args.count == 6, let pid = Int32(args[1]) {
             try trustedAX()
             let first = try process(pid, appPath: args[2], executable: args[3], expectedHash: args[4], bundle: args[5])
