@@ -1,0 +1,66 @@
+name: Unsigned native Unix payload preparation (not acceptance)
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Native payload target; no key, Hub installer or release is produced
+        type: choice
+        default: all
+        options: [all, linux, macos-arm64, macos-intel]
+
+permissions:
+  contents: read
+
+jobs:
+  payload:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.platform == 'linux' && '["ubuntu-22.04"]' || inputs.platform == 'macos-arm64' && '["macos-latest"]' || inputs.platform == 'macos-intel' && '["macos-15-intel"]' || '["ubuntu-22.04","macos-latest","macos-15-intel"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            modules/mcp/launcher/src-tauri
+            modules/project-setup/src-tauri
+            native/mcp-router
+          cache-on-failure: true
+      - name: Install native Linux compilation prerequisites on the disposable runner
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev \
+            build-essential file
+      - name: Install locked dependencies
+        run: |
+          npm ci
+          npm --prefix modules/mcp ci
+          npm --prefix modules/project-setup ci
+      - name: Check the source and split-producer controls before compiling
+        run: |
+          npm run check:sources
+          node --test scripts/build-unified.test.cjs scripts/unix-package-payload.test.cjs scripts/unix-managed-payload.test.cjs
+      - name: Prepare only native private modules and router, without selecting a signing key
+        env:
+          TAURI_CLI_VERBOSITY: '1'
+        run: npm run build:unified -- ci-unsigned-unix-payload --managed --experimental-unix --experimental-unix-writable --prepare-managed-unix
+      - name: Retain unsigned source-bound inputs, never release attachments
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-unix-payload-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: artifacts/unified/ci-unsigned-unix-payload/

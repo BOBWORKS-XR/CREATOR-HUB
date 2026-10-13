@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const semver = require('semver');
 
-const root = path.resolve(__dirname, '..');
+const repositoryRoot = path.resolve(__dirname, '..');
 const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 function stageFileMode(file, platform, executable, chmod = fs.chmodSync) {
   // The shebang server runs through private Node; archive data is not executable.
@@ -52,23 +52,31 @@ function verifyStage(directory, manifest) {
     }
   }
 }
-function build(label, { installer = false, managed = false, experimentalUnix = false, experimentalWritable = false } = {}) {
+function build(label, { installer = false, managed = false, experimentalUnix = false, experimentalWritable = false,
+  prepareManagedUnix = false, signedUnixInput = null } = {}, context = {}) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(label || '')) throw Error('Provide a unique, simple build name.');
-  const platform = { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
-  const arch = { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
+  const root = context.root || repositoryRoot;
+  const execute = context.execute || execFileSync;
+  const environment = context.env || process.env;
+  const platform = context.platform || { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
+  const arch = context.arch || { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
+  const payload = require('./unix-managed-payload.cjs');
+  payload.checkSplitOptions({ platform, installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput });
   const unix = require('./unix-package-payload.cjs');
   const plan = unix.nativePlan(platform, arch, { installer, experimentalUnix, experimentalWritable, managed });
   const nativeTargetArgs = plan.rustTarget ? ['--target', plan.rustTarget] : [];
   const releaseDirectory = target => path.join(target, ...(plan.rustTarget ? [plan.rustTarget] : []), 'release');
-  const buildEnv = plan.experimentalUnix ? unix.packageEnvironment(process.env, platform, plan.mcpMode) : process.env;
+  const buildEnv = plan.experimentalUnix ? unix.packageEnvironment(environment, platform, plan.mcpMode) : environment;
+  const preparedSource = prepareManagedUnix ? payload.prepareAdmission(root, platform, arch, buildEnv, execute) : null;
   const routing = require('./managed-router-package.cjs');
-  const key = managed ? routing.signingKey(root) : null;
+  const key = prepareManagedUnix ? null : (managed ? routing.signingKey(root) : null);
   const output = path.join(root, 'artifacts', 'unified', label);
+  if (prepareManagedUnix) payload.outputAdmission(output, root);
   if (fs.existsSync(output)) throw Error('Build output exists. Use a new name; artifacts are immutable.');
-  const npm = process.env.npm_execpath;
+  const npm = environment.npm_execpath;
   if (!npm || !fs.existsSync(npm)) throw Error('Run this builder through npm run build:unified.');
   fs.mkdirSync(output, { recursive: true });
-  const run = (args, cwd, env = buildEnv) => execFileSync(process.execPath, args, { cwd, env, stdio: 'inherit', windowsHide: true });
+  const run = (args, cwd, env = buildEnv) => execute(process.execPath, args, { cwd, env, stdio: 'inherit', windowsHide: true });
   run([npm, 'run', 'release:launcher'], path.join(root, 'modules/mcp'));
   const mcpSources = plan.experimentalUnix ? unix.hostedSourceHashes(path.join(root, 'modules/mcp')) : null;
   const cli = path.join(root, 'node_modules/@tauri-apps/cli/tauri.js');
@@ -80,7 +88,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
     ['setup', 'modules/project-setup', 'creator-project-setup'],
   ]) {
     const cwd = path.join(root, source);
-    const target = path.resolve(process.env[`CREATOR_${id.toUpperCase()}_TARGET_DIR`] || path.join(cwd, 'src-tauri/target'));
+    const target = path.resolve(environment[`CREATOR_${id.toUpperCase()}_TARGET_DIR`] || path.join(cwd, 'src-tauri/target'));
     const env = { ...buildEnv, CARGO_TARGET_DIR: target, CREATOR_HUB_INTERNAL_MODULE: '1' };
     const moduleFeatures = id === 'mcp' && experimentalWritable ? ['--features', 'experimental-unix-hosting'] : [];
     run([cli, 'build', '--no-bundle', ...moduleFeatures, ...nativeTargetArgs, '--', '--locked'], cwd, env);
@@ -90,10 +98,11 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(sourceFile, dest, fs.constants.COPYFILE_EXCL);
       stageFileMode(dest, platform, name.endsWith(binary) || name.endsWith('/runtime/node'));
+      if (prepareManagedUnix) fs.chmodSync(dest, payload.fileMode(manifest, name, executable));
       // Node is already signed in the pinned archive and its bytes were hashed
       // by MCP's build.rs. Re-sign only Rust backends before manifest binding.
       if (platform === 'macos' && name === `${id}/${binary}`) {
-        execFileSync('codesign', ['--force', '--sign', '-', '--options', 'hard,kill', dest], { stdio: 'inherit' });
+        execute('codesign', ['--force', '--sign', '-', '--options', 'hard,kill', dest], { stdio: 'inherit' });
       }
       files[name] = sha256(dest);
       resources[dest] = `modules/${name}`;
@@ -120,8 +129,8 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   const hubVersion = JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'))).version;
   writeRuntimeDescriptor(output, manifest, hubVersion);
   if (managed) {
-    const routerTarget = path.resolve(process.env.CREATOR_ROUTER_TARGET_DIR || path.join(root, 'native/mcp-router/target'));
-    execFileSync('cargo', ['build', '--release', '--locked', ...nativeTargetArgs, '--manifest-path', path.join(root, 'native/mcp-router/Cargo.toml')], {
+    const routerTarget = path.resolve(environment.CREATOR_ROUTER_TARGET_DIR || path.join(root, 'native/mcp-router/target'));
+    execute('cargo', ['build', '--release', '--locked', ...nativeTargetArgs, '--manifest-path', path.join(root, 'native/mcp-router/Cargo.toml')], {
       env: { ...buildEnv, CARGO_TARGET_DIR: routerTarget }, stdio: 'inherit', windowsHide: true,
     });
     let routerSource = path.join(releaseDirectory(routerTarget), `creator-hub-mcp-router${extension}`);
@@ -130,8 +139,13 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
       // binds its digest. Never alter a signature or signed receipt afterwards.
       const signed = path.join(output, 'router-for-package');
       fs.copyFileSync(routerSource, signed, fs.constants.COPYFILE_EXCL);
-      execFileSync('codesign', ['--force', '--sign', '-', signed], { stdio: 'inherit' });
+      execute('codesign', ['--force', '--sign', '-', signed], { stdio: 'inherit' });
       routerSource = signed;
+    }
+    if (prepareManagedUnix) {
+      payload.finishPreparation(output, manifest, routerSource, hubVersion, preparedSource, root, execute);
+      console.log(`Unsigned native managed payload: ${output}. No Hub, installer, signed routing authority or acceptance.`);
+      return output;
     }
     manifest.managedRouting = routing.prepare(output, manifest,
       routerSource, path.join(output, 'mcp-runtime.json'),
@@ -144,7 +158,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
     const archive = require('./module-archive.cjs');
     const file = path.join(output, archive.FILE);
     const decoderTarget = path.join(output, 'archive-decoder-target');
-    execFileSync('cargo', ['build', '--release', '--locked', '--manifest-path', path.join(root, 'native/module-archive/Cargo.toml')], {
+    execute('cargo', ['build', '--release', '--locked', '--manifest-path', path.join(root, 'native/module-archive/Cargo.toml')], {
       env: { ...buildEnv, CARGO_TARGET_DIR: decoderTarget }, stdio: 'inherit', windowsHide: true,
     });
     archiveDecoder = path.join(decoderTarget, 'release/creator-hub-module-archive');
@@ -159,7 +173,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources } }, null, 2));
   const env = { ...buildEnv, CREATOR_BUILTIN_MANIFEST: descriptor,
     CREATOR_MCP_HOST_WRITABLE: plan.mcpMode === 'writable' ? '1' : '0', CREATOR_MCP_HOST_READONLY_EVENTS: '1',
-    CARGO_TARGET_DIR: path.resolve(process.env.CARGO_TARGET_DIR || (plan.experimentalUnix ? path.join(output, 'hub-target') : path.join(root, 'src-tauri/target'))) };
+    CARGO_TARGET_DIR: path.resolve(environment.CARGO_TARGET_DIR || (plan.experimentalUnix ? path.join(output, 'hub-target') : path.join(root, 'src-tauri/target'))) };
   const bundleDirectory = path.join(releaseDirectory(env.CARGO_TARGET_DIR), 'bundle');
   if (plan.experimentalUnix && installer && fs.existsSync(bundleDirectory)) throw Error('Unix packaging requires a fresh bundle directory; select a new CARGO_TARGET_DIR. Existing outputs are not removed.');
   run([cli, 'build', ...nativeTargetArgs, ...(installer ? ['--bundles', plan.bundles.join(',')] : ['--no-bundle']), '--config', overlay, '--', '--locked'], root, env);
@@ -185,12 +199,30 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   console.log(`Local unified candidate: ${output}. Not a release or migration acceptance.`);
   return output;
 }
-module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, build };
+function parseBuildOptions(args) {
+  const options = {};
+  const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix.';
+  const flags = { '--installer': 'installer', '--managed': 'managed', '--experimental-unix': 'experimentalUnix',
+    '--experimental-unix-writable': 'experimentalWritable', '--prepare-managed-unix': 'prepareManagedUnix' };
+  const seen = new Set();
+  for (let index = 0; index < args.length; index++) {
+    const flag = args[index];
+    if (seen.has(flag)) throw Error(`Duplicate build option. ${usage}`);
+    seen.add(flag);
+    if (flag === '--signed-unix-input') {
+      const value = args[++index];
+      if (!value || !path.isAbsolute(value)) throw Error('--signed-unix-input requires an absolute staging path.');
+      options.signedUnixInput = value;
+    } else if (flags[flag]) options[flags[flag]] = true;
+    else throw Error(`Unknown build option. ${usage}`);
+  }
+  return options;
+}
+module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, build, parseBuildOptions };
 if (require.main === module) {
   try {
-    const flags = process.argv.slice(3);
-    if (!process.argv[2] || flags.some(flag => !['--installer', '--managed', '--experimental-unix', '--experimental-unix-writable'].includes(flag)) || new Set(flags).size !== flags.length) throw Error('Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable.');
-    build(process.argv[2], { installer: flags.includes('--installer'), managed: flags.includes('--managed'), experimentalUnix: flags.includes('--experimental-unix'), experimentalWritable: flags.includes('--experimental-unix-writable') });
+    if (!process.argv[2]) throw Error('Provide one build name.');
+    build(process.argv[2], parseBuildOptions(process.argv.slice(3)));
   }
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }
