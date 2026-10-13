@@ -6,7 +6,7 @@ use std::{
     fs::File,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{ChildStdin, Command, Stdio},
+    process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex,
@@ -113,6 +113,7 @@ pub fn preview_compatibility(
 }
 const MAX_FRAME: usize = 2 * 1024 * 1024;
 const MAX_REQUEST: usize = 64 * 1024;
+const MAX_EXECUTABLE: u64 = 128 * 1024 * 1024;
 const MAX_LIFECYCLE_FRAME: usize = 512;
 const MAX_SAFE_SEQUENCE: u64 = (1_u64 << 53) - 1;
 
@@ -236,34 +237,185 @@ fn verify_executable(path: &Path, expected: &str) -> Result<File, String> {
         // Keep the verified image locked against modification/replacement for the session.
         options.share_mode(1);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
     let mut file = options
         .open(path)
         .map_err(|_| "Cannot lock the app executable for verification.")?;
-    if file
+    let metadata = file
         .metadata()
-        .map_err(|_| "Cannot inspect app executable.")?
-        .len()
-        > 128 * 1024 * 1024
-    {
+        .map_err(|_| "Cannot inspect app executable.")?;
+    if !metadata.is_file() {
+        return Err("App executable must be a regular file.".into());
+    }
+    if metadata.len() > MAX_EXECUTABLE {
         return Err("App executable exceeds the size limit.".into());
     }
-    let mut digest = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .map_err(|_| "Cannot verify app executable.")?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buffer[..count]);
-    }
-    if format!("{:x}", digest.finalize()) != expected {
+    if executable_digest(&mut file, MAX_EXECUTABLE)? != expected {
         return Err(
             "This is not the app build approved for this Hub preview. Nothing was launched.".into(),
         );
     }
     Ok(file)
+}
+
+fn executable_digest(reader: &mut impl Read, limit: u64) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    let mut reader = reader.take(limit + 1);
+    let mut total = 0;
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|_| "Cannot verify app executable.")?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        if total > limit {
+            return Err("App executable grew beyond the size limit during verification.".into());
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+#[cfg(unix)]
+fn executable_snapshot(verified: &File) -> Result<Vec<u8>, String> {
+    use std::io::{Seek, SeekFrom};
+    let mut source = verified
+        .try_clone()
+        .map_err(|_| "Cannot capture hosted executable.")?;
+    source
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| "Cannot read hosted executable snapshot.")?;
+    let mut bytes = Vec::new();
+    source
+        .take(MAX_EXECUTABLE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot capture hosted executable bytes.")?;
+    if bytes.len() as u64 > MAX_EXECUTABLE {
+        return Err("Hosted executable snapshot exceeds the size limit.".into());
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn native_gui_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    use std::os::unix::ffi::OsStrExt;
+    std::env::vars_os()
+        .filter(|(name, _)| {
+            let name = name.as_bytes();
+            name != b"NODE_OPTIONS"
+                && name != b"NODE_PATH"
+                && !name.starts_with(b"LD_")
+                && !name.starts_with(b"DYLD_")
+        })
+        .collect()
+}
+
+enum HostedChild {
+    Standard(std::process::Child),
+    #[cfg(target_os = "macos")]
+    VerifiedMac(creator_hub_mcp_router::gui_exec_macos::Child),
+}
+impl HostedChild {
+    fn take_input(&mut self) -> Option<ChildStdin> {
+        match self {
+            Self::Standard(child) => child.stdin.take(),
+            #[cfg(target_os = "macos")]
+            Self::VerifiedMac(child) => child
+                .stdin
+                .take()
+                .map(|file| ChildStdin::from(std::os::fd::OwnedFd::from(file))),
+        }
+    }
+    fn take_output(&mut self) -> Option<ChildStdout> {
+        match self {
+            Self::Standard(child) => child.stdout.take(),
+            #[cfg(target_os = "macos")]
+            Self::VerifiedMac(child) => child
+                .stdout
+                .take()
+                .map(|file| ChildStdout::from(std::os::fd::OwnedFd::from(file))),
+        }
+    }
+    fn take_diagnostics(&mut self) -> Option<ChildStderr> {
+        match self {
+            Self::Standard(child) => child.stderr.take(),
+            #[cfg(target_os = "macos")]
+            Self::VerifiedMac(child) => child
+                .stderr
+                .take()
+                .map(|file| ChildStderr::from(std::os::fd::OwnedFd::from(file))),
+        }
+    }
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match self {
+            Self::Standard(child) => child.wait(),
+            #[cfg(target_os = "macos")]
+            Self::VerifiedMac(child) => child.wait(),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_mac_builtin(
+    path: &Path,
+    verified: &File,
+    expected_hash: &str,
+) -> Result<HostedChild, String> {
+    let bytes = executable_snapshot(verified)?;
+    let image = creator_hub_mcp_router::gui_exec_macos::prepare(&bytes, expected_hash)
+        .map_err(|error| format!("Cannot admit verified hosted executable: {error}"))?;
+    let argv = [path.as_os_str().to_owned(), "--creator-hub-host".into()];
+    creator_hub_mcp_router::gui_exec_macos::spawn(
+        &image,
+        path,
+        &argv,
+        &native_gui_environment(),
+        path.parent().ok_or("Invalid hosted app path.")?,
+    )
+    .map(HostedChild::VerifiedMac)
+    .map_err(|error| format!("Could not start verified hosted backend: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_linux_builtin(
+    path: &Path,
+    verified: &File,
+    expected_hash: &str,
+) -> Result<HostedChild, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = executable_snapshot(verified)?;
+    let image = creator_hub_mcp_router::gui_exec_linux::prepare(&bytes, expected_hash)
+        .map_err(|error| format!("Cannot admit verified hosted executable: {error}"))?;
+    let mut environment = native_gui_environment();
+    // AppImage backends need the host's packaged libraries, not an inherited override.
+    // Library files are outside the executable snapshot's identity guarantee.
+    let host =
+        std::env::current_exe().map_err(|_| "Cannot locate Hub's native library directory.")?;
+    if let Some(libraries) = host
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| root.join("lib"))
+    {
+        if libraries.is_dir() && !libraries.as_os_str().as_bytes().contains(&b':') {
+            environment.push(("LD_LIBRARY_PATH".into(), libraries.into_os_string()));
+        }
+    }
+    let argv = [path.as_os_str().to_owned(), "--creator-hub-host".into()];
+    creator_hub_mcp_router::gui_exec_linux::spawn(
+        &image,
+        &argv,
+        &environment,
+        path.parent().ok_or("Invalid hosted app path.")?,
+    )
+    .map(HostedChild::Standard)
+    .map_err(|error| format!("Could not start verified hosted backend: {error}"))
 }
 
 fn read_frame(reader: &mut impl BufRead) -> Result<Option<(Value, usize)>, String> {
@@ -443,7 +595,9 @@ impl Hosting {
             None
         };
         let read_only_events = kind == AppId::Mcp
-            && (writable || option_env!("CREATOR_MCP_HOST_READONLY_EVENTS") == Some("1"));
+            && (writable
+                || option_env!("CREATOR_MCP_HOST_READONLY_EVENTS") == Some("1")
+                || cfg!(unix) && bundled);
         let running = crate::platform::running(kind, path)?;
         // The MCP preview is read-only and does not take over its existing GUI or stdio servers.
         if !running.gui.is_empty() || ((kind == AppId::Setup || writable) && running.other_copy) {
@@ -464,14 +618,33 @@ impl Hosting {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000);
         }
+        #[cfg(target_os = "linux")]
+        let mut child = if bundled {
+            spawn_linux_builtin(path, &verified, expected_hash)?
+        } else {
+            command
+                .spawn()
+                .map(HostedChild::Standard)
+                .map_err(|e| format!("Could not start {}: {e}", kind.name()))?
+        };
+        #[cfg(target_os = "macos")]
+        let mut child = if bundled {
+            spawn_mac_builtin(path, &verified, expected_hash)?
+        } else {
+            command
+                .spawn()
+                .map(HostedChild::Standard)
+                .map_err(|e| format!("Could not start {}: {e}", kind.name()))?
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let mut child = command
             .spawn()
+            .map(HostedChild::Standard)
             .map_err(|e| format!("Could not start {}: {e}", kind.name()))?;
-        let input = child.stdin.take().ok_or("Missing hosted input pipe.")?;
-        let output = child.stdout.take().ok_or("Missing hosted output pipe.")?;
+        let input = child.take_input().ok_or("Missing hosted input pipe.")?;
+        let output = child.take_output().ok_or("Missing hosted output pipe.")?;
         let stderr = child
-            .stderr
-            .take()
+            .take_diagnostics()
             .ok_or("Missing hosted diagnostic pipe.")?;
         let connection = Arc::new(SessionConnection {
             input: Mutex::new(Some(input)),
@@ -481,7 +654,7 @@ impl Hosting {
         let process_image = Arc::clone(&verified);
         std::thread::spawn(move || {
             // EOF/output failure is not exit. Hold both native authority and the
-            // verified image until Windows confirms the backend actually drained.
+            // verified image until the kernel confirms the backend actually drained.
             if child.wait().is_ok() {
                 if let Ok(mut operation) = process_connection.operation.lock() {
                     operation.backend_exited();
@@ -540,6 +713,14 @@ impl Hosting {
         };
         if managed.is_some() {
             hello["managedRouting"] = json!(true);
+        }
+        #[cfg(unix)]
+        if bundled && kind == AppId::Mcp {
+            let resources = path
+                .parent()
+                .and_then(Path::to_str)
+                .ok_or("Hosted resource directory must be an absolute UTF-8 path.")?;
+            hello["resourceDirectory"] = json!(resources);
         }
         backend.send("initialize", hello)?;
         let response = backend
@@ -1318,6 +1499,30 @@ mod tests {
         assert!(verify_executable(&path, &hash).is_ok());
         assert!(verify_executable(&path, &"0".repeat(64)).is_err());
         assert!(verify_executable(&path, "").is_err());
+    }
+    #[test]
+    fn executable_digest_refuses_growth_at_the_read_boundary() {
+        let mut oversized = std::io::repeat(0).take(100);
+        assert!(executable_digest(&mut oversized, 8)
+            .unwrap_err()
+            .contains("grew beyond"));
+        assert_eq!(oversized.limit(), 91);
+        assert_eq!(
+            executable_digest(&mut b"test".as_slice(), 4).unwrap(),
+            format!("{:x}", Sha256::digest(b"test"))
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn executable_fifo_refuses_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap().join("backend");
+        let native = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(native.as_ptr(), 0o600) }, 0);
+        assert!(verify_executable(&path, &"0".repeat(64))
+            .unwrap_err()
+            .contains("regular file"));
     }
     #[test]
     fn lifecycle_preview_never_requests_writable_mode() {

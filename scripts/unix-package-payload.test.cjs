@@ -97,6 +97,17 @@ test('post-compile Node re-signing cannot be hidden by re-hashing a manifest', (
   } finally { f.cleanup(); }
 });
 
+test('Mac backend enforcement is signed before manifest binding without changing pinned Node', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'build-unified.cjs'), 'utf8');
+  assert.match(source, /platform === 'macos' && name === `\$\{id\}\/\$\{binary\}`/);
+  assert.match(source, /\['--force', '--sign', '-', '--options', 'hard,kill', dest\]/);
+  assert.ok(source.indexOf("'hard,kill', dest") < source.indexOf('files[name] = sha256(dest)'));
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/unified-unix-candidate.yml'), 'utf8');
+  for (const changed of ['src-tauri/src/hosted.rs', 'modules/mcp/launcher/src-tauri/**', 'native/mcp-router/**']) {
+    assert.ok(workflow.includes(`'${changed}'`));
+  }
+});
+
 test('exact-byte tamper, atomic replacement, missing and extra resources fail', () => {
   const f = fixture('linux', true);
   try {

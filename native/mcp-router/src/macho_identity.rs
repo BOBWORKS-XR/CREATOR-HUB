@@ -16,18 +16,37 @@ fn le(bytes: &[u8], offset: usize) -> Result<usize, String> {
     Ok(u32::from_le_bytes(range(bytes, offset, 4)?.try_into().unwrap()) as usize)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CodeDirectoryIdentity {
+    pub(crate) cdhash: [u8; 20],
+    pub(crate) flags: u32,
+}
+
 pub(crate) fn cdhashes(image: &[u8]) -> Result<Vec<[u8; 20]>, String> {
+    Ok(code_directories(image)?
+        .into_iter()
+        .map(|identity| identity.cdhash)
+        .collect())
+}
+
+pub(crate) fn code_directories(image: &[u8]) -> Result<Vec<CodeDirectoryIdentity>, String> {
+    code_directories_for_cpu(
+        image,
+        if cfg!(target_arch = "aarch64") {
+            0x0100000c
+        } else {
+            0x01000007
+        },
+    )
+}
+
+fn code_directories_for_cpu(
+    image: &[u8],
+    cpu: usize,
+) -> Result<Vec<CodeDirectoryIdentity>, String> {
     // The packaged Node archives are architecture-specific. Refuse FAT and
     // non-native slices rather than guessing which slice the kernel selected.
-    if le(image, 0)? != 0xfeedfacf
-        || le(image, 4)?
-            != if cfg!(target_arch = "aarch64") {
-                0x0100000c
-            } else {
-                0x01000007
-            }
-        || le(image, 12)? != 2
-    {
+    if le(image, 0)? != 0xfeedfacf || le(image, 4)? != cpu || le(image, 12)? != 2 {
         return Err("MCP requires a native, thin, signed 64-bit Mach-O executable.".into());
     }
     let commands = range(image, 32, le(image, 20)?)?;
@@ -104,7 +123,10 @@ pub(crate) fn cdhashes(image: &[u8]) -> Result<Vec<[u8; 20]>, String> {
                 return Err("MCP executable pages do not match their CodeDirectory.".into());
             }
         }
-        hashes.push(Sha256::digest(cd)[..20].try_into().unwrap());
+        hashes.push(CodeDirectoryIdentity {
+            cdhash: Sha256::digest(cd)[..20].try_into().unwrap(),
+            flags: be(cd, 12)? as u32,
+        });
     }
     if hashes.is_empty() {
         return Err("MCP executable requires a SHA-256 CodeDirectory.".into());
@@ -181,5 +203,66 @@ mod tests {
         let mut bytes = fixture();
         bytes[4096 + 20 + 32..4096 + 20 + 36].copy_from_slice(&4095u32.to_be_bytes());
         assert!(cdhashes(&bytes).is_err());
+    }
+
+    #[test]
+    fn signed_flags_are_bound_to_each_verified_code_directory() {
+        for flags in [0, 2, 0x100, 0x200, 0x302] {
+            let mut bytes = fixture();
+            bytes[4096 + 20 + 12..4096 + 20 + 16].copy_from_slice(&u32::to_be_bytes(flags));
+            let identities = code_directories(&bytes).unwrap();
+            assert_eq!(identities.len(), 1);
+            assert_eq!(identities[0].flags, flags);
+            assert_eq!(cdhashes(&bytes).unwrap(), vec![identities[0].cdhash]);
+        }
+    }
+
+    #[test]
+    fn native_architecture_requirement_is_preserved() {
+        let mut bytes = fixture();
+        bytes[4..8].copy_from_slice(
+            &if cfg!(target_arch = "aarch64") {
+                0x01000007u32
+            } else {
+                0x0100000cu32
+            }
+            .to_le_bytes(),
+        );
+        assert!(code_directories(&bytes).is_err());
+    }
+
+    #[test]
+    #[ignore = "read-only audit of explicit retained images, on any host architecture"]
+    fn inspect_retained_gui_code_directories() {
+        let paths = std::env::var_os("CREATOR_GUI_AUDIT_IMAGES").expect(
+            "Set CREATOR_GUI_AUDIT_IMAGES to a platform-separated list of retained Mach-O paths",
+        );
+        let mut count = 0;
+        for path in std::env::split_paths(&paths) {
+            let bytes = std::fs::read(&path).unwrap();
+            let cpu = le(&bytes, 4).unwrap();
+            assert!(cpu == 0x01000007 || cpu == 0x0100000c);
+            let identities = code_directories_for_cpu(&bytes, cpu).unwrap();
+            println!(
+                "{} sha256={:x} bytes={} cpu={cpu:#x}",
+                path.display(),
+                Sha256::digest(&bytes),
+                bytes.len()
+            );
+            for identity in identities {
+                println!(
+                    "  cdhash={} flags={:#x} signedHardKill={}",
+                    identity
+                        .cdhash
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                    identity.flags,
+                    identity.flags & 0x300 == 0x300,
+                );
+            }
+            count += 1;
+        }
+        assert!(count > 0, "No retained images were supplied");
     }
 }

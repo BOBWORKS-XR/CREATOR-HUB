@@ -98,8 +98,17 @@ harness; a next-version candidate still needs a separately pinned previous
 public stable baseline and exact signed installed-update acceptance.
 
 Claude Code connected to the candidate server, but its existing OAuth session
-expired before a model/tool call. Claude Desktop opens at sign-in. User login
-is required; credentials were not read, copied, transferred or automated.
+expired before a model/tool call. A fresh retry after the user's sign-in report
+returned the same native authentication failure (`live-clients-20261013-06`).
+Both installed CLI entrypoints reported `loggedIn=false` through their native
+status command. Desktop is now visibly signed in and exposes its existing
+Creator Works connector; an authenticated candidate health call is still pending.
+No account credentials were inspected or authentication UI automated.
+The user subsequently accepted their existing Claude Code/Desktop connections
+and supplied a VS Code screenshot showing `creator-works` connected. Current
+Claude authentication is no longer waiting for user action. That report is not
+an automated post-update tool-call or live Editor acceptance receipt; unrelated
+failed VS Code entries are untouched.
 
 ## Combined Source Follow-Up
 
@@ -153,6 +162,68 @@ can select one target, while pull requests continue to check all three.
 Rust is pinned to 1.99 locally and in the build workflows. Test workflows cancel
 superseded per-branch runs; publishing has no new cancellation behavior. The
 temporary RPM pull-request diagnostic trigger was removed after capture.
+
+## Exact-Source Follow-Up
+
+All three final source-81e585b workflows passed: general CI 38334244372,
+Unix packaging 38334244363 and direct installed acceptance 38334240825.
+The retained fresh/upgrade reports pass 19/23 checks and bind installed Hub
+`c4dded7e4194a36050bfc84e9a34a5f5491e9f61bf5a42e812bbd5230bdcfc02`.
+These remain unsigned direct-installer tests, not signed in-app updating.
+
+Both native Mac reports from the same final packaging run pass exact resource
+and ad-hoc signature integrity. Their retained Info.plists each declare 13.5.
+Apple-silicon DMG: `1025ef070bfb524c539935be6ed50f9fb790edab1a0ac5a690e7cb4fc41fac52`.
+Intel DMG: `0345ee6870f007a4eff8a20a27d25dbc4bcb65cdccbff817de3e55241f07485a`.
+Both retain `writableGuiAccepted=false` and `releaseReady=false`.
+
+The public updater test now uses one shared, hash-pinned baseline selection in
+its workflow and native harness. Current target 0.1.12 retains historical
+0.1.11 coverage; a future 0.1.13 target selects public 0.1.12. Live discovery
+must identify that exact previous stable or the test refuses before installation.
+Changing this test selection does not prove a signed update has occurred.
+
+The native launch audit at source 81e585b confirmed Unix hashed an ordinary file
+and then executed its pathname. The router's headless, single-threaded supervisor cannot
+be reused inside Tauri's multithreaded GUI. Linux execution-bound admission and
+macOS suspended-child code identity/enforcement must be proven before writable
+mode is enabled; resource lookup and GUI consent are separate integration tests.
+
+## Unpublished 0.1.13 Candidate
+
+The development version is now 0.1.13 so a future signed update can exercise a
+real change from public 0.1.12. No release or legacy feed was changed.
+
+- Linux built-in launch now snapshots the bounded approved executable, seals a
+  memfd and executes that image from a syscall-only `pre_exec` hook. Native WSL
+  component tests pass four cases, including 16 concurrent launches, exact
+  argv/environment/cwd/stdio, EOF/wait and foreign pathname/in-place replacement.
+  They used cached Rust 1.92; native pinned-1.99 CI remains separate.
+- Mac built-in launch derives approved CodeDirectories, starts the child
+  suspended and checks kernel identity/enforcement before continuing. All four
+  previously retained Mac backends have only ad-hoc flags `0x2`; those cannot
+  satisfy this new admission. The builder now signs Rust backend copies with
+  HARD/KILL before manifest binding. Pinned Node bytes are not re-signed. New
+  native Mac fixtures and packages must still pass; this is not notarization or
+  publisher-signing acceptance.
+- Both Unix built-in MCP backends now receive their resource directory through
+  validated private initialization and bind build-verified snapshots before
+  consent. This removes dependence on memfd executable canonicalization or a
+  nonexistent `.app` Resources layout around the flat internal backend. The
+  internal resource binding is not on either public command allowlist; it does
+  not bypass consent or enable writable mode. Windows/standalone lookup remains
+  unchanged. Captures reject non-regular files and bound growth during reading.
+- A loopback-only lab feed has hash-bound snapshots and exactly five GitHub
+  routes, without relay, redirects or disabled TLS checks. Unit tests verify the
+  producer's plain-text metadata signature versus base64 updater signature. Its
+  reports explicitly deny public/native acceptance. VM-only trust setup, a real
+  signed target and the unmodified-old-app run remain required; it has not run on
+  the user's PC.
+
+OS libraries, publisher trust and arbitrary detached descendants are outside
+the GUI executable binding guarantee. Source integration does not lift the
+Unix writable or publication gates. Installation/update/GUI acceptance must
+refer to the final 0.1.13 package hashes, not the previous 0.1.12 candidates.
 
 ## Remaining Release Gates
 

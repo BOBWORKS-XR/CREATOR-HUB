@@ -19,6 +19,10 @@ on:
       - 'native/module-archive/**'
       - 'src-tauri/src/builtin.rs'
       - 'src-tauri/src/module_archive.rs'
+      - 'src-tauri/src/hosted.rs'
+      - 'modules/mcp/launcher/src-tauri/**'
+      - 'modules/project-setup/src-tauri/src/**'
+      - 'native/mcp-router/**'
       - 'src-tauri/build.rs'
       - 'rust-toolchain.toml'
 

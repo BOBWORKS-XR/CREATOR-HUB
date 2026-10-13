@@ -92,7 +92,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
       // Node is already signed in the pinned archive and its bytes were hashed
       // by MCP's build.rs. Re-sign only Rust backends before manifest binding.
       if (platform === 'macos' && name === `${id}/${binary}`) {
-        execFileSync('codesign', ['--force', '--sign', '-', dest], { stdio: 'inherit' });
+        execFileSync('codesign', ['--force', '--sign', '-', '--options', 'hard,kill', dest], { stdio: 'inherit' });
       }
       files[name] = sha256(dest);
       resources[dest] = `modules/${name}`;

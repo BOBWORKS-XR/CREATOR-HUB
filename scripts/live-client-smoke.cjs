@@ -26,6 +26,26 @@ function values(value, visit) {
   else if (value && typeof value === 'object') Object.values(value).forEach(item => values(item, visit));
 }
 
+function summarizeClient(stdout, project) {
+  let toolCalled = false, completed = false, fixtureReturned = false, connected = false;
+  let failure = null;
+  for (const line of stdout.split(/\r?\n/).filter(Boolean)) {
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    values(event, value => {
+      if (!value || typeof value !== 'object') return;
+      if (value.name === 'acceptance' && value.status === 'connected') connected = true;
+      if ((value.type === 'mcp_tool_call' && value.tool === 'get_bridge_status' && value.server === 'acceptance') || (value.type === 'tool_use' && value.name === 'mcp__acceptance__get_bridge_status')) toolCalled = true;
+      if ((value.type === 'mcp_tool_call' && value.status === 'completed') || (value.type === 'result' && value.is_error === false)) completed = true;
+      if (value.error === 'authentication_failed') failure = 'client-authentication-failed';
+      if (typeof value.text === 'string') {
+        try { const payload = JSON.parse(value.text); if (payload.ready === false && payload.project?.path === project) fixtureReturned = true; } catch { /* Other client text is not a tool payload. */ }
+      }
+    });
+  }
+  return { connected, toolCalled, completed, fixtureReturned, failure };
+}
+
 async function main() {
   const [stage, codex, claude, label, ...flags] = process.argv.slice(2);
   if (!stage || !codex || !claude || !/^[a-z0-9-]+$/.test(label || '') || flags.some(flag => !['--only=codex', '--only=claude-code'].includes(flag) && !flag.startsWith('--bundle='))) throw Error('Usage: live-client-smoke.cjs STAGE CODEX-EXE CLAUDE-EXE UNIQUE-LABEL [--only=codex|--only=claude-code] [--bundle=REBUILT-SERVER]');
@@ -55,24 +75,14 @@ async function main() {
     const result = await run(command, args, output);
     fs.writeFileSync(path.join(output, `${name}.jsonl`), result.stdout, { flag: 'wx' });
     fs.writeFileSync(path.join(output, `${name}.stderr.log`), result.stderr, { flag: 'wx' });
-    let toolCalled = false, completed = false, fixtureReturned = false;
-    for (const line of result.stdout.split(/\r?\n/).filter(Boolean)) {
-      let event;
-      try { event = JSON.parse(line); } catch { continue; }
-      values(event, value => {
-        if (!value || typeof value !== 'object') return;
-        if ((value.type === 'mcp_tool_call' && value.tool === 'get_bridge_status' && value.server === 'acceptance') || (value.type === 'tool_use' && value.name === 'mcp__acceptance__get_bridge_status')) toolCalled = true;
-        if ((value.type === 'mcp_tool_call' && value.status === 'completed') || (value.type === 'result' && value.is_error === false)) completed = true;
-        if (typeof value.text === 'string') {
-          try { const payload = JSON.parse(value.text); if (payload.ready === false && payload.project?.path === project) fixtureReturned = true; } catch { /* Other client text is not a tool payload. */ }
-        }
-      });
-    }
-    report.clients[name] = { exitCode: result.code, timedOut: result.timedOut || false, toolCalled, completed, fixtureReturned, passed: result.code === 0 && toolCalled && completed && fixtureReturned };
+    const summary = summarizeClient(result.stdout, project);
+    report.clients[name] = { exitCode: result.code, timedOut: result.timedOut || false, ...summary,
+      passed: result.code === 0 && !summary.failure && summary.toolCalled && summary.completed && summary.fixtureReturned };
     console.log(`${name}: ${JSON.stringify(report.clients[name])}`);
   }
   fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2), { flag: 'wx' });
   if (Object.values(report.clients).some(client => !client.passed)) process.exitCode = 1;
 }
 
+module.exports = { summarizeClient };
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });

@@ -46,11 +46,22 @@ test('self-update acceptance accepts explicit target hashes and derives the targ
 
 test('self-update workflow builds and admits the exact baseline required by its native harness', () => {
   const source = require('node:fs').readFileSync(require.resolve('./native-self-update-smoke.cjs'), 'utf8');
-  const baseline = source.match(/const from = \{ version: '([0-9]+\.[0-9]+\.[0-9]+)'/);
-  assert.ok(baseline, 'Native harness must pin its public baseline');
+  assert.match(source, /require\('\.\/self-update-baselines\.cjs'\)/);
+  assert.match(source, /const from = selectBaseline\(to\.version\)/);
+  assert.match(source, /assertPreviousStable\(report\.feed\.previousStable, from\)/);
+  const acceptance = source.slice(source.indexOf('\n(async () => {'));
+  const feedGate = acceptance.indexOf('assertPreviousStable(report.feed.previousStable, from)');
+  assert.ok(feedGate >= 0 && acceptance.indexOf('const setup = spawn(installer') > feedGate);
   const workflow = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', '.github', 'workflows', 'self-update-acceptance.yml'), 'utf8');
-  assert.ok(workflow.includes(`Build-HostedUpdateFixture.ps1 -FromVersion ${baseline[1]}`));
-  assert.ok(workflow.includes(`$fixture.fromVersion -ne '${baseline[1]}'`));
+  assert.match(workflow, /\$selected = node scripts\/self-update-baselines\.cjs/);
+  assert.match(workflow, /if \(\$LASTEXITCODE -ne 0\) \{ throw 'Public self-update baseline selection failed\.'/);
+  assert.match(workflow, /"version=\$\(\$baseline\.version\)" >> \$env:GITHUB_OUTPUT/);
+  assert.equal((workflow.match(/SELECTED_FROM_VERSION: \$\{\{ steps\.baseline\.outputs\.version \}\}/g) || []).length, 2);
+  assert.match(workflow, /Build-HostedUpdateFixture\.ps1 -FromVersion \$env:SELECTED_FROM_VERSION/);
+  assert.match(workflow, /\$fixture\.fromVersion -ne \$env:SELECTED_FROM_VERSION/);
+  assert.ok(workflow.indexOf('id: target') < workflow.indexOf('id: baseline'));
+  assert.ok(workflow.indexOf('id: baseline') < workflow.indexOf('Build-HostedUpdateFixture.ps1'));
+  assert.doesNotMatch(workflow, /FromVersion 0\.1\.11|\$fixture\.fromVersion -ne '0\.1\.11'/);
 });
 test('draft gate accounts for full asset metadata and release notes before publication', () => {
   const current = bytes([{ ...release(), tag_name: 'v0.1.2', body: 'x'.repeat(240000) }]);

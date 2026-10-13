@@ -22,6 +22,11 @@ const KEY: &str = include_str!("../../../src-tauri/src/catalog-key.pub");
 mod bootstrap;
 pub use bootstrap::Router;
 
+#[cfg(target_os = "linux")]
+pub mod gui_exec_linux;
+#[cfg(target_os = "macos")]
+pub mod gui_exec_macos;
+
 #[cfg(any(target_os = "macos", test))]
 mod macho_identity;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     io::{BufRead, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -72,6 +72,9 @@ struct InitializeArgs {
     requested_mode: String,
     #[serde(default)]
     managed_routing: bool,
+    #[cfg(unix)]
+    #[serde(default)]
+    resource_directory: Option<PathBuf>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -221,6 +224,16 @@ pub(crate) fn config_snapshot(
 }
 
 fn dispatch(app: &tauri::AppHandle, command: &str, args: Value) -> Result<Value, String> {
+    #[cfg(unix)]
+    if command == "bind_verified_resources" {
+        // Only serve_authorized's validated initializer can reach this branch.
+        let args = decode::<ResourceArgs>(args)?;
+        let root = crate::hosted_payload::Root::verified(args.resource_directory.join("server"))?;
+        if !app.manage(root) {
+            return Err("Hosted resource authority already exists.".into());
+        }
+        return Ok(json!({}));
+    }
     if command == "bind_managed_route" {
         decode::<NoArgs>(args)?;
         crate::managed_client::bind(app)?;
@@ -244,7 +257,10 @@ fn dispatch(app: &tauri::AppHandle, command: &str, args: Value) -> Result<Value,
             )?;
             Ok(
                 json!({ "config": config, "source": source, "readOnly": true,
-                "resourceDir": app.path().resource_dir().map_err(|_| "Cannot locate MCP resources.")? }),
+                "resourceDir": snapshot_resource_directory(
+                    app.try_state::<crate::hosted_payload::Root>().as_deref(),
+                    || app.path().resource_dir().map_err(|_| "Cannot locate MCP resources.".into()),
+                )? }),
             )
         }
         "pick_project_folder" => {
@@ -270,6 +286,28 @@ fn dispatch(app: &tauri::AppHandle, command: &str, args: Value) -> Result<Value,
         }
         _ => crate::hosted_commands::dispatch(app, command, args),
     }
+}
+
+#[cfg(unix)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ResourceArgs {
+    resource_directory: PathBuf,
+}
+
+fn snapshot_resource_directory(
+    _root: Option<&crate::hosted_payload::Root>,
+    fallback: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<PathBuf, String> {
+    #[cfg(unix)]
+    if let Some(root) = _root {
+        return root
+            .0
+            .parent()
+            .map(Path::to_owned)
+            .ok_or_else(|| "Cannot locate MCP resources.".into());
+    }
+    fallback()
 }
 
 #[cfg(test)]
@@ -309,14 +347,24 @@ fn serve_authorized(
     if hello.id != 0 || hello.command != "initialize" {
         return Err("Expected hosted initialization.".into());
     }
-    let (lifecycle_events, writable, managed) =
+    let (lifecycle_events, writable, managed, resource_directory) =
         if hello.args.as_object().is_some_and(|args| args.is_empty()) {
-            (false, false, false)
+            (false, false, false, None)
         } else {
             let args = decode::<InitializeArgs>(hello.args)?;
+            #[cfg(unix)]
+            let resource_directory = args.resource_directory;
+            #[cfg(not(unix))]
+            let resource_directory: Option<PathBuf> = None;
             if args.hosting_revision != 2
                 || !["read-only", "writable"].contains(&args.requested_mode.as_str())
                 || args.managed_routing && args.requested_mode != "writable"
+                || resource_directory.as_ref().is_some_and(|directory| {
+                    !directory.is_absolute()
+                        || directory
+                            .components()
+                            .any(|part| matches!(part, std::path::Component::ParentDir))
+                })
             {
                 return Err("Unsupported hosting revision or mode.".into());
             }
@@ -324,10 +372,20 @@ fn serve_authorized(
                 true,
                 args.requested_mode == "writable",
                 args.managed_routing,
+                resource_directory,
             )
         };
     #[cfg(unix)]
     unix_boundary::require_managed_route(writable, managed)?;
+    if let Some(directory) = resource_directory {
+        if let Err(error) = call(
+            "bind_verified_resources",
+            json!({"resourceDirectory": directory}),
+        ) {
+            send(output, &hello.session, 0, Err(error))?;
+            return Ok(());
+        }
+    }
     let mut permission = match approve(writable) {
         Ok(permission) if permission.writable == writable => permission,
         Ok(_) => return Err("Hosting permission does not match the requested mode.".into()),
@@ -662,12 +720,16 @@ fn authorize(
             Ok(())
         };
         ensure_host()?;
-        let root = app
-            .path()
-            .resource_dir()
-            .map_err(|_| "Cannot locate MCP resources.")?
-            .join("server");
-        let payload = crate::hosted_payload::Root::verified(root)?;
+        let payload = if app.try_state::<crate::hosted_payload::Root>().is_some() {
+            None
+        } else {
+            let root = app
+                .path()
+                .resource_dir()
+                .map_err(|_| "Cannot locate MCP resources.")?
+                .join("server");
+            Some(crate::hosted_payload::Root::verified(root)?)
+        };
         let owner = crate::gui_owner::GuiWriteOwner::current_user()
             .map_err(|_| "Another MCP window owns these settings, or exclusive access is unavailable. No window was closed.")?;
         let settings = dirs::config_dir()
@@ -700,8 +762,10 @@ fn authorize(
         owner
             .ensure_current()
             .map_err(|_| "MCP settings ownership changed before authorization completed.")?;
-        if !app.manage(payload) {
-            return Err("Hosted resource authority already exists.".into());
+        if let Some(payload) = payload {
+            if !app.manage(payload) {
+                return Err("Hosted resource authority already exists.".into());
+            }
         }
         Ok(Permission {
             writable: true,
@@ -717,6 +781,266 @@ fn authorize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn initialize(args: Value) -> String {
+        request(0, "initialize").replace("\"args\":{}", &format!("\"args\":{args}"))
+    }
+
+    #[test]
+    fn resource_directory_field_is_optional_and_strict() {
+        let args = json!({"hostingRevision":2,"requestedMode":"read-only"});
+        assert!(decode::<InitializeArgs>(args).is_ok());
+        #[cfg(unix)]
+        {
+            let args =
+                json!({"hostingRevision":2,"requestedMode":"read-only","resourceDirectory":null});
+            assert!(decode::<InitializeArgs>(args)
+                .unwrap()
+                .resource_directory
+                .is_none());
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let absolute = temporary.path().canonicalize().unwrap();
+        let mut invalid = vec![
+            json!({"hostingRevision":2,"requestedMode":"read-only","resourceDirectory":true}),
+            json!({"hostingRevision":2,"requestedMode":"read-only","resourceDirectory":[]}),
+            json!({"hostingRevision":2,"requestedMode":"read-only","resourceDirectory":""}),
+            json!({"hostingRevision":2,"requestedMode":"read-only","resourceDirectory":"relative"}),
+            json!({"hostingRevision":2,"requestedMode":"read-only","resourceDirectory":absolute.join("../elsewhere")}),
+            json!({"hostingRevision":2,"requestedMode":"read-only","resource_directory":absolute}),
+            json!({"hostingRevision":2,"requestedMode":"read-only","resourceRoot":absolute}),
+            json!({"hostingRevision":3,"requestedMode":"read-only","resourceDirectory":absolute}),
+            json!({"resourceDirectory":absolute}),
+        ];
+        if !cfg!(unix) {
+            invalid.push(json!({"hostingRevision":2,"requestedMode":"read-only","resourceDirectory":absolute}));
+            invalid.push(
+                json!({"hostingRevision":2,"requestedMode":"read-only","resourceDirectory":null}),
+            );
+        }
+        for args in invalid {
+            let mut output = Vec::new();
+            assert!(serve_authorized(
+                &mut initialize(args.clone()).as_bytes(),
+                &mut output,
+                BTreeMap::new(),
+                |_| panic!("Invalid resource handoff must not prompt: {args}"),
+                |_, _| panic!("Invalid resource handoff must not bind: {args}"),
+            )
+            .is_err());
+            assert!(output.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resource_binding_precedes_permission_but_never_grants_managed_scope() {
+        use std::cell::Cell;
+        let bound = Cell::new(false);
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().canonicalize().unwrap();
+        let hello = initialize(
+            json!({"hostingRevision":2,"requestedMode":"read-only","resourceDirectory":directory}),
+        );
+        let mut output = Vec::new();
+        serve_authorized(
+            &mut hello.as_bytes(),
+            &mut output,
+            BTreeMap::new(),
+            |writable| {
+                assert!(bound.get());
+                assert!(!writable);
+                Ok(Permission::read_only())
+            },
+            |command, args| {
+                assert!(!bound.replace(true));
+                assert_eq!(command, "bind_verified_resources");
+                assert_eq!(args, json!({"resourceDirectory":directory}));
+                Ok(json!({}))
+            },
+        )
+        .unwrap();
+        let frames = replies(&output);
+        assert_eq!(frames[0]["result"]["effectiveMode"], "read-only");
+        assert_eq!(frames[0]["result"].as_object().unwrap().len(), 6);
+
+        for command in [
+            "save_config",
+            "begin_ui_operation",
+            "bind_managed_route",
+            "bind_verified_resources",
+            "initialize",
+        ] {
+            let input = hello.clone() + &request(1, command);
+            let mut calls = 0;
+            assert!(serve_authorized(
+                &mut input.as_bytes(),
+                &mut Vec::new(),
+                BTreeMap::new(),
+                |_| Ok(Permission::read_only()),
+                |name, _| {
+                    assert_eq!(name, "bind_verified_resources");
+                    calls += 1;
+                    Ok(Value::Null)
+                },
+            )
+            .is_err());
+            assert_eq!(calls, 1);
+        }
+        assert!(!COMMANDS.contains(&"bind_verified_resources"));
+        assert!(!crate::hosted_commands::COMMANDS.contains(&"bind_verified_resources"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreign_resources_fail_before_consent_or_snapshot_dispatch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().canonicalize().unwrap();
+        std::fs::create_dir(directory.join("server")).unwrap();
+        for (name, _) in crate::hosted_payload::FILES {
+            let path = directory.join("server").join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"foreign payload").unwrap();
+        }
+        assert!(!crate::hosted_payload::FILES.is_empty());
+        let input = initialize(
+            json!({"hostingRevision":2,"requestedMode":"read-only","resourceDirectory":directory}),
+        ) + &request(1, "get_hosted_snapshot");
+        let mut output = Vec::new();
+        serve_authorized(
+            &mut input.as_bytes(),
+            &mut output,
+            BTreeMap::new(),
+            |_| panic!("Foreign resources must not prompt"),
+            |command, args| {
+                assert_eq!(command, "bind_verified_resources");
+                let args = decode::<ResourceArgs>(args)?;
+                crate::hosted_payload::Root::verified(args.resource_directory.join("server"))?;
+                Ok(Value::Null)
+            },
+        )
+        .unwrap();
+        let frames = replies(&output);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["id"], 0);
+        assert_eq!(frames[0]["ok"], false);
+        assert!(frames[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("does not match"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resource_binding_does_not_bypass_decline_or_writable_admission() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().canonicalize().unwrap();
+        for args in [
+            json!({"hostingRevision":2,"requestedMode":"read-only","managedRouting":true,"resourceDirectory":directory}),
+            json!({"hostingRevision":2,"requestedMode":"writable","resourceDirectory":directory}),
+        ] {
+            assert!(serve_authorized(
+                &mut initialize(args).as_bytes(),
+                &mut Vec::new(),
+                BTreeMap::new(),
+                |_| panic!("Invalid route must not prompt"),
+                |_, _| panic!("Invalid route must not bind"),
+            )
+            .is_err());
+        }
+        for writable in [false, true] {
+            let input = initialize(
+                json!({"hostingRevision":2,"requestedMode":if writable {"writable"} else {"read-only"},"managedRouting":writable,"resourceDirectory":directory}),
+            ) + &request(1, "get_hosted_snapshot");
+            let mut output = Vec::new();
+            let mut calls = 0;
+            serve_authorized(
+                &mut input.as_bytes(),
+                &mut output,
+                BTreeMap::new(),
+                |requested| {
+                    assert_eq!(requested, writable);
+                    Err("Declined".into())
+                },
+                |command, _| {
+                    assert_eq!(command, "bind_verified_resources");
+                    calls += 1;
+                    Ok(Value::Null)
+                },
+            )
+            .unwrap();
+            assert_eq!(calls, 1);
+            let frames = replies(&output);
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0]["error"], "Declined");
+        }
+        let input = initialize(
+            json!({"hostingRevision":2,"requestedMode":"writable","managedRouting":true,"resourceDirectory":directory}),
+        );
+        assert!(serve_authorized(
+            &mut input.as_bytes(),
+            &mut Vec::new(),
+            BTreeMap::new(),
+            |_| Ok(Permission::read_only()),
+            |command, _| {
+                assert_eq!(command, "bind_verified_resources");
+                Ok(Value::Null)
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn absent_resources_keep_the_existing_snapshot_resolver() {
+        let directory = PathBuf::from("standalone resources");
+        assert_eq!(
+            snapshot_resource_directory(None, || Ok(directory.clone())).unwrap(),
+            directory
+        );
+        assert!(snapshot_resource_directory(None, || Err("resolver failed".into())).is_err());
+        #[cfg(windows)]
+        assert_eq!(
+            snapshot_resource_directory(
+                Some(&crate::hosted_payload::Root(PathBuf::from("C:/old/server"))),
+                || Ok(directory.clone())
+            )
+            .unwrap(),
+            directory,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bound_snapshot_uses_verified_root_without_the_current_exe_resolver() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().canonicalize().unwrap();
+        let server = directory.join("server");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (name, _) in crate::hosted_payload::FILES {
+            let from = if name.starts_with("unity-extension/") {
+                source.join(name)
+            } else {
+                source.join("release").join(name)
+            };
+            let to = server.join(name);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(from, to).unwrap();
+        }
+        assert!(!crate::hosted_payload::FILES.is_empty());
+        let root = crate::hosted_payload::Root::verified(server.clone()).unwrap();
+        assert_eq!(
+            snapshot_resource_directory(Some(&root), || panic!(
+                "Hosted Unix resources must not depend on current_exe"
+            ))
+            .unwrap(),
+            directory
+        );
+        let bridge = "unity-extension/Editor/BanterMCPBridge.cs";
+        let approved = root.read_verified(bridge).unwrap();
+        std::fs::write(server.join(bridge), b"external replacement").unwrap();
+        assert_eq!(root.read_verified(bridge).unwrap(), approved);
+        assert!(crate::hosted_payload::Root::verified(server).is_err());
+    }
 
     fn writable_permission(root: &Path) -> Permission {
         let mut permission = Permission::read_only();

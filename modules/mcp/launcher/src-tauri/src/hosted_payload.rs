@@ -111,6 +111,11 @@ fn open_image(path: &Path) -> Result<File, String> {
         use std::os::windows::fs::OpenOptionsExt;
         options.share_mode(1);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
     let file = options
         .open(path)
         .map_err(|_| format!("Cannot open required hosted file: {}", path.display()))?;
@@ -149,6 +154,42 @@ fn verify(directory: &Path, files: &[(&str, &str)]) -> Result<Vec<File>, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_opens_are_nonblocking_nofollow_cloexec_and_regular_only() {
+        use std::os::{fd::AsRawFd, unix::fs::symlink};
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().canonicalize().unwrap();
+        let path = directory.join("regular");
+        std::fs::write(&path, b"fixture").unwrap();
+        let file = open_image(&path).unwrap();
+        assert_ne!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK,
+            0
+        );
+        assert_ne!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        let link = directory.join("link");
+        symlink(&path, &link).unwrap();
+        assert!(open_image(&link).is_err());
+        let linked_directory = directory.join("linked-directory");
+        symlink(&directory, &linked_directory).unwrap();
+        assert!(open_image(&linked_directory.join("regular")).is_err());
+        assert!(open_image(&directory).is_err());
+        assert!(open_image(Path::new("relative")).is_err());
+        assert!(open_image(&directory.join("../regular")).is_err());
+        let fifo = directory.join("fifo");
+        let fifo_name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+        // No writer is attached: a blocking open would hang this test.
+        assert!(open_image(&fifo).is_err());
+        let socket_path = directory.join("socket");
+        let _socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        assert!(open_image(&socket_path).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn snapshots_not_advisory_locks_bind_exact_resource_consumption() {

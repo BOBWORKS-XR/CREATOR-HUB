@@ -129,5 +129,24 @@ The earlier expanded report remains a failure: its test checked transport.pid
 after SDK close had cleared it. That harness-only correction was rerun; it did
 not change runtime behavior or retroactively relabel the failed report.
 
-No native Mac run has been established in this task. Cross-target `cargo check`
-and Clippy, portable parser tests, and Windows regressions do not lift the block.
+Later native CI established the headless router's Mac component runs; the earlier
+statement about no native Mac run is superseded for that component only. New
+threaded GUI admission, Tauri consent/resource handoff, installed updating and
+writable operation remain separate gates. Cross-target checks do not lift them.
+
+## Threaded GUI Admission
+
+The 0.1.13 development candidate uses separate direct-parent GUI adapters; it
+does not remove the headless supervisor's single-thread guard. Linux seals and
+executes an approved buffer from a syscall-only pre-exec hook. Mac uses suspended
+spawn and requires approved signed HARD/KILL flags plus matching kernel CDHash
+and VALID/HARD/KILL status before resume, with no DEBUGGED status. Hub does not
+change its own global code-signing flags. Caller-owned private pipes and actual
+child waiting retain the existing EOF/draining behavior.
+
+Unix MCP initialization carries `resourceDirectory` because memfd paths cannot
+be canonicalized and flat Mac internal backends have no adjacent Resources
+bundle. The backend binds its build-verified resource snapshots from that path;
+the path alone supplies no executable or writable authority. Native consent,
+ownership and managed routing checks remain. New native Tauri/installed tests
+are required before enabling production writable mode.

@@ -29,6 +29,7 @@ jobs:
           workspaces: |
             native/mcp-router
             native/mcp-router/tests/hosted-boundary
+            native/mcp-router/tests/hosted-payload
       - run: cargo fmt --manifest-path native/mcp-router/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path native/mcp-router/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --release --locked --manifest-path native/mcp-router/Cargo.toml
@@ -45,6 +46,12 @@ jobs:
         env:
           CREATOR_HUB_INTERNAL_MODULE: '1'
         run: cargo test --release --locked --manifest-path native/mcp-router/tests/hosted-boundary/Cargo.toml
+      - name: Native verified resource snapshots and nonblocking file admission
+        if: runner.os != 'Windows'
+        run: |
+          cargo fmt --manifest-path native/mcp-router/tests/hosted-payload/Cargo.toml --check
+          cargo clippy --release --locked --manifest-path native/mcp-router/tests/hosted-payload/Cargo.toml --all-targets -- -D warnings
+          cargo test --release --locked --manifest-path native/mcp-router/tests/hosted-payload/Cargo.toml
       - uses: actions/setup-node@v6
         if: runner.os != 'Windows'
         with:
