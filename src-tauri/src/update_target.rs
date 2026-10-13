@@ -122,7 +122,18 @@ pub fn appimage_location(exe: &Path, appdir: &Path, image: &Path) -> Result<Path
     {
         return Err("Cannot identify the running Hub AppImage. Open the original AppImage file before updating.".into());
     }
-    Ok(image.to_path_buf())
+    // APPIMAGE and APPDIR are inherited strings, not backing-file identity.
+    // Until the running container can be bound to its outer file, refuse the
+    // destructive path rather than replacing an unrelated inherited image.
+    Err("Automatic AppImage updates are not enabled for this build because the running container cannot be verified. Download the latest AppImage and replace it after closing Hub; your app data is kept separately.".into())
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn verify_restart_target(installed: &Path, restart: &Path) -> Result<(), String> {
+    if installed != restart {
+        return Err("A launcher passed a different AppImage restart location to Hub. Close Hub and open the installed package directly before updating. No installer was started.".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -232,14 +243,27 @@ mod tests {
         }
     }
     #[test]
-    fn appimage_updates_replace_the_outer_file_not_the_read_only_mount() {
+    fn unproven_appimage_paths_cannot_authorize_replacement_of_an_outer_file() {
         let root = std::env::temp_dir();
         let dir = root.join(".mount_Hub");
         let exe = dir.join("usr/bin/creator-hub");
         let image = root.join("Creator_Hub.AppImage");
-        assert_eq!(appimage_location(&exe, &dir, &image).unwrap(), image);
+        assert!(appimage_location(&exe, &dir, &image)
+            .unwrap_err()
+            .contains("running container cannot be verified"));
+        assert!(appimage_location(&exe, &dir, &root.join("Unrelated.AppImage")).is_err());
         assert!(appimage_location(&root.join("usr/bin/creator-hub"), &dir, &image).is_err());
         assert!(appimage_location(&exe, &dir, &dir.join("bad.AppImage")).is_err());
         assert!(appimage_location(&exe, &dir, Path::new("relative.AppImage")).is_err());
+    }
+    #[test]
+    fn inherited_appimage_cannot_redirect_a_deb_or_rpm_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("usr/bin/creator-hub");
+        assert!(verify_restart_target(&installed, &installed).is_ok());
+        let unrelated = root.path().join("Another-App.AppImage");
+        assert!(verify_restart_target(&installed, &unrelated)
+            .unwrap_err()
+            .contains("No installer was started"));
     }
 }

@@ -208,6 +208,10 @@ fn raw_installed_location(_handle: &tauri::AppHandle) -> Result<PathBuf, String>
         if !fs::metadata(&location).is_ok_and(|m| m.is_file()) {
             return Err("The installed Hub package is unavailable.".into());
         }
+        let restart = tauri::process::current_binary(&_handle.env())
+            .map_err(|_| "Cannot verify Hub's restart target.")?;
+        platform::reject_links(&restart)?;
+        crate::update_target::verify_restart_target(&location, &restart)?;
         Ok(location)
     }
     #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]

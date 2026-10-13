@@ -229,6 +229,51 @@ Unix separate-companion management and Flatpak host Unity/client integration
 remain unaccepted and guarded. No new public release, tag or latest promotion
 is authorized by this checkpoint. Keep unification for 0.1.14 or later.
 
+## Follow-Up Native Evidence (2026-10-13)
+
+- [Signed Windows lab 38407655261](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38407655261)
+  passed the actual public 0.1.12 application through native cancellation,
+  verified installation, automatic restart and hosted-view restoration. It
+  binds installer `07e7356087b74a2de537b43196e104d58d521358a3ac84a2ea33ec49aa985bb4`
+  and installed executable `2315ad9d3eed9387e5409fd448219c012ab096b64653e1dbca2939eaa5c5b8d3`.
+  Public discovery remains a separate gate. Subsequent product changes require
+  a new candidate, signatures and installed acceptance; this receipt does not
+  transfer to rebuilt bytes. The stricter cleanup rerun
+  [38417422011](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38417422011)
+  passed, including exact owned Hub exit zero, policy restoration, proxy exit
+  zero and empty cleanup errors. An independent audit had identified false-pass
+  paths under test failures; those original findings remain recorded.
+- [Native build 38407664529](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38407664529)
+  passed all four platform builds at source `b4a0cd8`. The real multi-megabyte
+  DEB parser regression also passed. Apple Silicon's bundle and Mach-O minimum
+  both declare 11.0; the historical public 0.1.12 mismatch remains recorded.
+- [Linux native probe 38413390562](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38413390562)
+  passed fresh AppImage/DEB installs, synthetic terms, rendered GUI, normal
+  close and public 0.1.12 manual replacements. These are not signed updater
+  restart tests. Captured mount information identifies the FUSE mount, not
+  the outer AppImage backing file. Environment paths alone cannot authorize
+  replacing that file. Unproven AppImage updates now fail closed; inherited
+  `APPIMAGE` cannot redirect a DEB/RPM restart to a different executable.
+- [Mac native probe 38413382537](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38413382537)
+  captured both architectures' actual WebKit GUI. Apple Silicon retained
+  synthetic terms across normal restart. Intel returned to Terms after a
+  normal quit/relaunch, so persistence is not accepted. Ad-hoc Gatekeeper
+  rejection remains recorded; no quarantine or security-policy bypass occurred.
+  The follow-up uses a bounded native acknowledgement record, written and
+  verified before unlocking, with migration of existing accepted policies.
+  Browser/Rust regressions pass; rebuilt native Mac acceptance is still required.
+
+Flatpak run [38417415256](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38417415256)
+passed actual native DEB parsing, GNOME 50 runtime/SDK GPG verification,
+build/export and isolated installation. The permission validator rejected
+installed sockets `x11;wayland;fallback-x11`; GUI and update phases were not
+reached. Determine whether this is fallback serialization or genuinely excess
+permission before changing the validator. No host-access permission was added.
+
+Flatpak installed/update testing, native signed Unix update/restart, Unix
+companion operation and final public discovery remain open. No tag, release or
+latest promotion has been performed. Unification stays at 0.1.14 or later.
+
 ## Files Written by This Port
 
 - `scripts/native-hub-descriptor.cjs`
