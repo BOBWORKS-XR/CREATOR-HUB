@@ -178,7 +178,28 @@ mod tests {
         fs::write(&path, b"{\"preferences\":{\"keep\":true}}\n").unwrap();
         let (before, config) = read(&path).unwrap();
         let merged = merge(config, entry()).unwrap();
-        write(&path, before.as_deref(), &merged).unwrap();
+        let publish = |expected: Option<&[u8]>| {
+            write_using(
+                &path,
+                expected,
+                &merged,
+                crate::client_setup_write::protected(),
+                |text| {
+                    if crate::client_setup_write::protected() {
+                        crate::client_setup_write::commit_fixture(
+                            "Claude Desktop",
+                            &path,
+                            expected,
+                            text,
+                            &root.join("journal"),
+                        )
+                    } else {
+                        crate::atomic_write(&path, text)
+                    }
+                },
+            )
+        };
+        publish(before.as_deref()).unwrap();
         let backup = fs::read_dir(root.join(".creator-hub-settings-backups"))
             .unwrap()
             .next()
@@ -186,7 +207,7 @@ mod tests {
             .unwrap()
             .path();
         assert_eq!(fs::read(backup).unwrap(), before.unwrap());
-        assert!(write(&path, Some(b"stale"), &merged).is_err());
+        assert!(publish(Some(b"stale")).is_err());
         fs::write(&path, b"broken JSON").unwrap();
         assert!(read(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"broken JSON");

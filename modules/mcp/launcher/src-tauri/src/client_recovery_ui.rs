@@ -35,10 +35,17 @@ fn collect(client: &str, name: &str, path: &Path) -> Result<Vec<Pending>, String
 }
 
 pub(crate) fn central_root() -> Result<std::path::PathBuf, String> {
-    Ok(dirs::data_local_dir()
-        .ok_or("Local Hub data is unavailable.")?
-        .join("creator-hub")
-        .join("client-migrations-v1"))
+    #[cfg(test)]
+    {
+        Err("Unit tests must use explicit disposable migration storage.".into())
+    }
+    #[cfg(not(test))]
+    {
+        Ok(dirs::data_local_dir()
+            .ok_or("Local Hub data is unavailable.")?
+            .join("creator-hub")
+            .join("client-migrations-v1"))
+    }
 }
 
 pub(crate) fn require_no_pending_adjacent(path: &Path) -> Result<(), String> {
