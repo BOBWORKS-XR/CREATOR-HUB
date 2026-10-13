@@ -1,0 +1,50 @@
+name: Retained Linux package diagnostic (no build or install)
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run:
+        description: Exact retained experimental package run
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+jobs:
+  rpm:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - run: npm ci
+      - name: Check exact run identifier
+        env:
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
+        run: '[[ "$CANDIDATE_RUN" =~ ^[0-9]+$ ]]'
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y --no-install-recommends rpm libarchive-tools
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: unified-unix-candidate-Linux-X64-*
+          path: artifacts/retained-linux
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run }}
+      - name: Capture native parser outcomes without installing the RPM
+        env:
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
+        run: node scripts/native-rpm-probe.cjs artifacts/retained-linux artifacts/rpm-probe.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: retained-rpm-diagnostic-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: artifacts/rpm-probe.json

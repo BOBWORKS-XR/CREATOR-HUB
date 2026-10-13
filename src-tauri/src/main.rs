@@ -1,18 +1,32 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod builtin;
 mod catalog;
 mod community;
 mod community_project;
+#[cfg(all(target_os = "macos", test))]
+#[allow(dead_code)]
+#[path = "../../native/host_parent_macos.rs"]
+mod host_parent_macos;
 mod hosted;
 mod hosted_operation;
 mod hosted_restore;
+#[cfg(any(unix, test))]
+mod installation_identity;
 mod installer_preflight;
 mod launch;
+#[cfg(any(target_os = "macos", test))]
+mod mac_update;
 mod manager;
 mod mcp_runtime;
 mod platform;
+#[path = "../../native/plugins_retirement.rs"]
+mod plugins_retirement;
+mod preferences;
 mod projects;
 mod self_update;
+mod update_target;
+mod usage_terms;
 use catalog::AppId;
 use tauri::{Emitter, Manager as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -135,6 +149,9 @@ async fn app_inventory(
     preview: bool,
 ) -> Result<manager::Snapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        if let Some(snapshot) = builtin::inventory(&app)? {
+            return Ok(snapshot);
+        }
         app.state::<manager::Manager>().snapshot(check, preview)
     })
     .await
@@ -274,7 +291,7 @@ fn open_resource(resource: String) -> Result<(), String> {
 }
 
 fn shell_initialization(shell_key: &str) -> String {
-    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); }}", shell_key, env!("CARGO_PKG_VERSION"))
+    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); Object.defineProperty(window, '__CREATOR_HUB_TERMS_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_PREFERENCES_PROTOCOL__', {{value: 1}}); }}", shell_key, env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(target_os = "linux")]
@@ -312,6 +329,11 @@ fn main() {
     let shell_key: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
     let initialize = shell_initialization(&shell_key);
     let commands: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        usage_terms::usage_terms_status,
+        usage_terms::accept_usage_terms,
+        preferences::hub_preferences_status,
+        preferences::set_hub_preference,
+        plugins_retirement::open_plugins_website,
         open_resource,
         community_catalogue,
         community_projects,
@@ -357,6 +379,13 @@ fn main() {
         .manage(community::Community::default())
         .manage(community_project::ProjectImports::default())
         .manage(self_update::SelfUpdate::default())
+        .setup(|app| {
+            #[cfg(unix)]
+            self_update::initialize(app.handle());
+            #[cfg(not(unix))]
+            let _ = app;
+            Ok(())
+        })
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(hosted::Hosting::default())
         .manage(hosted_restore::Restore::default())
@@ -375,6 +404,10 @@ fn main() {
             let key = app.state::<ShellKey>();
             if invoke.message.headers().get("x-creator-shell-key").and_then(|value| value.to_str().ok()) != Some(key.0.as_str()) {
                 invoke.resolver.reject("Hub commands are available only to its trusted shell.");
+                return true;
+            }
+            if let Some(error) = plugins_retirement::command_error(invoke.message.command()) {
+                invoke.resolver.reject(error);
                 return true;
             }
             commands(invoke)
@@ -401,6 +434,20 @@ mod tests {
             "'__CREATOR_HUB_VERSION__', {{value: '{}'}}",
             env!("CARGO_PKG_VERSION")
         )));
+    }
+
+    #[test]
+    fn native_persistence_protocols_keep_top_window_shell_authority() {
+        let script = shell_initialization("test-key");
+        assert!(script.starts_with("if(window === window.top) {"));
+        assert!(script.contains("'__CREATOR_SHELL_KEY__', {value: 'test-key', configurable: true}"));
+        for property in [
+            "__CREATOR_HUB_TERMS_PROTOCOL__",
+            "__CREATOR_HUB_PREFERENCES_PROTOCOL__",
+        ] {
+            assert!(script.contains(&format!("'{property}', {{value: 1}}")));
+        }
+        assert!(script.ends_with(" }"));
     }
 
     #[test]

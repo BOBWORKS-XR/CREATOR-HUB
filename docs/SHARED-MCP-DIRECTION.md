@@ -1,5 +1,8 @@
 # Shared MCP Direction
 
+Superseded on 2026-10-03 by [Unified Creator Hub](UNIFIED-CREATOR-HUB.md).
+The text below records an earlier direction, not the current product plan.
+
 User clarification: 2026-09-14. This records the next packaging direction, not
 an implemented or released capability.
 

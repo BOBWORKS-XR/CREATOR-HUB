@@ -120,7 +120,7 @@ mod unix_native {
 
     impl Processes for Snapshot {
         fn next(&mut self) -> Result<Option<(u32, String)>, ()> {
-            while let Some(entry) = self.entries.next() {
+            for entry in self.entries.by_ref() {
                 let Ok(entry) = entry else { continue };
                 let file_name = entry.file_name();
                 let Some(s) = file_name.to_str() else {
@@ -132,6 +132,41 @@ mod unix_native {
                 }
             }
             Ok(None)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn enumeration_resumes_after_each_process_and_skips_incomplete_entries() {
+            let root = tempfile::tempdir().unwrap();
+            for (directory, name) in [
+                ("101", Some("other\n")),
+                ("202", Some("creator-hub\n")),
+                ("303", None),
+                ("not-a-pid", Some("creator-hub\n")),
+            ] {
+                let path = root.path().join(directory);
+                fs::create_dir(&path).unwrap();
+                if let Some(name) = name {
+                    fs::write(path.join("comm"), name).unwrap();
+                }
+            }
+            let mut snapshot = Snapshot {
+                entries: fs::read_dir(root.path()).unwrap(),
+            };
+            let mut processes = Vec::new();
+            while let Some(process) = snapshot.next().unwrap() {
+                processes.push(process);
+            }
+            processes.sort();
+            assert_eq!(
+                processes,
+                vec![(101, "other".into()), (202, "creator-hub".into())]
+            );
+            assert_eq!(snapshot.next().unwrap(), None);
         }
     }
 }

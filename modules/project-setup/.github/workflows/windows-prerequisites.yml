@@ -1,0 +1,239 @@
+name: Prerequisite Installation
+
+on:
+  workflow_dispatch:
+    inputs:
+      accept_test_licences:
+        description: Accept Unity, Android SDK/NDK and OpenJDK installation licences on a disposable runner
+        type: boolean
+        required: true
+        default: false
+      platforms:
+        description: Disposable installation hosts
+        type: choice
+        options: [windows, native, linux, macos, all]
+        default: windows
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup-prerequisites-${{ github.ref }}-${{ inputs.platforms }}
+  cancel-in-progress: false
+
+jobs:
+  clean-install:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-PROJECT-SETUP' && (inputs.platforms == 'windows' || inputs.platforms == 'all')
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Require explicit test approval
+        shell: pwsh
+        env:
+          APPROVED: ${{ inputs.accept_test_licences }}
+        run: |
+          if ($env:APPROVED -ne 'true') { throw 'Installation licences were not accepted for this test.' }
+          Get-Volume | Where-Object DriveLetter | Select-Object DriveLetter,SizeRemaining,Size
+      - name: Prepare the approved clean Windows fixture
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') { throw 'Fixture cleanup is only allowed on a disposable GitHub-hosted Windows runner.' }
+          $hubRoot = Join-Path $env:ProgramFiles 'Unity Hub'
+          $hub = Join-Path $hubRoot 'Unity Hub.exe'
+          if (Test-Path -LiteralPath $hub) {
+            $uninstaller = Join-Path $hubRoot 'Uninstall Unity Hub.exe'
+            if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw 'The preinstalled Hub has no expected uninstaller.' }
+            $resolved = (Resolve-Path -LiteralPath $uninstaller).Path
+            if ($resolved -ne $uninstaller -or (Get-Item -LiteralPath $hubRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Unexpected Hub fixture path.' }
+            $signature = Get-AuthenticodeSignature -LiteralPath $uninstaller
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Unity') { throw 'The fixture uninstaller is not a valid Unity-signed executable.' }
+            Write-Output "Removing only the runner's preinstalled Unity Hub: $resolved"
+            $process = Start-Process -FilePath $resolved -ArgumentList '/S' -WindowStyle Hidden -PassThru
+            if (-not $process.WaitForExit(120000)) { throw 'The fixture uninstaller did not finish. Nothing was force-closed.' }
+            if ($process.ExitCode -ne 0) { throw "Hub fixture uninstall failed: $($process.ExitCode)" }
+            $deadline = (Get-Date).AddSeconds(30)
+            while ((Test-Path -LiteralPath $hub) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 1 }
+            if (Test-Path -LiteralPath $hub) { throw 'Hub still exists; this is not a clean fixture.' }
+          }
+          $editorRoot = Join-Path $env:ProgramFiles 'Unity/Hub/Editor'
+          if (Test-Path -LiteralPath $editorRoot) {
+            if (@(Get-ChildItem -LiteralPath $editorRoot -Directory).Count -gt 0) { throw 'Unexpected preinstalled Editor. No Editor folders will be deleted.' }
+          }
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+      - run: npm ci
+      - run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
+      - run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml
+      - run: cargo clippy --release --locked --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
+      - name: Make room in the disposable fixture without relaxing app checks
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') { throw 'Fixture cleanup requires GitHub-hosted Windows.' }
+          $drive = ([IO.Path]::GetPathRoot($env:ProgramFiles)).TrimEnd('\', ':')
+          if ($drive -notmatch '^[A-Z]$') { throw 'Unexpected system installation volume.' }
+          $before = (Get-PSDrive -Name $drive).Free
+          # This workflow uses neither CodeQL nor Python. Keep Node, Rust, SDKs and Unity data.
+          # CodeQL's toolcache location is defined by actions/runner-images Install-CodeQLBundle.ps1.
+          foreach ($unused in @('CodeQL', 'Python')) {
+          if ((Get-PSDrive -Name $drive).Free -lt 40GB -and $env:RUNNER_TOOL_CACHE) {
+            $cache = [IO.Path]::GetFullPath($env:RUNNER_TOOL_CACHE).TrimEnd('\')
+            $entryRoot = Join-Path $cache $unused
+            if (Test-Path -LiteralPath $entryRoot -PathType Container) {
+              $resolved = (Resolve-Path -LiteralPath $entryRoot).Path
+              if ($resolved -ne $entryRoot -or -not $resolved.StartsWith($cache + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected fixture cache path.' }
+              if ((Get-Item -LiteralPath $entryRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Refusing linked fixture cache.' }
+              # Walk ordinary directories only. Leave every junction/link and directory
+              # in place; delete individual cache files without recursive removal.
+              $pending = [Collections.Generic.Queue[string]]::new()
+              $pending.Enqueue($resolved)
+              $removed = 0L
+              $skipped = 0
+              while ($pending.Count -gt 0) {
+                foreach ($entry in Get-ChildItem -LiteralPath $pending.Dequeue() -Force) {
+                  $path = [IO.Path]::GetFullPath($entry.FullName)
+                  if (-not $path.StartsWith($resolved + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Cache entry escaped the approved fixture root.' }
+                  if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { $skipped++; continue }
+                  if ($entry.PSIsContainer) { $pending.Enqueue($path); continue }
+                  $length = $entry.Length
+                  Remove-Item -LiteralPath $path -Force
+                  $removed += $length
+                }
+              }
+              Write-Output "Removed $removed bytes of ordinary $unused cache files; left $skipped links untouched."
+            }
+          }
+          }
+          Write-Output "System volume free bytes before: $before; after: $((Get-PSDrive -Name $drive).Free)"
+      - name: Install signature-verified Hub and actual Unity requirements
+        shell: pwsh
+        env:
+          CREATOR_SETUP_ACCEPT_TEST_LICENSES: 'true'
+        run: ./scripts/Test-PrerequisitesOnHostedRunner.ps1
+      - name: Stage diagnostics on one volume, without Unity account credentials
+        if: always()
+        shell: pwsh
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP 'prerequisite-evidence'
+          [void](New-Item -ItemType Directory -Path $destination -Force)
+          foreach ($file in @((Join-Path $PWD 'prerequisite-install.log'), (Join-Path $PWD 'prerequisite-install.stderr.log'), (Join-Path $PWD 'prerequisite-activity.ndjson'), (Join-Path $env:RUNNER_TEMP 'creator-prerequisite-acceptance.json'))) {
+            if (Test-Path -LiteralPath $file -PathType Leaf) { Copy-Item -LiteralPath $file -Destination $destination }
+          }
+          $logs = Join-Path $env:LOCALAPPDATA 'CreatorProjectSetup/logs'
+          if (Test-Path -LiteralPath $logs -PathType Container) {
+            Get-ChildItem -LiteralPath $logs -Directory -Filter 'requirements-*' | ForEach-Object {
+              Copy-Item -LiteralPath $_.FullName -Destination $destination -Recurse
+            }
+          }
+      - name: Upload installation evidence, without Unity account credentials
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prerequisite-install-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/prerequisite-evidence/
+
+  native-install:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-PROJECT-SETUP' && inputs.platforms != 'windows'
+    name: Native installation (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.platforms == 'linux' && '[{"os":"ubuntu-22.04","label":"Linux x64"}]' || inputs.platforms == 'macos' && '[{"os":"macos-latest","label":"macOS Apple silicon"},{"os":"macos-15-intel","label":"macOS Intel"}]' || '[{"os":"ubuntu-22.04","label":"Linux x64"},{"os":"macos-latest","label":"macOS Apple silicon"},{"os":"macos-15-intel","label":"macOS Intel"}]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Require explicit native test approval
+        shell: bash
+        env:
+          APPROVED: ${{ inputs.accept_test_licences }}
+        run: |
+          set -euo pipefail
+          test "$APPROVED" = true
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          df -h
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev patchelf build-essential file
+      - run: npm ci
+      - name: Use a canonical temporary path on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "TMPDIR=$(node -p "require('fs').realpathSync(require('os').tmpdir())")" >> "$GITHUB_ENV"
+      - run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
+      - name: Focused prerequisite regression tests
+        run: |
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml logic::tests
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml bootstrap::tests
+      - name: Install, reuse and repair real Unity requirements
+        shell: bash
+        env:
+          CREATOR_SETUP_ACCEPT_TEST_LICENSES: 'true'
+        run: |
+          set -euo pipefail
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml bootstrap::tests::disposable_install_smoke -- --ignored --exact --nocapture 2>&1 | tee prerequisite-install.log
+      - name: Diagnose failed Linux Hub bootstrap
+        if: failure() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -u
+          mkdir -p "$RUNNER_TEMP/prerequisite-evidence"
+          helper="${XDG_DATA_HOME:-$HOME/.local/share}/CreatorProjectSetup/tools/unity-cli/1.0.0-beta.9/unity"
+          if [ -x "$helper" ]; then
+            timeout 180 "$helper" hub install --format json --non-interactive --no-banner --no-pager --no-color > "$RUNNER_TEMP/prerequisite-evidence/hub-json-diagnostic.log" 2>&1
+            echo "exit=$?" >> "$RUNNER_TEMP/prerequisite-evidence/hub-json-diagnostic.log"
+          fi
+          for directory in "$HOME/Applications" "$HOME/.local/bin" /opt /usr/bin; do
+            test ! -d "$directory" || find "$directory" -maxdepth 3 -iname '*unity*' -print
+          done > "$RUNNER_TEMP/prerequisite-evidence/hub-locations.txt"
+      - name: Stage only installation diagnostics (no account data)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/prerequisite-evidence"
+          test ! -f prerequisite-install.log || cp prerequisite-install.log "$RUNNER_TEMP/prerequisite-evidence/"
+          test ! -f "$RUNNER_TEMP/creator-prerequisite-acceptance.json" || cp "$RUNNER_TEMP/creator-prerequisite-acceptance.json" "$RUNNER_TEMP/prerequisite-evidence/"
+          if [ "$RUNNER_OS" = macOS ]; then
+            logs="$HOME/Library/Application Support/CreatorProjectSetup/logs"
+          else
+            logs="${XDG_DATA_HOME:-$HOME/.local/share}/CreatorProjectSetup/logs"
+          fi
+          for directory in "$logs"/requirements-*; do
+            test ! -d "$directory" || cp -R "$directory" "$RUNNER_TEMP/prerequisite-evidence/"
+          done
+          df -h > "$RUNNER_TEMP/prerequisite-evidence/disk-space.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prerequisite-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/prerequisite-evidence/

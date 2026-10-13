@@ -1,0 +1,153 @@
+name: Windows candidate replay (test only)
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Replay all upgrade baselines or just the native-prompt route
+        type: choice
+        default: all
+        options: [all, '2.7.1']
+  push:
+    branches: [feature/community-plugins]
+    paths:
+      - .github/workflows/windows-candidate-replay.yml
+      - scripts/smoke-native-lifecycle-ci.mjs
+      - test/fixtures/native-lifecycle-window.ps1
+permissions:
+  contents: read
+  actions: read
+env:
+  CANDIDATE_RUN: '35283535011'
+  CANDIDATE_SOURCE: 'c9c0c64a1bdff5008904afbad266089fca52171c'
+  CANDIDATE_SHA256: '13f0e14bf321227f59788f13ec9253dff092891bb3144607e37263d5ee16e2ca'
+  CANDIDATE_EXECUTABLE_SHA256: '815147c99d04fa496c2d6d0d6d984aa99dee7c91b7cd880fefa2488eb089f610'
+jobs:
+  upgrade:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        baseline: ${{ fromJSON(inputs.baseline == '2.7.1' && '["2.7.1"]' || '["2.6.0", "2.7.0-alpha.1", "2.7.0-alpha.2", "2.7.0", "2.7.1"]') }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Verify the original build identity
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.path -cne '.github/workflows/windows-installer-acceptance.yml') { throw 'Original build identity differs.' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcp-windows-candidate-under-test
+          path: launcher/src-tauri/target/release/bundle/nsis
+          run-id: ${{ env.CANDIDATE_RUN }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        if: matrix.baseline == '2.7.0-alpha.2'
+        with:
+          name: mcp-windows-prerelease-candidate
+          path: artifacts/accepted-alpha2-baseline
+          run-id: 34985053768
+          github-token: ${{ github.token }}
+      - name: Replay exact installer with post-refusal diagnostics
+        shell: powershell
+        env:
+          BASELINE_VERSION: ${{ matrix.baseline }}
+        run: |
+          $extra = @{}
+          if ($env:BASELINE_VERSION -ceq '2.7.0-alpha.2') { $extra.BaselineInstaller = 'artifacts\accepted-alpha2-baseline\Creator Works MCP_2.7.0-alpha.2_x64-setup.exe' }
+          if ($env:BASELINE_VERSION -ceq '2.7.1') { $extra.TestInteractivePrompts = $true }
+          .\scripts\test-installed-upgrade-ci.ps1 -Installer 'launcher\src-tauri\target\release\bundle\nsis\Creator Works MCP_2.7.2_x64-setup.exe' -BaselineVersion $env:BASELINE_VERSION -ExpectedInstallerSha256 $env:CANDIDATE_SHA256 -ExpectedSourceCommit $env:CANDIDATE_SOURCE @extra
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installed-acceptance-${{ matrix.baseline }}
+          path: |
+            artifacts/installed-upgrade-ci/report.json
+            artifacts/installed-upgrade-ci/preflight-refusal.json
+          if-no-files-found: warn
+  lifecycle:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcp-windows-candidate-under-test
+          path: artifacts/lifecycle-installer
+          run-id: ${{ env.CANDIDATE_RUN }}
+          github-token: ${{ github.token }}
+      - name: Verify and extract the exact installer
+        shell: powershell
+        run: |
+          $installer = 'artifacts\lifecycle-installer\Creator Works MCP_2.7.2_x64-setup.exe'
+          if ((Get-FileHash -LiteralPath $installer).Hash.ToLowerInvariant() -cne $env:CANDIDATE_SHA256) { throw 'Candidate installer changed.' }
+          $inputs = Get-Content artifacts/lifecycle-installer/acceptance-inputs.json -Raw | ConvertFrom-Json
+          if ($inputs.sourceCommit -cne $env:CANDIDATE_SOURCE -or $inputs.installerSha256 -cne $env:CANDIDATE_SHA256) { throw 'Candidate source changed.' }
+          & 7z.exe x $installer '-oartifacts/lifecycle-payload' -y
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate extraction failed.' }
+      - name: Test exact packaged identity without starting the GUI
+        shell: pwsh
+        run: |
+          node scripts/smoke-creator-hub-info.mjs (Resolve-Path 'artifacts/lifecycle-payload/creator-works-mcp-launcher.exe').Path $env:CANDIDATE_EXECUTABLE_SHA256
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged identity check failed.' }
+      - run: npm install --prefix artifacts/lifecycle-tools --no-save --package-lock=false --ignore-scripts @playwright/test@1.63.0
+      - name: Enable app-specific loopback debugging on the disposable runner
+        id: test-policy
+        shell: powershell
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Disposable runner required.' }
+          $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          $name = 'creator-works-mcp-launcher.exe'
+          $existing = Get-Item -LiteralPath $key -ErrorAction SilentlyContinue
+          if ($existing -and $existing.GetValueNames() -contains $name) { throw 'Existing policy must not be overwritten.' }
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -LiteralPath $key -Name $name -Value '--remote-debugging-port=9239' -PropertyType String | Out-Null
+      - name: Test exact packaged app busy and idle close
+        run: node scripts/smoke-native-lifecycle-ci.mjs
+      - name: Remove only the test-specific policy
+        if: always() && steps.test-policy.outcome == 'success'
+        shell: powershell
+        run: |
+          $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          $name = 'creator-works-mcp-launcher.exe'
+          $value = (Get-ItemProperty -LiteralPath $key -Name $name -ErrorAction SilentlyContinue).$name
+          if ($value -ceq '--remote-debugging-port=9239') { Remove-ItemProperty -LiteralPath $key -Name $name }
+          elseif ($value) { throw 'Policy changed; left untouched.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-lifecycle-acceptance
+          path: |
+            artifacts/native-lifecycle/report.json
+            artifacts/native-lifecycle/*.png
+          if-no-files-found: warn
+  accepted-candidate:
+    needs: [upgrade, lifecycle]
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcp-windows-candidate-under-test
+          path: accepted
+          run-id: ${{ env.CANDIDATE_RUN }}
+          github-token: ${{ github.token }}
+      - name: Verify no rebuild or byte change
+        shell: pwsh
+        run: |
+          $installer = 'accepted/Creator Works MCP_2.7.2_x64-setup.exe'
+          if ((Get-FileHash -LiteralPath $installer).Hash.ToLowerInvariant() -cne $env:CANDIDATE_SHA256) { throw 'Accepted candidate changed.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcp-windows-stable-candidate
+          path: accepted/*-setup.exe
+          if-no-files-found: error

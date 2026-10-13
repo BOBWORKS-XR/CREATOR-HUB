@@ -21,6 +21,13 @@
   let hubUpdate = null;
   let busy = false;
   let launchRevision = -1;
+  const preferenceControls = [['preview-channel', 'preview', 'preview'],
+    ['auto-download', 'auto-download', 'autoDownload'], ['restore-hosted-views', 'restore-hosted-views', 'restoreHostedViews']];
+  const nativePreferences = window.CreatorHubNative.preferencesPersistence === true;
+  let preferencesReady = !nativePreferences;
+  let preferencesSaving = 0;
+  const legacyPreferences = {};
+  const preferenceFailures = new Map();
   const byId = id => document.getElementById(id);
   const invoke = (command, args) => window.CreatorHubNative.invoke(command, args);
   const platformLabel = () => {
@@ -32,12 +39,41 @@
   };
   byId('platform-status').textContent = platformLabel();
   if (typeof window.CreatorHubNative.version === 'string') document.querySelector('.footer-version').textContent = window.CreatorHubNative.version;
-  for (const [id, key] of [['preview-channel', 'preview'], ['auto-download', 'auto-download'], ['restore-hosted-views', 'restore-hosted-views']]) {
+  for (const [id, key, field] of preferenceControls) {
     byId(id).checked = true;
     try {
       const saved = localStorage.getItem(`creator-hub.${key}`);
       byId(id).checked = saved === null || saved === 'true';
     } catch { /* Keep the default when preference storage is unavailable. */ }
+    legacyPreferences[field] = byId(id).checked;
+    if (nativePreferences) { byId(id).checked = false; byId(id).disabled = true; }
+  }
+  const automaticDownloads = () => preferencesReady && !preferencesSaving && byId('auto-download').checked;
+  function preferenceError(message = '', key = 'load') {
+    if (message) preferenceFailures.set(key, message);
+    else preferenceFailures.delete(key);
+    byId('preferences-status').textContent = [...preferenceFailures.values()].join(' ');
+    byId('preferences-status').hidden = !preferenceFailures.size;
+  }
+  async function loadPreferences() {
+    if (!nativePreferences) return;
+    try {
+      const saved = await invoke('hub_preferences_status');
+      if (saved !== null && (!saved || typeof saved !== 'object' || Array.isArray(saved)
+        || Object.keys(saved).some(key => !preferenceControls.some(([, , field]) => field === key))
+        || preferenceControls.some(([, , field]) => saved[field] !== undefined && saved[field] !== null && typeof saved[field] !== 'boolean'))) throw Error('Invalid saved Hub preferences.');
+      for (const [id, key, field] of preferenceControls) {
+        const value = typeof saved?.[field] === 'boolean' ? saved[field] : legacyPreferences[field];
+        if (typeof saved?.[field] !== 'boolean') await invoke('set_hub_preference', { key, value });
+        byId(id).checked = value;
+      }
+      preferencesReady = true;
+      preferenceError();
+    } catch (reason) {
+      for (const [id] of preferenceControls) byId(id).checked = false;
+      preferenceError(`Saved preferences could not be verified: ${String(reason)}. Automatic downloads are off. Existing records were kept.`);
+    }
+    renderState();
   }
   function close(restore = false) {
     if (restore || menu.contains(document.activeElement)) trigger.focus({ preventScroll: true });
@@ -64,16 +100,9 @@
       else item.removeAttribute('aria-current');
     }
     if (view === 'projects') window.CreatorProjects.show();
-    const hosted = window.CreatorHosted.active(view);
-    window.CreatorHosted.show(hosted ? view : null);
-    document.body.classList.toggle('hosting-app', hosted);
-    document.querySelector('#view-detail').classList.toggle('hidden', !Object.hasOwn(tools, view) || hosted);
     const pageBrand = view === 'plugins' ? '<span>CREATOR</span> <strong>PLUGINS</strong>' : '<span>CREATOR</span> <strong>HUB</strong>';
-    title.innerHTML = hosted ? (view === 'setup' ? '<span>CREATOR</span> <strong>PROJECT</strong> SETUP' : '<span>CREATOR</span> <strong>WORKS</strong> MCP') : pageBrand;
     shell.querySelector('.suite-brand').innerHTML = pageBrand;
     trigger.replaceChildren(menu.querySelector(`[data-view="${view === 'plugins' ? 'plugins' : 'hub'}"] .suite-mark`).cloneNode(true));
-    byId('mode-description').textContent = hosted ? (view === 'setup' ? 'Unity and Creator SDK. Android + Windows.' :
-      (window.CreatorHosted.writable(view) ? 'Unity project connections and MCP setup.' : 'Unity project connections. Read-only preview.')) : view === 'plugins' ? 'Made by the community. Shared with creators.' : 'Unity tools. One place.';
     document.querySelector('#view-plugins').classList.toggle('hidden', view !== 'plugins');
     if (view === 'plugins') window.CreatorCommunity.show();
     else window.CreatorCommunity.closePreview();
@@ -96,28 +125,38 @@
         dt.textContent = label; dd.textContent = value; row.append(dt, dd); return row;
       }));
     }
-    const target = view === 'hub' || hosted ? title : document.querySelector(view === 'projects' ? '#hub-tab-projects' : view === 'plugins' ? '#plugins-title' : '#tool-title');
+    renderState();
+    const target = view === 'hub' || window.CreatorHosted.active(view) ? title : document.querySelector(view === 'projects' ? '#hub-tab-projects' : view === 'plugins' ? '#plugins-title' : appState()?.builtIn ? '#builtin-title' : '#tool-title');
     target.tabIndex = -1;
     target.focus();
-    renderState();
   }
   const hostAttempts = new Set();
+  const hostOpening = new Set();
+  const hostFailures = new Map();
   async function openHostedWhenReady(app) {
     const state = inventory?.apps?.find(item => item.app === app);
-    if (busy || hostAttempts.has(app) || window.CreatorHosted.active(app)
+    if (busy || inventoryError || !inventory?.supported || hostAttempts.has(app) || window.CreatorHosted.active(app)
       || !(state?.installed && state.trusted && state.hostedPreview && state.hostedCompatible === true && !state.issue)) return;
     hostAttempts.add(app);
+    hostOpening.add(app);
+    hostFailures.delete(app);
     busy = true; renderState();
     try {
       await window.CreatorHosted.start(app);
       if (current === app) show(app, true);
     } catch (reason) {
-      // Hub does not close standalone apps. Its normal fallback stays available.
-      error.textContent = String(reason);
-      error.classList.remove('hidden');
+      hostFailures.set(app, String(reason));
+      if (current === app && !state.builtIn) {
+        // Companion installations retain their normal fallback controls.
+        error.textContent = String(reason);
+        error.classList.remove('hidden');
+      }
     } finally {
+      hostOpening.delete(app);
       busy = false;
       renderState();
+      // A section selected during another startup must not need a second click.
+      if (current !== app && Object.hasOwn(tools, current)) void openHostedWhenReady(current);
     }
   }
   function selectView(view) {
@@ -160,15 +199,13 @@
   }
   for (const button of document.querySelectorAll('[data-resource]')) button.addEventListener('click', () => open(button.dataset.resource));
   document.querySelector('#source-button').addEventListener('click', () => { if (Object.hasOwn(tools, current)) open(`${current}-source`); });
-  for (const app of ['setup', 'mcp']) byId(`host-${app}-button`).addEventListener('click', async () => {
-    if (busy) return;
+  function retryHosted(app) {
     error.classList.add('hidden');
-    busy = true; byId(`host-${app}-button`).disabled = true; renderState();
-    byId('compatibility-detail').textContent = 'Opening in Hub... Check for a permission window from the installed app.';
-    try { await window.CreatorHosted.start(app); if (current === app) show(app); }
-    catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
-    finally { busy = false; byId(`host-${app}-button`).disabled = false; renderState(); }
-  });
+    hostAttempts.delete(app);
+    void openHostedWhenReady(app);
+  }
+  for (const app of ['setup', 'mcp']) byId(`host-${app}-button`).addEventListener('click', () => retryHosted(app));
+  byId('builtin-open').addEventListener('click', () => { if (appState()?.builtIn) retryHosted(current); });
   window.addEventListener('creator-host-closed', () => show(current, true));
 
   function appState() { return inventory?.apps?.find(app => app.app === current); }
@@ -188,6 +225,7 @@
     inventoryError = '';
   }
   function appStatus(state) {
+    if (state?.builtIn) return state.issue ? 'Built-in module unavailable' : 'Included in Hub';
     if (!state) return 'Status unavailable';
     if (state.installed && !state.trusted && state.issue?.startsWith("Hub couldn't verify this app.")) return 'Installed · not in Hub catalogue';
     if (state.issue) return 'Needs attention';
@@ -210,6 +248,7 @@
     return '';
   }
   function renderState() {
+    renderToolView();
     byId('check-updates').disabled = busy;
     byId('retry-inventory').disabled = busy;
     byId('inventory-error').classList.toggle('hidden', !inventoryError);
@@ -219,7 +258,7 @@
       const label = inventory?.supported === false ? 'Not supported' : !inventory && busy ? 'Checking' : appStatus(state);
       const status = byId(`status-${id}`);
       status.replaceChildren();
-      if (label.startsWith('Installed') && state?.trusted && !state.issue) {
+      if ((label.startsWith('Installed') || state?.builtIn) && state?.trusted && !state.issue) {
         const check = document.createElement('span');
         check.className = 'icon icon-check status-indicator';
         check.setAttribute('aria-hidden', 'true');
@@ -227,20 +266,20 @@
       }
       status.append(document.createTextNode(label));
       status.classList.toggle('not-installed', label.startsWith('Not installed'));
-      status.classList.toggle('installed', label.startsWith('Installed') && state?.trusted && !state.issue);
+      status.classList.toggle('installed', (label.startsWith('Installed') || state?.builtIn) && state?.trusted && !state.issue);
       status.classList.toggle('unverified', label.startsWith('Installed') && !state?.trusted);
       byId(`menu-status-${id}`).textContent = inventory?.supported === false ? 'Not supported'
         : inventoryError ? 'Check failed' : !inventory && busy ? 'Checking' : appStatus(state);
       const menuDownload = byId(`menu-download-${id}`);
-      const canDownload = Boolean(inventory?.supported && !inventoryError && state
+      const canDownload = Boolean(inventory?.supported && !inventoryError && state && !state.builtIn
         && (!state.installed || state.updateAvailable) && !state.downloaded && !state.issue && !state.installBlocked);
       menuDownload.classList.toggle('hidden', !canDownload);
       menuDownload.disabled = busy;
       menuDownload.title = state?.installed ? `Download latest ${tools[id].title} update` : `Download latest ${tools[id].title}`;
       menuDownload.setAttribute('aria-label', menuDownload.title);
     }
-    byId('preview-channel').disabled = busy;
-    byId('hub-update-button').disabled = busy || !hubUpdate?.availableVersion || Boolean(hubUpdate?.installBlocked);
+    for (const [id] of preferenceControls) byId(id).disabled = !preferencesReady || preferencesSaving || (id === 'preview-channel' && busy);
+    byId('hub-update-button').disabled = busy || preferencesSaving || !hubUpdate?.availableVersion || Boolean(hubUpdate?.installBlocked);
     byId('hub-update-status').textContent = !hubUpdate ? 'Hub update check is unavailable. Try Check for updates.'
       : hubUpdate.availableVersion ? `Version ${hubUpdate.availableVersion}${hubUpdate.downloaded ? ' is ready to install.' : ' is available.'}`
       : hubUpdate.warning ? 'Could not check for a Hub update.' : `You are using Hub ${hubUpdate.currentVersion}. No newer update was found.`;
@@ -281,15 +320,17 @@
     byId('release-button').disabled = needsRelease ? busy || Boolean(inventoryError) : blocked || (!opening && blockers.length > 0 && !canDisconnectForUpdate(state));
     byId('release-button').classList.toggle('hidden', Boolean(opening && canHost));
     byId('download-button').disabled = busy || Boolean(inventoryError) || !inventory?.supported || !state || state.downloaded || Boolean(state.installBlocked);
-    byId('adopt-button').disabled = busy || Boolean(inventoryError) || !inventory?.supported;
+    byId('adopt-button').disabled = busy || Boolean(inventoryError) || !inventory?.supported || Boolean(state?.builtIn);
+    byId('adopt-button').classList.toggle('hidden', Boolean(state?.builtIn));
     byId('open-button').disabled = blocked || !state?.trusted;
-    byId('open-button').classList.toggle('hidden', !state?.installed || (!state.updateAvailable && !canHost));
+    byId('open-button').classList.toggle('hidden', Boolean(state?.builtIn) || !state?.installed || (!state.updateAvailable && !canHost));
     byId('open-button').textContent = canHost ? 'Open separately' : 'Open app';
     byId('primary-label').textContent = !state ? busy ? 'Checking' : 'Unavailable' : opening ? 'Open app' : state.requiredHubVersion ? 'Update Hub first' : needsRelease ? 'Check for an update' : canDisconnectForUpdate(state) ? 'Disconnect and update' : state.updateAvailable ? 'Update app' : 'Install app';
     byId('install-options').classList.toggle('hidden', Boolean(opening || needsRelease) || !state || !inventory?.supported);
-    byId('download-button').classList.toggle('hidden', Boolean(opening || needsRelease));
+    byId('download-button').classList.toggle('hidden', Boolean(state?.builtIn || opening || needsRelease));
+    if (state?.builtIn) byId('release-button').classList.add('hidden');
     if (state) {
-      const lines = [`Available version: ${state.availableVersion}`, state.installed ? `Your version: ${state.installedVersion || 'not verified'}` : state.issue ? 'App needs attention' : 'Not installed',
+      const lines = [state.builtIn ? 'Included in this Creator Hub build. Updates are delivered with Hub.' : `Available version: ${state.availableVersion}`, state.builtIn ? '' : state.installed ? `Your version: ${state.installedVersion || 'not verified'}` : state.issue ? 'App needs attention' : 'Not installed',
         state.installedPath ? `Location: ${state.installedPath}` : '',
         state.downloaded ? 'Download ready' : '', state.running ? 'Currently in use' : '',
         state.installerInteractive && !opening && !needsRelease ? 'This release uses its normal installer window. Keep the default folder.' : '', state.issue, state.checkWarning, state.installBlocked].filter(Boolean);
@@ -316,6 +357,8 @@
     byId('compatibility-status').textContent = inventoryError ? 'App discovery needs attention' : !state ? 'Checking compatibility' : hostedMismatch ? 'Update needed for Hub' : canHost ? 'Ready to open in Hub' : state?.trusted ? 'Your app is ready' : unlistedBuild ? 'Installed outside Hub catalogue' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
     byId('compatibility-detail').textContent = inventoryError || !state
       ? 'Hub needs a completed app check to show installation, update and Open in Hub options.'
+      : state.builtIn
+      ? state.issue || `Included in Hub${state.hostedPreview === 'read-only' ? '; MCP controls on this platform are currently read-only' : ''}. No separate installation is needed.`
       : hostedMismatch
       ? `${state.requiredHubVersion ? 'Update Hub first, then check this app for updates.' : state.updateAvailable ? 'Update this app to open it inside Hub.' : 'Check for updates to get matching versions of Hub and this app.'} You can still use Open app for a separate window.`
       : unlistedBuild
@@ -340,6 +383,37 @@
       choose.addEventListener('click', () => action('use_existing_app', current, undefined, { path: copy.path }));
       row.append(detail, choose); copies.append(row);
     }
+  }
+
+  function renderToolView() {
+    const state = appState();
+    const tool = tools[current];
+    const builtIn = Boolean(state?.builtIn);
+    const hosted = window.CreatorHosted.active(current);
+    window.CreatorHosted.show(hosted ? current : null);
+    document.body.classList.toggle('hosting-app', hosted);
+    byId('view-detail').classList.toggle('hidden', !tool || builtIn || hosted);
+    byId('view-builtin').classList.toggle('hidden', !builtIn || hosted);
+    title.innerHTML = hosted || builtIn
+      ? current === 'setup' ? '<span>CREATOR</span> <strong>PROJECT</strong> SETUP' : '<span>CREATOR</span> <strong>WORKS</strong> MCP'
+      : current === 'plugins' ? '<span>CREATOR</span> <strong>PLUGINS</strong>' : '<span>CREATOR</span> <strong>HUB</strong>';
+    byId('mode-description').textContent = builtIn ? tool.summary : hosted ? (current === 'setup' ? 'Unity and Creator SDK. Android + Windows.' :
+      (window.CreatorHosted.writable(current) ? 'Unity project connections and MCP setup.' : 'Unity project connections. Read-only preview.')) : current === 'plugins' ? 'Plugins retirement' : 'Unity tools. One place.';
+    if (!builtIn || hosted) return;
+    const label = current === 'setup' ? 'Project Setup' : 'Creator Works MCP';
+    const opening = hostOpening.has(current);
+    const failure = hostFailures.get(current);
+    const canHost = inventory?.supported && state.installed && state.trusted && state.hostedPreview && state.hostedCompatible === true && !state.issue;
+    byId('builtin-title').textContent = tool.title;
+    byId('builtin-status').textContent = opening ? `Opening ${label}...` : inventoryError ? 'App discovery needs attention'
+      : !canHost ? `${label} unavailable` : failure ? `Could not open ${label}` : busy ? `Waiting to open ${label}...` : `Open ${label}`;
+    byId('builtin-detail').textContent = opening ? 'Complete the permission prompt to open this built-in tool. No separate app installation is needed.'
+      : inventoryError ? 'Retry app discovery above before opening this tool.'
+      : state.issue || (!canHost ? 'This built-in tool could not be verified for this platform. Check for a Creator Hub update from Apps.'
+        : failure || (busy ? 'Another Hub operation is finishing. This section will open when it is ready.' : 'Included in Creator Hub. Updates are delivered with Hub.'));
+    byId('builtin-open').classList.toggle('hidden', opening);
+    byId('builtin-open').disabled = busy || Boolean(inventoryError) || !canHost;
+    byId('builtin-open').querySelector('span:last-child').textContent = failure ? 'Retry opening' : `Open ${label}`;
   }
 
   function setProgress(payload) {
@@ -377,13 +451,13 @@
       hubChecked = true;
     } catch (reason) { hubUpdate = { warning: String(reason) }; }
     finally { busy = false; renderState(); }
-    if (check && succeeded && byId('auto-download').checked && inventory?.supported) {
+    if (check && succeeded && automaticDownloads() && inventory?.supported) {
       for (const app of [...inventory.apps]) {
-        if (!byId('auto-download').checked) break;
+        if (!automaticDownloads()) break;
         if (app.updateAvailable && !app.downloaded && !app.issue && !app.installBlocked) await action('download_app', app.app, app.availableVersion);
       }
     }
-    if (check && hubChecked && byId('auto-download').checked && hubUpdate?.availableVersion && !hubUpdate.downloaded && !hubUpdate.installBlocked) await hubAction('download_hub_update');
+    if (check && hubChecked && automaticDownloads() && hubUpdate?.availableVersion && !hubUpdate.downloaded && !hubUpdate.installBlocked) await hubAction('download_hub_update');
     if (succeeded && Object.hasOwn(tools, current)) void openHostedWhenReady(current);
     return succeeded;
   }
@@ -533,9 +607,22 @@
     byId('cancel-download').disabled = true;
     try { await invoke('cancel_download'); } catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
   });
-  for (const [id, key] of [['preview-channel', 'preview'], ['auto-download', 'auto-download'], ['restore-hosted-views', 'restore-hosted-views']]) {
-    byId(id).addEventListener('change', () => {
-      try { localStorage.setItem(`creator-hub.${key}`, String(byId(id).checked)); } catch { /* Session preference still applies. */ }
+  for (const [id, key] of preferenceControls) {
+    byId(id).addEventListener('change', async () => {
+      if (nativePreferences) {
+        preferencesSaving += 1; renderState();
+        try {
+          await invoke('set_hub_preference', { key, value: byId(id).checked });
+          preferenceError('', key);
+        } catch (reason) {
+          // A failed attempt to enable automation must not silently enable it.
+          byId(id).checked = false;
+          preferenceError(`${byId(id).closest('label').textContent.trim()} could not be saved: ${String(reason)}. It is off for this session.`, key);
+        } finally { preferencesSaving -= 1; renderState(); }
+      } else {
+        try { localStorage.setItem(`creator-hub.${key}`, String(byId(id).checked)); }
+        catch (reason) { preferenceError(`This preference could not be saved: ${String(reason)}. It applies only to this session.`, key); }
+      }
       if (id === 'preview-channel') refresh(true);
     });
   }
@@ -558,5 +645,5 @@
     await refresh(false);
     await refresh(true);
   }
-  window.CreatorUsageTerms.requireAcceptance().then(start);
+  window.CreatorUsageTerms.requireAcceptance().then(async () => { await loadPreferences(); await start(); });
 })();

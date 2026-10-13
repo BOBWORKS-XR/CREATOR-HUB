@@ -1,0 +1,102 @@
+name: Windows Candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [hub-compatibility]
+    paths-ignore:
+      - '**/*.md'
+      - .github/workflows/windows-installed-acceptance.yml
+      - scripts/Test-InstalledCandidate.ps1
+      - scripts/installed-acceptance-pin.json
+      - scripts/owned-setup-fixture*
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/dist/prerelease-target
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Checkout pinned notice tooling
+        uses: actions/checkout@v6
+        with:
+          repository: BOBWORKS-XR/CREATOR-HUB
+          ref: c1faf51ef6f9c0f1a056f59c1219214fee2bc44e
+          path: dist/notices-tool
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> ../dist/prerelease-target
+      - run: npm ci
+      - name: Test shared notice collector
+        run: node --test dist/notices-tool/scripts/collect-rust-notices.test.cjs
+      - name: Test artifact contract
+        shell: pwsh
+        run: |
+          node --test scripts/verify-windows-candidate.test.cjs 2>&1 | Tee-Object artifact-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test native application logic
+        shell: pwsh
+        run: |
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml 2>&1 | Tee-Object native-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check native warnings
+        shell: pwsh
+        run: |
+          cargo clippy --release --locked --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings 2>&1 | Tee-Object clippy.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: npx playwright install chromium
+      - name: Test completion and repair interface
+        shell: pwsh
+        run: |
+          npx playwright test --output dist/candidate-ui-tests 2>&1 | Tee-Object ui-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and verify unsigned candidate, without installing
+        shell: pwsh
+        run: ./scripts/Build-WindowsCandidate.ps1 -TargetDirectory $env:CARGO_TARGET_DIR -OutputDirectory dist/windows-candidate
+      - name: Capture source changes after candidate generation
+        if: always()
+        shell: pwsh
+        run: |
+          git status --porcelain=v1 --untracked-files=normal | Tee-Object source-status.log
+          git diff HEAD --stat | Tee-Object source-diff-stat.log
+          git diff HEAD -- src-tauri/gen/schemas | Out-File generated-schema-diff.log
+      - name: Upload candidate and evidence (not a release)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: creator-project-setup-windows-candidate-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: true
+          path: |
+            dist/windows-candidate/
+            dist/candidate-ui-tests/
+            dist/installer-guard-*/report.json
+            native-tests.log
+            ui-tests.log
+            artifact-tests.log
+            clippy.log
+            source-status.log
+            source-diff-stat.log
+            generated-schema-diff.log

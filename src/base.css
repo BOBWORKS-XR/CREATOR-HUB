@@ -65,3 +65,7 @@ footer .text-button { font-size: 11px; }
   main { padding: 4px 16px 20px; }
   footer { padding: 12px 16px; }
 }
+/* Reserve clearance for fixed Help at every scroll position. */
+main, footer { padding-right: 80px; }
+:root { scroll-padding-top: 80px; }
+:root .app-header { position: sticky; top: 0; z-index: 30; background: #090b0d; }

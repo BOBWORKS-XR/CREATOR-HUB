@@ -1,0 +1,180 @@
+name: Experimental Unix hosted prerequisites (not full acceptance)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/native-unix-hosted-acceptance.cjs'
+      - 'scripts/native-unix-hosted-acceptance.test.cjs'
+      - '.github/workflows/unix-hosted-acceptance.yml'
+      - 'docs/UNIX-HOSTED-ACCEPTANCE.md'
+  workflow_dispatch:
+    inputs:
+      platform:
+        type: choice
+        options: [linux, macos-arm64, macos-intel]
+        default: linux
+        description: Matching native package host; no application is launched
+      source_run:
+        type: string
+        required: true
+        description: Reviewed successful unified-unix-candidate workflow run ID
+      artifact_id:
+        type: string
+        required: true
+        description: Exact reviewed native artifact ID
+      source_commit:
+        type: string
+        required: true
+        description: Exact 40-character source/run head commit
+      build_commit:
+        type: string
+        required: true
+        description: Exact 40-character build/PR merge commit, not inferred from head
+      base_commit:
+        type: string
+        default: ''
+        description: Exact merge base parent for PR candidates; empty for dispatch candidates
+      zip_sha256:
+        type: string
+        required: true
+        description: Independently reviewed artifact ZIP SHA256
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  fixture:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Install locked verifier dependencies without package lifecycle scripts
+        run: npm ci --ignore-scripts
+      - run: node --test scripts/native-unix-hosted-acceptance.test.cjs
+
+  prerequisites:
+    if: github.event_name == 'workflow_dispatch'
+    needs: fixture
+    runs-on: ${{ inputs.platform == 'linux' && 'ubuntu-22.04' || inputs.platform == 'macos-arm64' && 'macos-latest' || 'macos-15-intel' }}
+    timeout-minutes: 20
+    env:
+      CREATOR_UNIX_HOSTED_EXPERIMENT: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Install locked verifier dependencies without package lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Bind exact packaging run, native job attempt, source/merge tree and artifact digest
+        uses: actions/github-script@v8
+        env:
+          TARGET: ${{ inputs.platform }}
+          SOURCE_RUN: ${{ inputs.source_run }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          BUILD_COMMIT: ${{ inputs.build_commit }}
+          BASE_COMMIT: ${{ inputs.base_commit }}
+          ZIP_SHA256: ${{ inputs.zip_sha256 }}
+        with:
+          script: |
+            const fs = require('node:fs'), path = require('node:path');
+            const h = require(path.join(process.env.GITHUB_WORKSPACE, 'scripts/native-unix-hosted-acceptance.cjs'));
+            if (`${context.repo.owner}/${context.repo.repo}` !== h.REPOSITORY) throw Error('Wrong repository');
+            const positiveId = value => {
+              if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) throw Error('Invalid numeric binding');
+              return Number(value);
+            };
+            const expected = { target: process.env.TARGET, runId: positiveId(process.env.SOURCE_RUN), artifactId: positiveId(process.env.ARTIFACT_ID),
+              sourceCommit: process.env.SOURCE_COMMIT, buildCommit: process.env.BUILD_COMMIT, baseCommit: process.env.BASE_COMMIT, zipSha256: process.env.ZIP_SHA256 };
+            for (const sha of [expected.sourceCommit, expected.buildCommit]) if (!/^[a-f0-9]{40}$/.test(sha)) throw Error('Invalid commit');
+            const {data: r} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: expected.runId});
+            const {data: a} = await github.rest.actions.getArtifact({...context.repo, artifact_id: expected.artifactId});
+            const {data: source} = await github.rest.git.getCommit({...context.repo, commit_sha: expected.sourceCommit});
+            const {data: build} = await github.rest.git.getCommit({...context.repo, commit_sha: expected.buildCommit});
+            const all = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {...context.repo, run_id: expected.runId, attempt_number: r.run_attempt, per_page: 100});
+            const run = Object.fromEntries(['id','head_sha','status','conclusion','event','run_attempt','repository','head_repository','path'].map(k => [k,r[k]]));
+            const artifact = Object.fromEntries(['id','name','expired','digest','size_in_bytes','workflow_run'].map(k => [k,a[k]]));
+            const jobs = all.map(j => Object.fromEntries(['name','run_id','run_attempt','status','conclusion'].map(k => [k,j[k]])));
+            const binding = {expected, run, artifact, source: {sha: source.sha, tree: source.tree}, build: {sha: build.sha, tree: build.tree, parents: build.parents}, jobs};
+            h.validateBinding(binding);
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'unix-binding.json'), JSON.stringify(binding), {flag:'wx',mode:0o600});
+      - name: Refuse product/helper drift from the reviewed package source
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          git fetch --no-tags origin "$SOURCE_COMMIT"
+          git diff --exit-code "$SOURCE_COMMIT" HEAD -- package.json package-lock.json rust-toolchain.toml src src-tauri modules native scripts/build-unified.cjs scripts/unix-package-payload.cjs scripts/module-archive.cjs
+      - name: Download exact ZIP, hash before extracting only metadata and DEB or DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/unix-source.zip"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,stat,zipfile
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])
+          binding=json.loads((root/'unix-binding.json').read_text())
+          archive=root/'unix-source.zip'
+          assert archive.stat().st_size==binding['artifact']['size_in_bytes']
+          with archive.open('rb') as stream:
+              digest=hashlib.file_digest(stream,'sha256').hexdigest() if hasattr(hashlib,'file_digest') else None
+          if digest is None:
+              h=hashlib.sha256()
+              with archive.open('rb') as stream:
+                  for chunk in iter(lambda:stream.read(1048576),b''): h.update(chunk)
+              digest=h.hexdigest()
+          assert digest==binding['expected']['zipSha256']
+          destination=root/'unix-input'; destination.mkdir(mode=0o700)
+          extension='.deb' if binding['expected']['target']=='linux' else '.dmg'
+          required={'builtin-manifest.json','unix-package-integrity.json','experimental-unix.json'}
+          with zipfile.ZipFile(archive) as z:
+              assert len(z.infolist())<=1024
+              names=[i.filename for i in z.infolist()]
+              assert len(names)==len(set(names))
+              packages=[n for n in names if n.startswith('native-packages/') and n.endswith(extension) and n.count('/')==1]
+              assert len(packages)==1
+              for name in sorted(required|set(packages)):
+                  entry=z.getinfo(name)
+                  assert not stat.S_ISLNK(entry.external_attr>>16) and not entry.is_dir()
+                  assert '\\' not in name and all(p not in ('','..','.') for p in name.split('/'))
+                  assert 0<entry.file_size<=(536870912 if name in packages else 1048576)
+                  target=destination/name; target.parent.mkdir(parents=True,exist_ok=True)
+                  with z.open(entry) as source,target.open('xb') as output:
+                      while chunk:=source.read(1048576): output.write(chunk)
+          PY
+      - uses: dtolnay/rust-toolchain@1.99.0
+        if: runner.os == 'Linux'
+      - name: Build only the existing shared bounded archive verifier on disposable Linux
+        if: runner.os == 'Linux'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/unix-archive-target
+        run: cargo build --release --locked --manifest-path native/module-archive/Cargo.toml
+      - name: Inspect sealed native payload; intentional full-hosting hold
+        run: |
+          decoder=-
+          if [ "$RUNNER_OS" = Linux ]; then decoder="$RUNNER_TEMP/unix-archive-target/release/creator-hub-module-archive"; fi
+          node scripts/native-unix-hosted-acceptance.cjs "$RUNNER_TEMP/unix-input" "$RUNNER_TEMP/unix-hosted-report" "$RUNNER_TEMP/unix-binding.json" "$RUNNER_TEMP/unix-source.zip" "$decoder"
+      - name: Preserve acquisition failure as non-acceptance without replacing an original receipt
+        if: always()
+        run: |
+          node - <<'JS'
+          const fs=require('node:fs'),path=require('node:path');
+          const h=require('./scripts/native-unix-hosted-acceptance.cjs');
+          const out=path.join(process.env.RUNNER_TEMP,'unix-hosted-report');
+          fs.mkdirSync(out,{recursive:true});
+          const file=path.join(out,'report.json');
+          if(!fs.existsSync(file)) fs.writeFileSync(file,JSON.stringify({...h.blockedReport(),status:'failed',error:'Prerequisite acquisition did not produce a receipt; retain original GitHub step failure logs.'},null,2),{flag:'wx',mode:0o600});
+          JS
+      - name: Retain only bounded receipt; no profiles, credentials or native packages uploaded
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unix-hosted-prerequisites-${{ inputs.platform }}-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ runner.temp }}/unix-hosted-report/report.json

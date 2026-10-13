@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "product": "Creator Hub",
+  "repository": "BOBWORKS-XR/CREATOR-HUB",
+  "appId": "com.creatorworks.hub",
+  "phase": "source-consolidation",
+  "baselineHub": "0.1.12",
+  "modules": {
+    "mcp": {
+      "path": "modules/mcp",
+      "frontend": "modules/mcp/launcher/src",
+      "legacyRepository": "BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP",
+      "baselineTag": "v2.7.7",
+      "baselineRevision": "9cd12e28d1dd05057b84166d4718a5d6369eff93"
+    },
+    "setup": {
+      "path": "modules/project-setup",
+      "frontend": "modules/project-setup/src",
+      "legacyRepository": "BOBWORKS-XR/CREATOR-PROJECT-SETUP",
+      "baselineTag": "v0.3.7",
+      "baselineRevision": "4a76945272560f9e0d2b93296a5223bf3e891eb2"
+    }
+  }
+}

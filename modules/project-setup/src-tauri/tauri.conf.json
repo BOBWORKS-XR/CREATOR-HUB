@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Creator Project Setup",
+  "version": "0.3.7",
+  "identifier": "com.creatorworks.projectsetup",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Creator Project Setup",
+        "width": 980,
+        "height": 580,
+        "minWidth": 560,
+        "minHeight": 480,
+        "center": true,
+        "resizable": true
+      }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "category": "DeveloperTool",
+    "publisher": "Creator Works",
+    "shortDescription": "Create and validate SideQuest Creator SDK Unity projects",
+    "longDescription": "Portable setup wizard for a pinned Unity, URP, build-module, and SideQuest Creator SDK project recipe",
+    "targets": "all",
+    "windows": { "nsis": { "installerHooks": "windows/installer-hooks.nsh" } },
+    "macOS": { "signingIdentity": "-" },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ]
+  }
+}

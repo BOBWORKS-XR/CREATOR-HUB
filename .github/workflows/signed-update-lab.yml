@@ -1,0 +1,95 @@
+name: Unmodified stable signed update lab (not public discovery)
+on:
+  push:
+    branches: [validation/unified-update-lab, validation/unified-update-lab-014]
+    paths: ['.github/workflows/signed-update-lab.yml']
+permissions:
+  contents: read
+jobs:
+  stage-input:
+    # Reading a private draft needs push access; no repository/dependency/app
+    # code is executed while this narrowly used token is available.
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Get the exact public-signature-only input
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path signed-input | Out-Null
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/octet-stream'; 'X-GitHub-Api-Version' = '2026-03-10' }
+          Invoke-WebRequest -Method Get -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/638202489' -Headers $headers -OutFile signed-input/signed-update-input.zip -MaximumRedirection 5 -TimeoutSec 180
+          if ((Get-FileHash signed-input/signed-update-input.zip).Hash.ToLowerInvariant() -ne '99623db1396e19086d257a9ba214aec7ffad6a10de35804965da5e086afe2630') { throw 'Signed input archive differs.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-update-lab-input
+          path: signed-input/signed-update-input.zip
+          retention-days: 7
+          if-no-files-found: error
+  update:
+    needs: stage-input
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - run: npx playwright install chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-update-lab-input
+          path: artifacts/signed-update-lab
+      - name: Validate inputs and stage the unmodified public baseline before proxy setup
+        shell: pwsh
+        run: |
+          $root = Join-Path $PWD artifacts/signed-update-lab
+          $zip = Join-Path $root signed-update-input.zip
+          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne '99623db1396e19086d257a9ba214aec7ffad6a10de35804965da5e086afe2630') { throw 'Signed input archive differs.' }
+          $candidate = Join-Path $root candidate
+          Expand-Archive -LiteralPath $zip -DestinationPath $candidate
+          $config = @{ schemaVersion=1; targetVersion='0.1.14'; directory=$candidate; pins=@{
+            descriptor='234c2088d366df6a32c920f8d67be09c3a3632f548e6c9f9c6f99f51812b289d'
+            descriptorSignature='113e6eda77ca0552334f0a9c3f0ae7f694fef4b40698836064d4642c874ac18a'
+            installer='76dc1398a5b08200bdf048d6d63a9f85bb7cbdb62629d255c8910a7508d95147'
+            manifest='594423b0e6d61238a3bf0ed33052be00115774c50eee1406f74b11d8acaff6f1'
+            executable='d0866c2398c2970e3e0716ef1cb62e866f114a7a77b473cfbbb56317ec33d71b'
+          }}
+          $config | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root lab-config.json) -Encoding utf8NoBOM
+          node -e "const fs=require('fs');require('./scripts/self-update-lab-feed.cjs').loadContract(JSON.parse(fs.readFileSync(process.argv[1],'utf8')));console.log('Pinned lab contract accepted; not native update acceptance.')" (Join-Path $root lab-config.json)
+          if ($LASTEXITCODE -ne 0) { throw 'Lab contract refused.' }
+          Invoke-WebRequest -Uri 'https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.12/Creator.Hub_0.1.12_x64-setup.exe' -OutFile (Join-Path $root baseline.exe) -TimeoutSec 180
+          if ((Get-FileHash (Join-Path $root baseline.exe)).Hash.ToLowerInvariant() -ne '0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18') { throw 'Public baseline differs.' }
+      - name: Unit refusal and lifecycle checks
+        run: node --test scripts/native-self-update-lab.test.cjs scripts/self-update-lab-feed.test.cjs scripts/self-update-lab-target.test.cjs
+      - name: Actual old-app signed update, native cancellation, restart and managed reconnect
+        # Explicit script success exit code must accompany the independent actual app receipt.
+        shell: pwsh
+        run: |
+          ./scripts/native-self-update-lab.ps1 -ContractPath (Join-Path $PWD artifacts/signed-update-lab/lab-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/signed-update-lab/baseline.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/signed-update-lab/lifecycle-public-metadata.jsonl
+          if ($LASTEXITCODE -ne 0) { throw 'Signed lab update failed; public/native release readiness is not established.' }
+          $reports = @(Get-ChildItem -LiteralPath artifacts -Directory | Where-Object { $_.Name -like 'native-suite-*' } | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter self-update-report.json })
+          if ($reports.Count -ne 1) { throw 'Expected one actual app update receipt.' }
+          $receipt = Get-Content -LiteralPath $reports[0].FullName -Raw | ConvertFrom-Json
+          if ($receipt.passed -ne $true -or $receipt.selfUpdateTested -ne $true -or $receipt.managedRouteReconnectTested -ne $true -or $receipt.policyRestored -ne $true -or $receipt.publicDiscovery -ne $false -or $receipt.releaseReady -ne $false) { throw 'Actual controlled-feed update receipt is incomplete.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unmodified-stable-signed-update-lab
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/native-suite-*/self-update-report.json
+            artifacts/native-suite-*/*.png
+            artifacts/native-suite-*/startup.json
+            artifacts/native-suite-*/dialogs.json
+            artifacts/native-suite-*/webview-policy.json
+            artifacts/signed-update-lab/lifecycle-public-metadata.jsonl
+            artifacts/signed-update-lab/lab-config.json

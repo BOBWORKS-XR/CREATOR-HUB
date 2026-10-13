@@ -50,6 +50,7 @@ pub struct Progress {
 #[serde(rename_all = "camelCase")]
 pub struct AppState {
     pub app: AppId,
+    pub built_in: bool,
     pub installed_version: Option<String>,
     pub available_version: String,
     pub installed: bool,
@@ -385,6 +386,7 @@ impl Manager {
             let release = latest(app, preview)?;
             let mut state = AppState {
                 app,
+                built_in: false,
                 installed_version: None,
                 available_version: release.version.clone(),
                 installed: false,
@@ -454,6 +456,7 @@ impl Manager {
     }
 
     fn selected(&self, app: AppId, expected: &str) -> Result<Release, String> {
+        crate::builtin::reject_legacy_management()?;
         let releases = self
             .releases
             .lock()
@@ -685,6 +688,7 @@ impl Manager {
     }
 
     pub fn open(&self, app: AppId) -> Result<String, String> {
+        crate::builtin::reject_legacy_management()?;
         let _operation = self.begin()?;
         let (path, known) = installed(app)?.ok_or("This app is not installed.")?;
         if known.is_none() {
@@ -697,6 +701,7 @@ impl Manager {
     }
 
     pub fn adopt(&self, app: AppId, path: PathBuf) -> Result<(), String> {
+        crate::builtin::reject_legacy_management()?;
         let _operation = self.begin()?;
         if !path.is_absolute() || !path.is_file() {
             return Err("Choose an existing app executable.".into());

@@ -9,6 +9,8 @@
   let pendingDiscovery = Promise.resolve();
   window.CreatorHubNative = Object.freeze({
     version: window.__CREATOR_HUB_VERSION__,
+    usageTermsPersistence: window.__CREATOR_HUB_TERMS_PROTOCOL__ === 1,
+    preferencesPersistence: window.__CREATOR_HUB_PREFERENCES_PROTOCOL__ === 1,
     invoke: (command, args = {}) => {
       const run = () => invoke(command, args, key ? { headers: { 'x-creator-shell-key': key } } : undefined);
       if (!discovery.has(command) && !(command === 'hosted_app_call' && hostedReads.has(args.command))) return run();

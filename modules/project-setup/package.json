@@ -1,0 +1,20 @@
+{
+  "name": "creator-project-setup",
+  "version": "0.3.7",
+  "private": true,
+  "license": "MIT",
+  "description": "Portable Creator SDK Unity project setup and validation",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "check": "cargo test --release --manifest-path src-tauri/Cargo.toml",
+    "test:scripts": "node --test scripts/release-checksums.test.mjs scripts/verify-windows-candidate.test.cjs scripts/release-ref.test.cjs",
+    "test:ui": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@tauri-apps/cli": "^2.8.5",
+    "lucide-static": "1.44.0",
+    "semver": "7.8.5"
+  }
+}

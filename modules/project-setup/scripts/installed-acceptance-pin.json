@@ -1,0 +1,35 @@
+{
+  "repository": "BOBWORKS-XR/CREATOR-PROJECT-SETUP",
+  "runId": "35283526299",
+  "sourceRevision": "d6ab04c008fd49a445f9766d74bc8def2f557f1f",
+  "version": "0.3.1",
+  "installerSha256": "8bb8aeecb18973f52cb9afe41c251a913b4e30dfbcfdc927edb785c5afd6f664",
+  "executableSha256": "efdc4e2f19d699983805e5c1aa90b5341c4a446628bac9f1daf8ac8680fdd401",
+  "baselines": {
+    "0.3.0": {
+      "url": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.3.0/Creator-Project-Setup-0.3.0-Windows-setup.exe",
+      "installerSha256": "1cb72e2ea31345a4679aabf2b0756e847b10b68bc2043988147c2449584e02f2",
+      "executableSha256": "ed0a57b2421c844a9d30dc5f69f0a358ae9fe32cf6e3b5fd6570028a3337f27d"
+    },
+    "0.3.0-alpha.6": {
+      "url": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.3.0-alpha.6/Creator-Project-Setup-0.3.0-alpha.6-Windows-setup.exe",
+      "installerSha256": "57bc1b1047b38790b174c1dd60576b639e91453f33e27004ce5a9d8055b60547",
+      "executableSha256": "ace1fa411559e84a10cc0bc7884a14aa427ae4f3fba197cc87b2b4b3cc02d800"
+    },
+    "0.2.2": {
+      "url": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.2.2/Creator-Project-Setup-0.2.2-Windows-setup.exe",
+      "installerSha256": "b3f9ed80e9319c4ce7339836310bbfbf7342da665fef155937a5701eda2229e5",
+      "executableSha256": "23006194bd8214b92c980dc1042466d598d6d1daaed26819ab697d67159db49b"
+    },
+    "0.3.0-alpha.1": {
+      "url": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.3.0-alpha.1/Creator-Project-Setup-0.3.0-alpha.1-Windows-setup.exe",
+      "installerSha256": "0fdef05fa42fb88cb4bba4929d87065d5114a202c8c2d59ddb3672dbab99f3be",
+      "executableSha256": "e160787c2e5e1ff0012e2e0aa74ecfa516434e05d2c255f6d11340724690e6f0"
+    },
+    "0.3.0-alpha.2": {
+      "url": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.3.0-alpha.2/Creator-Project-Setup-0.3.0-alpha.2-Windows-setup.exe",
+      "installerSha256": "204fbbd74c5f8ee6ecc2379b9f7bc197e61d206560caed41ac5594f1a93d5eaf",
+      "executableSha256": "d38c3434e2e330c941eac81048efa9eaada866c3cb8f5fcc0ba75df46edc8813"
+    }
+  }
+}

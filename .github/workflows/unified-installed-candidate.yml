@@ -1,0 +1,101 @@
+name: Unified installed candidate (not release)
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run:
+        description: Reuse an immutable candidate artifact from a completed build run (test-script-only fixes)
+        required: false
+        type: string
+      mode:
+        description: Installer scenario to test
+        type: choice
+        options: [all, fresh, upgrade]
+        default: all
+  push:
+    branches: [feature/unified-creator-hub]
+    paths:
+      - 'modules/**'
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'scripts/build-unified.cjs'
+      - 'rust-toolchain.toml'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+jobs:
+  build:
+    if: ${{ !inputs.candidate_run }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            modules/mcp/launcher/src-tauri
+            modules/project-setup/src-tauri
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - run: npm --prefix modules/project-setup ci
+      - run: npm run test:scripts
+      - run: npm run build:unified -- installed-ci --installer
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unified-installed-candidate
+          if-no-files-found: error
+          retention-days: 7
+          path: artifacts/unified/installed-ci/
+  installed:
+    needs: build
+    if: ${{ always() && !cancelled() && (inputs.candidate_run || needs.build.result == 'success') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: ${{ fromJSON(inputs.mode == 'fresh' && '["fresh"]' || inputs.mode == 'upgrade' && '["upgrade"]' || '["fresh","upgrade"]') }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - run: npx playwright install chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: unified-installed-candidate
+          path: artifacts/unified/installed-ci
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.candidate_run || github.run_id }}
+      - name: Record exact candidate source separately from the harness source
+        shell: pwsh
+        env:
+          CANDIDATE_RUN: ${{ inputs.candidate_run || github.run_id }}
+        run: |
+          $source = gh api "repos/${{ github.repository }}/actions/runs/$env:CANDIDATE_RUN" --jq .head_sha
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "CREATOR_CANDIDATE_SOURCE=$source" >> $env:GITHUB_ENV
+      - run: node scripts/native-builtin-smoke.cjs artifacts/unified/installed-ci ${{ matrix.mode }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unified-installed-${{ matrix.mode }}-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: artifacts/native-suite-*/

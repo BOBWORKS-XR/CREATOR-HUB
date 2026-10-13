@@ -3,6 +3,23 @@
 **Unity tools in one window.** Open Creator SDK / Altspace and Banter projects,
 manage Creator Works MCP and Creator Project Setup, and browse community plugins.
 
+## Next: One Creator Hub Product
+
+Future development is being consolidated into this repository. Project Setup,
+MCP, Projects and Plugins will become built-in sections of Creator Hub, with one
+installer and update stream. Their source histories are retained under
+`modules/project-setup` and `modules/mcp`.
+
+This is source consolidation, **not a released unified installer**. Current
+stable versions are [Hub 0.1.12](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.12),
+[MCP 2.7.7](https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/tag/v2.7.7)
+and [Project Setup 0.3.7](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/tag/v0.3.7).
+Historical downloads and repositories remain available while a tested migration
+preserves standalone users' settings, project lists and AI-client connections.
+
+See [the unified product and migration requirements](docs/UNIFIED-CREATOR-HUB.md).
+The following 0.1.7 section is retained release history, not the latest download.
+
 ## Windows 0.1.7
 
 [Download Creator Hub](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.7)
@@ -105,14 +122,20 @@ Tauri / Rust with a plain JavaScript frontend and Playwright tests, not Electron
 
 ```powershell
 npm ci
+npm --prefix modules/mcp ci
+npm --prefix modules/project-setup ci
+npm run check:sources
+npm run test:modules
 cargo test --release --manifest-path src-tauri/Cargo.toml
 npm run test:ui
 npm run dev
 ```
 
-Hosted tests need `CREATOR_SETUP_SOURCE` and `CREATOR_MCP_SOURCE` pointing
-to the companion frontend folders. Release builds use reviewed exact companion
-hashes, never an arbitrary version label.
+Hosted browser tests use the module frontend folders by default; optional
+`CREATOR_SETUP_SOURCE` and `CREATOR_MCP_SOURCE` overrides remain available for
+explicit legacy fixtures. Existing legacy-compatible packages use reviewed exact
+companion hashes, never an arbitrary version label. Unified packaging and migration
+are separate acceptance work and are release-blocked on this branch.
 
 [MIT licence](LICENSE) | [Third-party notices](THIRD_PARTY_NOTICES.md) |
 [Creator SDK source](https://greenfield-registry.sdq.st/-/web/detail/com.sidequest.creator-sdk)

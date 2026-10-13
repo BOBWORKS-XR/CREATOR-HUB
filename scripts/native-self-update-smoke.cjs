@@ -10,16 +10,21 @@ const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
 const { checkLive } = require('./check-release-feed.cjs');
 const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
-const from = { version: '0.1.11', asset: 'Creator.Hub_0.1.11_x64-setup.exe', installer: '90018f10096a52ad9abb5e2f8634acd6f8dfcea39cffd7ca2e25b92a54a7f07e', exe: 'b1ed8b37debb0e9e650ccdd62b954bd68e054590d1821092b25e68f545600c21' };
+const { selectBaseline, assertPreviousStable } = require('./self-update-baselines.cjs');
+const { managedLocations } = require('./native-managed-target.cjs');
 const to = {
   version: process.env.CREATOR_SELF_UPDATE_TARGET_VERSION || require('../package.json').version,
   installer: process.env.CREATOR_SELF_UPDATE_INSTALLER_SHA256,
   exe: process.env.CREATOR_SELF_UPDATE_EXECUTABLE_SHA256,
 };
 assert.equal(to.version, require('../package.json').version, 'Update acceptance pins for the intended release; testing an older update is not sufficient');
+const from = selectBaseline(to.version);
 assert.match(to.installer || '', /^[a-f0-9]{64}$/, 'Supply the exact published target installer SHA-256');
 assert.match(to.exe || '', /^[a-f0-9]{64}$/, 'Supply the exact packaged target executable SHA-256');
 const fixture = process.env.CREATOR_HOSTED_UPDATE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.CREATOR_HOSTED_UPDATE_FIXTURE, 'utf8')) : null;
+const lab = process.env.CREATOR_SELF_UPDATE_LAB_CONFIG
+  ? require('./self-update-lab-target.cjs').selectLab(process.env.CREATOR_SELF_UPDATE_LAB_CONFIG, to, fixture)
+  : null;
 if (fixture) {
   assert.equal(fixture.testOnly, true);
   assert.equal(fixture.fromVersion, from.version);
@@ -33,6 +38,10 @@ assert.equal(fs.existsSync(hub), false, 'Expected a fresh runner without Hub ins
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out, { recursive: true });
 const report = { passed: false, from, to, checks: [], userMachineUsed: false, selfUpdateTested: false };
+report.discoveryKind = lab ? 'controlled-lab-not-public-discovery' : 'public-github-discovery';
+report.labDiscovery = Boolean(lab);
+report.publicDiscovery = !lab;
+if (lab) report.releaseReady = false;
 report.sourceKind = fixture ? 'version-only-runtime-fixture-not-public-stable' : 'unmodified-public-stable';
 if (fixture) report.fixture = fixture;
 const policyState = path.join(out, 'webview-policy.json');
@@ -111,6 +120,50 @@ async function readyFrame(app) {
   if (app === 'setup') await frames[app].locator('#requirements .requirement').first().waitFor({ timeout: 90000 });
   else await frames[app].waitForFunction(() => !document.querySelector('#workspaceControls').disabled);
 }
+async function checkUpdatedBuiltIns() {
+  const inventory = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
+  assert.equal(inventory.supported, true);
+  assert.equal(inventory.apps.length, 2);
+  assert.ok(inventory.apps.every(app => app.builtIn && app.trusted && !app.issue));
+  for (const app of ['setup', 'mcp']) {
+    await showApp(app);
+    if (app === 'mcp') await retry(() => native(ownedPid, 'button', 'Enable managed routing'));
+    const backend = await retry(() => {
+      const matches = processes().filter(process => process.ParentProcessId === ownedPid);
+      const name = app === 'mcp' ? 'creator-works-mcp-launcher.exe' : 'creator-project-setup.exe';
+      const found = matches.filter(process => path.basename(process.ExecutablePath || '').toLowerCase() === name);
+      assert.equal(found.length, 1); return found[0];
+    });
+    apps[app] = backend.ExecutablePath;
+    backends[app] = backend.ProcessId;
+    await retry(() => powershell('scripts/native-window.ps1', ['-TargetPid', String(backend.ProcessId),
+      '-ExpectedExecutable', backend.ExecutablePath, '-Action', 'button', '-Value', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub']));
+    await readyFrame(app);
+    if (app === 'mcp') await frames[app].locator('#connection-guide-close').click();
+  }
+  const sdk = require('node:module').createRequire(path.resolve('modules/mcp/package.json'));
+  const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = sdk('@modelcontextprotocol/sdk/client/stdio.js');
+  const command = managedLocations(process.env.LOCALAPPDATA).command;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const client = new Client({ name: 'signed-update-managed-reconnect', version: '1' });
+    const transport = new StdioClientTransport({ command, args: [], stderr: 'pipe' });
+    try {
+      await client.connect(transport);
+      assert.ok((await client.listTools()).tools.some(tool => tool.name === 'get_mcp_reference'));
+      const response = await client.callTool({ name: 'get_mcp_reference', arguments: { source: 'creator-docs', query: 'PersistFileBridge', limit: 1 } });
+      assert.equal(JSON.parse(response.content[0].text).success, true);
+    } finally { await client.close(); }
+  }
+  report.managedRouteReconnectTested = true;
+  report.checks.push('After signed installation/restart, actual built-in Setup/MCP open through native consent; signed managed router connects and reconnects with the official SDK and serves bundled Creator docs. Not live AI/model or Editor acceptance.');
+  for (const app of ['setup', 'mcp']) {
+    await showApp(app);
+    await page.locator('#hosted-stop').click();
+    await retry(() => native(ownedPid, 'button', 'Close view'));
+    await retry(() => assert.ok(!processes().some(process => process.ProcessId === backends[app])));
+  }
+}
 async function installCompanions() {
   const pins = require('./prerelease-apps.json');
   for (const [app, exe] of Object.entries(apps)) {
@@ -136,15 +189,17 @@ async function installCompanions() {
   await retry(() => { assert.match(output, /ready/); assert.equal(unrelatedRuntime.exitCode, null); });
 }
 (async () => {
-  report.feed = await checkLive(to.version);
-  assert.equal(report.feed.previousStable, from.version, 'Exercise the previous public stable Hub, not an arbitrary older baseline');
-  const installer = fixture ? fixture.installerPath : path.join(out, `Creator-Hub-${from.version}-Windows-setup.exe`);
-  if (!fixture) execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '120', '--output', installer,
+  report.feed = lab ? require('./self-update-lab-target.cjs').discoveryScope(lab) : await checkLive(to.version);
+  assertPreviousStable(report.feed.previousStable, from);
+  const installer = fixture ? fixture.installerPath : lab ? process.env.CREATOR_SELF_UPDATE_LAB_BASELINE : path.join(out, `Creator-Hub-${from.version}-Windows-setup.exe`);
+  if (lab) assert.ok(typeof installer === 'string' && path.isAbsolute(installer), 'Pre-download the pinned public baseline before enabling the lab proxy');
+  if (!fixture && !lab) execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '120', '--output', installer,
     `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v${from.version}/${from.asset}`], { windowsHide: true, timeout: 130000 });
   assert.equal(hash(installer), from.installer);
   const setup = spawn(installer, ['/S', '/NS'], { windowsHide: true, stdio: 'ignore' });
   await retry(() => assert.equal(setup.exitCode, 0), 120);
   assert.equal(hash(hub), from.exe);
+  if (lab) require('./self-update-lab-target.cjs').checkBaseline(lab, installer, hub);
   if (fixture) await installCompanions();
   const sentinel = path.join(path.dirname(hub), 'ci-self-update-sentinel.txt');
   fs.writeFileSync(sentinel, 'Preserve unmanaged installed content.', { flag: 'wx' });
@@ -179,7 +234,7 @@ async function installCompanions() {
   const preference = 'self-update-preserves-storage';
   await page.evaluate(value => localStorage.setItem('creator-hub.ci-self-update', value), preference);
   report.before = state;
-  report.checks.push(`${report.sourceKind} ${from.version} discovers public signed ${to.version} and enables its actual Update Hub button`);
+  report.checks.push(`${report.sourceKind} ${from.version} discovers ${lab ? 'controlled-lab' : 'public'} signed ${to.version} and enables its actual Update Hub button`);
   await page.screenshot({ path: path.join(out, 'before-update.png') });
   await page.locator('#hub-update-button').click();
   await retry(() => native(child.pid, 'button', 'Not now'));
@@ -256,6 +311,7 @@ async function installCompanions() {
   await page.locator('#suite-menu').waitFor({ state: 'hidden' });
   await page.screenshot({ path: path.join(out, 'updated-plugins-icon.png') });
   report.checks.push('Restarted app opens Apps and renders the exact accepted transparent Plugins icon');
+  if (lab) await checkUpdatedBuiltIns();
   report.checks.push(`Actual in-app consent downloads/verifies, exits ${from.version}, installs exact ${to.version} and automatically restarts without a manual launch`);
   report.checks.push(`Restarted footer and uninstall registry show ${to.version}; browser preference and unmanaged installation file survive`);
   if (fixture) {
