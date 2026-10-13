@@ -100,7 +100,8 @@ function validateBinding(binding, request) {
     && run.head_repository?.full_name === REPO && run.event === 'pull_request'
     && run.path === '.github/workflows/ci.yml' && run.status === 'completed' && run.conclusion === 'success'
     && run.head_sha === request.sourceCommit && run.head_branch === 'fix/hub-013-platform-flatpak'
-    && run.pull_requests?.some(pr => pr.number === 22 && pr.base?.repo?.full_name === REPO), 'Run is not the requested successful PR22 CI source');
+    && run.pull_requests?.some(pr => pr.number === 22 && pr.base?.repo?.id === run.repository.id
+      && pr.head?.repo?.id === run.repository.id), 'Run is not the requested successful PR22 CI source');
   requireThat(artifact?.id === request.artifactId && artifact.expired === false
     && artifact.size_in_bytes === request.artifactBytes
     && artifact.digest === `sha256:${request.artifactSha256}`

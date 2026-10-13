@@ -123,7 +123,7 @@ jobs:
                 head_repository: { full_name: r.head_repository?.full_name }, event: r.event, path: r.path,
                 status: r.status, conclusion: r.conclusion, head_sha: r.head_sha, head_branch: r.head_branch,
                 run_attempt: r.run_attempt, pull_requests: r.pull_requests.map(p => ({ number: p.number,
-                  base: { repo: { full_name: p.base.repo.full_name } } })) },
+                  base: { repo: { id: p.base.repo.id } }, head: { repo: { id: p.head.repo.id } } })) },
               artifact: { id: a.id, name: a.name, digest: a.digest, size_in_bytes: a.size_in_bytes,
                 expired: a.expired, workflow_run: a.workflow_run },
               commit: { sha: c.sha, parents: c.parents.map(p => ({ sha: p.sha })),
