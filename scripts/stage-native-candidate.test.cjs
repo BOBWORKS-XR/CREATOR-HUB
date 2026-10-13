@@ -45,10 +45,13 @@ test('managed native workflow retains exact candidate pins and cannot publish', 
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/managed-candidate-acceptance.yml'), 'utf8');
   assert.match(workflow, /validation\/unified-managed-input/);
   assert.match(workflow, /contents: read/);
-  assert.match(workflow, /releases\/assets\/636510488/);
+  assert.match(workflow, /validation\/unified-managed-014/);
+  assert.match(workflow, /releases\/assets\/638170425/);
   assert.doesNotMatch(workflow, /gh release download/);
-  assert.match(workflow, /eee2b101c888db32be8e1fb3751717ce57e4ff7fd7a74aa6d5a179467129e5a0/);
-  assert.match(workflow, /sourceRevision -ne 'd59c030eb7567bbd5a93c005830d407acfc81b1d'/);
+  assert.match(workflow, /4ef0d46d69e7ecf1d9ffea7d1920a596b439104f1ff5b8e1e26ebc48ce3424ad/);
+  assert.match(workflow, /sourceRevision -ne 'c44f9b30cf7ca41c27d66fcd3fb41a562e1dca1f'/);
+  assert.match(workflow, /version -ne '0\.1\.14'/);
+  assert.match(workflow, /privateKeyIncluded -ne \$false/);
   assert.match(workflow, /matrix:\s*\n\s*mode: \[fresh, upgrade\]/);
   assert.doesNotMatch(workflow, /signing_key|signer sign|gh release (create|edit|upload)/);
   const staging = workflow.slice(workflow.indexOf('  stage-input:'), workflow.indexOf('  installed:'));

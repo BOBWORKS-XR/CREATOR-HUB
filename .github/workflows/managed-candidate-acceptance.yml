@@ -1,7 +1,7 @@
 name: Signed routing candidate acceptance (not release)
 on:
   push:
-    branches: [validation/unified-managed-input]
+    branches: [validation/unified-managed-input, validation/unified-managed-014]
     paths: ['.github/workflows/managed-candidate-acceptance.yml']
 permissions:
   contents: read
@@ -22,8 +22,8 @@ jobs:
           New-Item -ItemType Directory -Path managed-native-input | Out-Null
           $zip = 'managed-native-input/managed-candidate.zip'
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/octet-stream'; 'X-GitHub-Api-Version' = '2026-03-10' }
-          Invoke-WebRequest -Method Get -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/636510488' -Headers $headers -OutFile $zip -MaximumRedirection 5 -TimeoutSec 180
-          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne 'eee2b101c888db32be8e1fb3751717ce57e4ff7fd7a74aa6d5a179467129e5a0') { throw 'Managed candidate archive hash differs.' }
+          Invoke-WebRequest -Method Get -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/638170425' -Headers $headers -OutFile $zip -MaximumRedirection 5 -TimeoutSec 180
+          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne '4ef0d46d69e7ecf1d9ffea7d1920a596b439104f1ff5b8e1e26ebc48ce3424ad') { throw 'Managed candidate archive hash differs.' }
       - uses: actions/upload-artifact@v4
         with:
           name: managed-signed-input
@@ -56,10 +56,10 @@ jobs:
         shell: pwsh
         run: |
           $zip = 'artifacts/managed-native-input/managed-candidate.zip'
-          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne 'eee2b101c888db32be8e1fb3751717ce57e4ff7fd7a74aa6d5a179467129e5a0') { throw 'Managed candidate archive hash differs.' }
+          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne '4ef0d46d69e7ecf1d9ffea7d1920a596b439104f1ff5b8e1e26ebc48ce3424ad') { throw 'Managed candidate archive hash differs.' }
           Expand-Archive -LiteralPath $zip -DestinationPath artifacts/managed-native-input/candidate
           $proof = Get-Content artifacts/managed-native-input/candidate/candidate-source.json -Raw | ConvertFrom-Json
-          if ($proof.sourceRevision -ne 'd59c030eb7567bbd5a93c005830d407acfc81b1d' -or $proof.version -ne '0.1.13' -or $proof.acceptanceOnly -ne $true -or $proof.releaseReady -ne $false) { throw 'Unexpected candidate scope.' }
+          if ($proof.sourceRevision -ne 'c44f9b30cf7ca41c27d66fcd3fb41a562e1dca1f' -or $proof.version -ne '0.1.14' -or $proof.acceptanceOnly -ne $true -or $proof.releaseReady -ne $false -or $proof.privateKeyIncluded -ne $false) { throw 'Unexpected candidate scope.' }
           "CREATOR_CANDIDATE_SOURCE=$($proof.sourceRevision)" >> $env:GITHUB_ENV
       - name: Verify input pins and managed target assertions
         run: node --test scripts/native-managed-target.test.cjs scripts/native-installed-baseline.test.cjs
