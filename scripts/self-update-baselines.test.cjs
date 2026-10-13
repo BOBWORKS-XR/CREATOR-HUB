@@ -23,6 +23,19 @@ test('registry retains exact public 0.1.11 and 0.1.12 Windows artifact pins', ()
   assert.ok(baselines.every(Object.isFrozen));
 });
 
+test('installed candidate latest-Hub lane uses the shared pinned public baseline', () => {
+  const fs = require('node:fs');
+  const script = fs.readFileSync(require('node:path').join(__dirname, 'Test-InstalledCandidate.ps1'), 'utf8');
+  const workflow = fs.readFileSync(require('node:path').join(__dirname, '../.github/workflows/windows-candidate.yml'), 'utf8');
+  assert.match(script, /ValidateSet\([^\n]*'current-public'/);
+  assert.match(script, /\$HubBaseline -eq 'current-public'/);
+  assert.match(script, /self-update-baselines\.cjs'\) \$version/);
+  assert.match(script, /\$LASTEXITCODE -ne 0\) \{ throw 'Pinned public baseline selection failed\.'/);
+  assert.match(workflow, /-eq 'latest-hub'\) \{ 'current-public' \}/);
+  assert.doesNotMatch(workflow, /-eq 'latest-hub'\) \{ 'stable-0\.1\.11' \}/);
+  assert.equal(selectBaseline(require('../package.json').version).version, '0.1.12');
+});
+
 test('stable targets select the highest pinned version strictly below the target', () => {
   for (const [target, expected] of [['0.1.12', '0.1.11'], ['0.1.13', '0.1.12'], ['0.1.20', '0.1.12'], ['1.0.0', '0.1.12']]) {
     assert.equal(selectBaseline(target).version, expected, target);

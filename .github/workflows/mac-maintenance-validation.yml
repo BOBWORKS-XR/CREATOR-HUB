@@ -1,0 +1,108 @@
+name: macOS 0.1.13 bounded maintenance validation
+
+on:
+  pull_request:
+    paths:
+      - scripts/native-mac-maintenance-smoke.cjs
+      - scripts/native-mac-maintenance-smoke.test.cjs
+      - scripts/native-mac-window.swift
+      - .github/workflows/mac-maintenance-validation.yml
+      - docs/MAC-MAINTENANCE-VALIDATION.md
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Existing reviewed successful CI run, not a new build
+        required: true
+        default: '38393759689'
+        type: string
+      candidate_head_sha:
+        description: Reviewed PR head (full SHA)
+        required: true
+        default: '6d47bd0790cfc5c3560495bbd92c37b3cd06df14'
+        type: string
+      artifact_source_sha:
+        description: Artifact checkout PR merge SHA (tree and parents must bind to head)
+        required: true
+        default: 'cb7499b592b4260f6733b7ff5ef7c670f74233a0'
+        type: string
+      intel_dmg_sha256:
+        description: Reviewed exact 0.1.13 Intel DMG SHA256 (not ZIP digest)
+        required: true
+        default: '9697ba880b8c5169ebfae7b8d09ae03a94f367dcad6816e6295a2c9ed3d84128'
+        type: string
+      intel_executable_sha256:
+        description: Optional independently reviewed Intel executable SHA256, else derive from pinned DMG
+        required: false
+        type: string
+      arm_dmg_sha256:
+        description: Reviewed exact 0.1.13 ARM DMG SHA256 (not ZIP digest)
+        required: true
+        default: 'd023fe401c6cf1edb340e0eb9f06dabce988f5168e9b9d9ebb1ddd08a8c2728a'
+        type: string
+      arm_executable_sha256:
+        description: Optional independently reviewed ARM executable SHA256, else derive from pinned DMG
+        required: false
+        type: string
+
+# Read/download evidence only. No issuer keys, releases, tags or catalog changes.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  maintenance:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    name: ${{ matrix.arch }} ${{ matrix.lane }} (not signed updater acceptance)
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [X64, ARM64]
+        lane: [fresh, manual-upgrade]
+        include:
+          - arch: X64
+            os: macos-15-intel
+          - arch: ARM64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      CREATOR_MAC_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id || '38393759689' }}
+      CREATOR_MAC_HEAD_SHA: ${{ inputs.candidate_head_sha || '6d47bd0790cfc5c3560495bbd92c37b3cd06df14' }}
+      CREATOR_MAC_SOURCE_SHA: ${{ inputs.artifact_source_sha || 'cb7499b592b4260f6733b7ff5ef7c670f74233a0' }}
+      CREATOR_MAC_DMG_SHA256: ${{ matrix.arch == 'X64' && (inputs.intel_dmg_sha256 || '9697ba880b8c5169ebfae7b8d09ae03a94f367dcad6816e6295a2c9ed3d84128') || (inputs.arm_dmg_sha256 || 'd023fe401c6cf1edb340e0eb9f06dabce988f5168e9b9d9ebb1ddd08a8c2728a') }}
+      CREATOR_MAC_EXECUTABLE_SHA256: ${{ matrix.arch == 'X64' && inputs.intel_executable_sha256 || matrix.arch == 'ARM64' && inputs.arm_executable_sha256 || '' }}
+      CREATOR_MAC_LANE: ${{ matrix.lane }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Select canonical disposable evidence path on the runner
+        run: |
+          node -e 'const fs = require("node:fs"), p = require("node:path"); const root = fs.realpathSync(process.env.RUNNER_TEMP); const name = "mac-maintenance-" + process.env.RUNNER_ARCH + "-" + process.env.CREATOR_MAC_LANE; fs.appendFileSync(process.env.GITHUB_ENV, "CREATOR_MAC_WORK_DIR=" + p.join(root, name) + "\n");'
+      - name: Synthetic harness regressions (no installation)
+        run: node --test scripts/native-mac-maintenance-smoke.test.cjs
+      - name: Bind and download the existing exact CI artifact and public baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/native-mac-maintenance-smoke.cjs --download
+      - name: Compile read-only GUI capability and owned-process helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun swiftc scripts/native-mac-window.swift -o "$CREATOR_MAC_WORK_DIR/native-mac-window"
+      - name: Native per-user install, preservation and GUI capability probe
+        run: node scripts/native-mac-maintenance-smoke.cjs --run
+      - name: Retain original reports and failure scope (never release receipts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-maintenance-${{ matrix.arch }}-${{ matrix.lane }}-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ env.CREATOR_MAC_WORK_DIR }}/download-report.json
+            ${{ env.CREATOR_MAC_WORK_DIR }}/native-report.json
+            ${{ env.CREATOR_MAC_WORK_DIR }}/binding.json

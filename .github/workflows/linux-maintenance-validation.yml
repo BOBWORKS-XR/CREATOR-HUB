@@ -1,0 +1,69 @@
+name: Native Linux maintenance validation
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/linux-maintenance-validation.yml'
+      - 'scripts/native-linux-maintenance-smoke*'
+      - 'scripts/native-linux-window.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [appimage, deb]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Bind the reviewed native artifact to unchanged product source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/runs/38393759689 > native-run.json
+          node -e 'const r=require("./native-run.json");if(r.conclusion!=="success"||r.head_sha!=="6d47bd0790cfc5c3560495bbd92c37b3cd06df14"||r.repository.full_name!=="BOBWORKS-XR/CREATOR-HUB")throw Error("Native run binding differs")'
+          git fetch --no-tags origin 6d47bd0790cfc5c3560495bbd92c37b3cd06df14
+          git diff --exit-code 6d47bd0790cfc5c3560495bbd92c37b3cd06df14 HEAD -- package.json package-lock.json rust-toolchain.toml src src-tauri unity
+      - uses: actions/download-artifact@v4
+        with:
+          repository: BOBWORKS-XR/CREATOR-HUB
+          run-id: 38393759689
+          github-token: ${{ github.token }}
+          name: hub-development-Linux-X64-cb7499b592b4260f6733b7ff5ef7c670f74233a0
+          path: artifacts/native-input
+      - name: Provision disposable native desktop tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfuse2 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libxdo3 xvfb fluxbox wmctrl xdotool imagemagick dbus-x11 python3-gi gir1.2-atspi-2.0 python3-pil at-spi2-core
+      - run: node --test scripts/native-linux-maintenance-smoke.test.cjs
+      - name: Real installed GTK/WebKit GUI and manual upgrade
+        env:
+          PACKAGE_KIND: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/native-linux
+          input="$GITHUB_WORKSPACE/artifacts/native-input/$PACKAGE_KIND"
+          output="$GITHUB_WORKSPACE/artifacts/native-linux/$PACKAGE_KIND"
+          export INPUT_DIRECTORY="$input" OUTPUT_DIRECTORY="$output"
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' bash -c '
+            fluxbox > artifacts/native-linux/fluxbox.log 2>&1 &
+            node scripts/native-linux-maintenance-smoke.cjs "$PACKAGE_KIND" "$INPUT_DIRECTORY" "$OUTPUT_DIRECTORY"
+          '
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-native-${{ matrix.package }}-${{ github.run_id }}
+          path: |
+            artifacts/native-linux/
+            native-run.json
+          if-no-files-found: warn
+          retention-days: 7
