@@ -144,7 +144,7 @@ mod tests {
         entry.validate().unwrap();
         let products = parse(
             include_bytes!("../../tests/fixtures/community/products.json"),
-            &[entry.clone()],
+            std::slice::from_ref(&entry),
         )
         .unwrap();
         assert_eq!(products.len(), 1);
@@ -181,7 +181,7 @@ mod tests {
     fn exact_listed_version_only_and_no_download_authority() {
         let entry = listing();
         let bytes = serde_json::to_vec(&fixture(&entry)).unwrap();
-        let products = parse(&bytes, &[entry.clone()]).unwrap();
+        let products = parse(&bytes, std::slice::from_ref(&entry)).unwrap();
         assert_eq!(products.len(), 1);
         assert!(action(&products, &entry, "purchase")
             .unwrap()
@@ -230,7 +230,11 @@ mod tests {
                     data["products"].as_array_mut().unwrap().push(duplicate);
                 }
             }
-            assert!(parse(&serde_json::to_vec(&data).unwrap(), &[entry.clone()]).is_err());
+            assert!(parse(
+                &serde_json::to_vec(&data).unwrap(),
+                std::slice::from_ref(&entry)
+            )
+            .is_err());
         }
         assert!(entry.download.is_none());
     }

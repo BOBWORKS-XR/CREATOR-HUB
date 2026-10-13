@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "appId": "creator-hub",
+  "version": "0.1.13",
+  "platform": "windows",
+  "architecture": "x86_64",
+  "packageType": "nsis",
+  "assetName": "Creator.Hub_0.1.13_x64-setup.exe",
+  "byteLength": 6314502,
+  "sha256": "bbdc390ba49526c9bdd40efa373c7e7d292b68ebe7209fb31aa4c833bc2805cb",
+  "executableSha256": "2b2c8f5014d121f7ef408caab6626d14dc73b9f716b321ec9c1177ebe5c4a3ca",
+  "identityProtocol": 0,
+  "lifecycleProtocol": 0,
+  "installerProtocol": 1,
+  "minHubVersion": "0.1.3"
+}

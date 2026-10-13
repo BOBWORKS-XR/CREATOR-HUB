@@ -29,12 +29,32 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - uses: dtolnay/rust-toolchain@stable
+      - run: node --test scripts/self-update-baselines.test.cjs scripts/check-release-feed.test.cjs
+      - name: Read the packaged target version
+        id: target
+        shell: pwsh
+        env:
+          REQUESTED_TARGET_VERSION: ${{ inputs.target_version }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:REQUESTED_TARGET_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$' -or $env:REQUESTED_TARGET_VERSION -ne $version) { throw 'Target version must match the checked-out app version.' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Select the pinned previous public stable baseline
+        id: baseline
+        shell: pwsh
+        run: |
+          $selected = node scripts/self-update-baselines.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Public self-update baseline selection failed.' }
+          $baseline = $selected | ConvertFrom-Json
+          "version=$($baseline.version)" >> $env:GITHUB_OUTPUT
+      - uses: dtolnay/rust-toolchain@1.99.0
         if: ${{ inputs.hosted_fixture }}
       - name: Build test-only version fixture from current runtime source
         if: ${{ inputs.hosted_fixture && inputs.fixture_run == '' }}
         shell: pwsh
-        run: ./scripts/Build-HostedUpdateFixture.ps1 -FromVersion 0.1.10
+        env:
+          SELECTED_FROM_VERSION: ${{ steps.baseline.outputs.version }}
+        run: ./scripts/Build-HostedUpdateFixture.ps1 -FromVersion $env:SELECTED_FROM_VERSION
       - uses: actions/upload-artifact@v4
         if: ${{ inputs.hosted_fixture && inputs.fixture_run == '' }}
         with:
@@ -55,24 +75,15 @@ jobs:
         shell: pwsh
         env:
           REQUESTED_TARGET_VERSION: ${{ inputs.target_version }}
+          SELECTED_FROM_VERSION: ${{ steps.baseline.outputs.version }}
         run: |
           $fixture = Get-Content dist/Creator-Hub-hosted-update-fixture/fixture.json -Raw | ConvertFrom-Json
-          if ($fixture.testOnly -ne $true -or $fixture.fromVersion -ne '0.1.10' -or $fixture.toVersion -ne $env:REQUESTED_TARGET_VERSION) { throw 'Reused fixture has the wrong scope.' }
+          if ($fixture.testOnly -ne $true -or $fixture.fromVersion -ne $env:SELECTED_FROM_VERSION -or $fixture.toVersion -ne $env:REQUESTED_TARGET_VERSION) { throw 'Reused fixture has the wrong scope.' }
           if ($fixture.sourceRevision -notmatch '^[a-f0-9]{40}$') { throw 'Reused fixture has no source revision.' }
           git fetch --no-tags origin $fixture.sourceRevision
           if ($LASTEXITCODE -ne 0) { throw 'Fixture source revision is unavailable.' }
           git diff --quiet $fixture.sourceRevision HEAD -- package.json package-lock.json src src-tauri
           if ($LASTEXITCODE -ne 0) { throw 'Runtime source changed since the fixture was built.' }
-      - run: node --test scripts/check-release-feed.test.cjs
-      - name: Read the packaged target version
-        id: target
-        shell: pwsh
-        env:
-          REQUESTED_TARGET_VERSION: ${{ inputs.target_version }}
-        run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          if ($env:REQUESTED_TARGET_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$' -or $env:REQUESTED_TARGET_VERSION -ne $version) { throw 'Target version must match the checked-out app version.' }
-          "version=$version" >> $env:GITHUB_OUTPUT
       - name: Download and pin the exact published Windows update target
         shell: pwsh
         env:

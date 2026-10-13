@@ -120,7 +120,7 @@ mod unix_native {
 
     impl Processes for Snapshot {
         fn next(&mut self) -> Result<Option<(u32, String)>, ()> {
-            while let Some(entry) = self.entries.next() {
+            for entry in self.entries.by_ref() {
                 let Ok(entry) = entry else { continue };
                 let file_name = entry.file_name();
                 let Some(s) = file_name.to_str() else {
@@ -132,6 +132,42 @@ mod unix_native {
                 }
             }
             Ok(None)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn enumeration_resumes_without_repeating_or_skipping_readable_processes() {
+            let root = tempfile::tempdir().unwrap();
+            for (name, comm) in [
+                ("123", Some("creator-hub\n")),
+                ("456", Some("other\n")),
+                ("not-a-pid", Some("ignored")),
+                ("789", None),
+            ] {
+                let path = root.path().join(name);
+                fs::create_dir(&path).unwrap();
+                if let Some(comm) = comm {
+                    fs::write(path.join("comm"), comm).unwrap();
+                }
+            }
+            let mut snapshot = Snapshot {
+                entries: fs::read_dir(root.path()).unwrap(),
+            };
+            let mut processes = [
+                snapshot.next().unwrap().unwrap(),
+                snapshot.next().unwrap().unwrap(),
+            ];
+            processes.sort_by_key(|process| process.0);
+            assert_eq!(
+                processes,
+                [(123, "creator-hub".into()), (456, "other".into())]
+            );
+            assert_eq!(snapshot.next().unwrap(), None);
+            assert_eq!(snapshot.next().unwrap(), None);
         }
     }
 }

@@ -6,13 +6,20 @@ mod community_project;
 mod hosted;
 mod hosted_operation;
 mod hosted_restore;
+#[cfg(any(unix, test))]
+mod installation_identity;
 mod installer_preflight;
 mod launch;
+#[cfg(any(target_os = "macos", test))]
+mod mac_update;
 mod manager;
 mod mcp_runtime;
 mod platform;
+mod preferences;
 mod projects;
 mod self_update;
+mod update_target;
+mod usage_terms;
 use catalog::AppId;
 use tauri::{Emitter, Manager as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -274,7 +281,7 @@ fn open_resource(resource: String) -> Result<(), String> {
 }
 
 fn shell_initialization(shell_key: &str) -> String {
-    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); }}", shell_key, env!("CARGO_PKG_VERSION"))
+    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); Object.defineProperty(window, '__CREATOR_HUB_TERMS_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_PREFERENCES_PROTOCOL__', {{value: 1}}); }}", shell_key, env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(target_os = "linux")]
@@ -312,6 +319,10 @@ fn main() {
     let shell_key: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
     let initialize = shell_initialization(&shell_key);
     let commands: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        usage_terms::usage_terms_status,
+        usage_terms::accept_usage_terms,
+        preferences::hub_preferences_status,
+        preferences::set_hub_preference,
         open_resource,
         community_catalogue,
         community_projects,
@@ -357,6 +368,13 @@ fn main() {
         .manage(community::Community::default())
         .manage(community_project::ProjectImports::default())
         .manage(self_update::SelfUpdate::default())
+        .setup(|app| {
+            #[cfg(unix)]
+            self_update::initialize(app.handle());
+            #[cfg(not(unix))]
+            let _ = app;
+            Ok(())
+        })
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(hosted::Hosting::default())
         .manage(hosted_restore::Restore::default())

@@ -69,6 +69,24 @@ test('first launch requires saved terms acceptance before app discovery', async 
   await expect(dialog).toBeHidden();
 });
 
+test('Flatpak update status explains the sandbox route without a false up-to-date claim', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => {
+    window.hubUpdate = {
+      currentVersion: '0.1.13', updateSource: 'flatpak', availableVersion: null,
+      downloaded: false, warning: null,
+      installBlocked: 'Use your Software app or Flatpak to check for Hub updates. Native installers cannot update this sandboxed installation.',
+    };
+    window.calls.length = 0;
+  });
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#hub-update-status')).toHaveText('You are using Hub 0.1.13. Updates are managed by Flatpak.');
+  await expect(page.locator('#hub-update-status')).not.toContainText('No newer update');
+  await expect(page.locator('#hub-update-warning')).toContainText('Software app or Flatpak');
+  await expect(page.locator('#hub-update-button')).toBeDisabled();
+  expect(await page.evaluate(() => window.calls.some(c => ['download_hub_update', 'install_hub_update'].includes(c.command)))).toBe(false);
+});
+
 test('fixed Hub help opens with app roles and practical troubleshooting', async ({ page }) => {
   await load(page);
   const help = page.locator('#context-help-dialog');

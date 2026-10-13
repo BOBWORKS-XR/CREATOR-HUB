@@ -10,16 +10,20 @@ const { spawn, execFileSync } = require('node:child_process');
 const { chromium } = require('@playwright/test');
 const { checkLive } = require('./check-release-feed.cjs');
 const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
-const from = { version: '0.1.11', asset: 'Creator.Hub_0.1.11_x64-setup.exe', installer: '90018f10096a52ad9abb5e2f8634acd6f8dfcea39cffd7ca2e25b92a54a7f07e', exe: 'b1ed8b37debb0e9e650ccdd62b954bd68e054590d1821092b25e68f545600c21' };
+const { selectBaseline, assertPreviousStable } = require('./self-update-baselines.cjs');
 const to = {
   version: process.env.CREATOR_SELF_UPDATE_TARGET_VERSION || require('../package.json').version,
   installer: process.env.CREATOR_SELF_UPDATE_INSTALLER_SHA256,
   exe: process.env.CREATOR_SELF_UPDATE_EXECUTABLE_SHA256,
 };
 assert.equal(to.version, require('../package.json').version, 'Update acceptance pins for the intended release; testing an older update is not sufficient');
+const from = selectBaseline(to.version);
 assert.match(to.installer || '', /^[a-f0-9]{64}$/, 'Supply the exact published target installer SHA-256');
 assert.match(to.exe || '', /^[a-f0-9]{64}$/, 'Supply the exact packaged target executable SHA-256');
 const fixture = process.env.CREATOR_HOSTED_UPDATE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.CREATOR_HOSTED_UPDATE_FIXTURE, 'utf8')) : null;
+const lab = process.env.CREATOR_SELF_UPDATE_LAB_CONFIG
+  ? require('./self-update-lab-target.cjs').selectLab(process.env.CREATOR_SELF_UPDATE_LAB_CONFIG, to, fixture)
+  : null;
 if (fixture) {
   assert.equal(fixture.testOnly, true);
   assert.equal(fixture.fromVersion, from.version);
@@ -33,6 +37,11 @@ assert.equal(fs.existsSync(hub), false, 'Expected a fresh runner without Hub ins
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out, { recursive: true });
 const report = { passed: false, from, to, checks: [], userMachineUsed: false, selfUpdateTested: false };
+report.releaseLine = 'separate-apps';
+report.discoveryKind = lab ? 'controlled-lab-not-public-discovery' : 'public-github-discovery';
+report.labDiscovery = Boolean(lab);
+report.publicDiscovery = !lab;
+report.releaseReady = false;
 report.sourceKind = fixture ? 'version-only-runtime-fixture-not-public-stable' : 'unmodified-public-stable';
 if (fixture) report.fixture = fixture;
 const policyState = path.join(out, 'webview-policy.json');
@@ -44,6 +53,32 @@ function powershell(script, args = []) {
 function native(pid, action, value = '') { return powershell('scripts/native-window.ps1', ['-TargetPid', String(pid), '-ExpectedExecutable', hub, '-Action', action, '-Value', value]); }
 function policy(action) { return powershell('scripts/native-webview-policy.ps1', ['-Action', action, '-StateFile', policyState]); }
 function diagnostics() { return JSON.parse(powershell('scripts/native-startup-diagnostics.ps1').replace(/^\uFEFF/, '')); }
+function closeOwnedHub() {
+  assert.ok(Number.isSafeInteger(ownedPid) && ownedPid > 0, 'Owned Hub PID required');
+  const quote = value => `'${value.replaceAll("'", "''")}'`;
+  // Hold the exact process handle across WM_CLOSE and exit observation, including an automatic restart.
+  const command = `# CREATOR_OWNED_HUB_EXIT
+    $ErrorActionPreference='Stop'; $owned=[Diagnostics.Process]::GetProcessById(${ownedPid});
+    try {
+      [void]$owned.Handle;
+      $expected=${quote(hub)};
+      if ([IO.Path]::GetFullPath($owned.MainModule.FileName) -ine [IO.Path]::GetFullPath($expected)) { throw 'Hub process identity changed.' }
+      $started=$owned.StartTime.ToUniversalTime().Ticks.ToString();
+      $LASTEXITCODE=0;
+      [void](& ${quote(path.resolve('scripts/native-window.ps1'))} -TargetPid $owned.Id -ExpectedExecutable $expected -Action close);
+      if ($LASTEXITCODE -ne 0) { throw 'Owned Hub close failed.' }
+      if (-not $owned.WaitForExit(30000)) { throw 'Owned Hub close timed out.' }
+      if ($owned.ExitCode -ne 0) { throw 'Owned Hub exit was nonzero.' }
+      @{ pid=$owned.Id; startTimeTicks=$started; exitCode=$owned.ExitCode; normalCloseVerified=$true } | ConvertTo-Json -Compress
+    } finally { $owned.Dispose() }`;
+  const result = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-Command', command], {
+    encoding: 'utf8', timeout: 40000, windowsHide: true,
+  }).replace(/^\uFEFF/, ''));
+  assert.equal(result.pid, ownedPid);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.normalCloseVerified, true);
+  return result;
+}
 async function retry(fn, seconds = 30) {
   let last;
   for (const end = Date.now() + seconds * 1000; Date.now() < end;) {
@@ -59,6 +94,7 @@ const apps = {
 };
 const configPath = path.join(process.env.APPDATA, 'creator-works-mcp', 'launcher-config.json');
 const backends = {}, frames = {};
+const companionBefore = {};
 let configHash;
 async function connect(waitReady = true) {
   browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'), 90);
@@ -74,7 +110,7 @@ async function connect(waitReady = true) {
     await page.locator('#usage-terms-checkbox').check();
     await page.locator('#usage-terms-continue').click();
     await page.waitForFunction(() => !document.querySelector('#usage-terms-dialog')?.open);
-    report.checks.push('Accepted the required usage terms through the visible dialog on the disposable runner');
+    report.checks.push('Synthetic disposable test acknowledged the usage terms through the visible dialog; not customer consent');
   }
   if (waitReady) await page.waitForFunction(() => !document.querySelector('#check-updates').disabled, null, { timeout: 180000 });
   const state = diagnostics();
@@ -115,14 +151,17 @@ async function installCompanions() {
   const pins = require('./prerelease-apps.json');
   for (const [app, exe] of Object.entries(apps)) {
     assert.equal(fs.existsSync(exe), false);
-    const pin = pins[app], installer = path.join(out, pin.assetName);
+    const pin = pins[app], installer = lab ? lab.companionInstallers[app].path : path.join(out, pin.assetName);
     const repo = app === 'setup' ? 'CREATOR-PROJECT-SETUP' : 'CREATOR-WORKS-UNITY-MCP';
-    execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '180', '--output', installer,
+    if (!lab) execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '180', '--output', installer,
       `https://github.com/BOBWORKS-XR/${repo}/releases/download/v${pin.version}/${pin.assetName}`], { windowsHide: true, timeout: 190000 });
     assert.equal(hash(installer), pin.installerSha256);
     const setup = spawn(installer, ['/S', '/NS'], { windowsHide: true, stdio: 'ignore' });
     await retry(() => assert.equal(setup.exitCode, 0), 120);
     assert.equal(hash(exe), pin.executableSha256);
+    const sentinel = path.join(path.dirname(exe), 'ci-hub-update-companion-sentinel.txt');
+    fs.writeFileSync(sentinel, 'Preserve this unmanaged separate companion installation file.', { flag: 'wx' });
+    companionBefore[app] = { exe, executableSha256: pin.executableSha256, sentinel, sentinelSha256: hash(sentinel) };
   }
   assert.equal(fs.existsSync(configPath), false);
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -135,28 +174,63 @@ async function installCompanions() {
   unrelatedRuntime.stdout.on('data', chunk => { output += chunk; });
   await retry(() => { assert.match(output, /ready/); assert.equal(unrelatedRuntime.exitCode, null); });
 }
+function preserveCompanions(phase) {
+  assert.equal(hash(configPath), configHash);
+  for (const before of Object.values(companionBefore)) {
+    assert.equal(hash(before.exe), before.executableSha256, 'Separate companion executable changed during Hub update');
+    assert.equal(hash(before.sentinel), before.sentinelSha256, 'Unmanaged separate companion content changed');
+  }
+  (report.companionPreservation ||= {})[phase] = { launcherConfigSha256: configHash, installs: { ...companionBefore } };
+}
+async function warmPublicCompanionCatalog() {
+  // The five-route lab serves only Hub. Let the unmodified old app verify the
+  // real public companion descriptors first; never forge trusted cache records.
+  const env = { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238' };
+  for (const name of Object.keys(env)) if (/^(?:https?|all|no)_proxy$/i.test(name)) delete env[name];
+  child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env });
+  ownedPid = child.pid;
+  await connect();
+  const inventory = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: true, preview: true }));
+  assert.equal(inventory.supported, true);
+  const pins = require('./prerelease-apps.json');
+  for (const app of Object.keys(apps)) {
+    const state = inventory.apps.find(state => state.app === app);
+    assert.ok(state?.installed && state.trusted, 'Public baseline must authenticate each installed companion before lab discovery');
+    assert.equal(state.installedVersion, pins[app].version);
+    assert.equal(state.installedPath.toLowerCase(), apps[app].toLowerCase());
+  }
+  report.publicCompanionCatalog = { verifiedByUnmodifiedBaseline: true, baselinePid: child.pid,
+    versions: Object.fromEntries(Object.keys(apps).map(app => [app, pins[app].version])) };
+  await retry(() => native(child.pid, 'close'));
+  await retry(() => assert.equal(child.exitCode, 0), 60);
+  await browser.close(); browser = null; page = null;
+  preserveCompanions('public-catalog-warmup');
+}
 (async () => {
-  report.feed = await checkLive(to.version);
-  assert.equal(report.feed.previousStable, from.version, 'Exercise the previous public stable Hub, not an arbitrary older baseline');
-  const installer = fixture ? fixture.installerPath : path.join(out, `Creator-Hub-${from.version}-Windows-setup.exe`);
-  if (!fixture) execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '120', '--output', installer,
+  report.feed = lab ? require('./self-update-lab-target.cjs').discoveryScope(lab) : await checkLive(to.version);
+  assertPreviousStable(report.feed.previousStable, from);
+  const installer = fixture ? fixture.installerPath : lab ? process.env.CREATOR_SELF_UPDATE_LAB_BASELINE : path.join(out, `Creator-Hub-${from.version}-Windows-setup.exe`);
+  if (lab) assert.ok(typeof installer === 'string' && path.isAbsolute(installer), 'Pre-stage the exact public baseline before enabling the lab proxy');
+  if (!fixture && !lab) execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '120', '--output', installer,
     `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v${from.version}/${from.asset}`], { windowsHide: true, timeout: 130000 });
   assert.equal(hash(installer), from.installer);
   const setup = spawn(installer, ['/S', '/NS'], { windowsHide: true, stdio: 'ignore' });
   await retry(() => assert.equal(setup.exitCode, 0), 120);
   assert.equal(hash(hub), from.exe);
-  if (fixture) await installCompanions();
+  if (lab) require('./self-update-lab-target.cjs').checkBaseline(lab, installer, hub);
+  if (fixture || lab) await installCompanions();
   const sentinel = path.join(path.dirname(hub), 'ci-self-update-sentinel.txt');
   fs.writeFileSync(sentinel, 'Preserve unmanaged installed content.', { flag: 'wx' });
   const sentinelHash = hash(sentinel);
   policy('Enable');
+  if (lab) await warmPublicCompanionCatalog();
   child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238' } });
   ownedPid = child.pid;
   report.originalPid = child.pid;
   await connect();
   assert.equal((await page.locator('.footer-version').innerText()).trim(), from.version);
-  if (fixture) {
+  if (fixture || lab) {
     for (const app of Object.keys(apps)) {
       await showApp(app);
       await approveHosted(app);
@@ -179,7 +253,7 @@ async function installCompanions() {
   const preference = 'self-update-preserves-storage';
   await page.evaluate(value => localStorage.setItem('creator-hub.ci-self-update', value), preference);
   report.before = state;
-  report.checks.push(`${report.sourceKind} ${from.version} discovers public signed ${to.version} and enables its actual Update Hub button`);
+  report.checks.push(`${report.sourceKind} ${from.version} discovers ${lab ? 'controlled-lab' : 'public'} signed ${to.version} and enables its actual Update Hub button`);
   await page.screenshot({ path: path.join(out, 'before-update.png') });
   await page.locator('#hub-update-button').click();
   await retry(() => native(child.pid, 'button', 'Not now'));
@@ -187,11 +261,12 @@ async function installCompanions() {
   assert.equal(child.exitCode, null);
   assert.equal(hash(hub), from.exe);
   assert.equal(hash(sentinel), sentinelHash);
-  if (fixture) {
+  if (fixture || lab) {
     assert.equal(await frames.setup.locator('#project-name').inputValue(), 'Keep this draft when update is cancelled');
     const live = processes().map(p => p.ProcessId);
     assert.ok(Object.values(backends).every(pid => live.includes(pid)));
     assert.equal(hash(configPath), configHash);
+    preserveCompanions('native-cancel');
     assert.equal(unrelatedRuntime.exitCode, null);
     report.checks.push('Native Cancel leaves both hosted backends, unsaved Setup form, MCP settings and unrelated Node runtime intact');
   }
@@ -210,13 +285,14 @@ async function installCompanions() {
   }, 120);
   ownedPid = restarted.ProcessId;
   report.restartedPid = ownedPid;
-  await connect(!fixture);
-  if (fixture) {
+  await connect(!(fixture || lab));
+  if (fixture || lab) {
     for (const app of Object.keys(apps)) await approveHosted(app);
     await page.waitForFunction(() => document.querySelector('#hosted-restore-message').textContent.includes('views have reopened'));
     await page.waitForFunction(() => !document.querySelector('#check-updates').disabled);
     assert.equal(fs.existsSync(path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'hub-updates', 'hosted-restore.json')), false);
     assert.equal(hash(configPath), configHash);
+    preserveCompanions('automatic-restart');
     assert.equal(unrelatedRuntime.exitCode, null);
     const live = processes().map(p => p.ProcessId);
     assert.ok(Object.values(report.beforeBackendPids).every(pid => !live.includes(pid)), 'All original owned backends exited');
@@ -229,7 +305,7 @@ async function installCompanions() {
     await showApps();
     report.afterBackendPids = { ...backends };
     report.hostedViewsUpdateTested = true;
-    report.checks.push('New updater closes owned views automatically, exact signed public target installs/restarts, both real views reopen after native permission, consumed ticket and unchanged MCP settings; unrelated Node survives');
+    report.checks.push(`Updater closes owned views automatically, exact signed ${lab ? 'controlled-lab' : 'public'} target installs/restarts, both separate installed views reopen after native permission, consumed ticket and unchanged MCP settings; unrelated Node survives`);
   }
   assert.equal((await page.locator('.footer-version').innerText()).trim(), to.version);
   assert.equal(await page.evaluate(() => localStorage.getItem('creator-hub.ci-self-update')), preference);
@@ -258,7 +334,7 @@ async function installCompanions() {
   report.checks.push('Restarted app opens Apps and renders the exact accepted transparent Plugins icon');
   report.checks.push(`Actual in-app consent downloads/verifies, exits ${from.version}, installs exact ${to.version} and automatically restarts without a manual launch`);
   report.checks.push(`Restarted footer and uninstall registry show ${to.version}; browser preference and unmanaged installation file survive`);
-  if (fixture) {
+  if (fixture || lab) {
     for (const app of Object.keys(apps)) {
       await showApp(app);
       await page.locator('#hosted-stop').click();
@@ -291,15 +367,25 @@ async function installCompanions() {
     try { if (ownedPid) fs.writeFileSync(path.join(out, 'dialogs.json'), native(ownedPid, 'snapshot')); } catch (error) { report.dialogError = String(error); }
     try { if (page) await page.screenshot({ path: path.join(out, 'failure.png') }); } catch {}
   }
-  try { if (ownedPid) native(ownedPid, 'close'); } catch {}
-  if (browser) await browser.close().catch(() => {});
-  try { policy('Restore'); report.policyRestored = true; } catch (error) { report.policyError = String(error); report.passed = false; process.exitCode = 1; }
+  report.cleanup = { passed: false, errors: [] };
+  const cleanupFailed = (phase, error) => {
+    report.cleanup.errors.push({ phase, message: String(error.stack || error) });
+    report.passed = false; process.exitCode = 1;
+  };
+  try { if (ownedPid) report.hubShutdown = closeOwnedHub(); }
+  catch (error) { cleanupFailed('hub-close', error); report.cleanup.disposableJobTeardownRequired = true; }
+  try { if (browser) await browser.close(); } catch (error) { cleanupFailed('browser-close', error); }
+  try { policy('Restore'); report.policyRestored = true; }
+  catch (error) { report.policyError = String(error); cleanupFailed('policy-restore', error); }
+  // A failed close is evidence, not authority to kill a process tree. The disposable job owns recovery.
   if (child?.exitCode === null) child.unref();
   if (unrelatedRuntime?.exitCode === null) {
-    fs.writeFileSync(runtimeStop, 'exit', { flag: 'wx' });
-    try { await retry(() => assert.equal(unrelatedRuntime.exitCode, 0)); }
-    catch (error) { report.runtimeCleanupError = String(error); report.passed = false; process.exitCode = 1; }
+    try {
+      fs.writeFileSync(runtimeStop, 'exit', { flag: 'wx' });
+      await retry(() => assert.equal(unrelatedRuntime.exitCode, 0));
+    } catch (error) { report.runtimeCleanupError = String(error); cleanupFailed('runtime-stop', error); report.cleanup.disposableJobTeardownRequired = true; }
   }
+  report.cleanup.passed = report.cleanup.errors.length === 0;
   fs.writeFileSync(path.join(out, 'self-update-report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ out, ...report }, null, 2));
 });

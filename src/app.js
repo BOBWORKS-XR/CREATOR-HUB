@@ -21,6 +21,13 @@
   let hubUpdate = null;
   let busy = false;
   let launchRevision = -1;
+  const preferenceControls = [['preview-channel', 'preview', 'preview'],
+    ['auto-download', 'auto-download', 'autoDownload'], ['restore-hosted-views', 'restore-hosted-views', 'restoreHostedViews']];
+  const nativePreferences = window.CreatorHubNative.preferencesPersistence === true;
+  let preferencesReady = !nativePreferences;
+  let preferencesSaving = 0;
+  const legacyPreferences = {};
+  const preferenceFailures = new Map();
   const byId = id => document.getElementById(id);
   const invoke = (command, args) => window.CreatorHubNative.invoke(command, args);
   const platformLabel = () => {
@@ -32,12 +39,41 @@
   };
   byId('platform-status').textContent = platformLabel();
   if (typeof window.CreatorHubNative.version === 'string') document.querySelector('.footer-version').textContent = window.CreatorHubNative.version;
-  for (const [id, key] of [['preview-channel', 'preview'], ['auto-download', 'auto-download'], ['restore-hosted-views', 'restore-hosted-views']]) {
+  for (const [id, key, field] of preferenceControls) {
     byId(id).checked = true;
     try {
       const saved = localStorage.getItem(`creator-hub.${key}`);
       byId(id).checked = saved === null || saved === 'true';
     } catch { /* Keep the default when preference storage is unavailable. */ }
+    legacyPreferences[field] = byId(id).checked;
+    if (nativePreferences) { byId(id).checked = false; byId(id).disabled = true; }
+  }
+  const automaticDownloads = () => preferencesReady && !preferencesSaving && byId('auto-download').checked;
+  function preferenceError(message = '', key = 'load') {
+    if (message) preferenceFailures.set(key, message);
+    else preferenceFailures.delete(key);
+    byId('preferences-status').textContent = [...preferenceFailures.values()].join(' ');
+    byId('preferences-status').hidden = !preferenceFailures.size;
+  }
+  async function loadPreferences() {
+    if (!nativePreferences) return;
+    try {
+      const saved = await invoke('hub_preferences_status');
+      if (saved !== null && (!saved || typeof saved !== 'object' || Array.isArray(saved)
+        || Object.keys(saved).some(key => !preferenceControls.some(([, , field]) => field === key))
+        || preferenceControls.some(([, , field]) => saved[field] !== undefined && saved[field] !== null && typeof saved[field] !== 'boolean'))) throw Error('Invalid saved Hub preferences.');
+      for (const [id, key, field] of preferenceControls) {
+        const value = typeof saved?.[field] === 'boolean' ? saved[field] : legacyPreferences[field];
+        if (typeof saved?.[field] !== 'boolean') await invoke('set_hub_preference', { key, value });
+        byId(id).checked = value;
+      }
+      preferencesReady = true;
+      preferenceError();
+    } catch (reason) {
+      for (const [id] of preferenceControls) byId(id).checked = false;
+      preferenceError(`Saved preferences could not be verified: ${String(reason)}. Automatic downloads are off. Existing records were kept.`);
+    }
+    renderState();
   }
   function close(restore = false) {
     if (restore || menu.contains(document.activeElement)) trigger.focus({ preventScroll: true });
@@ -239,9 +275,10 @@
       menuDownload.title = state?.installed ? `Download latest ${tools[id].title} update` : `Download latest ${tools[id].title}`;
       menuDownload.setAttribute('aria-label', menuDownload.title);
     }
-    byId('preview-channel').disabled = busy;
-    byId('hub-update-button').disabled = busy || !hubUpdate?.availableVersion || Boolean(hubUpdate?.installBlocked);
+    for (const [id] of preferenceControls) byId(id).disabled = !preferencesReady || preferencesSaving || (id === 'preview-channel' && busy);
+    byId('hub-update-button').disabled = busy || preferencesSaving || !hubUpdate?.availableVersion || Boolean(hubUpdate?.installBlocked);
     byId('hub-update-status').textContent = !hubUpdate ? 'Hub update check is unavailable. Try Check for updates.'
+      : hubUpdate.updateSource === 'flatpak' ? `You are using Hub ${hubUpdate.currentVersion}. Updates are managed by Flatpak.`
       : hubUpdate.availableVersion ? `Version ${hubUpdate.availableVersion}${hubUpdate.downloaded ? ' is ready to install.' : ' is available.'}`
       : hubUpdate.warning ? 'Could not check for a Hub update.' : `You are using Hub ${hubUpdate.currentVersion}. No newer update was found.`;
     byId('hub-update-warning').textContent = hubUpdate?.installBlocked || hubUpdate?.warning || '';
@@ -377,13 +414,13 @@
       hubChecked = true;
     } catch (reason) { hubUpdate = { warning: String(reason) }; }
     finally { busy = false; renderState(); }
-    if (check && succeeded && byId('auto-download').checked && inventory?.supported) {
+    if (check && succeeded && automaticDownloads() && inventory?.supported) {
       for (const app of [...inventory.apps]) {
-        if (!byId('auto-download').checked) break;
+        if (!automaticDownloads()) break;
         if (app.updateAvailable && !app.downloaded && !app.issue && !app.installBlocked) await action('download_app', app.app, app.availableVersion);
       }
     }
-    if (check && hubChecked && byId('auto-download').checked && hubUpdate?.availableVersion && !hubUpdate.downloaded && !hubUpdate.installBlocked) await hubAction('download_hub_update');
+    if (check && hubChecked && automaticDownloads() && hubUpdate?.availableVersion && !hubUpdate.downloaded && !hubUpdate.installBlocked) await hubAction('download_hub_update');
     if (succeeded && Object.hasOwn(tools, current)) void openHostedWhenReady(current);
     return succeeded;
   }
@@ -533,9 +570,22 @@
     byId('cancel-download').disabled = true;
     try { await invoke('cancel_download'); } catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
   });
-  for (const [id, key] of [['preview-channel', 'preview'], ['auto-download', 'auto-download'], ['restore-hosted-views', 'restore-hosted-views']]) {
-    byId(id).addEventListener('change', () => {
-      try { localStorage.setItem(`creator-hub.${key}`, String(byId(id).checked)); } catch { /* Session preference still applies. */ }
+  for (const [id, key] of preferenceControls) {
+    byId(id).addEventListener('change', async () => {
+      if (nativePreferences) {
+        preferencesSaving += 1; renderState();
+        try {
+          await invoke('set_hub_preference', { key, value: byId(id).checked });
+          preferenceError('', key);
+        } catch (reason) {
+          // A failed attempt to enable automation must not silently enable it.
+          byId(id).checked = false;
+          preferenceError(`${byId(id).closest('label').textContent.trim()} could not be saved: ${String(reason)}. It is off for this session.`, key);
+        } finally { preferencesSaving -= 1; renderState(); }
+      } else {
+        try { localStorage.setItem(`creator-hub.${key}`, String(byId(id).checked)); }
+        catch (reason) { preferenceError(`This preference could not be saved: ${String(reason)}. It applies only to this session.`, key); }
+      }
       if (id === 'preview-channel') refresh(true);
     });
   }
@@ -558,5 +608,5 @@
     await refresh(false);
     await refresh(true);
   }
-  window.CreatorUsageTerms.requireAcceptance().then(start);
+  window.CreatorUsageTerms.requireAcceptance().then(async () => { await loadPreferences(); await start(); });
 })();

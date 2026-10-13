@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.creatorworks.hub</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Creator Hub (Flatpak Experiment)</name>
+  <summary>Experimental packaging of Creator Hub</summary>
+  <developer id="com.creatorworks"><name>Creator Works</name></developer>
+  <launchable type="desktop-id">com.creatorworks.hub.desktop</launchable>
+  <url type="homepage">https://github.com/BOBWORKS-XR/CREATOR-HUB</url>
+  <description>
+    <p>Creator Hub provides an interface for Creator Works tools and Unity projects,
+    including project listings and community content. This distribution is a
+    bounded packaging experiment for the maintenance release.</p>
+    <p>This experimental package is not a supported installation. Unity, AI client,
+    companion, settings migration and update workflows require sandbox acceptance.</p>
+  </description>
+</component>

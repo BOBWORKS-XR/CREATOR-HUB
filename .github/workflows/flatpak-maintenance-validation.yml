@@ -1,0 +1,211 @@
+name: Experimental Flatpak maintenance validation (never release-ready)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Exact successful PR22 CI run (no latest lookup)
+        type: string
+        required: true
+        default: '38423134520'
+      source_commit:
+        description: Exact PR22 source head, not the artifact merge SHA
+        type: string
+        required: true
+        default: '288d3d60a8108d6ff41729b63705af3598721f60'
+      artifact_id:
+        description: Exact Linux X64 artifact ID from that run
+        type: string
+        required: true
+        default: '11827776708'
+      artifact_sha256:
+        description: Reviewed artifact ZIP digest (not the DEB digest)
+        type: string
+        required: true
+        default: '5de4080ab8be4b46ef053af21e6d9985adbf77533b89f4d91d2e4d27bbc2e39e'
+      deb_sha256:
+        description: Separately reviewed exact native 0.1.13 amd64 DEB SHA256
+        type: string
+        required: true
+        default: 'b95d71ab62ae75b38d2e653eee3d21eacba4869027d2c1fa01495065c429b3e0'
+      deb_bytes:
+        description: Reviewed native DEB byte length
+        type: string
+        required: true
+        default: '6004284'
+      artifact_bytes:
+        description: Reviewed Linux artifact ZIP byte length
+        type: string
+        required: true
+        default: '97015435'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: flatpak-maintenance-validation-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  experimental:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    env:
+      VALIDATION_HARNESS_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      SOURCE_RUN: ${{ inputs.source_run || '38423134520' }}
+      SOURCE_COMMIT: ${{ inputs.source_commit || '288d3d60a8108d6ff41729b63705af3598721f60' }}
+      SOURCE_ARTIFACT: ${{ inputs.artifact_id || '11827776708' }}
+      ARTIFACT_SHA256: ${{ inputs.artifact_sha256 || '5de4080ab8be4b46ef053af21e6d9985adbf77533b89f4d91d2e4d27bbc2e39e' }}
+      ARTIFACT_BYTES: ${{ inputs.artifact_bytes || '97015435' }}
+      DEB_SHA256: ${{ inputs.deb_sha256 || 'b95d71ab62ae75b38d2e653eee3d21eacba4869027d2c1fa01495065c429b3e0' }}
+      DEB_BYTES: ${{ inputs.deb_bytes || '6004284' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Initialize failure-proof report and reject non-disposable environments
+        run: |
+          export VALIDATION_ROOT="$RUNNER_TEMP/creator-flatpak-validation"
+          printf 'VALIDATION_ROOT=%s\n' "$VALIDATION_ROOT" >> "$GITHUB_ENV"
+          node scripts/flatpak-native-smoke.cjs init --root "$VALIDATION_ROOT" \
+            --source-run "$SOURCE_RUN" --source-commit "$SOURCE_COMMIT" \
+            --artifact-id "$SOURCE_ARTIFACT" --artifact-sha256 "$ARTIFACT_SHA256" \
+            --artifact-bytes "$ARTIFACT_BYTES" --deb-sha256 "$DEB_SHA256" --deb-bytes "$DEB_BYTES"
+      - name: Fetch exact candidate ref and reject product differences in newer harness HEAD
+        run: |
+          git fetch --no-tags --depth=1 https://github.com/BOBWORKS-XR/CREATOR-HUB.git "$SOURCE_COMMIT"
+          node scripts/flatpak-native-smoke.cjs tree --root "$VALIDATION_ROOT"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Unit and structural tests (no installations)
+        run: node --test scripts/flatpak-package.test.cjs scripts/flatpak-native-smoke.test.cjs
+      - name: Bind and download only the requested public PR22 CI artifact
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const crypto = require('node:crypto');
+            const { hostedRoot, validateBinding, requestIdentity } = require(`${process.env.GITHUB_WORKSPACE}/scripts/flatpak-native-smoke.cjs`);
+            const root = hostedRoot({ root: process.env.VALIDATION_ROOT });
+            const request = requestIdentity({
+              'source-run': process.env.SOURCE_RUN, 'source-commit': process.env.SOURCE_COMMIT,
+              'artifact-id': process.env.SOURCE_ARTIFACT, 'artifact-sha256': process.env.ARTIFACT_SHA256,
+              'artifact-bytes': process.env.ARTIFACT_BYTES, 'deb-sha256': process.env.DEB_SHA256,
+              'deb-bytes': process.env.DEB_BYTES,
+            });
+            const repo = { owner: 'BOBWORKS-XR', repo: 'CREATOR-HUB' };
+            const { data: r } = await github.rest.actions.getWorkflowRun({ ...repo, run_id: request.runId });
+            const { data: a } = await github.rest.actions.getArtifact({ ...repo, artifact_id: request.artifactId });
+            const match = /^hub-development-Linux-X64-([a-f0-9]{40})$/.exec(a.name);
+            if (!match) throw Error('Artifact is not Linux X64 CI output');
+            const { data: c } = await github.rest.repos.getCommit({ ...repo, ref: match[1] });
+            const { data: s } = await github.rest.repos.getCommit({ ...repo, ref: request.sourceCommit });
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt,
+              { ...repo, run_id: request.runId, attempt_number: r.run_attempt, per_page: 100 });
+            const linuxJobs = jobs.filter(j => j.name === 'Hub (Linux)');
+            if (linuxJobs.length !== 1) throw Error('Missing or ambiguous Linux job');
+            const j = linuxJobs[0];
+            const binding = {
+              run: { id: r.id, repository: { id: r.repository.id, full_name: r.repository.full_name },
+                head_repository: { full_name: r.head_repository?.full_name }, event: r.event, path: r.path,
+                status: r.status, conclusion: r.conclusion, head_sha: r.head_sha, head_branch: r.head_branch,
+                run_attempt: r.run_attempt, pull_requests: r.pull_requests.map(p => ({ number: p.number,
+                  base: { repo: { id: p.base.repo.id } }, head: { repo: { id: p.head.repo.id } } })) },
+              artifact: { id: a.id, name: a.name, digest: a.digest, size_in_bytes: a.size_in_bytes,
+                expired: a.expired, workflow_run: a.workflow_run },
+              commit: { sha: c.sha, parents: c.parents.map(p => ({ sha: p.sha })),
+                commit: { message: c.commit.message, tree: { sha: c.commit.tree.sha } } },
+              source: { sha: s.sha, commit: { tree: { sha: s.commit.tree.sha } } },
+              linuxJob: { name: j.name, conclusion: j.conclusion, run_id: j.run_id, run_attempt: j.run_attempt },
+            };
+            const receipt = validateBinding(binding, request);
+            fs.writeFileSync(path.join(root, 'binding.json'), `${JSON.stringify(binding)}\n`, { flag: 'wx' });
+            fs.writeFileSync(path.join(root, 'evidence/source-binding.json'), `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx' });
+            // Octokit follows GitHub's temporary artifact redirect; no credential files or logs are read.
+            const response = await github.rest.actions.downloadArtifact({ ...repo,
+              artifact_id: request.artifactId, archive_format: 'zip', request: { timeout: 180000 } });
+            if (!(response.data instanceof ArrayBuffer) && !ArrayBuffer.isView(response.data)) {
+              throw Error('Artifact API did not return binary ZIP bytes');
+            }
+            const bytes = Buffer.from(response.data);
+            if (bytes.length !== a.size_in_bytes || crypto.createHash('sha256').update(bytes).digest('hex') !== request.artifactSha256) {
+              throw Error('Artifact ZIP size/digest mismatch');
+            }
+            fs.writeFileSync(path.join(root, 'source-artifact.zip'), bytes, { flag: 'wx', mode: 0o444 });
+      - name: Recheck binding before provisioning tools
+        run: node scripts/flatpak-native-smoke.cjs bind --root "$VALIDATION_ROOT"
+      - name: Install pinned Playwright WebKit only on the disposable runner
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/creator-flatpak-validation/playwright-browsers
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node -e "require('node:assert/strict').equal(require('@playwright/test/package.json').version, '1.63.0')"
+          node node_modules/playwright/cli.js install --with-deps webkit
+      - name: Prove single-keyboard terms contract before any native submit input
+        timeout-minutes: 3
+        env:
+          FLATPAK_WEBKIT_CONTRACT: '1'
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/creator-flatpak-validation/playwright-browsers
+        run: node --test --test-name-pattern='disposable WebKit keyboard contract' scripts/flatpak-native-smoke.test.cjs
+      - name: Provision tools only on this disposable hosted runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            flatpak flatpak-builder ostree gnupg dbus-x11 xvfb xauth \
+            xdotool x11-utils openbox imagemagick tesseract-ocr python3-pil \
+            gcc libc6-dev libx11-dev libxres-dev
+      - name: Compile runner-only XRes identity helper (no product or SDK changes)
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror \
+            scripts/flatpak-xres-window-pid.c -o "$VALIDATION_ROOT/flatpak-xres-window-pid" \
+            -lXRes -lX11
+      - name: Build, install, capture native pixels, and update isolated Flatpak deployments
+        run: |
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x1200x24' \
+            node scripts/flatpak-native-smoke.cjs run --root "$VALIDATION_ROOT"
+      - name: Finalize report even after download, provisioning, or harness failure
+        if: always()
+        env:
+          VALIDATION_JOB_STATUS: ${{ job.status }}
+        run: |
+          node scripts/flatpak-native-smoke.cjs finalize --root "$VALIDATION_ROOT" \
+            --job-status "$VALIDATION_JOB_STATUS"
+      - name: Retain bounded evidence only, never keys, packages, or fixture repositories
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-experimental-evidence-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/report.json
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/source-binding.json
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/terms-keyboard-contract.json
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/commands.json
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/window-manager.log
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/beforeimage.json
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/afterimage.json
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/runtime-metadata.txt
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/sdk-metadata.txt
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/runtime-manifest.json
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/app-metadata.txt
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/sandbox-probe.txt
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/candidate.png
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/candidate-ocr.txt
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/candidate-launch.log
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/candidate-context.txt
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/fixture.png
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/fixture-ocr.txt
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/fixture-launch.log
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/fixture-context.txt
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/runtime-generation.png
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/runtime-generation-ocr.txt
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/runtime-generation-launch.log
+            ${{ runner.temp }}/creator-flatpak-validation/evidence/runtime-generation-context.txt

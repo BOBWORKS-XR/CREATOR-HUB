@@ -1,0 +1,143 @@
+name: Native Linux maintenance validation
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [appimage, deb]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: node --test scripts/native-linux-maintenance-smoke.test.cjs
+      - name: Reject changed product source in the test-only harness
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin cef6f60310e88349e57951a2bbe0213e86fd05e7
+          git diff --exit-code cef6f60310e88349e57951a2bbe0213e86fd05e7 HEAD -- package.json package-lock.json rust-toolchain.toml src src-tauri unity
+      - name: Bind exact run, PR merge tree, Linux job and artifact; hash ZIP before extraction
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { BUILD, SOURCE, MERGE, runner, validateBinding, validateArchive } = require(`${process.env.GITHUB_WORKSPACE}/scripts/native-linux-maintenance-smoke.cjs`);
+            runner();
+            const repo = { owner: 'BOBWORKS-XR', repo: 'CREATOR-HUB' };
+            const { data: r } = await github.rest.actions.getWorkflowRun({ ...repo, run_id: BUILD.runId });
+            const { data: a } = await github.rest.actions.getArtifact({ ...repo, artifact_id: BUILD.artifactId });
+            const { data: m } = await github.rest.repos.getCommit({ ...repo, ref: MERGE });
+            const { data: s } = await github.rest.repos.getCommit({ ...repo, ref: SOURCE });
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt,
+              { ...repo, run_id: BUILD.runId, attempt_number: BUILD.attempt, per_page: 100 });
+            const matches = jobs.filter(j => j.name === 'Hub (Linux)');
+            if (matches.length !== 1) throw Error('Missing or ambiguous Linux job');
+            const j = matches[0];
+            const binding = {
+              run: { id:r.id, run_attempt:r.run_attempt, head_sha:r.head_sha, status:r.status, conclusion:r.conclusion,
+                event:r.event, path:r.path, repository:{id:r.repository.id,full_name:r.repository.full_name},
+                head_repository:{id:r.head_repository.id,full_name:r.head_repository.full_name},
+                pull_requests:r.pull_requests.map(p => ({number:p.number,head:{sha:p.head.sha,repo:{id:p.head.repo.id}},base:{repo:{id:p.base.repo.id}}})) },
+              artifact: {id:a.id,name:a.name,expired:a.expired,size_in_bytes:a.size_in_bytes,digest:a.digest,workflow_run:a.workflow_run},
+              merge: {sha:m.sha,tree:m.commit.tree.sha,message:m.commit.message,parents:m.parents.map(p => p.sha)},
+              source: {sha:s.sha,tree:s.commit.tree.sha},
+              linuxJob: {name:j.name,status:j.status,conclusion:j.conclusion,run_id:j.run_id,run_attempt:j.run_attempt},
+            };
+            validateBinding(binding);
+            const response = await github.rest.actions.downloadArtifact({ ...repo,
+              artifact_id:BUILD.artifactId, archive_format:'zip', request:{timeout:180000} });
+            if (!(response.data instanceof ArrayBuffer) && !ArrayBuffer.isView(response.data)) throw Error('Artifact API returned nonbinary ZIP');
+            const bytes = Buffer.from(response.data); validateArchive(bytes);
+            fs.mkdirSync('artifacts', {recursive:true}); fs.mkdirSync('artifacts/native-input');
+            fs.writeFileSync('artifacts/native-input.zip', bytes, {flag:'wx',mode:0o444});
+            fs.writeFileSync('artifacts/native-input/native-binding.json', JSON.stringify(binding,null,2)+'\n', {flag:'wx',mode:0o444});
+      - name: Extract and rehash only the three exact native packages (RPM inventory only)
+        run: |
+          python3 - artifacts/native-input.zip artifacts/native-input "$(node -e 'console.log(JSON.stringify(require("./scripts/native-linux-maintenance-smoke.cjs").PACKAGES))')" <<'PY'
+          import hashlib, json, pathlib, stat, sys, zipfile
+          target = pathlib.Path(sys.argv[2])
+          pins = json.loads(sys.argv[3])
+          expected = {f'{kind}/{pin["name"]}': pin for kind, pin in pins.items()}
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              assert len(archive.infolist()) <= 16, 'Unexpected artifact member count'
+              files = [item for item in archive.infolist() if not item.is_dir()]
+              assert len(files) == 3 and {item.filename for item in files} == set(expected), 'Unexpected native artifact files'
+              for item in files:
+                  pin = expected[item.filename]
+                  assert not stat.S_ISLNK(item.external_attr >> 16) and item.file_size == pin['bytes'], 'Native file mode/size differs'
+                  data = archive.read(item)
+                  assert hashlib.sha256(data).hexdigest() == pin['sha256'], 'Native file SHA256 differs'
+                  output = target / item.filename
+                  output.parent.mkdir()
+                  with output.open('xb') as destination:
+                      destination.write(data)
+          PY
+          node -e 'require("./scripts/native-linux-maintenance-smoke.cjs").validateInputs(require("node:path").resolve("artifacts/native-input"))'
+      - name: Provision disposable native desktop tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfuse2 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libxdo3 xvfb fluxbox wmctrl xdotool imagemagick dbus-x11 python3-gi gir1.2-atspi-2.0 python3-pil at-spi2-core
+      - name: Verify the actual native AT-SPI action binding before opening an app
+        run: |
+          python3 - <<'PY'
+          import gi
+          gi.require_version('Atspi', '2.0')
+          from gi.repository import Atspi
+          assert callable(Atspi.Action.get_action_name), 'Native AT-SPI action-name binding is unavailable'
+          PY
+      - name: Real installed GTK/WebKit GUI and manual upgrade
+        env:
+          PACKAGE_KIND: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/native-linux
+          input="$GITHUB_WORKSPACE/artifacts/native-input/$PACKAGE_KIND"
+          output="$GITHUB_WORKSPACE/artifacts/native-linux/$PACKAGE_KIND"
+          export INPUT_DIRECTORY="$input" OUTPUT_DIRECTORY="$output"
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' bash -c '
+            fluxbox > artifacts/native-linux/fluxbox.log 2>&1 &
+            node scripts/native-linux-maintenance-smoke.cjs "$PACKAGE_KIND" "$INPUT_DIRECTORY" "$OUTPUT_DIRECTORY"
+          '
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-native-${{ matrix.package }}-${{ github.run_id }}
+          path: |
+            artifacts/native-linux/${{ matrix.package }}/report.json
+            artifacts/native-linux/${{ matrix.package }}/*.json
+            artifacts/native-linux/${{ matrix.package }}/*.png
+            artifacts/native-linux/${{ matrix.package }}/*.log
+            artifacts/native-linux/${{ matrix.package }}/*.txt
+            artifacts/native-linux/${{ matrix.package }}/old-gui/*.json
+            artifacts/native-linux/${{ matrix.package }}/old-gui/*.png
+            artifacts/native-linux/${{ matrix.package }}/old-gui/*.log
+            artifacts/native-linux/${{ matrix.package }}/old-gui/*.txt
+            artifacts/native-linux/${{ matrix.package }}/upgraded-gui/*.json
+            artifacts/native-linux/${{ matrix.package }}/upgraded-gui/*.png
+            artifacts/native-linux/${{ matrix.package }}/upgraded-gui/*.log
+            artifacts/native-linux/${{ matrix.package }}/upgraded-gui/*.txt
+            artifacts/native-linux/${{ matrix.package }}/fresh-relaunch/*.json
+            artifacts/native-linux/${{ matrix.package }}/fresh-relaunch/*.png
+            artifacts/native-linux/${{ matrix.package }}/fresh-relaunch/*.log
+            artifacts/native-linux/${{ matrix.package }}/fresh-relaunch/*.txt
+            artifacts/native-linux/${{ matrix.package }}/old-relaunch/*.json
+            artifacts/native-linux/${{ matrix.package }}/old-relaunch/*.png
+            artifacts/native-linux/${{ matrix.package }}/old-relaunch/*.log
+            artifacts/native-linux/${{ matrix.package }}/old-relaunch/*.txt
+            artifacts/native-linux/${{ matrix.package }}/upgraded-relaunch/*.json
+            artifacts/native-linux/${{ matrix.package }}/upgraded-relaunch/*.png
+            artifacts/native-linux/${{ matrix.package }}/upgraded-relaunch/*.log
+            artifacts/native-linux/${{ matrix.package }}/upgraded-relaunch/*.txt
+            artifacts/native-linux/fluxbox.log
+            artifacts/native-input/native-binding.json
+          if-no-files-found: warn
+          retention-days: 7
