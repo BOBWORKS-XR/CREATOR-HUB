@@ -112,6 +112,19 @@ Creator Works MCP treats SDK detection as project metadata, not proof that the p
 
 The MCP contains source-checked knowledge of Banter components and 163 represented custom Visual Scripting node types. It also understands the Creator SDK namespace transition and refuses SideQuest-only shorthand when no matching SDK is detected.
 
+The [AltVR Creator SDK docs](https://altvr.app/docs/) are bundled separately as a
+pinned, offline snapshot. Use `get_mcp_reference` with `source: "creator-docs"`
+to search topics such as persistent world files, local multiplayer testing,
+recording, publishing, browsers and Visual Scripting. `creator://docs-index`
+lists the source URLs and SDK commit. These docs do not establish compatibility
+with the selected project's installed SDK; inspect its package before using a
+new API or node. Legacy Banter references remain unchanged.
+
+To refresh the snapshot after reviewing upstream changes and licensing, run
+`node scripts/sync-creator-docs.mjs --revision FULL_SDK_COMMIT` from this module,
+review the generated diff, then run the reference and importer tests. Normal MCP
+startup and reference lookup do not fetch remote documentation.
+
 ## Visual Scripting
 
 The Visual Scripting workflow is closed-loop:

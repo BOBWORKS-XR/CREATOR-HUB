@@ -115,6 +115,16 @@ try {
   assert.equal(excerpt.returned, 1);
   assert.ok(excerpt.guidance.length > 0);
   assert.ok(Buffer.byteLength(referenceText) <= 16384);
+  const creatorDocs = await request({ jsonrpc: "2.0", id: 5, method: "tools/call", params: {
+    name: "get_mcp_reference", arguments: { source: "creator-docs", query: "PersistFileBridge", limit: 1 },
+  } });
+  const creatorText = creatorDocs.result?.content?.[0]?.text;
+  assert.ok(creatorText, JSON.stringify(creatorDocs));
+  const creatorExcerpt = JSON.parse(creatorText);
+  assert.equal(creatorExcerpt.success, true);
+  assert.equal(creatorExcerpt.returned, 1);
+  assert.match(creatorExcerpt.entries[0].sourceUrl, /410de076ffc022d8f61832b968a133f46e9ec15d\/Docs\//);
+  assert.ok(Buffer.byteLength(creatorText) <= 16384);
   const prompt = await request({ jsonrpc: "2.0", id: 4, method: "prompts/get", params: { name: "create_vs_graph", arguments: {} } });
   assert.match(JSON.stringify(prompt.result), /get_mcp_reference/);
 

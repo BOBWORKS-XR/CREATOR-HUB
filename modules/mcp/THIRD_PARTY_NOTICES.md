@@ -10,6 +10,43 @@ The Windows launcher bundles the unmodified official Node.js 24.17.0 Windows x64
 
 The Windows launcher uses [Tauri](https://github.com/tauri-apps/tauri), distributed under Apache-2.0 and MIT terms. GitHub release packaging uses the official [Tauri Action](https://github.com/tauri-apps/tauri-action); the action is CI infrastructure and is not shipped in the application.
 
+## Creator SDK Documentation
+
+The bundled `src/resources/creator-docs-snapshot.ts` reproduces the Markdown
+documentation served by [AltVR](https://altvr.app/docs/) from
+[SideQuestVR/BanterSDK](https://github.com/SideQuestVR/BanterSDK/tree/410de076ffc022d8f61832b968a133f46e9ec15d/Docs),
+`feature/greenfield` commit `410de076ffc022d8f61832b968a133f46e9ec15d`.
+Page hashes, immutable source URLs and the full upstream licence are retained
+in the snapshot; `creator://docs-index` exposes provenance and that licence.
+This documentation import does not incorporate SDK implementation code or
+establish compatibility with any installed package or hosted application.
+
+Upstream licence, reproduced unchanged:
+
+```text
+MIT License
+
+Copyright (c) 2024 SideQuest
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Launcher Icons
 
 The launcher's `external-link`, `download`, `puzzle`, and `refresh-cw` SVGs are unmodified assets from

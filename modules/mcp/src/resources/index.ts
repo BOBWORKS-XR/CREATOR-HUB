@@ -15,6 +15,7 @@ import { UNITY_VS_JSON_MANUAL } from "./unity-vs-json-manual.js";
 import { UNITY_VS_JSON_ERRATA } from "./unity-vs-json-errata.js";
 import { BANTER_SDK_COMPATIBILITY } from "./banter-sdk-compatibility.js";
 import { BANTER_WORKFLOW_CONTRACT, BANTER_WORKFLOWS } from "./banter-workflows.js";
+import { CREATOR_DOCS_INDEX } from "./creator-docs.js";
 import {
   ALWAYS_AVAILABLE_TOOLS,
   TOOL_GROUP_MEMBERSHIP,
@@ -36,6 +37,8 @@ Run \`get_banter_sdk_info\` before adding SideQuest components, creating custom 
 - \`banter\`: author with \`Banter.SDK.*\` component types and \`Banter.VisualScripting.*\` nodes.
 - \`hybrid\`: prefer the Creator SDK contract for new content, preserve existing legacy content, and validate both before changing it.
 - \`none\` or \`unknown\`: do not guess a SideQuest namespace; restrict work to Unity built-ins or report the missing package state.
+
+For Creator SDK APIs and workflows, search \`get_mcp_reference\` with source \`creator-docs\`. The pinned AltVR documentation covers publishing, Play Mode, local multiplayer, persistence, recording, browsers and Visual Scripting. \`creator://docs-index\` lists the source pages and revision. Documentation is not installed-package or runtime verification; check new types against the selected SDK. Keep legacy Banter references separate.
 
 Legacy aliases inside the Creator SDK are migration inputs, not proof that a hosted target supports those legacy types. Never perform blanket text replacement in scenes, prefabs, or graph assets. Any migration must use an explicit source-to-target mapping, duplicated assets, Unity serialization APIs, and post-import validation.
 
@@ -151,6 +154,12 @@ export function registerResources(config: BanterMCPConfig): Resource[] {
       name: "Creator Works MCP System Prompt",
       description: "IMPORTANT: Read this first! Instructions for proactive Unity work across Creator SDK and legacy Banter projects",
       mimeType: "text/markdown",
+    },
+    {
+      uri: "creator://docs-index",
+      name: "AltVR Creator SDK Documentation Index",
+      description: "Pinned AltVR documentation pages, provenance and licence; use get_mcp_reference source creator-docs for bounded topic excerpts",
+      mimeType: "application/json",
     },
     // Static Banter knowledge
     {
@@ -281,6 +290,10 @@ export function handleResourceRead(
     case "banter://system-prompt":
       content = BANTER_SYSTEM_PROMPT;
       mimeType = "text/markdown";
+      break;
+
+    case "creator://docs-index":
+      content = JSON.stringify(CREATOR_DOCS_INDEX, null, 2);
       break;
 
     // Static Banter knowledge

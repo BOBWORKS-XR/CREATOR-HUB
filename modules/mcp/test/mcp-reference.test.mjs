@@ -60,7 +60,7 @@ test("Markdown headings inside fenced examples never split a reference entry", (
 });
 
 test("reference search has bounded defaults and preserves override rules", async () => {
-  for (const source of ["manual", "components", "javascript", "workflows"]) {
+  for (const source of ["manual", "components", "javascript", "workflows", "creator-docs"]) {
     const response = await handleToolCall("get_mcp_reference", { source, query: "a", limit: 5 }, createConfigForProject(""));
     assert.ok(Buffer.byteLength(response.content[0].text, "utf8") <= REFERENCE_RESPONSE_MAX_BYTES);
     const result = JSON.parse(response.content[0].text);

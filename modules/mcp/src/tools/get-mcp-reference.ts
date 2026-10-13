@@ -4,11 +4,15 @@ import { BANTER_JS_API } from "../resources/banter-js-api.js";
 import { BANTER_WORKFLOWS, BANTER_WORKFLOW_CONTRACT } from "../resources/banter-workflows.js";
 import { UNITY_VS_JSON_MANUAL } from "../resources/unity-vs-json-manual.js";
 import { UNITY_VS_JSON_ERRATA } from "../resources/unity-vs-json-errata.js";
+import { CREATOR_DOCS_SNAPSHOT } from "../resources/creator-docs-snapshot.js";
+import { CREATOR_DOCS_GUIDANCE } from "../resources/creator-docs.js";
 
 interface ReferenceEntry {
   id: string;
   title: string;
   text: string;
+  url?: string;
+  sourceUrl?: string;
 }
 
 // Headings inside examples belong to their code block, not the reference index.
@@ -58,6 +62,13 @@ const SOURCES: Record<string, { entries: ReferenceEntry[]; guidance: string }> =
   components: { entries: objectEntries(BANTER_COMPONENTS), guidance: "Legacy catalog keys must be resolved against get_banter_sdk_info before authoring Creator SDK or Banter components." },
   javascript: { entries: objectEntries(BANTER_JS_API), guidance: "This is the bundled Banter JavaScript reference. Confirm the selected SDK and hosted runtime contract before applying it to another backend." },
   workflows: { entries: objectEntries(BANTER_WORKFLOWS), guidance: JSON.stringify(BANTER_WORKFLOW_CONTRACT) },
+  "creator-docs": {
+    entries: CREATOR_DOCS_SNAPSHOT.pages.flatMap((page) => splitReferenceMarkdown(page.text).map((section) => ({
+      id: `${page.path}#${section.id}`, title: `${page.path} > ${section.title}`, text: section.text,
+      url: page.url, sourceUrl: page.sourceUrl,
+    }))),
+    guidance: CREATOR_DOCS_GUIDANCE,
+  },
 };
 const REVISIONS = Object.fromEntries(Object.entries(SOURCES).map(([key, source]) => [
   key, createHash("sha256").update(JSON.stringify(source)).digest("hex"),
@@ -80,7 +91,7 @@ function excerptLength(text: string): number {
 
 export function getMCPReference(args: Record<string, unknown>): Record<string, unknown> {
   const sourceName = typeof args.source === "string" ? args.source : "";
-  if (!Object.hasOwn(SOURCES, sourceName)) return { success: false, error: "source must be manual, components, javascript, or workflows." };
+  if (!Object.hasOwn(SOURCES, sourceName)) return { success: false, error: "source must be manual, components, javascript, workflows, or creator-docs." };
   const source = SOURCES[sourceName];
   if (args.revision !== undefined && args.revision !== REVISIONS[sourceName]) {
     return { success: false, error: "Reference revision changed. Search again before continuing an older excerpt." };
@@ -119,6 +130,7 @@ export function getMCPReference(args: Record<string, unknown>): Record<string, u
     return {
       entryId: entry.id, title: entry.title, text: entry.text.slice(startOffset, end),
       startOffset, nextOffset: end < entry.text.length ? end : null, complete: end === entry.text.length,
+      ...(entry.url ? { url: entry.url, sourceUrl: entry.sourceUrl } : {}),
     };
   });
   const result: Record<string, unknown> = {

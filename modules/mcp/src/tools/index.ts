@@ -108,11 +108,11 @@ export function registerTools(selection: ToolGroupSelection = "all"): Tool[] {
     },
     {
       name: "get_mcp_reference",
-      description: "Search bundled reference entries or read one entry in bounded pages. Prefer this over loading complete manuals/catalogs. Manual results always include compatibility corrections. Partial excerpts have continuation offsets; no network service is used.",
+      description: "Search bundled reference entries or read one entry in bounded pages. Use creator-docs for the AltVR Creator SDK documentation, not the legacy Banter catalogs. Manual results include compatibility corrections. Partial excerpts have continuation offsets; no network service is used.",
       inputSchema: {
         type: "object",
         properties: {
-          source: { type: "string", enum: ["manual", "components", "javascript", "workflows"] },
+          source: { type: "string", enum: ["manual", "components", "javascript", "workflows", "creator-docs"] },
           query: { type: "string", minLength: 1, maxLength: 128, description: "Keyword search; mutually exclusive with entryId" },
           entryId: { type: "string", minLength: 1, maxLength: 128, description: "Exact entry ID from an earlier result" },
           startOffset: { type: "integer", minimum: 0, default: 0, description: "Use nextOffset from the same entry to continue" },
