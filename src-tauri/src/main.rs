@@ -4,6 +4,7 @@ mod builtin;
 mod catalog;
 mod community;
 mod community_project;
+mod convergence;
 #[cfg(all(target_os = "macos", test))]
 #[allow(dead_code)]
 #[path = "../../native/host_parent_macos.rs"]
@@ -15,6 +16,9 @@ mod hosted_restore;
 mod installation_identity;
 mod installer_preflight;
 mod launch;
+#[cfg(test)]
+#[path = "../../native/legacy-dependencies.rs"]
+mod legacy_dependencies;
 #[cfg(any(target_os = "macos", test))]
 mod mac_update;
 mod manager;
@@ -291,7 +295,7 @@ fn open_resource(resource: String) -> Result<(), String> {
 }
 
 fn shell_initialization(shell_key: &str) -> String {
-    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); Object.defineProperty(window, '__CREATOR_HUB_TERMS_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_PREFERENCES_PROTOCOL__', {{value: 1}}); }}", shell_key, env!("CARGO_PKG_VERSION"))
+    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); Object.defineProperty(window, '__CREATOR_HUB_TERMS_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_PREFERENCES_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_CONVERGENCE_PROTOCOL__', {{value: {}}}); }}", shell_key, env!("CARGO_PKG_VERSION"), u8::from(builtin::enabled()))
 }
 
 #[cfg(target_os = "linux")]
@@ -333,6 +337,9 @@ fn main() {
         usage_terms::accept_usage_terms,
         preferences::hub_preferences_status,
         preferences::set_hub_preference,
+        convergence::convergence_status,
+        convergence::prepare_convergence,
+        convergence::migrate_convergence_connections,
         plugins_retirement::open_plugins_website,
         open_resource,
         community_catalogue,
@@ -376,6 +383,7 @@ fn main() {
         .manage(ShellKey(shell_key))
         .append_invoke_initialization_script(initialize)
         .manage(manager::Manager::default())
+        .manage(convergence::Convergence::default())
         .manage(community::Community::default())
         .manage(community_project::ProjectImports::default())
         .manage(self_update::SelfUpdate::default())

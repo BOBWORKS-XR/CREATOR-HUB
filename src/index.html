@@ -136,6 +136,18 @@
     </div>
   </dialog>
   <script src="usage-terms.js"></script>
+  <dialog id="convergence-dialog" class="convergence-dialog" aria-labelledby="convergence-title">
+    <h2 id="convergence-title">Move to unified Creator Hub</h2>
+    <p id="convergence-summary">Your MCP and Project Setup settings can be used by Hub. Unity projects stay where they are.</p>
+    <ul id="convergence-details"></ul>
+    <p id="convergence-error" role="alert" hidden></p>
+    <div class="convergence-actions">
+      <button id="convergence-later" class="text-button" type="button">Keep existing apps for now</button>
+      <button id="convergence-prepare" class="primary-button" type="button">Back up and continue</button>
+      <button id="convergence-connections" class="primary-button" type="button" hidden>Move existing connections</button>
+    </div>
+  </dialog>
+  <script src="convergence.js"></script>
   <script src="help.js"></script>
   <script src="app.js"></script>
 </body>

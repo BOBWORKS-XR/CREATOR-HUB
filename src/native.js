@@ -2,7 +2,7 @@
   const key = window.__CREATOR_SHELL_KEY__;
   delete window.__CREATOR_SHELL_KEY__;
   const invoke = window.__TAURI__.core.invoke;
-  const discovery = new Set(['project_inventory', 'app_inventory', 'hub_update_status', 'community_projects', 'pending_hosted_restore', 'restore_hosted_app']);
+  const discovery = new Set(['project_inventory', 'app_inventory', 'hub_update_status', 'community_projects', 'pending_hosted_restore', 'restore_hosted_app', 'convergence_status']);
   const hostedReads = new Set(['get_hosted_snapshot', 'probe_environment', 'get_recipe',
     'get_onboarding_status', 'get_project_sdk_profile', 'get_unity_extension_status',
     'get_project_feedback_settings', 'get_stable_release']);
@@ -11,6 +11,7 @@
     version: window.__CREATOR_HUB_VERSION__,
     usageTermsPersistence: window.__CREATOR_HUB_TERMS_PROTOCOL__ === 1,
     preferencesPersistence: window.__CREATOR_HUB_PREFERENCES_PROTOCOL__ === 1,
+    convergencePersistence: window.__CREATOR_HUB_CONVERGENCE_PROTOCOL__ === 1,
     invoke: (command, args = {}) => {
       const run = () => invoke(command, args, key ? { headers: { 'x-creator-shell-key': key } } : undefined);
       if (!discovery.has(command) && !(command === 'hosted_app_call' && hostedReads.has(args.command))) return run();

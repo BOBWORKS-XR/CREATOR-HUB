@@ -645,5 +645,12 @@
     await refresh(false);
     await refresh(true);
   }
-  window.CreatorUsageTerms.requireAcceptance().then(async () => { await loadPreferences(); await start(); });
+  window.CreatorUsageTerms.requireAcceptance().then(async () => {
+    await loadPreferences();
+    await window.CreatorConvergence?.run();
+    await start();
+  }).catch(reason => {
+    error.textContent = `Startup paused: ${String(reason)}. Existing apps and settings were kept.`;
+    error.classList.remove('hidden');
+  });
 })();

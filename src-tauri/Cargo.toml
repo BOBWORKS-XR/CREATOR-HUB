@@ -26,6 +26,7 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 sysinfo = "0.38"
 fs2 = "0.4"
 getrandom = "0.3"
+uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["macros", "time"] }
 tempfile = "3"
 flate2 = "=1.1.10"
@@ -41,3 +42,6 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+toml_edit = "=0.20.2"

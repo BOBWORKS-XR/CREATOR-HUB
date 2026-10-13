@@ -55,6 +55,7 @@ test('native terms and preference commands have exact trusted-main-window grants
   for (const [module, commands] of [
     ['usage_terms', ['usage_terms_status', 'accept_usage_terms']],
     ['preferences', ['hub_preferences_status', 'set_hub_preference']],
+    ['convergence', ['convergence_status', 'prepare_convergence', 'migrate_convergence_connections']],
   ]) {
     for (const command of commands) {
       assert.ok(main.includes(`${module}::${command},`), `${command} missing from invoke handler`);

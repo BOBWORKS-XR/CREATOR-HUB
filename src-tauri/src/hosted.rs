@@ -852,6 +852,34 @@ impl Hosting {
         state.remove(index);
         Ok(())
     }
+
+    // Used for an unrendered, coordinator-owned backend. Caller holds Manager's
+    // lease; EOF is not a completed exit and must not race first-view startup.
+    pub(crate) fn stop_owned_and_wait(
+        &self,
+        session: &str,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let connection = {
+            let sessions = self.0.lock().map_err(|_| "Hosted state unavailable.")?;
+            Arc::clone(
+                &sessions
+                    .iter()
+                    .find(|backend| backend.nonce == session)
+                    .ok_or("Stale hosted session.")?
+                    .connection,
+            )
+        };
+        self.stop(session)?;
+        let deadline = Instant::now() + timeout;
+        while !connection.exited.load(Ordering::Acquire) {
+            if Instant::now() >= deadline {
+                return Err("The migration backend has not finished closing. Old apps were kept; no process was forced closed.".into());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Ok(())
+    }
     pub fn close_idle(&self) {
         if let Ok(mut state) = self.0.try_lock() {
             state.retain(|session| {
@@ -952,6 +980,47 @@ mod tests {
             nonce: app.id().into(),
             _verified_executable: Arc::new(File::open(path).unwrap()),
         }
+    }
+
+    #[test]
+    fn convergence_waits_for_only_its_backend_and_never_treats_eof_as_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("fixture");
+        std::fs::write(&path, b"fixture").unwrap();
+        let mcp = Arc::new(SessionConnection::default());
+        let setup = Arc::new(SessionConnection::default());
+        let hosting = Hosting(Mutex::new(vec![
+            update_fixture(&path, AppId::Mcp, Arc::clone(&mcp)),
+            update_fixture(&path, AppId::Setup, setup),
+        ]));
+        assert!(hosting
+            .stop_owned_and_wait(AppId::Mcp.id(), Duration::ZERO)
+            .is_err());
+        assert!(!mcp.exited.load(Ordering::Acquire));
+        assert_eq!(hosting.0.lock().unwrap().len(), 1);
+        assert_eq!(hosting.0.lock().unwrap()[0].app, AppId::Setup);
+        assert!(hosting
+            .stop_owned_and_wait("unknown", Duration::ZERO)
+            .is_err());
+        assert_eq!(hosting.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn convergence_accepts_observed_normal_backend_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("fixture");
+        std::fs::write(&path, b"fixture").unwrap();
+        let connection = Arc::new(SessionConnection::default());
+        connection.exited.store(true, Ordering::Release);
+        let hosting = Hosting(Mutex::new(vec![update_fixture(
+            &path,
+            AppId::Mcp,
+            connection,
+        )]));
+        assert!(hosting
+            .stop_owned_and_wait(AppId::Mcp.id(), Duration::ZERO)
+            .is_ok());
+        assert!(hosting.0.lock().unwrap().is_empty());
     }
 
     #[test]

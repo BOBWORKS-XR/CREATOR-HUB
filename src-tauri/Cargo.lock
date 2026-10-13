@@ -603,6 +603,8 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
+ "toml_edit 0.20.2",
+ "uuid",
  "windows-sys 0.61.2",
  "winreg",
 ]
