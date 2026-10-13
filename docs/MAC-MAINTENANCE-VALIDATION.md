@@ -2,8 +2,13 @@
 
 ## Scope and Release Hold
 
-This probe is for the **separate-app 0.1.13** Hub only. Unification stays at
-0.1.14 or later. It changes no app source, catalog, signed descriptor, companion
+This probe targets the **unreleased separate-app 0.1.13** Hub as a maintenance
+regression foundation only. **0.1.13 remains on hold:** no new signing or
+publication, and no reduced Mac/Linux standalone-only 0.1.13 release.
+Unification remains planned for 0.1.14 or later, together on every platform.
+The actual native preference regression must be validated against these packages;
+package hashes and unit tests alone do not establish native persistence.
+This probe changes no app source, catalog, signed descriptor, companion
 installer or Flatpak file. Follow [maintenance gates](MAINTENANCE-0.1.13-GATES.md),
 [release gates](RELEASE-GATES.md) and the
 [publication checklist](HUB-PUBLICATION-CHECKLIST.md).
@@ -17,7 +22,44 @@ Copying a DMG app into Applications and manually launching it is **not** native
 update discovery, cancellation, approved download, automatic restart or reconnect
 proof. No version-only fixture is built or substituted for the old public app.
 
-## Exact Evidence Binding
+## Current Package Binding
+
+The Mac defaults now bind to successful all-five-job
+[CI 38442820243](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38442820243).
+Reviewed product head: `cef6f60310e88349e57951a2bbe0213e86fd05e7`.
+Artifact checkout merge: `dcbd0f8c84bd3ab5d6b463972f7701c5e3541a2e`.
+Both trees are `71c584be90aba7f28b67edda1c61782972d1f760`; API-verified
+merge parents remain public baseline `35a16a45814d821d65b5d203628478449174cd55`
+then the exact reviewed head. Repository/run/head, artifact names, IDs, lengths,
+digests, expiry and workflow repository IDs were checked independently.
+
+| Architecture | Artifact ID | ZIP bytes | Independently Hashed ZIP SHA-256 |
+| --- | --- | --- | --- |
+| Intel | 11838031910 | 5436847 | `9a215d6d2d1a9cdd180d37ce036d56896baead24cfff3e3368cd43cdf2a997ab` |
+| ARM64 | 11837072258 | 5154053 | `3ccbc6f62528490f696045fbe8a4575936d89fec617aabf09b70b526038530b8` |
+
+The single-member DMGs were independently extracted and hashed locally:
+
+- Intel: 5468115 bytes, `3a62251de7eac0dccd0cdf10052b0745263c981cf72ca562df5c0fb1a9f50389`.
+- ARM64: 5181127 bytes, `ebdbec2ef2e98b682cc107a926bcd683f39c9cca59b7eb621a72406c94a976a2`.
+
+Local archives, extracted packages and hash notes are retained under
+`artifacts/native-prefs-38442820243/`; `verified-mac-packages.json` records the
+exact local paths. No Mac app was mounted or installed on this Windows host.
+The workflow/script pins and matching binding fixture were rebound; an added
+regression rejects the former `288` tuple. Local Node 24 verification is
+**134 passed, 0 failed, 1 skipped** across 135 tests; the skipped file-symlink
+case requires Windows privilege, while directory-junction refusal passed.
+
+This is **package/source proof only**, not native persistence or release
+acceptance. The next four Mac lanes must establish terms and auto-download
+retention in the actual installed native-preference candidate after review.
+No dispatch, commit or push was performed here. Gatekeeper rejection and the
+historical old-12 failures remain separate, unmodified evidence. WebKit candidate
+key diagnostics remain active-store-unbound; the native preference path means a
+missing browser key alone does not establish a native preference failure.
+
+## Historical Original Binding
 
 Read-only GitHub API queries on 2026-10-13 established that
 [CI 38393759689](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38393759689)

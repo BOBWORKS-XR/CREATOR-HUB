@@ -28,7 +28,7 @@ function bindingFixture(architecture = 'X64') {
   const artifact = { id: pin.id, name: `hub-development-macOS-${architecture}-${input.sourceSha}`,
     expired: false, digest: `sha256:${pin.sha256}`, size_in_bytes: pin.size,
     workflow_run: { id: run.id, head_sha: input.headSha, repository_id: run.repository.id, head_repository_id: run.repository.id } };
-  const head = { sha: input.headSha, tree: { sha: '8b1deb17843f753f7b6fe5cf3560412ed8b541d9' } };
+  const head = { sha: input.headSha, tree: { sha: '71c584be90aba7f28b67edda1c61782972d1f760' } };
   const source = { sha: input.sourceSha, tree: head.tree,
     parents: [{ sha: mac.BASELINE_SOURCE }, { sha: input.headSha }] };
   return { input, run, artifact, head, source };
@@ -45,6 +45,23 @@ test('frozen public DMG and candidate pins cannot be overridden by returned fixt
   assert.throws(() => mac.options({ ...env, CREATOR_MAC_SOURCE_SHA: mac.CANDIDATE.headSha }));
   assert.throws(() => mac.options({ ...env, CREATOR_MAC_EXECUTABLE_SHA256: 'invalid' }));
   assert.throws(() => mac.options({ ...env, CREATOR_MAC_LANE: 'version-fixture' }));
+});
+
+test('the previous 288 package tuple cannot be reused for the native preference candidate', () => {
+  for (const architecture of ['X64', 'ARM64']) {
+    const env = environment(architecture);
+    for (const previous of [
+      { CREATOR_MAC_CANDIDATE_RUN_ID: '38423134520' },
+      { CREATOR_MAC_HEAD_SHA: '288d3d60a8108d6ff41729b63705af3598721f60' },
+      { CREATOR_MAC_SOURCE_SHA: 'da87dfb1f815653f23737a98766b5eaa8a525dc4' },
+      { CREATOR_MAC_DMG_SHA256: architecture === 'X64'
+        ? 'b5ffca2db3d20445f4a29b15972b61be76ea8a7ce8b2d09b09e5f90b6579fdd7'
+        : '3d8ecdfca77eb475607f2a1aadd9afc63195119bd7a7b73ad861608d727d47e2' },
+    ]) assert.throws(() => mac.options({ ...env, ...previous }));
+    const f = bindingFixture(architecture);
+    f.artifact.id = architecture === 'X64' ? 11827783041 : 11827864821;
+    assert.throws(() => validateFixture(f));
+  }
 });
 
 test('native actions refuse user machines, self-hosted, other repos, architectures and runtimes', () => {

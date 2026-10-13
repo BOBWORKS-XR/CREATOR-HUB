@@ -24,16 +24,16 @@ const BASELINES = Object.freeze({
 });
 const LIMIT = 512 * 1024 * 1024;
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
-const CANDIDATE = Object.freeze({ runId: '38423134520',
-  headSha: '288d3d60a8108d6ff41729b63705af3598721f60',
-  sourceSha: 'da87dfb1f815653f23737a98766b5eaa8a525dc4',
+const CANDIDATE = Object.freeze({ runId: '38442820243',
+  headSha: 'cef6f60310e88349e57951a2bbe0213e86fd05e7',
+  sourceSha: 'dcbd0f8c84bd3ab5d6b463972f7701c5e3541a2e',
   artifacts: Object.freeze({
-    X64: Object.freeze({ id: 11827783041, size: 5432006, dmgSize: 5463320,
-      dmgSha256: 'b5ffca2db3d20445f4a29b15972b61be76ea8a7ce8b2d09b09e5f90b6579fdd7',
-      sha256: '95217142d7415383c1399c0485df0a501d013c49409c0233b1266514701c1841' }),
-    ARM64: Object.freeze({ id: 11827864821, size: 5139069, dmgSize: 5166375,
-      dmgSha256: '3d8ecdfca77eb475607f2a1aadd9afc63195119bd7a7b73ad861608d727d47e2',
-      sha256: '4cbf383054a92b9cf923dd59596b39b99a208070a878fcd571d98de2e10a67d4' }),
+    X64: Object.freeze({ id: 11838031910, size: 5436847, dmgSize: 5468115,
+      dmgSha256: '3a62251de7eac0dccd0cdf10052b0745263c981cf72ca562df5c0fb1a9f50389',
+      sha256: '9a215d6d2d1a9cdd180d37ce036d56896baead24cfff3e3368cd43cdf2a997ab' }),
+    ARM64: Object.freeze({ id: 11837072258, size: 5154053, dmgSize: 5181127,
+      dmgSha256: 'ebdbec2ef2e98b682cc107a926bcd683f39c9cca59b7eb621a72406c94a976a2',
+      sha256: '3ccbc6f62528490f696045fbe8a4575936d89fec617aabf09b70b526038530b8' }),
   }),
 });
 const PROBE_FILES = Object.freeze(['scripts/native-mac-maintenance-smoke.cjs',
