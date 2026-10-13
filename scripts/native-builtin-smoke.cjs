@@ -174,7 +174,14 @@ async function verifyMigratedJsonConnection(entry) {
     assert.equal(app.availableVersion, descriptor.modules[app.app].version);
   }
   report.checks.push('Native inventory trusts packaged modules without companion catalogue or registration');
-  const denied = await page.evaluate(() => window.CreatorHubNative.invoke('download_app', { app: 'mcp', version: '2.7.7' }).then(() => 'unexpected allow', String));
+  let denied;
+  const installationProbeDeadline = Date.now() + 45000;
+  do {
+    denied = await page.evaluate(() => window.CreatorHubNative.invoke('download_app', { app: 'mcp', version: '2.7.7' }).then(() => 'unexpected allow', String));
+    if (denied !== 'Another Hub operation is already running.') break;
+    assert.ok(Date.now() < installationProbeDeadline, 'Startup must release the operation lease before installation refusal can be checked');
+    await delay(250);
+  } while (true);
   assert.match(denied, /built into this Hub/);
   report.checks.push('Separate module installation is rejected natively');
   await page.locator('#hub-pages [data-view="hub"]').click();

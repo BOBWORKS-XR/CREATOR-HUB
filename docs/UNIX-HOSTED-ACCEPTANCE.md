@@ -12,18 +12,23 @@ name `experimental-unix-packaging.yml` does not exist here; its actual counterpa
 is `.github/workflows/unified-unix-candidate.yml`. The builder entry is
 `scripts/build-unified.cjs`, using `--experimental-unix --installer`.
 
-Confirmed intentional gates, not harness defects:
+Implemented source contracts, not native acceptance:
 
-- The builder forces Unix MCP read-only and revision-2 events. Hub has no
-  `experimental-unix-hosting` feature. The backend's same-named feature does not
-  automatically enable the Hub or grant migration authority.
+- Default experimental Unix packaging remains read-only with revision-2 events.
+  Main has added `--experimental-unix-writable`, requiring both
+  `--experimental-unix` and `--managed`. Only that explicit producer mode
+  compiles the MCP backend feature and sets Hub writable mode. Its receipt uses
+  `plan.mcpMode` but keeps acceptance/readiness false. That producer has not yet
+  been executed or accepted; this bounded probe retains its reviewed read-only
+  input-receipt contract rather than silently admitting a new writable receipt.
 - `hosted_unix.rs::require_managed_route` rejects direct writable Node targets.
   Writable hosting requires the signed managed route and its verified payload.
-- `main.rs::review_existing_client_connection` and
-  `review_existing_client_connections` reject non-Windows, even with the backend
-  experimental feature. Their internal module check remains mandatory.
-- `product_settings.rs::native_review` also explicitly rejects Unix. No direct
-  `Plan::apply`/settings-writer call may stand in for these native commands.
+- Single/batch client review, product-settings review and recovery UI now share
+  `settings_review_admission.rs`: compiled internal marker `1` and Windows, or
+  Linux/macOS only with the backend `experimental-unix-hosting` feature. Default
+  production Unix remains disabled; inherited/runtime flags cannot enable it.
+  This admission implementation is not native acceptance. No direct
+  `Plan::apply`/settings-writer call may stand in for the native commands.
 - The existing full `native-builtin-smoke.cjs` and `native-window.ps1` are
   Windows-only. There is no reusable Unix built-in GUI/native-dialog adapter in
   this worktree. The separate-app maintenance helpers are not a built-in driver.
@@ -51,17 +56,29 @@ read-only DMG mount/owned detach contract. Tools compile only on disposable CI.
 The final receipt is blocked and exits nonzero. Earlier failures remain failed;
 original receipts are never replaced. Only the bounded receipt is uploaded.
 
-## Necessary Experimental Admission
+Both jobs run locked root `npm ci --ignore-scripts` on disposable runners before
+using the verifier helpers. Archive verification imports `build-unified.cjs`
+for pathname validation; that module requires the root `semver` dependency.
+Run 38457394593 omitted dependency installation and reported 52/53 passing while
+masking the original fixture error behind a status assertion. Its original log
+is retained under `artifacts/unix-hosted-fixture-38457394593`. An isolated
+dependency-free child reproduces the missing-semver failure, and the positive
+fixture assertion now includes the bounded original `report.error`.
 
-Main must review feature-scoped Unix admission for **all three native review
-commands**, not just MCP startup. Production/default builds must still refuse.
+## Remaining Native Proof
+
+Main has implemented feature-scoped admission for all three native review
+commands and recovery, plus an explicit managed experimental writable producer.
+Their first exact packaged/native run remains pending. Production/default builds
+must still refuse.
 Keep native decline/approval, per-operation ownership, stale-snapshot refusal,
 exact before-images, journals/recovery, signed retained routing, kernel-backed
 payload use, direct-parent verification and private inherited pipes intact.
 Do not introduce a test-parent, dialog auto-approval, direct mutable target,
 production signing-key access or migration/storage injection to make CI pass.
-The Unix Hub producer also needs a reviewed experimental hosting mode and a
-package manifest/receipt that honestly distinguishes it from read-only output.
+The next step needs reviewed writable producer receipts bound to the actual
+package, followed by a real owned-GUI driver. Source admission and receipt
+invariants cannot stand in for that native flow.
 
 Before a full driver is implemented, agree a narrow native action/evidence
 contract: exact owning PID/start time/executable hash, native dialog/window
@@ -85,8 +102,8 @@ settings or home directories are copied. Never upload entire profiles.
 The receipt fixture tests only this sequence's invariants. It cannot establish
 native consent, execute a backend, activate a router or promote a release.
 Full native GUI, migration, operation, process lifetime, signed update and product
-acceptance remain uncaptured. The native feature and producer changes are main's
-prerequisites, not part of these four test-only files.
+acceptance remain uncaptured. The native feature and producer implementation
+belong to main; this task only records their pending native proof.
 
 ## Checks
 

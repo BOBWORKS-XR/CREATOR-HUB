@@ -52,15 +52,15 @@ function verifyStage(directory, manifest) {
     }
   }
 }
-function build(label, { installer = false, managed = false, experimentalUnix = false } = {}) {
+function build(label, { installer = false, managed = false, experimentalUnix = false, experimentalWritable = false } = {}) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(label || '')) throw Error('Provide a unique, simple build name.');
   const platform = { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
   const arch = { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
   const unix = require('./unix-package-payload.cjs');
-  const plan = unix.nativePlan(platform, arch, { installer, experimentalUnix });
+  const plan = unix.nativePlan(platform, arch, { installer, experimentalUnix, experimentalWritable, managed });
   const nativeTargetArgs = plan.rustTarget ? ['--target', plan.rustTarget] : [];
   const releaseDirectory = target => path.join(target, ...(plan.rustTarget ? [plan.rustTarget] : []), 'release');
-  const buildEnv = plan.experimentalUnix ? unix.packageEnvironment(process.env, platform) : process.env;
+  const buildEnv = plan.experimentalUnix ? unix.packageEnvironment(process.env, platform, plan.mcpMode) : process.env;
   const routing = require('./managed-router-package.cjs');
   const key = managed ? routing.signingKey(root) : null;
   const output = path.join(root, 'artifacts', 'unified', label);
@@ -82,7 +82,8 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
     const cwd = path.join(root, source);
     const target = path.resolve(process.env[`CREATOR_${id.toUpperCase()}_TARGET_DIR`] || path.join(cwd, 'src-tauri/target'));
     const env = { ...buildEnv, CARGO_TARGET_DIR: target, CREATOR_HUB_INTERNAL_MODULE: '1' };
-    run([cli, 'build', '--no-bundle', ...nativeTargetArgs, '--', '--locked'], cwd, env);
+    const moduleFeatures = id === 'mcp' && experimentalWritable ? ['--features', 'experimental-unix-hosting'] : [];
+    run([cli, 'build', '--no-bundle', ...moduleFeatures, ...nativeTargetArgs, '--', '--locked'], cwd, env);
     const files = {};
     const copy = (sourceFile, name) => {
       const dest = path.join(output, 'modules', name);
@@ -157,7 +158,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   const overlay = path.join(output, 'tauri-unified.json');
   fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources } }, null, 2));
   const env = { ...buildEnv, CREATOR_BUILTIN_MANIFEST: descriptor,
-    CREATOR_MCP_HOST_WRITABLE: platform === 'windows' ? '1' : '0', CREATOR_MCP_HOST_READONLY_EVENTS: '1',
+    CREATOR_MCP_HOST_WRITABLE: plan.mcpMode === 'writable' ? '1' : '0', CREATOR_MCP_HOST_READONLY_EVENTS: '1',
     CARGO_TARGET_DIR: path.resolve(process.env.CARGO_TARGET_DIR || (plan.experimentalUnix ? path.join(output, 'hub-target') : path.join(root, 'src-tauri/target'))) };
   const bundleDirectory = path.join(releaseDirectory(env.CARGO_TARGET_DIR), 'bundle');
   if (plan.experimentalUnix && installer && fs.existsSync(bundleDirectory)) throw Error('Unix packaging requires a fresh bundle directory; select a new CARGO_TARGET_DIR. Existing outputs are not removed.');
@@ -178,7 +179,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
       productName: JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'))).productName,
       rawHub: path.join(output, 'creator-hub'), archiveDecoder });
     fs.writeFileSync(path.join(output, 'experimental-unix.json'), JSON.stringify({ schemaVersion: 1,
-      platform, arch, mcpMode: 'read-only', writableGuiAccepted: false, releaseReady: false,
+      platform, arch, mcpMode: plan.mcpMode, writableGuiAccepted: false, releaseReady: false,
       packages: plan.bundles, managedRoutingIncluded: managed }, null, 2), { flag: 'wx' });
   }
   console.log(`Local unified candidate: ${output}. Not a release or migration acceptance.`);
@@ -188,8 +189,8 @@ module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, build 
 if (require.main === module) {
   try {
     const flags = process.argv.slice(3);
-    if (!process.argv[2] || flags.some(flag => !['--installer', '--managed', '--experimental-unix'].includes(flag)) || new Set(flags).size !== flags.length) throw Error('Provide one build name and optional --installer, --managed and --experimental-unix.');
-    build(process.argv[2], { installer: flags.includes('--installer'), managed: flags.includes('--managed'), experimentalUnix: flags.includes('--experimental-unix') });
+    if (!process.argv[2] || flags.some(flag => !['--installer', '--managed', '--experimental-unix', '--experimental-unix-writable'].includes(flag)) || new Set(flags).size !== flags.length) throw Error('Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable.');
+    build(process.argv[2], { installer: flags.includes('--installer'), managed: flags.includes('--managed'), experimentalUnix: flags.includes('--experimental-unix'), experimentalWritable: flags.includes('--experimental-unix-writable') });
   }
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }

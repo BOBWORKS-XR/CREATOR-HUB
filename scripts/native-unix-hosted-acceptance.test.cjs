@@ -78,12 +78,14 @@ for (const [name, mutate] of Object.entries({
   backendSurvives: t => { t.events[3].survivors = 1; }, noNormalClose: t => { t.events[3].requested = false; },
   injectedStorage: t => { t.storageInjected = true; }, ai: t => { t.actualAiUsed = true; },
 })) test(`fixture fails closed on ${name}`, () => { const t = fixture(); mutate(t); assert.throws(() => h.validateFixture(t)); });
-test('blocked report keeps explicit Unix review gates and all acceptance flags false', () => {
+test('implemented experimental producer/review admission is still uncaptured and all acceptance flags stay false', () => {
   const r = h.blockedReport();
   assert.equal(r.passed, false); assert.equal(r.releaseReady, false);
   for (const key of ['nativeGuiTested', 'nativeConsentTested', 'hostedOperationsTested', 'clientMigrationTested', 'processCleanupTested', 'actualAiTested', 'unitySdkTested']) assert.equal(r[key], false);
-  assert.ok(r.blockers.some(b => b.id === 'client-review-admission'));
-  assert.ok(r.blockers.some(b => b.id === 'product-review-admission'));
+  for (const id of ['experimental-producer-capture', 'client-review-capture', 'product-review-capture']) {
+    assert.equal(r.blockers.find(b => b.id === id)?.classification, 'missing-capture');
+  }
+  assert.doesNotMatch(JSON.stringify(r.blockers), /including experimental-unix-hosting|explicitly refuses Unix/);
 });
 test('real filesystem failure receipt preserves the original hash failure and cannot overwrite old evidence', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unix-hosted-fixture-'));
@@ -134,13 +136,44 @@ function packageFixture(root) {
   };
   return { candidate, output, archive, decoder, execute, container, integrity };
 }
+function expectBlocked(report) {
+  assert.equal(report.status, 'blocked', report.error ? `Original report.error: ${report.error}` : 'Expected an integrity-only blocked receipt');
+}
 test('mocked package/container/embedded descriptor/raw-map checks still produce a nonzero-intent blocked receipt', t => {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'unix-hosted-package-'));
   t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
   const f=packageFixture(root);
   const r=h.inspectCandidate(f.candidate,f.output,binding(),f.archive,f.decoder,f.execute);
-  assert.equal(r.status,'blocked'); assert.equal(r.packageIntegrityTested,true);
+  expectBlocked(r); assert.equal(r.packageIntegrityTested,true);
   assert.equal(r.passed,false); assert.equal(r.releaseReady,false); assert.equal(r.nativeConsentTested,false);
+});
+test('isolated missing-dependency context preserves semver failure and exposes original report.error', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unix-hosted-no-dependencies-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const program = `
+    const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+    const h=require(${JSON.stringify(path.join(__dirname,'native-unix-hosted-acceptance.cjs'))});
+    const sha=value=>crypto.createHash('sha256').update(value).digest('hex');
+    const binding=${binding.toString()},packageFixture=${packageFixture.toString()};
+    const Module=require('node:module'),resolve=Module._resolveFilename;
+    Module._resolveFilename=function(request,...args){
+      if(!Module.isBuiltin(request)&&!request.startsWith('.')&&!path.isAbsolute(request)){
+        const error=new Error("Cannot find module '"+request+"' in isolated dependency-free context");
+        error.code='MODULE_NOT_FOUND';throw error;
+      }
+      return resolve.call(this,request,...args);
+    };
+    const f=packageFixture(${JSON.stringify(root)});
+    console.log(JSON.stringify(h.inspectCandidate(f.candidate,f.output,binding(),f.archive,f.decoder,f.execute)));
+  `;
+  const result = require('node:child_process').spawnSync(process.execPath, ['-e', program], {
+    encoding:'utf8', timeout:10000, maxBuffer:65536, env:{...process.env,NODE_OPTIONS:'',NODE_PATH:''},
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.status, 'failed'); assert.match(report.error, /Cannot find module 'semver'/);
+  assert.equal(report.passed, false); assert.equal(report.releaseReady, false);
+  assert.throws(() => expectBlocked(report), error => /Original report.error: Cannot find module 'semver'/.test(error.message));
 });
 for (const [name, mutate] of Object.entries({
   container: f=>fs.appendFileSync(f.container,'tamper'),
@@ -180,5 +213,7 @@ test('workflow is read-only, finite PR scope, always uploads only the failed/blo
   assert.match(workflow, /actions: read/); assert.match(workflow, /contents: read/);
   assert.match(workflow, /if: always\(\)/); assert.doesNotMatch(workflow, /continue-on-error|secrets\.|--experimental-unix-hosting|--sign|--no-sandbox|flatpak-spawn/);
   assert.match(workflow, /node --test scripts\/native-unix-hosted-acceptance.test.cjs/);
+  assert.equal((workflow.match(/run: npm ci --ignore-scripts/g) || []).length, 2, 'Both verifier jobs need locked dependencies');
+  assert.ok(workflow.indexOf('run: npm ci --ignore-scripts') < workflow.indexOf('run: node --test'));
   assert.match(workflow, /report.json/);
 });

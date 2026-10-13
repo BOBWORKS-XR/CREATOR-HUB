@@ -82,6 +82,24 @@ test('automatic credential use is refused; explicit managed signer variables are
   for (const name of ['APPLE_ID', 'APPLE_CERTIFICATE', 'APPLE_SIGNING_IDENTITY', 'TAURI_SIGNING_PRIVATE_KEY', 'TAURI_SIGNING_RPM_KEY']) assert.throws(() => packageEnvironment({ [name]: 'not-read' }, 'macos'), /without.*credentials/);
 });
 
+test('writable Unix experiments require both explicit opt-in and the signed managed route', () => {
+  for (const platform of ['linux', 'macos']) {
+    for (const options of [
+      { experimentalWritable: true },
+      { experimentalUnix: true, experimentalWritable: true },
+      { experimentalUnix: true, experimentalWritable: true, managed: false },
+      { experimentalUnix: true, experimentalWritable: 'true', managed: true },
+    ]) assert.throws(() => nativePlan(platform, 'x86_64', options));
+    const plan = nativePlan(platform, 'x86_64', { experimentalUnix: true, experimentalWritable: true, managed: true });
+    assert.equal(plan.mcpMode, 'writable');
+    assert.equal(plan.experimentalUnix, true);
+    assert.equal(packageEnvironment({}, platform, plan.mcpMode).CREATOR_MCP_HOST_WRITABLE, '1');
+    assert.equal(packageEnvironment({ CREATOR_MCP_HOST_WRITABLE: '1' }, platform).CREATOR_MCP_HOST_WRITABLE, '0');
+  }
+  assert.throws(() => nativePlan('windows', 'x86_64', { experimentalWritable: true, managed: true }), /Experimental writable Unix/);
+  assert.throws(() => packageEnvironment({}, 'linux', 'production'), /Unknown experimental/);
+});
+
 test('post-compile Node re-signing cannot be hidden by re-hashing a manifest', () => {
   const f = fixture('macos');
   try {
@@ -231,5 +249,18 @@ test('CLI rejects duplicate/unrecognized switches before any native build or key
   const source = fs.readFileSync(path.join(__dirname, 'build-unified.cjs'), 'utf8');
   assert.match(source, /managed \? routing.signingKey\(root\) : null/);
   assert.match(source, /file => routing.signDetached\(file, key\)/);
-  assert.doesNotMatch(source, /--no-sign|experimental-unix-hosting/);
+  assert.doesNotMatch(source, /--no-sign/);
+  assert.match(source, /id === 'mcp' && experimentalWritable \? \['--features', 'experimental-unix-hosting'\] : \[\]/);
+  assert.match(source, /mcpMode: plan.mcpMode, writableGuiAccepted: false, releaseReady: false/);
+});
+
+test('Mac DMG failures expose subprocess diagnostics and retain actual signed inputs', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/unified-unix-candidate.yml'), 'utf8');
+  assert.match(workflow, /TAURI_CLI_VERBOSITY: '1'/);
+  const step = workflow.slice(workflow.indexOf('      - name: Retain the actual failed Mac DMG inputs'), workflow.indexOf('      - name: Retain package/integrity evidence'));
+  assert.match(step, /if: failure\(\) && runner.os == 'macOS'/);
+  assert.match(step, /tar -czf.*signed-app-before-dmg\.tar\.gz/);
+  assert.match(step, /cp.*bundle_dmg\.sh/);
+  assert.doesNotMatch(step, /codesign|spctl|xattr|sudo|--dereference|rm /);
+  assert.match(workflow, /ci-native-package\/dmg-failure-inputs\//);
 });

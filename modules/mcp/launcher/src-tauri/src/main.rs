@@ -26,6 +26,7 @@ mod managed_client;
 #[path = "../../../../../native/plugins_retirement.rs"]
 mod plugins_retirement;
 mod settings_backup;
+mod settings_review_admission;
 mod unity_cli;
 
 use serde::{Deserialize, Serialize};
@@ -2564,9 +2565,9 @@ fn review_existing_client_connection(
     client: String,
 ) -> Result<serde_json::Value, String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-    if !cfg!(windows) || option_env!("CREATOR_HUB_INTERNAL_MODULE") != Some("1") {
+    if !settings_review_admission::enabled() {
         return Err(
-            "Reviewed connection migration is available only in the built-in Windows Hub preview."
+            "Reviewed connection migration requires an admitted writable built-in Hub build."
                 .into(),
         );
     }
@@ -2630,7 +2631,7 @@ fn review_existing_client_connections(
     clients: Vec<String>,
 ) -> Result<serde_json::Value, String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-    if !cfg!(windows) || option_env!("CREATOR_HUB_INTERNAL_MODULE") != Some("1") {
+    if !settings_review_admission::enabled() {
         return Err("Managed batch migration is not available in this app.".into());
     }
     if clients.is_empty()

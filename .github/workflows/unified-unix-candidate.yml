@@ -88,7 +88,27 @@ jobs:
       - name: Build and inspect real included payloads (MCP deliberately read-only)
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
+          TAURI_CLI_VERBOSITY: '1'
         run: npm run build:unified -- ci-native-package --experimental-unix --installer
+      - name: Retain the actual failed Mac DMG inputs without changing their signatures
+        if: failure() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_ARCH" in
+            ARM64) target=aarch64-apple-darwin ;;
+            X64) target=x86_64-apple-darwin ;;
+            *) exit 1 ;;
+          esac
+          bundle="src-tauri/target/$target/release/bundle"
+          evidence=artifacts/unified/ci-native-package/dmg-failure-inputs
+          mkdir -p "$evidence"
+          if test -f "$bundle/dmg/bundle_dmg.sh"; then
+            cp "$bundle/dmg/bundle_dmg.sh" "$evidence/bundle_dmg.sh"
+          fi
+          if test -d "$bundle/macos/Creator Hub.app"; then
+            tar -czf "$evidence/signed-app-before-dmg.tar.gz" -C "$bundle/macos" 'Creator Hub.app'
+          fi
       - name: Retain package/integrity evidence without any release upload
         if: always()
         uses: actions/upload-artifact@v4
@@ -101,3 +121,4 @@ jobs:
             artifacts/unified/ci-native-package/experimental-unix.json
             artifacts/unified/ci-native-package/unix-package-integrity.json
             artifacts/unified/ci-native-package/native-packages/
+            artifacts/unified/ci-native-package/dmg-failure-inputs/

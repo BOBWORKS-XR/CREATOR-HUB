@@ -3,6 +3,53 @@
 This is development integration, not a release or installed update acceptance.
 PR21 and the source publication guard remain held.
 
+## Current Target: Unified 0.1.14
+
+0.1.13 is unpublished and is not an upgrade prerequisite. Public Hub 0.1.12
+remains the pinned update baseline; earlier 0.1.13 receipts below are historical
+regressions, not acceptance of 0.1.14. The settings locations are reused, not
+silently relocated, and no legacy application is automatically uninstalled.
+
+The 0.1.14 follow-up protects Setup's invalid/unreadable Editor cache and refuses
+unbound AppImage replacement or redirected Linux restart targets. Windows native
+installation coverage now includes inactive legacy settings, Setup's cache and
+Claude Desktop conversion. See PRODUCT-SETTINGS-PRESERVATION.md and
+UPDATER-TARGET-SAFETY.md for exact test scope and open limitations.
+
+Unix single/batch client review, product-settings review and recovery now share
+compiled private-module admission. Linux/macOS additionally require the existing
+experimental backend feature. The builder has a separate
+`--experimental-unix-writable` mode requiring both `--experimental-unix` and
+`--managed`; it compiles that backend feature, binds the actual mode and retains
+`writableGuiAccepted=false` / `releaseReady=false`. Existing native consent,
+workflow, ownership, signed routing and resource checks are unchanged. Default
+Unix candidates stay read-only. Source/Windows tests are not native Unix GUI
+acceptance and these changes do not authorize publication.
+
+Local Windows checks at this follow-up: 291 browser tests, 183 Hub tests
+(11 opt-in ignored), 245 MCP tests (7 ignored), 23 Setup bootstrap tests
+(two opt-in ignored), and strict MCP/Setup all-target Clippy passed.
+The local unsigned/unmanaged 0.1.14 installer built and its extracted executable
+was verified; it was not installed over the user's apps. It cannot stand in for
+the final signed/managed, installed update or actual-client acceptance package.
+
+The first 0.1.14 read-only Unix candidate at source
+`93e67329b150e1db3d632ea5c999fa6b944f6ad3` passed native AppImage/DEB/RPM and
+both Mac architecture package-integrity lanes in
+[38457394304](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38457394304).
+The earlier Intel DMG failure in 38452354388 remains an unexplained packaging
+failure: the succeeding run does not establish its cause. Future failures now
+retain verbose subprocess output, the actual signed app and generated DMG script.
+No security workaround or re-signing was introduced by that diagnostic change.
+
+[38457384942](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38457384942)
+passed Windows fresh installation. Its upgrade lane reached the installed native
+inventory, then the negative companion-install probe collided with Hub's correct
+startup operation lock. The test now waits only for the exact busy response,
+with a deadline; any other result must still match the built-in-install refusal.
+The original failed lane is retained. Later experimental-admission source changes
+require their own exact package acceptance; this earlier installer is not final.
+
 ## Implemented Boundaries
 
 - Optional managed Windows candidates package signed runtime and router

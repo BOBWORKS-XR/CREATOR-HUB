@@ -67,3 +67,12 @@ test('installed migration coverage keeps Setup/legacy settings and includes the 
   assert.match(source, /verifyRetainedStores\('Failed payload and recovered retry'\)/);
   assert.match(source, /fresh profiles remain absent/);
 });
+
+test('built-in installation refusal retries only the exact startup busy response with a deadline', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-builtin-smoke.cjs'), 'utf8');
+  const probe = source.slice(source.indexOf('  let denied;'), source.indexOf("  report.checks.push('Separate module installation"));
+  assert.match(probe, /if \(denied !== 'Another Hub operation is already running\.'\) break;/);
+  assert.match(probe, /Date.now\(\) < installationProbeDeadline/);
+  assert.match(probe, /assert.match\(denied, \/built into this Hub\//);
+  assert.doesNotMatch(probe, /catch|continue-on-error|\.includes\('operation'\)/);
+});

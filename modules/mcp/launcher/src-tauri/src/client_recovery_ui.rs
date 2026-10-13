@@ -16,7 +16,7 @@ pub(crate) struct Pending {
 }
 
 fn supported() -> bool {
-    cfg!(windows) && option_env!("CREATOR_HUB_INTERNAL_MODULE") == Some("1")
+    crate::settings_review_admission::enabled()
 }
 
 fn operation_valid(value: &str) -> bool {

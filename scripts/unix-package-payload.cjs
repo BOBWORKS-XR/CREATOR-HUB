@@ -11,25 +11,30 @@ const hostedSources = {
   'mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png': 'unity-extension/Editor/CreatorWorksMCPLogo.png',
 };
 
-function nativePlan(platform, arch, { experimentalUnix = false, installer = false } = {}) {
+function nativePlan(platform, arch, { experimentalUnix = false, experimentalWritable = false, managed = false, installer = false } = {}) {
+  if (typeof experimentalWritable !== 'boolean') throw Error('Experimental writable mode must be explicit.');
   if (!['windows', 'linux', 'macos'].includes(platform) || !['x86_64', 'aarch64'].includes(arch)
     || (platform === 'windows' && arch !== 'x86_64')) throw Error('Unsupported native build host.');
   if (platform !== 'windows' && experimentalUnix !== true) {
     throw Error('Unix unified packaging refuses by default. Use --experimental-unix for a read-only, unaccepted CI candidate.');
   }
   if (platform === 'windows' && experimentalUnix) throw Error('--experimental-unix is Unix-only.');
-  return { experimentalUnix: platform !== 'windows', mcpMode: platform === 'windows' ? 'writable' : 'read-only',
+  if (experimentalWritable && (platform === 'windows' || experimentalUnix !== true || managed !== true)) {
+    throw Error('Experimental writable Unix hosting requires --experimental-unix and --managed; production/default packaging remains refused.');
+  }
+  return { experimentalUnix: platform !== 'windows', mcpMode: platform === 'windows' || experimentalWritable ? 'writable' : 'read-only',
     rustTarget: platform === 'windows' ? null : `${arch}-${platform === 'macos' ? 'apple-darwin' : 'unknown-linux-gnu'}`,
     bundles: installer ? { windows: ['nsis'], linux: ['appimage', 'deb', 'rpm'], macos: ['app', 'dmg'] }[platform] : [] };
 }
 
-function packageEnvironment(env, platform) {
+function packageEnvironment(env, platform, mode = 'read-only') {
+  if (!['read-only', 'writable'].includes(mode)) throw Error('Unknown experimental hosting mode.');
   // Tauri auto-imports Apple credentials / auto-signs RPMs when these exist.
   // CI packaging must not accidentally consult accounts or private keys.
   if (Object.keys(env).some(name => name.startsWith('APPLE_') || name.startsWith('TAURI_SIGNING_'))) {
     throw Error('Experimental Unix packaging requires an environment without Apple/Tauri automatic signing credentials. --managed uses its existing explicit signer separately.');
   }
-  return { ...env, CREATOR_MCP_HOST_WRITABLE: '0', CREATOR_MCP_HOST_READONLY_EVENTS: '1',
+  return { ...env, CREATOR_MCP_HOST_WRITABLE: mode === 'writable' ? '1' : '0', CREATOR_MCP_HOST_READONLY_EVENTS: '1',
     ...(platform === 'linux' ? { NO_STRIP: '1' } : {}) };
 }
 

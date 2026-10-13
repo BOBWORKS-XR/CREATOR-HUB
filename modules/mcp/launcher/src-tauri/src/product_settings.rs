@@ -415,9 +415,9 @@ pub(super) fn save(config: crate::LauncherConfig) -> Result<(), String> {
 
 pub(super) fn native_review(app: &tauri::AppHandle, base: &Path) -> Result<Report, String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-    if option_env!("CREATOR_HUB_INTERNAL_MODULE") != Some("1") || !cfg!(windows) {
+    if !crate::settings_review_admission::enabled() {
         return Err(
-            "Product settings review requires the built-in writable Windows Hub preview.".into(),
+            "Product settings review requires an admitted writable built-in Hub build.".into(),
         );
     }
     let paths = Paths::new(base)?;

@@ -13,14 +13,14 @@ const TARGETS = {
   'macos-intel': { platform: 'macos', arch: 'x86_64', os: 'macOS', runnerArch: 'X64', job: 'candidate (macos-15-intel)' },
 };
 const BLOCKERS = [
-  { id: 'readonly-package', classification: 'intentional-unsupported', evidence: 'scripts/build-unified.cjs',
-    detail: 'Unix Hub builds force CREATOR_MCP_HOST_WRITABLE=0; the Hub has no experimental-unix-hosting feature.' },
+  { id: 'experimental-producer-capture', classification: 'missing-capture', evidence: 'scripts/build-unified.cjs',
+    detail: 'The explicit experimental writable producer requires --experimental-unix plus --managed, compiles the backend feature and sets Hub writable mode. It has not been executed/accepted; default experimental packages remain read-only.' },
   { id: 'managed-route', classification: 'prerequisite', evidence: 'modules/mcp/launcher/src-tauri/src/hosted_unix.rs',
     detail: 'Writable Unix MCP requires a signed managed route, not a direct mutable Node target. No key is selected by this probe.' },
-  { id: 'client-review-admission', classification: 'intentional-unsupported', evidence: 'modules/mcp/launcher/src-tauri/src/main.rs:2568,2634',
-    detail: 'Single/batch native client review explicitly refuses Unix, including experimental-unix-hosting. No direct Plan/apply adapter is used.' },
-  { id: 'product-review-admission', classification: 'intentional-unsupported', evidence: 'modules/mcp/launcher/src-tauri/src/product_settings.rs:418',
-    detail: 'Native product-settings review explicitly refuses Unix, including the backend experimental feature.' },
+  { id: 'client-review-capture', classification: 'missing-capture', evidence: 'modules/mcp/launcher/src-tauri/src/settings_review_admission.rs',
+    detail: 'Single/batch review and recovery now use compiled internal-module admission: Windows, or Linux/macOS with the backend experimental feature. Native Unix review remains unaccepted; runtime flags cannot enable production admission.' },
+  { id: 'product-review-capture', classification: 'missing-capture', evidence: 'modules/mcp/launcher/src-tauri/src/settings_review_admission.rs',
+    detail: 'Product review shares the implemented experimental admission; native dialog/workflow/router/ownership and preservation acceptance is still uncaptured.' },
   { id: 'native-gui-driver', classification: 'missing-capture', evidence: 'scripts/native-builtin-smoke.cjs',
     detail: 'The full built-in harness/native dialog helper is Windows-only. No reusable Unix owned-window action contract exists here.' },
 ];
