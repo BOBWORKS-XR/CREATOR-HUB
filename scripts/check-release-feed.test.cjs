@@ -43,6 +43,15 @@ test('self-update acceptance accepts explicit target hashes and derives the targ
   assert.match(workflow, /Published installer differs from its checksum/);
   assert.match(workflow, /inputs\.target_version/);
 });
+
+test('self-update workflow builds and admits the exact baseline required by its native harness', () => {
+  const source = require('node:fs').readFileSync(require.resolve('./native-self-update-smoke.cjs'), 'utf8');
+  const baseline = source.match(/const from = \{ version: '([0-9]+\.[0-9]+\.[0-9]+)'/);
+  assert.ok(baseline, 'Native harness must pin its public baseline');
+  const workflow = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', '.github', 'workflows', 'self-update-acceptance.yml'), 'utf8');
+  assert.ok(workflow.includes(`Build-HostedUpdateFixture.ps1 -FromVersion ${baseline[1]}`));
+  assert.ok(workflow.includes(`$fixture.fromVersion -ne '${baseline[1]}'`));
+});
 test('draft gate accounts for full asset metadata and release notes before publication', () => {
   const current = bytes([{ ...release(), tag_name: 'v0.1.2', body: 'x'.repeat(240000) }]);
   const draft = { ...release(), draft: true, body: 'x'.repeat(24000) };

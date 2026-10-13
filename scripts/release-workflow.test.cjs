@@ -3,6 +3,19 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
+test('repository and native build workflows use the same explicit Rust compiler', () => {
+  const root = path.join(__dirname, '..');
+  const toolchain = fs.readFileSync(path.join(root, 'rust-toolchain.toml'), 'utf8');
+  const version = toolchain.match(/^channel = "([0-9]+\.[0-9]+\.[0-9]+)"$/m);
+  assert.ok(version, 'Compiler must be a pinned release, not a moving stable alias');
+  for (const name of ['ci', 'unified-installed-candidate', 'unified-unix-candidate', 'self-update-acceptance', 'windows-candidate', 'release']) {
+    const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', `${name}.yml`), 'utf8');
+    const revisions = [...workflow.matchAll(/uses: dtolnay\/rust-toolchain@([^\s]+)/g)];
+    assert.ok(revisions.length, `${name} must install the repository compiler`);
+    for (const revision of revisions) assert.equal(revision[1], version[1], name);
+  }
+});
+
 test('browser failures retain screenshots and traces without enabling automatic retries', () => {
   const config = require('../playwright.config.js');
   assert.equal(config.use.trace, 'retain-on-failure');
