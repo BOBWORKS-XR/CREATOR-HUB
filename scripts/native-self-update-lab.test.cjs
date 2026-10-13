@@ -24,7 +24,7 @@ function powershell(command, env = process.env) {
 
 function isolatedFunctions(names, body) {
   // Parse/extract only whitelisted pure or mocked functions; never execute the script body.
-  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Assert-LabRootAbsent', 'Remove-LabRoot'].includes(name)));
+  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure'].includes(name)));
   const result = powershell(`$ErrorActionPreference='Stop'; $PSScriptRoot='${__dirname.replaceAll("'", "''")}'; $tokens=$null; $errors=$null;
     $ast=[System.Management.Automation.Language.Parser]::ParseFile('${helper.replaceAll("'", "''")}',[ref]$tokens,[ref]$errors);
     foreach ($name in @(${names.map(name => `'${name}'`).join(',')})) {
@@ -271,6 +271,21 @@ test('public metadata never claims update acceptance or signature verification',
   assert.doesNotMatch(source, /nativeAcceptanceTested\s*=\s*\$true|releaseReady\s*=\s*\$true|signaturesVerifiedByHarness\s*=\s*\$true/);
   assert.match(source, /labDiscovery=\$true; publicDiscovery=\$false/);
   assert.doesNotMatch(bootstrap, /console\.log\((?:control|input|report|config)|JSON\.stringify\((?:control|report|config)\)/);
+});
+
+test('failure diagnostics expose only allowlisted phase, exception class, numeric code and line', { skip: !hasPwsh }, () => {
+  const output = isolatedFunctions(['Get-LabFailure'], `
+    try { throw 'NEVER-LOG-SECRET-CONTROL-FRAME' } catch { $record=$_ }
+    $safe=Get-LabFailure 'baseline' $record;
+    if ($safe.phase -cne 'baseline' -or $safe.exceptionClass -cne 'System.Management.Automation.RuntimeException') { throw 'Missing phase/class' }
+    if (($safe.Keys | Sort-Object) -join ',' -cne 'exceptionClass,hResult,phase,scriptLine') { throw 'Unexpected diagnostic fields' }
+    if ($safe.hResult -isnot [int] -or $safe.scriptLine -isnot [int]) { throw 'Non-numeric diagnostic' }
+    $unknown=Get-LabFailure 'NEVER-LOG-SECRET' $record;
+    if ($unknown.phase -cne 'unknown') { throw 'Untrusted phase exposed' }
+    $json=$safe | ConvertTo-Json -Compress;
+    if ($json -match 'NEVER-LOG|CONTROL-FRAME') { throw 'Secret exposed' }
+    'safe-failure-diagnostics'`);
+  assert.equal(output, 'safe-failure-diagnostics');
 });
 
 test('adapter refuses every bad runner before requiring modules or reading contract', () => {

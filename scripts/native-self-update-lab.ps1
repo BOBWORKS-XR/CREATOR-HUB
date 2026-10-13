@@ -115,6 +115,18 @@ function Read-LabLine($Reader, [int]$Milliseconds = 10000) {
     return $line
 }
 
+function Get-LabFailure([string]$Phase, $Record) {
+    $allowed = @('timeout', 'baseline', 'contract', 'feed-path', 'driver-path', 'node-path', 'pwsh-path',
+        'validator-start', 'validator-result', 'certificates', 'root-store', 'watcher-start', 'watcher-arm',
+        'root-add', 'proxy-start', 'proxy-register', 'proxy-ready', 'system-tls', 'driver-start', 'driver-register', 'driver-wait')
+    if ($Phase -cnotin $allowed) { $Phase = 'unknown' }
+    $class = $Record.Exception.GetType().FullName
+    if ($class -cnotmatch '^[A-Za-z0-9_.+`]+$') { $class = 'unknown' }
+    # Never include messages, exception data, command text, paths or control frames.
+    return [ordered]@{phase=$Phase; exceptionClass=$class; hResult=[int]$Record.Exception.HResult;
+        scriptLine=[int]$Record.InvocationInfo.ScriptLineNumber}
+}
+
 # The watcher receives only public DER and verified process identities, never the PFX/password.
 # Arm it before adding trust so helper termination still removes exactly its newly owned root.
 if ($CleanupWatch) {
@@ -256,22 +268,32 @@ $validator = $null; $watcher = $null; $proxy = $null; $driver = $null
 $validatorRecord = $null; $proxyRecord = $null; $driverRecord = $null; $watcherRecord = $null
 $trustOwned = $false; $failed = $false; $cleanupVerified = $true; $systemTlsVerified = $false
 $driverExitCode = $null; $feedResult = $null; $rootThumbprint = $null; $leafThumbprint = $null
+$phase = 'timeout'; $failureDetails = $null
 try {
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 480) { throw 'Driver timeout must be 1..480 seconds.' }
     # The exact five-route proxy cannot bootstrap public 0.1.12. Stage it publicly beforehand.
+    $phase = 'baseline'
     $BaselineInstallerPath = Resolve-LabBaseline $BaselineInstallerPath
+    $phase = 'contract'
     $ContractPath = Resolve-LabFile $ContractPath
+    $phase = 'feed-path'
     $feedPath = Resolve-LabFile (Join-Path $PSScriptRoot 'self-update-lab-feed.cjs')
+    $phase = 'driver-path'
     $driverPath = Resolve-LabFile (Join-Path $PSScriptRoot 'native-self-update-smoke.cjs')
+    $phase = 'node-path'
     $nodePath = Resolve-LabFile (Get-Command node.exe -CommandType Application).Source
+    $phase = 'pwsh-path'
     $pwshPath = Resolve-LabFile (Join-Path $PSHOME 'pwsh.exe')
+    $phase = 'validator-start'
     $validator = [Diagnostics.Process]::new()
     $validator.StartInfo = New-LabStartInfo $nodePath @('-e', $proxyBootstrap, $feedPath, $ContractPath, 'validate')
     [void]$validator.Start(); $validatorRecord = Get-LabProcessRecord $validator $nodePath
     $validatorErrorDrain = $validator.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
+    $phase = 'validator-result'
     $validated = Read-LabLine $validator.StandardOutput | ConvertFrom-Json
     if ($validated.kind -cne 'lab-contract-validated' -or -not $validator.WaitForExit(10000) -or $validator.ExitCode -ne 0) { throw 'Reviewed contract refused.' }
 
+    $phase = 'certificates'
     $caKey = [Security.Cryptography.RSACng]::new(2048)
     $leafKey = [Security.Cryptography.RSACng]::new(2048)
     if (-not $caKey.Key.IsEphemeral -or -not $leafKey.Key.IsEphemeral) { throw 'Persistent private keys refused.' }
@@ -302,8 +324,10 @@ try {
     $leaf.Dispose(); $leaf = $null; $unsignedLeaf.Dispose(); $unsignedLeaf = $null
     $ca.Dispose(); $ca = $null; $leafKey.Dispose(); $leafKey = $null; $caKey.Dispose(); $caKey = $null
 
+    $phase = 'root-store'
     $rootStore = Open-LabRootStore
     Assert-LabRootAbsent $rootStore $publicRoot
+    $phase = 'watcher-start'
     $watcher = [Diagnostics.Process]::new()
     $watcher.StartInfo = New-LabStartInfo $pwshPath @('-NoProfile', '-NonInteractive', '-File', $PSCommandPath, '-CleanupWatch')
     [void]$watcher.Start(); $watcherRecord = Get-LabProcessRecord $watcher $pwshPath
@@ -311,16 +335,20 @@ try {
     $owner = Get-LabProcessRecord ([Diagnostics.Process]::GetCurrentProcess()) $pwshPath
     $watcher.StandardInput.WriteLine((@{rootDer=[Convert]::ToBase64String($publicRoot.RawData); owner=$owner; timeoutSeconds=($TimeoutSeconds + 60)} | ConvertTo-Json -Depth 4 -Compress))
     $watcher.StandardInput.Flush()
+    $phase = 'watcher-arm'
     $armed = Read-LabLine $watcher.StandardOutput | ConvertFrom-Json
     if ($armed.kind -cne 'lab-cleanup-armed') { throw 'Cleanup watcher unavailable.' }
     Assert-LabRootAbsent $rootStore $publicRoot
     $trustOwned = $true
+    $phase = 'root-add'
     $rootStore.Add($publicRoot)
 
+    $phase = 'proxy-start'
     $proxy = [Diagnostics.Process]::new()
     $proxy.StartInfo = New-LabStartInfo $nodePath @('-e', $proxyBootstrap, $feedPath, $ContractPath, 'serve')
     [void]$proxy.Start(); $proxyRecord = Get-LabProcessRecord $proxy $nodePath
     $proxyErrorDrain = $proxy.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
+    $phase = 'proxy-register'
     $watcher.StandardInput.WriteLine(($proxyRecord | ConvertTo-Json -Compress)); $watcher.StandardInput.Flush()
     $registered = Read-LabLine $watcher.StandardOutput | ConvertFrom-Json
     if ($registered.kind -cne 'lab-process-registered') { throw 'Proxy ownership not registered.' }
@@ -328,14 +356,17 @@ try {
     $proxy.StandardInput.WriteLine($tlsControl); $proxy.StandardInput.Flush()
     [Array]::Clear($pfx, 0, $pfx.Length); $pfx = $null
     [Array]::Clear($passwordBytes, 0, $passwordBytes.Length); $passwordBytes = $null; $password = $null; $tlsControl = $null
+    $phase = 'proxy-ready'
     $ready = Read-LabLine $proxy.StandardOutput | ConvertFrom-Json
     if ($ready.kind -cne 'lab-feed-ready' -or $ready.proxyUrl -cnotmatch '^http://127\.0\.0\.1:[1-9][0-9]{0,4}$' -or ([uri]$ready.proxyUrl).Port -gt 65535) { throw 'Proxy readiness refused.' }
+    $phase = 'system-tls'
     Test-LabSystemTls $ready.proxyUrl 'github.com' $leafThumbprint
     Test-LabSystemTls $ready.proxyUrl 'api.github.com' $leafThumbprint
     $systemTlsVerified = $true
     [ordered]@{kind='lab-lifecycle-ready'; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; systemTlsVerified=$true;
         proxyUrl=$ready.proxyUrl; rootThumbprint=$publicRoot.Thumbprint; leafThumbprint=$leafThumbprint; proxy=$proxyRecord; cleanupWatcher=$watcherRecord} | ConvertTo-Json -Depth 4 -Compress
 
+    $phase = 'driver-start'
     $driver = [Diagnostics.Process]::new()
     $driver.StartInfo = New-LabStartInfo $nodePath @($driverPath) $ready.proxyUrl
     $driver.StartInfo.Environment['CREATOR_SELF_UPDATE_LAB_CONFIG'] = $ContractPath
@@ -346,10 +377,12 @@ try {
     [void]$driver.Start(); $driverRecord = Get-LabProcessRecord $driver $nodePath
     $driverOutputDrain = $driver.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
     $driverErrorDrain = $driver.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
+    $phase = 'driver-register'
     $watcher.StandardInput.WriteLine(($driverRecord | ConvertTo-Json -Compress)); $watcher.StandardInput.Flush()
     $registered = Read-LabLine $watcher.StandardOutput | ConvertFrom-Json
     if ($registered.kind -cne 'lab-process-registered') { throw 'Driver ownership not registered.' }
     $driver.StandardInput.Close()
+    $phase = 'driver-wait'
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while (-not $driver.WaitForExit(200)) {
         if ($proxy.HasExited -or $watcher.HasExited -or [DateTime]::UtcNow -ge $deadline) { throw 'Transport/driver lifetime ended.' }
@@ -358,6 +391,7 @@ try {
     if ($driverExitCode -ne 0) { throw 'Driver did not succeed.' }
 } catch {
     $failed = $true
+    $failureDetails = Get-LabFailure $phase $_
     [Console]::Error.WriteLine('Lab lifecycle refused or failed; no native/public acceptance established.')
 } finally {
     foreach ($record in @($driverRecord, $validatorRecord)) {
@@ -389,7 +423,7 @@ try {
 }
 [ordered]@{kind='lab-lifecycle-result'; lifecycleSucceeded=(-not $failed -and $cleanupVerified); cleanupVerified=$cleanupVerified;
     systemTlsVerified=$systemTlsVerified; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; releaseReady=$false;
-    driverExitCode=$driverExitCode; rootThumbprint=$rootThumbprint; leafThumbprint=$leafThumbprint; driver=$driverRecord; proxy=$proxyRecord; cleanupWatcher=$watcherRecord;
+    driverExitCode=$driverExitCode; failureDetails=$failureDetails; rootThumbprint=$rootThumbprint; leafThumbprint=$leafThumbprint; driver=$driverRecord; proxy=$proxyRecord; cleanupWatcher=$watcherRecord;
     servedRouteCount=$(if ($feedResult) { $feedResult.servedRouteCount } else { $null });
     rejectedRequestCount=$(if ($feedResult) { $feedResult.rejectedRequestCount } else { $null })} | ConvertTo-Json -Depth 4 -Compress
 if ($failed -or -not $cleanupVerified) { exit 1 }
