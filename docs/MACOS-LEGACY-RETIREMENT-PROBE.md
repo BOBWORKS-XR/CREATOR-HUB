@@ -117,9 +117,9 @@ its compact evidence and the original audit's follow-up link record the result.
 The 32 portable refusal/source checks passed before native execution. The later
 evidence regression checks recorded results only; they do not rerun native code.
 
-## Next Bounded Experiment: Complete Bundle
+## Complete-Bundle Experiment Definition
 
-The next native run changes **one mutation variable**: instead of removing only
+This native run changes **one mutation variable**: instead of removing only
 the executable, exclusively rename the complete pinned per-user MCP `.app` into
 `~/Library/Application Support/CreatorHubLegacyRetirementProbe/<run>-<attempt>/`.
 Reuse the same source, baselines, native Cancel/Approve, held directory descriptors,
@@ -140,3 +140,50 @@ migration.** Existing unsupported or unmigrated clients must block eventual prod
 cleanup. Restore the exact bundle after the measurement, retaining any failure;
 no new recovery framework, symlink, signing change, production deletion or Root
 wiring is part of this experiment. No additional hypothesis/run loop is planned.
+
+## Complete-Bundle Result And Handoff
+
+[Run 38634969103](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38634969103)
+at `75d728f3b327055fa24005169fe88294c40ca4d5` passed both Intel and ARM jobs.
+[Pinned evidence](evidence/macos-legacy-whole-bundle-archive-experiment-014.json)
+records primary artifact metadata and independently verified original ZIP/report
+digests. Raw reports, native journal records and original ZIPs are retained at
+`artifacts/mac-legacy-retirement-38634969103`; the earlier negative experiment
+and baseline are untouched. No repeat run or second hypothesis was added.
+
+| Observation | Both Architectures |
+| --- | --- |
+| Native Cancel/Approve; exclusive directory collision refusal | Passed |
+| Complete bundle at owned Application Support backup | Same 13 file identities/bytes and 9 directory identities |
+| Strict codesign at backup, then after exact restore | Exit 0 in both locations |
+| Original Applications URL during archive | Absent; native launch returns not-found error 260, not corrupt-app error 259 |
+| Already-live MCP connection during archive | `tools/list`: 53; bounded `get_mcp_reference`: same successful result/hash as before |
+| Both original Node-path reconnect attempts | Refused before spawn with `ENOENT` |
+| Both new archive-path reconnects | 53 tools, successful read-only reference, valid Node signature, ordinary EOF exit 0 |
+| LaunchServices and NSWorkspace lookup | Resolve the valid archived app; resolve the original URL again after restore |
+
+**Compatibility tradeoff:** whole-bundle archival is an intact backup/rollback
+primitive, unlike the corrupt hollow bundle. It does **not** preserve runtime
+paths or migrate clients, and it does **not** unregister the old product:
+LaunchServices follows the valid bundle into the backup. These are the two
+measured requirements still preventing relocation alone from being Hub-only
+cleanup. The old live connection surviving read-only calls does not prove that
+the next client restart/reconnect will work; both actual old-path attempts failed.
+Gatekeeper assessment of the old ad-hoc app remains rejection, not consumer
+notarization/signing acceptance. Setup was only the unchanged normal-close control;
+this experiment did not archive Setup or migrate any real AI-app configuration.
+
+**Smallest supported-client migration requirement before cleanup:** reuse the
+existing reviewed adapter, not the backup path. Keep exact before-images; change
+each recognized, approved Creator/Banter entry's executable and old server argument
+to Hub's verified stable managed router (empty arguments, or `[router]` for
+OpenCode). Preserve project/environment/options and unrelated entries. Prove an
+initialize and safe reference call after the actual client restarts. Any unknown,
+unsupported or unmigrated connection must stop cleanup. Source shape/refusal rules
+are in `modules/mcp/launcher/src-tauri/src/client_migration.rs`; this experiment
+does not establish that native client migration acceptance.
+
+The separately measured registration-following behavior must also be resolved
+before declaring the legacy GUI retired. No Root wiring, production deletion,
+symlink, re-signing, security bypass or generic recovery framework was added.
+All test state was restored on the disposable runners. Publication remains held.

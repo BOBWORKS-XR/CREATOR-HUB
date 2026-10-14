@@ -138,3 +138,25 @@ test('recorded native measurement does not turn preserved stdio into clean retir
     assert.equal(row.exactGuiInodeRestored, true); assert.equal(row.restoredBundleSignatureExit, 0);
   }
 });
+test('whole-bundle native evidence distinguishes intact backup, broken old reconnects and retained registration', () => {
+  const evidence = require('../docs/evidence/macos-legacy-whole-bundle-archive-experiment-014.json');
+  assert.equal(evidence.sourceCommit, '75d728f3b327055fa24005169fe88294c40ca4d5');
+  assert.equal(evidence.runId, 38634969103);
+  for (const key of ['nativeRetirementAccepted', 'originalRuntimePathsPreserved', 'clientsMigrated', 'cleanHubOnlyAccepted', 'releaseReady']) {
+    assert.equal(evidence[key], false);
+  }
+  assert.deepEqual(evidence.targets.map(row => row.architecture), ['arm64', 'x64']);
+  for (const row of evidence.targets) {
+    assert.equal(row.nativeCancel, true); assert.equal(row.nativeApprove, true); assert.equal(row.collisionRefused, true);
+    assert.equal(row.allFileIdentitiesAndBytesEqualAtArchive, 13); assert.equal(row.allDirectoryIdentitiesEqualAtArchive, 9);
+    assert.equal(row.archivedStrictSignatureExit, 0); assert.equal(row.restoredStrictSignatureExit, 0);
+    assert.equal(row.oldAppUrlAbsent, true); assert.equal(row.nativeOldUrlLaunch.errorCode, 260);
+    assert.equal(row.launchServicesRegisteredArchive, true); assert.equal(row.workspacePreferredArchive, true);
+    assert.equal(row.originalLiveStdio.referenceSuccess, true);
+    assert.deepEqual(row.oldPathReconnects, { node: 'ENOENT', 'node.exe': 'ENOENT' });
+    for (const alias of ['node', 'node.exe']) {
+      assert.equal(row.archivePathReconnects[alias].tools, 53); assert.equal(row.archivePathReconnects[alias].referenceSuccess, true);
+    }
+    assert.equal(row.exactWholeBundleRestored, true);
+  }
+});

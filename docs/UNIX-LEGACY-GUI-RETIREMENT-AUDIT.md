@@ -233,3 +233,22 @@ registered, strict bundle signature fails, and native launch reports the app is
 corrupt (NSCocoaErrorDomain 259). Every original member/inode was restored and
 strict signature passed again. This measured negative result supports retaining
 the production refusal; it does not authorize shipping a hollow registered app.
+
+### Intact Whole-Bundle Comparison
+
+The user's clarified requirement is preserved settings plus one Hub product.
+Keeping every original runtime pathname was an internal compatibility strategy,
+not permission to ship the corrupt hollow bundle or a requirement to retain
+standalone GUIs indefinitely. Old paths may change only after reviewed supported
+client migration; unknown, unsupported or unmigrated connections must stop cleanup.
+
+The single [whole-bundle follow-up](MACOS-LEGACY-RETIREMENT-PROBE.md#complete-bundle-result-and-handoff),
+[run 38634969103](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38634969103),
+kept every member/inode and a valid strict signature at an owned Application
+Support backup on both architectures, then restored the exact bundle. Already-live
+stdio still answered list/reference, but both old Node paths refused reconnect
+with `ENOENT`; both archive paths connected. LaunchServices and NSWorkspace followed
+the bundle to its backup, rather than unregistering it. Thus this is a valid
+backup primitive with an explicit reconnect break, not migration or completed
+Hub-only cleanup. See the linked evidence and minimal client requirement; no
+production mutator or additional experiment loop was added.
