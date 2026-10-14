@@ -1,0 +1,10 @@
+{
+  "runId": 38643675124,
+  "harnessCommit": "563887dccfa0f3cf404ff6753c2c19d787061c85",
+  "scope": "captured-ocr-refusal-regression-only",
+  "report": {"size": 42533, "sha256": "7c2a45c3f63d00e0a5cdcb14f7db970016301b0a060d519b77d216e67d80f8cb"},
+  "screenshot": {"size": 86323, "sha256": "3a26a4f14b64cc5d25f3f84a915e4e51d607bf990fd844438b52a20819580d38"},
+  "ocr": {"size": 972, "sha256": "d18c49b12d119c0fb4b34f725ede7fc2f89752aecfb153ded763e52329b25954"},
+  "expectedParserOutcome": "refuse",
+  "ocrText": "BCR mE milan g\n\neee eee Eee ue atc\n\nlee ree ore Roe Sar nate\n\ner ene nce meen\n\nThe tools can change Unity projects, files, settings, packages and installed components.\n\nErrors or incompatibilties may cause project corruption, data loss, failed setup or builds, or\n\n\u2018other damage. Keep independent backups and review changes before relying on them.\n\nBasic Unity knowledge is recommended. Support is not guaranteed,\n\nDeere ne Rees eee Ue ea ue Ree ee\n\nyour Al provider, client, model, prompts and settings. The apps\u2019 developers do not control,\n\nestimate or cap that usage. Check your provider's billing and usage limits.\n\nTo the maximum extent permitted by law, you assume the risks of using the software and\n\nee eee ea ene keen ene eu un Lat\n\nPes re NE abt arr adoro\n\nnot liable for project corruption, data loss, setup or build problems, indirect or consequential\n\n| have read and agree to these terms, including the risk assumption and liability limitations\n\nabove.\n\f"
+}

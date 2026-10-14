@@ -65,6 +65,14 @@ class Fixtures(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 p.terms_text(fragment)
 
+    def test_actual_captured_ocr_does_not_manufacture_terms_proof(self):
+        fixture = p.unique_json(Path(__file__).with_name('flatpak-gui-probe-ocr-38643675124.json').read_bytes())
+        self.assertEqual(p.record(fixture['ocrText'].encode()), fixture['ocr'])
+        self.assertEqual(fixture['runId'], 38643675124)
+        self.assertEqual(fixture['expectedParserOutcome'], 'refuse')
+        with self.assertRaisesRegex(RuntimeError, 'Rendered terms not proven by OCR'):
+            p.terms_text(fixture['ocrText'])
+
     def test_environment_drops_injection_auth_and_adds_no_app_permissions(self):
         env = p.child_environment(Path('/owned'))
         self.assertEqual(env['FLATPAK_USER_DIR'], str(Path('/owned') / 'installation'))

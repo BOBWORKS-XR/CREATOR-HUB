@@ -6,6 +6,75 @@ It is not native-Linux product, host integration, MCP, migration, update, releas
 Wayland or real-device acceptance. Windows and Linux/Flatpak are the active targets;
 Mac is suspended and is neither run nor modified here.
 
+## Current Capture
+
+**Actual launch obtained; original automation result remains failed.**
+[Run 38643675124/1, job 116125161574](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38643675124/job/116125161574)
+uses test source `563887dccfa0f3cf404ff6753c2c19d787061c85` and the unchanged
+product/bundle pins below. Exactly **one** Hub launch occurred across these
+three attempts; both earlier attempts stopped before launching the app.
+
+- Confirmed: exact current bundle installation, six deployed byte/mode checks,
+  live Hub ELF/deployed-inode and process-ancestry binding, all 15 archive members,
+  resource-path/hash read in the normal sandbox, unchanged metadata/effective
+  permissions and pinned Platform before/after. All 21 recorded commands exit 0.
+- Confirmed: XRes host PID `3466`, start `149117`, XID `6291458`, exact Hub title;
+  its ELF hash is `1ba7eabe...06e54d9`. The actual 940x580 client screenshot has
+  829 sampled colors. Direct visual inspection shows the terms heading, policy
+  version, unchecked checkbox and disabled **Accept and continue** button.
+- Confirmed: normal EWMH close requested after ownership/protocol rechecks;
+  owned Flatpak parent reaped with exit 0. `normalCloseReaped:true`,
+  `leftRunningAtReport:false`. No terms input/acceptance/navigation/force-close occurred.
+- Confirmed harness limitation: Tesseract exits 0 but its 972-byte text omits the
+  visible heading/version/button. The parser correctly refuses insufficient OCR.
+  `suitePassed:false` and the original error `Rendered terms not proven by OCR`
+  remain immutable. This is not a blank/render failure. No fourth run, OCR flag
+  tuning, grant change or product workaround was performed.
+- Unknown: live Hub archive consumption and backend execution/ABI beyond the outer
+  GUI. Stderr contains only one 187-byte AT-SPI `ServiceUnknown` warning. That is
+  observed context, not evidence that it caused the OCR miss or a product failure.
+  Every broad acceptance/readiness field remains false.
+
+Capture retained at `artifacts/flatpak-gui-capture-38643675124/`:
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `terms-window.png` | 86323 | `3a26a4f14b64cc5d25f3f84a915e4e51d607bf990fd844438b52a20819580d38` |
+| `gui-report.json` | 42533 | `7c2a45c3f63d00e0a5cdcb14f7db970016301b0a060d519b77d216e67d80f8cb` |
+| `terms-ocr.stdout` | 972 | `d18c49b12d119c0fb4b34f725ede7fc2f89752aecfb153ded763e52329b25954` |
+
+The compact artifact `11931950290` is 101,990 bytes (API digest
+`1037cf20d8c8094005d0519943de1c57ba67d4158eac37976f00c2fda346047f`).
+Full evidence, original ZIP and source proof remain in artifact `11931711358`,
+419,017,592 bytes (API digest
+`7f1ca81fe574867698c472824e9b4a19ce5bb0919e2d24ab4e75c0297472007c`).
+Local extracted screenshot/report/OCR bytes were hashed directly; artifact digests
+above are primary API values, not locally rehashed artifact ZIP claims.
+
+The new hash-bound OCR fixture preserves this exact false-negative text and tests
+that it continues to refuse. Final local checks: **49 Node tests + 15 Python
+fixtures pass**, zero skipped; Python AST and workflow YAML parse. This offline
+fixture/documentation commit does not rerun the application or turn the failed job
+green. A future automatic OCR correction needs separate offline proof against this
+image before any separately authorized native test.
+
+### Scoped File List
+
+```text
+.github/workflows/flatpak-gui-probe-014.yml
+docs/FLATPAK-GUI-PROBE.md
+scripts/flatpak-gui-probe-pins.json
+scripts/flatpak-gui-probe.cjs
+scripts/flatpak-gui-probe.py
+scripts/flatpak-gui-probe.test.cjs
+scripts/flatpak-gui-probe.test.py
+scripts/flatpak-gui-probe-ocr-38643675124.json
+```
+
+Independent validation commits: initial `e292c4c`, capped logging `3b92a93`,
+setup-node path `563887d`. The shared feature checkout/index were not switched,
+staged, committed or pushed. No other owner's source/evidence was edited.
+
 ## Immutable Input
 
 - Producer source `9d015402bbbcb9b6c584cedd88815a4867d7739a`, tree
@@ -97,6 +166,10 @@ test source `e292c4caa16ff766074e27f2f95cafdbde90ed98`, failed at installation;
 prerequisite provisioning passed. The failed run is not GUI or ABI evidence.
 Its original artifact is `11930707276`, 418,915,929 bytes, API SHA-256
 `54bf8eea2ffb933fec28d2721273b43f29a3b54352c36c2c159824e5c8eb031a`.
+The downloaded original report confirms install status **-25 (SIGXFSZ)** after
+981 ms, with 56 stdout bytes and zero stderr. Report hash is
+`3e7b9560816dfe31c87762fe39d00ae1a35c430aa0a43a2c80918593be45c250`.
+Its retained input ZIP and bundle were rehashed locally and still match the pins.
 
 The first harness incorrectly inherited a log-oriented file-size limit into
 OSTree installation. The corrected harness drains stdout/stderr into capped
