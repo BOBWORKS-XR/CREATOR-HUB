@@ -94,6 +94,15 @@ test('both cargo tool builds explicitly bind the same target directories as thei
   }
 });
 
+test('the Root verifier cache resolves relative to its Cargo workspace, not the repository', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-assembly.yml'), 'utf8');
+  const mapping = workflow.match(/^\s+src-tauri -> (\S+)\r?$/m);
+  assert.ok(mapping);
+  const root = path.resolve('/owned-source');
+  const args = verificationTools(root).verifierArgs;
+  assert.equal(path.resolve(root, 'src-tauri', mapping[1]), args[args.indexOf('--target-dir') + 1]);
+});
+
 test('Linux assembly runs actual Root migration and process tests before compiling a package', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-assembly.yml'), 'utf8');
   const triggers = workflow.slice(0, workflow.indexOf('permissions:'));

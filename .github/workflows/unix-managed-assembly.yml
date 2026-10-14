@@ -77,7 +77,7 @@ jobs:
         with:
           workspaces: |
             native/unix-transfer
-            src-tauri -> artifacts/unix-verifier-target
+            src-tauri -> ../artifacts/unix-verifier-target
           cache-on-failure: true
       - name: Install native Linux prerequisites only on the disposable runner
         if: runner.os == 'Linux'
