@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import platform
 import unittest
+import xml.etree.ElementTree as ET
 
 SPEC = importlib.util.spec_from_file_location("sealed", Path(__file__).with_name("linux-sealed-update-probe.py"))
 p = importlib.util.module_from_spec(SPEC)
@@ -33,12 +34,22 @@ class ProbeTests(unittest.TestCase):
 
     def test_privileged_invocation_has_no_mutable_path_shell_or_password_fallback(self):
         self.assertEqual(p.PKEXEC_ARGS, ["/usr/bin/pkexec", "--disable-internal-agent", "/usr/bin/dpkg", "--install", "/proc/self/fd/0"])
-        self.assertEqual(p.POLICY.as_posix(), "/etc/polkit-1/rules.d/49-creator-sealed-update-probe.rules")
+        self.assertEqual(p.POLICY.as_posix(), "/usr/share/polkit-1/actions/org.creatorworks.hub.disposable-sealed-update-probe.policy")
         source = Path(p.__file__).read_text()
         self.assertNotIn("sudo -S", source)
         self.assertNotIn("shell=True", source)
         for gate in ["actualUserAuthenticationAccepted", "cancellationAccepted", "signedUpdateAccepted", "restartAccepted", "releaseReady"]:
             self.assertIn('"' + gate + '": False', source)
+
+    def test_ubuntu_2204_policy_uses_documented_action_xml_not_unsupported_js_rules(self):
+        action = ET.fromstring(p.policy_xml()).find("action")
+        self.assertEqual(action.attrib, {"id": p.ACTION})
+        self.assertEqual(action.find("annotate").attrib, {"key": "org.freedesktop.policykit.exec.path"})
+        self.assertEqual(action.find("annotate").text, "/usr/bin/dpkg")
+        self.assertEqual([n.text for n in action.find("defaults")], ["yes", "yes", "yes"])
+        self.assertNotIn("polkit.addRule", p.policy_xml())
+        self.assertNotIn("/rules.d/", p.POLICY.as_posix())
+        self.assertIn("never install", action.find("message").text.lower())
 
     @unittest.skipUnless(platform.system() == "Linux", "Linux kernel seals required")
     def test_real_seals_refuse_writes_shrink_growth_and_preserve_content(self):

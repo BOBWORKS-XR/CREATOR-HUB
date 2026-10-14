@@ -8,13 +8,32 @@ import platform
 import stat
 import subprocess
 import sys
+import time
 
 
 PACKAGE = "creator-hub-sealed-update-probe"
-POLICY = Path("/etc/polkit-1/rules.d/49-creator-sealed-update-probe.rules")
+ACTION = "org.creatorworks.hub.disposable-sealed-update-probe"
+POLICY = Path("/usr/share/polkit-1/actions/" + ACTION + ".policy")
 DEST = Path("/usr/share/creator-hub-sealed-update-probe/fixture.txt")
 CONTENT = b"Creator Hub disposable sealed package probe\n"
 PKEXEC_ARGS = ["/usr/bin/pkexec", "--disable-internal-agent", "/usr/bin/dpkg", "--install", "/proc/self/fd/0"]
+
+
+def policy_xml():
+    # polkit 0.105 uses action XML, not the newer JavaScript rule backend.
+    # This disposable no-auth policy grants dpkg, not argument-level authority.
+    # It must never be packaged, copied to a user PC, or counted as auth proof.
+    return f'''<?xml version="1.0" encoding="UTF-8"?>
+<policyconfig>
+  <vendor>Creator Hub disposable test only</vendor>
+  <action id="{ACTION}">
+    <description>Disposable sealed package mechanism test</description>
+    <message>Disposable runner only; never install this policy on a user PC</message>
+    <defaults><allow_any>yes</allow_any><allow_inactive>yes</allow_inactive><allow_active>yes</allow_active></defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/dpkg</annotate>
+  </action>
+</policyconfig>
+'''
 
 
 def require(value, message):
@@ -86,18 +105,23 @@ def run(root, report):
     for path in (Path("/usr/bin/pkexec"), Path("/usr/bin/dpkg"), Path("/usr/bin/dpkg-deb")):
         protected_tool(path)
     require(not DEST.exists(), "Fixture destination already exists")
+    report["pkexecVersion"] = command(["/usr/bin/pkexec", "--version"], env)
+    report["dpkgVersion"] = command(["/usr/bin/dpkg", "--version"], env)
     absent = command(["/usr/bin/dpkg-query", "--show", "--showformat=${db:Status-Status}", PACKAGE], env, accepted=(0, 1))
     require(absent["exitCode"] == 1, "Fixture package already registered")
-    require(not POLICY.exists(), "Test-only authorization rule already exists")
-    policy = ("polkit.addRule(function(action, subject) {\n"
-              f"  if (action.id === 'org.freedesktop.policykit.exec' && subject.user === 'runner' &&\n"
-              "      action.lookup('program') === '/usr/bin/dpkg' &&\n"
-              "      action.lookup('command_line') === '/usr/bin/dpkg --install /proc/self/fd/0') {\n"
-              "    return polkit.Result.YES;\n  }\n});\n")
-    rule = root / "fixture.rules"
-    rule.write_text(policy, encoding="ascii")
-    report["policyInstall"] = command(["/usr/bin/sudo", "--non-interactive", "/usr/bin/install", "-o", "root", "-g", "root", "-m", "0644", str(rule), str(POLICY)], env)
+    require(POLICY.parent.is_dir() and not POLICY.exists(), "Test action directory missing or action already exists")
+    policy = root / "fixture.policy"
+    policy.write_text(policy_xml(), encoding="ascii")
     try:
+        report["policyInstall"] = command(["/usr/bin/sudo", "--non-interactive", "/usr/bin/install", "-o", "root", "-g", "root", "-m", "0644", str(policy), str(POLICY)], env)
+        deadline = time.monotonic() + 10
+        while True:
+            ready = command(["/usr/bin/pkaction", "--action-id", ACTION, "--verbose"], env, accepted=(0, 1))
+            if ready["exitCode"] == 0 and ACTION in ready["stdout"]:
+                report["policyObserved"] = ready
+                break
+            require(time.monotonic() < deadline, "Test-only action was not observed by polkit")
+            time.sleep(0.05)
         package = root / "package"
         control = package / "DEBIAN"
         control.mkdir(parents=True, mode=0o755)
@@ -124,9 +148,9 @@ def run(root, report):
         require(report["installed"]["stdout"] == PACKAGE + " 0.0.1 all installed", "Installed package identity differs")
         report["mechanismPassed"] = True
     finally:
-        # Never ship this permissive fixture rule or retain it after the probe.
-        report["policyRemove"] = command(["/usr/bin/sudo", "--non-interactive", "/usr/bin/rm", "--", str(POLICY)], env)
-        require(not POLICY.exists(), "Test authorization rule remained")
+        # Never ship this permissive fixture policy or retain it after the probe.
+        report["policyRemove"] = command(["/usr/bin/sudo", "--non-interactive", "/usr/bin/rm", "--force", "--", str(POLICY)], env)
+        require(not POLICY.exists(), "Test authorization policy remained")
 
 
 def main():
