@@ -1,4 +1,4 @@
-name: Current reviewed signed stable update lab (not public discovery)
+name: Current admitted signed stable update lab (not public discovery)
 on:
   push:
     branches: [validation/unified-update-lab, validation/unified-update-lab-014]

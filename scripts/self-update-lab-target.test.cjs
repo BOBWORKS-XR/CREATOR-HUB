@@ -57,12 +57,15 @@ test('lab workflow uses pinned public signatures, keeps import privileges separa
   const importing = source.slice(source.indexOf('  stage-input:'), source.indexOf('  update:'));
   const native = source.slice(source.indexOf('  update:'));
   assert.match(importing, /contents: write/);
-  assert.match(importing, /releases\/assets\/638202489/);
+  assert.match(importing, /releases\/assets\/641164968/);
+  assert.match(importing, /\$release\.draft -ne \$true/);
+  assert.match(importing, /\$matches\[0\]\.size -ne 36496310/);
+  assert.match(importing, /\$matches\[0\]\.state -cne 'uploaded'/);
   assert.match(importing, /Invoke-WebRequest -Method Get/);
   assert.doesNotMatch(importing, /npm ci|actions\/checkout|native-self-update-lab.ps1/);
   assert.doesNotMatch(native, /contents: write|GH_TOKEN|signing_key|signer sign/);
   assert.match(source, /validation\/unified-update-lab-014/);
-  assert.match(source, /99623db1396e19086d257a9ba214aec7ffad6a10de35804965da5e086afe2630/);
+  assert.match(source, /872453de9cf7b4f4e5cef7e89e315d79f2257007b8881e13b368e95cf12f1337/);
   assert.match(source, /targetVersion='0\.1\.14'/);
   assert.ok(native.indexOf('Public baseline differs') < native.indexOf('./scripts/native-self-update-lab.ps1'));
   assert.match(native, /BaselineInstallerPath/);

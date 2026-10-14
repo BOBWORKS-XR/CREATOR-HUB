@@ -44,9 +44,9 @@ function bytes(file, max = META) {
   const record = capture(file, max), body = fs.readFileSync(file);
   assert.equal(hash(body), record.sha256); return body;
 }
-function copy(file, dest, record) {
-  unchanged(file, record); absolute(dest); fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.copyFileSync(file, dest, fs.constants.COPYFILE_EXCL); unchanged(dest, record); unchanged(file, record);
+function copy(file, dest, record, cargoOutput = false) {
+  unchanged(file, record, cargoOutput); absolute(dest); fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.copyFileSync(file, dest, fs.constants.COPYFILE_EXCL); unchanged(dest, record); unchanged(file, record, cargoOutput);
 }
 function inventory(root, expected) {
   const found = [];
@@ -226,7 +226,9 @@ function buildFixture(label, services = {}) {
     checkSource(source, entries, changes); unchanged(descriptor, descriptorRecord);
     verifyStage(path.join(payload, 'modules'), finalManifest); inventory(path.join(payload, 'modules'), Object.keys(allFiles(finalManifest)));
     for (const [name, record] of Object.entries(privateFiles)) unchanged(path.join(payload, 'modules', name), record);
-    const release = path.join(buildEnv.CARGO_TARGET_DIR, 'release'), rawHub = path.join(release, 'creator-hub.exe');
+    const release = path.join(buildEnv.CARGO_TARGET_DIR, 'release');
+    const cargoHub = path.join(release, 'creator-hub.exe'), rawHub = path.join(output, 'raw-creator-hub.exe');
+    copy(cargoHub, rawHub, capture(cargoHub, MAX, true), true);
     assert.ok(bytes(rawHub, MAX).includes(manifestBody), 'Hub does not embed the exact 15-file resource authority');
     const versionScript = `[Diagnostics.FileVersionInfo]::GetVersionInfo('${rawHub.replaceAll("'", "''")}').ProductVersion`;
     assert.equal(run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', versionScript]), TO, 'Built Hub PE version differs');

@@ -65,5 +65,6 @@ test('fixture pins current reviewed input, checks signed payloads and retains ex
   assert.ok(source.includes("const producerSidecars = ['routing/router.json.sig', 'routing/runtime.json.sig']"));
   assert.ok(source.includes("'Producer signature differs from verified package signature'"));
   assert.ok(source.includes("['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'archive'"));
+  assert.ok(source.includes('copy(cargoHub, rawHub, capture(cargoHub, MAX, true), true)'));
   assert.doesNotMatch(source, /readFileSync\(key|readFileSync\([^)]*auth\.json|release (?:create|edit|upload)/);
 });
