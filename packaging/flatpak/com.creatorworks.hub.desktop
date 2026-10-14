@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Creator Hub
+Exec=creator-hub
+Icon=com.creatorworks.hub
+Terminal=false
+Categories=Development;

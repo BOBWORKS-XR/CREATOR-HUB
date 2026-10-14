@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.creatorworks.hub</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Creator Hub</name>
+  <summary>Unity projects and creator tools</summary>
+  <description><p>Creator Hub brings project setup and MCP tooling together.</p></description>
+  <launchable type="desktop-id">com.creatorworks.hub.desktop</launchable>
+  <releases><release version="0.1.14" date="2026-10-14"/></releases>
+</component>

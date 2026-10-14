@@ -1,8 +1,9 @@
-# Unified Linux And Flatpak Acceptance Plan
+# Unified Linux And Flatpak Acceptance
 
 Audit: 2026-10-14, Hub 0.1.14; checkout HEAD
 `cc2c2836da79afb9ef4a02ebbdcd47ab502a295d`, with concurrent uncommitted
 coordinator changes. This is a source/fixture audit, not a frozen payload binding.
+The 2026-10-14 continuation implements a packaging-only experiment below.
 No Linux app, Flatpak, installer, user settings or auth file was opened here.
 No workflow was dispatched. All readiness and migration acceptance remain false.
 
@@ -23,85 +24,195 @@ Flatpak's app-private XDG locations are documented in
 Native defaults below mean independently derived host XDG directories, not
 hardcoded paths when a user has configured other XDG roots.
 
-## Smallest Proposed Manifest
+## Implemented Offline Recipe
 
-This is an exact **local experiment recipe**, not a checked-in packaging change
-or a usable migration package. It requires a reviewed, future broker-aware UI
-build; the unchanged current UI does not implement that boundary. Start x86_64
-only. Do not claim aarch64 acceptance from synthetic preparation fixtures.
+`packaging/flatpak/com.creatorworks.hub.json` is an actual local-directory
+`flatpak-builder` recipe, not a Flathub submission or production migration
+package. Its ref is `app/com.creatorworks.hub/x86_64/flatpak-test`, command
+`creator-hub`, Platform/SDK `org.gnome.Platform`/`org.gnome.Sdk`, branch `50`.
+Branch 50 is a candidate informed by GNOME's
+[build-output documentation](https://gnome.pages.gitlab.gnome.org/gnome-build-meta/docs/ci-outputs.html),
+not an ABI, availability or lifetime acceptance claim. The experiment records
+the actual installed Platform/SDK commits; unavailable refs block it.
 
-GNOME documents stable Platform/SDK branch 50 in its
-[published build outputs](https://gnome.pages.gitlab.gnome.org/gnome-build-meta/docs/ci-outputs.html).
-Branch 50 is a bounded candidate choice, not a claim that it is newest, supported
-for the required lifetime, or ABI-compatible with this payload. Record the exact
-Platform/SDK commits used by the disposable experiment. No such commits were
-resolved or installed during this audit.
+Only four static grants exist: `--socket=wayland`, `--socket=fallback-x11`,
+`--device=dri`, `--share=ipc`. There is **no network, filesystem, broker,
+session/system-bus, host-command, devel or extra PID visibility grant**.
+The earlier hypothetical broker permission has been removed. No broker exists.
+Network omission also excludes catalogue/download/update functionality; this
+is intentionally an offline package experiment, not a usable replacement for
+all native functionality. See [the permission contract](https://docs.flatpak.org/en/latest/sandbox-permissions.html).
 
-```yaml
-id: com.creatorworks.hub
-runtime: org.gnome.Platform
-runtime-version: '50'
-sdk: org.gnome.Sdk
-command: creator-hub
-build-options:
-  strip: false
-  no-debuginfo: true
-finish-args:
-  - --socket=wayland
-  - --socket=fallback-x11
-  - --device=dri
-  - --share=ipc
-  - --share=network
-  - --talk-name=com.creatorworks.hub.HostMcp1
-modules:
-  - name: creator-hub-reviewed-input
-    buildsystem: simple
-    sources:
-      - type: dir
-        path: flatpak-input
-    build-commands:
-      - install -Dm755 bin/creator-hub /app/bin/creator-hub
-      - install -Dm644 'lib/Creator Hub/modules.tar.gz' '/app/lib/Creator Hub/modules.tar.gz'
-      - install -Dm644 share/applications/com.creatorworks.hub.desktop /app/share/applications/com.creatorworks.hub.desktop
-      - install -Dm644 share/icons/hicolor/128x128/apps/com.creatorworks.hub.png /app/share/icons/hicolor/128x128/apps/com.creatorworks.hub.png
-      - install -Dm644 share/metainfo/com.creatorworks.hub.metainfo.xml /app/share/metainfo/com.creatorworks.hub.metainfo.xml
+The exact six input destinations are:
+
+```text
+/app/bin/creator-hub
+/app/lib/Creator Hub/modules.tar.gz
+/app/share/applications/com.creatorworks.hub.desktop
+/app/share/icons/hicolor/128x128/apps/com.creatorworks.hub.png
+/app/share/metainfo/com.creatorworks.hub.metainfo.xml
+/app/share/licenses/com.creatorworks.hub/LICENSE
 ```
 
-The proposed five-file staging tree is exactly the five source paths above.
-Require ordinary files/ancestors, no links or extra files, canonical modes,
-bounded sizes and an independently reviewed hash inventory before building.
-The Hub ELF must embed the final archive descriptor for the exact archive.
-Preserve signed routing/runtime metadata and executable modes **inside** the
-bounded archive; do not apply Tauri's example recursive resource `chmod 644` to
-unpacked Node/router/backend executables. Disable builder ELF debug extraction
-and stripping, then compare installed Hub/archive bytes again. Builder options
-are defined in the [manifest reference](https://docs.flatpak.org/en/latest/flatpak-builder-command-reference.html).
+The sixth file retains Hub's MIT license. The icon is the existing 128px Hub PNG.
+The archive stays opaque and unchanged, including Node/backend/router modes,
+signed metadata and third-party license files. `strip:false` and
+`no-debuginfo:true` avoid rewriting pinned ELFs. A local source, owned state dir,
+offline download guard and sandboxed build follow the
+[builder reference](https://docs.flatpak.org/en/latest/flatpak-builder-command-reference.html).
 
 The resource destination is grounded in locked `tauri-utils` 2.9.3
-`resource_dir_from`: Linux first tries the executable's existing
-`../lib/<package_info.name>`. Existing package-layout fixtures use `Creator Hub`.
-For `/app/bin/creator-hub`, an existing `/app/lib/Creator Hub` is therefore the
-candidate resource directory. Prove this with the actual ELF, not an assumed
-`/app/share` copy or APPDIR override. The desktop file must use
-`Exec=creator-hub`, `Icon=com.creatorworks.hub`, `Terminal=false`; metainfo must
-match the app/desktop ID and version. These input files do not exist as a reviewed
-Flatpak staging tree yet.
+`resource_dir_from`, which first tries the executable's existing
+`../lib/<package_info.name>` on Linux. Actual Hub resource lookup remains
+untested. [Tauri's guide](https://v2.tauri.app/distribute/flatpak/) supports this
+packaging pattern, not ABI compatibility with this Ubuntu-built payload. Do not
+copy host `.so` files, disable WebKit's sandbox or broaden permissions to conceal
+a missing-library or renderer failure.
 
-[Tauri's Flatpak guide](https://v2.tauri.app/distribute/flatpak/) supports the
-binary/resources/desktop/icon/metainfo pattern, but its example runtime numbers
-are not this application's ABI proof. Missing libraries must be built for the
-selected runtime; do not copy arbitrary host `.so` files to make startup pass.
+## Scripts And Proof Boundaries
 
-Permissions deliberately omit `home`, `host`, host config/data paths, global
-session/system bus access, `org.freedesktop.Flatpak` host-command access, extra
-process visibility and `--allow=devel`. Network is included only for current
-Hub catalogue/download functionality; it is not needed merely to talk to the
-broker. A later broker-only/offline UI can remove it after proving its call graph.
-Network permission also exposes host abstract Unix sockets, so the broker must
-enforce authority itself; the bus filter is not the sole security boundary.
-The graphics and narrowly named bus permissions follow
-[Flatpak sandbox guidance](https://docs.flatpak.org/en/latest/sandbox-permissions.html).
-No software-rendering or sandbox-disabling workaround is proposed.
+`scripts/flatpak-package.cjs INPUT REVIEWED_PINS NEW_STAGE` reads exactly
+`creator-hub`, `modules.tar.gz`, `builtin-manifest.json` from a verified outer
+assembly. It checks external byte/size pins, ELF64/x86_64 identity, exact embedded
+descriptor bytes, known MCP 2.7.7/Setup 0.3.7 file maps, optional exact managed
+routing map, archive binding and before/after input snapshots. It publishes a
+new six-file stage; existing destinations, redirections, hard-linked inputs,
+changed bytes and extra staged files refuse. It neither extracts nor executes
+payloads. `archiveMembersVerified` stays false at this stage.
+
+The pin schema deliberately includes source commit/tree, assembly run/attempt,
+input artifact digest, Hub version and producer mode. **Pins are caller-reviewed
+data, not a self-authenticating build receipt.** This lane does not independently
+query GitHub, verify the artifact download, authenticate a source tree, or verify
+routing signatures. Main must first bind the exact successful assembly artifact
+and source, then supply independent expected pins. Never derive authorization
+from arbitrary downloaded files or relabel 0.1.12/0.1.13 as 0.1.14.
+
+`scripts/flatpak-disposable.cjs STAGE DECODER DECODER_SHA256 [SECOND_STAGE]`
+requires native Linux x64, explicitly opted-in GitHub-hosted execution in the
+exact repository, and no Flatpak/runtime-injection context. Its fresh
+`RUNNER_TEMP/creator-flatpak-*` contains a separate HOME, XDG config/data/cache/
+runtime, temp, empty GnuPG dir and `FLATPAK_USER_DIR`. Child environment is a
+finite allowlist, not inherited auth, user configuration or injection variables.
+The system Platform/SDK are inspected read-only; they must already exist.
+
+The runner verifies members with the rechecked pinned shared native archive decoder,
+builds/export locally with `--sandbox --disable-download`, compares packaged
+and deployed bytes/executable modes (also allowing the corresponding
+write-bit-removed modes), rejects unexpected grants, creates a real unsigned
+`.flatpak`, and installs only the exact test ref in the isolated user store.
+It probes `/usr/bin/ldd` inside the **Platform** sandbox with `flatpak run
+--sandbox --command=sh`; it does not use the SDK build shell as runtime proof.
+The shell snippets are static and inspect only the packaged file/owned fixture.
+It never launches Hub, either GUI backend, Node or the router.
+
+With a second separately verified stage, it requires different Hub bytes and
+deployment commit, performs an exact-ref local repository update, rechecks bytes,
+and checks a synthetic app-private config fixture through both the host's owned
+temp path and the sandbox's actual XDG config view. This proves only private
+package replacement/fixture retention, **not native settings retention, approved
+Hub updater/restart, legacy coexistence, or migration**. It does not uninstall,
+kill processes or remove partial evidence. Failure reports preserve command
+status/signal/error, elapsed time, stdout/stderr byte counts/hashes and bounded
+failure tails. Artifact output and private stores remain for capture.
+
+Even `suitePassed:true` cannot change these fields: `nativeLinuxAccepted`,
+`flatpakGuiAccepted`, `hostIntegrationAccepted`, `mcpAccepted`,
+`migrationAccepted`, `signedUpdateAccepted`, `releaseReady` are always false.
+`signedRoutingVerifiedByThisLane` is false. Linker success is not WebKit rendering,
+resource lookup, backend ABI, portal consent or host MCP acceptance.
+
+## Exact Disposable Invocation
+
+Main owns the workflow, verified artifact staging and public dependency setup.
+Nothing below is to run on the user's PC. Use a native hosted Linux x64 runner
+with Node 22+ and the repository's Rust toolchain. The bounded public bootstrap
+is based on [Flatpak's first-build guide](https://docs.flatpak.org/en/latest/first-build.html):
+
+```sh
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends flatpak flatpak-builder appstream desktop-file-utils
+sudo flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+sudo flatpak install --system --noninteractive --assumeyes --no-related flathub org.gnome.Platform/x86_64/50 org.gnome.Sdk/x86_64/50
+```
+
+This provisions only public runtime/build dependencies on that disposable host,
+not signing keys or product/user configs. Retain bootstrap errors if refs,
+namespaces or packages are unavailable; do not substitute another runtime or
+turn off sandboxing without a separately reviewed experiment.
+
+Place independent reviewed pins in `$RUNNER_TEMP/reviewed-flatpak-pins.json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "version": "0.1.14",
+  "platform": "linux",
+  "arch": "x86_64",
+  "mcpMode": "writable",
+  "sourceCommit": "ASSEMBLY_COMMIT_40_HEX",
+  "sourceTree": "ASSEMBLY_TREE_40_HEX",
+  "runId": 38607998719,
+  "runAttempt": 1,
+  "inputArtifactSha256": "VERIFIED_ORIGINAL_ARTIFACT_DIGEST_64_HEX",
+  "files": {
+    "creator-hub": { "size": 0, "sha256": "REVIEWED_HUB_HASH_64_HEX" },
+    "builtin-manifest.json": { "size": 0, "sha256": "REVIEWED_DESCRIPTOR_HASH_64_HEX" },
+    "modules.tar.gz": { "size": 0, "sha256": "REVIEWED_ARCHIVE_HASH_64_HEX" }
+  }
+}
+```
+
+This template is deliberately invalid until all placeholders, sizes and actual
+run attempt are reviewed. Run `38607998719`/short source `7eb00ad` passing was
+reported by main, not independently verified by this packaging task. The local
+checkout currently has no `artifacts/unified/ci-signed-unix-hub` to stage. Its
+Linux assembly has no installer; that is acceptable for this experiment.
+
+```sh
+node --test scripts/flatpak-package.test.cjs
+INPUT="$GITHUB_WORKSPACE/artifacts/unified/ci-signed-unix-hub"
+STAGE="$RUNNER_TEMP/flatpak-stage"
+node scripts/flatpak-package.cjs "$INPUT" "$RUNNER_TEMP/reviewed-flatpak-pins.json" "$STAGE"
+cargo build --locked --release --manifest-path native/module-archive/Cargo.toml --target-dir "$RUNNER_TEMP/flatpak-decoder-target"
+DECODER="$RUNNER_TEMP/flatpak-decoder-target/release/creator-hub-module-archive"
+DECODER_SHA256="$(sha256sum "$DECODER" | cut -d ' ' -f1)"
+CREATOR_FLATPAK_PACKAGE_TEST=1 node scripts/flatpak-disposable.cjs "$STAGE" "$DECODER" "$DECODER_SHA256"
+```
+
+The decoder hash above is computed only for a tool freshly compiled from the
+trusted consumer checkout with its locked dependency graph, not an arbitrary
+downloaded executable. Alternatively use an independently pinned decoder from
+the verified assembly. Keep the consumer source identity with the report.
+For a second verified outer build, stage it in a different fresh directory with
+its own reviewed pins, then append that directory as `SECOND_STAGE` to the
+disposable command. One input cannot prove an update by rebuilding unchanged
+bytes. Capture `creator-flatpak-*/flatpak-report.json`, `.flatpak` bundles, local
+repository, build dirs and resolved `/app/manifest.json` even when linkage fails.
+
+`FLATPAK_USER_DIR`, exact-ref operations and the bundle interface are documented
+in the [Flatpak command reference](https://docs.flatpak.org/en/latest/flatpak-command-reference.html).
+The test remote is unsigned and private, not a publication or update trust model.
+
+## Current Results And Stop Conditions
+
+- Windows source/temp-fixture tests: 18 passed, zero skipped, no native children.
+- Related archive/package source suites: combined 37 passed, one existing Unix
+  mode test skipped on Windows; no native Linux/Flatpak execution implied.
+- Local runner inventory: no `flatpak`, `flatpak-builder`, Docker or Podman. No
+  accessible fresh Linux executor; existing workflow reruns cannot execute these
+  new uncommitted scripts. User WSL/SSH or user Flatpak provisioning is excluded.
+- Real Flatpak build, bundle export/install/update, Platform linkage and renderer:
+  **not run**. No Flatpak artifact or GTK ABI success is claimed.
+- Existing inspected Linux package receipts label 0.1.12/0.1.13. They were not
+  relabeled. Fresh current14 assembly acceptance is main's independently verified
+  prerequisite, not replaced by fixture hashes.
+
+Stop on any pinned-input, decoder, tool, runtime, permission, byte-preservation,
+linkage or private-fixture mismatch; preserve the first failure report. No timing,
+library-copy, permission or sandbox workaround is included. The smallest next
+test is the single-input command above using main's freshly verified Linux outer
+assembly. Actual unified native install/update/migration remains a separate gap.
 
 ## Host MCP Broker Boundary
 
@@ -213,7 +324,7 @@ immutable before-images and report failed cleanup separately from original failu
 | Gate | Smallest exact positive/negative evidence |
 | --- | --- |
 | Native current14 baseline | Bind source/tree/run/attempt, Hub hash, private input hashes/modes and signed descriptors. Exercise actual Hub terms, Convergence deferral, hosted decline/retry/status/recipe and parent-reaped normal closure. Component scope must report migration skipped, never full flow. |
-| Flatpak ABI/resources | Build/export five-file recipe; retain resolved manifest, app/Platform/SDK commits and arch. Check ELF interpreter/NEEDED/symbol versions, real nonblank WebKit rendering, resource lookup and archive bytes/modes. Repacking alone does not pass. |
+| Flatpak ABI/resources | Build/export six-file recipe; retain resolved manifest, app/Platform/SDK commits and arch. Check ELF interpreter/NEEDED/symbol versions, real nonblank WebKit rendering, resource lookup and archive bytes/modes. Repacking alone does not pass. |
 | No broker / foreign peer | Missing broker, wrong version/app/deployment, proxy/PID ambiguity, reused PID, changed bus owner, oversized/unknown method/field, replay/expired nonce and arbitrary path/argv/env must refuse without host writes or process launch. |
 | No-consent retention | Preview, Later/Keep existing, cancel, read-only launch and failed admission leave exact host/sandbox settings, legacy registrations/desktop files, client entries, projects and active route unchanged, including absence. Run without broad home/host permissions. |
 | Reviewed migration | Known exact legacy client entries in JSON/JSONC/TOML convert only after native review; preserve unrelated bytes/options/unknown fields. Current-vs-legacy product conflicts and custom server selection stay explicit. Concurrent standalone owner or changed before-image refuses. |
@@ -223,9 +334,10 @@ immutable before-images and report failed cleanup separately from original failu
 | Flatpak lifecycle | Fresh install and native-legacy coexistence; update/cancel/rollback/uninstall preserve host runtime/settings/projects and sandbox state unless separately approved data deletion. Flatpak owns outer updates; native Tauri installer/update/removal commands must not operate on the sandbox deployment. |
 | Real user workflow | Actual configured host AI connection and Unity workflow remain a separate authorized acceptance gate. Helper events, metadata receipts and SDK fixture connections do not manufacture that proof. |
 
-## Local Verification And Next Step
+## Prior Audit Verification
 
-Read-only source audit plus disposable fixtures on Windows, 2026-10-14:
+Initial read-only source audit plus disposable fixtures on Windows, 2026-10-14,
+before the packaging continuation above. These retain that earlier test scope:
 
 | Command | Result | Scope |
 | --- | --- | --- |
@@ -235,9 +347,10 @@ Read-only source audit plus disposable fixtures on Windows, 2026-10-14:
 | `python -B scripts/native-unix-window.test.py` | 36 passed, 2 skipped | Mocked owned-window/identity controls; Linux private receipt/kernel cases not run. |
 | `python -B scripts/native-unix-window-fixture.test.py` | 8 passed | Pure driver regressions, no GTK/X11/proc/live-app reads. |
 
-Smallest next action for main: refresh the appropriate source-bound native inputs
-and outer Linux Hub, then capture the existing owned native GUI primitive against
-that exact Hub/backend before designing a full guide lane. Flatpak remains
+The native Linux follow-up is still an actual current-payload GUI/guide capture;
+it is separate from the single-input disposable Flatpak package experiment above.
+Main has reported a fresh signed Linux outer assembly; a rebuild is not required
+merely to wrap those independently verified unchanged bytes. Flatpak remains
 blocked on reviewed UI/broker admission, caller mapping, native host packaging,
 runtime ABI, portal grant handling and actual sandbox migration/lifecycle tests.
 This document does not authorize production changes or publication.
