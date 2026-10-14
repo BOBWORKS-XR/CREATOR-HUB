@@ -482,7 +482,7 @@ def install(root):
         report["control"] = deb_control(control)
         require(pinned(deb, DEB_PIN, DEB_PIN[2]) == before, "DEB changed during control review")
         report["phase"] = "dpkg-install"
-        run_tool(root, "dpkg-install", ["/usr/bin/sudo", "-n", "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "LANG=C.UTF-8",
+        run_tool(root, "dpkg-install", ["/usr/bin/sudo", "-n", "/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8",
                                        "/usr/bin/dpkg", "--install", "--", str(deb)], timeout=90)
         state = installed_state(root, "postinstall-state")
         save_json(root / "installed-package.json", {"packageState": state, "debSha256": DEB_PIN[1], "sourceCommit": SOURCE})

@@ -419,11 +419,30 @@ class DebTests(unittest.TestCase):
 
     def test_source_guard_limits_installation_to_exact_sanitized_native_dpkg(self):
         source = SCRIPT.read_text()
-        self.assertIn('"/usr/bin/sudo", "-n", "/usr/bin/env", "-i", "PATH=/usr/bin:/bin"', source)
+        self.assertIn('"/usr/bin/sudo", "-n", "/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"', source)
         self.assertIn('"/usr/bin/dpkg", "--install", "--", str(deb)', source)
         self.assertNotIn("apt-get -f", source)
         self.assertNotIn("--force", source)
         self.assertIn("INSTALLED_HUB_PIN[1]", source)
+
+    def test_installer_has_system_sbin_without_broadening_gui_environment(self):
+        commands = []
+        def tool(_root, label, command, **_kwargs):
+            commands.append(command)
+            if label == "preinstall-state":
+                return 1, b""
+            return (0, control_fixture()) if label == "deb-control" else (0, b"")
+        with tempfile.TemporaryDirectory(prefix="creator-deb-pure-") as temp, \
+                mock.patch.object(p, "verify_inputs", return_value={}), mock.patch.object(p, "verify_stage", return_value={}), \
+                mock.patch.object(p.os.path, "lexists", return_value=False), mock.patch.object(p, "pinned", return_value={"sha256": p.DEB_PIN[1]}), \
+                mock.patch.object(p, "run_tool", side_effect=tool), \
+                mock.patch.object(p, "installed_state", return_value="creator-hub\t0.1.14\tamd64\tinstalled\n"):
+            root = Path(temp).resolve()
+            p.install(root)
+        install = next(command for command in commands if command[0] == "/usr/bin/sudo")
+        self.assertEqual(install, ["/usr/bin/sudo", "-n", "/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8",
+                                   "/usr/bin/dpkg", "--install", "--", str(p.input_path(root, "native-packages/" + p.DEB_NAME))])
+        self.assertEqual(p.child_env({}, root)["PATH"], "/usr/bin:/bin")
 
 
 class SourceGuardTests(unittest.TestCase):
