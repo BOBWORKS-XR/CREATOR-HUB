@@ -186,3 +186,26 @@ dictionary regression covers both a real default-value string and an absent
 value without accessing the PC registry. Original reports remain under
 `artifacts/legacy-retention-38486711648/`. This failure is harness serialization,
 not evidence of uninstall failure or retention acceptance.
+
+## Accepted Windows Retention Scope
+
+[Run 38487590987](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38487590987)
+at source `3209e54` passed both disposable native jobs. Each exact published
+installer ran, then its generated uninstaller exited normally. App registrations,
+executables and known installed payloads were absent afterward. Exact synthetic
+before-images and metadata were retained in five MCP stores and three Setup
+stores. The residual uninstaller/empty install root were removed only after
+their exact scoped identity checks.
+
+Generated uninstaller proofs from that run:
+
+| Product | Bytes | SHA256 |
+| --- | ---: | --- |
+| MCP 2.7.7 | 70977 | `8ab62d3fac6dffd9234e5f54bbc19b7388fe84a341aceae086d9dca87afb8114` |
+| Setup 0.3.7 | 67714 | `f8070d8e017032bcca3f91b3b0aa451780583dc7ab7503c16f7f7a3dee1e82b5` |
+
+Local reports: `artifacts/legacy-retention-38487590987/`. This proves only the
+tested published Windows uninstallers' retention procedure. It does not prove
+Hub migration, live AI-client reconnection, safe removal of modified/custom
+installations, Mac/Linux cleanup or release readiness. Product/migration/release
+acceptance flags remain false. The user's installed applications were untouched.
