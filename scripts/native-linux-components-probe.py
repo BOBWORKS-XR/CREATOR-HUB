@@ -117,12 +117,30 @@ def visible(nodes, atspi):
     return [node for node in nodes if node.get_state_set().contains(atspi.StateType.SHOWING)]
 
 
+def node_text(node, atspi):
+    # Paragraph names are empty in the captured WebKit tree. This is a read,
+    # never EditableText. https://docs.gtk.org/atspi2/method.Text.get_text.html
+    roles = {getattr(atspi.Role, key, -1) for key in ("PARAGRAPH", "TEXT", "STATIC", "LABEL")}
+    if node.get_role() not in roles or not node.get_state_set().contains(atspi.StateType.SHOWING):
+        return ""
+    interface = node.get_text_iface()
+    if interface is None:
+        return ""
+    count = interface.get_character_count()
+    require(type(count) is int and 0 <= count <= 2048, "Owned UI text exceeds character bound")
+    text = interface.get_text(0, count)
+    require(isinstance(text, str) and len(text) <= count and len(text.encode("utf8")) <= 8192
+            and interface.get_character_count() == count, "Owned UI text changed or exceeded byte bound")
+    return text
+
+
 def ui_snapshot(nodes, owner, atspi):
     result = {"actionCount": 0, "ownership": owner.evidence(), "nodes": [
-        {"name": (n.get_name() or "")[:512], "pid": n.get_process_id(), "role": int(n.get_role()),
+        {"name": (n.get_name() or "")[:512], "text": node_text(n, atspi), "pid": n.get_process_id(), "role": int(n.get_role()),
          **{key.lower(): n.get_state_set().contains(getattr(atspi.StateType, key))
             for key in ("SHOWING", "ENABLED", "SENSITIVE", "BUSY", "DEFUNCT")}} for n in nodes],
         "controls": B.control_metadata(nodes, owner.helper, atspi)}
+    require(sum(len(n["text"].encode("utf8")) for n in result["nodes"]) <= 16384, "Owned UI text aggregate exceeds bound")
     owner.recheck(full=True)
     return result
 
@@ -131,7 +149,8 @@ def fixed_control(nodes, action, owner, atspi):
     require(action in CONTROLS, "Unreviewed component action")
     name, heading = CONTROLS[action]
     shown = visible(nodes, atspi)
-    require(heading is None or any(n.get_name() == heading for n in shown), "Required component context missing: " + str(heading))
+    require(heading is None or any(n.get_name() == heading or node_text(n, atspi) == heading for n in shown),
+            "Required component context missing: " + str(heading))
     choices = [n for n in shown if n.get_name() == name and n.get_role() == atspi.Role.PUSH_BUTTON]
     require(len(choices) == 1, "Exact unique component button required: " + name)
     node = choices[0]
@@ -159,7 +178,7 @@ def press(action, owner, atspi):
 
 
 def shown_names(snapshot):
-    return [n["name"] for n in snapshot["nodes"] if n["showing"]]
+    return [value for n in snapshot["nodes"] if n["showing"] for value in (n["name"], n.get("text", "")) if value]
 
 
 def ready_snapshot(snapshot, state):
@@ -194,7 +213,7 @@ def proc_children(pid, opener=open):
     return result
 
 
-def direct_backend(root_record, app, helper):
+def direct_backend(root_record, app, helper, observed=None):
     """Inventory only direct children; a name/receipt is never image authority."""
     found = []
     for pid in proc_children(root_record["pid"]):
@@ -202,6 +221,10 @@ def direct_backend(root_record, app, helper):
             actual = B.native_process(pid, helper)
         except FileNotFoundError:
             continue
+        if observed is not None:
+            key = str(actual["pid"]) + ":" + actual["startTime"]
+            require(key in observed or len(observed) < 32, "Observed Root child identities exceed bound")
+            observed[key] = actual
         if actual["kernelImageSha256"] != APPS[app]["hash"]:
             continue
         require(actual["parentPid"] == root_record["pid"] and actual["uids"] == root_record["uids"],
@@ -230,6 +253,12 @@ def receipt(root_record, actual, image, app):
 
 
 def dialog_window(pid, title, x11):
+    matches = [item["window"] for item in owned_windows(pid, x11) if item["title"] == title and item["mapped"]]
+    require(len(matches) <= 1, "Ambiguous exact native dialog")
+    return matches[0] if matches else None
+
+
+def owned_windows(pid, x11):
     matches = []
     for xid in B.client_ids(x11):
         claim = x11.property(xid, "_NET_WM_PID")
@@ -237,16 +266,14 @@ def dialog_window(pid, title, x11):
             continue
         info = x11.inspect(xid)
         require(info["pid"] == pid, "Dialog claimed PID differs from native XRes PID")
-        if info["title"] == title and info["mapped"]:
-            matches.append(xid)
-    require(len(matches) <= 1, "Ambiguous exact native dialog")
-    return matches[0] if matches else None
+        matches.append({"window": xid, **info})
+    return matches
 
 
 def consent(root, action, request, helper, x11, atspi, root_record):
     app, choice = action.split("-", 1)
     require(app in APPS and choice in ("decline", "approve"), "Unknown native consent action")
-    deadline, routing = time.monotonic() + 20, None
+    deadline, routing, observed, matched = time.monotonic() + 20, None, {}, None
     while time.monotonic() < deadline:
         helper.identity(request, helper.Proc())
         require(B.native_process(request.pid, helper) == root_record, "Root identity changed during consent")
@@ -257,9 +284,10 @@ def consent(root, action, request, helper, x11, atspi, root_record):
                                           request.sha256, str(route_xid), "Enable managed MCP routing",
                                           "DIALOG", "Enable managed routing"])
             routing = helper.perform(route, atspi, helper.Proc(), x11)
-        found = direct_backend(root_record, app, helper)
+        found = direct_backend(root_record, app, helper, observed)
         if found:
             actual, image = found
+            matched = actual
             value = receipt(root_record, actual, image, app)
             pins = [str(request.pid), request.start, request.sha256, APPS[app]["hash"], B.SOURCE, str(B.RUN)]
             parsed = helper.Receipt.parse(value, pins)
@@ -283,6 +311,12 @@ def consent(root, action, request, helper, x11, atspi, root_record):
             finally:
                 binding.close()
         time.sleep(0.05)
+    diagnostics = {"readOnly": True, "authorization": False, "rootChildren": list(observed.values()),
+                   "rootWindows": owned_windows(request.pid, x11), "matchedBackend": matched, "routing": routing}
+    if matched is not None and helper.Proc().exists(matched["pid"]):
+        require(B.native_process(matched["pid"], helper) == matched, "Matched backend changed before diagnostic capture")
+        diagnostics["backendWindows"] = owned_windows(matched["pid"], x11)
+    B.save_json(root / (action + "-observation.json"), diagnostics)
     raise RuntimeError("Exact native component consent readiness deadline: " + action)
 
 
@@ -290,7 +324,7 @@ def worker(root, args):
     require(len(args) == 4, "Expected fixed worker action and owned Root PID/start/XID")
     action, pid, start, xid = args
     require(action in CONTROLS or action in ("navigation", "setup-declined", "mcp-declined", "setup-ready",
-            "mcp-ready", "mcp-saved", "setup-decline", "setup-approve", "mcp-decline", "mcp-approve"),
+            "mcp-ready", "mcp-saved", "setup-decline", "setup-approve", "mcp-decline", "mcp-approve", "failure-snapshot"),
             "Unknown bounded component worker")
     B.verify_stage(root)
     manifest_pins(root)
@@ -322,6 +356,8 @@ def worker(root, args):
         while time.monotonic() < deadline:
             nodes = own_tree(helper.select_window(request, Atspi), owner, Atspi)
             last = ui_snapshot(nodes, owner, Atspi)
+            if action == "failure-snapshot":
+                return last
             if action in ("setup-ready", "mcp-ready", "mcp-saved"):
                 alerts = [n["name"] for n in last["nodes"] if n["showing"] and n["name"]
                           and (n["role"] == int(Atspi.Role.ALERT) or n["name"].startswith("Action failed:"))]
@@ -504,6 +540,17 @@ def probe(root, env):
         failure = error
         report["error"] = str(error)[:1500]
     finally:
+        if failure is not None and child is not None and capture is not None and child.poll() is None \
+                and report.get("snapshot") and all(w["exitCode"] is not None for w in report["workers"]):
+            try:
+                report["failureSnapshot"] = call(root, env_child, "failure-snapshot", child, start, xid, capture, report)
+            except Exception as diagnostic:
+                report["failureSnapshotRefusal"] = str(diagnostic)[:1000]
+            if not (root / "root-window.png").exists():
+                try:
+                    report["failureBitmap"] = B.run_worker(root, env_child, "bitmap", child.pid, start, xid, capture, report["workers"])
+                except Exception as diagnostic:
+                    report["failureBitmapRefusal"] = str(diagnostic)[:1000]
         if child is not None and capture is not None and child.poll() is None and report.get("snapshot") \
                 and not report.get("normalCloseAttempted") and all(w["exitCode"] is not None for w in report["workers"]):
             try:

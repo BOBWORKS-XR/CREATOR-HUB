@@ -226,6 +226,18 @@ class NativeReceiptTests(unittest.TestCase):
         binding.close.assert_called_once()
         save.assert_called_once()
 
+    def test_deadline_retains_read_only_observation_without_input_or_timing_change(self):
+        parent, _actual, _image = self.fixture()
+        request = types.SimpleNamespace(pid=42)
+        helper = types.SimpleNamespace(perform=mock.Mock())
+        with mock.patch.object(p.time, "monotonic", side_effect=[0, 21]), \
+                mock.patch.object(p, "owned_windows", return_value=[]), \
+                mock.patch.object(p.B, "save_json") as save, self.assertRaisesRegex(RuntimeError, "readiness deadline"):
+            p.consent(Path("/fixture"), "setup-decline", request, helper, object(), object(), parent)
+        helper.perform.assert_not_called()
+        self.assertFalse(save.call_args.args[1]["authorization"])
+        self.assertTrue(save.call_args.args[1]["readOnly"])
+
     def test_backend_absence_is_not_fabricated_exit_zero_and_pid_reuse_refuses(self):
         helper = types.SimpleNamespace(Proc=lambda: types.SimpleNamespace(exists=lambda _: False))
         self.assertTrue(p.backend_gone({"pid": 42, "startTime": "100"}, helper))
@@ -236,6 +248,25 @@ class NativeReceiptTests(unittest.TestCase):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_empty_ax_name_uses_only_bounded_native_read_only_text(self):
+        interface = types.SimpleNamespace(get_character_count=mock.Mock(return_value=len(p.RECIPE)),
+                                          get_text=mock.Mock(return_value=p.RECIPE))
+        node = types.SimpleNamespace(get_role=lambda: 72, get_state_set=lambda: types.SimpleNamespace(contains=lambda _: True),
+                                     get_text_iface=lambda: interface)
+        atspi = types.SimpleNamespace(Role=types.SimpleNamespace(PARAGRAPH=72), StateType=types.SimpleNamespace(SHOWING=1))
+        self.assertEqual(p.node_text(node, atspi), p.RECIPE)
+        interface.get_text.assert_called_once_with(0, len(p.RECIPE))
+        snap = {"nodes": [{"name": "", "text": p.RECIPE, "showing": True}]}
+        self.assertIn(p.RECIPE, p.shown_names(snap))
+        interface.get_character_count = mock.Mock(return_value=2049)
+        interface.get_text.reset_mock()
+        with self.assertRaisesRegex(RuntimeError, "character bound"):
+            p.node_text(node, atspi)
+        interface.get_text.assert_not_called()
+        interface.get_character_count = mock.Mock(side_effect=[len(p.RECIPE), 1])
+        with self.assertRaisesRegex(RuntimeError, "changed"):
+            p.node_text(node, atspi)
+
     @unittest.skipIf(os.name == "nt", "Native private modes/inodes are Linux contracts")
     def test_only_native_guide_preference_change_allowed_and_fixtures_retained(self):
         with tempfile.TemporaryDirectory(prefix="component-pure-") as folder:

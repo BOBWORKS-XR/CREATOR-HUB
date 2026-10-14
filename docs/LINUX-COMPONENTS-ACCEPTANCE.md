@@ -107,3 +107,28 @@ Local pre-dispatch verification: new focused suite 18 passed / 1 native-mode
 fixture skipped on Windows; unchanged Root suite 75 passed / 1 skipped. Workflow
 YAML and embedded GitHub-script JavaScript syntax parsed. These are harness
 contracts, not native component acceptance.
+
+## First Actual Component Run
+
+Run `38644484142`, source `22838a5630f2e6456c223713d4e6c105a68b2948`,
+job `116127860015`: original artifact/source/resource/DEB checks and actual install
+passed. Linux preflight passed 76 Root and 19 component tests. Actual native Root
+terms/save, convergence `Continue for now` and one Setup navigation press passed.
+The Setup consent worker reached its unchanged 20-second readiness deadline;
+no consent input occurred. Cleanup normally reaped Root exit 0 with output EOF.
+No Setup/MCP operation or preference acceptance is claimed.
+
+Original result artifact `11931861904`, 386621915 bytes, SHA-256
+`19c4ff9e4e987d210d78d4a0d4707842f66cb2d569f1ee4dafeeb9f20424c666`,
+is retained under `artifacts/native-linux-components-38644484142`. Root stderr
+was empty. The first harness did not retain a post-failure Root tree or child
+inventory, so **product admission versus dialog discovery remains unknown**.
+
+The minimal diagnostic follow-up adds only failure-time owned tree/PNG and exact
+Root direct-child/kernel-image/window metadata; no deadline, payload, environment,
+permission or input change. Nameless WebKit paragraph/text nodes observed in the
+actual tree use the bounded, read-only native Text interface (2048 characters per
+node, 16384 UTF-8 bytes aggregate), never EditableText. Primary API contracts:
+[Text.get_text](https://docs.gtk.org/atspi2/method.Text.get_text.html) and
+[Text.get_character_count](https://docs.gtk.org/atspi2/method.Text.get_character_count.html).
+Failure diagnostics never authorize another input or override the original error.
