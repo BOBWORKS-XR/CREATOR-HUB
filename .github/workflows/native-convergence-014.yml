@@ -1,4 +1,4 @@
-name: Actual Windows first-launch convergence with owned policy directory (not release)
+name: Actual Windows convergence with bounded baseline refusal diagnostics (not release)
 on:
   push:
     branches: [validation/convergence-014]
