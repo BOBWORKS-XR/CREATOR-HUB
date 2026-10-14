@@ -21,6 +21,9 @@ PACKAGE_SHA = "db47aed5f5acd4e00e8e0782361444de228c4181eeea4970f90116f1f16cf10b"
 PACKAGE_BYTES = 96666824
 PACKAGE = "creator-works-mcp"
 OLD, NEW = "2.7.7", "2.7.7-1+hub.retention014.1"
+REUSE_RUN, REUSE_ARTIFACT = 38642404016, 11929999662
+CANDIDATE_BYTES = 69843476
+CANDIDATE_SHA = "0f3c7ade0eba54b8d44a8ea5e71d33da0938f96f6c3f4b68502e937532eccd19"
 SERVER = "usr/lib/Creator Works MCP/server/"
 RUNTIME = {SERVER + s for s in (
     "LICENSE", "THIRD_PARTY_NOTICES.md", "creator-works-mcp.mjs", "runtime/LICENSE",
@@ -76,6 +79,14 @@ def md5_entries(data):
         require(name == member_name(name) and name not in entries, "Duplicate/unsafe md5 member")
         entries[name] = digest
     return entries
+
+
+def desktop_discovery(gio):
+    # PyGObject raises TypeError for the missing DesktopAppInfo.new() result on Ubuntu 22.04.
+    matches = [{"id": app.get_id(), "executable": app.get_executable()}
+               for app in gio.AppInfo.get_all() if app.get_id() == "Creator Works MCP.desktop"]
+    require(len(matches) <= 1, "Duplicate desktop registration")
+    return matches[0] if matches else None
 
 
 def fingerprint(path):
@@ -177,12 +188,16 @@ class Probe:
     def prepare(self):
         url = f"https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/download/v2.7.7/{ASSET}"
         require(self.pin["packageUrl"] == url, "Unexpected public URL")
-        with urllib.request.urlopen(url, timeout=120) as response, self.old.open("xb") as target:
-            total = 0
-            while chunk := response.read(1024 * 1024):
-                total += len(chunk)
-                require(total <= PACKAGE_BYTES, "Download exceeds exact package size")
-                target.write(chunk)
+        reuse = self.root.parent / "linux-deb-retention-reuse"
+        if reuse.is_dir():
+            shutil.copyfile(reuse / ASSET, self.old)
+        else:
+            with urllib.request.urlopen(url, timeout=120) as response, self.old.open("xb") as target:
+                total = 0
+                while chunk := response.read(1024 * 1024):
+                    total += len(chunk)
+                    require(total <= PACKAGE_BYTES, "Download exceeds exact package size")
+                    target.write(chunk)
         original = self.verify_old()
         control_tar = self.command("original-control-tar", ["dpkg-deb", "--ctrl-tarfile", str(self.old)]).stdout
         controls = {}
@@ -228,8 +243,14 @@ class Probe:
             "Description": "TEST ONLY - original MCP 2.7.7 runtime compatibility payload\n No launcher or desktop entries; not a published Creator Hub transition."}
         (metadata / "control").write_text("".join(f"{k}: {v}\n" for k, v in new_fields.items()))
         (metadata / "md5sums").write_text("".join(f"{files[n]['md5']}  {n}\n" for n in sorted(RUNTIME)))
-        self.command("build-candidate", ["dpkg-deb", "--root-owner-group", "-Zxz", "-z1", "--build",
-                     str(stage), str(self.new)], timeout=180)
+        if reuse.is_dir():
+            retained = fingerprint(reuse / self.new.name)
+            require((retained["bytes"], retained["sha256"]) == (CANDIDATE_BYTES, CANDIDATE_SHA),
+                    "Exact immutable candidate from first run required")
+            shutil.copyfile(reuse / self.new.name, self.new)
+        else:
+            self.command("build-candidate", ["dpkg-deb", "--root-owner-group", "-Zxz", "-z1", "--build",
+                         str(stage), str(self.new)], timeout=180)
         require(self.package_payload(self.new, RUNTIME) == {n: files[n] for n in RUNTIME},
                 "Candidate changed original runtime bytes/modes/ownership")
         candidate_control = self.command("candidate-control", ["dpkg-deb", "--field", str(self.new)]).stdout
@@ -237,6 +258,9 @@ class Probe:
         self.command("ldd-original-node", ["ldd", str(source / (SERVER + "runtime/node"))])
         plan = {"original": original, "originalControl": fields, "candidate": fingerprint(self.new),
                 "candidateControl": new_fields, "files": files, "runtime": sorted(RUNTIME), "retired": sorted(RETIRED)}
+        if reuse.is_dir():
+            plan["reusedImmutableInput"] = {"runId": REUSE_RUN, "artifactId": REUSE_ARTIFACT,
+                "sourceRevision": "a0297d5622681b633ce6364d9b97244ffe892416"}
         return self.save("plan", plan)
 
     def plan(self):
@@ -280,9 +304,7 @@ class Probe:
                 require(not result.stdout, "Retired package ownership remains")
         verification = self.command(phase + "-verify", ["dpkg", "--verify", PACKAGE])
         require(not verification.stdout and not verification.stderr, "dpkg verification reported differences")
-        desktop = self.command(phase + "-desktop-discovery", ["/usr/bin/python3", "-c",
-            "from gi.repository import Gio; import json; a=Gio.DesktopAppInfo.new('Creator Works MCP.desktop'); "
-            "print(json.dumps(None if a is None else {'id':a.get_id(),'executable':a.get_executable()}))"])
+        desktop = self.command(phase + "-desktop-discovery", ["/usr/bin/python3", "-B", str(Path(__file__).resolve()), "desktop"])
         discovery = json.loads(desktop.stdout)
         if phase == "before":
             require(discovery == {"id": "Creator Works MCP.desktop", "executable": "creator-works-mcp-launcher"},
@@ -301,10 +323,14 @@ class Probe:
 
 
 def main():
-    require(len(sys.argv) == 2 and sys.argv[1] in ("prepare", "install", "before", "upgrade", "after"), "Fixed phase required")
+    require(len(sys.argv) == 2 and sys.argv[1] in ("prepare", "install", "before", "upgrade", "after", "desktop"), "Fixed phase required")
     probe = Probe()
     phase = sys.argv[1]
-    result = probe.snapshot(phase) if phase in ("before", "after") else getattr(probe, phase)()
+    if phase == "desktop":
+        from gi.repository import Gio
+        result = desktop_discovery(Gio)
+    else:
+        result = probe.snapshot(phase) if phase in ("before", "after") else getattr(probe, phase)()
     print(json.dumps(result))
 
 

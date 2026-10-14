@@ -53,6 +53,10 @@ Current primary docs checked 2026-10-14:
 - [dpkg-query](https://manpages.debian.org/trixie/dpkg/dpkg-query.1.en.html):
   `-L` reports installed file lists and `-S` package ownership; these alone do not
   inventory arbitrary maintainer-script output or alternatives.
+- [Gio application enumeration](https://docs.gtk.org/gio/type_func.AppInfo.get_all.html)
+  lists registered applications without constructing a missing desktop object.
+  [DesktopAppInfo.new](https://docs.gtk.org/gio-unix/ctor.DesktopAppInfo.new.html)
+  may return NULL when the desktop ID no longer exists.
 
 Inference to test, not an atomicity guarantee: an existing Node process should
 continue while normal unpack replaces its on-disk image, and unchanged files at
@@ -102,8 +106,29 @@ node --check scripts/linux-deb-retention-sdk.cjs
 node --test scripts/linux-deb-retention-sdk.test.cjs
 ```
 
-Native dispatch and exact outcome are pending. A green portable preflight is
-not native acceptance. Original/candidate DEBs, command exits/stdout/stderr,
-before/after package captures and `report.json` are retained for seven days by
-the single workflow. A compact permanent evidence record will identify the run,
-source, package hashes and measured outcome without lifting other gates.
+### First Run: Confirmed Probe Failure
+
+[38642404016](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38642404016),
+source `a0297d5622681b633ce6364d9b97244ffe892416` (parent
+`058516dfc9e7d12c38c9be039ae52a318e2c512e`), failed overall. Its dpkg update
+completed and package status was `install ok installed` at the higher version.
+Already-live PID 3375/start time 77239 answered 53 tools and the same bounded
+reference hash before/after. Both original aliases reconnected on both sides.
+The after-snapshot completed package/hash/ownership/absence/verification checks,
+then its desktop-observer constructor raised `TypeError: constructor returned
+NULL`. This is a **confirmed harness defect**, not a package/runtime failure.
+Settings-after and overall acceptance were not recorded; all gates stayed false.
+
+The minimal regression reproduces the missing constructor's exception and checks
+enumeration with present, absent and duplicate IDs. The corrected capture uses
+fresh-process Gio enumeration. No product behavior changes. The rerun downloads
+the first run's immutable artifact `11929999662` (ZIP SHA-256
+`fed96cd27ab4245e61ac91fd1fe3010e70cdb2192dbc4250786c1ed15f3d6d9e`)
+and reuses the exact original/candidate DEBs. Candidate: 69,843,476 bytes, SHA-256
+`0f3c7ade0eba54b8d44a8ea5e71d33da0938f96f6c3f4b68502e937532eccd19`.
+The native guard and archive checks still apply; package bytes are not rebuilt.
+
+Corrected native outcome is pending. A green portable preflight is not native
+acceptance. Original/candidate DEBs, command exits/stdout/stderr, before/after
+package captures and `report.json` are retained for seven days. A permanent
+compact evidence record will preserve both outcomes without lifting other gates.

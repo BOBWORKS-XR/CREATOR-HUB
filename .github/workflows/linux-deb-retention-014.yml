@@ -5,6 +5,7 @@ on:
     paths: ['.github/workflows/linux-deb-retention-014.yml']
 permissions:
   contents: read
+  actions: read
 jobs:
   deb-retention:
     if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' && github.ref == 'refs/heads/validation/linux-deb-retention-014'
@@ -24,6 +25,14 @@ jobs:
           python3 -B scripts/linux-deb-retention-probe.test.py
           node --check scripts/linux-deb-retention-sdk.cjs
           node --test scripts/linux-deb-retention-sdk.test.cjs
+      - name: Reuse exact original and candidate DEBs from first transaction; do not rebuild product bytes
+        uses: actions/download-artifact@v5
+        with:
+          artifact-ids: '11929999662'
+          run-id: '38642404016'
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/linux-deb-retention-reuse
       - name: Install the lockfile-pinned official SDK without build or lifecycle scripts
         run: npm ci --prefix modules/mcp --omit=dev --ignore-scripts --no-audit --no-fund
       - name: Provision package metadata and desktop-discovery support

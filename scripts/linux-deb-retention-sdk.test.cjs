@@ -90,5 +90,8 @@ test('workflow is one push-only Ubuntu job with preflight first and no secret/wr
   assert.match(file, /contents: read/);
   assert.ok(file.indexOf('linux-deb-retention-probe.test.py') < file.indexOf('npm ci'));
   assert.ok(file.indexOf('linux-deb-retention-sdk.test.cjs') < file.indexOf('apt-get'));
+  assert.ok(file.indexOf('linux-deb-retention-sdk.test.cjs') < file.indexOf('actions/download-artifact'));
+  assert.match(file, /artifact-ids: '11929999662'/);
+  assert.match(file, /run-id: '38642404016'/);
   assert.doesNotMatch(file, /matrix:|macos-|windows-|workflow_dispatch:|secrets\.|contents: write|gh release/);
 });

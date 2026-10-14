@@ -9,6 +9,7 @@ from pathlib import Path
 import tarfile
 import unittest
 import sys
+from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
 SCRIPT = Path(__file__).with_name("linux-deb-retention-probe.py")
@@ -38,6 +39,24 @@ def archive(entries):
 
 
 class Preflight(unittest.TestCase):
+    def test_missing_desktop_constructor_null_regression_38642404016(self):
+        def old_constructor(_name):
+            raise TypeError("constructor returned NULL")
+        gui = SimpleNamespace(get_id=lambda: "Creator Works MCP.desktop",
+                              get_executable=lambda: "creator-works-mcp-launcher")
+        other = SimpleNamespace(get_id=lambda: "unrelated.desktop")
+        gio = SimpleNamespace(DesktopAppInfo=SimpleNamespace(new=old_constructor),
+                              AppInfo=SimpleNamespace(get_all=lambda: [other, gui]))
+        with self.assertRaisesRegex(TypeError, "constructor returned NULL"):
+            gio.DesktopAppInfo.new("missing.desktop")
+        self.assertEqual(probe.desktop_discovery(gio), {"id": "Creator Works MCP.desktop",
+                                                       "executable": "creator-works-mcp-launcher"})
+        gio.AppInfo.get_all = lambda: [other]
+        self.assertIsNone(probe.desktop_discovery(gio))
+        gio.AppInfo.get_all = lambda: [gui, gui]
+        with self.assertRaises(RuntimeError):
+            probe.desktop_discovery(gio)
+
     def test_parse_all_owned_python(self):
         for p in (SCRIPT, Path(__file__)):
             ast.parse(p.read_text())
