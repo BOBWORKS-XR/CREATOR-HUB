@@ -10,40 +10,9 @@ use std::{
 };
 
 const MAX_LINK_BYTES: u64 = 64 * 1024;
-const MAX_OUTPUT: usize = 16 * 1024;
-const MAX_ERROR: usize = 4096;
-const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const LINK_HEADER: [u8; 20] = [
     0x4c, 0, 0, 0, 1, 0x14, 2, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46,
 ];
-
-// Only a native-derived literal path enters through the cleared child environment.
-// CreateShortcut loads an existing .lnk; there is deliberately no Save or Resolve.
-const READ_SCRIPT: &str = r#"
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
-$path = $env:CREATOR_HUB_SHORTCUT_READ_PATH
-if (-not [IO.File]::Exists($path)) { throw 'Shortcut is absent' }
-$shell = $null
-$link = $null
-try {
-    $shell = New-Object -ComObject WScript.Shell
-    $link = $shell.CreateShortcut($path)
-    $result = [ordered]@{
-        target = [string]$link.TargetPath
-        arguments = [string]$link.Arguments
-        workingDirectory = [string]$link.WorkingDirectory
-    }
-    foreach ($value in $result.Values) {
-        if ($value.Length -gt 4096) { throw 'Shortcut metadata exceeds bound' }
-    }
-    [Console]::Write(($result | ConvertTo-Json -Compress))
-} finally {
-    if ($null -ne $link) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
-    if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
-}
-"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -277,6 +246,16 @@ fn capture(path: &Path) -> Result<Option<(File, Proof)>, String> {
 }
 
 fn routing_matches(routing: &Routing, expected: &Path) -> Result<(), String> {
+    if [
+        &routing.target,
+        &routing.arguments,
+        &routing.working_directory,
+    ]
+    .iter()
+    .any(|value| value.len() > 4096 || value.chars().any(char::is_control))
+    {
+        return Err("Shortcut metadata is oversized or ambiguous; preserve it.".into());
+    }
     #[cfg(windows)]
     ordinary_local_path(expected)?;
     let expected = expected
@@ -296,27 +275,6 @@ fn routing_matches(routing: &Routing, expected: &Path) -> Result<(), String> {
         );
     }
     Ok(())
-}
-
-fn parse_routing(output: &[u8], error: &[u8], successful: bool) -> Result<Routing, String> {
-    if !successful || !error.is_empty() || output.len() > MAX_OUTPUT || error.len() > MAX_ERROR {
-        return Err(
-            "Read-only shortcut probe failed or exceeded its output bound; preserve it.".into(),
-        );
-    }
-    let routing: Routing = serde_json::from_slice(output)
-        .map_err(|_| "Shortcut probe returned invalid metadata; preserve it.")?;
-    if [
-        &routing.target,
-        &routing.arguments,
-        &routing.working_directory,
-    ]
-    .iter()
-    .any(|value| value.len() > 4096 || value.chars().any(char::is_control))
-    {
-        return Err("Shortcut metadata is oversized or ambiguous; preserve it.".into());
-    }
-    Ok(routing)
 }
 
 fn inspect_candidate(
@@ -476,13 +434,7 @@ fn archived_routing_with(
 #[cfg(windows)]
 mod native {
     use super::*;
-    use base64::Engine;
-    use std::{
-        ffi::{c_void, OsString},
-        os::windows::{ffi::OsStringExt, io::AsRawHandle},
-        process::{Command, Stdio},
-        time::Instant,
-    };
+    use std::{ffi::c_void, os::windows::ffi::OsStringExt};
 
     #[link(name = "shell32")]
     extern "system" {
@@ -494,23 +446,10 @@ mod native {
             path: *mut u16,
         ) -> i32;
     }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetSystemDirectoryW(path: *mut u16, size: u32) -> u32;
-        fn GetWindowsDirectoryW(path: *mut u16, size: u32) -> u32;
-        fn PeekNamedPipe(
-            pipe: *mut c_void,
-            buffer: *mut c_void,
-            size: u32,
-            read: *mut u32,
-            available: *mut u32,
-            left: *mut u32,
-        ) -> i32;
-    }
 
     pub(super) fn folder(id: i32) -> Result<PathBuf, String> {
         let mut buffer = [0u16; 260];
-        // DONT_VERIFY never creates a missing shell directory; flags=0 is current path.
+        // DONT_VERIFY obtains the current namespace without creating a directory.
         let status = unsafe {
             SHGetFolderPathW(
                 std::ptr::null_mut(),
@@ -523,451 +462,28 @@ mod native {
         if status < 0 {
             return Err("Native current-user shortcut folder is unavailable.".into());
         }
-        native_path(&buffer)
-    }
-
-    fn native_path(buffer: &[u16]) -> Result<PathBuf, String> {
         let end = buffer
             .iter()
             .position(|value| *value == 0)
-            .ok_or("Native Windows path is truncated.")?;
-        let path = PathBuf::from(OsString::from_wide(&buffer[..end]));
+            .ok_or("Native folder path is truncated.")?;
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..end]));
         ordinary_local_path(&path)?;
         Ok(path)
     }
 
-    fn system_path(windows: bool) -> Result<PathBuf, String> {
-        let mut buffer = [0u16; 32768];
-        let length = unsafe {
-            if windows {
-                GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32)
-            } else {
-                GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32)
-            }
-        };
-        if length == 0 || length as usize >= buffer.len() {
-            return Err("Native Windows system directory is unavailable.".into());
-        }
-        native_path(&buffer)
-    }
-
-    pub(super) fn command(path: &Path) -> Result<Command, String> {
-        let system = system_path(false)?;
-        let windows = system_path(true)?;
-        let home = folder(0x28)?;
-        let local = folder(0x1c)?;
-        let roaming = folder(0x1a)?;
-        let command = command_with_folders(path, &system, &windows, &home, &local, &roaming)?;
-        reject_redirects(Path::new(command.get_program()))?;
-        Ok(command)
-    }
-
-    // Pure construction lets fixtures check exact OS spellings without inspection/spawn.
-    pub(super) fn command_with_folders(
-        path: &Path,
-        system: &Path,
-        windows: &Path,
-        home: &Path,
-        local: &Path,
-        roaming: &Path,
-    ) -> Result<Command, String> {
-        let powershell = system.join("WindowsPowerShell").join("v1.0");
-        let executable = powershell.join("powershell.exe");
-        let mut command = platform::command(&executable);
-        command
-            .env_clear()
-            .current_dir(system)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env("SystemRoot", windows)
-            .env("windir", windows)
-            .env("ComSpec", system.join("cmd.exe"))
-            .env("USERPROFILE", home)
-            .env("APPDATA", roaming)
-            .env("LOCALAPPDATA", local)
-            .env("TEMP", local.join("Temp"))
-            .env("TMP", local.join("Temp"))
-            .env(
-                "PATH",
-                std::env::join_paths([
-                    system.to_path_buf(),
-                    windows.to_path_buf(),
-                    powershell.clone(),
-                ])
-                .map_err(|_| "Cannot sanitize system PATH.")?,
-            )
-            .env("PSModulePath", powershell.join("Modules"))
-            .env("CREATOR_HUB_SHORTCUT_READ_PATH", path);
-        let utf16: Vec<_> = READ_SCRIPT
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .collect();
-        command
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand",
-            ])
-            .arg(base64::engine::general_purpose::STANDARD.encode(utf16));
-        Ok(command)
-    }
-
-    // Peek before reading: no blocking drain or reader thread can outlive the deadline.
-    fn drain(
-        pipe: &mut (impl Read + AsRawHandle),
-        output: &mut Vec<u8>,
-        limit: usize,
-    ) -> Result<bool, String> {
-        let mut available = 0;
-        let ok = unsafe {
-            PeekNamedPipe(
-                pipe.as_raw_handle(),
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                &mut available,
-                std::ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            return if std::io::Error::last_os_error().raw_os_error() == Some(109) {
-                Ok(true) // ERROR_BROKEN_PIPE: fully drained
-            } else {
-                Err("Cannot read bounded shortcut probe output.".into())
-            };
-        }
-        if available > 0 {
-            let mut buffer = [0; 4096];
-            let count = pipe
-                .read(&mut buffer[..(available as usize).min(4096)])
-                .map_err(|_| "Cannot read shortcut probe output.")?;
-            if count > limit.saturating_sub(output.len()) {
-                return Err("Shortcut probe output bound exceeded; preserve it.".into());
-            }
-            output.extend_from_slice(&buffer[..count]);
-        }
-        Ok(false)
-    }
-
-    pub(super) struct ProbeOutput {
-        pub(super) stdout: Vec<u8>,
-        pub(super) stderr: Vec<u8>,
-        pub(super) exit: std::process::ExitStatus,
-        pub(super) report: String,
-    }
-
-    pub(super) fn run(mut command: Command) -> Result<ProbeOutput, String> {
-        let started = Instant::now();
-        let mut child = command
-            .spawn()
-            .map_err(|_| "Cannot start shortcut metadata process.")?;
-        drop(command);
-        let spawn_ms = started.elapsed().as_millis();
-        let deadline = Instant::now() + PROBE_TIMEOUT;
-        let mut output = Vec::new();
-        let mut error = Vec::new();
-        let mut out_done = false;
-        let mut err_done = false;
-        let mut exit = None;
-        let result = (|| {
-            let mut stdout = child.stdout.take().ok_or("Shortcut probe has no stdout.")?;
-            let mut stderr = child.stderr.take().ok_or("Shortcut probe has no stderr.")?;
-            loop {
-                out_done = drain(&mut stdout, &mut output, MAX_OUTPUT)?;
-                err_done = drain(&mut stderr, &mut error, MAX_ERROR)?;
-                exit = child
-                    .try_wait()
-                    .map_err(|_| "Cannot wait for shortcut probe.")?;
-                if Instant::now() >= deadline {
-                    return Err("Read-only shortcut probe timed out; preserve it.".into());
-                }
-                if let Some(exit) = exit.filter(|_| out_done && err_done) {
-                    return Ok(exit);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        })();
-        let report = format!(
-            "child_status={exit:?} stdout_bytes={} stderr_bytes={} stdout_eof={out_done} stderr_eof={err_done} elapsed_ms={} spawn_ms={spawn_ms}",
-            output.len(), error.len(), started.elapsed().as_millis(),
-        );
-        #[cfg(test)]
-        let report = format!("{report} fixture_phases={}", fixture_phases(&output));
-        let result: Result<_, String> =
-            result.map_err(|original: String| format!("{original} {report}"));
-        if let Err(original) = &result {
-            // Terminate only this owned metadata probe, never a product or user process.
-            if !matches!(child.try_wait(), Ok(Some(_))) {
-                child.kill().map_err(|_| {
-                    format!(
-                        "{original} Owned metadata probe PID {} cleanup failed.",
-                        child.id()
-                    )
-                })?;
-                let cleanup_deadline = Instant::now() + std::time::Duration::from_secs(2);
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(_)) => break,
-                        Ok(None) if Instant::now() < cleanup_deadline => {
-                            std::thread::sleep(std::time::Duration::from_millis(10))
-                        }
-                        _ => {
-                            return Err(format!(
-                                "{original} Owned metadata probe PID {} exit is unverified.",
-                                child.id()
-                            ))
-                        }
-                    }
-                }
-            }
-        }
-        result.map(|exit| ProbeOutput {
-            stdout: output,
-            stderr: error,
-            exit,
-            report,
-        })
-    }
-
     pub(super) fn read(path: &Path) -> Result<Routing, String> {
-        let output = run(command(path)?)?;
-        #[cfg(test)]
-        eprintln!("native_read: {}", output.report);
-        parse_routing(&output.stdout, &output.stderr, output.exit.success())
-            .map_err(|error| format!("{error} {}", output.report))
-    }
-
-    #[cfg(test)]
-    pub(super) fn fixture_phases(output: &[u8]) -> String {
-        let phases: Vec<_> = output
-            .split(|byte| *byte == b'\n')
-            .filter_map(|line| {
-                let line = line.strip_suffix(b"\r").unwrap_or(line);
-                match line {
-                    b"fixture-phase=entry" => Some("entry"),
-                    b"fixture-phase=before-new-object" => Some("before-new-object"),
-                    b"fixture-phase=after-com" => Some("after-com"),
-                    b"fixture-phase=after-create" => Some("after-create"),
-                    b"fixture-phase=before-save" => Some("before-save"),
-                    b"fixture-phase=after-save" => Some("after-save"),
-                    b"fixture-phase=after-release" => Some("after-release"),
-                    _ => None,
-                }
-            })
-            .collect();
-        if phases.is_empty() {
-            "none".into()
-        } else {
-            phases.join(",")
-        }
+        let result = crate::legacy_shortcut_native_windows::read(path)?;
+        Ok(Routing {
+            target: result.target,
+            arguments: result.arguments,
+            working_directory: result.working_directory,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(windows)]
-    #[test]
-    fn native_com_owned_shell_link_fixture() {
-        use base64::Engine;
-        use std::io::Write;
-        let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("fixture gui.exe");
-        assert!(!target.exists());
-        let target_bytes = b"Owned ShellLink target fixture; deliberately not executable.\r\n";
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&target)
-            .unwrap()
-            .write_all(target_bytes)
-            .unwrap();
-        let target_metadata = fs::metadata(&target).unwrap();
-        let target_before = (
-            target_metadata.len(),
-            target_metadata.created().unwrap(),
-            target_metadata.modified().unwrap(),
-        );
-        // Save is allowed only for this newly owned cfg(test) fixture, never READ_SCRIPT.
-        let script = r#"
-[Console]::WriteLine('fixture-phase=entry')
-[Console]::Out.Flush()
-$ErrorActionPreference = 'Stop'
-$path = $env:CREATOR_HUB_SHORTCUT_READ_PATH
-if ([IO.File]::Exists($path)) { throw 'Fixture path already exists' }
-$shell = $null
-$link = $null
-try {
-    [Console]::WriteLine('fixture-phase=before-new-object')
-    [Console]::Out.Flush()
-    $shell = New-Object -ComObject WScript.Shell
-    [Console]::WriteLine('fixture-phase=after-com')
-    [Console]::Out.Flush()
-    $link = $shell.CreateShortcut($path)
-    [Console]::WriteLine('fixture-phase=after-create')
-    [Console]::Out.Flush()
-    $link.TargetPath = $env:CREATOR_HUB_SHORTCUT_FIXTURE_TARGET
-    $link.Arguments = ''
-    $link.WorkingDirectory = [IO.Path]::GetDirectoryName($path)
-    [Console]::WriteLine('fixture-phase=before-save')
-    [Console]::Out.Flush()
-    $link.Save()
-    [Console]::WriteLine('fixture-phase=after-save')
-    [Console]::Out.Flush()
-} finally {
-    if ($null -ne $link) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
-    if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
-}
-[Console]::WriteLine('fixture-phase=after-release')
-[Console]::Out.Flush()
-"#;
-        let utf16: Vec<_> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
-        // Exactly the finite OS/profile allowlist in legacy_removal_windows::uninstall_command.
-        // PATH/PSModulePath stay the native-derived, component-joined system paths.
-        let accepted_os_variables = [
-            "SystemRoot",
-            "windir",
-            "SystemDrive",
-            "ComSpec",
-            "USERPROFILE",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "HOMEDRIVE",
-            "HOMEPATH",
-            "USERNAME",
-            "USERDOMAIN",
-            "ProgramFiles",
-            "ProgramFiles(x86)",
-            "ProgramW6432",
-            "PROCESSOR_ARCHITECTURE",
-            "NUMBER_OF_PROCESSORS",
-            "TEMP",
-            "TMP",
-        ];
-        let mut failures = Vec::new();
-        let mut fixtures = Vec::new();
-        // Repeat minimal after baseline even when the first attempt passes. All three
-        // paths are fresh; a later success never erases an earlier timeout/refusal.
-        for (case, accepted) in [
-            ("minimal-first", false),
-            ("accepted-baseline", true),
-            ("minimal-repeat", false),
-        ] {
-            let path = directory.path().join(format!("{case} with spaces.lnk"));
-            assert!(!path.exists());
-            let template = native::command(&path).unwrap();
-            let mut command = platform::command(Path::new(template.get_program()));
-            command
-                .env_clear()
-                .current_dir(template.get_current_dir().unwrap())
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            for (key, value) in template.get_envs() {
-                command.env(key, value.unwrap());
-            }
-            let mut copied = 0;
-            if accepted {
-                for name in accepted_os_variables {
-                    if let Some(value) = std::env::var_os(name) {
-                        command.env(name, value);
-                        copied += 1;
-                    }
-                }
-            }
-            command
-                .env("CREATOR_HUB_SHORTCUT_FIXTURE_TARGET", &target)
-                .args([
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-EncodedCommand",
-                ])
-                .arg(&encoded);
-            eprintln!(
-                "fixture case={case} target_exists=true copied_os_variables={copied}: starting creation"
-            );
-            match native::run(command) {
-                Ok(creation) => {
-                    eprintln!("fixture case={case}: {}", creation.report);
-                    eprintln!(
-                        "fixture case={case}: stderr_clixml={} stderr_progress_record={}",
-                        creation.stderr.starts_with(b"#< CLIXML"),
-                        String::from_utf8_lossy(&creation.stderr).contains("S=\"progress\"")
-                    );
-                    if !creation.exit.success() || native::fixture_phases(&creation.stdout)
-                        != "entry,before-new-object,after-com,after-create,before-save,after-save,after-release" {
-                        failures.push(format!("fixture case={case}: incomplete creation; {}", creation.report));
-                    }
-                }
-                Err(original) => {
-                    eprintln!("fixture case={case}: {original}");
-                    failures.push(format!("fixture case={case}: {original}"));
-                }
-            }
-            if path.exists() {
-                fixtures.push((case, path));
-            } else {
-                failures.push(format!("fixture case={case}: owned link is absent"));
-            }
-        }
-        // Production read always uses its unmodified minimal environment, including
-        // on a link created by the comparison baseline. No comparison receipt authorizes it.
-        for (case, path) in fixtures {
-            let checked = (|| -> Result<(), String> {
-                let (reserved, before) = capture(&path)?.ok_or("Owned fixture link is absent.")?;
-                eprintln!("production native_read case={case}: starting reserved minimal-environment read");
-                routing_matches(&native_read(&path)?, &target)?;
-                let (_, after) = capture(&path)?.ok_or("Owned fixture link disappeared.")?;
-                if before != after {
-                    return Err("Owned fixture link changed during read.".into());
-                }
-                drop(reserved);
-                Ok(())
-            })();
-            match checked {
-                Ok(()) => eprintln!("production native_read case={case}: passed"),
-                Err(original) => {
-                    eprintln!("production native_read case={case}: {original}");
-                    failures.push(format!("production native_read case={case}: {original}"));
-                }
-            }
-        }
-        assert_eq!(fs::read(&target).unwrap(), target_bytes);
-        let metadata = fs::metadata(&target).unwrap();
-        assert_eq!(
-            target_before,
-            (
-                metadata.len(),
-                metadata.created().unwrap(),
-                metadata.modified().unwrap()
-            )
-        );
-        assert!(
-            failures.is_empty(),
-            "Original comparison/production failures retained:\n{}",
-            failures.join("\n")
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn fixture_phase_diagnostics_never_copy_unknown_output() {
-        assert_eq!(
-            native::fixture_phases(
-                b"fixture-phase=entry\r\nprivate arbitrary output\r\nfixture-phase=after-com\r\n"
-            ),
-            "entry,after-com"
-        );
-        assert_eq!(
-            native::fixture_phases(b"{\"target\":\"private arbitrary path\"}"),
-            "none"
-        );
-    }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
@@ -1130,19 +646,12 @@ try {
     }
 
     #[test]
-    fn parser_rejects_errors_extra_fields_duplicates_and_output_overflow() {
-        let valid = br#"{"target":"x","arguments":"","workingDirectory":""}"#;
-        assert!(parse_routing(valid, b"", true).is_ok());
-        assert!(parse_routing(valid, b"warning", true).is_err());
-        assert!(parse_routing(valid, b"", false).is_err());
-        assert!(parse_routing(&vec![b' '; MAX_OUTPUT + 1], b"", true).is_err());
-        for invalid in [
-            br#"{"target":"x","arguments":""}"#.as_slice(),
-            br#"{"target":"x","target":"x","arguments":"","workingDirectory":""}"#,
-            br#"{"target":"x","arguments":"","workingDirectory":"","extra":1}"#,
-            br#"{"target":"x\u0000","arguments":"","workingDirectory":""}"#,
-        ] {
-            assert!(parse_routing(invalid, b"", true).is_err());
+    fn routing_metadata_is_bounded_and_rejects_control_characters() {
+        let (_directory, _path, expected) = fixture();
+        for value in ["x".repeat(4097), "bad\0value".into()] {
+            let mut routing = route(&expected);
+            routing.target = value;
+            assert!(routing_matches(&routing, &expected).is_err());
         }
     }
 
@@ -1227,41 +736,6 @@ try {
 
     #[cfg(windows)]
     #[test]
-    fn command_program_and_environment_have_ordinary_spellings_without_spawning() {
-        let system = Path::new(r"C:\Windows\System32");
-        let windows = Path::new(r"C:\Windows");
-        let home = Path::new(r"C:\Users\Fixture User");
-        let local = home.join("AppData").join("Local");
-        let roaming = home.join("AppData").join("Roaming");
-        let shortcut = Path::new(r"C:\Fixtures\Space Name\shortcut.retired.lnk");
-        let command =
-            native::command_with_folders(shortcut, system, windows, home, &local, &roaming)
-                .unwrap();
-        ordinary_local_path(Path::new(command.get_program())).unwrap_or_else(|error| {
-            panic!("{error} Generated program: {:?}", command.get_program())
-        });
-        assert_eq!(
-            command.get_program().to_str().unwrap(),
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-        );
-        ordinary_local_path(command.get_current_dir().unwrap()).unwrap();
-        for (key, value) in command.get_envs() {
-            let value = value.expect("The cleared environment uses explicit finite values");
-            if key.eq_ignore_ascii_case("PATH") {
-                let entries: Vec<_> = std::env::split_paths(value).collect();
-                assert_eq!(entries.len(), 3);
-                for entry in entries {
-                    ordinary_local_path(&entry).unwrap();
-                }
-            } else {
-                ordinary_local_path(Path::new(value))
-                    .unwrap_or_else(|error| panic!("{error} Environment {key:?}: {value:?}"));
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
     fn hardlinked_owned_fixture_is_ambiguous_and_preserved() {
         let (_directory, path, expected) = fixture();
         let alias = path.with_file_name("alias.lnk");
@@ -1274,34 +748,22 @@ try {
     }
 
     #[test]
-    fn source_guards_keep_com_read_only_and_process_bounded() {
-        assert_eq!(READ_SCRIPT.matches(".CreateShortcut(").count(), 1);
-        assert!(READ_SCRIPT.contains("[IO.File]::Exists($path)"));
-        for forbidden in [
-            ".Save",
-            ".Resolve",
-            "Invoke-",
-            "Start-Process",
-            "Remove-Item",
-            "Set-Content",
-            "WriteAll",
-            "ShellExecute",
-            "ExpandEnvironmentStrings",
-        ] {
-            assert!(!READ_SCRIPT.contains(forbidden), "{forbidden}");
-        }
+    fn source_guards_keep_metadata_read_only_without_scripting_or_processes() {
         let source = include_str!("legacy_shortcuts_windows.rs");
         let implementation = source.split("mod tests {").next().unwrap();
-        assert!(implementation.contains(".env_clear()"));
-        assert!(implementation.contains("-NoProfile"));
-        assert!(implementation.contains("-NonInteractive"));
-        assert!(implementation.contains("PeekNamedPipe"));
-        assert!(implementation.contains("Instant::now() >= deadline"));
-        assert!(!implementation.contains("std::env::var"));
-        assert!(!implementation.contains("remove_file("));
-        assert!(!implementation.contains("remove_dir("));
-        assert!(!implementation.contains(".wait()"));
-        assert_eq!(PROBE_TIMEOUT.as_secs(), 10);
+        assert!(implementation.contains("legacy_shortcut_native_windows::read"));
+        for forbidden in [
+            "WScript",
+            "powershell",
+            "Command",
+            ".spawn(",
+            "remove_file(",
+            "remove_dir(",
+            ".Resolve(",
+            ".Save(",
+        ] {
+            assert!(!implementation.contains(forbidden), "{forbidden}");
+        }
     }
 
     #[cfg(windows)]

@@ -32,7 +32,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Compile Root and compare exact native probe startup before any installation
+      - name: Compile Root and verify native ShellLink reads before any installation
         id: adapter
         shell: pwsh
         run: |
@@ -49,6 +49,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Root retirement handle/journal regressions failed.' }
           & $bin legacy_shortcuts_windows::tests::
           if ($LASTEXITCODE -ne 0) { throw 'Root shortcut ownership regressions failed.' }
+          & $bin legacy_shortcut_native_windows::tests:: --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Actual native ShellLink fixture failed before any installation.' }
           "executable=$bin" >> $env:GITHUB_OUTPUT
       - name: Capture exact shortcut child status and validate retirement with retained MCP connections
         shell: pwsh

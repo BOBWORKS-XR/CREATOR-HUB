@@ -27,6 +27,9 @@ mod legacy_retirement_windows;
 #[cfg(windows)]
 #[allow(dead_code)]
 mod legacy_shortcuts_windows;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod legacy_shortcut_native_windows;
 #[cfg(any(target_os = "macos", test))]
 mod mac_update;
 mod manager;

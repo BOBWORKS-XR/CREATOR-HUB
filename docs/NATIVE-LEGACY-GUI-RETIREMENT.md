@@ -18,6 +18,10 @@ acceptance. The production guide does not invoke it yet.
 - Require independently verified shortcut target, no arguments, and default or
   empty working directory. Routing alone is not publisher/installer provenance.
   Missing shortcut snapshots must remain missing; changed/foreign shortcuts stay.
+- Metadata now uses typed in-process `IShellLinkW`, read-only `IPersistFile::Load`
+  and `SLGP_RAWPATH`. No WScript/PowerShell process, Resolve, Save, target launch
+  or environment expansion is used in production. Unsupported COM apartment,
+  malformed input, invalid Unicode, empty target or truncated buffers refuse.
 
 ## Interruption And Concurrency
 
@@ -62,6 +66,13 @@ the compatibility guarantee and require review before production retirement.
   running, stdout/stderr are both empty, neither EOF is observed, and spawn
   took 2 ms. This is not an EOF-after-exit failure. System-environment versus
   COM/startup phase remains unverified; a controlled comparison is pending.
+- The controlled comparison in run 38568393682 at `770492d` reaches
+  `before-new-object` and stalls at `New-Object -ComObject WScript.Shell` with
+  minimal, accepted OS allowlist and repeated minimal contexts. No installer
+  starts. This does not establish whether cmdlet loading or WScript activation
+  is responsible. The scripting dependency has been removed rather than its
+  deadline extended. Nine real native extractor tests and seventeen snapshot
+  tests pass locally; native hosted/official-installer acceptance is pending.
 - The older complete-uninstaller acceptance remains preserved at run 38542947181;
   it does not establish this separate compatibility-retirement operation.
 - Production coordinator/native consent, GUI quiescence, signed-router reconnect,
