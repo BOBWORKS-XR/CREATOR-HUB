@@ -3,6 +3,17 @@
 This is development integration, not a release or installed update acceptance.
 PR21 and the source publication guard remain held.
 
+2026-10-14 checkpoint: the actual Windows first-launch convergence guide passes
+in run38604727650 on the ce62e9d candidate, including native cancel/approval,
+settings/client preservation, compatibility-retaining GUI retirement, old live
+stdio and old/signed-router reconnect, then normal close after startup checks.
+Later backup/receipt hardening has a fresh local candidate but not its own native
+acceptance. Current-source unsigned Linux/Intel/ARM private payloads pass
+preparation38599976833 and local signature verification. Both Mac Root normal
+closes pass in38597644861; its exact-owned bitmaps are nonblank, but accessibility
+mapping and current-payload operation remain unaccepted. Full signed updater,
+Mac/Linux migration/GUI and Flatpak gates remain separate and incomplete.
+
 ## Current Target: Unified 0.1.14
 
 0.1.13 is unpublished and is not an upgrade prerequisite. Public Hub 0.1.12

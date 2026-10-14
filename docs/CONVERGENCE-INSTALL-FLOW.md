@@ -77,7 +77,7 @@ Do not force-close AI clients, Unity or unrelated Node processes.
 - Full native first launch, signed update/restart, actual AI-client reconnect,
   macOS/Linux cleanup and end-to-end uninstall retention are still required.
 
-Current Windows source checks: 337 Root Rust tests pass with 13 explicitly
+Current Windows source checks: 342 Root Rust tests pass with 13 explicitly
 opt-in native tests ignored; strict Clippy passes. Dependency inspection is
 connected to a distinct negative gate, not itself removal authorization. The 18
 browser convergence/startup tests pass, including screenshots at 390 and 1100
@@ -95,3 +95,26 @@ the earlier native run did not exercise the new production coordinator. Fresh
 packaged first-launch and signed update convergence acceptance remain required.
 
 Published releases and the user's installed applications remain unchanged.
+
+## Actual Coordinator Checkpoint (2026-10-14)
+
+Run 38604727650 passes the real Windows first-launch guide using the immutable
+ce62e9d candidate, installed over exact public Hub 0.1.12, MCP 2.7.7 and Setup
+0.3.7 baselines. Native backup and GUI-retirement cancellation then approval,
+three-client reviewed routing, product server-field preservation, both GUI/app
+registration retirement, all nine original runtime files, an existing live MCP
+connection and reconnect through old and signed-router paths pass. After the
+observed startup update check completes, normal Hub exit also passes.
+
+The initial runs remain preserved: 38596125719 reached installed preservation
+then refused a misnamed WebView policy folder; 38596730141 stopped at public
+MCP installer exit10 (cause unknown, not proven busy); 38601824666 stopped before
+install because a refusal test incorrectly assumed non-CI environment; and
+38602694102 passed the migration steps but requested close during startup checks.
+Harness corrections did not rebuild or change that candidate.
+
+This acceptance does not include later independent backup freshness and pre-
+adoption receipt checks from aa6f2a6/297177b. A new local reviewed candidate
+contains them and still requires its own actual acceptance. Neither run proves
+signed in-app updates, actual AI-app operation, Mac/Linux migration or Flatpak.
+Publication remains held.
