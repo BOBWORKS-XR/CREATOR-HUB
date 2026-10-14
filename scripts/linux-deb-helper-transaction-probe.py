@@ -67,6 +67,33 @@ def helper_result(code, out, err, repeat=False):
     return result
 
 
+def stage_built_helper(source, destination):
+    # Cargo hard-links final binaries from deps. Copy only build output, never
+    # relax the single-link checks for packages, installed resources or image.
+    before = source.lstat()
+    require(stat.S_ISREG(before.st_mode) and source.resolve() == source and before.st_nlink >= 1,
+            "Ordinary unredirected Cargo output required")
+    fields = ("st_dev", "st_ino", "st_size", "st_mode", "st_nlink", "st_uid", "st_gid", "st_mtime_ns", "st_ctime_ns")
+    stamp = lambda info: tuple(getattr(info, field) for field in fields)
+    digest = hashlib.sha256()
+    with source.open("rb") as incoming:
+        opened = os.fstat(incoming.fileno())
+        # Compare descriptor identity separately: Windows stat/fstat report mode
+        # and ctime differently. Each full metadata view must remain unchanged.
+        identity = ("st_dev", "st_ino", "st_size", "st_nlink", "st_uid", "st_gid", "st_mtime_ns")
+        require(stat.S_ISREG(opened.st_mode) and all(getattr(opened, key) == getattr(before, key) for key in identity),
+                "Cargo source changed before copy")
+        with destination.open("xb") as outgoing:
+            while chunk := incoming.read(1024 * 1024):
+                require(outgoing.write(chunk) == len(chunk), "Incomplete helper image copy")
+                digest.update(chunk)
+        require(stamp(os.fstat(incoming.fileno())) == stamp(opened) and stamp(source.lstat()) == stamp(before),
+                "Cargo source changed during copy")
+    copied = fixture.fingerprint(destination)
+    require(copied["bytes"] == before.st_size and copied["sha256"] == digest.hexdigest(), "Staged helper bytes differ")
+    return copied
+
+
 class Probe:
     def __init__(self):
         admission(os.environ, platform.system(), platform.machine(), os.getuid())
@@ -156,11 +183,15 @@ class Probe:
         self.command("build-helper", ["cargo", "build", "--locked", "--release", "--features", "experimental-transaction",
             "--manifest-path", "native/linux-deb-retirement/Cargo.toml", "--target-dir", str(target)], timeout=600)
         binary = target / "release/creator-hub-linux-deb-retirement"
-        built = fixture.fingerprint(binary)
+        metadata = binary.lstat()
+        self.save("cargo-helper-source", {"path": str(binary), "links": metadata.st_nlink, "bytes": metadata.st_size,
+            "mode": metadata.st_mode, "uid": metadata.st_uid, "gid": metadata.st_gid, "resolved": str(binary.resolve())})
+        staged = self.root / "helper-install-image"
+        built = stage_built_helper(binary, staged)
         parent = Path(HELPER).parent
         if not parent.exists():
             self.command("helper-directory", ["/usr/bin/sudo", "-n", "/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0755", str(parent)])
-        self.command("install-helper", ["/usr/bin/sudo", "-n", "/usr/bin/install", "-T", "-o", "root", "-g", "root", "-m", "0755", str(binary), HELPER])
+        self.command("install-helper", ["/usr/bin/sudo", "-n", "/usr/bin/install", "-T", "-o", "root", "-g", "root", "-m", "0755", str(staged), HELPER])
         image = fixture.fingerprint(Path(HELPER))
         require(image["sha256"] == built["sha256"] and image["uid"] == image["gid"] == 0 and image["mode"] == 0o755, "Installed helper image differs")
         self.save("helper-image", {"built": built, "installed": image})

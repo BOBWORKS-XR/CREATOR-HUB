@@ -61,6 +61,29 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue(p.STAGE.fullmatch("mcp-2.7.7-preparation-" + "a" * 32))
         self.assertIsNone(p.STAGE.fullmatch("../untrusted"))
 
+    def test_cargo_hard_link_is_copied_to_a_fresh_strict_single_link_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, alias, staged = root / "cargo-binary", root / "deps-binary", root / "helper-install-image"
+            content = b"synthetic compiled helper bytes\n"
+            source.write_bytes(content)
+            p.os.link(source, alias)
+            self.assertEqual(source.stat().st_nlink, 2)
+            with self.assertRaisesRegex(RuntimeError, "single-link"):
+                p.fixture.fingerprint(source)
+            copied = p.stage_built_helper(source, staged)
+            self.assertEqual(staged.stat().st_nlink, 1)
+            self.assertEqual(copied["sha256"], p.hashlib.sha256(content).hexdigest())
+            self.assertEqual(copied["bytes"], len(content))
+            self.assertEqual(alias.read_bytes(), content)
+            self.assertEqual(source.stat().st_nlink, 2)
+            with self.assertRaises(FileExistsError):
+                p.stage_built_helper(source, staged)
+            # The strict resource/image fingerprint is still unchanged.
+            p.os.link(staged, root / "invalid-installed-image-alias")
+            with self.assertRaisesRegex(RuntimeError, "single-link"):
+                p.fixture.fingerprint(staged)
+
     def test_first_refusal_is_captured_once_and_never_retried_or_promoted(self):
         with tempfile.TemporaryDirectory() as temporary:
             probe = p.Probe.__new__(p.Probe)
