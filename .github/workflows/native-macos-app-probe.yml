@@ -30,6 +30,8 @@ jobs:
         with:
           node-version: 24.17.0
       - run: npm ci --ignore-scripts
+      - name: Validate read-only Root associations and compile native Mac sampler without app actions
+        run: node --test scripts/native-macos-app-probe.test.cjs scripts/native-macos-window.test.cjs
       - name: Verify exact successful native package provenance
         uses: actions/github-script@v8
         env:

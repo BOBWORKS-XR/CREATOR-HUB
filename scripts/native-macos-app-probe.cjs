@@ -136,6 +136,21 @@ function bitmapImage(file) {
   return { ...image.image, width, height };
 }
 
+// Pure regression contract, also emitted into Swift. Facts in the native sampler
+// come only from live AX/Root checks, never from a receipt or caller-supplied JSON.
+const remoteReadChecks = Object.freeze([
+  ['nodeIdentityVerified', 'remote-ax-process-unverified'],
+  ['parentMatchesTraversalParent', 'remote-ax-parent-unverified'],
+  ['windowMatchesHeldRoot', 'remote-ax-window-unverified'],
+  ['rootUnchanged', 'remote-ax-root-unverified'],
+  ['withinLimits', 'ax-surface-incomplete'],
+  ['metadataOnly', 'remote-ax-read-only-required'],
+].map(check => Object.freeze(check)));
+function remoteReadPolicy(facts) {
+  for (const [key, reason] of remoteReadChecks) requireThat(facts?.[key] === true, reason);
+  return Object.freeze({ diagnosticOnly: true, readOnly: true, actionAllowed: false, ...acceptance });
+}
+
 // A separate read-only sampler is needed because the unchanged action helper emits only fixed consent controls.
 const surfaceSource = String.raw`
 import Foundation
@@ -150,6 +165,7 @@ var nativeRootSnapshot = [String: Any]()
 func check(_ condition: Bool, _ reason: String) throws { if !condition { throw Denied(reason) } }
 func emit(_ input: [String: Any]) {
     var value = input
+    value["diagnosticOnly"] = true
     for key in ["nativeGuiAccepted", "mcpAccepted", "migrationAccepted", "updateAccepted", "releaseReady"] { value[key] = false }
     if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) { print(String(decoding: data, as: UTF8.self)) }
 }
@@ -193,6 +209,27 @@ func children(_ item: AXUIElement, _ name: String) throws -> [AXUIElement] {
 func pidMatches(_ item: AXUIElement, _ expected: Int32) throws {
     var pid: pid_t = 0
     try check(AXUIElementGetPid(item, &pid) == .success && pid == expected, "foreign-ax-pid")
+}
+func elementPID(_ item: AXUIElement) throws -> Int32 {
+    var pid: pid_t = 0
+    try check(AXUIElementSetMessagingTimeout(item, 0.2) == .success
+        && AXUIElementGetPid(item, &pid) == .success && pid > 0, "ax-element-pid-unverified")
+    return pid
+}
+struct RemoteProcess: Equatable {
+    let pid: Int32
+    let startSeconds: UInt64
+    let startMicroseconds: UInt64
+}
+func remoteProcess(_ pid: Int32) throws -> RemoteProcess {
+    var info = proc_bsdinfo()
+    try check(pid > 0 && proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) == Int32(MemoryLayout<proc_bsdinfo>.size)
+        && info.pbi_pid == UInt32(pid) && info.pbi_start_tvsec > 0 && info.pbi_start_tvusec < 1000000, "remote-ax-process-unverified")
+    // A stable PID/start stamp is a freshness guard, not WK or Root ownership.
+    return RemoteProcess(pid: pid, startSeconds: info.pbi_start_tvsec, startMicroseconds: info.pbi_start_tvusec)
+}
+func requireRemoteRead(_ facts: [String: Bool]) throws {
+${remoteReadChecks.map(([key, reason]) => `    try check(facts["${key}"] == true, "${reason}")`).join('\n')}
 }
 func imageMatches(_ name: String, _ expected: [String: Any], _ limit: Int) throws {
     let fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
@@ -298,18 +335,57 @@ do {
     readiness = ["rootWebAreaObserved": false, "notificationsSupported": supported, "observerStatus": observerStatus.rawValue,
                  "changesOnly": true, "rootNativeCFReferencePreserved": true]
     let labelRoles = Set(["AXWindow", "AXWebArea", "AXGroup", "AXHeading", "AXStaticText", "AXButton", "AXCheckBox", "AXRadioButton", "AXLink", "AXTab", "AXTabGroup"])
-    func visit(_ item: AXUIElement, _ depth: Int, _ path: String) throws {
-        try check(depth <= 16 && seen.count < 512 && ProcessInfo.processInfo.systemUptime < deadline, "ax-surface-incomplete")
-        if seen.contains(where: { CFEqual($0, item) }) { return }
-        seen.append(item); try pidMatches(item, pid)
-        if !CFEqual(item, window), let linked = attr(item, kAXWindowAttribute) {
-            try check(CFGetTypeID(linked) == AXUIElementGetTypeID() && CFEqual(linked as! AXUIElement, window), "foreign-ax-window")
+    func checkHeldRoot() throws {
+        try fence(p, parent); try checkCG()
+        try check(AXIsProcessTrusted() && ProcessInfo.processInfo.systemUptime < deadline, "root-fence-time-or-trust-unverified")
+        let current = try children(root, kAXWindowsAttribute).filter { item in
+            try pidMatches(item, pid)
+            try check(attr(item, kAXRoleAttribute) as? String == kAXWindowRole, "ax-window-role-unverified")
+            return try bounds(item) == expected
         }
-        guard let role = attr(item, kAXRoleAttribute) as? String else { throw Denied("ax-role-unreadable") }
+        let unchanged = current.count == 1 && CFEqual(current[0], window)
+        readiness["rootNativeCFReferencePreserved"] = unchanged
+        try check(unchanged && ProcessInfo.processInfo.systemUptime < deadline, "root-native-cf-reference-drift")
+    }
+    func remoteLinks(_ item: AXUIElement, _ traversalParent: AXUIElement?, _ depth: Int) throws {
+        try check(depth <= 16 && seen.count < 512 && ProcessInfo.processInfo.systemUptime < deadline, "ax-surface-incomplete")
+        var parentMatches = false, windowMatches = false
+        // Apple kAXParentAttribute is the hierarchy parent; kAXWindowAttribute
+        // is the containing window. Neither establishes process/WK ownership.
+        // Required native associations: nil/error/wrong CF type never becomes
+        // permission. No PID, process name, uid, or launchd ancestry substitutes.
+        if let traversalParent = traversalParent, let linked = attr(item, kAXParentAttribute), CFGetTypeID(linked) == AXUIElementGetTypeID() {
+            parentMatches = CFEqual(linked as! AXUIElement, traversalParent)
+        }
+        if let linked = attr(item, kAXWindowAttribute), CFGetTypeID(linked) == AXUIElementGetTypeID() {
+            windowMatches = CFEqual(linked as! AXUIElement, window)
+        }
+        try requireRemoteRead(["nodeIdentityVerified": true, "parentMatchesTraversalParent": parentMatches,
+            "windowMatchesHeldRoot": windowMatches, "rootUnchanged": true,
+            "withinLimits": depth <= 16 && seen.count < 512 && ProcessInfo.processInfo.systemUptime < deadline,
+            "metadataOnly": true])
+    }
+    func visit(_ item: AXUIElement, _ depth: Int, _ path: String, _ traversalParent: AXUIElement?) throws {
+        try check(depth <= 16 && seen.count < 512 && ProcessInfo.processInfo.systemUptime < deadline, "ax-surface-incomplete")
+        let readPID = try elementPID(item), remote = readPID != pid
+        var remoteBefore: RemoteProcess?
+        if remote {
+            try checkHeldRoot()
+            remoteBefore = try remoteProcess(readPID)
+            try remoteLinks(item, traversalParent, depth)
+        } else {
+            try pidMatches(item, pid)
+            if !CFEqual(item, window), let linked = attr(item, kAXWindowAttribute) {
+                try check(CFGetTypeID(linked) == AXUIElementGetTypeID() && CFEqual(linked as! AXUIElement, window), "foreign-ax-window")
+            }
+        }
+        if seen.contains(where: { CFEqual($0, item) }) { return }
+        guard let role = attr(item, kAXRoleAttribute) as? String, role.utf8.count <= 128 else { throw Denied("ax-role-unreadable") }
         let b = try? bounds(item)
         let contained = b.map { $0["width"]! > 0 && $0["height"]! > 0 && $0["x"]! >= expected["x"]! && $0["y"]! >= expected["y"]!
             && $0["x"]! + $0["width"]! <= expected["x"]! + expected["width"]! && $0["y"]! + $0["height"]! <= expected["y"]! + expected["height"]! } ?? false
-        var row: [String: Any] = ["path": path, "role": role, "pid": pid, "windowID": id, "withinRootBounds": contained]
+        var row: [String: Any] = ["path": path, "role": role, "pid": readPID, "rootPID": pid, "windowID": id, "withinRootBounds": contained,
+            "association": remote ? "native-parent-and-root-window" : "root-pid", "diagnosticOnly": true]
         if let b = b { row["bounds"] = b }
         if contained && labelRoles.contains(role) {
             for (key, attribute) in [("title", kAXTitleAttribute), ("description", kAXDescriptionAttribute)] {
@@ -318,8 +394,18 @@ do {
                 }
             }
         }
-        rows.append(row)
-        for (index, child) in try children(item, kAXChildrenAttribute).enumerated() { try visit(child, depth + 1, path + "/" + String(index)) }
+        let descendants = try children(item, kAXChildrenAttribute)
+        if remote {
+            try check(try elementPID(item) == readPID, "remote-ax-pid-drift")
+            try check(try remoteProcess(readPID) == remoteBefore, "remote-ax-process-drift")
+            try remoteLinks(item, traversalParent, depth)
+            try checkHeldRoot()
+            row["nativeParentMatchesTraversalParent"] = true; row["nativeWindowMatchesHeldRoot"] = true
+            row["rootNativeCFReferencePreserved"] = true; row["readOnly"] = true; row["actionAttempted"] = false
+        }
+        // Append only after all post-read association/process/Root fences pass.
+        rows.append(row); seen.append(item)
+        for (index, child) in descendants.enumerated() { try visit(child, depth + 1, path + "/" + String(index), item) }
     }
     var previousSnapshot: Data?, observedRevision = -1, observationCount = 0
     while ProcessInfo.processInfo.systemUptime < readinessDeadline {
@@ -327,16 +413,9 @@ do {
             try check(observationCount < 32, "root-readiness-change-limit")
             observationCount += 1
             deadline = min(readinessDeadline, ProcessInfo.processInfo.systemUptime + 4)
-            try fence(p, parent); try checkCG()
-            let current = try children(root, kAXWindowsAttribute).filter { item in
-                try pidMatches(item, pid)
-                return try bounds(item) == expected
-            }
-            let unchanged = current.count == 1 && CFEqual(current[0], window)
-            readiness["rootNativeCFReferencePreserved"] = unchanged
-            try check(unchanged, "root-native-cf-reference-drift")
-            rows = []; seen = []; try visit(window, 0, "root-window")
-            try fence(p, parent); try checkCG(); try check(AXIsProcessTrusted() && ProcessInfo.processInfo.systemUptime < deadline, "post-capture-unverified")
+            try checkHeldRoot()
+            rows = []; seen = []; try visit(window, 0, "root-window", nil)
+            try checkHeldRoot()
             let snapshot = try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys])
             if snapshot != previousSnapshot {
                 changedSnapshots.append(["revision": rootRevision, "nodes": rows, "rootNativeCFReferencePreserved": true])
@@ -373,7 +452,7 @@ async function probe(args, env) {
   const cpu = process.arch === 'arm64' ? 0x0100000c : 0x01000007;
   requireThat(executablePin.head.length >= 8 && executablePin.head.readUInt32LE(0) === 0xfeedfacf
     && executablePin.head.readUInt32LE(4) === cpu, 'exact-native-thin-mach-o-required');
-  const output = reserveOutput(temporary, request.app, request.output), report = { schemaVersion: 1, scope: 'Owned Root AX surface/window bitmap diagnostics only; not product acceptance.',
+  const output = reserveOutput(temporary, request.app, request.output), report = { schemaVersion: 1, diagnosticOnly: true, scope: 'Owned Root AX surface/window bitmap diagnostics only; not product acceptance.',
     ...acceptance, passed: false, captureCompleted: false, acceptedExit: false, cleanupUncertain: false,
     app: request.app, executable, suppliedHubSha256: request.hubSha256, runnerArchitecture: env.RUNNER_ARCH,
     childPid: null, ownedChildExit: null, tools: [],
@@ -428,7 +507,7 @@ async function probe(args, env) {
     }
     const helperImage = pin(helper).image, samplerImage = pin(sampler).image;
     report.helper = { path: helper, image: helperImage, sourceSha256: source.image.sha256 };
-    report.sampler = { path: sampler, image: samplerImage };
+    report.sampler = { path: sampler, image: samplerImage, sourceSha256: crypto.createHash('sha256').update(surfaceSource, 'utf8').digest('hex') };
     for (const [file, image, label] of [[helper, helperImage, 'availability-helper'], [sampler, samplerImage, 'availability-surface']]) {
       const result = await command(file, ['availability'], label, 15000, image);
       requireThat(result.exitCode === 0 && JSON.parse(result.text).accessibilityTrusted === true, 'existing-ax-trust-required-no-prompt');
@@ -533,4 +612,4 @@ if (require.main === module) {
   }).catch(error => { console.log(JSON.stringify({ error: error.message, passed: false, ...acceptance })); process.exitCode = 2; });
 }
 module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, closeAssessment,
-  bitmapArguments, bitmapImage, windowBitmapDiagnostic, acceptance, surfaceSource };
+  bitmapArguments, bitmapImage, windowBitmapDiagnostic, remoteReadPolicy, acceptance, surfaceSource };

@@ -263,6 +263,121 @@ test('surface sampler is read-only and binds kernel parent/start/path/images plu
   assert.match(probe.surfaceSource, /try fence\(p, parent\); try checkCG\(\)/);
 });
 
+// Synthetic facts model results of native checks, not proof from a saved receipt.
+function remoteFacts() {
+  return { nodeIdentityVerified: true, parentMatchesTraversalParent: true, windowMatchesHeldRoot: true,
+    rootUnchanged: true, withinLimits: true, metadataOnly: true };
+}
+
+test('remote read policy requires every native association, identity, fence, bound and metadata-only fact', () => {
+  assert.equal(probe.remoteReadPolicy(remoteFacts()).readOnly, true);
+  for (const key of Object.keys(remoteFacts())) {
+    for (const invalid of [false, undefined, null, 'true', 1, {}, []]) {
+      const facts = remoteFacts(); facts[key] = invalid;
+      assert.throws(() => probe.remoteReadPolicy(facts), undefined, `${key}:${String(invalid)}`);
+    }
+    const missing = remoteFacts(); delete missing[key];
+    assert.throws(() => probe.remoteReadPolicy(missing));
+  }
+  for (const unknown of [undefined, null, {}, 'linked', true]) assert.throws(() => probe.remoteReadPolicy(unknown));
+});
+
+test('different parent/window, missing links or unchanged-looking PID/name/uid cannot admit remote metadata', () => {
+  let metadataReads = 0;
+  const capture = facts => { const policy = probe.remoteReadPolicy(facts); metadataReads++; return policy; };
+  for (const changed of [
+    { parentMatchesTraversalParent: false }, { windowMatchesHeldRoot: false },
+    { parentMatchesTraversalParent: undefined }, { windowMatchesHeldRoot: undefined },
+    { rootUnchanged: false }, { nodeIdentityVerified: false }, { withinLimits: false },
+  ]) assert.throws(() => capture({ ...remoteFacts(), ...changed }));
+  // These facts match the retained Intel diagnostic but do not authorize a read.
+  assert.throws(() => capture({ pid: 7638, rootPID: 7628, kernelParentPID: 1, uid: 501, sameUID: true,
+    processName: 'WebKit', rootStillOwned: true, rootNativeCFReferenceUnchanged: true }));
+  assert.equal(metadataReads, 0);
+});
+
+test('linked remote policy returns only a frozen read-only diagnostic result, never action or product acceptance', () => {
+  const facts = remoteFacts(), before = structuredClone(facts), policy = probe.remoteReadPolicy(facts);
+  assert.deepEqual(facts, before); assert.equal(Object.isFrozen(policy), true);
+  assert.equal(policy.diagnosticOnly, true); assert.equal(policy.actionAllowed, false);
+  for (const key of Object.keys(probe.acceptance)) assert.equal(policy[key], false);
+  assert.throws(() => probe.remoteReadPolicy({ ...facts, metadataOnly: false, action: 'AXPress' }));
+});
+
+test('generated Swift enforces the same fail-closed policy; facts are native, not receipt or PID ancestry assertions', () => {
+  const policy = probe.surfaceSource.split('func requireRemoteRead')[1].split('func imageMatches')[0];
+  for (const key of Object.keys(remoteFacts())) assert.ok(policy.includes(`facts["${key}"] == true`));
+  const links = probe.surfaceSource.split('func remoteLinks')[1].split('func visit')[0];
+  assert.match(links, /var parentMatches = false, windowMatches = false/);
+  assert.match(links, /let traversalParent = traversalParent, let linked = attr\(item, kAXParentAttribute\), CFGetTypeID\(linked\) == AXUIElementGetTypeID\(\)/);
+  assert.match(links, /parentMatches = CFEqual\(linked as! AXUIElement, traversalParent\)/);
+  assert.match(links, /let linked = attr\(item, kAXWindowAttribute\), CFGetTypeID\(linked\) == AXUIElementGetTypeID\(\)/);
+  assert.match(links, /windowMatches = CFEqual\(linked as! AXUIElement, window\)/);
+  assert.doesNotMatch(links, /JSONSerialization|pbi_ppid|pbi_uid|proc_pidpath|kAXRoleAttribute|kAXTitleAttribute|kAXDescriptionAttribute|kAXChildrenAttribute/);
+});
+
+test('remote metadata is bracketed by native Root/CF/process/link fences before row publication and recursion', () => {
+  const held = probe.surfaceSource.split('func checkHeldRoot')[1].split('func remoteLinks')[0];
+  assert.match(held, /try fence\(p, parent\); try checkCG\(\)/);
+  assert.match(held, /AXIsProcessTrusted\(\).*systemUptime < deadline/);
+  assert.match(held, /try pidMatches\(item, pid\)/);
+  assert.match(held, /current.count == 1 && CFEqual\(current\[0\], window\)/);
+  const visit = probe.surfaceSource.split('func visit')[1].split('var previousSnapshot')[0];
+  const before = visit.indexOf('if remote {'), metadata = visit.indexOf('kAXRoleAttribute');
+  assert.ok(before >= 0 && visit.indexOf('try checkHeldRoot()', before) < metadata);
+  assert.ok(visit.indexOf('remoteBefore = try remoteProcess(readPID)', before) < metadata);
+  assert.ok(visit.indexOf('try remoteLinks(item, traversalParent, depth)', before) < metadata);
+  const descendants = visit.indexOf('let descendants = try children(item, kAXChildrenAttribute)');
+  const after = visit.indexOf('if remote {', descendants), published = visit.indexOf('rows.append(row)');
+  assert.ok(descendants > metadata && after > descendants && published > after);
+  assert.match(visit.slice(after, published), /try elementPID\(item\) == readPID/);
+  assert.match(visit.slice(after, published), /try remoteProcess\(readPID\) == remoteBefore/);
+  assert.match(visit.slice(after, published), /try remoteLinks\(item, traversalParent, depth\)[\s\S]*?try checkHeldRoot\(\)/);
+  assert.match(visit.slice(published), /try visit\(child, depth \+ 1, path \+ "\/" \+ String\(index\), item\)/);
+  // Association checks precede the seen check, so a repeated CF object cannot
+  // silently bypass refusal when reached through an inconsistent parent.
+  assert.ok(visit.indexOf('try remoteLinks(item, traversalParent, depth)') < visit.indexOf('if seen.contains'));
+});
+
+test('remote metadata keeps actual PID, finite traversal/time/message limits and no action/value/permission API', () => {
+  assert.match(probe.surfaceSource, /"pid": readPID, "rootPID": pid/);
+  assert.match(probe.surfaceSource, /"association": remote \? "native-parent-and-root-window" : "root-pid"/);
+  assert.match(probe.surfaceSource, /AXUIElementSetMessagingTimeout\(item, 0\.2\) == \.success/);
+  assert.match(probe.surfaceSource, /depth <= 16 && seen.count < 512 && ProcessInfo.processInfo.systemUptime < deadline/);
+  assert.match(probe.surfaceSource, /readinessDeadline = ProcessInfo.processInfo.systemUptime \+ 20/);
+  assert.match(probe.surfaceSource, /systemUptime \+ 4/);
+  assert.match(probe.surfaceSource, /observationCount < 32/);
+  assert.match(probe.surfaceSource, /role.utf8.count <= 128/);
+  assert.match(probe.surfaceSource, /text.utf8.count <= 2048/);
+  const remoteProcess = probe.surfaceSource.split('func remoteProcess')[1].split('func requireRemoteRead')[0];
+  assert.match(remoteProcess, /info.pbi_pid == UInt32\(pid\).*info.pbi_start_tvsec > 0.*info.pbi_start_tvusec < 1000000/);
+  assert.doesNotMatch(remoteProcess, /pbi_ppid|pbi_uid|processName|proc_name/);
+  assert.doesNotMatch(probe.surfaceSource, /AXUIElementPerformAction|AXUIElementSetAttributeValue|AXUIElementCopyActionNames|kAXPressAction|kAXCloseButtonAttribute|kAXValueAttribute|CreateSystemWide|AXIsProcessTrustedWithOptions|CGRequestScreenCaptureAccess|NSRunningApplication/);
+});
+
+test('unchanged action helper still refuses foreign nodes and enforces target Root PID before its sole action', () => {
+  const helper = fs.readFileSync(path.join(__dirname, 'native-macos-window.swift'));
+  // Source hash retained in the actual Intel evidence; no action-helper edits.
+  assert.equal(crypto.createHash('sha256').update(helper).digest('hex'), 'f0adc5eaafee9577d6629391807ad875738fa15cceb869b10f575a16de3a1258');
+  const swift = helper.toString('utf8');
+  assert.match(swift, /AXUIElementGetPid\(item, &pid\) == \.success, pid == expected else \{ throw Refusal\("foreign-ax-element"\)/);
+  assert.match(swift, /do \{ try axPID\(item, identity.pid\) \}[\s\S]*?catch \{ throw Refusal\("foreign-ax-element"/);
+  assert.equal(swift.match(/AXUIElementPerformAction\(/g).length, 1);
+  const action = swift.slice(swift.indexOf('try axPID(target, owner.process.pid)'));
+  assert.match(action, /CFEqual\(targetWindow, fenceWindow\)[\s\S]*?try admission\(\); try trustedAX\(\)[\s\S]*?AXUIElementPerformAction/);
+  assert.doesNotMatch(swift, /remoteReadPolicy|requireRemoteRead|native-parent-and-root-window/);
+});
+
+test('sampler diagnostics retain source hashes and all false acceptance flags without relaxing orchestrator/helper errors', () => {
+  assert.match(source, /report.helper = \{ path: helper, image: helperImage, sourceSha256: source.image.sha256 \}/);
+  assert.match(source, /report.sampler = \{ path: sampler, image: samplerImage, sourceSha256: crypto.createHash\('sha256'\).update\(surfaceSource, 'utf8'\).digest\('hex'\) \}/);
+  assert.match(probe.surfaceSource, /value\["diagnosticOnly"\] = true/);
+  assert.match(probe.surfaceSource, /for key in \["nativeGuiAccepted", "mcpAccepted", "migrationAccepted", "updateAccepted", "releaseReady"\] \{ value\[key\] = false \}/);
+  assert.match(source, /requireThat\(inspected.exitCode === 0, 'owned-root-inspection-refused'\)/);
+  assert.match(source, /requireThat\(after.exitCode === 0, 'post-capture-inspection-refused'\)/);
+  assert.match(source, /requireThat\(close.exitCode === 0, 'normal-close-refused-or-post-identity-unverified'\)/);
+});
+
 test('actual Mac SDK compiles the read-only sampler; local execution refuses before AX inspection', { skip: process.platform !== 'darwin' }, async t => {
   const file = path.join(scratch, 'surface.swift'), binary = path.join(scratch, 'surface');
   fs.writeFileSync(file, probe.surfaceSource, { flag: 'wx' });
