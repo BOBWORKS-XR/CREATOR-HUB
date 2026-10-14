@@ -1,13 +1,19 @@
-"""Pinned Root 14 DEB: real disposable installation and read-only GUI capture.
+"""Pinned Root 14 DEB: disposable native terms acceptance and normal close.
 
-Only the disposable hosted lane may stage or launch. The existing window helper
-retains all action authority; this probe never accepts terms or opens a module.
+Only the disposable hosted lane may stage or launch. Probe-local action authority
+is limited to the two exact Root terms controls and normal Root WM close. The
+generic helper and its single-PID policy are unchanged. No module is opened.
 
 Primary bitmap contract (obscured/off-screen pixels are undefined):
 https://docs.gtk.org/gdk3/func.pixbuf_get_from_window.html
 https://docs.gtk.org/gdk3-x11/ctor.X11Window.foreign_new_for_display.html
 Peer PID is diagnostic, not authorization:
 https://docs.gtk.org/atspi2/method.Accessible.get_process_id.html
+WebKit joins UI/web-process AX trees; this does not authorize arbitrary peers:
+https://bugs.webkit.org/show_bug.cgi?id=230255
+Exact 2.50.4 Action names are check/uncheck and press, not GTK's click:
+https://github.com/WebKit/WebKit/blob/webkitgtk-2.50.4/Source/WebCore/accessibility/AccessibilityObject.cpp
+https://github.com/WebKit/WebKit/blob/webkitgtk-2.50.4/Source/WebCore/accessibility/atspi/AccessibilityObjectActionAtspi.cpp
 """
 import ctypes as C
 import hashlib
@@ -52,6 +58,15 @@ PRIVATE_SOURCE = "a3118106086516751b78a58b5dbd684cff4c63a7"
 HANDOFF_SHA = "77bf64dcf8c82d4e9ad5e4112445a59639425e6315d4723f910bd8058c9a1a62"
 TITLE = "Creator Hub - Development Preview"
 TERMS = "Terms of use and risk acknowledgement"
+TERMS_CHECKBOX = "I have read and agree to these terms, including the risk assumption and liability limitations above."
+TERMS_ACCEPT = "Accept and continue"
+POLICY = "2026-09-28-v1"
+# Observed native system image in run 38634063716, not a same-name peer rule.
+WEBKIT = "/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebProcess"
+WEBKIT_SHA = "5375925828be8acc2c0e905cae0d4654da0519ce1b83f2f724a43eae346bd78e"
+WEBKIT_PACKAGE = "libwebkit2gtk-4.1-0:amd64"
+WEBKIT_VERSION = "2.50.4-0ubuntu0.22.04.1"
+SCOPE = "native-deb-root-terms-and-normal-close-only"
 MAX_LOG, MAX_JSON = 262144, 196608
 MAX_IMAGE = 1920 * 1080
 FLAGS = {key: False for key in ("nativeGuiAccepted", "installationAccepted", "mcpAccepted",
@@ -250,7 +265,7 @@ def stage(temp):
     original_zip = pinned(archive, (ZIP_SIZE, ZIP_SHA))
     root = temp / "linux-root-probe"
     root.mkdir(mode=0o700)
-    report = {"scope": "native-deb-installed-root-read-only-capture-only", **FLAGS, "phase": "stage"}
+    report = {"scope": SCOPE, **FLAGS, "phase": "stage"}
     try:
         (root / "input").mkdir(mode=0o700)
         with zipfile.ZipFile(archive) as z:
@@ -469,7 +484,7 @@ def installed_state(root, label):
 
 
 def install(root):
-    report = {"scope": "native-deb-installed-root-read-only-capture-only", **FLAGS, "phase": "preinstall", "debInstalled": False}
+    report = {"scope": SCOPE, **FLAGS, "phase": "preinstall", "debInstalled": False}
     try:
         report["package"] = verify_inputs(root, full=True)
         require(not os.path.lexists("/usr/bin/creator-hub") and not os.path.lexists("/usr/lib/Creator Hub"),
@@ -577,6 +592,149 @@ def peer_record(pid, helper):
     return result
 
 
+def process_uids(pid):
+    with open(f"/proc/{pid}/status", "rb") as stream:
+        body = stream.read(16385)
+    require(len(body) <= 16384, "Process status exceeds bound")
+    matches = re.findall(rb"^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$", body, re.M)
+    require(len(matches) == 1, "Exact process UID tuple unavailable")
+    return [int(v) for v in matches[0]]
+
+
+def image_identity(path):
+    value = os.stat(path)
+    require(stat.S_ISREG(value.st_mode) and 0 < value.st_size <= 256 * 1024 * 1024,
+            "Ordinary bounded kernel image required")
+    return {key: str(getattr(value, key)) for key in
+            ("st_dev", "st_ino", "st_size", "st_mode", "st_uid", "st_gid", "st_mtime_ns", "st_ctime_ns")}
+
+
+def native_process(pid, helper, full=True):
+    proc = helper.Proc()
+    first = proc.stat(pid)
+    start = helper.parse_start(first, pid)
+    uids, executable = process_uids(pid), proc.executable(pid)
+    image = image_identity(f"/proc/{pid}/exe")
+    result = {"pid": pid, "startTime": start, "parentPid": int(first[first.rfind(")") + 2:].split()[1]),
+              "uids": uids, "executable": executable, "image": image}
+    if full:
+        result["kernelImageSha256"] = proc.digest(pid)
+    last = proc.stat(pid)
+    require(helper.parse_start(last, pid) == start and last[last.rfind(")") + 2:].split()[1]
+            == first[first.rfind(")") + 2:].split()[1] and process_uids(pid) == uids
+            and proc.executable(pid) == executable and image_identity(f"/proc/{pid}/exe") == image,
+            "Process identity changed during capture")
+    return result
+
+
+def verify_system_webkit():
+    path = ordinary(WEBKIT)
+    for entry in [path, *path.parents]:
+        value = entry.stat()
+        require(value.st_uid == 0 and not value.st_mode & 0o022, "System WebKit path is not protected root-owned content")
+    image = file_record(path, 256 * 1024 * 1024, 0o755)
+    require(image["sha256"] == WEBKIT_SHA, "System WebKit image differs from measured native runner; no peer adopted")
+    return image
+
+
+def system_webkit_provenance(root):
+    image = verify_system_webkit()
+    _status, owner = run_tool(root, "webkit-owner", ["/usr/bin/dpkg-query", "-S", WEBKIT])
+    _status, package = run_tool(root, "webkit-package", ["/usr/bin/dpkg-query", "-W", "-f=" + STATE_FORMAT, WEBKIT_PACKAGE])
+    require(owner == (WEBKIT_PACKAGE + ": " + WEBKIT + "\n").encode(), "System WebKit package owner differs")
+    require(package == ("libwebkit2gtk-4.1-0\t" + WEBKIT_VERSION + "\tamd64\tinstalled\n").encode(),
+            "Measured native WebKit package version/state differs")
+    require(verify_system_webkit() == image, "System WebKit image changed during package attribution")
+    return {"path": WEBKIT, "sha256": WEBKIT_SHA, "package": WEBKIT_PACKAGE, "version": WEBKIT_VERSION, "file": image}
+
+
+def validate_peer(peer, root):
+    require(type(peer["pid"]) is int and peer["pid"] > 1 and peer["pid"] != root["pid"]
+            and peer["parentPid"] == root["pid"], "WebKit peer is not a direct Root child")
+    require(peer["uids"] == root["uids"], "WebKit peer UID differs")
+    require(peer["executable"] == WEBKIT and peer["kernelImageSha256"] == WEBKIT_SHA,
+            "Foreign WebKit peer path/image refused")
+    require(int(peer["startTime"]) >= int(root["startTime"]), "WebKit peer predates Root")
+
+
+class RootOwnership:
+    """One pinned Root/XRes frame plus one pinned native renderer, never all peers."""
+    def __init__(self, request, helper, x11, root_record, xres, system_file, renderer=None,
+                 reader=None, system_check=None):
+        self.request, self.helper, self.x11 = request, helper, x11
+        self.root, self.xres, self.system_file, self.renderer = root_record, xres, system_file, renderer
+        self.reader = reader or (lambda pid, full: native_process(pid, helper, full))
+        self.system_check = system_check or verify_system_webkit
+        require(root_record["pid"] == request.pid and root_record["startTime"] == request.start
+                and root_record["executable"] == request.executable
+                and root_record["kernelImageSha256"] == request.sha256, "Root binding differs from native request")
+        if renderer is not None:
+            validate_peer(renderer, root_record)
+        self.recheck(full=True)
+
+    def recheck(self, full=False):
+        for expected in [self.root] + ([self.renderer] if self.renderer is not None else []):
+            actual = self.reader(expected["pid"], full)
+            require(all(expected.get(k) == v for k, v in actual.items()), "Bound Root/renderer identity changed")
+        require(self.helper.bound_window(self.request, self.x11) == self.xres, "Bound Root XRes window changed")
+        if full:
+            require(self.system_check() == self.system_file, "Bound system WebKit provenance changed")
+
+    def node(self, node):
+        self.recheck()
+        pid = node.get_process_id()
+        require(type(pid) is int and pid > 1, "Invalid AX process identity")
+        if pid != self.root["pid"]:
+            if self.renderer is None:
+                candidate = self.reader(pid, True)
+                validate_peer(candidate, self.root)
+                require(self.system_check() == self.system_file, "System WebKit changed before child binding")
+                self.renderer = candidate
+            require(pid == self.renderer["pid"], "Additional foreign AX peer refused")
+        self.recheck()
+
+    def evidence(self):
+        return {"root": self.root, "xres": self.xres, "renderer": self.renderer,
+                "policy": "one-native-direct-child-WebKit-in-exact-Root-frame"}
+
+
+def owned_walk(window, ownership, atspi):
+    helper, request = ownership.helper, ownership.request
+    require(window.get_process_id() == request.pid and window.get_role() == atspi.Role.FRAME
+            and window.get_name() == request.title, "Foreign AX window refused")
+    nodes, pending = [], [(window, None, 0)]
+    ownership.recheck(full=True)
+    while pending:
+        node, parent, depth = pending.pop()
+        require(node is not None and len(nodes) < helper.MAX_NODES and depth < helper.MAX_DEPTH,
+                "Owned AX tree exceeds bounds")
+        ownership.node(node)
+        if parent is not None:
+            require(node.get_parent() == parent, "AX subtree escaped the bound Root window")
+            require(node.get_role() not in (atspi.Role.FRAME, atspi.Role.WINDOW, atspi.Role.APPLICATION),
+                    "Foreign/nested AX window refused")
+        require(node not in nodes, "Cyclic/duplicate AX subtree refused")
+        nodes.append(node)
+        budget = min(helper.MAX_CHILDREN, helper.MAX_NODES - len(nodes) - len(pending))
+        pending.extend((child, node, depth + 1) for child in reversed(helper.children(node, budget)))
+    ownership.recheck(full=True)
+    require(helper.select_window(request, atspi) == window, "Owned AX window changed during traversal")
+    return nodes
+
+
+def snapshot_owned(request, helper, atspi, ownership):
+    window = helper.select_window(request, atspi)
+    nodes = owned_walk(window, ownership, atspi)
+    result = {"action": "snapshot", "actionCount": 0, "nodes": [
+        {"pid": n.get_process_id(), "role": int(n.get_role()), "name": (n.get_name() or "")[:256],
+         **{s.lower(): n.get_state_set().contains(getattr(atspi.StateType, s))
+            for s in ("SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY", "CHECKED")}} for n in nodes],
+        "controls": control_metadata(nodes, helper, atspi), "ownership": ownership.evidence()}
+    ownership.recheck(full=True)
+    require(helper.select_window(request, atspi) == window, "Owned AX window changed during snapshot")
+    return result
+
+
 def routing_diagnostic(request, helper, atspi):
     window = helper.select_window(request, atspi)
     nodes, pending = [], [(window, 0)]
@@ -594,7 +752,7 @@ def routing_diagnostic(request, helper, atspi):
     return {"diagnosticOnly": True, "authorization": False, "nodesBeforeRefusal": nodes, "foreignSubtreeRefused": False}
 
 
-def snapshot_ready(request, helper, atspi, proc, x11):
+def snapshot_ready(request, helper, atspi, proc, x11, ownership):
     """Poll absence/loading only; any identity, ambiguity or foreign tree refuses."""
     deadline, last = time.monotonic() + 20, None
     while time.monotonic() < deadline:
@@ -611,7 +769,7 @@ def snapshot_ready(request, helper, atspi, proc, x11):
             states = windows[0].get_state_set()
             if all(states.contains(getattr(atspi.StateType, k)) for k in ("SHOWING", "ENABLED", "SENSITIVE")) \
                     and not any(states.contains(getattr(atspi.StateType, k)) for k in ("DEFUNCT", "BUSY")):
-                last = helper.perform(request, atspi, proc, x11)
+                last = snapshot_owned(request, helper, atspi, ownership)
                 if any(n["name"] == TERMS and n["showing"] for n in last["nodes"]):
                     return last
         time.sleep(0.05)
@@ -619,13 +777,10 @@ def snapshot_ready(request, helper, atspi, proc, x11):
     return last
 
 
-def control_metadata(request, helper, atspi, proc, x11):
-    helper.identity(request, proc)
-    bound = helper.bound_window(request, x11)
-    window = helper.select_window(request, atspi)
+def control_metadata(nodes, helper, atspi):
     controls = []
     roles = {getattr(atspi.Role, key) for key in ("PUSH_BUTTON", "CHECK_BOX", "TOGGLE_BUTTON", "RADIO_BUTTON", "PAGE_TAB", "LINK", "COMBO_BOX")}
-    for node in helper.walk(window, request):
+    for node in nodes:
         if node.get_role() not in roles:
             continue
         interface = node.get_action_iface()
@@ -640,10 +795,88 @@ def control_metadata(request, helper, atspi, proc, x11):
                          "role": int(node.get_role()), "roleName": node.get_role_name(), "actions": names,
                          **{key.lower(): states.contains(getattr(atspi.StateType, key))
                             for key in ("CHECKED", "SELECTED", "SHOWING", "ENABLED", "SENSITIVE")}})
-    helper.identity(request, proc)
-    require(helper.bound_window(request, x11) == bound and helper.select_window(request, atspi) == window,
-            "Owned controls changed during read-only metadata snapshot")
     return controls
+
+
+def terms_control(nodes, action, helper, atspi):
+    require(action in ("check-terms", "accept-terms"), "Non-terms native action refused")
+    require(any(n.get_name() == TERMS and n.get_state_set().contains(atspi.StateType.SHOWING) for n in nodes),
+            "Visible exact Root terms heading required")
+    checks = [n for n in nodes if n.get_name() == TERMS_CHECKBOX and n.get_role() == atspi.Role.CHECK_BOX]
+    accepts = [n for n in nodes if n.get_name() == TERMS_ACCEPT and n.get_role() == atspi.Role.PUSH_BUTTON]
+    require(len(checks) == len(accepts) == 1, "Exact unique terms checkbox/button required")
+    checked = checks[0].get_state_set().contains(atspi.StateType.CHECKED)
+    require(checked == (action == "accept-terms"), "Terms checkbox precondition differs; never retry/toggle blindly")
+    node, verb = (checks[0], "check") if action == "check-terms" else (accepts[0], "press")
+    helper.ready(node, atspi)
+    if action == "check-terms":
+        require(not accepts[0].get_state_set().contains(atspi.StateType.ENABLED), "Terms accept unexpectedly enabled before agreement")
+    interface = node.get_action_iface()
+    require(interface and interface.get_n_actions() == 1 and interface.get_action_name(0) == verb,
+            "Exact source-proven WebKit terms action required: " + verb)
+    return node, interface, verb
+
+
+def perform_owned(action, request, helper, atspi, ownership):
+    require(action in ("check-terms", "accept-terms", "close"), "Unreviewed native action refused")
+    window = helper.select_window(request, atspi)
+    nodes = owned_walk(window, ownership, atspi)
+    selected = terms_control(nodes, action, helper, atspi)[0] if action != "close" else None
+    if action == "close":
+        ownership.x11.check_close(request.window)
+    ownership.recheck(full=True)
+    require(helper.select_window(request, atspi) == window, "AX frame changed before native action")
+    current_nodes = owned_walk(window, ownership, atspi)
+    if selected is not None:
+        current, interface, verb = terms_control(current_nodes, action, helper, atspi)
+        require(ownership.renderer is not None and current == selected
+                and current.get_process_id() == ownership.renderer["pid"],
+                "Terms control changed or is not in the bound WebKit child")
+    terms_visible = any(n.get_name() == TERMS and n.get_state_set().contains(atspi.StateType.SHOWING) for n in current_nodes)
+    ownership.recheck(full=True)
+    # One terminal input boundary. Failures after this line never authorize retry.
+    try:
+        if selected is not None:
+            require(interface.do_action(0), "Native terms action refused; no retry")
+        else:
+            ownership.x11.close_window(request.window, ownership.xres)
+        return {"action": action, "actionCount": 1, "verb": verb if selected is not None else "WM_DELETE_WINDOW",
+                "ownership": ownership.evidence(), "normalExitVerified": False,
+                "termsVisibleBeforeAction": terms_visible}
+    except Exception as error:
+        raise helper.ActionError(str(error)) from error
+
+
+def acknowledgement(root, earliest_ms):
+    path = root / "home/data/CreatorHub/consent/hub-usage-terms.json"
+    body = bounded_read(path, 2048)
+    value = unique_json(body)
+    require(set(value) == {"schemaVersion", "policyVersion", "acceptedAtMs"}
+            and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+            and value["policyVersion"] == POLICY and type(value["acceptedAtMs"]) is int
+            and earliest_ms <= value["acceptedAtMs"] <= time.time_ns() // 1000000,
+            "Saved native terms acknowledgement differs or predates actual input")
+    return {"record": value, "file": file_record(path, 2048), "seeded": False}
+
+
+def accept_terms(root, environment, child, start, xid, capture, report):
+    path = root / "home/data/CreatorHub/consent/hub-usage-terms.json"
+    require(not os.path.lexists(path), "Terms acknowledgement must be absent before native input")
+    earliest = time.time_ns() // 1000000
+    report["termsAcknowledgementAbsentBefore"] = True
+    for action in ("check-terms", "accept-terms"):
+        report["phase"] = action
+        value = run_worker(root, environment, action, child.pid, start, xid, capture, report["workers"])
+        require(value["action"] == action and value["actionCount"] == 1, "Exact native terms action receipt required")
+        report[action] = value
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not os.path.lexists(path):
+        capture.pump(0.02)
+    report["termsAcknowledgement"] = acknowledgement(root, earliest)
+    write_new(root / "native-terms-acknowledgement.json", bounded_read(path, 2048))
+    require(file_record(root / "native-terms-acknowledgement.json", 2048)["sha256"]
+            == report["termsAcknowledgement"]["file"]["sha256"], "Retained native acknowledgement copy differs")
+    report["termsAcceptanceVerified"] = True
 
 
 def intersects(a, b):
@@ -757,13 +990,13 @@ def bitmap(request, root, helper, x11):
 
 
 def worker(root, args):
-    require(len(args) == 4 and args[0] in ("discover", "snapshot", "diagnose", "bitmap", "close"), "Invalid worker request")
+    require(len(args) == 4 and args[0] in ("discover", "snapshot", "diagnose", "bitmap", "check-terms", "accept-terms", "close"),
+            "Invalid worker request")
     action, pid, start, xid = args
     verify_stage(root)
     helper = load_helper()
     helper.ensure_runner(os.environ, sys.platform, platform.machine())
-    request = helper.Request.parse(["snapshot" if action in ("discover", "diagnose", "bitmap") else action,
-                                   pid, start, str(paths(root)["creator-hub"]), INSTALLED_HUB_PIN[1], xid, TITLE, "FRAME"])
+    request = helper.Request.parse(["snapshot", pid, start, str(paths(root)["creator-hub"]), INSTALLED_HUB_PIN[1], xid, TITLE, "FRAME"])
     proc, x11 = helper.Proc(), None
     helper.identity(request, proc)
     record = proc.stat(request.pid)
@@ -804,11 +1037,23 @@ def worker(root, args):
             helper.identity(request, proc)
             helper.bound_window(request, x11)
             return value
+        saved = unique_json(bounded_read(root / "root-ownership.json", 16384))
+        require(saved["root"]["uids"] == [os.getuid()] * 4 and saved["root"]["parentPid"] == os.getppid()
+                and saved["window"] == request.window, "Root UID/parent/window binding differs")
+        require(saved["systemWebKit"]["path"] == WEBKIT and saved["systemWebKit"]["sha256"] == WEBKIT_SHA
+                and saved["systemWebKit"]["package"] == WEBKIT_PACKAGE and saved["systemWebKit"]["version"] == WEBKIT_VERSION,
+                "Exact measured system WebKit provenance required")
+        renderer_path = root / "renderer-ownership.json"
+        renderer = unique_json(bounded_read(renderer_path, 8192)) if renderer_path.exists() else None
+        require(action == "snapshot" or renderer is not None, "Native input requires a completed owned renderer snapshot")
+        ownership = RootOwnership(request, helper, x11, saved["root"], saved["xres"], saved["systemWebKit"]["file"], renderer)
         if action == "snapshot":
-            value = snapshot_ready(request, helper, Atspi, proc, x11)
-            value["controls"] = control_metadata(request, helper, Atspi, proc, x11)
+            value = snapshot_ready(request, helper, Atspi, proc, x11, ownership)
+            require(ownership.renderer is not None, "Root snapshot has no verified native WebKit child")
+            require(renderer is None, "Initial owned snapshot cannot replace an existing renderer binding")
+            save_json(renderer_path, ownership.renderer)
             return value
-        return helper.perform(request, Atspi, proc, x11)
+        return perform_owned(action, request, helper, Atspi, ownership)
     finally:
         if x11 is not None:
             x11.dispose()
@@ -817,7 +1062,7 @@ def worker(root, args):
 def normal_close(root, environment, child, start, xid, capture, report, helper):
     report["normalCloseAttempted"] = True
     closed = run_worker(root, environment, "close", child.pid, start, xid, capture, report["workers"])
-    require(closed["action"] == "close" and closed["actionCount"] == 1, "Exact helper normal-close receipt required")
+    require(closed["action"] == "close" and closed["actionCount"] == 1, "Exact owned native normal-close receipt required")
     report["close"] = closed
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and (child.poll() is None or not all(i["eof"] for i in capture.items.values())):
@@ -830,13 +1075,14 @@ def normal_close(root, environment, child, start, xid, capture, report, helper):
 
 
 def probe(root, env):
-    report = {"scope": "native-deb-installed-root-read-only-capture-only", **FLAGS, "phase": "verify",
+    report = {"scope": SCOPE, **FLAGS, "phase": "verify", "termsAcceptanceVerified": False,
               "readOnlyCaptureCompleted": False, "normalExitVerified": False, "workers": []}
     child, capture, start, request_xid = None, None, None, None
     failure = None
     try:
         report["package"] = verify_stage(root, full=True)
         report["actualDpkgState"] = installed_state(root, "probe-installed-state")
+        report["systemWebKit"] = system_webkit_provenance(root)
         for directory in (root / "home", root / "home/config", root / "home/data", root / "home/cache", root / "tmp"):
             directory.mkdir(mode=0o700)
         environment = child_env(env, root)
@@ -857,6 +1103,13 @@ def probe(root, env):
         request_xid = found["window"]
         report["window"] = found
         check_process(child, start, executable, helper)
+        identity = native_process(child.pid, helper)
+        require(identity["uids"] == [os.getuid()] * 4 and identity["parentPid"] == os.getpid()
+                and identity["startTime"] == start and identity["kernelImageSha256"] == INSTALLED_HUB_PIN[1],
+                "Captured Root native identity differs")
+        save_json(root / "root-ownership.json", {"root": identity, "window": request_xid,
+                                               "xres": found["properties"], "systemWebKit": report["systemWebKit"]})
+        report["root"] = identity
         report["phase"] = "snapshot"
         try:
             snapshot = run_worker(root, environment, "snapshot", child.pid, start, request_xid, capture, report["workers"])
@@ -866,7 +1119,7 @@ def probe(root, env):
         except Exception as error:
             failure = error
             report["snapshotRefusal"] = str(error)[:1000]
-            report["normalCloseSkippedReason"] = "Snapshot ownership/readiness refused; helper action authority is not bypassed"
+            report["normalCloseSkippedReason"] = "Snapshot ownership/readiness refused; no native action authorized"
             # This read-only diagnostic stops at the first foreign node; never adopts it.
             try:
                 report["accessibilityDiagnostic"] = run_worker(root, environment, "diagnose", child.pid, start,
@@ -877,16 +1130,22 @@ def probe(root, env):
         report["bitmap"] = run_worker(root, environment, "bitmap", child.pid, start, request_xid, capture, report["workers"])
         check_process(child, start, executable, helper)
         require(failure is None, "Original snapshot refusal preserved: " + str(failure))
+        require(report["termsObservedInOwnedSnapshot"], "Actual terms node was not observed; no terms acceptance inferred")
+        accept_terms(root, environment, child, start, request_xid, capture, report)
         report["phase"] = "normal-close"
         normal_close(root, environment, child, start, request_xid, capture, report, helper)
-        require(report["termsObservedInOwnedSnapshot"], "Actual terms node was not observed; no terms acceptance inferred")
-        report.update(readOnlyCaptureCompleted=True, phase="captured-and-normally-reaped")
+        saved_ack = report["termsAcknowledgement"]
+        require(acknowledgement(root, saved_ack["record"]["acceptedAtMs"]) == saved_ack,
+                "Native terms acknowledgement changed after normal Root exit")
+        require(report["close"]["termsVisibleBeforeAction"] is False, "Terms modal remained visible after native acceptance")
+        report.update(readOnlyCaptureCompleted=True, termsAcknowledgementRetainedAfterExit=True,
+                      phase="native-terms-accepted-and-normally-reaped")
     except Exception as error:
         failure = error
         report["error"] = str(error)[:1000]
     finally:
-        # A failed bitmap may still leave a valid owned frame. Re-use only the
-        # existing helper, never retry a close or act after an ownership refusal.
+        # One fresh, full ownership traversal must still pass for cleanup close.
+        # Never retry a close or send a signal after a native input/worker timeout.
         if child is not None and capture is not None and child.poll() is None and report.get("snapshot") \
                 and not report.get("normalCloseAttempted") and all(w["exitCode"] is not None for w in report["workers"]):
             report["cleanupNormalCloseAttempted"] = True

@@ -280,13 +280,13 @@ class NativeAdapterTests(unittest.TestCase):
         root = types.SimpleNamespace(get_process_id=lambda: 42)
         desktop = object()
         helper = types.SimpleNamespace(identity=mock.Mock(), bound_window=mock.Mock(),
-                                       children=lambda n, _: [root] if n is desktop else [frame],
-                                       perform=mock.Mock(side_effect=RuntimeError("Foreign accessibility subtree refused")))
+                                       children=lambda n, _: [root] if n is desktop else [frame])
         atspi = types.SimpleNamespace(get_desktop=lambda _: desktop, Role=types.SimpleNamespace(FRAME=1),
                                      StateType=types.SimpleNamespace(SHOWING=1, ENABLED=2, SENSITIVE=3, DEFUNCT=4, BUSY=5))
-        with self.assertRaisesRegex(RuntimeError, "Foreign"):
-            p.snapshot_ready(types.SimpleNamespace(pid=42, title=p.TITLE), helper, atspi, None, None)
-        self.assertEqual(helper.perform.call_count, 1)
+        with mock.patch.object(p, "snapshot_owned", side_effect=RuntimeError("Foreign accessibility subtree refused")) as snapshot:
+            with self.assertRaisesRegex(RuntimeError, "Foreign"):
+                p.snapshot_ready(types.SimpleNamespace(pid=42, title=p.TITLE), helper, atspi, None, None, None)
+        self.assertEqual(snapshot.call_count, 1)
 
     def test_solid_or_alpha_only_bitmap_refused(self):
         for data, channels in ((b"\0\0\0" * 512, 3), (b"\xff\0\0" * 512, 3),
@@ -446,13 +446,21 @@ class DebTests(unittest.TestCase):
 
 
 class SourceGuardTests(unittest.TestCase):
-    def test_no_new_action_authority_injection_or_kill_fallback(self):
+    def test_only_fixed_terms_action_authority_no_injection_or_kill_fallback(self):
         source = SCRIPT.read_text()
-        for forbidden in (".kill(", ".terminate(", "os.kill(", "pkill", "killall", "xdotool", "do_action(",
-                          "close_window(", "get_default_root_window", "eval(", "execute_script", "subprocess.run(",
+        for forbidden in (".kill(", ".terminate(", "os.kill(", "pkill", "killall", "xdotool",
+                          "get_default_root_window", "eval(", "execute_script", "subprocess.run(",
                           "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "--no-sandbox", "shell=True"):
             self.assertNotIn(forbidden, source)
-        self.assertIn("helper.perform(request, Atspi, proc, x11)", source)
+        self.assertEqual(source.count("interface.do_action(0)"), 1)
+        self.assertEqual(source.count("ownership.x11.close_window("), 1)
+        self.assertIn('action in ("check-terms", "accept-terms", "close")', source)
+        self.assertNotIn("helper.walk(", source)
+        self.assertNotIn("helper.perform(", source)
+        self.assertNotIn("accept_usage_terms", source)
+        self.assertNotIn("localStorage", source)
+        helper = p.HELPER.read_text()
+        self.assertIn('node.get_process_id() == request.pid, "Foreign accessibility subtree refused"', helper)
         self.assertIn("Gdk.pixbuf_get_from_window(window, 0, 0", source)
         self.assertIn('GdkX11.X11Window.foreign_new_for_display(display, request.window)', source)
         self.assertNotIn('Request.parse(["click"', source)
@@ -480,6 +488,325 @@ class SourceGuardTests(unittest.TestCase):
             self.assertNotIn(forbidden, text)
 
 
+class AxNode:
+    def __init__(self, pid, role, name="", parent=None, states=(1, 2, 3), verb=None):
+        self.pid, self.role, self.name, self.parent = pid, role, name, parent
+        self.states, self.children = set(states), []
+        self.action = types.SimpleNamespace(get_n_actions=lambda: 1, get_action_name=lambda _: verb,
+                                            do_action=mock.Mock(return_value=True)) if verb else None
+        if parent is not None:
+            parent.children.append(self)
+
+    def get_process_id(self):
+        return self.pid
+
+    def get_role(self):
+        return self.role
+
+    def get_role_name(self):
+        return "fixture"
+
+    def get_name(self):
+        return self.name
+
+    def get_parent(self):
+        return self.parent
+
+    def get_state_set(self):
+        return types.SimpleNamespace(contains=lambda state: state in self.states)
+
+    def get_action_iface(self):
+        return self.action
+
+
+class OwnershipTests(unittest.TestCase):
+    def fixture(self):
+        root = {"pid": 42, "startTime": "100", "parentPid": 40, "uids": [1000] * 4,
+                "executable": "/usr/bin/creator-hub", "kernelImageSha256": p.INSTALLED_HUB_PIN[1], "image": {"inode": "1"}}
+        peer = {**copy.deepcopy(root), "pid": 43, "startTime": "110", "parentPid": 42,
+                "executable": p.WEBKIT, "kernelImageSha256": p.WEBKIT_SHA, "image": {"inode": "2"}}
+        self.records, self.system = {42: root, 43: peer}, {"sha256": p.WEBKIT_SHA}
+        self.info = {"pid": 42, "client": 3, "title": p.TITLE, "mapped": True}
+        self.request = types.SimpleNamespace(pid=42, start="100", executable=root["executable"],
+                                              sha256=p.INSTALLED_HUB_PIN[1], title=p.TITLE, window=77)
+        self.window = AxNode(42, 23, p.TITLE)
+        self.container = AxNode(42, 20, parent=self.window)
+        self.web = AxNode(43, 20, parent=self.container)
+        self.heading = AxNode(43, 78, p.TERMS, parent=self.web)
+        self.checkbox = AxNode(43, 7, p.TERMS_CHECKBOX, parent=self.web, verb="check")
+        self.accept = AxNode(43, 43, p.TERMS_ACCEPT, parent=self.web, states=(1,), verb="press")
+        self.atspi = types.SimpleNamespace(Role=types.SimpleNamespace(FRAME=23, WINDOW=69, APPLICATION=75, CHECK_BOX=7,
+            PUSH_BUTTON=43, TOGGLE_BUTTON=62, RADIO_BUTTON=44, PAGE_TAB=37, LINK=88, COMBO_BOX=11),
+            StateType=types.SimpleNamespace(SHOWING=1, ENABLED=2, SENSITIVE=3, DEFUNCT=4, BUSY=5, CHECKED=6, SELECTED=7))
+        self.helper = types.SimpleNamespace(bound_window=lambda *_: dict(self.info), select_window=lambda *_: self.window,
+            children=lambda n, limit: n.children if len(n.children) <= limit else p.require(False, "children bound"),
+            ready=lambda n, a: p.require({1, 2, 3} <= n.states and not n.states.intersection({4, 5}), "not ready"),
+            MAX_NODES=512, MAX_DEPTH=32, MAX_CHILDREN=128, ActionError=p.load_helper().ActionError)
+        self.x11 = types.SimpleNamespace(check_close=mock.Mock(), close_window=mock.Mock())
+
+        def read(pid, full):
+            value = copy.deepcopy(self.records[pid])
+            if not full:
+                value.pop("kernelImageSha256")
+            return value
+        self.reader = mock.Mock(side_effect=read)
+        self.ownership = p.RootOwnership(self.request, self.helper, self.x11, copy.deepcopy(root), dict(self.info),
+                                          dict(self.system), reader=self.reader, system_check=lambda: dict(self.system))
+        return self.ownership
+
+    def test_only_measured_direct_child_is_bound_and_both_rechecked_per_node(self):
+        binding = self.fixture()
+        nodes = p.owned_walk(self.window, binding, self.atspi)
+        self.assertEqual(len(nodes), 6)
+        self.assertEqual(binding.renderer["pid"], 43)
+        self.assertEqual(binding.renderer["parentPid"], 42)
+        for pid in (42, 43):
+            self.assertGreaterEqual(sum(c.args[0] == pid for c in self.reader.call_args_list), len(nodes))
+        value = p.snapshot_owned(self.request, self.helper, self.atspi, binding)
+        self.assertEqual({n["pid"] for n in value["nodes"]}, {42, 43})
+        self.assertEqual(value["controls"][0]["actions"], ["check"])
+
+    def test_wrong_parent_uid_custom_path_hash_or_older_child_refused_before_children(self):
+        for field, value in (("parentPid", 99), ("uids", [1001] * 4), ("uids", [1000, 0, 1000, 1000]),
+                             ("executable", "/tmp/WebKitWebProcess"), ("kernelImageSha256", "f" * 64), ("startTime", "99")):
+            with self.subTest(field=field, value=value):
+                binding = self.fixture()
+                self.records[43][field] = value
+                original = self.helper.children
+                self.helper.children = mock.Mock(side_effect=original)
+                with self.assertRaises(RuntimeError):
+                    p.owned_walk(self.window, binding, self.atspi)
+                self.assertFalse(any(c.args[0] is self.web for c in self.helper.children.call_args_list))
+
+    def test_root_and_child_pid_reuse_uid_parent_and_kernel_image_drift_refused(self):
+        for pid in (42, 43):
+            for field, value in (("startTime", "999"), ("uids", [0] * 4), ("parentPid", 99),
+                                 ("image", {"inode": "different"}), ("kernelImageSha256", "f" * 64)):
+                with self.subTest(pid=pid, field=field):
+                    binding = self.fixture()
+                    p.owned_walk(self.window, binding, self.atspi)
+                    self.records[pid][field] = value
+                    with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                        binding.recheck(full=True)
+
+    def test_system_hash_file_identity_and_xres_client_window_drift_refused(self):
+        binding = self.fixture()
+        self.system["sha256"] = "f" * 64
+        with self.assertRaisesRegex(RuntimeError, "provenance changed"):
+            binding.recheck(full=True)
+        for field, value in (("pid", 99), ("client", 9), ("title", "Foreign"), ("mapped", False)):
+            binding = self.fixture()
+            self.info[field] = value
+            with self.assertRaisesRegex(RuntimeError, "XRes window changed"):
+                p.owned_walk(self.window, binding, self.atspi)
+
+    def test_additional_peer_nested_foreign_window_and_escaped_ax_parent_refused(self):
+        for kind in ("peer", "frame", "window", "application", "parent"):
+            with self.subTest(kind=kind):
+                binding = self.fixture()
+                if kind == "peer":
+                    AxNode(44, 20, parent=self.web)
+                elif kind == "parent":
+                    self.heading.parent = AxNode(43, 20)
+                else:
+                    AxNode(43, {"frame": 23, "window": 69, "application": 75}[kind], parent=self.web)
+                with self.assertRaises(RuntimeError):
+                    p.owned_walk(self.window, binding, self.atspi)
+
+    def test_foreign_ax_root_is_never_traversed_even_if_title_matches(self):
+        binding = self.fixture()
+        for pid in (43, 99):
+            with self.assertRaisesRegex(RuntimeError, "Foreign AX window"):
+                p.owned_walk(AxNode(pid, 23, p.TITLE), binding, self.atspi)
+
+    def test_pid_reuse_during_traversal_refuses_before_any_input(self):
+        binding = self.fixture()
+        original = self.helper.children
+        def children(node, limit):
+            if node is self.web:
+                self.records[43]["startTime"] = "999"
+            return original(node, limit)
+        self.helper.children = children
+        with self.assertRaisesRegex(RuntimeError, "identity changed"):
+            p.perform_owned("check-terms", self.request, self.helper, self.atspi, binding)
+        self.checkbox.action.do_action.assert_not_called()
+
+    def test_one_exact_unchecked_checkbox_action_not_arbitrary_click(self):
+        binding = self.fixture()
+        result = p.perform_owned("check-terms", self.request, self.helper, self.atspi, binding)
+        self.assertEqual((result["actionCount"], result["verb"]), (1, "check"))
+        self.checkbox.action.do_action.assert_called_once_with(0)
+        self.accept.action.do_action.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, "Unreviewed"):
+            p.perform_owned("click", self.request, self.helper, self.atspi, binding)
+
+    def test_only_checked_terms_accept_uses_source_proven_press(self):
+        binding = self.fixture()
+        self.checkbox.states.add(6)
+        self.accept.states.update({2, 3})
+        result = p.perform_owned("accept-terms", self.request, self.helper, self.atspi, binding)
+        self.assertEqual(result["verb"], "press")
+        self.accept.action.do_action.assert_called_once_with(0)
+
+    def test_wrong_terms_action_role_label_state_or_duplicate_cannot_act(self):
+        for kind in ("checked", "enabled", "verb", "role", "label", "duplicate", "no-heading"):
+            with self.subTest(kind=kind):
+                binding = self.fixture()
+                if kind == "checked":
+                    self.checkbox.states.add(6)
+                elif kind == "enabled":
+                    self.accept.states.add(2)
+                elif kind == "verb":
+                    self.checkbox.action.get_action_name = lambda _: "click"
+                elif kind == "role":
+                    self.checkbox.role = 43
+                elif kind == "label":
+                    self.checkbox.name = "Foreign"
+                elif kind == "duplicate":
+                    AxNode(43, 7, p.TERMS_CHECKBOX, parent=self.web, verb="check")
+                else:
+                    self.heading.name = "Foreign"
+                with self.assertRaises(RuntimeError):
+                    p.perform_owned("check-terms", self.request, self.helper, self.atspi, binding)
+                self.checkbox.action.do_action.assert_not_called()
+
+    def test_native_input_failure_is_action_uncertain_and_never_retried(self):
+        binding = self.fixture()
+        self.checkbox.action.do_action.return_value = False
+        with self.assertRaises(self.helper.ActionError) as error:
+            p.perform_owned("check-terms", self.request, self.helper, self.atspi, binding)
+        self.assertTrue(error.exception.action_may_have_run)
+        self.checkbox.action.do_action.assert_called_once_with(0)
+
+    def test_close_only_exact_root_ewmh_after_full_renderer_traversal(self):
+        binding = self.fixture()
+        result = p.perform_owned("close", self.request, self.helper, self.atspi, binding)
+        self.assertEqual(result["verb"], "WM_DELETE_WINDOW")
+        self.x11.close_window.assert_called_once_with(77, self.info)
+        self.checkbox.action.do_action.assert_not_called()
+
+    def test_terminal_close_does_not_read_destroyed_ax_nodes_after_input(self):
+        binding = self.fixture()
+        def close(*_args):
+            for node in (self.window, self.web, self.heading, self.checkbox, self.accept):
+                node.get_name = mock.Mock(side_effect=AssertionError("AX read after terminal close"))
+        self.x11.close_window.side_effect = close
+        self.assertEqual(p.perform_owned("close", self.request, self.helper, self.atspi, binding)["actionCount"], 1)
+
+
+class AcknowledgementTests(unittest.TestCase):
+    def fixture(self, root, value):
+        path = root / "home/data/CreatorHub/consent/hub-usage-terms.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(value))
+        return path
+
+    def test_only_current_native_record_created_after_actual_input_is_accepted(self):
+        with tempfile.TemporaryDirectory(prefix="creator-ack-pure-") as temp:
+            root = Path(temp).resolve()
+            value = {"schemaVersion": 1, "policyVersion": p.POLICY, "acceptedAtMs": 100}
+            self.fixture(root, value)
+            with mock.patch.object(p.time, "time_ns", return_value=110000000):
+                self.assertFalse(p.acknowledgement(root, 100)["seeded"])
+                for minimum in (101,):
+                    with self.assertRaises(RuntimeError):
+                        p.acknowledgement(root, minimum)
+
+    def test_old_foreign_future_boolean_or_extended_acknowledgement_refused(self):
+        for change in ({"schemaVersion": True}, {"schemaVersion": 2}, {"policyVersion": "foreign"},
+                       {"acceptedAtMs": True}, {"acceptedAtMs": 999999999999999}, {"foreign": 1}):
+            with self.subTest(change=change), tempfile.TemporaryDirectory(prefix="creator-ack-pure-") as temp:
+                root = Path(temp).resolve()
+                self.fixture(root, {"schemaVersion": 1, "policyVersion": p.POLICY, "acceptedAtMs": 100, **change})
+                with self.assertRaises(RuntimeError):
+                    p.acknowledgement(root, 100)
+
+    def test_preexisting_acknowledgement_refuses_before_any_native_input(self):
+        with tempfile.TemporaryDirectory(prefix="creator-ack-pure-") as temp:
+            root = Path(temp).resolve()
+            self.fixture(root, {"schemaVersion": 1, "policyVersion": p.POLICY, "acceptedAtMs": 100})
+            with mock.patch.object(p, "run_worker") as worker, self.assertRaisesRegex(RuntimeError, "absent"):
+                p.accept_terms(root, {}, None, None, None, None, {})
+            worker.assert_not_called()
+
+    def test_exact_action_sequence_retains_only_record_created_by_fixture_app_callback(self):
+        with tempfile.TemporaryDirectory(prefix="creator-ack-pure-") as temp:
+            root, calls, report = Path(temp).resolve(), [], {"workers": []}
+            value = {"schemaVersion": 1, "policyVersion": p.POLICY, "acceptedAtMs": 100}
+            def worker(_root, _env, action, *_args):
+                calls.append(action)
+                if action == "accept-terms":
+                    self.fixture(root, value)
+                return {"action": action, "actionCount": 1}
+            with mock.patch.object(p, "run_worker", side_effect=worker), \
+                    mock.patch.object(p.time, "time_ns", return_value=100000000):
+                p.accept_terms(root, {}, types.SimpleNamespace(pid=42), "123", 77, None, report)
+            self.assertEqual(calls, ["check-terms", "accept-terms"])
+            self.assertTrue(report["termsAcknowledgementAbsentBefore"])
+            self.assertTrue(report["termsAcceptanceVerified"])
+            self.assertEqual(json.loads((root / "native-terms-acknowledgement.json").read_text()), value)
+
+    def test_uncertain_first_terms_action_never_retries_or_attempts_accept(self):
+        with tempfile.TemporaryDirectory(prefix="creator-ack-pure-") as temp, \
+                mock.patch.object(p, "run_worker", side_effect=RuntimeError("uncertain action")) as worker:
+            with self.assertRaisesRegex(RuntimeError, "uncertain action"):
+                p.accept_terms(Path(temp).resolve(), {}, types.SimpleNamespace(pid=42), "123", 77, None, {"workers": []})
+            self.assertEqual(worker.call_count, 1)
+            self.assertEqual(worker.call_args.args[2], "check-terms")
+
+
+class NativeIdentityTests(unittest.TestCase):
+    def test_uid_parser_captures_all_four_without_echoing_status(self):
+        for body, good in ((b"Name:\tfixture\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\n", True),
+                           (b"Uid:\t1000\t0\t1000\t1000\n", True), (b"Uid:\t1000\n", False),
+                           (b"Uid:\t1\t1\t1\t1\nUid:\t2\t2\t2\t2\n", False), (b"x" * 16385, False)):
+            with mock.patch("builtins.open", return_value=io.BytesIO(body)):
+                if good:
+                    self.assertEqual(len(p.process_uids(42)), 4)
+                else:
+                    with self.assertRaises(RuntimeError):
+                        p.process_uids(42)
+
+    def test_package_attribution_requires_exact_owner_version_and_unchanged_file(self):
+        image = {"sha256": p.WEBKIT_SHA}
+        expected_owner = (p.WEBKIT_PACKAGE + ": " + p.WEBKIT + "\n").encode()
+        expected_package = ("libwebkit2gtk-4.1-0\t" + p.WEBKIT_VERSION + "\tamd64\tinstalled\n").encode()
+        with mock.patch.object(p, "verify_system_webkit", return_value=image), \
+                mock.patch.object(p, "run_tool", side_effect=[(0, expected_owner), (0, expected_package)]) as tool:
+            value = p.system_webkit_provenance(Path("/owned"))
+        self.assertEqual(value["sha256"], p.WEBKIT_SHA)
+        self.assertEqual(tool.call_args_list[0].args[2], ["/usr/bin/dpkg-query", "-S", p.WEBKIT])
+        for owner, package in ((b"foreign\n", expected_package), (expected_owner, b"foreign\n")):
+            with mock.patch.object(p, "verify_system_webkit", return_value=image), \
+                    mock.patch.object(p, "run_tool", side_effect=[(0, owner), (0, package)]), self.assertRaises(RuntimeError):
+                p.system_webkit_provenance(Path("/owned"))
+        with mock.patch.object(p, "verify_system_webkit", side_effect=[image, {"sha256": "f" * 64}]), \
+                mock.patch.object(p, "run_tool", side_effect=[(0, expected_owner), (0, expected_package)]), \
+                self.assertRaisesRegex(RuntimeError, "changed during"):
+            p.system_webkit_provenance(Path("/owned"))
+
+    def test_native_identity_rechecks_start_uid_parent_path_and_kernel_inode_around_hash(self):
+        helper = p.load_helper()
+        # /proc stat fields: state, ppid, ... starttime at index19 after comm.
+        def record(start="100", parent="40"):
+            return "42 (fixture) " + " ".join(["S", parent] + ["0"] * 17 + [start])
+        image = {"inode": "1"}
+        for changed in ("start", "uid", "parent", "path", "inode", None):
+            with self.subTest(changed=changed):
+                proc = types.SimpleNamespace(stat=mock.Mock(side_effect=[record(), record("999" if changed == "start" else "100",
+                                                                                         "99" if changed == "parent" else "40")]),
+                    executable=mock.Mock(side_effect=["/usr/bin/creator-hub", "/tmp/foreign" if changed == "path" else "/usr/bin/creator-hub"]),
+                    digest=lambda _pid: p.INSTALLED_HUB_PIN[1])
+                with mock.patch.object(helper, "Proc", return_value=proc), \
+                        mock.patch.object(p, "process_uids", side_effect=[[1000] * 4, [0 if changed == "uid" else 1000] * 4]), \
+                        mock.patch.object(p, "image_identity", side_effect=[image, {"inode": "2"} if changed == "inode" else image]):
+                    if changed is None:
+                        self.assertEqual(p.native_process(42, helper)["startTime"], "100")
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "changed during"):
+                            p.native_process(42, helper)
+
+
 class ParentTests(unittest.TestCase):
     def harness(self, temp, *, snapshot_refusal=False, terms=True, exit_code=0, truncated=False, bitmap_refusal=False):
         root = Path(temp).resolve()
@@ -502,7 +829,7 @@ class ParentTests(unittest.TestCase):
             actions.append(action)
             records.append({"action": action, "exitCode": 1 if snapshot_refusal and action == "snapshot" else 0})
             if action == "discover":
-                return {"window": 77}
+                return {"window": 77, "properties": {"pid": 42, "client": 3, "title": p.TITLE, "mapped": True}}
             if action == "snapshot":
                 if snapshot_refusal:
                     raise RuntimeError("Foreign accessibility subtree refused")
@@ -515,8 +842,16 @@ class ParentTests(unittest.TestCase):
                 return {"windowOnly": True, "nonblank": True, "diagnosticOnly": True}
             if action == "close":
                 child.poll.return_value = exit_code
-                return {"action": "close", "actionCount": 1}
+                return {"action": "close", "actionCount": 1, "termsVisibleBeforeAction": False}
+            if action in ("check-terms", "accept-terms"):
+                return {"action": action, "actionCount": 1}
             self.fail("Unexpected worker action")
+
+        saved_ack = {"record": {"acceptedAtMs": 123}}
+        def accept_terms(_root, _env, _child, _start, _xid, _capture, report):
+            for action in ("check-terms", "accept-terms"):
+                run_worker(_root, _env, action, 42, "123", 77, _capture, report["workers"])
+            report.update(termsAcceptanceVerified=True, termsAcknowledgement=saved_ack)
 
         environment = {**runner_fixture(), "DISPLAY": ":99", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/fixture"}
         with mock.patch.object(p, "verify_stage", return_value={"debInstalled": False}), \
@@ -524,6 +859,12 @@ class ParentTests(unittest.TestCase):
                 mock.patch.object(p, "INSTALLED_HUB_PIN", p.PINS["creator-hub"]), \
                 mock.patch.object(p, "load_helper", return_value=helper), \
                 mock.patch.object(p, "check_process", return_value="123"), \
+                mock.patch.object(p, "system_webkit_provenance", return_value={}), \
+                mock.patch.object(p, "native_process", return_value={"pid": 42, "startTime": "123", "parentPid": os.getpid(),
+                                                                    "uids": [1000] * 4, "kernelImageSha256": p.PINS["creator-hub"][1]}), \
+                mock.patch.object(p.os, "getuid", return_value=1000, create=True), \
+                mock.patch.object(p, "accept_terms", side_effect=accept_terms), \
+                mock.patch.object(p, "acknowledgement", return_value=saved_ack), \
                 mock.patch.object(p.subprocess, "Popen", return_value=child) as spawn, \
                 mock.patch.object(p, "Capture", Captured), mock.patch.object(p, "run_worker", side_effect=run_worker):
             error = None
@@ -539,9 +880,11 @@ class ParentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="creator-parent-pure-") as temp:
             report, error, actions, child = self.harness(temp)
         self.assertIsNone(error)
-        self.assertEqual(actions, ["discover", "snapshot", "bitmap", "close"])
+        self.assertEqual(actions, ["discover", "snapshot", "bitmap", "check-terms", "accept-terms", "close"])
         self.assertTrue(report["normalExitVerified"])
         self.assertTrue(report["readOnlyCaptureCompleted"])
+        self.assertTrue(report["termsAcceptanceVerified"])
+        self.assertTrue(report["termsAcknowledgementRetainedAfterExit"])
         self.assertFalse(report["installationAccepted"])
         self.assertFalse(report["nativeGuiAccepted"])
         self.assertFalse(report["releaseReady"])
