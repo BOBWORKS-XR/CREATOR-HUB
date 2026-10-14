@@ -58,7 +58,11 @@ function parseMetadata(text) {
   const context = sections.Context || {};
   assert.ok(Object.keys(context).every(name => ['shared', 'sockets', 'devices'].includes(name)), 'Unexpected sandbox grant');
   for (const [key, values] of [['shared', ['ipc']], ['sockets', ['wayland', 'fallback-x11']], ['devices', ['dri']]]) {
-    assert.deepEqual((context[key] || '').split(';').filter(Boolean).sort(), [...values].sort(), 'Sandbox permission differs');
+    const actual = (context[key] || '').split(';').filter(Boolean).sort();
+    // Flatpak 1.12.7 serializes fallback-x11 with an implicit x11 bit.
+    if (key === 'sockets' && actual.length === 3 && actual[0] === 'fallback-x11'
+      && actual[1] === 'wayland' && actual[2] === 'x11') actual.pop();
+    assert.deepEqual(actual, [...values].sort(), 'Sandbox permission differs');
   }
   return sections;
 }

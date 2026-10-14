@@ -1,4 +1,4 @@
-name: SDK-compatible unified Flatpak packaging and ABI check (not acceptance)
+name: Canonical sandbox unified Flatpak packaging and ABI check (not acceptance)
 on:
   push:
     branches: [validation/flatpak-package-014]

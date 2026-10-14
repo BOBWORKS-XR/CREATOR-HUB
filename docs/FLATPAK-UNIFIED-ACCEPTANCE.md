@@ -199,8 +199,8 @@ The test remote is unsigned and private, not a publication or update trust model
 
 ## Current Results And Stop Conditions
 
-- Windows source/temp-fixture tests: 20 passed, zero skipped, no native children.
-- Related archive/package source suites: combined 39 passed, one existing Unix
+- Windows source/temp-fixture tests: 21 passed, zero skipped, no native children.
+- Related archive/package source suites: combined 40 passed, one existing Unix
   mode test skipped on Windows; no native Linux/Flatpak execution implied.
 - Local runner inventory: no `flatpak`, `flatpak-builder`, Docker or Podman. No
   accessible fresh Linux executor; existing workflow reruns cannot execute these
@@ -215,8 +215,26 @@ The test remote is unsigned and private, not a publication or update trust model
   exact XML bytes at the builder's observed appdata path. Primary
   [builder 1.2.2 cleanup source](https://github.com/flatpak/flatpak-builder/blob/1.2.2/src/builder-manifest.c#L2364)
   proves the unconditional relocation and separate optional composition guard.
-  The regression failed before the correction and passes afterward. Native
-  export/linkage after this correction remains untested; no app rebuild is needed.
+  The regression failed before the correction and passes afterward. The later
+  native build-command success below does not establish full package/linkage
+  acceptance; no app rebuild is needed.
+- Actual run `38615166143`: `build-0` returned 0 in 5,697 ms, with 1,615 stdout
+  bytes and no stderr. Our post-build verifier then falsely rejected generated
+  `sockets=x11;wayland;fallback-x11;`. Retained `build-0/metadata` is 195 bytes,
+  SHA-256 `5d3028ba3e3a7273d57680b9c8531e17dacb82099d0ba7767941df69b3edd707`.
+  `build-0/files/manifest.json` retains the exact four recipe finish arguments
+  and the report's Platform/SDK commits. Both are under
+  `artifacts/flatpak-package-38615166143/flatpak-package-38615166143-1/creator-flatpak-WG2Pan/`.
+  Flatpak 1.12.7's [socket parser](https://github.com/flatpak/flatpak/blob/1.12.7/common/flatpak-context.c#L1002)
+  adds the X11 bit for fallback; its [execution contract](https://github.com/flatpak/flatpak/blob/1.12.7/common/flatpak-run.c#L1623)
+  still permits X11 only when Wayland is unavailable. The verifier now normalizes
+  only the exact three-token `x11`/`wayland`/`fallback-x11` set for comparison,
+  retaining the original metadata. Unconditional X11, duplicates and additional
+  bus/environment grants still refuse; recipe bytes and permissions are unchanged.
+  The hash-pinned capture regression failed before this verifier-only correction
+  and passes afterward, including the original three refusal controls. No native
+  rerun was started. Packaged-byte verification, bundle/install/update, ABI,
+  renderer and host/MCP/migration acceptance remain untested or false.
 - Existing inspected Linux package receipts label 0.1.12/0.1.13. They were not
   relabeled. Fresh current14 assembly acceptance is main's independently verified
   prerequisite, not replaced by fixture hashes.

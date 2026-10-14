@@ -178,6 +178,28 @@ test('deployed metadata allows exact graphics only and refuses grant/env/bus inj
     metadata().replace('sockets=wayland;fallback-x11;', 'sockets=session-bus;'), `${metadata()}[Context]\n`,
     `${metadata()}shared=ipc;\n`]) assert.throws(() => runner.parseMetadata(text));
 });
+test('Flatpak 1.12.7 captured fallback metadata accepts only the exact canonical three socket bits', () => {
+  // Run 38615166143, build-0/metadata; fixture bytes are pinned to the retained artifact.
+  const captured = `[Application]\nname=${pkg.ID}\nruntime=org.gnome.Platform/x86_64/50\nsdk=org.gnome.Sdk/x86_64/50\ncommand=creator-hub\n\n[Context]\nshared=ipc;\nsockets=x11;wayland;fallback-x11;\ndevices=dri;\n`;
+  assert.equal(Buffer.byteLength(captured), 195);
+  assert.equal(pkg.sha256(captured), '5d3028ba3e3a7273d57680b9c8531e17dacb82099d0ba7767941df69b3edd707');
+  assert.equal(runner.parseMetadata(captured).Context.sockets, 'x11;wayland;fallback-x11;');
+  runner.parseMetadata(captured.replace('x11;wayland;fallback-x11;', 'fallback-x11;x11;wayland;'));
+  for (const sockets of ['x11;wayland;', 'x11;', 'x11;wayland;fallback-x11;session-bus;',
+    'x11;fallback-x11;', 'x11;wayland;fallback-x11;x11;', 'x11;wayland;fallback-x11;wayland;',
+    'x11;wayland;fallback-x11;fallback-x11;', 'x11;wayland;fallback-x11;system-bus;']) {
+    assert.throws(() => runner.parseMetadata(captured.replace(/^sockets=.*$/m, `sockets=${sockets}`)), /Sandbox permission differs/);
+  }
+  for (const text of [`${captured}[Environment]\nPATH=/foreign\n`,
+    `${captured}[Session Bus Policy]\norg.freedesktop.Flatpak=talk\n`,
+    `${captured}[System Bus Policy]\norg.foreign=talk\n`, `${captured}env=FOREIGN\n`,
+    `${captured}sockets=x11;wayland;fallback-x11;\n`, `${captured}[Context]\n`,
+    captured.replace('ipc;', 'ipc;network;'), `${captured}filesystems=home;\n`]) {
+    assert.throws(() => runner.parseMetadata(text));
+  }
+  assert.deepEqual(recipe()['finish-args'], pkg.PERMISSIONS);
+  assert.equal(recipe()['finish-args'].includes('--socket=x11'), false);
+});
 test('runtime linkage requires the native loader and rejects missing libraries/symbol versions', () => {
   const known = 'linux-vdso.so.1 (0x1)\nlibc.so.6 => /usr/lib/libc.so.6 (0x2)\n/lib64/ld-linux-x86-64.so.2 (0x3)';
   assert.equal(runner.linkageMatches(known), true);
