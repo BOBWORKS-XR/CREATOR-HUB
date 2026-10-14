@@ -70,11 +70,9 @@ test('fresh version/source options are all-or-none independent pins, not action 
   for (const bad of [args.slice(0, 8), [...args, '--skip-identity'], args.map(v => v === '0.1.14' ? 'latest' : v),
     args.map(v => v === 'b'.repeat(64) ? 'not-pinned' : v)]) assert.throws(() => probe.options(bad));
 });
-test('fresh Mac workflow preserves exact private input pins, split permissions and Linux no-bundle admission', () => {
+test('current Linux-only assembly default preserves exact pins and split permissions; archived Mac capture is separate', () => {
   const expected = [
-    { target: 'linux', os: 'ubuntu-22.04', assetId: 641099820, zipBytes: 55172816, zipSha256: '5036cab13213f56e1e08ab74037a4a719a9591573deb80fda013b25e0ba844f7', handoffSha256: '96f63bb4a5def192b086367fa4a6d00efd297a8cdb106cd4ace4bb35c8e4a3c9' },
-    { target: 'macos-arm64', os: 'macos-latest', assetId: 641099814, zipBytes: 47761280, zipSha256: '75d61ea27e4fa62d28688c8794b25bc917104e23a45c80427debcfaaf9c19871', handoffSha256: 'c051a7e230abb5832a96c738919d0c9cc6ebd740b73533edb0af0b4ebde49670' },
-    { target: 'macos-intel', os: 'macos-15-intel', assetId: 641099811, zipBytes: 49622185, zipSha256: '04191eb7007c274eb290e6de08fd4e6643b1483f8ef9a4ac3007a8f2ddc66884', handoffSha256: '332eab5174d3290c4e973086f3d36ee60390d123f45317923c301fe08ee92fb6' },
+    { target: 'linux', os: 'ubuntu-22.04', assetId: 641477926, zipBytes: 58332901, zipSha256: '679c376684bc705f1cb453e12f421cc5dd729007315454742ff4f94f1ee88001', handoffSha256: '77bf64dcf8c82d4e9ad5e4112445a59639425e6315d4723f910bd8058c9a1a62' },
   ];
   const matrices = [...assemblyWorkflow.matchAll(/fromJSON\(inputs.signed_inputs \|\| '([^']+)'\)/g)];
   assert.equal(matrices.length, 2); for (const [, value] of matrices) assert.deepEqual(JSON.parse(value), expected);
@@ -84,8 +82,7 @@ test('fresh Mac workflow preserves exact private input pins, split permissions a
   const stage = assemblyWorkflow.split('  stage-input:')[1].split('  assembly:')[0];
   assert.doesNotMatch(stage, /actions\/checkout|npm ci|build:unified|native-macos-app-probe/);
   assert.match(stage, /release_id:411494394/); assert.match(stage, /release.tag_name,'v0.1.13-validation'/);
-  assert.match(assemblyWorkflow, /installer=\(\)\n          if \[\[ "\$RUNNER_OS" == 'macOS' \]\]; then installer=\(--installer\); fi/);
-  assert.match(assemblyWorkflow, /ci-signed-unix-hub "\$\{installer\[@\]\}" --managed --experimental-unix --experimental-unix-writable/);
+  assert.match(assemblyWorkflow, /ci-signed-unix-hub --installer --managed --experimental-unix --experimental-unix-writable/);
   assert.doesNotMatch(assemblyWorkflow, /GITHUB_WORKFLOW_REF\s*=|exportVariable\('GITHUB_|contents: write[\s\S]*?\n  assembly:[\s\S]*?contents: write|workflow_dispatch.*create/);
 });
 test('fresh workflow validates primary native package/version pins before probe and retains only owned failure evidence', () => {

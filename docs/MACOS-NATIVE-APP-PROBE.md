@@ -716,3 +716,56 @@ Likewise, only after the selected kernel metadata establishes a native launch
 association should a distinct read-only LaunchServices fence be considered.
 Parent1/name/UID alone are not authority, and LaunchServices still has no genuine
 caller-owned Root exit code.
+
+### Intel Terms Read-Only Capture Checkpoint
+
+Actual selected run38629771103 at877db61 passed SDK fixtures and primary package
+qualification on all three cases. Independently verified ZIP receipts are under
+`artifacts/mac-root-control-38629771103/`. Both LaunchServices refusals are now
+parent-only: full136-byte kernel info, errno0, parent1 instead of Node2052/4493;
+PID/UID/real-UID/start match. Both helpers separately verify native termination,
+without a fabricated caller-owned exit. No further LS test is needed for that
+known harness contract.
+
+Intel/direct-ordinary verifies one normal close AXPress0, exact kernel/window/
+image bindings and PID2962 exit0/noSignal (`acceptedExit:true`). Its log helper
+overflowed527684 bytes against524288 after913.5ms; not a timeout. GUI-tool
+uncertainty is false, diagnostic lifetime/cleanup uncertainty remain true and the
+suite stays false. Its AXWindows initial read is -25204 at220.97ms, count unknown.
+Its exact-window PNG is independently pinned and visually nonblank at20.83s.
+
+The next implementation adds only `native-macos-terms-inspect.swift`, its tests,
+probe integration and a dedicated `intel-terms-readonly` selector. Push/default
+dispatch now emits that one same-DMG Intel/direct-ordinary case, never LS/ARM or a
+new package build. Existing old cases require explicit manual selection.
+
+The separate inspector reuses the existing compiled sampler support declarations
+for admission/kernel/image/children guards; it does not modify the action helper.
+It starts after genuine Root identification and polls only actual native document
+evidence: at most32 read-only attempts/20s, each capped4s, depth16/nodes512,
+256 recorded reads and0.2s messages. It retains exact owner bytes and any held
+native Root window CF reference across attempts. Only unavailable initial
+AXWindows -25204/zero windows or an incomplete unique terms inventory can remain
+pending. Association, identity, ambiguity and control-state failures are never
+retried into acceptance. Attempts retain monotonic time, elapsed time, Root age,
+original error/detail and whether native readiness remained pending.
+
+The unique known terms container/document and both controls must be native-read
+and Root-linked. Metadata includes strict parent/window CF links, Root-PID targets,
+container/document/parent PIDs, typed enabled/hidden/checkbox state, bounded native
+action names, bounds and exact native hit peers. Parent child-list membership,
+Root kernel/images/window and held references are rechecked. Missing state stays
+unknown; independent safe fields/second control are retained where possible,
+but capture refuses. Initially disabled Continue is an observation, not a driver
+failure or permission to press. No AX action/set-value, DOM/IPC or storage write
+exists; `termsAccepted` and `actionAuthorityEstablished` always remain false.
+
+Local checkpoint:213 cases,87 pass,0 fail,126 native/SDK skipped on Windows.
+The Mac fixtures compile the actual multi-file inspector, poison local admission,
+and exercise strict CF types/links, every required fact and bounded pending/refusal
+distinctions without a live target. One stale source guard was updated to the
+parent's explicit5bb05a2 Linux-only assembly pins/installer command; Mac archived
+DMG qualification pins are unchanged. No product or action-helper source changed;
+the reviewed helper remains212a8c94149d159da69c4161220333969fbc71bd555ee951c26d9ff04bae2a68.
+Native source has not run until the parent stages these files on the validation
+branch. The child inspector cannot be substituted with an old workflow run.

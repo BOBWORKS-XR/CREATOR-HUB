@@ -5,8 +5,8 @@ on:
       control_case:
         description: Same-package diagnostic contexts only; no rebuild
         type: choice
-        default: selected-three
-        options: [selected-three, ls-arm, ls-intel, intel-ordinary]
+        default: intel-terms-readonly
+        options: [intel-terms-readonly, selected-three, ls-arm, ls-intel, intel-ordinary]
   push:
     branches: [validation/mac-root-probe-014]
     paths: ['.github/workflows/native-macos-launch-control.yml']
@@ -20,11 +20,11 @@ jobs:
     outputs:
       matrix: ${{ steps.select.outputs.matrix }}
     steps:
-      - name: Select only the three admitted follow-up contexts
+      - name: Select only the admitted diagnostic context
         id: select
         uses: actions/github-script@v8
         env:
-          CONTROL_CASE: ${{ github.event_name == 'push' && 'selected-three' || inputs.control_case }}
+          CONTROL_CASE: ${{ github.event_name == 'push' && 'intel-terms-readonly' || inputs.control_case }}
         with:
           script: |
             const assert=require('node:assert/strict');
@@ -39,11 +39,12 @@ jobs:
             const cases=[
               {case:'ls-arm',context:'launchservices-ordinary',...targets.arm},
               {case:'ls-intel',context:'launchservices-ordinary',...targets.intel},
-              {case:'intel-ordinary',context:'direct-ordinary',...targets.intel}
+              {case:'intel-ordinary',context:'direct-ordinary',...targets.intel},
+              {case:'intel-terms-readonly',context:'direct-ordinary',termsInspect:true,...targets.intel}
             ];
             const selected=process.env.CONTROL_CASE;
             assert.ok(['selected-three',...cases.map(item=>item.case)].includes(selected),'unknown control case');
-            const include=selected==='selected-three'?cases:cases.filter(item=>item.case===selected);
+            const include=selected==='selected-three'?cases.filter(item=>!item.termsInspect):cases.filter(item=>item.case===selected);
             assert.ok(include.length===1||selected==='selected-three'&&include.length===3);
             core.setOutput('matrix',JSON.stringify({include}));
   control:
@@ -63,7 +64,7 @@ jobs:
           node-version: 24.17.0
       - run: npm ci --ignore-scripts
       - name: Compile SDK guard fixtures without launching a product
-        run: node --test scripts/native-macos-root-diagnostics.test.cjs scripts/native-macos-app-probe.test.cjs scripts/native-macos-window.test.cjs
+        run: node --test scripts/native-macos-root-diagnostics.test.cjs scripts/native-macos-app-probe.test.cjs scripts/native-macos-window.test.cjs scripts/native-macos-terms-inspect.test.cjs
       - name: Independently qualify original packaged artifact, not the failed GUI job as acceptance
         uses: actions/github-script@v8
         env:
@@ -171,8 +172,12 @@ jobs:
           CREATOR_MACOS_OWNED_GUI_TEST: '1'
           CREATOR_MACOS_LAUNCH_CONTROL: '1'
           LAUNCH_CONTEXT: ${{ matrix.context }}
+          CONTROL_CASE: ${{ matrix.case }}
+          CREATOR_MACOS_TERMS_INSPECT: ${{ matrix.termsInspect && '1' || '0' }}
         run: |
-          node scripts/native-macos-app-probe.cjs --app "$APP_PATH" --hub-sha256 "$HUB_SHA256" --output "$RUNNER_TEMP/root-app-probe" --expected-version 0.1.14 --assembly-receipt "$ASSEMBLY_RECEIPT" --assembly-receipt-sha256 "$ASSEMBLY_RECEIPT_SHA256" --launch-context "$LAUNCH_CONTEXT"
+          extra=()
+          if [[ "$CONTROL_CASE" == 'intel-terms-readonly' ]]; then extra=(--terms-inspect); fi
+          node scripts/native-macos-app-probe.cjs --app "$APP_PATH" --hub-sha256 "$HUB_SHA256" --output "$RUNNER_TEMP/root-app-probe" --expected-version 0.1.14 --assembly-receipt "$ASSEMBLY_RECEIPT" --assembly-receipt-sha256 "$ASSEMBLY_RECEIPT_SHA256" --launch-context "$LAUNCH_CONTEXT" "${extra[@]}"
       - name: Retain only owned Root diagnostics and exact-window bitmap; no entire desktop or user log archive
         if: always()
         uses: actions/upload-artifact@v4

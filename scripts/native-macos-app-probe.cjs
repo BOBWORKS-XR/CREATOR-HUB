@@ -17,6 +17,8 @@ function admission(env, platform, arch) {
   requireThat(env.RUNNER_ARCH === (arch === 'arm64' ? 'ARM64' : 'X64'), 'runner-architecture-mismatch');
 }
 function options(args) {
+  const termsInspect = args.at(-1) === '--terms-inspect';
+  if (termsInspect) args = args.slice(0, -1);
   let launchContext;
   if (args.at(-2) === '--launch-context') {
     launchContext = args.at(-1); args = args.slice(0, -2);
@@ -33,6 +35,10 @@ function options(args) {
     Object.assign(result, { expectedVersion: args[7], assemblyReceipt: args[9], assemblyReceiptSha256: args[11] });
   }
   if (launchContext) result.launchContext = launchContext;
+  if (termsInspect) {
+    requireThat(launchContext === 'direct-ordinary' && result.expectedVersion === '0.1.14', 'terms-inspection-requires-exact-ordinary14-context');
+    result.termsInspect = true;
+  }
   return result;
 }
 function inside(root, value) { return value.startsWith(root + path.sep); }
@@ -121,6 +127,36 @@ function validatePackageIdentity(receipt, owner, expectedVersion) {
     && Object.keys(p).every(k => fields.includes(k)) && p.bundleIdentifier === bundle && p.bundleExecutable === 'creator-hub'
     && version(p.bundleShortVersion) && version(p.bundleVersion) && isDeepStrictEqual(p.infoPlist, owner.process.infoPlist)
     && (expectedVersion === undefined || p.bundleShortVersion === expectedVersion), 'native-package-identity-unverified');
+}
+function validateTermsInspection(receipt, owner) {
+  requireThat(receipt?.command === 'terms-inspect' && receipt.complete === true && receipt.readOnly === true
+    && receipt.actionAttempted === false && receipt.permissionRequestsPerformed === false
+    && receipt.actionAuthorityEstablished === false && receipt.termsAccepted === false
+    && Object.keys(acceptance).every(key => receipt[key] === false)
+    && isDeepStrictEqual(receipt.process, owner.process) && isDeepStrictEqual(receipt.window, owner.window)
+    && receipt.package?.bundleShortVersion === '0.1.14' && receipt.package.bundleIdentifier === bundle
+    && receipt.package.bundleExecutable === 'creator-hub' && isDeepStrictEqual(receipt.package.infoPlist, owner.process.infoPlist)
+    && receipt.active === true && receipt.candidateCount === 2 && Number.isSafeInteger(receipt.visitedNodeCount)
+    && receipt.rootNativeCFReferencePreserved === true && receipt.rootReferenceScope === 'native-invocation'
+    && receipt.visitedNodeCount > 0 && receipt.visitedNodeCount <= 512
+    && Array.isArray(receipt.reads) && receipt.reads.length <= 256 && Array.isArray(receipt.controls) && receipt.controls.length === 2,
+  'terms-control-capture-unverified');
+  const expected = new Map([
+    ['AXCheckBox', 'I have read and agree to these terms, including the risk assumption and liability limitations above.'],
+    ['AXButton', 'Accept and continue'],
+  ]);
+  for (const control of receipt.controls) {
+    requireThat(expected.get(control.role) === control.title && control.pid === owner.process.pid && control.windowID === owner.window.id
+      && typeof control.enabled === 'boolean' && typeof control.hidden === 'boolean'
+      && control.parentCFMatches === true && control.windowCFMatches === true && control.nativeReferencesStable === true
+      && control.contained === true && control.hitPeerAXError === 0 && control.hitPeerPIDAXError === 0
+      && control.hitPeerPID === owner.process.pid && control.hitPeerCFMatches === true
+      && control.actionsAXError === 0 && Array.isArray(control.actions) && control.actions.length <= 32
+      && control.actions.every(name => typeof name === 'string' && Buffer.byteLength(name) <= 128) && control.actions.includes('AXPress')
+      && (control.role !== 'AXCheckBox' || [0, 1].includes(control.checked)), 'terms-control-capture-unverified');
+    expected.delete(control.role);
+  }
+  requireThat(expected.size === 0, 'terms-control-capture-unverified');
 }
 function privateProfile(output) {
   const home = path.join(output, 'private-home');
@@ -840,11 +876,17 @@ do {
     emit(failure); exit(2)
 }
 `;
+function surfaceSupportSource() {
+  const marker = '\ndo {\n', at = surfaceSource.indexOf(marker);
+  requireThat(at > 0 && surfaceSource.indexOf(marker, at + marker.length) === -1, 'sampler-support-boundary-unverified');
+  return surfaceSource.slice(0, at) + '\n';
+}
 
 async function probe(args, env) {
   admission(env, process.platform, process.arch);
   const request = options(args), temporary = canonical(env.RUNNER_TEMP || '');
   if (request.launchContext) rootDiagnostics.launchControl(request.launchContext, env, request.expectedVersion);
+  if (request.termsInspect) requireThat(process.arch === 'x64' && env.CREATOR_MACOS_TERMS_INSPECT === '1', 'explicit-intel-terms-inspection-required');
   canonical(request.app); requireThat(inside(temporary, request.app) && request.app.endsWith('.app'), 'root-app-outside-runner-temp');
   const executable = path.join(request.app, 'Contents/MacOS/creator-hub'), info = path.join(request.app, 'Contents/Info.plist');
   const executablePin = pin(executable), infoPin = pin(info, 65536);
@@ -925,6 +967,16 @@ async function probe(args, env) {
     const helperImage = pin(helper).image, samplerImage = pin(sampler).image;
     report.helper = { path: helper, image: helperImage, sourceSha256: source.image.sha256 };
     report.sampler = { path: sampler, image: samplerImage, sourceSha256: crypto.createHash('sha256').update(surfaceSource, 'utf8').digest('hex') };
+    if (request.termsInspect) {
+      const source = pin(path.join(__dirname, 'native-macos-terms-inspect.swift'), 65536, true), support = surfaceSupportSource();
+      fs.mkdirSync(path.join(output, 'terms-inspection'), { mode: 0o700 });
+      write('terms-inspection/main.swift', source.bytes); write('terms-inspection/support.swift', support);
+      const binary = path.join(output, 'terms-inspection/terms-inspect');
+      const result = await command('/usr/bin/swiftc', [path.join(output, 'terms-inspection/support.swift'), path.join(output, 'terms-inspection/main.swift'), '-o', binary], 'compile-terms-inspect', 120000);
+      requireThat(result.exitCode === 0, 'terms-inspector-compilation-failed');
+      report.termsInspector = { path: binary, image: pin(binary).image, sourceSha256: source.image.sha256,
+        supportSha256: crypto.createHash('sha256').update(support, 'utf8').digest('hex') };
+    }
     for (const [file, image, label] of [[helper, helperImage, 'availability-helper'], [sampler, samplerImage, 'availability-surface']]) {
       const result = await command(file, ['availability'], label, 15000, image);
       requireThat(result.exitCode === 0 && JSON.parse(result.text).accessibilityTrusted === true, 'existing-ax-trust-required-no-prompt');
@@ -991,6 +1043,16 @@ async function probe(args, env) {
     ownerImage = pin(ownerPath, 8192).image;
     const captureOwnerFence = () => requireThat(!toolUncertain && !ownedExit && sameImage(pin(ownerPath, 8192).image, ownerImage),
       'capture-owner-or-tool-state-unverified');
+    if (request.termsInspect) {
+      captureOwnerFence();
+      const inspector = report.termsInspector;
+      const result = await command(inspector.path, [ownerPath, String(process.pid)], 'terms-inspect', 30000, inspector.image);
+      const receipt = JSON.parse(result.text); report.termsControlInspection = receipt; write('terms-control-inspection.json', receipt);
+      requireThat(result.exitCode === 0, 'terms-native-inspection-refused');
+      validateTermsInspection(receipt, owner); captureOwnerFence();
+      if (sourcePin) requireThat(sameImage(pin(request.assemblyReceipt, 16384).image, sourcePin.image), 'assembly-receipt-drift');
+      report.captureCompleted = true;
+    } else {
     captureOwnerFence();
     const identityResult = await command(sampler, ['package-identity', ownerPath, String(process.pid)], 'package-identity', 15000, samplerImage);
     requireThat(identityResult.exitCode === 0, 'native-package-identity-refused');
@@ -1023,6 +1085,7 @@ async function probe(args, env) {
     report.surfaceSummary = { nodeCount: surface.nodes.length, rootWebAreaObserved: surface.nodes.some(node => node.role === 'AXWebArea'),
       roleCounts: Object.fromEntries([...new Set(surface.nodes.map(node => node.role))].map(role => [role, surface.nodes.filter(node => node.role === role).length])) };
     report.captureCompleted = true;
+    }
   } catch (error) { report.error = error.message; }
   finally {
     if (rootPid && owner && !ownedExit && !toolUncertain) {
@@ -1103,4 +1166,5 @@ if (require.main === module) {
 }
 module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, closeAssessment, probeCompletion,
   bitmapArguments, bitmapImage, windowBitmapDiagnostic, remoteReadPolicy, validateRootInspection, validateChildrenFailure, verifiedRootCloseDialog,
-  assemblyIdentity, validatePackageIdentity, validateLinkFailure, validateChildObservations, rootSurfaceDiagnostic, acceptance, surfaceSource };
+  assemblyIdentity, validatePackageIdentity, validateLinkFailure, validateChildObservations, rootSurfaceDiagnostic, acceptance, surfaceSource,
+  surfaceSupportSource, validateTermsInspection };

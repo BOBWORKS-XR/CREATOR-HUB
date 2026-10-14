@@ -167,7 +167,7 @@ test('same-package workflow pins original failed-run package steps independently
     '294615a337b1eb527df57c0fb3a9aba239aae204812d8a7b7b680d3698282767',
     '16ef1b41718fb3381fc4a02a26eeaa5a573ec748438e97ea0c91cbe0cc1b37c1',
     '85f7a1f9401d540e3fb8f6ddb5b83d3a3ff8681ad7b7f21c80cad085fcaffca5']) assert.ok(source.includes(value));
-  assert.match(source, /options: \[selected-three, ls-arm, ls-intel, intel-ordinary\]/);
+  assert.match(source, /options: \[intel-terms-readonly, selected-three, ls-arm, ls-intel, intel-ordinary\]/);
   assert.match(source, /matrix: \$\{\{ fromJSON\(needs.select-control.outputs.matrix\) \}\}/);
   assert.doesNotMatch(source, /context: \[direct-private|target: \[macos-arm64/);
   assert.match(source, /artifact\.workflow_run\.head_sha,run\.head_sha/);
@@ -180,10 +180,10 @@ test('same-package workflow pins original failed-run package steps independently
 
 test('exact workflow selector emits only LS ARM/LS Intel/Intel ordinary or one exact case; unknown contexts fail before output', () => {
   const source = fs.readFileSync(path.join(__dirname, '../.github/workflows/native-macos-launch-control.yml'), 'utf8');
-  const block = workflowScript(source, 'Select only the three admitted follow-up contexts');
+  const block = workflowScript(source, 'Select only the admitted diagnostic context');
   const selectionJob = source.split('  select-control:')[1].split('\n  control:')[0];
   assert.match(selectionJob, /permissions: \{\}/);
-  assert.match(selectionJob, /CONTROL_CASE: \$\{\{ github.event_name == 'push' && 'selected-three' \|\| inputs.control_case \}\}/);
+  assert.match(selectionJob, /CONTROL_CASE: \$\{\{ github.event_name == 'push' && 'intel-terms-readonly' \|\| inputs.control_case \}\}/);
   assert.doesNotMatch(selectionJob, /checkout|github.rest|download|spawn|execFile|writeFile|GH_TOKEN/);
   const expected = [
     ['ls-arm', 'launchservices-ordinary', 'macos-arm64', 'macos-latest', 11919728492, 116030795575],
@@ -202,6 +202,10 @@ test('exact workflow selector emits only LS ARM/LS Intel/Intel ordinary or one e
   for (const item of include) {
     const outputs = []; execute(item.case, outputs); assert.deepEqual(outputs, [{ include: [item] }]);
   }
+  const terms = []; execute('intel-terms-readonly', terms);
+  assert.equal(terms.length, 1); assert.equal(terms[0].include.length, 1);
+  assert.equal(terms[0].include[0].target, 'macos-intel'); assert.equal(terms[0].include[0].context, 'direct-ordinary');
+  assert.equal(terms[0].include[0].termsInspect, true); assert.equal(terms[0].include[0].artifact, 11919859477);
   for (const invalid of [undefined, '', 'all', 'direct-private', 'arm-ordinary', 'macos-intel', 'ls-arm,ls-intel', '[]', '{}', '__proto__']) {
     const outputs = []; assert.throws(() => execute(invalid, outputs)); assert.deepEqual(outputs, []);
   }
