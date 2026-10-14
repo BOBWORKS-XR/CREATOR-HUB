@@ -101,18 +101,30 @@ jobs:
             trap '\''openbox --exit; wait "$manager"'\'' EXIT
             /usr/bin/python3 -B "$GITHUB_WORKSPACE/scripts/native-linux-components-probe.py" probe
           '
-      - name: Retain scoped capture, refusals and original assembly evidence
+      - name: Retain compact owned capture first without the original input ZIP
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-linux-components-${{ github.run_id }}-${{ github.run_attempt }}
+          name: native-linux-components-capture-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
           if-no-files-found: warn
           path: |
-            ${{ runner.temp }}/linux-root-input.zip
             ${{ runner.temp }}/linux-root-source-binding.json
             ${{ runner.temp }}/linux-root-probe/*.json
             ${{ runner.temp }}/linux-root-probe/*.stdout
             ${{ runner.temp }}/linux-root-probe/*.stderr
             ${{ runner.temp }}/linux-root-probe/root-window.png
             ${{ runner.temp }}/linux-components-session/openbox.log
+      - name: Retain original immutable package evidence separately
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-components-source-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/linux-root-input.zip
+            ${{ runner.temp }}/linux-root-source-binding.json
+            ${{ runner.temp }}/linux-root-probe/input/builtin-manifest.json
+            ${{ runner.temp }}/linux-root-probe/input/signed-unix-assembly.json
+            ${{ runner.temp }}/linux-root-probe/input/unix-package-integrity.json

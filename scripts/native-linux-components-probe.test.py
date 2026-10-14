@@ -92,6 +92,19 @@ class ContractTests(unittest.TestCase):
         for forbidden in ("cargo build", "npm run build", "secrets."):
             self.assertNotIn(forbidden, body)
 
+    def test_compact_capture_upload_precedes_separate_original_zip_and_keeps_refusals(self):
+        body = (HERE.parent / ".github/workflows/native-linux-components-014.yml").read_text()
+        compact = body.split("      - name: Retain compact owned capture first", 1)[1]
+        compact, original = compact.split("      - name: Retain original immutable package evidence separately", 1)
+        self.assertNotIn("linux-root-input.zip", compact)
+        self.assertNotIn("linux-root-probe/input/", compact)
+        for suffix in ("*.json", "*.stdout", "*.stderr", "root-window.png"):
+            self.assertIn("linux-root-probe/" + suffix, compact)
+        self.assertIn("if: always()", compact)
+        self.assertIn("linux-root-input.zip", original)
+        self.assertIn("input/signed-unix-assembly.json", original)
+        self.assertIn("if: always()", original)
+
 
 class OwnershipTests(unittest.TestCase):
     def fixture(self):
@@ -106,6 +119,16 @@ class OwnershipTests(unittest.TestCase):
         f, owner = self.fixture()
         result = p.press("view-setup", owner, f.atspi)
         self.assertEqual(result["actionCount"], 1)
+        f.button.action.do_action.assert_called_once_with(0)
+
+    def test_builtin_retry_is_observed_retry_opening_not_companion_open_in_hub(self):
+        f, owner = self.fixture()
+        f.button.name = "Open in Hub"
+        with self.assertRaisesRegex(RuntimeError, "Retry opening"):
+            p.press("retry", owner, f.atspi)
+        f.button.action.do_action.assert_not_called()
+        f.button.name = "Retry opening"
+        self.assertEqual(p.press("retry", owner, f.atspi)["button"], "Retry opening")
         f.button.action.do_action.assert_called_once_with(0)
 
     def test_contained_semantic_parent_is_allowed_but_external_parent_is_refused(self):

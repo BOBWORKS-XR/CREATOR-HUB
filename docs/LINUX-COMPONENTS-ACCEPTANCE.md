@@ -57,7 +57,7 @@ Planned actual sequence:
 2. If required, normal `Continue for now` on the convergence review. No prepare,
    migration or retirement action; fixtures and absent migration record checked.
 3. Select Setup, native `Not now`, observe decline and reaped backend, normal
-   `Open in Hub` retry, native approval. Require actual rendered Linux requirements
+   `Retry opening`, native approval. Require actual rendered Linux requirements
    and exact approved recipe, then `Check requirements again` and real result.
 4. Select MCP, native `Not now`, observe decline/reap, normal retry and native
    `Enable MCP controls`. Managed routing, if requested by the real product, is
@@ -132,3 +132,78 @@ node, 16384 UTF-8 bytes aggregate), never EditableText. Primary API contracts:
 [Text.get_text](https://docs.gtk.org/atspi2/method.Text.get_text.html) and
 [Text.get_character_count](https://docs.gtk.org/atspi2/method.Text.get_character_count.html).
 Failure diagnostics never authorize another input or override the original error.
+
+## Second Run: Exact Refusal And Contract Gaps
+
+Run `38645211366`, test source `b8b3037d0c8f41805640472feb42ce264b13c5dd`,
+job `116130248902`, same unchanged product: all input/install gates and 76 Root /
+21 component Linux tests passed. Failure remained at `open-setup`, consent
+readiness deadline, no consent input. Root terms acknowledgement was saved and
+normal cleanup reaped Root exit 0. This is **not** a component suite pass.
+
+The exact owned PNG was viewed. It shows `Could not open Project Setup` and
+`Opening Setup in Hub was declined. Standalone Setup is unchanged.` The native
+Root frame (PID 3332/start 44045, XRes window 4194307) was bound; the deadline
+inventory contained only its two system WebKit children, no matching Setup
+backend. That inventory cannot exclude a short-lived backend before sampling.
+The screenshot SHA-256 is
+`d6d8ee9913e40f643f7f854b6551408139a39a34b50695ecb9befdc62dd30fc8`.
+The owned AX tree independently shows `Retry opening`, but its paragraph Text
+interfaces yielded empty text; PNG evidence, not invented AX text, supplies the
+exact displayed refusal.
+
+Original result artifact `11931638467`, 386652442 bytes, SHA-256
+`dfdc597245cf8812602d2ba7e09bb7309d0fa1e8ca5ef1fd2957caecf66db86f`,
+is verified and retained under `artifacts/native-linux-components-38645211366`.
+Both original failed artifacts remain unchanged.
+
+Classification:
+
+- **Confirmed product surface failure:** Setup returned the declined result
+  without this probe pressing either permission button. It did not reach its
+  embedded operation. The message alone does not prove deliberate cancellation,
+  dependency absence, backend admission denial or the underlying OS error.
+- **Confirmed source/runtime dependency gap:** private source `a311810...` selects
+  Linux `tauri-plugin-dialog` 2.7.3 with `default-features = false` and
+  `xdg-portal`; its locked `rfd` is 0.16.0. That backend implements message
+  questions by spawning `zenity`, not an in-process GTK message window. A launch
+  error becomes `MessageDialogResult::Cancel`; the plugin maps that to false,
+  and Setup maps false to the exact displayed declined message. The actual DEB
+  declares only `libwebkit2gtk-4.1-0, libgtk-3-0`, not Zenity. The test provisioning
+  also did not explicitly provide or inventory Zenity. Primary pinned contracts:
+  [rfd XDG backend](https://github.com/PolyMeilex/rfd/blob/0.16.0/src/backend/xdg_desktop_portal.rs),
+  [Zenity question spawning](https://github.com/PolyMeilex/rfd/blob/0.16.0/src/backend/linux/zenity.rs),
+  [documented Linux prerequisites](https://github.com/PolyMeilex/rfd/blob/0.16.0/src/lib.rs).
+  Read-only inspection of the actual original archive's Setup ELF independently
+  matched its 20868880-byte manifest hash and found the compiled Zenity error,
+  command and `--question` strings. No app was executed for that inspection.
+- **Likely, not proven runtime cause:** missing/failed Zenity is consistent with
+  the immediate declined surface. No captured binary-presence/exec-status proof
+  establishes its availability or original launch error on this runner.
+- **Confirmed harness contract gaps:** the probe expects consent on the sealed
+  module PID, whereas this backend's window belongs to its spawned Zenity child.
+  It also originally selected companion `Open in Hub` for retry; that selector
+  is now corrected with a focused regression to the actual built-in source/PNG
+  label `Retry opening`. The paragraph Text gap means
+  the planned recipe/status predicates are not yet experimentally verified.
+
+Smallest next step, **before another dispatch**: parent review of this exact
+dialog/dependency contract; bounded read-only inventory of the runner's resolved
+Zenity binary/package/hash and backend launch outcome. Any native action would
+need an explicitly reviewed Root -> sealed Setup -> exact system Zenity chain,
+UID/start/kernel-image/XRes binding and rechecks, not a foreign-PID guard bypass.
+Production package/dependency/error-reporting changes remain parent-owned. No
+dependency, sandbox, payload, environment or deadline has been changed here.
+
+Future workflow captures upload a small `native-linux-components-capture-*`
+artifact **first**, containing all JSON/reports, stdout/stderr, owned PNG and
+session log but no original input ZIP. `native-linux-components-source-*` retains
+the original immutable ZIP/binding/receipts separately. Diagnose the compact
+artifact; do not download another 386 MB source ZIP to inspect a refusal.
+No additional run or product repin was dispatched after this classification.
+
+Final local verification for the compact-first workflow and observed built-in
+retry correction: 22 focused tests passed, 1 Linux-only fixture skipped; unchanged
+Root tests 75 passed, 1 skipped. Workflow YAML, upload ordering and embedded native
+GitHub-script syntax parsed. These changes are not a third native run or a suite
+acceptance claim.

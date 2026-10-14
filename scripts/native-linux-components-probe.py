@@ -35,7 +35,7 @@ CONTROLS = {
     "skip-migration": ("Continue for now", "Move to unified Creator Hub"),
     "view-setup": (APPS["setup"]["view"], None),
     "view-mcp": (APPS["mcp"]["view"], None),
-    "retry": ("Open in Hub", None),
+    "retry": ("Retry opening", None),
     "requirements": ("Check requirements again", RECIPE),
     "save-guide": ("Use existing controls", "Connect your AI to Unity"),
 }
