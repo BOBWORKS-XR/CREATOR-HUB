@@ -17,6 +17,20 @@ BUTTONS = {
     "Open Setup in Creator Hub?": {"Not now", "Open in Hub"},
     "Enable managed MCP routing": {"Not now", "Enable managed routing"},
 }
+GTK_INFO_BUTTONS = {
+    "Open Setup in Creator Hub?": {"Not now", "Open in Hub"},
+    "Open MCP in Creator Hub?": {"Not now", "Enable MCP controls"},
+    "Enable managed MCP routing": {"Not now", "Enable managed routing"},
+}
+
+
+def validate_gtk_frame(title, role, frame, sealed):
+    if frame is None:
+        return
+    allowed = {"Open Setup in Creator Hub?", "Open MCP in Creator Hub?"} if sealed else {"Enable managed MCP routing"}
+    require(title in allowed and role == "ALERT" and type(frame) is tuple and len(frame) == 4
+            and all(type(v) is int for v in frame) and all(0 <= v <= 8192 for v in frame[:2])
+            and all(0 < v <= 8192 for v in frame[2:]), "Exact pinned GTK message/geometry contract required")
 
 
 def require(value, message):
@@ -54,9 +68,14 @@ class Request:
     role: str
     button: str = ""
     receipt: object = None
+    gtk_message_info_frame: tuple | None = None
+
+    @property
+    def accessibility_name(self):
+        return "Information" if self.gtk_message_info_frame is not None else self.title
 
     @classmethod
-    def parse(cls, args):
+    def parse(cls, args, *, gtk_message_info_frame=None):
         require(len(args) in (8, 9), "Use ACTION PID START EXE SHA256 XID TITLE ROLE [BUTTON]")
         action, pid, start, executable, digest, window, title, role = args[:8]
         button = args[8] if len(args) == 9 else ""
@@ -74,10 +93,11 @@ class Request:
         require(not button if action != "click" else button in BUTTONS.get(title, set()), "Permission title/button pair is not allowlisted")
         require(action != "click" or role in ("DIALOG", "ALERT"), "Permission action requires a native dialog")
         require(action != "close" or role == "FRAME", "Normal close requires the owned main frame")
-        return cls(action, int(pid), start, executable, digest, xid, title, role, button)
+        validate_gtk_frame(title, role, gtk_message_info_frame, sealed=False)
+        return cls(action, int(pid), start, executable, digest, xid, title, role, button, None, gtk_message_info_frame)
 
     @classmethod
-    def sealed(cls, args, receipt):
+    def sealed(cls, args, receipt, *, gtk_message_info_frame=None):
         require(len(args) in (4, 5), "Use ACTION XID TITLE ROLE [BUTTON] after sealed receipt pins")
         action, window, title, role = args[:4]
         control = args[4] if len(args) == 5 else ""
@@ -91,7 +111,9 @@ class Request:
         require(not control if action != "click" else control in BUTTONS.get(title, set()), "Permission title/button pair is not allowlisted")
         require(action != "click" or role in ("DIALOG", "ALERT"), "Permission action requires a native dialog")
         require(action != "close" or role == "FRAME", "Normal close requires the owned main frame")
-        return cls(action, receipt.child_pid, receipt.child_start, "", receipt.child_hash, xid, title, role, control, receipt)
+        validate_gtk_frame(title, role, gtk_message_info_frame, sealed=True)
+        return cls(action, receipt.child_pid, receipt.child_start, "", receipt.child_hash, xid, title, role, control, receipt,
+                   gtk_message_info_frame)
 
 
 def exact_keys(value, keys):
@@ -345,12 +367,24 @@ def select_window(request, atspi):
     # Inspect only application PID metadata until the sole owned root is selected.
     roots = [app for app in children(atspi.get_desktop(0), 128) if app.get_process_id() == request.pid]
     require(len(roots) == 1, "Owned accessibility application is missing or ambiguous")
-    matches = [node for node in children(roots[0], 32)
-               if node.get_name() == request.title and node.get_role() == getattr(atspi.Role, request.role)]
+    windows = children(roots[0], 32)
+    require(request.gtk_message_info_frame is None or request.receipt is None or len(windows) == 1,
+            "Expected one sealed backend AX top-level")
+    require(request.gtk_message_info_frame is None or all(n.get_process_id() == request.pid for n in windows),
+            "Foreign GTK message AX top-level refused")
+    matches = [node for node in windows
+               if node.get_name() == request.accessibility_name and node.get_role() == getattr(atspi.Role, request.role)]
     require(len(matches) == 1, "Exact owned accessibility window is missing or ambiguous")
     window = matches[0]
     require(window.get_process_id() == request.pid, "Accessibility window is not owned")
     ready(window, atspi)
+    if request.gtk_message_info_frame is not None:
+        component = window.get_component_iface()
+        require(component is not None, "Native AX window geometry unavailable")
+        rectangle = component.get_extents(atspi.CoordType.SCREEN)
+        actual = (rectangle.x, rectangle.y, rectangle.width, rectangle.height)
+        require(all(type(v) is int for v in actual) and actual == request.gtk_message_info_frame,
+                f"Exact AX/native frame differs: {actual} != {request.gtk_message_info_frame}")
     return window
 
 
@@ -366,7 +400,35 @@ def walk(window, request):
     return nodes
 
 
+def gtk_message_context(request, nodes, atspi):
+    if request.gtk_message_info_frame is None:
+        return
+    windows = {getattr(atspi.Role, name, -1) for name in ("FRAME", "WINDOW", "DIALOG", "ALERT", "APPLICATION")}
+    require(all(n.get_role() not in windows for n in nodes[1:]), "Nested GTK accessibility window refused")
+    if request.title == "Open Setup in Creator Hub?":
+        body = ("Run Project Setup inside this Creator Hub window?\n\n" + request.receipt.parent_executable
+                + "\n\nThis preview uses your existing Setup operations. It does not install an app or change shortcuts. Only continue if you just chose Project Setup in Hub.")
+    elif request.title == "Open MCP in Creator Hub?":
+        body = ("Enable the normal MCP controls in this running Creator Hub?\n\n" + request.receipt.parent_executable
+                + "\nSHA-256: " + request.receipt.parent_hash
+                + "\n\nThis permits launcher settings, selected AI-client configuration and Unity bridge changes when you use their controls. Only approve the Hub you intentionally opened. "
+                + "The direct parent and private pipes are checked. This fingerprint is a file snapshot, not a publisher signature or an immutable executable lock. "
+                + "This does not install updates, adopt shortcuts, or stop any client.")
+    else:
+        require(request.title == "Enable managed MCP routing" and request.receipt is None, "Unknown GTK message context")
+        body = ("Enable Creator Hub's managed MCP connection?\n\nA signed retained router will keep AI-client command paths stable across compatible Hub updates. "
+                + "Existing client settings are not changed by this action. Moving their connections still requires your approval. Old apps and Unity projects stay in place.")
+    for text in (request.title, body):
+        labels = [node for node in nodes if node.get_role() == atspi.Role.LABEL and node.get_name() == text]
+        require(len(labels) == 1, "Exact unique GTK context label required")
+        ready(labels[0], atspi)
+    controls = [node for node in nodes if node.get_role() == atspi.Role.PUSH_BUTTON]
+    require(len(controls) == 2 and {n.get_name() for n in controls} == GTK_INFO_BUTTONS[request.title],
+            "Exact two GTK permission controls required")
+
+
 def button(request, nodes, atspi):
+    gtk_message_context(request, nodes, atspi)
     matches = [node for node in nodes if node.get_role() == atspi.Role.PUSH_BUTTON and node.get_name() == request.button]
     require(len(matches) == 1, "Expected one exact owned permission button")
     node = matches[0]
@@ -383,20 +445,26 @@ def bound_window(request, x11):
     require(info["pid"] == request.pid, "XRes window is not owned by target PID")
     require(info["title"] == request.title and info["mapped"], "Exact visible X window differs")
     require(info["client"] > 0, "Missing XRes client identity")
+    if request.gtk_message_info_frame is not None:
+        require(x11.frame_rectangle(request.window) == request.gtk_message_info_frame, "Native dialog frame changed")
     return info
 
 
 def perform(request, atspi, proc, x11, binding=None):
     """Adapters exist for pure unit fixtures; main constructs only native implementations."""
+    validate_gtk_frame(request.title, request.role, request.gtk_message_info_frame, sealed=request.receipt is not None)
     identity(request, proc, binding)
     owned = bound_window(request, x11)
     window = select_window(request, atspi)
     nodes = walk(window, request)
+    gtk_message_context(request, nodes, atspi)
     result = {"pid": request.pid, "startTime": request.start, "executable": request.executable,
               "executableSha256": request.sha256, "window": str(request.window), "title": request.title,
               "executableBinding": "pathname-and-running-proc-image-hash",
               "role": request.role, "xresClient": str(owned["client"]), "action": request.action,
               "actionCount": 0, "normalExitVerified": False, "releaseReady": False}
+    if request.gtk_message_info_frame is not None:
+        result.update(axName=request.accessibility_name, nativeFrame=list(request.gtk_message_info_frame))
     if binding is not None:
         r = binding.receipt
         result.update(executable=None, executableBinding="sealed-proc-fd-and-owned-launcher", kernelImage=dict(binding.last_image),
@@ -501,6 +569,8 @@ class X11:
             "XSetErrorHandler": ([C.c_void_p], C.c_void_p), "XDefaultRootWindow": ([C.c_void_p], C.c_ulong),
             "XInternAtom": ([C.c_void_p, C.c_char_p, C.c_int], C.c_ulong), "XFree": ([C.c_void_p], C.c_int),
             "XGetWindowAttributes": ([C.c_void_p, C.c_ulong, C.POINTER(WindowAttributes)], C.c_int),
+            "XTranslateCoordinates": ([C.c_void_p, C.c_ulong, C.c_ulong, C.c_int, C.c_int,
+                                       C.POINTER(C.c_int), C.POINTER(C.c_int), C.POINTER(C.c_ulong)], C.c_int),
             "XGetWindowProperty": ([C.c_void_p, C.c_ulong, C.c_ulong, C.c_long, C.c_long, C.c_int, C.c_ulong,
                                    C.POINTER(C.c_ulong), C.POINTER(C.c_int), C.POINTER(C.c_ulong), C.POINTER(C.c_ulong), C.POINTER(C.c_void_p)], C.c_int),
             "XSendEvent": ([C.c_void_p, C.c_ulong, C.c_int, C.c_long, C.POINTER(Event)], C.c_int),
@@ -588,6 +658,29 @@ class X11:
         self.sync()
         require(not attrs.override_redirect, "Owned X window became unmanaged")
         return {"pid": pid, "client": client, "title": title[2].decode("utf8"), "mapped": attrs.map_state == 2}
+
+    def frame_rectangle(self, window):
+        # GTK's native window Component reports gdk_window_get_frame_extents.
+        # EWMH defines the four WM-added borders in client-window coordinates.
+        extents = self.property(window, "_NET_FRAME_EXTENTS")
+        require(extents and extents[:2] == (6, 32) and len(extents[2]) == 4
+                and all(type(v) is int and 0 <= v <= 8192 for v in extents[2]), "Exact WM frame extents unavailable")
+        attrs, screen = WindowAttributes(), WindowAttributes()
+        root = self.x.XDefaultRootWindow(self.display)
+        require(self.x.XGetWindowAttributes(self.display, window, C.byref(attrs))
+                and self.x.XGetWindowAttributes(self.display, root, C.byref(screen)), "Native frame geometry unavailable")
+        x, y, child = C.c_int(), C.c_int(), C.c_ulong()
+        require(self.x.XTranslateCoordinates(self.display, window, root, 0, 0, C.byref(x), C.byref(y), C.byref(child)),
+                "Native frame origin unavailable")
+        self.sync()
+        left, right, top, bottom = extents[2]
+        result = (x.value-left, y.value-top, attrs.width+left+right, attrs.height+top+bottom)
+        require(attrs.map_state == 2 and not attrs.override_redirect and attrs.width > 0 and attrs.height > 0
+                and 0 < screen.width <= 8192 and 0 < screen.height <= 8192
+                and result[0] >= 0 and result[1] >= 0 and result[0]+result[2] <= screen.width
+                and result[1]+result[3] <= screen.height, "Native dialog frame is not wholly visible/bounded")
+        require(self.property(window, "_NET_FRAME_EXTENTS") == extents, "WM frame extents changed during read")
+        return result
 
     def check_close(self, window):
         root = self.x.XDefaultRootWindow(self.display)

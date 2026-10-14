@@ -519,3 +519,24 @@ The dedicated validation branch is authorized for one such native run, not an
 automatic repeat or a product rebuild. Actual AX evidence must precede any
 role/name input-contract correction; this checkpoint contains no new native
 result or component acceptance.
+
+## Captured And Coupled GTK Contracts
+Run `38653904385`, test `8f46524b357c90192abdda08be1412a50068b007`, unchanged 4f product.
+Compact artifact `11935468678`, 41774 bytes; SHA-256 `1a4b3c44ae933e794530c1ebba43a3d87d4df3965cdc32862ab02141dc9f9224`.
+Evidence: `artifacts/native-linux-components-38653904385/linux-root-probe/setup-capture-backend-{window,ax-refusal}.json`.
+Setup PID 3525/start 128979, PPID 3440, UID 1001; sealed image 16554072 bytes, seals 15.
+Image SHA-256 `c960edfdd2f86d1ef994ef639b0d3e1b35041acb78935bf5d61dd7f69f32978c`; XID 12582920/client 12582912.
+Native title `Open Setup in Creator Hub?`; one AX `ALERT`/`Information`, 11 same-PID nodes, exact title/body and two buttons.
+Identity rechecks passed; no consent input, backend exit status unavailable, Root normal reap/EOF not verified, no signals.
+| Dialog | Pinned Source Contract | Native AX Evidence |
+| --- | --- | --- |
+| Setup | 773 `hosted.rs`: explicit Info, Open in Hub/Not now | Confirmed above |
+| Root managed routing | 4f `builtin.rs`: default Info, Enable managed routing/Not now | Not observed; exact runtime gate required |
+| MCP writable permission | 773 `hosted.rs`: explicit Info, Enable MCP controls/Not now, exact host/hash/body | Not observed; exact runtime gate required |
+Root plugin 2.7.3 default Info verified from the crate matching 4f lock SHA `61854a36651aa48381e5e209f69a01273b77f3f9f91f0c430b1b98d33bd47229`; three cached source files matched the archive.
+Opt-in `gtk_message_info_frame` uses only these exact title/ALERT/Information/context/button profiles; ordinary routing vs sealed modules remain distinct; old API defaults unchanged.
+Geometry is exact AX SCREEN extents vs translated X client plus WM frame borders: [GTK](https://github.com/GNOME/gtk/blob/3.24.33/gtk/a11y/gtkwindowaccessible.c), [EWMH](https://specifications.freedesktop.org/wm/latest/ar01s05.html).
+Source/fixture-tested geometry is NOT native-accepted. Root/MCP role/name association and later nameless-paragraph readiness remain unverified.
+Read-only MCP, warning/unknown dialogs, altered host/hash/body, extra/nested/foreign windows, geometry or image drift refuse; no guessed input.
+Captured-tree failing-first regression now passes; focused preflight 173 passed / 4 skipped, plus Python/YAML/JS syntax checks.
+Six owned harness paths staged for parent review; prepared workflow is full `probe`, but no dispatch/push/product rebuild or full-flow acceptance.

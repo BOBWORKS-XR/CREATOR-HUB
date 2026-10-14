@@ -439,6 +439,168 @@ class XResTests(unittest.TestCase):
         self.assertEqual(len(sends), 1)
 
 
+class GtkMessageContractTests(unittest.TestCase):
+    def setup_fixture(self, title="Open Setup in Creator Hub?"):
+        api, _old_proc, x11, control, window, app, desktop = fixture()
+        value, pins = receipt_fixture()
+        receipt, proc = h.Receipt.parse(value, pins), KernelProc()
+        binding = h.KernelBinding(receipt, proc)
+        self.addCleanup(binding.close)
+        api.Role = types.SimpleNamespace(**vars(ROLE), LABEL=6)
+        api.CoordType = types.SimpleNamespace(SCREEN=0)
+        frame = (10, 20, 600, 240)
+        x11.info["title"] = title
+        x11.frame_rectangle = lambda _: frame
+        window.name, window.role = "Information", ROLE.ALERT
+        window.get_component_iface = lambda: types.SimpleNamespace(get_extents=lambda _: types.SimpleNamespace(x=10, y=20, width=600, height=240))
+        heading = Node(title, api.Role.LABEL)
+        messages = {
+            "Open Setup in Creator Hub?": ("Run Project Setup inside this Creator Hub window?\n\n" + receipt.parent_executable
+                + "\n\nThis preview uses your existing Setup operations. It does not install an app or change shortcuts. Only continue if you just chose Project Setup in Hub.", "Open in Hub"),
+            "Open MCP in Creator Hub?": ("Enable the normal MCP controls in this running Creator Hub?\n\n" + receipt.parent_executable
+                + "\nSHA-256: " + receipt.parent_hash
+                + "\n\nThis permits launcher settings, selected AI-client configuration and Unity bridge changes when you use their controls. Only approve the Hub you intentionally opened. "
+                + "The direct parent and private pipes are checked. This fingerprint is a file snapshot, not a publisher signature or an immutable executable lock. "
+                + "This does not install updates, adopt shortcuts, or stop any client.", "Enable MCP controls"),
+            "Enable managed MCP routing": ("Enable Creator Hub's managed MCP connection?\n\nA signed retained router will keep AI-client command paths stable across compatible Hub updates. "
+                + "Existing client settings are not changed by this action. Moving their connections still requires your approval. Old apps and Unity projects stay in place.", "Enable managed routing"),
+        }
+        body = Node(messages[title][0], api.Role.LABEL)
+        approval = Node(messages[title][1])
+        window.children = [heading, body, approval, control]
+        if title == "Enable managed MCP routing":
+            req = h.Request.parse(["click", "123", "9876", EXE, DIGEST, "456", title, "ALERT", "Not now"], gtk_message_info_frame=frame)
+            proc, binding = FakeProc(), None
+            other = Node("Creator Hub - Development Preview", ROLE.FRAME)
+            other.get_child_count = lambda: self.fail("Root WebKit frame is not this native dialog")
+            app.children.append(other)
+        else:
+            req = h.Request.sealed(["click", "456", title, "ALERT", "Not now"], receipt, gtk_message_info_frame=frame)
+        return types.SimpleNamespace(api=api, proc=proc, x11=x11, control=control, window=window, app=app,
+            desktop=desktop, heading=heading, body=body, approval=approval, binding=binding, req=req, frame=frame)
+
+    def test_default_name_stays_coupled_and_explicit_sealed_setup_contract_is_exact(self):
+        f = self.setup_fixture()
+        default = h.Request.sealed(["click", "456", f.req.title, "ALERT", "Not now"], f.binding.receipt)
+        with self.assertRaisesRegex(RuntimeError, "accessibility window"):
+            h.perform(default, f.api, f.proc, f.x11, f.binding)
+        self.assertEqual(f.control.calls, 0)
+        result = h.perform(f.req, f.api, f.proc, f.x11, f.binding)
+        self.assertEqual(f.control.calls, 1)
+        self.assertEqual(result["axName"], "Information")
+        self.assertEqual(result["title"], "Open Setup in Creator Hub?")
+        self.assertEqual(result["nativeFrame"], list(f.frame))
+
+    def test_opt_in_refuses_other_titles_roles_and_invalid_rectangles(self):
+        f = self.setup_fixture()
+        for title, role, frame in (("Enable managed MCP routing", "ALERT", f.frame), (f.req.title, "DIALOG", f.frame),
+                (f.req.title, "ALERT", list(f.frame)), (f.req.title, "ALERT", (10, 20, 0, 240)),
+                (f.req.title, "ALERT", (True, 20, 600, 240)), (f.req.title, "ALERT", (-1, 20, 600, 240)),
+                (f.req.title, "ALERT", (10, 20, 8193, 240))):
+            with self.subTest(title=title, role=role, frame=frame), self.assertRaises(RuntimeError):
+                h.Request.sealed(["snapshot", "456", title, role], f.binding.receipt, gtk_message_info_frame=frame)
+        invalid = h.Request("click", f.req.pid, f.req.start, "", f.req.sha256, f.req.window, f.req.title,
+                            "DIALOG", f.req.button, f.req.receipt, f.frame)
+        with self.assertRaisesRegex(RuntimeError, "pinned GTK"):
+            h.perform(invalid, f.api, f.proc, f.x11, f.binding)
+        self.assertEqual(f.control.calls, 0)
+        self.assertEqual(f.x11.inspections, 0)
+
+    def test_mcp_and_root_routing_exact_source_profiles_keep_ownership_and_context(self):
+        for title in ("Open MCP in Creator Hub?", "Enable managed MCP routing"):
+            f = self.setup_fixture(title)
+            result = h.perform(f.req, f.api, f.proc, f.x11, f.binding)
+            self.assertEqual(result["actionCount"], 1)
+            self.assertEqual(result["axName"], "Information")
+            self.assertEqual(result["title"], title)
+            self.assertEqual(f.control.calls, 1)
+            f = self.setup_fixture(title)
+            f.body.name += " changed"
+            with self.subTest(title=title), self.assertRaisesRegex(RuntimeError, "context label"):
+                h.perform(f.req, f.api, f.proc, f.x11, f.binding)
+            self.assertEqual(f.control.calls, 0)
+
+    def test_mcp_read_only_warning_and_unknown_root_contracts_are_not_inferred(self):
+        f = self.setup_fixture("Open MCP in Creator Hub?")
+        f.approval.name = "Open read-only preview"
+        with self.assertRaises(RuntimeError):
+            h.perform(f.req, f.api, f.proc, f.x11, f.binding)
+        self.assertEqual(f.control.calls, 0)
+        for title in ("Open MCP in Creator Hub?", "Previous MCP outcome needs checking"):
+            with self.subTest(title=title), self.assertRaises(RuntimeError):
+                h.Request.parse(["snapshot", "123", "9876", EXE, DIGEST, "456", title, "ALERT"], gtk_message_info_frame=f.frame)
+
+    def test_names_context_buttons_foreign_window_and_geometry_fail_closed(self):
+        for change in ("name", "role", "heading", "body", "buttons", "extra-window", "nested-window", "foreign", "native-geometry", "ax-geometry"):
+            f = self.setup_fixture()
+            if change == "name":
+                f.window.name = "Question"
+            elif change == "role":
+                f.window.role = ROLE.DIALOG
+            elif change == "heading":
+                f.heading.name = "Other operation"
+            elif change == "body":
+                f.body.name += " changed"
+            elif change == "buttons":
+                f.window.children.append(Node("Open in Hub"))
+            elif change == "extra-window":
+                f.app.children.append(Node("Information", ROLE.ALERT))
+            elif change == "nested-window":
+                f.window.children.append(Node("Unexpected window", ROLE.FRAME))
+            elif change == "foreign":
+                f.window.pid = 999
+                f.window.get_name = lambda: self.fail("Foreign AX name must not be read")
+            elif change == "native-geometry":
+                f.x11.frame_rectangle = lambda _: (10, 20, 601, 240)
+            else:
+                f.window.get_component_iface = lambda: types.SimpleNamespace(get_extents=lambda _: types.SimpleNamespace(x=11, y=20, width=600, height=240))
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                h.perform(f.req, f.api, f.proc, f.x11, f.binding)
+            self.assertEqual(f.control.calls, 0)
+
+    def test_context_and_geometry_drift_at_button_boundary_prevent_input(self):
+        for change in ("label", "native-frame", "ax-frame", "pid-reuse", "ppid", "held-image"):
+            f = self.setup_fixture()
+            original = f.control.get_action_name
+            def mutate(index):
+                if change == "label":
+                    f.heading.name = "Changed"
+                elif change == "native-frame":
+                    f.x11.frame_rectangle = lambda _: (10, 20, 601, 240)
+                elif change == "ax-frame":
+                    f.window.get_component_iface = lambda: types.SimpleNamespace(get_extents=lambda _: types.SimpleNamespace(x=11, y=20, width=600, height=240))
+                elif change == "pid-reuse":
+                    f.proc.child_start = "99999"
+                elif change == "ppid":
+                    f.proc.ppid = 999
+                else:
+                    f.proc.held["sha256"] = "f"*64
+                return original(index)
+            f.control.get_action_name = mutate
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                h.perform(f.req, f.api, f.proc, f.x11, f.binding)
+            self.assertEqual(f.control.calls, 0)
+
+    def test_native_frame_uses_exact_translated_client_and_wm_borders_no_tolerance(self):
+        x = object.__new__(h.X11)
+        x.display, x.error = 1, False
+        properties = (6, 32, [2, 2, 24, 2])
+        x.property = lambda *_: properties
+        def attrs(_display, xid, pointer):
+            value = C.cast(pointer, C.POINTER(h.WindowAttributes)).contents
+            value.width, value.height, value.map_state = (1280, 800, 2) if xid == 1 else (600, 240, 2)
+            return 1
+        def translate(_display, _window, _root, _x, _y, ox, oy, _child):
+            C.cast(ox, C.POINTER(C.c_int))[0], C.cast(oy, C.POINTER(C.c_int))[0] = 12, 44
+            return 1
+        x.x = types.SimpleNamespace(XDefaultRootWindow=lambda _: 1, XGetWindowAttributes=attrs,
+                                    XTranslateCoordinates=translate, XSync=lambda *_: 0)
+        self.assertEqual(x.frame_rectangle(456), (10, 20, 604, 266))
+        for properties in (None, (6, 8, [2, 2, 24, 2]), (6, 32, [2, 2]), (6, 32, [-1, 2, 24, 2]), (6, 32, [8193, 2, 24, 2])):
+            with self.subTest(properties=properties), self.assertRaises(RuntimeError):
+                x.frame_rectangle(456)
+
+
 class CliTests(unittest.TestCase):
     def test_local_cli_refuses_without_native_modules_or_process_reads(self):
         import subprocess

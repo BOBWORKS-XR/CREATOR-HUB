@@ -1,6 +1,6 @@
 """Disposable, pinned DEB component UI experiment; not migration acceptance.
 
-Reuse the reviewed Root/XRes/direct-WebKit binding without changing its helper.
+Reuse the reviewed Root/XRes/direct-WebKit binding and captured Setup GTK contract.
 All inputs below are fixed source controls, never caller-supplied UI selectors.
 The native consent helper retains its strict single-process GTK dialog policy.
 """
@@ -298,11 +298,12 @@ def owned_windows(pid, x11):
 
 
 def backend_ax_observation(request, helper, x11, atspi, binding, root_record, actual):
-    """Failure-only read of one sealed backend, never a role/input authority."""
+    """Failure-only read of one native Root/dialog owner, never input authority."""
     result = {"readOnly": True, "authorization": False, "actionCount": 0, "verified": False,
               "timing": "post-strict-snapshot-failure-not-original-trace", "windows": [], "nodes": []}
     try:
-        require(request.action == "snapshot" and request.receipt is not None, "Diagnostic requires sealed snapshot request")
+        require(request.action == "snapshot" and (request.receipt is not None
+                or request.pid == root_record["pid"] and actual == root_record), "Diagnostic requires exact native owner")
 
         def recheck():
             helper.identity(request, helper.Proc(), binding)
@@ -323,6 +324,9 @@ def backend_ax_observation(request, helper, x11, atspi, binding, root_record, ac
                 index = len(result["windows"])
                 result["windows"].append({"pid": request.pid, "role": int(window.get_role()),
                                           "roleName": (window.get_role_name() or "")[:64], "name": (window.get_name() or "")[:256]})
+                if request.receipt is None and window.get_role() == getattr(atspi.Role, "FRAME", -1):
+                    result["skippedRootFrames"] = result.get("skippedRootFrames", 0) + 1
+                    continue
                 pending.append((window, 0, index))
         while pending:
             node, depth, index = pending.pop()
@@ -346,9 +350,34 @@ def backend_ax_observation(request, helper, x11, atspi, binding, root_record, ac
     return result
 
 
+def routing_permission(root, request, helper, x11, atspi, root_record, xid):
+    args = [str(request.pid), request.start, request.executable, request.sha256, str(xid), "Enable managed MCP routing", "ALERT"]
+    base = helper.Request.parse(["snapshot", *args])
+    B.save_json(root / "managed-routing-window.json", {"readOnly": True, "authorization": False, "native": root_record,
+                                                     "xres": {"window": xid, **helper.bound_window(base, x11)}})
+    frame = None
+    try:
+        frame = x11.frame_rectangle(xid)
+        snapshot = helper.Request.parse(["snapshot", *args], gtk_message_info_frame=frame)
+        before = helper.perform(snapshot, atspi, helper.Proc(), x11)
+        B.save_json(root / "managed-routing-snapshot.json", before)
+    except Exception as error:
+        B.save_json(root / "managed-routing-ax-refusal.json",
+                    {"strictSnapshotError": str(error)[:1000], "nativeFrame": frame, "readOnly": True, "authorization": False,
+                     "ax": backend_ax_observation(base, helper, x11, atspi, None, root_record, root_record)})
+        raise
+    require(B.native_process(request.pid, helper) == root_record, "Root identity changed before routing approval")
+    result = helper.perform(helper.Request.parse(["click", *args, "Enable managed routing"], gtk_message_info_frame=frame),
+                            atspi, helper.Proc(), x11)
+    require(B.native_process(request.pid, helper) == root_record, "Root identity changed during routing approval")
+    return {"dialogSnapshot": before, "input": result, "native": root_record}
+
+
 def consent(root, action, request, helper, x11, atspi, root_record):
     app, choice = action.split("-", 1)
     require(app in APPS and (choice in ("decline", "approve") or action == "setup-capture"), "Unknown native consent action")
+    gtk_component = B.SELECTED_CANDIDATE == B.GTK3_CANDIDATE
+    role = "ALERT" if gtk_component else "DIALOG"
     deadline, routing, observed, matched = time.monotonic() + 20, None, {}, None
     while time.monotonic() < deadline:
         helper.identity(request, helper.Proc())
@@ -356,10 +385,13 @@ def consent(root, action, request, helper, x11, atspi, root_record):
         route_xid = dialog_window(request.pid, "Enable managed MCP routing", x11) if app == "mcp" else None
         if route_xid:
             require(routing is None, "Managed routing dialog repeated; no automatic retry")
-            route = helper.Request.parse(["click", str(request.pid), request.start, request.executable,
-                                          request.sha256, str(route_xid), "Enable managed MCP routing",
-                                          "DIALOG", "Enable managed routing"])
-            routing = helper.perform(route, atspi, helper.Proc(), x11)
+            if gtk_component:
+                routing = routing_permission(root, request, helper, x11, atspi, root_record, route_xid)
+            else:
+                route = helper.Request.parse(["click", str(request.pid), request.start, request.executable,
+                                              request.sha256, str(route_xid), "Enable managed MCP routing",
+                                              "DIALOG", "Enable managed routing"])
+                routing = helper.perform(route, atspi, helper.Proc(), x11)
         found = direct_backend(root_record, app, helper, observed)
         if found:
             actual, image = found
@@ -373,16 +405,22 @@ def consent(root, action, request, helper, x11, atspi, root_record):
                 if xid:
                     uid_before = B.process_uids(actual["pid"])
                     require(uid_before == root_record["uids"], "Native backend UID changed")
-                    snapshot = helper.Request.sealed(["snapshot", str(xid), APPS[app]["title"], "DIALOG"], parsed)
+                    base_snapshot = helper.Request.sealed(["snapshot", str(xid), APPS[app]["title"], role], parsed)
                     B.save_json(root / (action + "-backend-window.json"),
                                 {"readOnly": True, "authorization": False, "actionCount": 0, "receipt": value,
-                                 "native": actual, "kernelImage": image, "expectedAxRole": "DIALOG",
-                                 "xres": {"window": xid, **helper.bound_window(snapshot, x11)}})
+                                 "native": actual, "kernelImage": image, "expectedAxRole": role,
+                                 "expectedAxName": "Information" if gtk_component else APPS[app]["title"],
+                                 "xres": {"window": xid, **helper.bound_window(base_snapshot, x11)}})
+                    frame = None
                     try:
+                        frame = x11.frame_rectangle(xid) if gtk_component else None
+                        snapshot = helper.Request.sealed(["snapshot", str(xid), APPS[app]["title"], role], parsed,
+                                                         gtk_message_info_frame=frame)
                         before = helper.perform(snapshot, atspi, helper.Proc(), x11, binding)
                     except Exception as error:
                         diagnostic = {"strictSnapshotError": str(error)[:1000], "readOnly": True, "authorization": False,
-                                      "ax": backend_ax_observation(snapshot, helper, x11, atspi, binding, root_record, actual)}
+                                      "nativeFrame": frame,
+                                      "ax": backend_ax_observation(base_snapshot, helper, x11, atspi, binding, root_record, actual)}
                         try:
                             B.save_json(root / (action + "-backend-ax-refusal.json"), diagnostic)
                         except Exception as retention_error:
@@ -394,9 +432,9 @@ def consent(root, action, request, helper, x11, atspi, root_record):
                                     {"readOnly": True, "authorization": False, "strictSnapshot": before,
                                      "ax": backend_ax_observation(snapshot, helper, x11, atspi, binding, root_record, actual)})
                         raise RuntimeError("Capture-only stop before component consent input")
-                    args = ["click", str(xid), APPS[app]["title"], "DIALOG",
+                    args = ["click", str(xid), APPS[app]["title"], role,
                             "Not now" if choice == "decline" else APPS[app]["approve"]]
-                    req = helper.Request.sealed(args, parsed)
+                    req = helper.Request.sealed(args, parsed, gtk_message_info_frame=frame)
                     require(B.process_uids(actual["pid"]) == uid_before, "Backend UID changed before consent")
                     result = helper.perform(req, atspi, helper.Proc(), x11, binding)
                     B.save_json(root / (action + "-backend.json"), {"receipt": value, "native": actual})

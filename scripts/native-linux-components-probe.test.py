@@ -87,7 +87,7 @@ class ContractTests(unittest.TestCase):
                         "run.run_attempt,pins.ATTEMPT", "job.run_attempt,pins.ATTEMPT", "pins.helperSha256",
                         "Buffer.isBuffer(data)||data instanceof ArrayBuffer", "persist-credentials: false", "if: always()",
                         "ubuntu-22.04", "CREATOR_LINUX_COMPONENTS_PROBE", "validation/linux-components-014",
-                        "native-linux-components-probe.py\" capture-only", "linux-root-probe/*.json", "linux-root-input.zip"):
+                        "native-linux-components-probe.py\" probe", "linux-root-probe/*.json", "linux-root-input.zip"):
             self.assertIn(literal, body)
         self.assertLess(body.index("native-linux-components-probe.test.py"), body.index("downloadArtifact("))
         self.assertLess(body.index("candidate-pins >"), body.index("getWorkflowRun("))
@@ -100,7 +100,7 @@ class ContractTests(unittest.TestCase):
         source = (HERE / "native-linux-components-probe.py").read_text()
         for removed in ("system_zenity", "inventory_zenity", "zenity_proof", "ZENITY", "import shutil"):
             self.assertNotIn(removed, source)
-        self.assertIn("helper.Request.sealed(args, parsed)", source)
+        self.assertIn("helper.Request.sealed(args, parsed, gtk_message_info_frame=frame)", source)
         self.assertIn("helper.perform(req, atspi, helper.Proc(), x11, binding)", source)
 
     def test_pending_assembly_blocks_component_cli_before_any_staging_or_native_read(self):
@@ -454,7 +454,7 @@ class NativeReceiptTests(unittest.TestCase):
         self.assertEqual(identity.call_count, 2)
         perform.assert_not_called()
         button.action.do_action.assert_not_called()
-        source = (HERE / "native-linux-components-probe.py").read_text().split("def backend_ax_observation(", 1)[1].split("def consent(", 1)[0]
+        source = (HERE / "native-linux-components-probe.py").read_text().split("def backend_ax_observation(", 1)[1].split("def routing_permission(", 1)[0]
         for forbidden in (".perform(", "Request.sealed", "do_action(", "get_action_iface", "time.sleep"):
             self.assertNotIn(forbidden, source)
 
@@ -504,6 +504,103 @@ class NativeReceiptTests(unittest.TestCase):
         helper.parse_start = lambda *_args, **_kwargs: "999"
         with self.assertRaisesRegex(RuntimeError, "reused"):
             p.backend_gone({"pid": 42, "startTime": "100"}, helper)
+
+
+class SetupGtkContractTests(unittest.TestCase):
+    def fixture(self):
+        subject = load("captured_setup_gtk_contract", HERE / "native-linux-components-probe.py")
+        subject.configure_component_candidate(subject.B.GTK3_CANDIDATE)
+        parent, actual, image = NativeReceiptTests().fixture()
+        parent["kernelImageSha256"] = subject.B.INSTALLED_HUB_PIN[1]
+        actual["kernelImageSha256"] = image["sha256"] = subject.APPS["setup"]["hash"]
+        image["size"] = subject.APPS["setup"]["size"]
+        helper = subject.B.load_helper()
+        with mock.patch.object(subject.os, "getuid", return_value=parent["uids"][0], create=True):
+            value = subject.receipt(parent, actual, image, "setup")
+        pins = ["42", "100", subject.B.INSTALLED_HUB_PIN[1], subject.APPS["setup"]["hash"], subject.B.SOURCE, str(subject.B.RUN)]
+        parsed = helper.Receipt.parse(value, pins)
+        binding = types.SimpleNamespace(receipt=parsed, verify=mock.Mock(), parent_and_image=mock.Mock(),
+                                        check_child=mock.Mock(), close=mock.Mock(), last_image=image)
+        records = {42: copy.deepcopy(parent), 43: copy.deepcopy(actual)}
+        proc = types.SimpleNamespace(exists=lambda pid: pid in records,
+            stat=lambda pid: f"{pid} (fixture) S {40 if pid == 42 else 42} " + "0 "*17 + records[pid]["startTime"],
+            executable=lambda pid: records[pid]["executable"], digest=lambda pid: records[pid]["kernelImageSha256"])
+        desktop = fixtures.AxNode(0, 14)
+        app = fixtures.AxNode(43, 75, parent=desktop)
+        window = fixtures.AxNode(43, 2, "Information", parent=app)
+        window.get_component_iface = lambda: types.SimpleNamespace(get_extents=lambda _: types.SimpleNamespace(x=10, y=20, width=600, height=240))
+        heading = fixtures.AxNode(43, 29, subject.APPS["setup"]["title"], parent=window)
+        body = fixtures.AxNode(43, 29, "Run Project Setup inside this Creator Hub window?\n\n" + parent["executable"]
+            + "\n\nThis preview uses your existing Setup operations. It does not install an app or change shortcuts. Only continue if you just chose Project Setup in Hub.", parent=window)
+        approve = fixtures.AxNode(43, 43, "Open in Hub", parent=window, verb="click")
+        decline = fixtures.AxNode(43, 43, "Not now", parent=window, verb="click")
+        for node in (desktop, app, window, heading, body, approve, decline):
+            node.get_child_count = lambda node=node: len(node.children)
+            node.get_child_at_index = lambda index, node=node: node.children[index]
+        atspi = types.SimpleNamespace(get_desktop=lambda _: desktop,
+            Role=types.SimpleNamespace(ALERT=2, DIALOG=16, LABEL=29, PUSH_BUTTON=43),
+            StateType=types.SimpleNamespace(SHOWING=1, ENABLED=2, SENSITIVE=3, DEFUNCT=4, BUSY=5),
+            CoordType=types.SimpleNamespace(SCREEN=0))
+        info = {"pid": 43, "client": 3, "title": subject.APPS["setup"]["title"], "mapped": True}
+        x11 = types.SimpleNamespace(inspect=lambda _: dict(info), frame_rectangle=lambda _: (10, 20, 600, 240))
+        request = helper.Request("snapshot", 42, "100", parent["executable"], parent["kernelImageSha256"], 1, subject.B.TITLE, "FRAME")
+        return types.SimpleNamespace(p=subject, parent=parent, actual=actual, image=image, helper=helper, binding=binding,
+            parsed=parsed, proc=proc, records=records, window=window, heading=heading, body=body, approve=approve,
+            decline=decline, atspi=atspi, x11=x11, request=request, info=info)
+
+    def test_captured_alert_information_with_title_label_passes_snapshot_without_consent(self):
+        f = self.fixture()
+        with mock.patch.object(f.p.os, "getuid", return_value=f.parent["uids"][0], create=True), \
+                mock.patch.object(f.p.B, "native_process", side_effect=lambda pid, *_args: copy.deepcopy(f.records[pid])), \
+                mock.patch.object(f.p.B, "process_uids", return_value=f.parent["uids"]), \
+                mock.patch.object(f.p.B, "save_json") as save, \
+                mock.patch.object(f.p, "direct_backend", return_value=(f.actual, f.image)), \
+                mock.patch.object(f.p, "dialog_window", return_value=77), \
+                mock.patch.object(f.helper, "Proc", return_value=f.proc), \
+                mock.patch.object(f.helper, "KernelBinding", return_value=f.binding), \
+                self.assertRaisesRegex(RuntimeError, "Capture-only stop before component consent input"):
+            f.p.consent(Path("/fixture"), "setup-capture", f.request, f.helper, f.x11, f.atspi, f.parent)
+        snapshot = save.call_args.args[1]["strictSnapshot"]
+        self.assertEqual(snapshot["role"], "ALERT")
+        self.assertEqual(snapshot["axName"], "Information")
+        self.assertEqual(snapshot["title"], "Open Setup in Creator Hub?")
+        self.assertEqual(snapshot["actionCount"], 0)
+        f.approve.action.do_action.assert_not_called()
+        f.decline.action.do_action.assert_not_called()
+
+    def test_root_routing_requires_snapshot_before_exact_native_approval(self):
+        f = self.fixture()
+        def perform(req, *_args):
+            self.assertEqual(save.call_count, 1 if req.action == "snapshot" else 2)
+            self.assertEqual(req.role, "ALERT")
+            self.assertEqual(req.accessibility_name, "Information")
+            self.assertEqual(req.title, "Enable managed MCP routing")
+            self.assertEqual(req.gtk_message_info_frame, (10, 20, 600, 240))
+            return {"actionCount": 0 if req.action == "snapshot" else 1}
+        with mock.patch.object(f.p.B, "native_process", return_value=f.parent), \
+                mock.patch.object(f.p.B, "save_json") as save, \
+                mock.patch.object(f.helper, "bound_window", return_value={"pid": 42, "client": 3}), \
+                mock.patch.object(f.helper, "perform", side_effect=perform) as effect:
+            result = f.p.routing_permission(Path("/fixture"), f.request, f.helper, f.x11, f.atspi, f.parent, 99)
+        self.assertEqual([c.args[0].action for c in effect.call_args_list], ["snapshot", "click"])
+        self.assertEqual(effect.call_args.args[0].button, "Enable managed routing")
+        self.assertIsNone(effect.call_args.args[0].receipt)
+        self.assertEqual(result["input"]["actionCount"], 1)
+
+    def test_root_routing_snapshot_refusal_retains_owner_and_ax_without_input(self):
+        f = self.fixture()
+        with mock.patch.object(f.p.B, "save_json") as save, \
+                mock.patch.object(f.helper, "bound_window", return_value={"pid": 42, "client": 3}), \
+                mock.patch.object(f.p, "backend_ax_observation", return_value={"verified": False}) as observation, \
+                mock.patch.object(f.helper, "perform", side_effect=RuntimeError("Strict native AX refusal")) as effect, \
+                self.assertRaisesRegex(RuntimeError, "Strict native AX refusal"):
+            f.p.routing_permission(Path("/fixture"), f.request, f.helper, f.x11, f.atspi, f.parent, 99)
+        self.assertEqual(effect.call_count, 1)
+        self.assertEqual(effect.call_args.args[0].action, "snapshot")
+        self.assertEqual(save.call_count, 2)
+        self.assertEqual(save.call_args.args[0].name, "managed-routing-ax-refusal.json")
+        self.assertFalse(save.call_args.args[1]["authorization"])
+        observation.assert_called_once()
 
 
 class FixtureTests(unittest.TestCase):
