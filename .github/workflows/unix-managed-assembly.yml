@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":641477926,"zipBytes":58332901,"zipSha256":"679c376684bc705f1cb453e12f421cc5dd729007315454742ff4f94f1ee88001","handoffSha256":"77bf64dcf8c82d4e9ad5e4112445a59639425e6315d4723f910bd8058c9a1a62"}]') }}
+        include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":641883669,"zipBytes":53946597,"zipSha256":"28887d8d783468e04583d75905ca732237986f90110dea1d4929a103e37c6eb5","handoffSha256":"75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -58,7 +58,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":641477926,"zipBytes":58332901,"zipSha256":"679c376684bc705f1cb453e12f421cc5dd729007315454742ff4f94f1ee88001","handoffSha256":"77bf64dcf8c82d4e9ad5e4112445a59639425e6315d4723f910bd8058c9a1a62"}]') }}
+        include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":641883669,"zipBytes":53946597,"zipSha256":"28887d8d783468e04583d75905ca732237986f90110dea1d4929a103e37c6eb5","handoffSha256":"75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 65
     env:

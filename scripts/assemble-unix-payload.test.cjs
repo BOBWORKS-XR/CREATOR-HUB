@@ -106,6 +106,22 @@ test('Linux assembly runs actual Root migration and process tests before compili
     /cargo test --release --locked --manifest-path src-tauri\/Cargo\.toml\s+--target-dir artifacts\/unix-verifier-target/);
   assert.doesNotMatch(workflow.slice(step, workflow.indexOf('      - ', step)), /continue-on-error|--ignored|--skip/);
 });
+
+test('both Linux assembly jobs select the same bounded signed input', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-assembly.yml'), 'utf8');
+  const values = [...workflow.matchAll(/include: \$\{\{ fromJSON\(inputs\.signed_inputs \|\| '([^']+)'\) \}\}/g)]
+    .map(match => JSON.parse(match[1]));
+  assert.equal(values.length, 2);
+  assert.deepEqual(values[0], values[1]);
+  assert.equal(values[0].length, 1);
+  const pin = values[0][0];
+  assert.deepEqual(Object.keys(pin).sort(), ['assetId', 'handoffSha256', 'os', 'target', 'zipBytes', 'zipSha256']);
+  assert.equal(pin.target, 'linux');
+  assert.equal(pin.os, 'ubuntu-22.04');
+  assert.ok(Number.isSafeInteger(pin.assetId) && pin.assetId > 0);
+  assert.ok(Number.isSafeInteger(pin.zipBytes) && pin.zipBytes > 0 && pin.zipBytes <= 300 * 1024 * 1024);
+  for (const value of [pin.zipSha256, pin.handoffSha256]) assert.match(value, /^[a-f0-9]{64}$/);
+});
 test('retained pre-wrapper is the signed manifest and original preparation is separately immutable', () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unix-manifest-test-')));
   try {
