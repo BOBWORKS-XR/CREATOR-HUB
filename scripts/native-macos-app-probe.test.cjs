@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const vm = require('node:vm');
 const { spawn, spawnSync } = require('node:child_process');
 const probe = require('./native-macos-app-probe.cjs');
 const sourcePath = path.join(__dirname, 'native-macos-app-probe.cjs');
@@ -105,12 +106,49 @@ test('fresh workflow validates primary native package/version pins before probe 
   assert.match(assemblyWorkflow, /nativeGuiAccepted:false,mcpAccepted:false,migrationAccepted:false,updateAccepted:false,releaseReady:false/);
   assert.match(assemblyWorkflow, /native-packages\/\*\.dmg/);
   assert.match(assemblyWorkflow, /if: always\(\) && runner.os == 'macOS'/);
-  assert.match(assemblyWorkflow, /assert.ok\(probe.sameImage\(image,report.windowBitmap.image\)\)/);
+  assert.match(assemblyWorkflow, /assert.equal\(reportedPath,file\)/);
+  assert.match(assemblyWorkflow, /assert.deepEqual\(Object.keys\(expectedImage\).sort\(\),Object.keys\(image\).sort\(\)\)/);
+  assert.match(assemblyWorkflow, /assert.ok\(probe.sameImage\(image,expectedImage\)\)/);
   assert.doesNotMatch(assemblyWorkflow, /AXUIElementPerformAction|accept_usage_terms|mock.*IPC|CGRequestScreenCaptureAccess|screencapture.*-D|release.*publish/);
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const scripts = [...assemblyWorkflow.matchAll(/^          script: \|\n((?:            .*\n)+)/gm)];
   assert.equal(scripts.length, 2);
   for (const [, block] of scripts) assert.doesNotThrow(() => new AsyncFunction(block.split('\n').map(line => line.slice(12)).join('\n')));
+});
+
+test('actual bitmap workflow gate separates the recorded owned path from exact pin fields', () => {
+  const block = assemblyWorkflow.split('      - name: Admit only a completed exact-owned-window bitmap diagnostic')[1];
+  const script = block.match(/node - <<'NODE'\n([\s\S]*?)\n          NODE/)[1].split('\n').map(line => line.slice(10)).join('\n');
+  const temp = path.join(scratch, 'virtual-runner'), root = path.join(temp, 'root-app-probe');
+  const file = path.join(root, 'window-bitmap', 'root-window.png');
+  // Exact pin-field shape of ARM38613119845; synthetic execution proves only the
+  // workflow admission contract, never native ownership or rendered pixels.
+  const image = { sha256: 'a37b8869130b771971cc4e9efb40408da64344afb5f24bf82162148417e8224b',
+    device: '16777230', inode: '3027251', size: 234135, modifiedSeconds: 1792002063,
+    modifiedNanoseconds: 877590458, uid: 501, width: 1052, height: 692 };
+  const good = { windowBitmap: { completed: true, diagnosticOnly: true, ...probe.acceptance, image: { path: file, ...image } } };
+  assert.equal(probe.sameImage(image, good.windowBitmap.image), false);
+  const execute = report => {
+    const output = [];
+    const fakeFS = { realpathSync: value => { assert.equal(value, temp); return temp; },
+      readFileSync: value => { assert.equal(value, path.join(root, 'report.json')); return JSON.stringify(report); },
+      appendFileSync: (value, data) => { assert.equal(value, 'test-output'); output.push(data); } };
+    vm.runInNewContext(script, { process: { env: { RUNNER_TEMP: temp, GITHUB_OUTPUT: 'test-output' } },
+      require: name => {
+        if (name === 'node:assert/strict') return assert;
+        if (name === 'node:fs') return fakeFS;
+        if (name === 'node:path') return path;
+        assert.equal(name, './scripts/native-macos-app-probe.cjs');
+        return { ...probe, bitmapImage: value => { assert.equal(value, file); return { ...image }; } };
+      } });
+    return output;
+  };
+  assert.deepEqual(execute(good), ['completed=true\n']);
+  for (const mutate of [r => r.windowBitmap.image.path = path.join(root, 'other.png'), r => delete r.windowBitmap.image.path,
+    r => delete r.windowBitmap.image.inode, r => r.windowBitmap.image.unreviewed = true, r => r.windowBitmap.nativeGuiAccepted = true,
+    ...Object.keys(image).map(key => r => { r.windowBitmap.image[key] = typeof image[key] === 'number' ? image[key] + 1 : 'changed'; })]) {
+    const changed = structuredClone(good); mutate(changed); assert.throws(() => execute(changed));
+  }
 });
 test('source receipt preserves distinct established assembly/private source stamps without inventing verification', () => {
   const good = assemblyReceipt(), identity = probe.assemblyIdentity(receiptBytes(good), 'x86_64', '0.1.14');

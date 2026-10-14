@@ -233,7 +233,10 @@ jobs:
             const report=JSON.parse(fs.readFileSync(path.join(root,'report.json'),'utf8'));
             if(report.windowBitmap?.completed!==true||report.windowBitmap.diagnosticOnly!==true) process.exit(0);
             const file=path.join(root,'window-bitmap','root-window.png'),image=probe.bitmapImage(file);
-            assert.ok(probe.sameImage(image,report.windowBitmap.image));
+            const {path:reportedPath,...expectedImage}=report.windowBitmap.image||{};
+            assert.equal(reportedPath,file);
+            assert.deepEqual(Object.keys(expectedImage).sort(),Object.keys(image).sort());
+            assert.ok(probe.sameImage(image,expectedImage));
             for(const key of Object.keys(probe.acceptance)) assert.equal(report.windowBitmap[key],false);
             fs.appendFileSync(process.env.GITHUB_OUTPUT,'completed=true\n');
           } catch(error) { if(error.code!=='ENOENT') throw error; }
