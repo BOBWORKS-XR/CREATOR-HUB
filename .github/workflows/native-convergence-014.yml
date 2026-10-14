@@ -1,4 +1,4 @@
-name: Current Windows fresh repeat launch and backup-drift convergence (not release)
+name: Corrected Windows repeat launch and native convergence (not release)
 on:
   push:
     branches: [validation/convergence-014]
@@ -21,11 +21,11 @@ jobs:
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2026-03-10' }
           $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/411494394' -Headers $headers
           if ($release.draft -ne $true -or $release.tag_name -ne 'v0.1.13-validation') { throw 'Unexpected private validation release.' }
-          $assets = @($release.assets | Where-Object name -CEQ 'unified-reviewed-42a35d1-20261014.zip')
-          if ($assets.Count -ne 1 -or $assets[0].state -ne 'uploaded' -or $assets[0].size -ne 86724469 -or $assets[0].digest -ne 'sha256:e8b27af186ca14268b48da57f553416a7f75d024b42a32fc5c78319aca8c87e9') { throw 'Exact convergence input is not available.' }
+          $assets = @($release.assets | Where-Object name -CEQ 'unified-repeat-a914bb9-20261014.zip')
+          if ($assets.Count -ne 1 -or $assets[0].state -ne 'uploaded' -or $assets[0].size -ne 86745210 -or $assets[0].digest -ne 'sha256:66eb9ace6a8ba8ababe78ca03114e1f493f163838854f434a173d3df5e00839f') { throw 'Exact convergence input is not available.' }
           $headers.Accept = 'application/octet-stream'
           Invoke-WebRequest -Uri ("https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/" + $assets[0].id) -Headers $headers -OutFile convergence-input/candidate.zip -MaximumRedirection 5 -TimeoutSec 300
-          if ((Get-FileHash convergence-input/candidate.zip).Hash.ToLowerInvariant() -ne 'e8b27af186ca14268b48da57f553416a7f75d024b42a32fc5c78319aca8c87e9') { throw 'Candidate archive differs.' }
+          if ((Get-FileHash convergence-input/candidate.zip).Hash.ToLowerInvariant() -ne '66eb9ace6a8ba8ababe78ca03114e1f493f163838854f434a173d3df5e00839f') { throw 'Candidate archive differs.' }
       - uses: actions/upload-artifact@v4
         with:
           name: convergence-signed-input
@@ -58,10 +58,10 @@ jobs:
         shell: pwsh
         run: |
           $zip = 'artifacts/convergence-input/candidate.zip'
-          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne 'e8b27af186ca14268b48da57f553416a7f75d024b42a32fc5c78319aca8c87e9') { throw 'Candidate archive differs.' }
+          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne '66eb9ace6a8ba8ababe78ca03114e1f493f163838854f434a173d3df5e00839f') { throw 'Candidate archive differs.' }
           Expand-Archive -LiteralPath $zip -DestinationPath artifacts/convergence-input/candidate
           $proof = Get-Content artifacts/convergence-input/candidate/candidate-source.json -Raw | ConvertFrom-Json
-          if ($proof.sourceRevision -ne '42a35d17c8f0c2f5e61ecaa6ce21aafb2725312f' -or $proof.version -ne '0.1.14' -or $proof.acceptanceOnly -ne $true -or $proof.releaseReady -ne $false -or $proof.privateKeyIncluded -ne $false) { throw 'Candidate proof differs.' }
+          if ($proof.sourceRevision -ne 'a914bb96abaca8837f586c25c341d24fe58fe73d' -or $proof.version -ne '0.1.14' -or $proof.acceptanceOnly -ne $true -or $proof.releaseReady -ne $false -or $proof.privateKeyIncluded -ne $false) { throw 'Candidate proof differs.' }
           "CREATOR_CANDIDATE_SOURCE=$($proof.sourceRevision)" >> $env:GITHUB_ENV
       - run: node --test scripts/native-convergence-smoke.test.cjs scripts/native-installed-baseline.test.cjs scripts/command-permissions.test.cjs
       - name: Exercise real installer and production migration guide
