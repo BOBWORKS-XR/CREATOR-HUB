@@ -50,6 +50,13 @@ the compatibility guarantee and require review before production retirement.
   forward slashes, rejected by its exact-path guard. Original reports remain in
   `artifacts/legacy-retirement-38561260878/`. Component-wise joins now pass a new
   no-spawn native-command regression; the corrected native run remains pending.
+- Run 38562397580 refuses before mutation with a ten-second shortcut probe
+  timeout on both products. Original evidence is retained separately. An actual
+  local temporary ShellLink fixture passes with both absent and present targets
+  while its read-only reservation stays held (308/292 ms, exit zero, both EOFs).
+  The runner cause is unknown. Deadline diagnostics now include exact child
+  status, stdout/stderr sizes, EOF states and elapsed/spawn times, without raw
+  environment or output values. No deadline/ownership guard is relaxed.
 - The older complete-uninstaller acceptance remains preserved at run 38542947181;
   it does not establish this separate compatibility-retirement operation.
 - Production coordinator/native consent, GUI quiescence, signed-router reconnect,

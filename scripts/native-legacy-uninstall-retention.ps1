@@ -410,6 +410,15 @@ function Invoke-LegacyRetention([string]$Id, [string]$Output) {
             $report.registrationsAfter = @(Get-LegacyRegistrations $pin)
             if (Test-Path -LiteralPath $installRoot) { $report.installedAfter = Get-LegacyInventory $installRoot }
         } catch { $report.errors += $_.Exception.Message } }
+        if ($report.caughtFailure -and $AdapterTestExecutable) { try {
+            $adapterLog = @($report.tools | Where-Object { $_.label -cin @('run-root-pinned-removal-adapter', 'run-root-pinned-retirement-adapter') })
+            if ($adapterLog.Count -eq 1) {
+                $path = Join-Path $Output $adapterLog[0].stderr
+                $item = Get-Item -LiteralPath $path
+                if ($item.Length -le 65536) { Write-Host ([IO.File]::ReadAllText($path)) }
+                else { Write-Host 'Native adapter failure log exceeds the console bound; full evidence retained in artifact.' }
+            }
+        } catch { Write-Host 'Native adapter console diagnostic unavailable; original failure remains in retained report.' } }
         foreach ($store in $seeded) { try {
             Require-Legacy ($null -ne $store.before) 'Synthetic store seeding failed before capture.'
             Assert-LegacyRetained $store.identity (Get-LegacyRootIdentity $store.path)

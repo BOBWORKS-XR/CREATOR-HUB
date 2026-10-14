@@ -50,7 +50,7 @@ jobs:
           & $bin legacy_shortcuts_windows::tests::
           if ($LASTEXITCODE -ne 0) { throw 'Root shortcut ownership regressions failed.' }
           "executable=$bin" >> $env:GITHUB_OUTPUT
-      - name: Validate native shortcut reads, cancellation, journal refusal/retry and retained MCP connections
+      - name: Capture exact shortcut child status and validate retirement with retained MCP connections
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}

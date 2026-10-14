@@ -551,7 +551,7 @@ mod native {
         native_path(&buffer)
     }
 
-    fn command(path: &Path) -> Result<Command, String> {
+    pub(super) fn command(path: &Path) -> Result<Command, String> {
         let system = system_path(false)?;
         let windows = system_path(true)?;
         let home = folder(0x28)?;
@@ -651,31 +651,50 @@ mod native {
         Ok(false)
     }
 
-    pub(super) fn read(path: &Path) -> Result<Routing, String> {
-        let mut child = command(path)?
+    pub(super) struct ProbeOutput {
+        pub(super) stdout: Vec<u8>,
+        pub(super) stderr: Vec<u8>,
+        pub(super) exit: std::process::ExitStatus,
+        pub(super) report: String,
+    }
+
+    pub(super) fn run(mut command: Command) -> Result<ProbeOutput, String> {
+        let started = Instant::now();
+        let mut child = command
             .spawn()
-            .map_err(|_| "Cannot start read-only shortcut probe.")?;
+            .map_err(|_| "Cannot start shortcut metadata process.")?;
+        drop(command);
+        let spawn_ms = started.elapsed().as_millis();
         let deadline = Instant::now() + PROBE_TIMEOUT;
         let mut output = Vec::new();
         let mut error = Vec::new();
+        let mut out_done = false;
+        let mut err_done = false;
+        let mut exit = None;
         let result = (|| {
             let mut stdout = child.stdout.take().ok_or("Shortcut probe has no stdout.")?;
             let mut stderr = child.stderr.take().ok_or("Shortcut probe has no stderr.")?;
             loop {
+                out_done = drain(&mut stdout, &mut output, MAX_OUTPUT)?;
+                err_done = drain(&mut stderr, &mut error, MAX_ERROR)?;
+                exit = child
+                    .try_wait()
+                    .map_err(|_| "Cannot wait for shortcut probe.")?;
                 if Instant::now() >= deadline {
                     return Err("Read-only shortcut probe timed out; preserve it.".into());
                 }
-                let out_done = drain(&mut stdout, &mut output, MAX_OUTPUT)?;
-                let err_done = drain(&mut stderr, &mut error, MAX_ERROR)?;
-                let exit = child
-                    .try_wait()
-                    .map_err(|_| "Cannot wait for shortcut probe.")?;
                 if let Some(exit) = exit.filter(|_| out_done && err_done) {
-                    return parse_routing(&output, &error, exit.success());
+                    return Ok(exit);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         })();
+        let report = format!(
+            "child_status={exit:?} stdout_bytes={} stderr_bytes={} stdout_eof={out_done} stderr_eof={err_done} elapsed_ms={} spawn_ms={spawn_ms}",
+            output.len(), error.len(), started.elapsed().as_millis(),
+        );
+        let result: Result<_, String> =
+            result.map_err(|original: String| format!("{original} {report}"));
         if let Err(original) = &result {
             // Terminate only this owned metadata probe, never a product or user process.
             if !matches!(child.try_wait(), Ok(Some(_))) {
@@ -702,13 +721,137 @@ mod native {
                 }
             }
         }
-        result
+        result.map(|exit| ProbeOutput {
+            stdout: output,
+            stderr: error,
+            exit,
+            report,
+        })
+    }
+
+    pub(super) fn read(path: &Path) -> Result<Routing, String> {
+        let output = run(command(path)?)?;
+        #[cfg(test)]
+        eprintln!("native_read: {}", output.report);
+        parse_routing(&output.stdout, &output.stderr, output.exit.success())
+            .map_err(|error| format!("{error} {}", output.report))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn native_com_owned_shell_link_fixture() {
+        use base64::Engine;
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fixture with spaces.lnk");
+        let target = directory.path().join("fixture gui.exe");
+        assert!(!target.exists());
+        assert!(!path.exists());
+        // Save is allowed only for this newly owned cfg(test) fixture, never READ_SCRIPT.
+        let script = r#"
+$ErrorActionPreference = 'Stop'
+$path = $env:CREATOR_HUB_SHORTCUT_READ_PATH
+if ([IO.File]::Exists($path)) { throw 'Fixture path already exists' }
+$shell = $null
+$link = $null
+try {
+    $shell = New-Object -ComObject WScript.Shell
+    $link = $shell.CreateShortcut($path)
+    $link.TargetPath = $env:CREATOR_HUB_SHORTCUT_FIXTURE_TARGET
+    $link.Arguments = ''
+    $link.WorkingDirectory = [IO.Path]::GetDirectoryName($path)
+    $link.Save()
+} finally {
+    if ($null -ne $link) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
+    if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
+}
+"#;
+        let template = native::command(&path).unwrap();
+        let mut command = platform::command(Path::new(template.get_program()));
+        command
+            .env_clear()
+            .current_dir(template.get_current_dir().unwrap())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for (key, value) in template.get_envs() {
+            command.env(key, value.unwrap());
+        }
+        command.env("CREATOR_HUB_SHORTCUT_FIXTURE_TARGET", &target);
+        let utf16: Vec<_> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        command
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+            ])
+            .arg(base64::engine::general_purpose::STANDARD.encode(utf16));
+        let creation =
+            native::run(command).unwrap_or_else(|error| panic!("fixture creation: {error}"));
+        eprintln!("fixture creation: {}", creation.report);
+        eprintln!(
+            "fixture creation stderr: clixml={} progress_record={}",
+            creation.stderr.starts_with(b"#< CLIXML"),
+            String::from_utf8_lossy(&creation.stderr).contains("S=\"progress\""),
+        );
+        assert!(creation.exit.success(), "{}", creation.report);
+        assert!(path.exists());
+        let (reserved, before) = capture(&path).unwrap().unwrap();
+        let target_bytes = b"Owned ShellLink target fixture; deliberately not executable.\r\n";
+        for target_exists in [false, true] {
+            if target_exists {
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)
+                    .unwrap()
+                    .write_all(target_bytes)
+                    .unwrap();
+            }
+            assert_eq!(target.exists(), target_exists);
+            let target_before = fs::metadata(&target).ok().map(|metadata| {
+                (
+                    metadata.len(),
+                    metadata.created().unwrap(),
+                    metadata.modified().unwrap(),
+                )
+            });
+            eprintln!("native fixture target_exists={target_exists}: starting reserved read");
+            let started = std::time::Instant::now();
+            let metadata = native_read(&path).unwrap_or_else(|error| {
+                panic!("target_exists={target_exists} native_read: {error}")
+            });
+            eprintln!(
+                "native fixture target_exists={target_exists}: read_elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            routing_matches(&metadata, &target).unwrap();
+            let (_, after) = capture(&path).unwrap().unwrap();
+            assert_eq!(before, after);
+            if target_exists {
+                assert_eq!(fs::read(&target).unwrap(), target_bytes);
+                let metadata = fs::metadata(&target).unwrap();
+                assert_eq!(
+                    target_before,
+                    Some((
+                        metadata.len(),
+                        metadata.created().unwrap(),
+                        metadata.modified().unwrap()
+                    ))
+                );
+            } else {
+                assert!(!target.exists());
+            }
+        }
+        drop(reserved);
+        assert!(target.exists());
+    }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
@@ -1032,7 +1175,7 @@ mod tests {
             assert!(!READ_SCRIPT.contains(forbidden), "{forbidden}");
         }
         let source = include_str!("legacy_shortcuts_windows.rs");
-        let implementation = source.split("#[cfg(test)]").next().unwrap();
+        let implementation = source.split("mod tests {").next().unwrap();
         assert!(implementation.contains(".env_clear()"));
         assert!(implementation.contains("-NoProfile"));
         assert!(implementation.contains("-NonInteractive"));
