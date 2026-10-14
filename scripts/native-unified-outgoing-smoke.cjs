@@ -210,6 +210,8 @@ async function main() {
     await show('mcp'); await press(root, 'Enable managed MCP routing', 'Enable managed routing'); await approveBackend('mcp', manifest);
     verifyMigratedTarget({ command: route.command, args: [] }, manifest, null, local);
     await frames.mcp.locator('.advanced-section summary').click();
+    await frames.mcp.locator('#autoConfig').check();
+    await retry(() => assert.equal(JSON.parse(bytes(config)).auto_start, true));
     await frames.mcp.locator('#autoConfig').uncheck(); // Actual UI saves; no client/project is configured.
     await retry(() => assert.equal(JSON.parse(bytes(config)).auto_start, false));
     await frames.mcp.locator('#mcpServerPath').fill(path.join(path.dirname(path.dirname(backends.mcp.image)), 'mcp/server/creator-works-mcp.mjs'));

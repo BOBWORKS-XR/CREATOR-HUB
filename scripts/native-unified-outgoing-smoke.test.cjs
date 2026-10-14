@@ -2,6 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 const { BASELINE, TARGET } = require('./native-unified-outgoing-target.cjs');
 const checks = require('./native-unified-outgoing-checks.cjs');
 const clone = value => structuredClone(value);
@@ -35,6 +36,50 @@ function updated() {
 test('synthetic receipt contracts never establish native/product/public/AI acceptance', () => {
   const report = checks.newReport();
   for (const flag of ['passed', 'outgoingHostedUpdateTested', 'publicDiscovery', 'liveAiAcceptance', 'editorAcceptance', 'productAcceptance', 'releaseReady']) assert.equal(report[flag], false);
+});
+
+test('fixed MCP target sequence creates settings from the false default, verifying true before false', async () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-unified-outgoing-smoke.cjs'), 'utf8');
+  const opened = "await frames.mcp.locator('.advanced-section summary').click();";
+  const start = source.indexOf(opened);
+  const end = source.indexOf("await frames.mcp.locator('#mcpServerPath').fill(", start);
+  assert.ok(start >= 0 && end > start, 'Fixed MCP preference sequence required');
+  const sequence = source.slice(start + opened.length, end);
+  async function exercise(save) {
+    let checked = false, saved = null, pending = null;
+    const events = [];
+    const setChecked = async value => {
+      events.push(value ? 'check' : 'uncheck');
+      if (checked === value) return; // Playwright emits no change for the existing false default.
+      checked = value; pending = { auto_start: value };
+    };
+    const run = vm.runInNewContext(`(async () => { ${sequence} })()`, {
+      assert, JSON, config: 'fixed-mcp-settings',
+      frames: { mcp: { locator(selector) {
+        assert.equal(selector, '#autoConfig');
+        return { check: () => setChecked(true), uncheck: () => setChecked(false) };
+      } } },
+      bytes(file) { assert.equal(file, 'fixed-mcp-settings'); return saved; },
+      async retry(read) {
+        try { read(); } catch (error) {
+          if (!pending || !save) throw error;
+          saved = JSON.stringify(pending); pending = null;
+          read();
+        }
+        events.push(`verified:${JSON.parse(saved).auto_start}`);
+      },
+    }, { timeout: 1000 });
+    if (!save) {
+      await assert.rejects(run);
+      assert.deepEqual(events, ['check'], 'No uncheck before the first real save is verified');
+      return;
+    }
+    await run;
+    assert.deepEqual(events, ['check', 'verified:true', 'uncheck', 'verified:false']);
+    assert.deepEqual(JSON.parse(saved), { auto_start: false });
+  }
+  await exercise(true);
+  await exercise(false);
 });
 test('cancel retains both drafts, kernel process starts, exact config/preferences/content and absence', () => {
   const initial = before(); checks.cancelPreserved(initial, clone(initial));
