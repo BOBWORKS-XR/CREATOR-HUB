@@ -1,4 +1,4 @@
-name: Fresh14 Mac package and owned Root diagnostics; Unix assembly (not acceptance)
+name: Fresh signed14 native packages; Linux default and reviewed Mac inputs (not acceptance)
 on:
   push:
     branches: [validation/unix-assembly-014]
@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":641099820,"zipBytes":55172816,"zipSha256":"5036cab13213f56e1e08ab74037a4a719a9591573deb80fda013b25e0ba844f7","handoffSha256":"96f63bb4a5def192b086367fa4a6d00efd297a8cdb106cd4ace4bb35c8e4a3c9"},{"target":"macos-arm64","os":"macos-latest","assetId":641099814,"zipBytes":47761280,"zipSha256":"75d61ea27e4fa62d28688c8794b25bc917104e23a45c80427debcfaaf9c19871","handoffSha256":"c051a7e230abb5832a96c738919d0c9cc6ebd740b73533edb0af0b4ebde49670"},{"target":"macos-intel","os":"macos-15-intel","assetId":641099811,"zipBytes":49622185,"zipSha256":"04191eb7007c274eb290e6de08fd4e6643b1483f8ef9a4ac3007a8f2ddc66884","handoffSha256":"332eab5174d3290c4e973086f3d36ee60390d123f45317923c301fe08ee92fb6"}]') }}
+        include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":641477926,"zipBytes":58332901,"zipSha256":"679c376684bc705f1cb453e12f421cc5dd729007315454742ff4f94f1ee88001","handoffSha256":"77bf64dcf8c82d4e9ad5e4112445a59639425e6315d4723f910bd8058c9a1a62"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -59,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":641099820,"zipBytes":55172816,"zipSha256":"5036cab13213f56e1e08ab74037a4a719a9591573deb80fda013b25e0ba844f7","handoffSha256":"96f63bb4a5def192b086367fa4a6d00efd297a8cdb106cd4ace4bb35c8e4a3c9"},{"target":"macos-arm64","os":"macos-latest","assetId":641099814,"zipBytes":47761280,"zipSha256":"75d61ea27e4fa62d28688c8794b25bc917104e23a45c80427debcfaaf9c19871","handoffSha256":"c051a7e230abb5832a96c738919d0c9cc6ebd740b73533edb0af0b4ebde49670"},{"target":"macos-intel","os":"macos-15-intel","assetId":641099811,"zipBytes":49622185,"zipSha256":"04191eb7007c274eb290e6de08fd4e6643b1483f8ef9a4ac3007a8f2ddc66884","handoffSha256":"332eab5174d3290c4e973086f3d36ee60390d123f45317923c301fe08ee92fb6"}]') }}
+        include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":641477926,"zipBytes":58332901,"zipSha256":"679c376684bc705f1cb453e12f421cc5dd729007315454742ff4f94f1ee88001","handoffSha256":"77bf64dcf8c82d4e9ad5e4112445a59639425e6315d4723f910bd8058c9a1a62"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 65
     env:
@@ -85,7 +85,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev build-essential file
+            libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev build-essential file \
+            patchelf rpm libarchive-tools
+          for tool in patchelf rpm bsdtar dpkg-deb file; do command -v "$tool"; done
       - run: npm ci
       - name: Check the handoff and bounded native extraction contracts
         run: |
@@ -114,9 +116,7 @@ jobs:
         run: |
           set -euo pipefail
           temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
-          installer=()
-          if [[ "$RUNNER_OS" == 'macOS' ]]; then installer=(--installer); fi
-          npm run build:unified -- ci-signed-unix-hub "${installer[@]}" --managed --experimental-unix --experimental-unix-writable --signed-unix-input "$temp/signed-unix-input"
+          npm run build:unified -- ci-signed-unix-hub --installer --managed --experimental-unix --experimental-unix-writable --signed-unix-input "$temp/signed-unix-input"
       - name: Bind the actual packaged Mac app, native version and primary assembly receipt
         if: runner.os == 'macOS'
         uses: actions/github-script@v8
@@ -201,6 +201,9 @@ jobs:
             artifacts/unified/ci-signed-unix-hub/signed-unix-assembly.json
             artifacts/unified/ci-signed-unix-hub/unix-package-integrity.json
             artifacts/unified/ci-signed-unix-hub/native-packages/*.dmg
+            artifacts/unified/ci-signed-unix-hub/native-packages/*.deb
+            artifacts/unified/ci-signed-unix-hub/native-packages/*.rpm
+            artifacts/unified/ci-signed-unix-hub/native-packages/*.AppImage
             artifacts/unified/ci-signed-unix-hub/creator-hub
             artifacts/unified/ci-signed-unix-hub/modules.tar.gz
             artifacts/unified/ci-signed-unix-hub/modules/
