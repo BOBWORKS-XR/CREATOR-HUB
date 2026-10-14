@@ -13,6 +13,30 @@ remain in scope, and their incomplete gates are not waived.
 
 ## Latest Acceptance Checkpoint, 2026-10-14
 
+- Linux-only source `e60db6f` allows reviewed migration to finish when no known
+  standalone installation exists. It rechecks settings, backups, app inventory
+  and the signed route before and after native approval. Any detected old app
+  still refuses retirement; this is not a removal implementation. Before backup,
+  an open old Linux GUI now pauses the guide instead of falling through a no-op
+  close function. Detection uses the kernel executable path in addition to the
+  15-byte Linux process name; Node connections are not stopped.
+  Windows-hosted checks: 356 Root tests passed, 13 opt-in tests ignored, strict
+  Clippy and 61 assembly/source regressions passed. A fresh Linux assembly runs
+  real process fixtures and Root tests before packaging. Native acceptance of
+  these new Linux branches is pending; tested Windows installer bytes are unchanged.
+- [Linux run38639742819](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38639742819)
+  uses the unchanged real DEB from assembly `5bb05a2`: the 940x580 terms window
+  is nonblank, native checkbox/button actions save the real acknowledgement,
+  and normal window close reaps Root with exit0. The acknowledgement remains
+  after exit. WebKit renderer ownership is bound to its actual direct Root
+  parent, system package image and accessibility bus owner/object paths.
+  This is launch/terms/close evidence, not embedded operation or migration.
+- [Windows outgoing run38636750918](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38636750918)
+  accepts B03-to-outer-only15 fixture cancellation, signed install, automatic
+  restart, both restored module views and live/reconnected SDK transports.
+  Original 14/15 installer bytes were not rebuilt for harness corrections.
+  This deliberately labelled fixture is not public discovery, live AI-model
+  migration or a publishable version15 product.
 - [Windows run38620271427](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38620271427)
   accepts B03 sourcea914bb9: real fresh installation, embedded interfaces,
   native decline/retry, migration/GUI retirement, retained old runtime paths,

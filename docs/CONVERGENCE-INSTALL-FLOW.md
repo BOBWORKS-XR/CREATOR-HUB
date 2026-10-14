@@ -4,6 +4,14 @@ Work in progress for Hub 0.1.14. The Windows coordinator now invokes the tested
 GUI-retirement leaf, but full packaged coordinator acceptance is still pending.
 This is not release evidence.
 
+2026-10-14 continuation: active targets are Windows and Linux/Flatpak; macOS is
+suspended. Linux source now distinguishes completion with no known standalone
+apps from actual retirement. The former requires fresh native approval and
+pre/post rechecks; the latter still refuses pending a package-manager-supported
+retention transition. Open legacy Linux GUI windows must be closed before backup;
+Hub does not kill them or their Node connections. Native testing of these new
+branches is pending. See [the latest scoped evidence](UNIFIED-UPDATE-INTEGRATION.md).
+
 Hub takes over the existing Creator settings files in their established OS data
 locations. It does not need to move Unity projects or create a second copy of
 settings that can drift. Standalone executable resources and app registrations
