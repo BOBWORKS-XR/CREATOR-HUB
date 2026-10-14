@@ -693,6 +693,8 @@ mod native {
             "child_status={exit:?} stdout_bytes={} stderr_bytes={} stdout_eof={out_done} stderr_eof={err_done} elapsed_ms={} spawn_ms={spawn_ms}",
             output.len(), error.len(), started.elapsed().as_millis(),
         );
+        #[cfg(test)]
+        let report = format!("{report} fixture_phases={}", fixture_phases(&output));
         let result: Result<_, String> =
             result.map_err(|original: String| format!("{original} {report}"));
         if let Err(original) = &result {
@@ -736,6 +738,31 @@ mod native {
         parse_routing(&output.stdout, &output.stderr, output.exit.success())
             .map_err(|error| format!("{error} {}", output.report))
     }
+
+    #[cfg(test)]
+    pub(super) fn fixture_phases(output: &[u8]) -> String {
+        let phases: Vec<_> = output
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| {
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                match line {
+                    b"fixture-phase=entry" => Some("entry"),
+                    b"fixture-phase=before-new-object" => Some("before-new-object"),
+                    b"fixture-phase=after-com" => Some("after-com"),
+                    b"fixture-phase=after-create" => Some("after-create"),
+                    b"fixture-phase=before-save" => Some("before-save"),
+                    b"fixture-phase=after-save" => Some("after-save"),
+                    b"fixture-phase=after-release" => Some("after-release"),
+                    _ => None,
+                }
+            })
+            .collect();
+        if phases.is_empty() {
+            "none".into()
+        } else {
+            phases.join(",")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -748,109 +775,198 @@ mod tests {
         use base64::Engine;
         use std::io::Write;
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("fixture with spaces.lnk");
         let target = directory.path().join("fixture gui.exe");
         assert!(!target.exists());
-        assert!(!path.exists());
+        let target_bytes = b"Owned ShellLink target fixture; deliberately not executable.\r\n";
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .unwrap()
+            .write_all(target_bytes)
+            .unwrap();
+        let target_metadata = fs::metadata(&target).unwrap();
+        let target_before = (
+            target_metadata.len(),
+            target_metadata.created().unwrap(),
+            target_metadata.modified().unwrap(),
+        );
         // Save is allowed only for this newly owned cfg(test) fixture, never READ_SCRIPT.
         let script = r#"
+[Console]::WriteLine('fixture-phase=entry')
+[Console]::Out.Flush()
 $ErrorActionPreference = 'Stop'
 $path = $env:CREATOR_HUB_SHORTCUT_READ_PATH
 if ([IO.File]::Exists($path)) { throw 'Fixture path already exists' }
 $shell = $null
 $link = $null
 try {
+    [Console]::WriteLine('fixture-phase=before-new-object')
+    [Console]::Out.Flush()
     $shell = New-Object -ComObject WScript.Shell
+    [Console]::WriteLine('fixture-phase=after-com')
+    [Console]::Out.Flush()
     $link = $shell.CreateShortcut($path)
+    [Console]::WriteLine('fixture-phase=after-create')
+    [Console]::Out.Flush()
     $link.TargetPath = $env:CREATOR_HUB_SHORTCUT_FIXTURE_TARGET
     $link.Arguments = ''
     $link.WorkingDirectory = [IO.Path]::GetDirectoryName($path)
+    [Console]::WriteLine('fixture-phase=before-save')
+    [Console]::Out.Flush()
     $link.Save()
+    [Console]::WriteLine('fixture-phase=after-save')
+    [Console]::Out.Flush()
 } finally {
     if ($null -ne $link) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
     if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
 }
+[Console]::WriteLine('fixture-phase=after-release')
+[Console]::Out.Flush()
 "#;
-        let template = native::command(&path).unwrap();
-        let mut command = platform::command(Path::new(template.get_program()));
-        command
-            .env_clear()
-            .current_dir(template.get_current_dir().unwrap())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        for (key, value) in template.get_envs() {
-            command.env(key, value.unwrap());
-        }
-        command.env("CREATOR_HUB_SHORTCUT_FIXTURE_TARGET", &target);
         let utf16: Vec<_> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        command
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand",
-            ])
-            .arg(base64::engine::general_purpose::STANDARD.encode(utf16));
-        let creation =
-            native::run(command).unwrap_or_else(|error| panic!("fixture creation: {error}"));
-        eprintln!("fixture creation: {}", creation.report);
-        eprintln!(
-            "fixture creation stderr: clixml={} progress_record={}",
-            creation.stderr.starts_with(b"#< CLIXML"),
-            String::from_utf8_lossy(&creation.stderr).contains("S=\"progress\""),
-        );
-        assert!(creation.exit.success(), "{}", creation.report);
-        assert!(path.exists());
-        let (reserved, before) = capture(&path).unwrap().unwrap();
-        let target_bytes = b"Owned ShellLink target fixture; deliberately not executable.\r\n";
-        for target_exists in [false, true] {
-            if target_exists {
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&target)
-                    .unwrap()
-                    .write_all(target_bytes)
-                    .unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+        // Exactly the finite OS/profile allowlist in legacy_removal_windows::uninstall_command.
+        // PATH/PSModulePath stay the native-derived, component-joined system paths.
+        let accepted_os_variables = [
+            "SystemRoot",
+            "windir",
+            "SystemDrive",
+            "ComSpec",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "USERNAME",
+            "USERDOMAIN",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramW6432",
+            "PROCESSOR_ARCHITECTURE",
+            "NUMBER_OF_PROCESSORS",
+            "TEMP",
+            "TMP",
+        ];
+        let mut failures = Vec::new();
+        let mut fixtures = Vec::new();
+        // Repeat minimal after baseline even when the first attempt passes. All three
+        // paths are fresh; a later success never erases an earlier timeout/refusal.
+        for (case, accepted) in [
+            ("minimal-first", false),
+            ("accepted-baseline", true),
+            ("minimal-repeat", false),
+        ] {
+            let path = directory.path().join(format!("{case} with spaces.lnk"));
+            assert!(!path.exists());
+            let template = native::command(&path).unwrap();
+            let mut command = platform::command(Path::new(template.get_program()));
+            command
+                .env_clear()
+                .current_dir(template.get_current_dir().unwrap())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            for (key, value) in template.get_envs() {
+                command.env(key, value.unwrap());
             }
-            assert_eq!(target.exists(), target_exists);
-            let target_before = fs::metadata(&target).ok().map(|metadata| {
-                (
-                    metadata.len(),
-                    metadata.created().unwrap(),
-                    metadata.modified().unwrap(),
-                )
-            });
-            eprintln!("native fixture target_exists={target_exists}: starting reserved read");
-            let started = std::time::Instant::now();
-            let metadata = native_read(&path).unwrap_or_else(|error| {
-                panic!("target_exists={target_exists} native_read: {error}")
-            });
+            let mut copied = 0;
+            if accepted {
+                for name in accepted_os_variables {
+                    if let Some(value) = std::env::var_os(name) {
+                        command.env(name, value);
+                        copied += 1;
+                    }
+                }
+            }
+            command
+                .env("CREATOR_HUB_SHORTCUT_FIXTURE_TARGET", &target)
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-EncodedCommand",
+                ])
+                .arg(&encoded);
             eprintln!(
-                "native fixture target_exists={target_exists}: read_elapsed_ms={}",
-                started.elapsed().as_millis()
+                "fixture case={case} target_exists=true copied_os_variables={copied}: starting creation"
             );
-            routing_matches(&metadata, &target).unwrap();
-            let (_, after) = capture(&path).unwrap().unwrap();
-            assert_eq!(before, after);
-            if target_exists {
-                assert_eq!(fs::read(&target).unwrap(), target_bytes);
-                let metadata = fs::metadata(&target).unwrap();
-                assert_eq!(
-                    target_before,
-                    Some((
-                        metadata.len(),
-                        metadata.created().unwrap(),
-                        metadata.modified().unwrap()
-                    ))
-                );
+            match native::run(command) {
+                Ok(creation) => {
+                    eprintln!("fixture case={case}: {}", creation.report);
+                    eprintln!(
+                        "fixture case={case}: stderr_clixml={} stderr_progress_record={}",
+                        creation.stderr.starts_with(b"#< CLIXML"),
+                        String::from_utf8_lossy(&creation.stderr).contains("S=\"progress\"")
+                    );
+                    if !creation.exit.success() || native::fixture_phases(&creation.stdout)
+                        != "entry,before-new-object,after-com,after-create,before-save,after-save,after-release" {
+                        failures.push(format!("fixture case={case}: incomplete creation; {}", creation.report));
+                    }
+                }
+                Err(original) => {
+                    eprintln!("fixture case={case}: {original}");
+                    failures.push(format!("fixture case={case}: {original}"));
+                }
+            }
+            if path.exists() {
+                fixtures.push((case, path));
             } else {
-                assert!(!target.exists());
+                failures.push(format!("fixture case={case}: owned link is absent"));
             }
         }
-        drop(reserved);
-        assert!(target.exists());
+        // Production read always uses its unmodified minimal environment, including
+        // on a link created by the comparison baseline. No comparison receipt authorizes it.
+        for (case, path) in fixtures {
+            let checked = (|| -> Result<(), String> {
+                let (reserved, before) = capture(&path)?.ok_or("Owned fixture link is absent.")?;
+                eprintln!("production native_read case={case}: starting reserved minimal-environment read");
+                routing_matches(&native_read(&path)?, &target)?;
+                let (_, after) = capture(&path)?.ok_or("Owned fixture link disappeared.")?;
+                if before != after {
+                    return Err("Owned fixture link changed during read.".into());
+                }
+                drop(reserved);
+                Ok(())
+            })();
+            match checked {
+                Ok(()) => eprintln!("production native_read case={case}: passed"),
+                Err(original) => {
+                    eprintln!("production native_read case={case}: {original}");
+                    failures.push(format!("production native_read case={case}: {original}"));
+                }
+            }
+        }
+        assert_eq!(fs::read(&target).unwrap(), target_bytes);
+        let metadata = fs::metadata(&target).unwrap();
+        assert_eq!(
+            target_before,
+            (
+                metadata.len(),
+                metadata.created().unwrap(),
+                metadata.modified().unwrap()
+            )
+        );
+        assert!(
+            failures.is_empty(),
+            "Original comparison/production failures retained:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fixture_phase_diagnostics_never_copy_unknown_output() {
+        assert_eq!(
+            native::fixture_phases(
+                b"fixture-phase=entry\r\nprivate arbitrary output\r\nfixture-phase=after-com\r\n"
+            ),
+            "entry,after-com"
+        );
+        assert_eq!(
+            native::fixture_phases(b"{\"target\":\"private arbitrary path\"}"),
+            "none"
+        );
     }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {

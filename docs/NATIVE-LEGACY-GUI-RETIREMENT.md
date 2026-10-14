@@ -57,6 +57,11 @@ the compatibility guarantee and require review before production retirement.
   The runner cause is unknown. Deadline diagnostics now include exact child
   status, stdout/stderr sizes, EOF states and elapsed/spawn times, without raw
   environment or output values. No deadline/ownership guard is relaxed.
+- Run 38565677434 at `cc34ff6` catches the timeout in the new temporary native
+  COM fixture before any installer starts. At the deadline the child is still
+  running, stdout/stderr are both empty, neither EOF is observed, and spawn
+  took 2 ms. This is not an EOF-after-exit failure. System-environment versus
+  COM/startup phase remains unverified; a controlled comparison is pending.
 - The older complete-uninstaller acceptance remains preserved at run 38542947181;
   it does not establish this separate compatibility-retirement operation.
 - Production coordinator/native consent, GUI quiescence, signed-router reconnect,

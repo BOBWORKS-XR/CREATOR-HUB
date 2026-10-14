@@ -32,7 +32,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Compile exact Root production adapter and pure regressions, without packaging
+      - name: Compile Root and compare exact native probe startup before any installation
         id: adapter
         shell: pwsh
         run: |
