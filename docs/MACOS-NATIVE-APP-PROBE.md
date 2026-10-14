@@ -235,6 +235,19 @@ without treating either result as full product acceptance.
 
 ## Tests And Remaining Gates
 
+Run 38561264659 at `840d1e8` reaches the read-only sampler on both native Mac
+architectures. Root-only before/after inspection succeeds on each. ARM still
+reports `root-web-area-readiness-unverified`; Intel reports
+`ax-children-unbounded-or-unreadable`. These are unaccepted captures, not proof
+that the app's rendered frontend is broken. Reports are preserved under
+`artifacts/mac-root-probe-38561264659/`.
+
+The next diagnostic adds one bounded `errorDetail` for the refused children
+operation: actual numeric AX status, count/type, timing and cached role/depth/PID.
+It keeps the original error, deadlines, action helper and false acceptance flags.
+There is no fallback read, retry, permission change or action-authority relaxation.
+Local JS/guard fixtures pass; native compilation/runtime remains pending.
+
 ```sh
 node --test scripts/native-macos-app-probe.test.cjs
 ```

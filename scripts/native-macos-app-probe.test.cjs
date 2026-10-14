@@ -327,7 +327,7 @@ test('remote metadata is bracketed by native Root/CF/process/link fences before 
   assert.ok(before >= 0 && visit.indexOf('try checkHeldRoot()', before) < metadata);
   assert.ok(visit.indexOf('remoteBefore = try remoteProcess(readPID)', before) < metadata);
   assert.ok(visit.indexOf('try remoteLinks(item, traversalParent, depth)', before) < metadata);
-  const descendants = visit.indexOf('let descendants = try children(item, kAXChildrenAttribute)');
+  const descendants = visit.indexOf('let descendants = try children(item, kAXChildrenAttribute, "traversal", childNode)');
   const after = visit.indexOf('if remote {', descendants), published = visit.indexOf('rows.append(row)');
   assert.ok(descendants > metadata && after > descendants && published > after);
   assert.match(visit.slice(after, published), /try elementPID\(item\) == readPID/);
@@ -483,7 +483,7 @@ test('root-only native branch exits before observer/control traversal and preser
   assert.doesNotMatch(branch, /AXObserver|kAXChildrenAttribute|visit\(|kAXTitleAttribute|kAXDescriptionAttribute|AXUIElementPerformAction/);
   const fence = probe.surfaceSource.split('func checkHeldRoot')[1].split('if rootOnly {')[0];
   assert.match(fence, /try fence\(p, parent\); try checkCG\(\)/);
-  assert.match(fence, /children\(root, kAXWindowsAttribute\)/);
+  assert.match(fence, /children\(root, kAXWindowsAttribute, "root-window-recheck", applicationNode\)/);
   assert.match(fence, /try pidMatches\(item, pid\)/);
   assert.match(fence, /current.count == 1 && CFEqual\(current\[0\], window\)/);
   assert.doesNotMatch(fence, /kAXChildrenAttribute|visit\(/);
@@ -503,9 +503,116 @@ test('orchestrator brackets sampler with root-only inspections, retains owner/im
   assert.match(source, /report.acceptedExit = acceptedExit\(closeReceipt, ownedExit, owner\) && !report.closeError/);
 });
 
-test('actual Mac SDK compiles the read-only sampler; local execution refuses before AX inspection', { skip: process.platform !== 'darwin' }, async t => {
-  const file = path.join(scratch, 'surface.swift'), binary = path.join(scratch, 'surface');
-  fs.writeFileSync(file, probe.surfaceSource, { flag: 'wx' });
+function childrenFailure(changed = {}) {
+  return { operation: 'AXUIElementGetAttributeValueCount', attribute: 'AXWindows', phase: 'root-window-discovery',
+    classification: 'native-error', axError: -25204, axErrorName: 'cannot-complete', timeoutSetAXError: 0,
+    messageTimeoutSeconds: 0.2, elapsedMilliseconds: 201.5, count: 0, countExact: '0', countVerified: false,
+    returnedCFTypeID: null, returnedCount: null, unexpectedChildIndex: null, unexpectedChildCFTypeID: null,
+    expectedArrayCFTypeID: 19, expectedElementCFTypeID: 23,
+    node: { path: 'root-application', depth: -1, role: null, pid: 42, rootPID: 42, windowID: 71,
+      referenceKind: 'root-application', referenceScope: 'native-invocation', cfTypeID: 23, pidSource: 'application-reference' },
+    ...changed };
+}
+
+test('AX child failures retain numeric errors, exact counts and unknown types without claiming timeout or ownership', () => {
+  const fixtures = [childrenFailure(), childrenFailure({ phase: 'root-window-recheck', axError: -25201, axErrorName: 'illegal-argument' }),
+    childrenFailure({ axError: -25212, axErrorName: 'no-value' }),
+    childrenFailure({ axError: -25205, axErrorName: 'attribute-unsupported' }),
+    childrenFailure({ axError: -12345, axErrorName: 'other', timeoutSetAXError: -25202 }),
+    childrenFailure({ classification: 'count-out-of-range', axError: 0, axErrorName: 'success', count: -1, countExact: '-1', countVerified: true }),
+    childrenFailure({ classification: 'count-out-of-range', axError: 0, axErrorName: 'success', count: 513, countExact: '513', countVerified: true }),
+    childrenFailure({ classification: 'count-out-of-range', axError: 0, axErrorName: 'success', count: Number('9223372036854775807'),
+      countExact: '9223372036854775807', countVerified: true })];
+  for (const detail of fixtures) {
+    const saved = structuredClone(detail);
+    assert.doesNotThrow(() => probe.validateChildrenFailure(detail));
+    assert.deepEqual(detail, saved);
+    assert.ok(JSON.stringify(detail).length < 1400);
+    assert.equal('timedOut' in detail, false); assert.equal('ownershipVerified' in detail.node, false);
+    assert.equal('actionAllowed' in detail, false);
+  }
+});
+
+test('bounded copy/type/count diagnostics identify a cached held-window or traversal node without reading child values', () => {
+  const base = childrenFailure({ operation: 'validate-values', attribute: 'AXChildren', phase: 'traversal',
+    classification: 'missing-array', axError: 0, axErrorName: 'success', count: 2, countExact: '2', countVerified: true,
+    node: { path: 'root-window', depth: 0, role: 'AXWindow', pid: 42, rootPID: 42, windowID: 71,
+      referenceKind: 'held-root-window', referenceScope: 'native-invocation', cfTypeID: 23, pidSource: 'native-read' } });
+  for (const changed of [{}, { classification: 'wrong-array-type', returnedCFTypeID: 7 },
+    { classification: 'array-count-mismatch', returnedCFTypeID: 19, returnedCount: 1 },
+    { classification: 'missing-child-value', returnedCFTypeID: 19, returnedCount: 2, unexpectedChildIndex: 0 },
+    { classification: 'wrong-child-type', returnedCFTypeID: 19, returnedCount: 2, unexpectedChildIndex: 1, unexpectedChildCFTypeID: 7 },
+    { classification: 'bridge-failed', returnedCFTypeID: 19, returnedCount: 2 },
+    { operation: 'AXUIElementCopyAttributeValues', classification: 'native-error', axError: -25204, axErrorName: 'cannot-complete' }]) {
+    assert.doesNotThrow(() => probe.validateChildrenFailure({ ...base, ...changed }));
+  }
+  const remote = { ...base, node: { ...base.node, path: 'root-window/0/511', depth: 2, role: 'AXGroup', pid: 52, referenceKind: 'traversal-node' } };
+  assert.doesNotThrow(() => probe.validateChildrenFailure(remote));
+  assert.equal(remote.node.referenceScope, 'native-invocation');
+});
+
+test('malformed or expanded child diagnostics reject rather than turning arbitrary values into trusted metadata', () => {
+  for (const invalid of [undefined, null, {}, [], 'failed']) assert.throws(() => probe.validateChildrenFailure(invalid));
+  for (const mutate of [d => delete d.countVerified, d => d.operation = 'AXUIElementCopyAttributeValue', d => d.attribute = 'AXValue',
+    d => d.phase = 'action', d => d.classification = 'timeout-proven', d => d.axError = 'cannotComplete', d => d.axError = -Infinity,
+    d => d.timeoutSetAXError = null, d => d.messageTimeoutSeconds = 1, d => d.elapsedMilliseconds = NaN,
+    d => d.elapsedMilliseconds = Infinity, d => d.elapsedMilliseconds = -1, d => d.countExact = '9'.repeat(20),
+    d => d.countExact = 'not-a-number', d => d.countExact = '1', d => d.countVerified = 'false',
+    d => d.returnedCFTypeID = {}, d => d.unexpectedChildIndex = 512, d => d.unexpectedChildCFTypeID = [],
+    d => d.expectedElementCFTypeID = -1, d => d.node = [], d => d.node.path = 'root-window/0'.repeat(17),
+    d => d.node.path = 'root-window/999', d => d.node.depth = 17, d => d.node.role = '\u00e9'.repeat(65),
+    d => d.node.pid = 0, d => d.node.rootPID = 2147483648, d => d.node.windowID = 0,
+    d => d.node.referenceScope = 'serialized-cf-authority', d => d.node.pidSource = 'name-or-uid',
+    d => d.node.title = 'private label', d => d.children = Array(513).fill('value'), d => d.actionAllowed = true,
+    d => d.classification = 'count-out-of-range', d => d.countVerified = true]) {
+    const detail = childrenFailure(); mutate(detail); assert.throws(() => probe.validateChildrenFailure(detail));
+  }
+});
+
+test('child refusal detail survives unchanged between valid root-only fences and never accepts capture or retries', async () => {
+  const { owner } = ownership();
+  for (const detail of [childrenFailure(), { ...childrenFailure(), title: 'unexpected metadata' }]) {
+    const calls = [], sample = rootSample(owner);
+    sample.exitCode = 2; sample.receipt.complete = false; sample.receipt.nodes = [];
+    sample.receipt.error = 'ax-children-unbounded-or-unreadable'; sample.receipt.errorDetail = detail;
+    const result = await probe.rootSurfaceDiagnostic(owner, {
+      inspectRoot: async stage => { calls.push(stage); return rootInspection(owner); },
+      sample: async () => { calls.push('sample'); return sample; },
+    });
+    assert.deepEqual(calls, ['before', 'sample', 'after']); assert.equal(result.completed, false);
+    assert.equal(result.surface.error, 'ax-children-unbounded-or-unreadable'); assert.deepEqual(result.surface.errorDetail, detail);
+    assert.equal(result.reason, 'title' in detail ? 'ax-children-diagnostic-invalid' : 'root-surface-capture-unverified');
+    for (const key of Object.keys(probe.acceptance)) assert.equal(result[key], false);
+  }
+  const acceptedShape = rootSample(owner); acceptedShape.receipt.errorDetail = childrenFailure();
+  const rejected = await probe.rootSurfaceDiagnostic(owner, { inspectRoot: async () => rootInspection(owner), sample: async () => acceptedShape });
+  assert.equal(rejected.completed, false); assert.equal(rejected.reason, 'ax-children-diagnostic-invalid');
+});
+
+test('native child diagnostics preserve refusal strings and bounds, with no post-failure AX reads or fallback', () => {
+  const children = probe.surfaceSource.split('func children(')[1].split('func pidMatches')[0];
+  assert.equal(children.match(/AXUIElementGetAttributeValueCount\(/g).length, 1);
+  assert.equal(children.match(/AXUIElementCopyAttributeValues\(/g).length, 1);
+  assert.match(children, /if status == \.noValue \|\| status == \.attributeUnsupported \{ return \[\] \}/);
+  assert.match(children, /if status != \.success \|\| count < 0 \|\| count > 512/);
+  assert.match(children, /let timeoutStatus = AXUIElementSetMessagingTimeout\(item, 0\.2\)/);
+  assert.match(children, /"axError": result.rawValue, "axErrorName": axErrorName\(result\)/);
+  assert.match(children, /"count": count, "countExact": String\(count\), "countVerified": status == \.success/);
+  assert.match(children, /"unexpectedChildCFTypeID": badType.map/);
+  assert.ok(children.indexOf('if arrayType != CFArrayGetTypeID()') < children.indexOf('CFArrayGetCount(array)'));
+  assert.ok(children.indexOf('if actualCount != count') < children.indexOf('for index in 0..<actualCount'));
+  assert.match(children, /guard let raw = CFArrayGetValueAtIndex/);
+  assert.match(children, /childType != AXUIElementGetTypeID\(\)/);
+  assert.doesNotMatch(children, /attr\(|AXUIElementCopyAttributeValue\(|kAXRoleAttribute|kAXTitleAttribute|Thread.sleep|while |AXUIElementPerformAction/);
+  const cached = probe.surfaceSource.split('func childrenNode')[1].split('func children(')[0];
+  assert.doesNotMatch(cached, /attr\(|AXUIElementGetPid|AXUIElementCopyAttribute/);
+  assert.match(probe.surfaceSource, /childrenNode\(root, "root-application", -1, nil, pid, pid, id, "root-application"\)/);
+  assert.match(probe.surfaceSource, /children\(root, kAXWindowsAttribute, "root-window-discovery", applicationNode\)/);
+  assert.match(probe.surfaceSource, /if let detail = \(error as\? Denied\)\?\.detail \{ failure\["errorDetail"\] = detail \}/);
+  assert.match(probe.surfaceSource, /emit\(failure\); exit\(2\)/);
+});
+
+async function compileSwift(file, binary) {
   const child = spawn('/usr/bin/swiftc', [file, '-o', binary], { stdio: ['ignore', 'ignore', 'pipe'] });
   let errors = ''; child.stderr.on('data', data => { if (errors.length < 1048576) errors += data; });
   const result = await new Promise((resolve, reject) => {
@@ -517,14 +624,101 @@ test('actual Mac SDK compiles the read-only sampler; local execution refuses bef
     child.once('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
   });
   assert.equal(result.code, 0, errors); assert.equal(result.signal, null);
+}
+
+test('actual Mac SDK compiles the read-only sampler; local execution refuses before AX inspection', { skip: process.platform !== 'darwin' }, async t => {
+  const file = path.join(scratch, 'surface.swift'), binary = path.join(scratch, 'surface');
+  fs.writeFileSync(file, probe.surfaceSource, { flag: 'wx' });
+  await compileSwift(file, binary);
   for (const args of [['availability'], ['inspect-root', '/unread-owner.json', '1'], ['inspect-root'],
     ['inspect-root', '/unread-owner.json', '1', '--controls']]) {
     const refusal = spawnSync(binary, args, { env: {}, encoding: 'utf8' });
     assert.equal(refusal.status, 2, refusal.stderr || refusal.stdout);
     const receipt = JSON.parse(refusal.stdout);
     assert.equal(receipt.error, 'hosted-ci-explicit-opt-in-required');
+    assert.equal(receipt.errorDetail, undefined);
     assert.equal(receipt.actionAttempted, false); assert.equal(receipt.permissionRequestsPerformed, false);
     for (const key of Object.keys(probe.acceptance)) assert.equal(receipt[key], false);
   }
   t.diagnostic(JSON.stringify({ samplerCompiled: true, rootAppLaunched: false, ...probe.acceptance }));
+});
+
+test('SDK child-read fixtures exercise emitted Swift failure branches without app launch or live AX reads', { skip: process.platform !== 'darwin' }, async t => {
+  // Test-only substitution of the three native calls; no fixture entry point is
+  // emitted into the production sampler or its admission/ownership path.
+  const declarations = probe.surfaceSource.split('\ndo {\n')[0]
+    .replaceAll('AXUIElementSetMessagingTimeout(item, 0.2)', 'fixtureTimeout(item, 0.2)')
+    .replace('AXUIElementGetAttributeValueCount(item, name as CFString, &count)', 'fixtureCount(item, name as CFString, &count)')
+    .replace('AXUIElementCopyAttributeValues(item, name as CFString, 0, count, &array)', 'fixtureCopy(item, name as CFString, 0, count, &array)');
+  assert.ok(!declarations.includes('\ndo {\n'));
+  const fixture = declarations + String.raw`
+var fixtureCalls = [String](), fixtureCountValue = 0
+var fixtureCountStatus = AXError.success, fixtureCopyStatus = AXError.success
+var fixtureArray: CFArray?
+func fixtureTimeout(_ item: AXUIElement, _ seconds: Float) -> AXError {
+    fixtureCalls.append("timeout"); return .success
+}
+func fixtureCount(_ item: AXUIElement, _ name: CFString, _ count: inout Int) -> AXError {
+    fixtureCalls.append("count"); count = fixtureCountValue; return fixtureCountStatus
+}
+func fixtureCopy(_ item: AXUIElement, _ name: CFString, _ index: Int, _ count: Int, _ array: inout CFArray?) -> AXError {
+    fixtureCalls.append("copy"); array = fixtureArray; return fixtureCopyStatus
+}
+do {
+    let root = AXUIElementCreateApplication(424242)
+    let node = childrenNode(root, "root-application", -1, nil, 424242, 424242, 71, "root-application")
+    var failures = [[String: Any]]()
+    let textArray = ["wrong-child" as NSString] as CFArray
+    let wrongArray = unsafeBitCast("not-an-array" as NSString, to: CFArray.self)
+    for (countStatus, count, copyStatus, array, reason, classification) in [
+        (AXError.cannotComplete, 0, AXError.success, nil, "ax-children-unbounded-or-unreadable", "native-error"),
+        (.illegalArgument, 0, .success, nil, "ax-children-unbounded-or-unreadable", "native-error"),
+        (.invalidUIElement, 0, .success, nil, "ax-children-unbounded-or-unreadable", "native-error"),
+        (.success, -1, .success, nil, "ax-children-unbounded-or-unreadable", "count-out-of-range"),
+        (.success, 513, .success, nil, "ax-children-unbounded-or-unreadable", "count-out-of-range"),
+        (.success, Int.max, .success, nil, "ax-children-unbounded-or-unreadable", "count-out-of-range"),
+        (.success, 1, .cannotComplete, nil, "ax-children-unreadable", "native-error"),
+        (.success, 1, .noValue, nil, "ax-children-unreadable", "native-error"),
+        (.success, 1, .success, nil, "ax-children-unreadable", "missing-array"),
+        (.success, 1, .success, wrongArray, "ax-children-unreadable", "wrong-array-type"),
+        (.success, 2, .success, textArray, "ax-children-unreadable", "array-count-mismatch"),
+        (.success, 1, .success, textArray, "ax-children-unreadable", "wrong-child-type")
+    ] as [(AXError, Int, AXError, CFArray?, String, String)] {
+        fixtureCalls = []; fixtureCountStatus = countStatus; fixtureCountValue = count
+        fixtureCopyStatus = copyStatus; fixtureArray = array
+        do {
+            _ = try children(root, kAXWindowsAttribute, "root-window-discovery", node)
+            throw Denied("fixture-did-not-refuse")
+        } catch let refused as Denied {
+            try check(refused.reason == reason, "fixture-original-reason-drift")
+            guard let detail = refused.detail else { throw Denied("fixture-detail-missing") }
+            try check(detail["classification"] as? String == classification, "fixture-classification-drift")
+            try check(fixtureCalls == (countStatus == .success && count > 0 && count <= 512
+                ? ["timeout", "count", "copy"] : ["timeout", "count"]), "fixture-retried-or-unbounded")
+            failures.append(["error": refused.reason, "errorDetail": detail])
+        }
+    }
+    for status in [AXError.noValue, .attributeUnsupported, .success] {
+        fixtureCalls = []; fixtureCountStatus = status; fixtureCountValue = 0
+        let result = try children(root, kAXWindowsAttribute, "root-window-discovery", node)
+        try check(result.isEmpty && fixtureCalls == ["timeout", "count"], "fixture-empty-semantics-drift")
+    }
+    fixtureCalls = []; fixtureCountStatus = .success; fixtureCountValue = 1
+    fixtureCopyStatus = .success; fixtureArray = [root] as CFArray
+    let result = try children(root, kAXWindowsAttribute, "root-window-discovery", node)
+    try check(result.count == 1 && CFEqual(result[0], root) && fixtureCalls == ["timeout", "count", "copy"], "fixture-valid-elements-refused")
+    emit(["failures": failures, "rootAppLaunched": false, "liveAXReads": false, "readOnly": true,
+          "actionAttempted": false, "permissionRequestsPerformed": false])
+} catch { emit(["error": (error as? Denied)?.reason ?? "fixture-failed"]); exit(2) }
+`;
+  const file = path.join(scratch, 'children-fixture.swift'), binary = path.join(scratch, 'children-fixture');
+  fs.writeFileSync(file, fixture, { flag: 'wx' }); await compileSwift(file, binary);
+  const result = spawnSync(binary, [], { env: {}, encoding: 'utf8', maxBuffer: 1024 * 1024 });
+  assert.equal(result.status, 0, result.stderr || result.stdout); assert.equal(result.signal, null);
+  const receipt = JSON.parse(result.stdout);
+  assert.equal(receipt.failures.length, 12); assert.equal(receipt.liveAXReads, false); assert.equal(receipt.rootAppLaunched, false);
+  assert.equal(receipt.actionAttempted, false); assert.equal(receipt.permissionRequestsPerformed, false);
+  for (const failed of receipt.failures) probe.validateChildrenFailure(failed.errorDetail);
+  for (const key of Object.keys(probe.acceptance)) assert.equal(receipt[key], false);
+  t.diagnostic(JSON.stringify({ childFailureFixtures: receipt.failures.length, rootAppLaunched: false, ...probe.acceptance }));
 });

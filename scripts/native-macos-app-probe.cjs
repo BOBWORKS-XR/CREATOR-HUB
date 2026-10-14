@@ -165,6 +165,53 @@ function validateRootInspection(receipt, owner) {
   'read-only-root-inspection-unverified');
 }
 
+function validateChildrenFailure(detail) {
+  const fields = ['operation', 'attribute', 'phase', 'classification', 'axError', 'axErrorName', 'timeoutSetAXError',
+    'messageTimeoutSeconds', 'elapsedMilliseconds', 'count', 'countExact', 'countVerified', 'returnedCFTypeID',
+    'returnedCount', 'unexpectedChildIndex', 'unexpectedChildCFTypeID', 'expectedArrayCFTypeID', 'expectedElementCFTypeID', 'node'];
+  const nodeFields = ['path', 'depth', 'role', 'pid', 'rootPID', 'windowID', 'referenceKind', 'referenceScope', 'cfTypeID', 'pidSource'];
+  const integer = value => Number.isSafeInteger(value) && value >= 0;
+  const nullableInteger = value => value === null || integer(value);
+  const node = detail?.node;
+  requireThat(detail && Object.keys(detail).length === fields.length && Object.keys(detail).every(key => fields.includes(key))
+    && ['AXUIElementGetAttributeValueCount', 'AXUIElementCopyAttributeValues', 'validate-values'].includes(detail.operation)
+    && ['AXWindows', 'AXChildren'].includes(detail.attribute)
+    && ['root-window-discovery', 'root-window-recheck', 'traversal'].includes(detail.phase)
+    && ['native-error', 'count-out-of-range', 'missing-array', 'wrong-array-type', 'array-count-mismatch', 'missing-child-value', 'wrong-child-type', 'bridge-failed'].includes(detail.classification)
+    && [detail.axError, detail.timeoutSetAXError].every(value => Number.isInteger(value) && value >= -2147483648 && value <= 2147483647)
+    && ['success', 'failure', 'illegal-argument', 'invalid-ui-element', 'cannot-complete', 'attribute-unsupported', 'not-implemented', 'api-disabled', 'no-value', 'other'].includes(detail.axErrorName)
+    && detail.messageTimeoutSeconds === 0.2 && Number.isFinite(detail.elapsedMilliseconds) && detail.elapsedMilliseconds >= 0
+    && Number.isInteger(detail.count) && typeof detail.countExact === 'string' && /^-?\d{1,19}$/.test(detail.countExact)
+    && Number(detail.countExact) === detail.count && typeof detail.countVerified === 'boolean'
+    && [detail.returnedCFTypeID, detail.returnedCount, detail.unexpectedChildIndex, detail.unexpectedChildCFTypeID].every(nullableInteger)
+    && (detail.unexpectedChildIndex === null || detail.unexpectedChildIndex < 512)
+    && integer(detail.expectedArrayCFTypeID) && integer(detail.expectedElementCFTypeID)
+    && node && Object.keys(node).length === nodeFields.length && Object.keys(node).every(key => nodeFields.includes(key))
+    && typeof node.path === 'string' && /^(root-application|root-window(?:\/[0-9]{1,3}){0,16})$/.test(node.path)
+    && Number.isInteger(node.depth) && node.depth >= -1 && node.depth <= 16
+    && (node.role === null || (typeof node.role === 'string' && Buffer.byteLength(node.role, 'utf8') <= 128))
+    && [node.pid, node.rootPID].every(value => integer(value) && value > 0 && value <= 2147483647)
+    && integer(node.windowID) && node.windowID > 0 && node.windowID <= 0xffffffff && integer(node.cfTypeID)
+    && ['root-application', 'held-root-window', 'traversal-node'].includes(node.referenceKind)
+    && node.referenceScope === 'native-invocation' && ['application-reference', 'native-read'].includes(node.pidSource),
+  'ax-children-diagnostic-invalid');
+  const application = node.referenceKind === 'root-application';
+  requireThat((application
+    ? detail.attribute === 'AXWindows' && detail.phase !== 'traversal' && node.path === 'root-application'
+      && node.depth === -1 && node.role === null && node.pidSource === 'application-reference' && node.pid === node.rootPID
+    : detail.attribute === 'AXChildren' && detail.phase === 'traversal' && node.path !== 'root-application'
+      && node.depth === node.path.split('/').length - 1 && node.role !== null && node.pidSource === 'native-read'
+      && node.path.split('/').slice(1).every(index => Number(index) < 512)
+      && (node.referenceKind !== 'held-root-window' || node.depth === 0))
+    && (detail.operation !== 'AXUIElementGetAttributeValueCount'
+      || (detail.countVerified === (detail.axError === 0) && detail.returnedCFTypeID === null && detail.returnedCount === null))
+    && (detail.operation === 'AXUIElementGetAttributeValueCount' || (detail.countVerified && detail.count > 0 && detail.count <= 512))
+    && (detail.classification === 'native-error' ? detail.axError !== 0 : detail.axError === 0)
+    && (detail.classification !== 'count-out-of-range' || detail.count < 0 || detail.count > 512)
+    && (detail.operation !== 'validate-values' || detail.classification !== 'native-error')
+    && (detail.unexpectedChildIndex === null || detail.operation === 'validate-values'), 'ax-children-diagnostic-invalid');
+}
+
 async function rootSurfaceDiagnostic(owner, io) {
   const result = { diagnosticOnly: true, completed: false, ...acceptance };
   try {
@@ -174,6 +221,11 @@ async function rootSurfaceDiagnostic(owner, io) {
     result.after = await io.inspectRoot('after'); validateRootInspection(result.after, owner);
     if (sampleError) throw sampleError;
     const surface = result.surface;
+    if (surface?.errorDetail !== undefined) {
+      requireThat(surface.complete === false && ['ax-children-unbounded-or-unreadable', 'ax-children-unreadable'].includes(surface.error),
+        'ax-children-diagnostic-invalid');
+      validateChildrenFailure(surface.errorDetail);
+    }
     requireThat(sampled?.exitCode === 0 && sampled.signal === null && !sampled.timedOut && !sampled.error
       && surface?.complete === true && surface.readOnly === true && surface.diagnosticOnly === true
       && surface.actionAttempted === false && surface.permissionRequestsPerformed === false && !surface.error
@@ -197,7 +249,10 @@ import ApplicationServices
 import CoreGraphics
 import Darwin
 import CryptoKit
-struct Denied: Error { let reason: String; init(_ reason: String) { self.reason = reason } }
+struct Denied: Error {
+    let reason: String, detail: [String: Any]?
+    init(_ reason: String, detail: [String: Any]? = nil) { self.reason = reason; self.detail = detail }
+}
 var rows = [[String: Any]]()
 var changedSnapshots = [[String: Any]](), readiness = [String: Any](), rootRevision = 0
 var nativeRootSnapshot = [String: Any]()
@@ -233,16 +288,74 @@ func bounds(_ item: AXUIElement) throws -> [String: Double] {
     try check(AXValueGetValue(position as! AXValue, .cgPoint, &point) && AXValueGetValue(size as! AXValue, .cgSize, &extent), "ax-bounds-unavailable")
     return ["x": Double(point.x), "y": Double(point.y), "width": Double(extent.width), "height": Double(extent.height)]
 }
-func children(_ item: AXUIElement, _ name: String) throws -> [AXUIElement] {
+func axErrorName(_ status: AXError) -> String {
+    switch status {
+    case .success: return "success"
+    case .failure: return "failure"
+    case .illegalArgument: return "illegal-argument"
+    case .invalidUIElement: return "invalid-ui-element"
+    case .cannotComplete: return "cannot-complete"
+    case .attributeUnsupported: return "attribute-unsupported"
+    case .notImplemented: return "not-implemented"
+    case .apiDisabled: return "api-disabled"
+    case .noValue: return "no-value"
+    default: return "other"
+    }
+}
+func childrenNode(_ item: AXUIElement, _ path: String, _ depth: Int, _ role: String?, _ readPID: Int32,
+                  _ rootPID: Int32, _ windowID: UInt32, _ kind: String) -> [String: Any] {
+    // Cached/pre-read facts only, not post-read ownership or action authority.
+    return ["path": path, "depth": depth, "role": role.map { $0 as Any } ?? NSNull(), "pid": readPID,
+            "rootPID": rootPID, "windowID": windowID, "referenceKind": kind, "referenceScope": "native-invocation",
+            "cfTypeID": CFGetTypeID(item), "pidSource": kind == "root-application" ? "application-reference" : "native-read"]
+}
+func children(_ item: AXUIElement, _ name: String, _ phase: String, _ node: [String: Any]) throws -> [AXUIElement] {
     var count = 0
-    AXUIElementSetMessagingTimeout(item, 0.2)
+    let timeoutStatus = AXUIElementSetMessagingTimeout(item, 0.2), started = ProcessInfo.processInfo.systemUptime
+    var operationStarted = started
     let status = AXUIElementGetAttributeValueCount(item, name as CFString, &count)
+    func refusal(_ reason: String, _ operation: String, _ result: AXError, _ classification: String,
+                 _ returnedType: CFTypeID? = nil, _ returnedCount: Int? = nil,
+                 _ badIndex: Int? = nil, _ badType: CFTypeID? = nil) -> Denied {
+        // One bounded scalar record; no fallback AX reads, values, pointers or retries.
+        return Denied(reason, detail: ["operation": operation, "attribute": name, "phase": phase,
+            "classification": classification, "axError": result.rawValue, "axErrorName": axErrorName(result),
+            "timeoutSetAXError": timeoutStatus.rawValue, "messageTimeoutSeconds": 0.2,
+            "elapsedMilliseconds": max(0, (ProcessInfo.processInfo.systemUptime - operationStarted) * 1000),
+            "count": count, "countExact": String(count), "countVerified": status == .success,
+            "returnedCFTypeID": returnedType.map { $0 as Any } ?? NSNull(),
+            "returnedCount": returnedCount.map { $0 as Any } ?? NSNull(),
+            "unexpectedChildIndex": badIndex.map { $0 as Any } ?? NSNull(),
+            "unexpectedChildCFTypeID": badType.map { $0 as Any } ?? NSNull(),
+            "expectedArrayCFTypeID": CFArrayGetTypeID(), "expectedElementCFTypeID": AXUIElementGetTypeID(), "node": node])
+    }
     if status == .noValue || status == .attributeUnsupported { return [] }
-    try check(status == .success && count >= 0 && count <= 512, "ax-children-unbounded-or-unreadable")
+    if status != .success || count < 0 || count > 512 {
+        throw refusal("ax-children-unbounded-or-unreadable", "AXUIElementGetAttributeValueCount", status,
+                      status == .success ? "count-out-of-range" : "native-error")
+    }
     if count == 0 { return [] }
     var array: CFArray?
-    guard AXUIElementCopyAttributeValues(item, name as CFString, 0, count, &array) == .success,
-        let result = array as? [AXUIElement], result.count == count else { throw Denied("ax-children-unreadable") }
+    operationStarted = ProcessInfo.processInfo.systemUptime
+    let copyStatus = AXUIElementCopyAttributeValues(item, name as CFString, 0, count, &array)
+    if copyStatus != .success { throw refusal("ax-children-unreadable", "AXUIElementCopyAttributeValues", copyStatus, "native-error") }
+    guard let array = array else { throw refusal("ax-children-unreadable", "validate-values", copyStatus, "missing-array") }
+    let arrayType = CFGetTypeID(array)
+    if arrayType != CFArrayGetTypeID() { throw refusal("ax-children-unreadable", "validate-values", copyStatus, "wrong-array-type", arrayType) }
+    let actualCount = CFArrayGetCount(array)
+    if actualCount != count { throw refusal("ax-children-unreadable", "validate-values", copyStatus, "array-count-mismatch", arrayType, actualCount) }
+    for index in 0..<actualCount {
+        guard let raw = CFArrayGetValueAtIndex(array, index) else {
+            throw refusal("ax-children-unreadable", "validate-values", copyStatus, "missing-child-value", arrayType, actualCount, index)
+        }
+        let child = Unmanaged<CFTypeRef>.fromOpaque(raw).takeUnretainedValue(), childType = CFGetTypeID(child)
+        if childType != AXUIElementGetTypeID() {
+            throw refusal("ax-children-unreadable", "validate-values", copyStatus, "wrong-child-type", arrayType, actualCount, index, childType)
+        }
+    }
+    guard let result = array as? [AXUIElement], result.count == count else {
+        throw refusal("ax-children-unreadable", "validate-values", copyStatus, "bridge-failed", arrayType, actualCount)
+    }
     return result
 }
 func pidMatches(_ item: AXUIElement, _ expected: Int32) throws {
@@ -347,7 +460,8 @@ do {
               "permissionRequestsPerformed": false]); exit(0)
     }
     let root = AXUIElementCreateApplication(pid)
-    let matches = try children(root, kAXWindowsAttribute).filter { item in
+    let applicationNode = childrenNode(root, "root-application", -1, nil, pid, pid, id, "root-application")
+    let matches = try children(root, kAXWindowsAttribute, "root-window-discovery", applicationNode).filter { item in
         try pidMatches(item, pid)
         try check(attr(item, kAXRoleAttribute) as? String == kAXWindowRole, "ax-window-role-unverified")
         return try bounds(item) == expected
@@ -359,7 +473,7 @@ do {
     func checkHeldRoot() throws {
         try fence(p, parent); try checkCG()
         try check(AXIsProcessTrusted() && ProcessInfo.processInfo.systemUptime < deadline, "root-fence-time-or-trust-unverified")
-        let current = try children(root, kAXWindowsAttribute).filter { item in
+        let current = try children(root, kAXWindowsAttribute, "root-window-recheck", applicationNode).filter { item in
             try pidMatches(item, pid)
             try check(attr(item, kAXRoleAttribute) as? String == kAXWindowRole, "ax-window-role-unverified")
             return try bounds(item) == expected
@@ -441,7 +555,8 @@ do {
                 }
             }
         }
-        let descendants = try children(item, kAXChildrenAttribute)
+        let childNode = childrenNode(item, path, depth, role, readPID, pid, id, CFEqual(item, window) ? "held-root-window" : "traversal-node")
+        let descendants = try children(item, kAXChildrenAttribute, "traversal", childNode)
         if remote {
             try check(try elementPID(item) == readPID, "remote-ax-pid-drift")
             try check(try remoteProcess(readPID) == remoteBefore, "remote-ax-process-drift")
@@ -484,8 +599,10 @@ do {
     emit(["complete": true, "readOnly": true, "nodes": rows, "snapshots": changedSnapshots, "readiness": readiness, "nativeRootSnapshot": nativeRootSnapshot,
           "window": w, "process": p, "actionAttempted": false, "permissionRequestsPerformed": false])
 } catch {
-    emit(["complete": false, "readOnly": true, "nodes": rows, "snapshots": changedSnapshots, "readiness": readiness, "nativeRootSnapshot": nativeRootSnapshot,
-          "error": (error as? Denied)?.reason ?? "surface-unverified", "actionAttempted": false, "permissionRequestsPerformed": false]); exit(2)
+    var failure: [String: Any] = ["complete": false, "readOnly": true, "nodes": rows, "snapshots": changedSnapshots, "readiness": readiness, "nativeRootSnapshot": nativeRootSnapshot,
+          "error": (error as? Denied)?.reason ?? "surface-unverified", "actionAttempted": false, "permissionRequestsPerformed": false]
+    if let detail = (error as? Denied)?.detail { failure["errorDetail"] = detail }
+    emit(failure); exit(2)
 }
 `;
 
@@ -664,4 +781,4 @@ if (require.main === module) {
   }).catch(error => { console.log(JSON.stringify({ error: error.message, passed: false, ...acceptance })); process.exitCode = 2; });
 }
 module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, closeAssessment,
-  bitmapArguments, bitmapImage, windowBitmapDiagnostic, remoteReadPolicy, validateRootInspection, rootSurfaceDiagnostic, acceptance, surfaceSource };
+  bitmapArguments, bitmapImage, windowBitmapDiagnostic, remoteReadPolicy, validateRootInspection, validateChildrenFailure, rootSurfaceDiagnostic, acceptance, surfaceSource };
