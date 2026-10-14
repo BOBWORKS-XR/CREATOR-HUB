@@ -102,3 +102,21 @@ test('dedicated workflow cannot select arbitrary input, self-hosted machines or 
   assert.doesNotMatch(workflow, /self-hosted|inputs:|secrets:|contents: write|continue-on-error|sudo |xattr -d/);
   assert.match(workflow, /if: always\(\)/);
 });
+test('recorded native measurement does not turn preserved stdio into clean retirement acceptance', () => {
+  const evidence = require('../docs/evidence/macos-legacy-gui-archive-experiment-014.json');
+  assert.equal(evidence.sourceCommit, '2bbf8a67c512a1defa70e928aed48bcded9fffdf');
+  assert.equal(evidence.runId, 38633431819);
+  assert.equal(evidence.nativeRetirementAccepted, false); assert.equal(evidence.releaseReady, false);
+  assert.deepEqual(evidence.targets.map(row => row.architecture), ['arm64', 'x64']);
+  for (const row of evidence.targets) {
+    assert.equal(row.reportMatchesOriginalZip, true); assert.match(row.zipSha256, /^[a-f0-9]{64}$/);
+    assert.equal(row.nativeCancel, true); assert.equal(row.nativeApprove, true);
+    assert.equal(row.existingDestinationCollisionRefused, true); assert.equal(row.originalRuntimeResourcesRetained, 9);
+    assert.equal(row.liveStdioWhileArchived.tools, 53);
+    assert.equal(row.bundleSignatureWhileArchived.exit, 1);
+    assert.equal(row.nativeLaunchWhileArchived.errorDomain, 'NSCocoaErrorDomain');
+    assert.equal(row.nativeLaunchWhileArchived.errorCode, 259);
+    assert.equal(row.stillRegisteredAt, '/Users/runner/Applications/Creator Works MCP.app');
+    assert.equal(row.exactGuiInodeRestored, true); assert.equal(row.restoredBundleSignatureExit, 0);
+  }
+});

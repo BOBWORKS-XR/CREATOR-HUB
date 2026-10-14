@@ -217,3 +217,19 @@ its internal symlinked desktop entry is a host desktop registration.
 `node --test native/legacy-retirement-unix-proof.test.cjs` checks only captured
 public evidence and distinct payload identities. Production files and shared
 agent files were not edited. No native retirement or release claim is made.
+
+## Native Follow-Up: One Reversible Mac Experiment
+
+The passive-only statements above describe the original audit, not this later
+capture. The [dedicated native follow-up](MACOS-LEGACY-RETIREMENT-PROBE.md#native-experiment-result)
+ran the exact public DMGs on Intel and ARM Macs, closed both legacy GUIs normally,
+then tested fresh native Cancel/Approve and one journaled, exclusive MCP
+GUI-executable-only archive followed by exact restoration.
+
+[Run 38633431819](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38633431819)
+proves original-path live MCP stdio and both Node aliases survive that temporary
+move. It also **disproves clean GUI retirement by that method**: the app remains
+registered, strict bundle signature fails, and native launch reports the app is
+corrupt (NSCocoaErrorDomain 259). Every original member/inode was restored and
+strict signature passed again. This measured negative result supports retaining
+the production refusal; it does not authorize shipping a hollow registered app.

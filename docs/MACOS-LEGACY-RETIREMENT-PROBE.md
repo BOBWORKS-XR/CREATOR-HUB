@@ -77,3 +77,42 @@ Portable refusal/source tests:
 `node --test scripts/native-macos-legacy-retirement-probe.test.cjs native/legacy-retirement-unix-proof.test.cjs`
 
 Native workflow results and exact report facts will be appended after execution.
+
+## Native Experiment Result
+
+[Run 38633431819](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38633431819),
+commit `2bbf8a67c512a1defa70e928aed48bcded9fffdf`, passed both native jobs.
+The [compact measured evidence](evidence/macos-legacy-gui-archive-experiment-014.json)
+binds the primary run/job/artifact metadata, independently verified original ZIP
+size/digest and matching extracted report digest. Raw reports and original ZIPs
+are retained locally under `artifacts/mac-legacy-retirement-38633431819`.
+
+**One hypothesis proved, one disproved on both architectures:**
+
+- **Proved:** actual native Cancel leaves every app member/inode unchanged;
+  native Approve permits the one temporary GUI-executable move. Exclusive rename
+  refuses the existing sentinel. All nine original MCP runtime/resources stay
+  in place. The already live stdio PID still returns 53 tools while the GUI is
+  archived; both original `node` and `node.exe` paths independently pass strict
+  signature, reconnect with 53 tools and exit 0 on EOF. The exact GUI inode and
+  whole bundle are restored; strict bundle signature passes again.
+- **Disproved:** main-executable archival is clean Mac GUI retirement. The old
+  app remains registered at `~/Applications/Creator Works MCP.app`.
+  `codesign --verify --deep --strict` fails with exit 1, reporting
+  `code object is not signed at all`. Gatekeeper rejects it with no usable
+  signature. A real absolute-URL `NSWorkspace.openApplication` attempt returns
+  **NSCocoaErrorDomain 259**, reporting the application is corrupt, and no app.
+
+This is a concrete negative result, not missing hypothetical acceptance paperwork:
+**do not wire the executable-only hollow-bundle technique into Root as clean
+retirement.** It preserves runtime execution but leaves a corrupt, registered
+legacy app. A different design must resolve that exact registration/signature
+outcome while retaining original runtimes. No claim is made that all possible
+Mac retirement designs are impossible. No production helper or generic recovery
+framework was added; permanent retirement and release flags remain false.
+
+Changed implementation paths are only the dedicated workflow and
+`scripts/native-macos-legacy-retirement-probe.{cjs,swift,test.cjs}`. This document,
+its compact evidence and the original audit's follow-up link record the result.
+The 32 portable refusal/source checks passed before native execution. The later
+evidence regression checks recorded results only; they do not rerun native code.

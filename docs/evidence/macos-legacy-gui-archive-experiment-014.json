@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Native disposable-runner measurement of one reversible GUI-executable-only archive, not production retirement acceptance.",
+  "sourceCommit": "2bbf8a67c512a1defa70e928aed48bcded9fffdf",
+  "workflow": ".github/workflows/native-macos-legacy-retirement-probe.yml",
+  "branch": "validation/mac-legacy-retirement-014",
+  "runId": 38633431819,
+  "runAttempt": 1,
+  "runUrl": "https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38633431819",
+  "runConclusion": "success",
+  "nativeRetirementAccepted": false,
+  "releaseReady": false,
+  "interpretation": "Original-path MCP runtime continuity demonstrated. Clean GUI retirement by main-executable archival is rejected: both architectures retain a registered corrupt app.",
+  "targets": [
+    {
+      "architecture": "arm64",
+      "jobId": 116090506269,
+      "artifactId": 11927691571,
+      "artifactName": "mac-legacy-retirement-macos-arm64-38633431819-1",
+      "zipBytes": 34986,
+      "zipSha256": "e2ca70058b5098dabd15820770ea7275b7a068c51b6e6149b6a69e48e6670915",
+      "reportSha256": "49817f407cd40fab423d0708f630fe813ad61964bbd659353d7e61fb93e33d8f",
+      "reportMatchesOriginalZip": true,
+      "nativeCancel": true,
+      "nativeApprove": true,
+      "existingDestinationCollisionRefused": true,
+      "guiOnlyTemporarilyArchived": true,
+      "originalRuntimeResourcesRetained": 9,
+      "liveStdioWhileArchived": { "pid": 1712, "tools": 53 },
+      "originalPathReconnects": [
+        { "alias": "node", "tools": 53, "signatureExit": 0, "eofExit": 0 },
+        { "alias": "node.exe", "tools": 53, "signatureExit": 0, "eofExit": 0 }
+      ],
+      "bundleSignatureWhileArchived": { "exit": 1, "diagnostic": "code object is not signed at all" },
+      "gatekeeperWhileArchived": { "exit": 3, "diagnostic": "source=no usable signature" },
+      "stillRegisteredAt": "/Users/runner/Applications/Creator Works MCP.app",
+      "nativeLaunchWhileArchived": { "returnedApplication": false, "errorDomain": "NSCocoaErrorDomain", "errorCode": 259, "description": "The application could not be launched because it is corrupt." },
+      "exactGuiInodeRestored": true,
+      "allOriginalBundleMembersPreserved": true,
+      "restoredBundleSignatureExit": 0,
+      "experimentHostExit": 0,
+      "syntheticServerConfigPreserved": true
+    },
+    {
+      "architecture": "x64",
+      "jobId": 116090505919,
+      "artifactId": 11926408828,
+      "artifactName": "mac-legacy-retirement-macos-intel-38633431819-1",
+      "zipBytes": 34359,
+      "zipSha256": "7baba7c00094671282f4c6241a9218933170d0362a72fe0c0143e4a7adca374c",
+      "reportSha256": "ab6a9fdccc7b9e3abba657295d0c559f0fcac0ca54fee77ff4be9d568e505454",
+      "reportMatchesOriginalZip": true,
+      "nativeCancel": true,
+      "nativeApprove": true,
+      "existingDestinationCollisionRefused": true,
+      "guiOnlyTemporarilyArchived": true,
+      "originalRuntimeResourcesRetained": 9,
+      "liveStdioWhileArchived": { "pid": 2925, "tools": 53 },
+      "originalPathReconnects": [
+        { "alias": "node", "tools": 53, "signatureExit": 0, "eofExit": 0 },
+        { "alias": "node.exe", "tools": 53, "signatureExit": 0, "eofExit": 0 }
+      ],
+      "bundleSignatureWhileArchived": { "exit": 1, "diagnostic": "code object is not signed at all" },
+      "gatekeeperWhileArchived": { "exit": 3, "diagnostic": "source=no usable signature" },
+      "stillRegisteredAt": "/Users/runner/Applications/Creator Works MCP.app",
+      "nativeLaunchWhileArchived": { "returnedApplication": false, "errorDomain": "NSCocoaErrorDomain", "errorCode": 259, "description": "The application could not be launched because it is corrupt." },
+      "exactGuiInodeRestored": true,
+      "allOriginalBundleMembersPreserved": true,
+      "restoredBundleSignatureExit": 0,
+      "experimentHostExit": 0,
+      "syntheticServerConfigPreserved": true
+    }
+  ],
+  "notEstablished": [
+    "Clean permanent Hub-only Mac GUI retirement",
+    "Actual existing user-settings migration or unified installer flow",
+    "Busy-workflow refusal, competing installers, or crash recovery",
+    "Signed updater or consumer Gatekeeper/notarization acceptance"
+  ]
+}
