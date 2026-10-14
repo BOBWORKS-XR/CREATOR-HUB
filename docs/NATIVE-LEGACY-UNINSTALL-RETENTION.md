@@ -225,3 +225,13 @@ custom registrations; it does not use an arbitrary registry command or force
 process exit. The outer harness independently compares all eight synthetic
 persistent stores and retains original errors. A successful adapter run would
 still be leaf retention acceptance, not full Hub migration or release readiness.
+
+[Adapter run 38537875593](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38537875593)
+at `eaaabcb` passed Setup removal and retained all three seeded stores. The MCP
+adapter reached its exact generated uninstaller, but returned an incomplete
+removal error; the test process exited 101. All five MCP stores stayed identical.
+This does not identify the uninstaller's own exit code or refusal cause. Reports
+are preserved under `artifacts/legacy-retention-38537875593/`. A read-only
+public-preflight diagnostic and exact child-exit/remaining-registration capture
+are being added before changing the adapter's behavior. No process guard is
+bypassed and no successful MCP adapter acceptance is claimed.

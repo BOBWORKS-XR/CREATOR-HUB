@@ -387,6 +387,10 @@ function Invoke-LegacyRetention([string]$Id, [string]$Output) {
         $report.status = 'passed'
     } catch { $failure = $_; $report.caughtFailure = $true; $report.status = 'failed'; $report.error = $_.Exception.Message }
     finally {
+        if ($installRoot) { try {
+            $report.registrationsAfter = @(Get-LegacyRegistrations $pin)
+            if (Test-Path -LiteralPath $installRoot) { $report.installedAfter = Get-LegacyInventory $installRoot }
+        } catch { $report.errors += $_.Exception.Message } }
         foreach ($store in $seeded) { try {
             Require-Legacy ($null -ne $store.before) 'Synthetic store seeding failed before capture.'
             Assert-LegacyRetained $store.identity (Get-LegacyRootIdentity $store.path)

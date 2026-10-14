@@ -18,6 +18,40 @@ struct Pin {
     files: &'static [(&'static str, u64, &'static str)],
 }
 
+#[cfg(windows)]
+fn uninstall_command(path: &Path) -> Result<std::process::Command, String> {
+    let system = PathBuf::from(
+        std::env::var_os("SystemRoot").ok_or("Windows system directory unavailable.")?,
+    );
+    let mut command = platform::command(path);
+    command.current_dir(system.join("System32")).env_clear();
+    for name in [
+        "SystemRoot",
+        "windir",
+        "SystemDrive",
+        "ComSpec",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "USERNAME",
+        "USERDOMAIN",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "PROCESSOR_ARCHITECTURE",
+        "TEMP",
+        "TMP",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command.env("PATH", system.join("System32"));
+    Ok(command)
+}
+
 // Captured after fresh installation of the immutable public installers, run
 // 38487590987. No runtime manifest or registry value can replace these pins.
 const MCP: Pin = Pin {
@@ -279,38 +313,8 @@ impl Plan {
         }
         self.recheck()?;
         preflight()?;
-        let system = PathBuf::from(
-            std::env::var_os("SystemRoot").ok_or("Windows system directory unavailable.")?,
-        );
-        let mut command = platform::command(&uninstaller);
-        command
-            .raw_arg(uninstall_arguments(&self.root)?)
-            .current_dir(system.join("System32"))
-            .env_clear();
-        for name in [
-            "SystemRoot",
-            "windir",
-            "SystemDrive",
-            "ComSpec",
-            "USERPROFILE",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "HOMEDRIVE",
-            "HOMEPATH",
-            "USERNAME",
-            "USERDOMAIN",
-            "ProgramFiles",
-            "ProgramFiles(x86)",
-            "ProgramW6432",
-            "PROCESSOR_ARCHITECTURE",
-            "TEMP",
-            "TMP",
-        ] {
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
-        command.env("PATH", system.join("System32"));
+        let mut command = uninstall_command(&uninstaller)?;
+        command.raw_arg(uninstall_arguments(&self.root)?);
         let mut child = command
             .spawn()
             .map_err(|_| "The exact old-app uninstaller could not start.")?;
@@ -327,8 +331,9 @@ impl Plan {
             }
             std::thread::sleep(Duration::from_millis(100));
         };
-        if !status.success() || registration(self.pin)?.is_some() {
-            return Err("Old-app removal did not complete. Keep retained backups and inspect the installation.".into());
+        let still_registered = registration(self.pin)?.is_some();
+        if !status.success() || still_registered {
+            return Err(format!("Old-app removal did not complete (exit {:?}, registration remains: {still_registered}). Keep retained backups and inspect the installation.", status.code()));
         }
         for (name, _, _) in self
             .pin
@@ -560,6 +565,44 @@ mod tests {
         let plans = inspect().unwrap();
         assert_eq!(plans.len(), 1, "only the isolated fixture may be installed");
         assert_eq!(plans[0].app(), expected);
+        if expected == AppId::Mcp {
+            // Read-only diagnostic using the exact public preflight source.
+            // This is not a substitute for the uninstaller's own guard.
+            let source = include_bytes!(
+                "../../modules/mcp/launcher/src-tauri/windows/installer-preflight.ps1"
+            );
+            let temp = tempfile::tempdir().unwrap();
+            let script = temp.path().join("public-preflight.ps1");
+            fs::write(&script, source).unwrap();
+            let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+            let mut command = uninstall_command(&powershell).unwrap();
+            let output = command
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(&script)
+                .arg("-InstallDir")
+                .arg(plans[0].root())
+                .output()
+                .unwrap();
+            assert!(output.stdout.len() <= 65536 && output.stderr.len() <= 65536);
+            println!(
+                "Read-only MCP preflight: exit {:?}; stdout {:?}; stderr {:?}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.status.success(),
+                "read-only preflight refused; no uninstaller was started"
+            );
+        }
         // The outer native harness independently captures and compares every
         // synthetic retained-data directory before and after this exact adapter.
         plans[0].remove_after_native_review(|| Ok(())).unwrap();
