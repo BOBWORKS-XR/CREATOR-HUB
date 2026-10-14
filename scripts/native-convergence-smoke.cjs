@@ -152,6 +152,28 @@ async function main(candidate) {
     assert.equal(backupReport.stage, 'backed-up'); assert.equal(backupReport.backups.length, 3);
     assert.ok(backupReport.backups.some(file => fs.readFileSync(file).equals(sourceConfig)));
     unchanged();
+    for (const file of [backupReport.backups[0], config]) {
+      const original = fs.readFileSync(file);
+      const changed = Buffer.from(original);
+      changed[changed.length - 1] ^= 1;
+      try {
+        fs.writeFileSync(file, changed);
+        await page.locator('#convergence-connections').click();
+        await page.locator('#convergence-error').waitFor({ state: 'visible' });
+        const refused = await page.evaluate(() => window.CreatorHubNative.invoke('convergence_status'));
+        assert.equal(refused.stage, 'backed-up');
+        assert.equal(refused.retirementAvailable, false);
+        assert.deepEqual(fs.readFileSync(file), changed, 'Refusal must not repair or overwrite changed evidence');
+        for (const client of clients) assert.deepEqual(fs.readFileSync(client.path), client.bytes);
+        assert.deepEqual(registrationNames(), ['Creator Hub', 'Creator Works MCP', 'Creator Project Setup']);
+        const windows = JSON.parse(native(child.pid, hub, 'snapshot'));
+        assert.equal(windows.some(window => window.title === 'Enable managed MCP routing'), false);
+      } finally {
+        fs.writeFileSync(file, original);
+      }
+      unchanged();
+    }
+    report.checks.push('Actual guide refuses same-length backup and live-settings drift before routing or retirement; changed evidence is not overwritten');
     await page.locator('#convergence-connections').click();
     await press(child.pid, hub, 'Enable managed MCP routing', 'Enable managed routing');
     const backend = await retry(() => {

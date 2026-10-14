@@ -1,4 +1,4 @@
-name: Current Windows convergence and original-backup safeguards (not release)
+name: Current Windows convergence with actual backup-drift refusal (not release)
 on:
   push:
     branches: [validation/convergence-014]

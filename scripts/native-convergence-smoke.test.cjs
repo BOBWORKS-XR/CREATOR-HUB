@@ -29,5 +29,7 @@ test('actual guide harness fences inspection and distinguishes flow acceptance f
   const close = source.indexOf("native(child.pid, hub, 'close');");
   assert.ok(readiness > 0 && readiness < close, 'Wait for the actual startup update checks, not a fixed sleep, before the single normal close');
   assert.ok(source.includes("event.listen('close-blocked'"));
+  assert.ok(source.includes('for (const file of [backupReport.backups[0], config])'));
+  assert.ok(source.includes("'Refusal must not repair or overwrite changed evidence'"));
   assert.doesNotMatch(source, /taskkill|\.kill\(|Stop-Process|auth\.json|process\.env\.(?:TAURI_SIGNING_PRIVATE_KEY|CREATOR_HUB_SIGNING_KEY_PATH)/);
 });
