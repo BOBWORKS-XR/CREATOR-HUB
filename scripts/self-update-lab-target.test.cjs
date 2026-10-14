@@ -57,15 +57,20 @@ test('lab workflow uses pinned public signatures, keeps import privileges separa
   const importing = source.slice(source.indexOf('  stage-input:'), source.indexOf('  update:'));
   const native = source.slice(source.indexOf('  update:'));
   assert.match(importing, /contents: write/);
-  assert.match(importing, /releases\/assets\/641164968/);
+  assert.match(importing, /releases\/assets\/641560071/);
   assert.match(importing, /\$release\.draft -ne \$true/);
-  assert.match(importing, /\$matches\[0\]\.size -ne 36496310/);
+  assert.match(importing, /\$matches\[0\]\.size -ne 36498841/);
   assert.match(importing, /\$matches\[0\]\.state -cne 'uploaded'/);
   assert.match(importing, /Invoke-WebRequest -Method Get/);
   assert.doesNotMatch(importing, /npm ci|actions\/checkout|native-self-update-lab.ps1/);
   assert.doesNotMatch(native, /contents: write|GH_TOKEN|signing_key|signer sign/);
   assert.match(source, /validation\/unified-update-lab-014/);
-  assert.match(source, /872453de9cf7b4f4e5cef7e89e315d79f2257007b8881e13b368e95cf12f1337/);
+  assert.match(source, /530bb816137ff078d63b0f78e9e1f88f8b8a961c391c21fc486dc11b7247436d/);
+  for (const pin of ['30005699f97457bd283c91d8dcdff2c8e518fc03e963ba5f612c0ae46e78d653',
+    '14d2ee14a2ad7728d7a666c37a60e167a217c548f1874176dc85cc7642cc68de',
+    '7007a87c2818fa809382742fb41fc80ddacf6391d678759112196dd962d0955e',
+    '5b13e590dc176ea9991cf4cbe228dc6a358dc914b08367bc7dc033e8523d6f32',
+    '2782921b6bebcf6e811d1240a27d3d47f9c139269aaf6544ff0c6dff85a454ad']) assert.ok(native.includes(pin));
   assert.match(source, /targetVersion='0\.1\.14'/);
   assert.ok(native.indexOf('Public baseline differs') < native.indexOf('./scripts/native-self-update-lab.ps1'));
   assert.match(native, /BaselineInstallerPath/);

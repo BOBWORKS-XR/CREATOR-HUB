@@ -12,8 +12,15 @@ PR21 and the source publication guard remain held.
   `edc47ecca5e80ce950d5b8ecf6bb32c46fa531e163b9d6ab7722b143a02a4e7a`,
   installed Hub `dd74917a67e360a479158d81149a385ad813da9213661959928543a8f366dfca`.
 - Later source7ab0a52 binds review to the retained legacy image and refuses
-  unfinished outcomes. Its rebuilt B04 installer is awaiting native acceptance;
-  B03's result does not cover this change. The guide now tests an actual restart
+  unfinished outcomes. B04's fresh installation and independent public12 guarded
+  `/UPDATE /S /NS` contract pass [run38629778073](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38629778073),
+  preserving exact preferences/current and legacy MCP/Setup/unmanaged fixtures.
+  The full migration lane reached five checks, then the harness dereferenced
+  its already-closed client on the post-migration restart. Sourcea8c9021 keeps
+  that original connection alive through both normal closes; actual repeat
+  [run38631484537](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38631484537)
+  passes all three actual lanes, including the completed-migration restart.
+  B03's earlier result does not cover this change. The guide tests an actual restart
   after completed migration, not only a restart after a fresh settings save.
   Root tests: 352 passed, 13 platform-specific ignored; strict Clippy passed.
   MCP tests: 277 passed; Setup packaging scripts: 15 passed.
@@ -25,14 +32,21 @@ PR21 and the source publication guard remain held.
   close on both architectures. Its blank screenshots were captured early,
   at 4.39s/5.65s, before the intended sampler deadline. Cause is unverified.
   [Control run38623617492](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38623617492)
-  reuses those exact DMGs without rebuilding, comparing private/ordinary direct
-  launch and ordinary LaunchServices launch with measured capture age >=20s.
-- Flatpak run38619251453 builds and installs the exact reviewed Linux package
-  and passes native linkage. Its retention probe fails because `--sandbox`
-  omits app-private XDG mapping. The corrected normal-sandbox read and distinct
-  actual14 package replacement are under test in
+  reuses those exact DMGs without rebuilding: all four direct-launch images
+  were nonblank at measured20.36-24.33s. This does not prove terms actions or
+  embedded operation. [run38629771103](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38629771103)
+  independently accepts Intel ordinary native close. Its read-only log capture
+  overflows512KiB, so suite acceptance remains false. LaunchServices has a
+  parent-only kernel mismatch, not evidence of blank rendering.
+- The corrected normal-sandbox read and distinct actual14 Flatpak replacement
+  pass all47 native commands in
   [run38624468436](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38624468436).
-  This is same-version package replacement, not a future signed update.
+  This is same-version package replacement/private-settings retention, not a
+  future signed update, GUI or host integration acceptance.
+- The actual installed Claude Code2.1.296 made one successful read-only
+  `get_mcp_reference` call against B04's exact packaged server and exited0;
+  no processes using that test runtime remained. This isolated temporary
+  connection did not test migrated saved clients, Desktop or signed update.
 
 All full-product/public-discovery/live-AI-app and release-ready gates remain
 false. Unix standalone retirement and Flatpak host integration are still

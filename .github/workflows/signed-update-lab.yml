@@ -1,4 +1,4 @@
-name: Current admitted signed stable update lab (not public discovery)
+name: B04 signed stable update lab (not public discovery)
 on:
   push:
     branches: [validation/unified-update-lab, validation/unified-update-lab-014]
@@ -24,10 +24,10 @@ jobs:
           $metadataHeaders = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2026-03-10' }
           $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/411494394' -Headers $metadataHeaders
           if ($release.draft -ne $true -or $release.tag_name -cne 'v0.1.13-validation') { throw 'Private validation draft differs.' }
-          $matches = @($release.assets | Where-Object id -EQ 641164968)
-          if ($matches.Count -ne 1 -or $matches[0].name -cne 'signed-update-reviewed-42a35d1-20261014.zip' -or $matches[0].state -cne 'uploaded' -or $matches[0].size -ne 36496310 -or $matches[0].digest -cne 'sha256:872453de9cf7b4f4e5cef7e89e315d79f2257007b8881e13b368e95cf12f1337') { throw 'Exact signed input is unavailable.' }
-          Invoke-WebRequest -Method Get -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/641164968' -Headers $headers -OutFile signed-input/signed-update-input.zip -MaximumRedirection 5 -TimeoutSec 180
-          if ((Get-FileHash signed-input/signed-update-input.zip).Hash.ToLowerInvariant() -ne '872453de9cf7b4f4e5cef7e89e315d79f2257007b8881e13b368e95cf12f1337') { throw 'Signed input archive differs.' }
+          $matches = @($release.assets | Where-Object id -EQ 641560071)
+          if ($matches.Count -ne 1 -or $matches[0].name -cne 'signed-update-reviewed-7ab0a52-20261014.zip' -or $matches[0].state -cne 'uploaded' -or $matches[0].size -ne 36498841 -or $matches[0].digest -cne 'sha256:530bb816137ff078d63b0f78e9e1f88f8b8a961c391c21fc486dc11b7247436d') { throw 'Exact signed input is unavailable.' }
+          Invoke-WebRequest -Method Get -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/641560071' -Headers $headers -OutFile signed-input/signed-update-input.zip -MaximumRedirection 5 -TimeoutSec 180
+          if ((Get-FileHash signed-input/signed-update-input.zip).Hash.ToLowerInvariant() -ne '530bb816137ff078d63b0f78e9e1f88f8b8a961c391c21fc486dc11b7247436d') { throw 'Signed input archive differs.' }
       - uses: actions/upload-artifact@v4
         with:
           name: signed-update-lab-input
@@ -57,15 +57,15 @@ jobs:
         run: |
           $root = Join-Path $PWD artifacts/signed-update-lab
           $zip = Join-Path $root signed-update-input.zip
-          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne '872453de9cf7b4f4e5cef7e89e315d79f2257007b8881e13b368e95cf12f1337') { throw 'Signed input archive differs.' }
+          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne '530bb816137ff078d63b0f78e9e1f88f8b8a961c391c21fc486dc11b7247436d') { throw 'Signed input archive differs.' }
           $candidate = Join-Path $root candidate
           Expand-Archive -LiteralPath $zip -DestinationPath $candidate
           $config = @{ schemaVersion=1; targetVersion='0.1.14'; directory=$candidate; pins=@{
-            descriptor='c74c2670f5fdf8b750faa14c963a3e09775d6b14e8190118e58af38c86cb2acb'
-            descriptorSignature='adead620bc8f4d4d76ca6470a4d636405683098ace753aa6db750bf8d4edb3dc'
-            installer='b3a42b8d67ef94edefa9cefa9e3791a196febb9d88a2163d38dcfed49c09c13d'
-            manifest='0e12262b1d50f492ce3296ced826c19cb87224642f2e7f77703f2eb361fd8057'
-            executable='9c52bdee2a53dee1caaa535b0fb40d23e1bdce9ea72fae5e817f9f82dd221ecc'
+            descriptor='30005699f97457bd283c91d8dcdff2c8e518fc03e963ba5f612c0ae46e78d653'
+            descriptorSignature='14d2ee14a2ad7728d7a666c37a60e167a217c548f1874176dc85cc7642cc68de'
+            installer='7007a87c2818fa809382742fb41fc80ddacf6391d678759112196dd962d0955e'
+            manifest='5b13e590dc176ea9991cf4cbe228dc6a358dc914b08367bc7dc033e8523d6f32'
+            executable='2782921b6bebcf6e811d1240a27d3d47f9c139269aaf6544ff0c6dff85a454ad'
           }}
           $config | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root lab-config.json) -Encoding utf8NoBOM
           node -e "const fs=require('fs');require('./scripts/self-update-lab-feed.cjs').loadContract(JSON.parse(fs.readFileSync(process.argv[1],'utf8')));console.log('Pinned lab contract accepted; not native update acceptance.')" (Join-Path $root lab-config.json)
