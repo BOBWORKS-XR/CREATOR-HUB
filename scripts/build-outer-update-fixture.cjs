@@ -13,6 +13,7 @@ const { applications, updaterManifest } = require('./release-descriptor.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const FROM = '0.1.14', TO = '0.1.15', META = 128 * 1024, MAX = 512 * 1024 * 1024;
+const VERSION_SOURCE_LIMIT = 1024 * 1024;
 const VERSIONS = ['package.json', 'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock'];
 const BASELINE = Object.freeze({
   directory: 'artifacts/unified/unified-014-reviewed-20261014-02',
@@ -24,6 +25,8 @@ const BASELINE = Object.freeze({
     'installer-extracted/creator-hub.exe': '9c52bdee2a53dee1caaa535b0fb40d23e1bdce9ea72fae5e817f9f82dd221ecc',
     'installer-checksum.json': 'b744d0ec64501f7749d52ae7bfa7798ba9df9cba1a958ca3616bfd2262c218af',
     'mcp-runtime.json': 'a662c80957ff14b077332b15d58f69a9f94d079b44a5869eeb96783b22928e7c',
+    'modules/routing/router.json.sig': 'f80375cf6749f3cfebc70c74063be3d9a83d97aa0702f1a658099ea97884a918',
+    'modules/routing/runtime.json.sig': '986fa6e2d106308b43c698e1137fc676d3be298139bd00bcaca9bed8da7ee9c8',
   },
 });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -79,7 +82,7 @@ function sourceEntries(tree) {
   const result = {};
   for (const line of tree.split('\0').filter(Boolean)) {
     const match = /^(100644|100755) blob ([a-f0-9]{40})\t(.+)$/.exec(line);
-    assert.ok(match && /^[A-Za-z0-9_./ -]+$/.test(match[3]) && !match[3].startsWith('/')
+    assert.ok(match && /^[A-Za-z0-9_./ @-]+$/.test(match[3]) && !match[3].startsWith('/')
       && !match[3].split('/').some(p => ['', '.', '..'].includes(p)), 'Unsupported source tree member');
     assert.equal(Object.hasOwn(result, match[3]), false); result[match[3]] = match[2];
   }
@@ -113,7 +116,7 @@ function buildFixture(label, services = {}) {
   absolute(root);
   const input = path.join(root, baseline.directory), output = path.join(root, 'artifacts/outer-update-fixture', label);
   absolute(input); absolute(output); assert.equal(fs.existsSync(output), false, 'Fixture output is immutable');
-  const canonicalVersions = Object.fromEntries(VERSIONS.map(name => [name, capture(path.join(root, name), META)]));
+  const canonicalVersions = Object.fromEntries(VERSIONS.map(name => [name, capture(path.join(root, name), VERSION_SOURCE_LIMIT)]));
   const original = Object.fromEntries(Object.entries(baseline.hashes).map(([name, sha256]) => {
     const record = capture(path.join(input, name), name.endsWith('.exe') ? MAX : META);
     assert.equal(record.sha256, sha256, 'Pinned reviewed 14 baseline differs'); return [name, record];
@@ -122,7 +125,15 @@ function buildFixture(label, services = {}) {
   assert.deepEqual(Object.keys(manifest).sort(), ['arch', 'managedRouting', 'modules', 'platform', 'schemaVersion']);
   assert.equal(manifest.platform, 'windows'); assert.equal(manifest.arch, 'x86_64');
   assert.equal(manifest.modules.mcp.version, '2.7.7'); assert.equal(manifest.modules.setup.version, '0.3.7');
-  verifyStage(path.join(input, 'modules'), manifest); inventory(path.join(input, 'modules'), Object.keys(allFiles(manifest)));
+  verifyStage(path.join(input, 'modules'), manifest);
+  const producerSidecars = ['routing/router.json.sig', 'routing/runtime.json.sig'];
+  inventory(path.join(input, 'modules'), [...Object.keys(allFiles(manifest)), ...producerSidecars]);
+  for (const name of ['router', 'runtime']) {
+    const encoded = bytes(path.join(input, `modules/routing/${name}.json.sig`), 4096).toString('utf8').trim();
+    const decoded = Buffer.from(encoded, 'base64');
+    assert.equal(decoded.toString('base64'), encoded, 'Noncanonical producer signature');
+    assert.deepEqual(decoded, bytes(path.join(input, `modules/routing/${name}.minisig`), 4096), 'Producer signature differs from verified package signature');
+  }
   const privateNames = [...moduleFiles('mcp', 'windows'), ...moduleFiles('setup', 'windows'), routing.routeFiles('windows')[0]];
   const privateFiles = Object.fromEntries(privateNames.map(name => [name, capture(path.join(input, 'modules', name), MAX)]));
   const boundFiles = Object.fromEntries(Object.keys(allFiles(manifest)).map(name => [name, capture(path.join(input, 'modules', name), MAX)]));
@@ -166,13 +177,13 @@ function buildFixture(label, services = {}) {
   try {
     const source = path.join(output, 'source'), archive = path.join(output, 'source.tar');
     fs.mkdirSync(source);
-    run('git', ['archive', '--format=tar', `--output=${archive}`, baseline.commit]); capture(archive, MAX);
+    run('git', ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'archive', '--format=tar', `--output=${archive}`, baseline.commit]); capture(archive, MAX);
     run('tar.exe', ['-xf', archive, '-C', source]);
     inventory(source, Object.keys(entries)); checkSource(source, entries);
     const changes = {};
     for (const name of VERSIONS) {
-      const file = path.join(source, name); fs.writeFileSync(file, bumpRootVersion(name, bytes(file)));
-      changes[name] = capture(file, META);
+      const file = path.join(source, name); fs.writeFileSync(file, bumpRootVersion(name, bytes(file, VERSION_SOURCE_LIMIT)));
+      changes[name] = capture(file, VERSION_SOURCE_LIMIT);
     }
     checkSource(source, entries, changes);
     const payload = path.join(output, 'payload'); fs.mkdirSync(payload);

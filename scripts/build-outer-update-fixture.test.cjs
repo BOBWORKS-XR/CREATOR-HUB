@@ -36,6 +36,7 @@ test('source export rejects links, submodules, duplicate paths and traversal bef
   const sha = 'a'.repeat(40);
   const valid = VERSIONS.map(name => `100644 blob ${sha}\t${name}\0`).join('');
   assert.equal(Object.keys(sourceEntries(valid)).length, 4);
+  assert.equal(Object.keys(sourceEntries(valid + `100644 blob ${sha}\tsrc-tauri/icons/128x128@2x.png\0`)).length, 5);
   for (const bad of [`120000 blob ${sha}\tlink\0`, `160000 commit ${sha}\tmodule\0`,
     `100644 blob ${sha}\t../outside\0`, `100644 blob ${sha}\t/absolute\0`, `100644 blob ${sha}\tpackage.json\0`]) {
     assert.throws(() => sourceEntries(valid + bad));
@@ -59,5 +60,10 @@ test('fixture pins current reviewed input, checks signed payloads and retains ex
   assert.ok(source.includes("['verify-package-input', 'verify-managed-runtime', 'verify-release']"));
   assert.ok(source.includes('privateModulesRecompiled: false, privateModulesResigned: false, privateKeyIncluded: false'));
   assert.ok(source.includes('outgoingNativeUpdateTested: false, viewsRestored: false, releaseReady: false'));
+  assert.ok(source.includes('capture(path.join(root, name), VERSION_SOURCE_LIMIT)'));
+  assert.ok(source.includes('bumpRootVersion(name, bytes(file, VERSION_SOURCE_LIMIT))'));
+  assert.ok(source.includes("const producerSidecars = ['routing/router.json.sig', 'routing/runtime.json.sig']"));
+  assert.ok(source.includes("'Producer signature differs from verified package signature'"));
+  assert.ok(source.includes("['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'archive'"));
   assert.doesNotMatch(source, /readFileSync\(key|readFileSync\([^)]*auth\.json|release (?:create|edit|upload)/);
 });
