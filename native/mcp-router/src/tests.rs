@@ -94,6 +94,75 @@ fn repeated_approved_activation_is_idempotent_and_does_not_edit_payloads() {
 }
 
 #[test]
+fn repeated_activation_accepts_another_valid_signature_and_keeps_retained_metadata() {
+    let (_temporary, store) = setup();
+    let previous = activate_a(&store);
+    let (bytes, signature) = fixture("a");
+    let text = std::str::from_utf8(&signature).unwrap();
+    let signed_lines = text.split_once('\n').unwrap().1;
+    let renewed = format!("untrusted comment: renewed packaging metadata\n{signed_lines}");
+    assert_ne!(renewed.as_bytes(), signature);
+    store.verify_descriptor(&bytes, renewed.as_bytes()).unwrap();
+    let target = store.root.join("descriptors").join(digest(&bytes));
+    let expected = store.resolve().unwrap().generation;
+    assert_eq!(
+        store
+            .activate(&bytes, renewed.as_bytes(), Some(&previous))
+            .unwrap(),
+        expected
+    );
+    assert_eq!(store.snapshot().unwrap().unwrap(), previous);
+    assert_eq!(fs::read(target.join("runtime.json")).unwrap(), bytes);
+    assert_eq!(fs::read(target.join("runtime.minisig")).unwrap(), signature);
+    assert_eq!(store.resolve().unwrap().generation, expected);
+}
+
+#[test]
+fn reactivation_does_not_repair_an_invalid_retained_signature() {
+    let (_temporary, store) = setup();
+    let previous = activate_a(&store);
+    let (bytes, signature) = fixture("a");
+    let target = store.root.join("descriptors").join(digest(&bytes));
+    fs::write(target.join("runtime.minisig"), b"damaged signature").unwrap();
+    assert!(store.activate(&bytes, &signature, Some(&previous)).is_err());
+    assert_eq!(store.snapshot().unwrap().unwrap(), previous);
+    assert_eq!(
+        fs::read(target.join("runtime.minisig")).unwrap(),
+        b"damaged signature"
+    );
+    assert!(store.resolve().is_err());
+}
+
+#[test]
+fn retry_refuses_invalid_inactive_retained_metadata_without_repair() {
+    let (_temporary, store) = setup();
+    let previous = activate_a(&store);
+    let (bytes, signature) = stage(&store, "b");
+    assert!(store
+        .activate_with(&bytes, &signature, Some(&previous), |step| {
+            if step == "backup" {
+                Err("interrupted before publication".into())
+            } else {
+                Ok(())
+            }
+        })
+        .is_err());
+    let target = store.root.join("descriptors").join(digest(&bytes));
+    fs::write(
+        target.join("runtime.minisig"),
+        b"damaged inactive signature",
+    )
+    .unwrap();
+    assert!(store.activate(&bytes, &signature, Some(&previous)).is_err());
+    assert_eq!(store.snapshot().unwrap().unwrap(), previous);
+    assert_eq!(
+        fs::read(target.join("runtime.minisig")).unwrap(),
+        b"damaged inactive signature"
+    );
+    assert_eq!(store.resolve().unwrap().hub_version, "0.1.12");
+}
+
+#[test]
 fn a_new_route_does_not_replace_an_active_old_generation() {
     let (_temporary, store) = setup();
     let previous = activate_a(&store);

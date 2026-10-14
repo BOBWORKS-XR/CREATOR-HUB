@@ -450,13 +450,15 @@ impl Store {
         let target = directory.join(&descriptor_id);
         reject_links(&target)?;
         if target.exists() {
-            if bounded(&target.join("runtime.json"), MAX_DESCRIPTOR)? != bytes
-                || bounded(&target.join("runtime.minisig"), 4096)? != signature
-            {
+            let retained = bounded(&target.join("runtime.json"), MAX_DESCRIPTOR)?;
+            let retained_signature = bounded(&target.join("runtime.minisig"), 4096)?;
+            if retained != bytes || self.descriptor(&retained, &retained_signature).is_err() {
                 return Err(
                     "Retained signed runtime metadata changed. Nothing was replaced.".into(),
                 );
             }
+            // Valid re-signing need not produce identical signature-file bytes.
+            // Keep the already verified retained pair instead of rewriting it.
         } else {
             let staging = tempfile::Builder::new()
                 .prefix(".descriptor-")
