@@ -577,6 +577,7 @@ mod tests {
             let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
                 .join("System32/WindowsPowerShell/v1.0/powershell.exe");
             let mut command = uninstall_command(&powershell).unwrap();
+            let started = Instant::now();
             let output = command
                 .args([
                     "-NoLogo",
@@ -593,7 +594,8 @@ mod tests {
                 .unwrap();
             assert!(output.stdout.len() <= 65536 && output.stderr.len() <= 65536);
             println!(
-                "Read-only MCP preflight: exit {:?}; stdout {:?}; stderr {:?}",
+                "Read-only MCP preflight: elapsed {}ms; exit {:?}; stdout {:?}; stderr {:?}",
+                started.elapsed().as_millis(),
                 output.status.code(),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
@@ -601,6 +603,45 @@ mod tests {
             assert!(
                 output.status.success(),
                 "read-only preflight refused; no uninstaller was started"
+            );
+            // Compare only the sanitized module/search environment used by the
+            // already accepted PowerShell retention harness. No process is stopped.
+            let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+            let modules = system.join("System32/WindowsPowerShell/v1.0/Modules");
+            let mut baseline = uninstall_command(&powershell).unwrap();
+            baseline.env("PSModulePath", modules).env(
+                "PATH",
+                std::env::join_paths([
+                    system.join("System32"),
+                    system.clone(),
+                    system.join("System32/WindowsPowerShell/v1.0"),
+                ])
+                .unwrap(),
+            );
+            if let Some(value) = std::env::var_os("NUMBER_OF_PROCESSORS") {
+                baseline.env("NUMBER_OF_PROCESSORS", value);
+            }
+            let started = Instant::now();
+            let output = baseline
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(&script)
+                .arg("-InstallDir")
+                .arg(plans[0].root())
+                .output()
+                .unwrap();
+            assert!(output.stdout.len() <= 65536 && output.stderr.len() <= 65536);
+            println!("Sanitized baseline MCP preflight: elapsed {}ms; exit {:?}; stdout {:?}; stderr {:?}",
+                started.elapsed().as_millis(), output.status.code(), String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "sanitized baseline preflight refused; no uninstaller was started"
             );
         }
         // The outer native harness independently captures and compares every

@@ -29,9 +29,9 @@
 #[path = "../../native/legacy-dependencies.rs"]
 mod dependencies;
 
-pub use dependencies::{Blocker, Client};
 #[cfg(test)]
 use dependencies::BlockerKind;
+pub use dependencies::{Blocker, Client};
 use dependencies::{ConfigDocument, ConfigFormat, Coverage, DocumentContent, Inspection};
 use serde::Serialize;
 use std::{

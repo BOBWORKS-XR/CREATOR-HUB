@@ -46,7 +46,7 @@ jobs:
           & $bin legacy_removal_windows::tests:: --skip native_windows_pinned_removal
           if ($LASTEXITCODE -ne 0) { throw 'Root adapter pure regressions failed.' }
           "executable=$bin" >> $env:GITHUB_OUTPUT
-      - name: Install exact baseline, capture read-only preflight and actual adapter outcome, prove retention
+      - name: Compare read-only MCP preflight environments and capture exact adapter outcome
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
