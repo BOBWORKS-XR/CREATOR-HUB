@@ -22,7 +22,7 @@ installs without prior Creator data or standalone applications skip it.
    uninstall only the source-bound legacy application resources.
 
 Steps 1-6 have initial source implementation and unit coverage. Step 7 remains
-blocked pending dependency guards, generated official uninstaller provenance,
+blocked pending effective dependency-scope integration, generated official uninstaller provenance,
 native retention acceptance, platform-specific cleanup and full native-flow tests.
 The guide says cleanup is pending; it does not claim completion. A review record
 is not permission to uninstall, live-client acceptance or publisher verification.
@@ -49,5 +49,12 @@ Do not force-close AI clients, Unity or unrelated Node processes.
   cancellation, retry, duplicate-click refusal, escaped text and explicit phases.
 - Full native first launch, signed update/restart, actual AI-client reconnect,
   macOS/Linux cleanup and end-to-end uninstall retention are still required.
+
+Current Windows source checks: 251 Root Rust tests pass with 11 explicitly
+opt-in native tests ignored; strict Clippy passes. Thirty dependency-guard tests
+are connected to Root's test target only, not production cleanup. The 15 browser
+convergence/startup tests pass, including screenshots at 390 and 1100 pixels.
+MCP's supported-client recovery selector has nine passing Windows-hosted Rust
+tests; Linux-native operation is not inferred from those selector fixtures.
 
 Published releases and the user's installed applications remain unchanged.
