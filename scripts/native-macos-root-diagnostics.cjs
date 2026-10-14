@@ -62,10 +62,11 @@ function parseLog(bytes, plan) {
 function runLog(plan, env, create = spawn) {
   return new Promise(resolve => {
     const task = create(plan.file, plan.argv, { env, stdio: ['ignore', 'pipe', 'pipe'] });
-    const chunks = []; let total = 0, settled = false;
+    const chunks = [], started = performance.now(); let total = 0, settled = false;
     const finish = result => {
       if (settled) return; settled = true; clearTimeout(timer);
-      resolve({ ...result, bytes: Buffer.concat(chunks), toolPid: task.pid ?? null });
+      resolve({ ...result, bytes: Buffer.concat(chunks), toolPid: task.pid ?? null,
+        stdoutBytesReceived: total, elapsedMilliseconds: Math.max(0, performance.now() - started) });
     };
     const abandon = result => {
       task.stdout.destroy(); task.stderr.destroy(); task.unref();
@@ -79,25 +80,36 @@ function runLog(plan, env, create = spawn) {
       else chunks.push(Buffer.from(data));
     });
     task.stderr.resume(); // No broad/error/credential text copied into receipts.
-    task.once('error', error => finish({ exitCode: null, signal: null, error: error.code }));
+    task.once('error', error => finish({ exitCode: null, signal: null, error: error.code, toolLifetimeUncertain: true }));
     task.once('close', (code, signal) => finish({ exitCode: code, signal, toolLifetimeUncertain: false }));
   });
+}
+function logToolStatus(output, threw = false) {
+  const integer = (value, min = 0, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(value) && value >= min && value <= max ? value : null;
+  return { threw, toolPid: integer(output?.toolPid, 1, 0x7fffffff), exitCode: integer(output?.exitCode, 0, 255),
+    signal: output?.signal === null ? null : typeof output?.signal === 'string' && /^SIG[A-Z0-9]{1,16}$/.test(output.signal) ? output.signal : 'unknown',
+    errorCode: typeof output?.error === 'string' && /^[A-Z][A-Z0-9_]{0,31}$/.test(output.error) ? output.error : null,
+    timedOut: output?.timedOut === true, overflow: output?.overflow === true,
+    stdoutBytesReceived: integer(output?.stdoutBytesReceived),
+    stdoutBytesRetained: Buffer.isBuffer(output?.bytes) ? output.bytes.length : null,
+    elapsedMilliseconds: Number.isFinite(output?.elapsedMilliseconds) && output.elapsedMilliseconds >= 0 ? output.elapsedMilliseconds : null };
 }
 async function diagnostic(owner, io) {
   const result = { ...flags, scope: 'exact-held-root-kernel-lifetime-only', completed: false,
     webContentScope: 'unresolved-native-association; no WebContent process logs read' };
   try {
     result.before = await io.fence('before'); fence(result.before, owner);
-    const plan = logPlan(owner, io.now());
+    const plan = logPlan(owner, io.now()); result.plan = plan;
     let output, toolError;
     try { output = await io.run(plan); } catch (error) { toolError = error; }
+    result.toolStatus = logToolStatus(output, !!toolError);
     result.toolLifetimeUncertain = !!toolError || output?.toolLifetimeUncertain === true;
     result.after = await io.fence('after'); fence(result.after, owner);
     if (toolError) throw toolError;
     check(output.exitCode === 0 && output.signal === null && !output.error && !output.timedOut && !output.overflow,
       'diagnostic-log-tool-refused-or-bounded-out');
-    result.plan = plan; result.entries = parseLog(output.bytes, plan); result.completed = true;
+    result.entries = parseLog(output.bytes, plan); result.completed = true;
   } catch (error) { result.reason = error.message; }
   return result;
 }
-module.exports = { scopes, flags, launchControl, ordinaryProfile, fence, logPlan, parseLog, runLog, diagnostic };
+module.exports = { scopes, flags, launchControl, ordinaryProfile, fence, logPlan, parseLog, runLog, logToolStatus, diagnostic };

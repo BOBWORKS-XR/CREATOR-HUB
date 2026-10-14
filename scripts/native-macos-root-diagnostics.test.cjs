@@ -13,6 +13,12 @@ const fence = () => ({ command: 'bitmap-fence', cgWindowFenceVerified: true, per
   actionAttempted: false, process: structuredClone(owner.process), window: structuredClone(owner.window) });
 const records = (...items) => Buffer.from(items.map(item => JSON.stringify(item)).join('\n'));
 const entry = () => ({ timestamp: new Date(now - 1000).toISOString(), processID: 47, subsystem: 'com.apple.WebKit', eventMessage: 'fixture only' });
+function workflowScript(source, stepName) {
+  const section = source.replace(/\r\n/g, '\n').split(`      - name: ${stepName}\n`)[1];
+  assert.ok(section, `missing step ${stepName}`);
+  const block = section.match(/          script: \|\n((?: {12}.*(?:\n|$))*)/)[1];
+  return block.split('\n').map(line => line.slice(12)).join('\n');
+}
 
 test('ordinary control is explicit14/disposable and strips HOME coercion/injection/secrets; private default unchanged', () => {
   diagnostics.launchControl('direct-ordinary', { CREATOR_MACOS_LAUNCH_CONTROL: '1' }, '0.1.14');
@@ -80,6 +86,58 @@ test('bounded output abandons only log tool streams without any signal or Root/p
   task.stdout.write(Buffer.alloc(plan.maxBytes + 1));
   const result = await pending; assert.equal(result.overflow, true); assert.equal(result.toolPid, 99);
   assert.equal(unreferenced, true); assert.equal(result.toolLifetimeUncertain, true); assert.equal(result.bytes.length, 0);
+  assert.equal(result.stdoutBytesReceived, plan.maxBytes + 1); assert.ok(result.elapsedMilliseconds >= 0);
+});
+test('log tool status retains timeout/overflow/exit distinction before the after-fence, without raw error or log text', async () => {
+  for (const failure of [
+    { exitCode: null, signal: null, timedOut: true, toolLifetimeUncertain: true },
+    { exitCode: null, signal: null, overflow: true, toolLifetimeUncertain: true },
+    { exitCode: 1, signal: null, error: 'EPERM', toolLifetimeUncertain: false },
+    { exitCode: null, signal: 'SIGTERM', toolLifetimeUncertain: false },
+  ]) {
+    const output = { toolPid: 99, stdoutBytesReceived: 41, elapsedMilliseconds: 5001,
+      bytes: Buffer.from('not retained in status'), ...failure };
+    for (const afterRefused of [false, true]) {
+      const calls = [];
+      const result = await diagnostics.diagnostic(owner, { now: () => now,
+        fence: async stage => { calls.push(stage); return afterRefused && stage === 'after' ? {} : fence(); }, run: async () => output });
+      assert.equal(result.completed, false); assert.deepEqual(calls, ['before', 'after']);
+      assert.deepEqual(result.plan, diagnostics.logPlan(owner, now));
+      assert.deepEqual(result.toolStatus, diagnostics.logToolStatus(output));
+      assert.equal(result.toolLifetimeUncertain, failure.toolLifetimeUncertain);
+      assert.equal(result.reason, afterRefused ? 'diagnostic-owned-root-fence-unverified' : 'diagnostic-log-tool-refused-or-bounded-out');
+      assert.equal(result.entries, undefined); assert.equal(result.toolStatus.bytes, undefined);
+      assert.equal(result.actionAttempted, false); assert.equal(result.nativeGuiAccepted, false);
+    }
+  }
+  const thrown = await diagnostics.diagnostic(owner, { now: () => now, fence: async () => fence(), run: async () => { throw Error('fixture'); } });
+  assert.equal(thrown.toolStatus.threw, true); assert.equal(thrown.toolLifetimeUncertain, true);
+});
+test('malformed tool metadata remains unknown and cannot copy arbitrary fields or change diagnostic acceptance', () => {
+  const result = diagnostics.logToolStatus({ toolPid: '47', exitCode: -1, signal: 'private/path', error: 'private/path',
+    timedOut: 'true', overflow: 'true', stdoutBytesReceived: Infinity, elapsedMilliseconds: NaN, bytes: 'private text', actionAllowed: true });
+  assert.deepEqual(result, { threw: false, toolPid: null, exitCode: null, signal: 'unknown', errorCode: null,
+    timedOut: false, overflow: false, stdoutBytesReceived: null, stdoutBytesRetained: null, elapsedMilliseconds: null });
+  assert.equal(diagnostics.logToolStatus(null, true).threw, true);
+});
+test('timeout status preserves finite budget and uncertain tool lifetime without signalling any process', async () => {
+  const task = new EventEmitter(); task.stdout = new PassThrough(); task.stderr = new PassThrough(); task.pid = 99;
+  task.unref = () => {}; task.kill = () => { throw Error('No signals'); };
+  const plan = { ...diagnostics.logPlan(owner, now), timeoutMilliseconds: 20 };
+  const result = await diagnostics.runLog(plan, {}, () => task);
+  assert.equal(result.timedOut, true); assert.equal(result.overflow, undefined);
+  assert.equal(result.toolLifetimeUncertain, true); assert.equal(result.stdoutBytesReceived, 0);
+  task.emit('close', 0, null); assert.equal(result.timedOut, true); assert.equal(result.exitCode, null);
+  assert.equal(diagnostics.logPlan(owner, now).timeoutMilliseconds, 5000);
+});
+test('log tool error preserves unknown lifetime and a bounded error code, never an assumed clean exit', async () => {
+  const task = new EventEmitter(); task.stdout = new PassThrough(); task.stderr = new PassThrough(); task.pid = 99;
+  const pending = diagnostics.runLog(diagnostics.logPlan(owner, now), {}, () => task);
+  task.emit('error', Object.assign(Error('must not copy this message'), { code: 'EACCES' }));
+  const result = await pending;
+  assert.equal(result.exitCode, null); assert.equal(result.toolLifetimeUncertain, true);
+  assert.equal(diagnostics.logToolStatus(result).errorCode, 'EACCES');
+  assert.equal(JSON.stringify(diagnostics.logToolStatus(result)).includes('must not copy'), false);
 });
 test('source keeps AX authority/refusal/deadlines, measured20s control bitmap and genuine direct-only exit receipt', () => {
   const source = fs.readFileSync(path.join(__dirname, 'native-macos-app-probe.cjs'), 'utf8');
@@ -87,6 +145,14 @@ test('source keeps AX authority/refusal/deadlines, measured20s control bitmap an
   assert.match(source, /controlBitmapAgeMilliseconds >= 20000/);
   assert.match(source, /No invented Node ChildProcess/);
   assert.doesNotMatch(source, /ownedExit\s*=\s*\{[^}]*code:\s*0/);
+  assert.match(source, /if \(report.rootFailureDiagnostics.toolLifetimeUncertain === true\) diagnosticToolUncertain = true/);
+  assert.doesNotMatch(source, /rootFailureDiagnostics.toolLifetimeUncertain === true\) toolUncertain = true/);
+  const close = source.split("'readonly-code-signature'")[1].split('if (child) await waitExit')[0];
+  assert.match(close, /if \(rootPid && owner && !ownedExit && !toolUncertain\)/);
+  assert.doesNotMatch(close, /!diagnosticToolUncertain/);
+  assert.match(close, /sameImage\(pin\(path.join\(output, 'owner.json'\), 8192\).image, ownerImage\)/);
+  assert.match(close, /\['close', path.join\(output, 'owner.json'\)\], 'normal-close', 15000, helper.image/);
+  assert.match(source, /toolUncertain !== false \|\| diagnosticToolUncertain !== false/);
   const swift = fs.readFileSync(path.join(__dirname, 'native-macos-launchservices.swift'), 'utf8');
   assert.ok(swift.indexOf('GITHUB_ACTIONS') < swift.indexOf('NSWorkspace.shared'));
   assert.match(swift, /configuration\.createsNewApplicationInstance = true/);
@@ -101,7 +167,9 @@ test('same-package workflow pins original failed-run package steps independently
     '294615a337b1eb527df57c0fb3a9aba239aae204812d8a7b7b680d3698282767',
     '16ef1b41718fb3381fc4a02a26eeaa5a573ec748438e97ea0c91cbe0cc1b37c1',
     '85f7a1f9401d540e3fb8f6ddb5b83d3a3ff8681ad7b7f21c80cad085fcaffca5']) assert.ok(source.includes(value));
-  assert.match(source, /context: \[direct-private, direct-ordinary, launchservices-ordinary\]/);
+  assert.match(source, /options: \[selected-three, ls-arm, ls-intel, intel-ordinary\]/);
+  assert.match(source, /matrix: \$\{\{ fromJSON\(needs.select-control.outputs.matrix\) \}\}/);
+  assert.doesNotMatch(source, /context: \[direct-private|target: \[macos-arm64/);
   assert.match(source, /artifact\.workflow_run\.head_sha,run\.head_sha/);
   assert.match(source, /packageStepsVerified:true,originalGuiJobFailed:true,nativeGuiAccepted:false,releaseReady:false/);
   assert.match(source, /count==e\.file_size/); assert.match(source, /len\(names\)==len\(set\(names\)\)/);
@@ -109,10 +177,38 @@ test('same-package workflow pins original failed-run package steps independently
   assert.match(source, /--launch-context "\$LAUNCH_CONTEXT"/);
   assert.doesNotMatch(source, /cargo |tauri build|build:unified|signingKey|codesign.*--sign|sudo|id-token:|contents: write|actions: write|xattr|WEBKIT_DISABLE|DYLD_|osascript/);
 });
+
+test('exact workflow selector emits only LS ARM/LS Intel/Intel ordinary or one exact case; unknown contexts fail before output', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../.github/workflows/native-macos-launch-control.yml'), 'utf8');
+  const block = workflowScript(source, 'Select only the three admitted follow-up contexts');
+  const selectionJob = source.split('  select-control:')[1].split('\n  control:')[0];
+  assert.match(selectionJob, /permissions: \{\}/);
+  assert.match(selectionJob, /CONTROL_CASE: \$\{\{ github.event_name == 'push' && 'selected-three' \|\| inputs.control_case \}\}/);
+  assert.doesNotMatch(selectionJob, /checkout|github.rest|download|spawn|execFile|writeFile|GH_TOKEN/);
+  const expected = [
+    ['ls-arm', 'launchservices-ordinary', 'macos-arm64', 'macos-latest', 11919728492, 116030795575],
+    ['ls-intel', 'launchservices-ordinary', 'macos-intel', 'macos-15-intel', 11919859477, 116030795486],
+    ['intel-ordinary', 'direct-ordinary', 'macos-intel', 'macos-15-intel', 11919859477, 116030795486],
+  ];
+  function execute(selection, writes) {
+    vm.runInNewContext(block, { require, process: { env: { CONTROL_CASE: selection } }, core: {
+      setOutput: (name, value) => { assert.equal(name, 'matrix'); writes.push(JSON.parse(value)); },
+    } });
+  }
+  const writes = []; execute('selected-three', writes); assert.equal(writes.length, 1);
+  const { include } = writes[0];
+  assert.deepEqual(include.map(c => [c.case, c.context, c.target, c.os, c.artifact, c.job]), expected);
+  assert.deepEqual(include[1].zip, include[2].zip); assert.deepEqual(include[1].hub, include[2].hub);
+  for (const item of include) {
+    const outputs = []; execute(item.case, outputs); assert.deepEqual(outputs, [{ include: [item] }]);
+  }
+  for (const invalid of [undefined, '', 'all', 'direct-private', 'arm-ordinary', 'macos-intel', 'ls-arm,ls-intel', '[]', '{}', '__proto__']) {
+    const outputs = []; assert.throws(() => execute(invalid, outputs)); assert.deepEqual(outputs, []);
+  }
+});
 test('actual workflow qualification refuses drift/expired ZIP or a failed package step before recording any admission', async () => {
   const source = fs.readFileSync(path.join(__dirname, '../.github/workflows/native-macos-launch-control.yml'), 'utf8');
-  const block = source.match(/          script: \|\r?\n([\s\S]*?)(?=      - name:)/)[1]
-    .split(/\r?\n/).map(line => line.startsWith('            ') ? line.slice(12) : line).join('\n');
+  const block = workflowScript(source, 'Independently qualify original packaged artifact, not the failed GUI job as acceptance');
   const fixture = () => ({
     run: { id: 38615878801, head_sha: '17b769ad2d8c4a005520459749170895d75ff05b', path: '.github/workflows/unix-managed-assembly.yml', event: 'push', status: 'completed', run_attempt: 1, conclusion: 'failure' },
     artifact: { id: 11919728492, name: 'signed-unix-hub-macos-arm64-38615878801-1', expired: false,

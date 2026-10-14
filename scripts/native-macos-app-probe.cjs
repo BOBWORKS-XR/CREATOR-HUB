@@ -180,6 +180,13 @@ function closeAssessment(close, exit, owner) {
     postProcessState: bound && ['absent', 'same-kernel-process', 'different-process', 'unavailable'].includes(status.state) ? status.state : 'unknown',
     closeAccepted: callerOwnedExit0 && acceptedExit(close, exit, owner), diagnosticOnly: true };
 }
+function probeCompletion(report, close, exit, owner, rootPid, toolUncertain, diagnosticToolUncertain) {
+  const accepted = acceptedExit(close, exit, owner) && !report.closeError;
+  const cleanupUncertain = toolUncertain !== false || diagnosticToolUncertain !== false || !!rootPid && !exit;
+  return { acceptedExit: accepted, cleanupUncertain, guiToolLifetimeUncertain: toolUncertain !== false,
+    readOnlyDiagnosticToolLifetimeUncertain: diagnosticToolUncertain !== false,
+    passed: report.captureCompleted === true && accepted && !report.error && !cleanupUncertain };
+}
 function bitmapArguments(id, file) {
   requireThat(Number.isSafeInteger(id) && id > 0 && id <= 0xffffffff, 'bitmap-exact-window-id-required');
   requireThat(path.isAbsolute(file) && path.normalize(file) === file && file.endsWith('.png') && !/[\x00-\x1f]/.test(file), 'bitmap-owned-png-path-required');
@@ -556,14 +563,36 @@ func imageMatches(_ name: String, _ expected: [String: Any], _ limit: Int, conte
         && (expected["size"] as? NSNumber)?.int64Value == after.st_size, "pinned-image-drift")
     return data
 }
+func requireKernelFence(_ p: [String: Any], _ parent: UInt32, _ pid: Int32, _ info: proc_bsdinfo,
+                        _ bytes: Int32, _ kernelErrno: Int32, _ uid: UInt32) throws {
+    if pid > 0 && bytes == Int32(MemoryLayout<proc_bsdinfo>.size)
+        && info.pbi_pid == UInt32(pid) && info.pbi_ppid == parent && info.pbi_uid == uid && info.pbi_ruid == uid
+        && info.pbi_start_tvsec == (p["startSeconds"] as? NSNumber)?.uint64Value
+        && info.pbi_start_tvusec == (p["startMicroseconds"] as? NSNumber)?.uint64Value { return }
+    let complete = bytes == Int32(MemoryLayout<proc_bsdinfo>.size)
+    // Captured scalar facts only. Partial/unavailable kernel fields are not identities.
+    let expected: [String: Any] = ["pid": pid, "parentPID": parent, "uid": uid, "ruid": uid,
+        "startSeconds": (p["startSeconds"] as? NSNumber).map { String($0.uint64Value) as Any } ?? NSNull(),
+        "startMicroseconds": (p["startMicroseconds"] as? NSNumber).map { String($0.uint64Value) as Any } ?? NSNull()]
+    let observed: [String: Any] = ["pid": info.pbi_pid, "parentPID": info.pbi_ppid, "uid": info.pbi_uid, "ruid": info.pbi_ruid,
+        "startSeconds": String(info.pbi_start_tvsec), "startMicroseconds": String(info.pbi_start_tvusec)]
+    let matches: [String: Any] = ["pid": pid > 0 && info.pbi_pid == UInt32(pid), "parentPID": info.pbi_ppid == parent,
+        "uid": info.pbi_uid == uid, "ruid": info.pbi_ruid == uid,
+        "startSeconds": info.pbi_start_tvsec == (p["startSeconds"] as? NSNumber)?.uint64Value,
+        "startMicroseconds": info.pbi_start_tvusec == (p["startMicroseconds"] as? NSNumber)?.uint64Value]
+    throw Denied("owned-process-start-drift", detail: ["operation": "proc_pidinfo", "phase": "process-kernel-fence",
+        "bytes": bytes, "expectedBytes": MemoryLayout<proc_bsdinfo>.size, "kernelErrno": kernelErrno,
+        "fieldsVerified": complete, "expected": expected, "observed": complete ? observed as Any : NSNull(),
+        "matches": complete ? matches as Any : NSNull()])
+}
 func fence(_ p: [String: Any], _ parent: UInt32) throws {
     guard let pid = (p["pid"] as? NSNumber)?.int32Value, let exe = p["executablePath"] as? String,
         let app = p["bundlePath"] as? String, let image = p["image"] as? [String: Any], let plist = p["infoPlist"] as? [String: Any] else { throw Denied("owner-process-invalid") }
+    try check(pid > 0, "owned-process-start-drift")
     var info = proc_bsdinfo(), name = [CChar](repeating: 0, count: 4096)
-    try check(pid > 0 && proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) == Int32(MemoryLayout<proc_bsdinfo>.size)
-        && info.pbi_pid == UInt32(pid) && info.pbi_ppid == parent && info.pbi_uid == getuid() && info.pbi_ruid == getuid()
-        && info.pbi_start_tvsec == (p["startSeconds"] as? NSNumber)?.uint64Value
-        && info.pbi_start_tvusec == (p["startMicroseconds"] as? NSNumber)?.uint64Value, "owned-process-start-drift")
+    errno = 0
+    let bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)), kernelErrno = errno
+    try requireKernelFence(p, parent, pid, info, bytes, kernelErrno, getuid())
     let length = name.withUnsafeMutableBytes { proc_pidpath(pid, $0.baseAddress, UInt32($0.count)) }
     try check(length > 0 && Int(length) < name.count && name[Int(length)] == 0 && String(cString: name) == exe, "kernel-executable-drift")
     try imageMatches(exe, image, 128 * 1024 * 1024)
@@ -844,7 +873,7 @@ async function probe(args, env) {
     childPid: null, ownedChildExit: null, tools: [],
     windowBitmap: { diagnosticOnly: true, attempted: false, completed: false, reason: 'owned-live-window-not-available', ...acceptance } };
   const write = (name, data) => fs.writeFileSync(path.join(output, name), typeof data === 'string' || Buffer.isBuffer(data) ? data : JSON.stringify(data, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
-  let child, rootPid, owner, ownerImage, closeReceipt, ownedExit = null, toolUncertain = false, sequence = 0;
+  let child, rootPid, owner, ownerImage, closeReceipt, ownedExit = null, toolUncertain = false, diagnosticToolUncertain = false, sequence = 0;
   report.launchContext = request.launchContext || 'direct-private';
   function retainForeign(receipt, label) {
     if (receipt?.foreignElement && !report.foreignElementReceipt) {
@@ -1036,7 +1065,9 @@ async function probe(args, env) {
         },
         run: plan => rootDiagnostics.runLog(plan, toolEnv),
       });
-      if (report.rootFailureDiagnostics.toolLifetimeUncertain === true) toolUncertain = true;
+      // The fixed read-only log command has no GUI/action path. Its unknown lifetime
+      // still fails overall cleanup, but does not replace the close helper's authority checks.
+      if (report.rootFailureDiagnostics.toolLifetimeUncertain === true) diagnosticToolUncertain = true;
       write('root-failure-diagnostics.json', report.rootFailureDiagnostics);
       try {
         const signature = await command('/usr/bin/codesign', ['--display', '--verbose=4', '--entitlements', ':-', request.app], 'readonly-code-signature', 15000);
@@ -1056,9 +1087,7 @@ async function probe(args, env) {
     if (child) await waitExit(15000);
     report.ownedChildExit = ownedExit;
     report.closeAssessment = closeAssessment(closeReceipt, ownedExit, owner);
-    report.acceptedExit = acceptedExit(closeReceipt, ownedExit, owner) && !report.closeError;
-    report.cleanupUncertain = toolUncertain || !!rootPid && !ownedExit;
-    report.passed = report.captureCompleted && report.acceptedExit && !report.error && !report.cleanupUncertain;
+    Object.assign(report, probeCompletion(report, closeReceipt, ownedExit, owner, rootPid, toolUncertain, diagnosticToolUncertain));
     write('report.json', report);
     if (child && !ownedExit) child.unref();
   }
@@ -1072,6 +1101,6 @@ if (require.main === module) {
     console.log(JSON.stringify(result)); process.exitCode = result.passed ? 0 : 2;
   }).catch(error => { console.log(JSON.stringify({ error: error.message, passed: false, ...acceptance })); process.exitCode = 2; });
 }
-module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, closeAssessment,
+module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, closeAssessment, probeCompletion,
   bitmapArguments, bitmapImage, windowBitmapDiagnostic, remoteReadPolicy, validateRootInspection, validateChildrenFailure, verifiedRootCloseDialog,
   assemblyIdentity, validatePackageIdentity, validateLinkFailure, validateChildObservations, rootSurfaceDiagnostic, acceptance, surfaceSource };

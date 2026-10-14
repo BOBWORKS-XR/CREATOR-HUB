@@ -1,6 +1,12 @@
 name: Exact fresh14 Mac launch context control (diagnostic only, no rebuild)
 on:
   workflow_dispatch:
+    inputs:
+      control_case:
+        description: Same-package diagnostic contexts only; no rebuild
+        type: choice
+        default: selected-three
+        options: [selected-three, ls-arm, ls-intel, intel-ordinary]
   push:
     branches: [validation/mac-root-probe-014]
     paths: ['.github/workflows/native-macos-launch-control.yml']
@@ -8,27 +14,44 @@ permissions:
   contents: read
   actions: read
 jobs:
+  select-control:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - name: Select only the three admitted follow-up contexts
+        id: select
+        uses: actions/github-script@v8
+        env:
+          CONTROL_CASE: ${{ github.event_name == 'push' && 'selected-three' || inputs.control_case }}
+        with:
+          script: |
+            const assert=require('node:assert/strict');
+            const targets={
+              arm:{target:'macos-arm64',os:'macos-latest',artifact:11919728492,bytes:107558637,
+                zip:'e3487449c031dac861cdcc92a012588dcfae58cbb88b1f575c30984ede869fbb',
+                hub:'16ef1b41718fb3381fc4a02a26eeaa5a573ec748438e97ea0c91cbe0cc1b37c1',job:116030795575},
+              intel:{target:'macos-intel',os:'macos-15-intel',artifact:11919859477,bytes:111199637,
+                zip:'294615a337b1eb527df57c0fb3a9aba239aae204812d8a7b7b680d3698282767',
+                hub:'85f7a1f9401d540e3fb8f6ddb5b83d3a3ff8681ad7b7f21c80cad085fcaffca5',job:116030795486}
+            };
+            const cases=[
+              {case:'ls-arm',context:'launchservices-ordinary',...targets.arm},
+              {case:'ls-intel',context:'launchservices-ordinary',...targets.intel},
+              {case:'intel-ordinary',context:'direct-ordinary',...targets.intel}
+            ];
+            const selected=process.env.CONTROL_CASE;
+            assert.ok(['selected-three',...cases.map(item=>item.case)].includes(selected),'unknown control case');
+            const include=selected==='selected-three'?cases:cases.filter(item=>item.case===selected);
+            assert.ok(include.length===1||selected==='selected-three'&&include.length===3);
+            core.setOutput('matrix',JSON.stringify({include}));
   control:
+    name: control (${{ matrix.case }})
+    needs: select-control
     strategy:
       fail-fast: false
-      matrix:
-        context: [direct-private, direct-ordinary, launchservices-ordinary]
-        target: [macos-arm64, macos-intel]
-        include:
-          - target: macos-arm64
-            os: macos-latest
-            artifact: 11919728492
-            bytes: 107558637
-            zip: e3487449c031dac861cdcc92a012588dcfae58cbb88b1f575c30984ede869fbb
-            hub: 16ef1b41718fb3381fc4a02a26eeaa5a573ec748438e97ea0c91cbe0cc1b37c1
-            job: 116030795575
-          - target: macos-intel
-            os: macos-15-intel
-            artifact: 11919859477
-            bytes: 111199637
-            zip: 294615a337b1eb527df57c0fb3a9aba239aae204812d8a7b7b680d3698282767
-            hub: 85f7a1f9401d540e3fb8f6ddb5b83d3a3ff8681ad7b7f21c80cad085fcaffca5
-            job: 116030795486
+      matrix: ${{ fromJSON(needs.select-control.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 12
     steps:

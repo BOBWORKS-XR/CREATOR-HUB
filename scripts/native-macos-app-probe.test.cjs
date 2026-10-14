@@ -271,7 +271,7 @@ test('capture and accepted exit require more than a successful close call or exi
   for (const pair of [[null, exit], [close, null], [close, { ...exit, code: 1 }],
     [close, { ...exit, signal: 'SIGTERM' }], [{ ...close, postIdentityVerified: false }, exit],
     [{ ...close, actionAttempted: false }, exit]]) assert.equal(probe.acceptedExit(...pair, owner), false);
-  assert.match(source, /report.passed = report.captureCompleted && report.acceptedExit && !report.error && !report.cleanupUncertain/);
+  assert.match(source, /passed: report.captureCompleted === true && accepted && !report.error && !cleanupUncertain/);
   for (const value of Object.values(probe.acceptance)) assert.equal(value, false);
 });
 
@@ -293,6 +293,36 @@ test('ARM refusal contract keeps close acceptance false while reporting only the
     const changed = { ...receipt, postProcessStatus: { state, pid: owner.process.pid,
       expectedStartSeconds: owner.process.startSeconds, expectedStartMicroseconds: owner.process.startMicroseconds } };
     assert.equal(probe.closeAssessment(changed, exit, owner).closeAccepted, false);
+  }
+});
+
+test('read-only log lifetime cannot forge close proof or suite cleanup but does not erase an independently verified Root exit', () => {
+  const { owner } = ownership(), exit = { pid: owner.process.pid, code: 0, signal: null };
+  const before = { process: owner.process, window: owner.window, accessibilityTrusted: true, active: true,
+    truncated: false, hasDialog: false, closeDialog: closeDialog() };
+  const close = { action: 'close-window', axAction: 'AXPress', actionAttempted: true, postIdentityVerified: true,
+    forceKillPerformed: false, permissionRequestsPerformed: false, before, after: before };
+  const report = { captureCompleted: true };
+  const complete = (changed = {}, receipt = close, childExit = exit, gui = false, log = false) =>
+    probe.probeCompletion({ ...report, ...changed }, receipt, childExit, owner, owner.process.pid, gui, log);
+  assert.equal(complete().passed, true);
+  const diagnosticUncertain = complete({}, close, exit, false, true);
+  assert.equal(diagnosticUncertain.acceptedExit, true); assert.equal(diagnosticUncertain.passed, false);
+  assert.equal(diagnosticUncertain.guiToolLifetimeUncertain, false);
+  assert.equal(diagnosticUncertain.readOnlyDiagnosticToolLifetimeUncertain, true);
+  assert.equal(diagnosticUncertain.cleanupUncertain, true);
+  for (const uncertain of [true, undefined, null, 'false']) {
+    assert.equal(probe.probeCompletion(report, close, exit, owner, owner.process.pid, uncertain, false).passed, false);
+    assert.equal(probe.probeCompletion(report, close, exit, owner, owner.process.pid, false, uncertain).passed, false);
+  }
+  for (const changed of [{ error: 'native-package-identity-refused' }, { closeError: 'normal-close-refused' },
+    { captureCompleted: false }, { captureCompleted: 'true' }]) assert.equal(complete(changed).passed, false);
+  for (const receipt of [null, { ...close, postIdentityVerified: false }, { ...close, error: 'foreign-ax-element' },
+    { ...close, before: { ...before, process: { ...owner.process, startSeconds: owner.process.startSeconds + 1 } } }]) {
+    assert.equal(complete({}, receipt, exit, false, true).acceptedExit, false);
+  }
+  for (const childExit of [null, { ...exit, pid: exit.pid + 1 }, { ...exit, signal: 'SIGTERM' }, { ...exit, code: 1 }]) {
+    assert.equal(complete({}, close, childExit, false, true).acceptedExit, false);
   }
 });
 
@@ -768,7 +798,8 @@ test('orchestrator brackets sampler with root-only inspections, retains owner/im
   assert.match(source, /owner-file-drift-no-close-attempted/);
   assert.match(source, /command\(helper.path, \['close', path.join\(output, 'owner.json'\)\]/);
   assert.match(source, /requireThat\(close.exitCode === 0, 'normal-close-refused-or-post-identity-unverified'\)/);
-  assert.match(source, /report.acceptedExit = acceptedExit\(closeReceipt, ownedExit, owner\) && !report.closeError/);
+  assert.match(source, /Object.assign\(report, probeCompletion\(report, closeReceipt, ownedExit, owner, rootPid, toolUncertain, diagnosticToolUncertain\)\)/);
+  assert.match(source, /const accepted = acceptedExit\(close, exit, owner\) && !report.closeError/);
 });
 
 function childrenFailure(changed = {}) {
@@ -893,6 +924,86 @@ async function compileSwift(file, binary) {
   });
   assert.equal(result.code, 0, errors); assert.equal(result.signal, null);
 }
+
+test('kernel refusal metadata uses one captured read and keeps parent/uid/start fences and original refusal', () => {
+  const fence = probe.surfaceSource.split('func fence(')[1].split('func packageFields(')[0];
+  assert.equal(fence.match(/proc_pidinfo\(/g).length, 1);
+  assert.match(fence, /errno = 0/);
+  assert.match(fence, /kernelErrno = errno/);
+  assert.match(fence, /try requireKernelFence\(p, parent, pid, info, bytes, kernelErrno, getuid\(\)\)/);
+  const check = probe.surfaceSource.split('func requireKernelFence(')[1].split('func fence(')[0];
+  for (const field of ['pid', 'ppid', 'uid', 'ruid', 'start_tvsec', 'start_tvusec']) assert.match(check, new RegExp(`info\\.pbi_${field}`));
+  assert.match(check, /throw Denied\("owned-process-start-drift", detail:/);
+  assert.match(check, /"observed": complete \? observed as Any : NSNull\(\)/);
+  assert.match(check, /"matches": complete \? matches as Any : NSNull\(\)/);
+  assert.doesNotMatch(check, /proc_pidinfo\(|proc_pidpath\(|AXUIElement|imageMatches|parent == 1|kill|sleep/);
+});
+
+test('SDK kernel fixture distinguishes each drift and unavailable read without permitting LaunchServices or missing process', { skip: process.platform !== 'darwin' }, async () => {
+  const declarations = probe.surfaceSource.split('\ndo {\n')[0];
+  const fixture = declarations + String.raw`
+do {
+    let p: [String: Any] = ["startSeconds": NSNumber(value: 1700000000), "startMicroseconds": NSNumber(value: 123456)]
+    let bytes = Int32(MemoryLayout<proc_bsdinfo>.size)
+    var good = proc_bsdinfo()
+    good.pbi_pid = 42; good.pbi_ppid = 900; good.pbi_uid = 501; good.pbi_ruid = 501
+    good.pbi_start_tvsec = 1700000000; good.pbi_start_tvusec = 123456
+    try requireKernelFence(p, 900, 42, good, bytes, 0, 501)
+    var failures = [[String: Any]]()
+    for field in ["pid", "parentPID", "uid", "ruid", "startSeconds", "startMicroseconds"] {
+        var bad = good
+        switch field {
+        case "pid": bad.pbi_pid += 1
+        case "parentPID": bad.pbi_ppid = 1
+        case "uid": bad.pbi_uid += 1
+        case "ruid": bad.pbi_ruid += 1
+        case "startSeconds": bad.pbi_start_tvsec += 1
+        default: bad.pbi_start_tvusec += 1
+        }
+        var refused = false
+        do { try requireKernelFence(p, 900, 42, bad, bytes, 0, 501) }
+        catch let d as Denied {
+            guard let detail = d.detail, let matches = detail["matches"] as? [String: Bool] else { throw Denied("fixture-detail-missing") }
+            try check(d.reason == "owned-process-start-drift" && matches[field] == false && matches.values.filter { !$0 }.count == 1, "fixture-drift-accepted")
+            failures.append(["error": d.reason, "errorDetail": detail]); refused = true
+        }
+        try check(refused, "fixture-mismatch-accepted")
+    }
+    for (returned, code) in [(Int32(0), Int32(ESRCH)), (Int32(0), Int32(EPERM)), (bytes - 1, Int32(0)), (Int32(-1), Int32(EINVAL))] {
+        var refused = false
+        do { try requireKernelFence(p, 900, 42, good, returned, code, 501) }
+        catch let d as Denied {
+            guard let detail = d.detail else { throw Denied("fixture-detail-missing") }
+            try check(d.reason == "owned-process-start-drift" && detail["fieldsVerified"] as? Bool == false
+                && detail["observed"] is NSNull && detail["matches"] is NSNull, "fixture-partial-identity-promoted")
+            failures.append(["error": d.reason, "errorDetail": detail]); refused = true
+        }
+        try check(refused, "fixture-unavailable-accepted")
+    }
+    for malformed in [[String: Any](), ["startSeconds": NSNumber(value: 1700000000)]] {
+        var refused = false
+        do { try requireKernelFence(malformed, 900, 42, good, bytes, 0, 501) } catch { refused = true }
+        try check(refused, "fixture-missing-start-accepted")
+    }
+    emit(["failures": failures, "actionAttempted": false])
+} catch { emit(["error": String(describing: error)]); exit(2) }
+`;
+  const file = path.join(scratch, 'kernel-fence-fixture.swift'), binary = path.join(scratch, 'kernel-fence-fixture');
+  fs.writeFileSync(file, fixture, { flag: 'wx' }); await compileSwift(file, binary);
+  const result = spawnSync(binary, [], { encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
+  assert.equal(result.status, 0, result.stderr || result.stdout); assert.equal(result.signal, null);
+  const receipt = JSON.parse(result.stdout); assert.equal(receipt.failures.length, 10); assert.equal(receipt.actionAttempted, false);
+  for (const { error, errorDetail: d } of receipt.failures) {
+    assert.equal(error, 'owned-process-start-drift'); assert.equal(d.operation, 'proc_pidinfo');
+    assert.equal(d.phase, 'process-kernel-fence'); assert.equal(typeof d.bytes, 'number'); assert.equal(typeof d.kernelErrno, 'number');
+    assert.equal(d.expected.pid, 42); assert.equal(d.expected.parentPID, 900);
+    assert.equal(d.expected.startSeconds, '1700000000');
+    assert.equal(d.fieldsVerified, d.bytes === d.expectedBytes);
+    if (!d.fieldsVerified) { assert.equal(d.observed, null); assert.equal(d.matches, null); }
+    assert.equal(d.actionAllowed, undefined);
+  }
+  for (const key of Object.keys(probe.acceptance)) assert.equal(receipt[key], false);
+});
 
 test('actual SDK compiles LaunchServices control and poisoned local admission refuses before app launch', { skip: process.platform !== 'darwin' }, async () => {
   const source = path.join(__dirname, 'native-macos-launchservices.swift'), binary = path.join(scratch, 'launchservices-guard');

@@ -611,3 +611,108 @@ blocked by unverified document/control associations and the absence of any
 authorized Root-terms writable action in the helper. Remote read association,
 rendered pixels, source selectors or unit fixtures do not supply that capability;
 no fake IPC, storage seeding, new remote press or blanket CF coercion is added.
+
+### Same-Package Control38623617492
+
+Run38623617492 at `3d956a3e320840d96ae505e624d066b91845f20e` reused the
+archived ARM/Intel DMGs from38615878801 at17b769a. No Root/private module rebuild,
+resigning, resource or entitlement changes were made. All six jobs passed SDK
+fixtures and independently qualified the primary package before failing the
+capture step. The API-bound artifact ZIP hashes/sizes were independently checked;
+bounded reports and pixels are retained under
+`artifacts/mac-root-control-38623617492/`.
+
+| Context | ARM | Intel |
+| --- | --- | --- |
+| Direct/private | Nonblank terms and Hub at20.36s; AXChildren -25204 on Root AXGroup, then AXWindows -25204 after-fence | Nonblank terms and Hub at20.38s; package AXWindows -25204 |
+| Direct/ordinary | Nonblank terms and Hub at24.33s; Root AXGroup children0, no WebArea by deadline | Nonblank terms and Hub at20.46s; AX surface capture completed |
+| LaunchServices/ordinary | No admitted PNG; `owned-process-start-drift` | No admitted PNG; `owned-process-start-drift` |
+
+Intel/direct-ordinary recorded34 nodes, including one Root-PID AXWebArea,
+the terms AXCheckBox and the `Accept and continue` AXButton. The intermediate
+foreign AXGroup was admitted for metadata only through native parent/window CF
+association. This is a concrete document/control observation, not press authority;
+no checkbox or continue action was attempted.
+
+The four PNGs were visually inspected after exact before/after process/start,
+executable/plist and CG window fences, local PNG hash/length/dimension checks and
+native file-modification age checks. All show the terms modal and Hub content,
+including the macOS label. This disproves persistent white rendering at20s in
+these four disposable controls, not an ordinary-user or whole-product acceptance
+claim. The earlier38615878801 white PNGs were real early captures: ARM4.3938s,
+Intel5.6473s, after package AX refusal short-circuited the sampler. They were not
+20-second observations. No WebKit initialization/resource/entitlement defect has
+been established. An AX refusal is not evidence of blank pixels.
+
+Confirmed harness limitations: the sampler requires the Root's kernel parent
+to equal the Node caller, while LaunchServices creates a non-child process.
+The combined guard did not record which field actually differed; actual parent
+PID is still unverified. All four direct controls also abandoned the bounded log
+tool with `toolLifetimeUncertain:true`, but their receipt discarded whether the
+cause was timeout or output overflow. Normal close was consequently skipped;
+acceptedExit is false and cleanup remains uncertain. That refusal is retained,
+not treated as a successful close. LaunchServices has no caller-owned exit
+receipt and must never synthesize one.
+
+The narrow follow-up adds captured kernel bytes/errno, expected/observed scalar
+fields and comparison results to the original `owned-process-start-drift` error.
+Partial/unavailable reads expose no observed identity. It retains the same
+parent/UID/real-UID/start/path/image guards and performs no extra native read.
+Log failure receipts now retain the exact finite plan, timeout/overflow/exit/error
+code, bounded byte counts and elapsed time, including when the after-fence
+refuses. No raw stderr is copied, deadline is still5s and output ceiling512KiB.
+The fixed `/usr/bin/log show` wrapper has no native GUI/action path. Its unknown
+lifetime is now separate from GUI/helper-tool uncertainty: it still sets
+`readOnlyDiagnosticToolLifetimeUncertain:true`, `cleanupUncertain:true` and
+`passed:false`, but does not block an independently authorized normal Root close.
+Compiler/sampler/bitmap/action-tool uncertainty still blocks that close. The
+unchanged helper rechecks exact image/plist/kernel/window, finite native dialogs,
+close-button role/state/hit peer and native CF reference before its one AXPress.
+No log result supplies action authority or a synthetic exit receipt. Native
+action helper and product acceptance flags are unchanged. New SDK fixtures require
+a Mac runner; Windows tests alone cannot verify emitted Swift compilation.
+
+Local follow-up checkpoint:207 cases,83 passed,0 failed,124 native/SDK skipped;
+whitespace checks pass. The unchanged reviewed action-helper SHA256 remains
+`212a8c94149d159da69c4161220333969fbc71bd555ee951c26d9ff04bae2a68`.
+
+Smallest next native test after parent review: reuse these same qualified DMGs
+and run LaunchServices/ordinary on ARM and Intel for the exact failing kernel
+field, plus Intel/direct-ordinary for the missing log-tool status (its AX capture
+already completed) and independent close receipt. No all-platform build is needed.
+The authorized workflow selector accepts only `selected-three`, `ls-arm`,
+`ls-intel`, or `intel-ordinary`. Push/default dispatch selects exactly the three
+follow-ups; each individual enum emits one case. A permissions-empty selection
+job emits the finite include matrix; the package qualification job retains its
+read-only permissions and all original artifact/DMG/executable/source pins.
+Unknown selectors refuse before matrix output. There is no six-case product
+repeat, arbitrary JSON matrix input, new package build or signature operation.
+Parent review/commit/push and native SDK/capture results are still required.
+
+After the selected capture, the smallest terms-authority capture is read-only:
+uniquely identify the exact terms heading, Root-PID AXCheckBox and `Accept and
+continue` AXButton in the same held native document/window. Record successful
+typed AXParent and AXWindow reads for each control, exact parent/window CF
+association, active Root identity, bounds, enabled/hidden state, supported
+AXPress action and a Root-PID native hit-test peer CF-equal to that control.
+Recheck the same control, parent and held window references plus all Root
+kernel/image/plist pins within the invocation. Missing, unequal, malformed,
+ambiguous, remote-PID target, changed-reference or unavailable state must refuse.
+The checkbox and continue button need not share a parent; each must retain its
+own exact native parent. The recorded traversal indices/labels are not authority.
+
+The34-node receipt does not contain those control-state, hit-peer and stable
+parent/control CF facts. Root-PID metadata and the foreign ancestor's read-only
+association do not fill that gap. No terms press or new remote-action authority
+is implemented. Only after actual native capture establishes this contract should
+an explicitly bounded action be considered: one checkbox AXPress, native checked
+state and Continue-enabled transition; then a separately verified native Continue
+AXPress and actual terms disappearance/navigation receipt. Any new selector must
+have SDK negatives for every missing/drifted association, role, state and peer,
+without weakening the existing MCP/Setup consent paths. Terms, owned AI/Setup GUI,
+live AI and whole-product acceptance remain separate and unaccepted.
+
+Likewise, only after the selected kernel metadata establishes a native launch
+association should a distinct read-only LaunchServices fence be considered.
+Parent1/name/UID alone are not authority, and LaunchServices still has no genuine
+caller-owned Root exit code.
