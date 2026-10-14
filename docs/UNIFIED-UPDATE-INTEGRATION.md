@@ -3,16 +3,30 @@
 This is development integration, not a release or installed update acceptance.
 PR21 and the source publication guard remain held.
 
-2026-10-14 checkpoint: the actual Windows first-launch convergence guide passes
-in run38604727650 on the ce62e9d candidate, including native cancel/approval,
-settings/client preservation, compatibility-retaining GUI retirement, old live
-stdio and old/signed-router reconnect, then normal close after startup checks.
-Later backup/receipt hardening has a fresh local candidate but not its own native
-acceptance. Current-source unsigned Linux/Intel/ARM private payloads pass
-preparation38599976833 and local signature verification. Both Mac Root normal
-closes pass in38597644861; its exact-owned bitmaps are nonblank, but accessibility
-mapping and current-payload operation remain unaccepted. Full signed updater,
-Mac/Linux migration/GUI and Flatpak gates remain separate and incomplete.
+2026-10-14 checkpoint: current reviewed Windows source42a35d1 passes actual
+first-launch convergence in run38608296824, including native cancellation,
+same-length backup/settings drift refusal, reviewed three-client routing,
+GUI-only retirement, preserved original runtimes and old/signed-router reconnect.
+Run38608917818 repeats this flow and passes real fresh installation, both embedded
+module interfaces, explicit settings saves, normal closing and tamper recovery.
+Installer SHA256 b3a42b8d67ef94edefa9cefa9e3791a196febb9d88a2163d38dcfed49c09c13d;
+installed Hub SHA256 9c52bdee2a53dee1caaa535b0fb40d23e1bdce9ea72fae5e817f9f82dd221ecc.
+
+Run38610890908 passes the same signed installer through the unmodified public
+0.1.12 app's actual update button: controlled-feed discovery, native cancellation,
+approved installation, automatic restart, version/hash checks, preserved browser
+preference/unmanaged content, embedded module reopening and managed SDK reconnect.
+`publicDiscovery=false` and `releaseReady=false`: this is prepublication signed
+update acceptance, not public-route or live AI-app/model acceptance.
+
+All three fresh signed Unix outer assemblies pass run38607998719 at7eb00ad with
+private sourcea517375 from preparation38599976833. No GUI, migration or update
+acceptance follows from this build. Fresh packaged Mac version/AX/close diagnostics
+are queued in run38613119845 at85ecdb8. The older Mac close-only run38597644861
+remains qualified separately. Flatpak run38612495075 verifies actual Linux inputs
+and archive members, then fails during SDK AppStream composition before installation.
+The original report is retained. Native Mac/Linux migration, full outgoing-view
+update restoration, actual AI apps and Flatpak host integration remain release gates.
 
 ## Current Target: Unified 0.1.14
 

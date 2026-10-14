@@ -77,7 +77,7 @@ Do not force-close AI clients, Unity or unrelated Node processes.
 - Full native first launch, signed update/restart, actual AI-client reconnect,
   macOS/Linux cleanup and end-to-end uninstall retention are still required.
 
-Current Windows source checks: 342 Root Rust tests pass with 13 explicitly
+Current Windows source checks: 349 Root Rust tests pass with 13 explicitly
 opt-in native tests ignored; strict Clippy passes. Dependency inspection is
 connected to a distinct negative gate, not itself removal authorization. The 18
 browser convergence/startup tests pass, including screenshots at 390 and 1100
@@ -113,8 +113,11 @@ install because a refusal test incorrectly assumed non-CI environment; and
 38602694102 passed the migration steps but requested close during startup checks.
 Harness corrections did not rebuild or change that candidate.
 
-This acceptance does not include later independent backup freshness and pre-
-adoption receipt checks from aa6f2a6/297177b. A new local reviewed candidate
-contains them and still requires its own actual acceptance. Neither run proves
-signed in-app updates, actual AI-app operation, Mac/Linux migration or Flatpak.
-Publication remains held.
+The current42a35d1 candidate includes independent backup freshness and pre-
+adoption receipt checks from aa6f2a6/297177b. Run38608296824 passes its real guide,
+including same-length backup and live-settings mutation refusal before routing.
+Run38608917818 repeats the guide and separately passes fresh installed components.
+Run38610890908 passes its signed Windows update from unmodified public0.1.12 via
+a controlled feed, native cancellation, approved install and automatic restart.
+Public discovery, outgoing hosted-view restoration, actual AI-app operation,
+Mac/Linux migration and Flatpak remain separate. Publication remains held.
