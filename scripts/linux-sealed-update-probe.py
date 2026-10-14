@@ -42,6 +42,7 @@ def action_observed(record, version):
     expected = [ACTION + ":", "  description:       Disposable sealed package mechanism test",
                 "  message:           Disposable runner only; never install this policy on a user PC",
                 "  vendor:            Creator Hub disposable test only",
+                "  vendor_url:        ", "  icon:              ",
                 "  implicit any:      yes", "  implicit inactive: yes", "  implicit active:   yes",
                 "  annotation:        org.freedesktop.policykit.exec.path -> /usr/bin/dpkg", ""]
     allowed = (0, 1) if version == "pkexec version 0.105\n" else (0,)

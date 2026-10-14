@@ -20,6 +20,7 @@ jobs:
         run: python3 -B scripts/linux-sealed-update-probe.test.py
       # Ubuntu 22.04 has polkit 0.105: the probe uses its documented action XML,
       # not newer JavaScript rules. The temporary no-auth action is test-only.
+      # Action readiness binds the exact original 0.105 native output, not exit 0.
       - name: Provision Ubuntu authorization for a test-only action, no app or Rust build
         run: |
           sudo apt-get update
