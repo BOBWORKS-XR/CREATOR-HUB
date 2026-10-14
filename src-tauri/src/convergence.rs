@@ -34,6 +34,7 @@ pub struct Report {
 
 struct Plan {
     stores: Vec<stores::Snapshot>,
+    retained_images: Vec<stores::Backup>,
     report: Report,
     retry_allowed: bool,
     #[cfg(windows)]
@@ -157,6 +158,7 @@ fn inspect() -> Result<Plan, String> {
     );
     Ok(Plan {
         stores: snapshots,
+        retained_images: Vec::new(),
         retry_allowed: true,
         #[cfg(windows)]
         retirement_dependencies: None,
@@ -281,6 +283,9 @@ fn require_builtin() -> Result<(), String> {
 fn recheck(plan: &Plan) -> Result<(), String> {
     for saved in &plan.stores {
         saved.recheck()?;
+    }
+    for backup in &plan.retained_images {
+        backup.recheck()?;
     }
     Ok(())
 }
@@ -467,6 +472,7 @@ pub async fn prepare_convergence(handle: tauri::AppHandle) -> Result<Report, Str
         close_reviewed_guis(plan)?;
         can_retain(plan)?;
         let mut backups = Vec::new();
+        let mut retained_images = Vec::new();
         for snapshot in &plan.stores {
             if snapshot.bytes().is_some() {
                 let backup = snapshot.retain_reviewed()?;
@@ -476,10 +482,12 @@ pub async fn prepare_convergence(handle: tauri::AppHandle) -> Result<Report, Str
                     stores::validate_import(snapshot, &backup, snapshot.bytes(), snapshot.bytes().unwrap())?;
                 }
                 backups.push(backup.path().to_path_buf());
+                retained_images.push(backup);
             }
         }
         recheck(plan)?;
         plan.report.backups = backups;
+        plan.retained_images = retained_images;
         plan.report.stage = "backed-up";
         plan.report.message = "Exact settings backups are verified. Next, review existing AI connections. Old apps have not been removed.".into();
         Ok(plan.report.clone())
@@ -841,6 +849,7 @@ mod tests {
                 .into_iter()
                 .map(|kind| stores::Snapshot::inspect(kind, &roots).unwrap())
                 .collect(),
+            retained_images: Vec::new(),
             retry_allowed: true,
             #[cfg(windows)]
             retirement_dependencies: None,
@@ -891,6 +900,39 @@ mod tests {
         )
         .is_err());
         assert!(recheck_durable_settings(&plan).is_err());
+    }
+
+    #[test]
+    fn cleanup_keeps_original_backups_bound_after_reviewed_server_transition() {
+        let (_temp, base, mut plan) = fixture_plan();
+        let backup = plan.stores[0].retain_reviewed().unwrap();
+        let before_image = backup.path().to_path_buf();
+        let original = fs::read(&before_image).unwrap();
+        plan.retained_images.push(backup);
+        assert!(can_retain(&plan).is_ok());
+        let server = base.local_data.join("verified/server.mjs");
+        let live = stores::Store::McpCurrent.path(&base).unwrap();
+        let mut value: Value = serde_json::from_slice(plan.stores[0].bytes().unwrap()).unwrap();
+        value["mcp_server_path"] = json!(server);
+        fs::write(&live, serde_json::to_vec(&value).unwrap()).unwrap();
+        refresh_reviewed_server_paths(
+            &mut plan,
+            &base,
+            &server,
+            &json!({"changed":true,"server":server}),
+        )
+        .unwrap();
+        assert!(can_retain(&plan).is_ok());
+        assert_eq!(fs::read(&before_image).unwrap(), original);
+        fs::write(&before_image, b"changed before-image").unwrap();
+        assert!(can_retain(&plan).is_err());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&live).unwrap()).unwrap(),
+            value
+        );
+        fs::remove_file(&before_image).unwrap();
+        assert!(can_retain(&plan).is_err());
+        assert!(!before_image.exists());
     }
 
     #[test]

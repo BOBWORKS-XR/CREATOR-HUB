@@ -241,6 +241,7 @@ impl Snapshot {
     }
 }
 
+/// Opaque native before-image identity; no caller-supplied paths or hash inputs.
 pub struct Backup {
     path: PathBuf,
     source: PathBuf,
@@ -250,6 +251,18 @@ pub struct Backup {
 impl Backup {
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Recheck the original retained bytes independently of a renewed live
+    /// Snapshot. Does not read the live source, recreate or repair any file.
+    /// Callers must separately recheck their current reviewed live snapshot.
+    pub fn recheck(&self) -> Result<(), String> {
+        if storage::read_bytes(&self.path)?
+            .is_none_or(|bytes| format!("{:x}", Sha256::digest(&bytes)) != self.sha256)
+        {
+            return Err("Creator before-image is missing or changed.".into());
+        }
+        Ok(())
     }
 
     fn verify(&self, snapshot: &Snapshot) -> Result<(), String> {
@@ -420,12 +433,75 @@ mod tests {
         put(Store::McpLegacy, &roots, &body);
         let saved = Snapshot::inspect(Store::McpLegacy, &roots).unwrap();
         let backup = saved.retain_reviewed().unwrap();
-        fs::write(backup.path(), b"changed").unwrap();
+        assert!(backup.recheck().is_ok());
+        let changed = String::from_utf8(body.clone())
+            .unwrap()
+            .replace("\"kept\"", "\"lost\"")
+            .into_bytes();
+        assert_eq!(changed.len(), body.len());
+        fs::write(backup.path(), &changed).unwrap();
+        assert!(backup.recheck().is_err());
         assert!(validate_import(&saved, &backup, None, &body).is_err());
         assert!(saved.retain_reviewed().is_err());
-        assert_eq!(fs::read(backup.path()).unwrap(), b"changed");
+        assert_eq!(fs::read(backup.path()).unwrap(), changed);
         fs::remove_file(backup.path()).unwrap();
+        assert!(backup.recheck().is_err());
         assert!(validate_import(&saved, &backup, None, &body).is_err());
+        assert!(!backup.path().exists());
+    }
+
+    #[test]
+    fn convergence_backup_recheck_survives_only_reviewed_live_server_field_change() {
+        let (_temp, roots) = roots();
+        let mut original: serde_json::Value = serde_json::from_slice(&config()).unwrap();
+        original["mcp_server_path"] = serde_json::json!(roots.local_data.join("old/server.mjs"));
+        let body = serde_json::to_vec(&original).unwrap();
+        let source = put(Store::McpCurrent, &roots, &body);
+        let saved = Snapshot::inspect(Store::McpCurrent, &roots).unwrap();
+        let backup = saved.retain_reviewed().unwrap();
+        assert!(backup.recheck().is_ok());
+        assert!(backup.verify(&saved).is_ok());
+
+        let mut transitioned = original;
+        transitioned["mcp_server_path"] =
+            serde_json::json!(roots.local_data.join("bundled/server.mjs"));
+        let changed_live = serde_json::to_vec(&transitioned).unwrap();
+        fs::write(&source, &changed_live).unwrap();
+        assert!(saved.recheck().is_err());
+        let renewed = Snapshot::inspect(Store::McpCurrent, &roots).unwrap();
+        assert!(renewed.recheck().is_ok());
+        // Snapshot-bound verification still rejects a new snapshot's bytes,
+        // while the independent retained-byte check needs no live snapshot.
+        assert!(backup.verify(&renewed).is_err());
+        assert!(backup.verify(&saved).is_ok());
+        assert!(validate_import(&saved, &backup, None, &body).is_err());
+        for _ in 0..2 {
+            assert!(backup.recheck().is_ok());
+            assert_eq!(fs::read(backup.path()).unwrap(), body);
+            assert_eq!(fs::read(&source).unwrap(), changed_live);
+        }
+        assert_eq!(
+            fs::read_dir(backup.path().parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn convergence_backup_recheck_refuses_oversized_or_nonregular_images_without_repair() {
+        let (_temp, roots) = roots();
+        put(Store::McpLegacy, &roots, &config());
+        let saved = Snapshot::inspect(Store::McpLegacy, &roots).unwrap();
+        let backup = saved.retain_reviewed().unwrap();
+        let oversized = vec![b'x'; storage::MAX_BYTES as usize + 1];
+        fs::write(backup.path(), &oversized).unwrap();
+        assert!(backup.recheck().is_err());
+        assert_eq!(fs::read(backup.path()).unwrap(), oversized);
+        fs::remove_file(backup.path()).unwrap();
+        fs::create_dir(backup.path()).unwrap();
+        assert!(backup.recheck().is_err());
+        assert!(backup.path().is_dir());
     }
 
     #[test]
@@ -578,5 +654,65 @@ mod tests {
         assert!(Snapshot::inspect(Store::McpLegacy, &roots).is_err());
         fs::remove_dir(&junction).unwrap();
         assert_eq!(fs::read(real).unwrap(), config());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn convergence_backup_recheck_refuses_junction_even_with_original_image_bytes() {
+        let (_temp, roots) = roots();
+        let body = config();
+        let source = put(Store::McpLegacy, &roots, &body);
+        let saved = Snapshot::inspect(Store::McpLegacy, &roots).unwrap();
+        let backup = saved.retain_reviewed().unwrap();
+        let junction = backup.path().parent().unwrap();
+        let target = roots.config.join("linked-backup-target");
+        fs::create_dir(&target).unwrap();
+        let target_image = target.join(backup.path().file_name().unwrap());
+        fs::write(&target_image, &body).unwrap();
+        fs::remove_file(backup.path()).unwrap();
+        fs::remove_dir(junction).unwrap();
+        let result = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(junction)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        let checked = backup.recheck();
+        let verified = backup.verify(&saved);
+        // Remove only the disposable junction, never its target directory.
+        fs::remove_dir(junction).unwrap();
+        assert!(checked.unwrap_err().contains("links or junctions"));
+        assert!(verified.is_err());
+        assert_eq!(fs::read(target_image).unwrap(), body);
+        assert_eq!(fs::read(source).unwrap(), body);
+        assert!(!junction.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn convergence_backup_recheck_refuses_symlinked_leaf_and_ancestor() {
+        let (_temp, roots) = roots();
+        let body = config();
+        let source = put(Store::McpLegacy, &roots, &body);
+        let saved = Snapshot::inspect(Store::McpLegacy, &roots).unwrap();
+        let backup = saved.retain_reviewed().unwrap();
+        let target = roots.config.join("linked-backup-target");
+        fs::create_dir(&target).unwrap();
+        let target_image = target.join(backup.path().file_name().unwrap());
+        fs::write(&target_image, &body).unwrap();
+        fs::remove_file(backup.path()).unwrap();
+        std::os::unix::fs::symlink(&target_image, backup.path()).unwrap();
+        assert!(backup.recheck().is_err());
+        assert!(backup.verify(&saved).is_err());
+        fs::remove_file(backup.path()).unwrap();
+        let parent = backup.path().parent().unwrap();
+        fs::remove_dir(parent).unwrap();
+        std::os::unix::fs::symlink(&target, parent).unwrap();
+        assert!(backup.recheck().is_err());
+        assert!(backup.verify(&saved).is_err());
+        fs::remove_file(parent).unwrap();
+        assert_eq!(fs::read(target_image).unwrap(), body);
+        assert_eq!(fs::read(source).unwrap(), body);
     }
 }
