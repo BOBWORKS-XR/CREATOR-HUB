@@ -21,7 +21,10 @@ three attempts; both earlier attempts stopped before launching the app.
 - Confirmed: XRes host PID `3466`, start `149117`, XID `6291458`, exact Hub title;
   its ELF hash is `1ba7eabe...06e54d9`. The actual 940x580 client screenshot has
   829 sampled colors. Direct visual inspection shows the terms heading, policy
-  version, unchecked checkbox and disabled **Accept and continue** button.
+  version, unchecked checkbox and disabled **Accept and continue** button. The
+  parent subsequently opened this exact retained owned PNG and explicitly
+  confirmed that the heading, version and accept button are visibly clear. This
+  is a separate **manual parent visual inspection**, not an automated OCR pass.
 - Confirmed: normal EWMH close requested after ownership/protocol rechecks;
   owned Flatpak parent reaped with exit 0. `normalCloseReaped:true`,
   `leftRunningAtReport:false`. No terms input/acceptance/navigation/force-close occurred.
@@ -34,6 +37,22 @@ three attempts; both earlier attempts stopped before launching the app.
   GUI. Stderr contains only one 187-byte AT-SPI `ServiceUnknown` warning. That is
   observed context, not evidence that it caused the OCR miss or a product failure.
   Every broad acceptance/readiness field remains false.
+
+Exact OCR/source classification: the pinned product HTML says **Terms of use and
+risk acknowledgement**, **Creator Suite Terms v2026-09-28**, and **Accept and
+continue**. The parser requires the normalized heading, `creator suite terms`
+prefix and button label. None occurs in the captured normalized OCR text; those
+image regions became gibberish while substantial body text was recognized. This
+is an OCR recognition limitation, not a source-label mismatch or evidence that
+the product is blank. The string parser is correct as-is: accepting this text
+would manufacture missing label evidence. No parser relaxation, timer, OCR flag
+change or additional dispatch is justified by this capture.
+
+Cleanup is retained evidence, not a new action: the original report already says
+`normalCloseRequested:true`, `normalCloseReaped:true`, `launchExitStatus:0`, and
+`leftRunningAtReport:false`; the parent can independently verify these unchanged
+fields against the report hash below. No further close was attempted. The missing
+host bridge is not supplied by this probe; no host/MCP/migration acceptance follows.
 
 Capture retained at `artifacts/flatpak-gui-capture-38643675124/`:
 
@@ -71,9 +90,20 @@ scripts/flatpak-gui-probe.test.py
 scripts/flatpak-gui-probe-ocr-38643675124.json
 ```
 
-Independent validation commits: initial `e292c4c`, capped logging `3b92a93`,
-setup-node path `563887d`. The shared feature checkout/index were not switched,
-staged, committed or pushed. No other owner's source/evidence was edited.
+Independent validation commits, in application order, based on
+`e60db6f5b937ef3036cec8fcf44240ee93787495`:
+
+```text
+e292c4caa16ff766074e27f2f95cafdbde90ed98 initial probe
+3b92a936a96ebc18168e1bc6fbfa182eba6ea388 capped logging
+563887dccfa0f3cf404ff6753c2c19d787061c85 setup-node path; actual launch source
+6c21f0cf525d569d742299cf3790add781216c65 retained evidence and OCR refusal fixture
+```
+
+The final manual-parent-inspection prose commit is returned in the chat handoff.
+This task did not switch, stage, commit or push the shared feature checkout/index.
+No other owner's source/evidence was edited. Its eight scoped files remain
+untracked there until the parent integrates the independent validation commits.
 
 ## Immutable Input
 
