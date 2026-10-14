@@ -3,9 +3,9 @@
 Audit: 2026-10-14, Hub 0.1.14; checkout HEAD
 `cc2c2836da79afb9ef4a02ebbdcd47ab502a295d`, with concurrent uncommitted
 coordinator changes. This is a source/fixture audit, not a frozen payload binding.
-The 2026-10-14 continuation implements a packaging-only experiment below.
-No Linux app, Flatpak, installer, user settings or auth file was opened here.
-No workflow was dispatched. All readiness and migration acceptance remain false.
+The initial audit was read-only. Subsequent disposable packaging and native
+Root GUI results are separately bound below; none ran on the user's PC or read
+real credentials/projects. All readiness and migration acceptance remain false.
 
 ## Findings And Classification
 
@@ -17,7 +17,8 @@ No workflow was dispatched. All readiness and migration acceptance remain false.
 | Confirmed missing integration | `native/mcp-router/src/lib.rs:Store::installed`, `src-tauri/src/builtin.rs:generations`, and MCP settings derive XDG locations. Flatpak redirects XDG config/data to its own app-private directories. | An unchanged sandbox build would select different product/route stores; it cannot claim retention of the native host stores. |
 | Confirmed missing integration | MCP `hosted_unix.rs:parent_host` requires private inherited FIFOs and the direct Creator Hub parent; `hosted.rs:run` locks the parent image. Unix writable admission also requires a signed managed route and current settings ownership. | A D-Bus proxy, `flatpak-spawn`, environment flag or copied receipt does not satisfy the existing hosting contract. |
 | Likely wrong, not runtime-proven | Repacking Ubuntu-built GUI/backend ELFs into an unrelated GNOME runtime, or executing a Flatpak-built backend on the host. | ELF dependencies, symbol versions, WebKitGTK, resources and execution policy require actual tests on each side; file hashes alone do not establish ABI compatibility. |
-| Unknown / needs capture | Current 0.1.14 real Linux GUI, writable migration, package replacement/reconnect, Wayland, and Flatpak caller/portal admission. | Keep native Linux, component fixtures and Flatpak acceptance separate. |
+| Confirmed native Root component only | Exact installed 0.1.14 DEB, Root/WebKit ownership, native terms acceptance/save, nonblank window-only capture and parent-reaped normal Root exit pass in `38639742819`. | See Native Root Terms Checkpoint below. No module, MCP connection, migration or Flatpak GUI acceptance follows. |
+| Unknown / needs capture | Actual built-in module operations, writable migration, product-settings retention/reconnect, Wayland, and Flatpak caller/portal admission. | Keep native Linux, component fixtures and Flatpak acceptance separate. |
 
 Flatpak's app-private XDG locations are documented in
 [Flatpak conventions](https://docs.flatpak.org/en/latest/conventions.html).
@@ -489,8 +490,9 @@ Use native Linux first; it cannot confer Flatpak acceptance.
 | Existing route | Exact useful contract | Limit |
 | --- | --- | --- |
 | `.github/workflows/unix-managed-payload.yml`, `platform=linux`, Ubuntu 22.04 | `npm run build:unified -- ci-unsigned-unix-payload --managed --experimental-unix --experimental-unix-writable --prepare-managed-unix`; then native `unix-transfer pack/verify`. Produces unsigned modules/router, canonical modes, exact commit/tree/run binding. | No outer Hub, key, GUI or migration acceptance. Push admission is restricted to `validation/unix-payload-014` and the workflow path; source changes alone do not automatically refresh this lane. |
-| `.github/workflows/unix-managed-assembly.yml` | Main supplies exact independently reviewed signed input pins; `npm run build:unified -- ci-signed-unix-hub --managed --experimental-unix --experimental-unix-writable --signed-unix-input "$temp/signed-unix-input"`. Builds only outer Hub plus verification/archive tools. | No installer or full native GUI acceptance in this invocation. Existing default artifact IDs/hashes are not proof of freshness. |
+| `.github/workflows/unix-managed-assembly.yml` | Main supplies exact independently reviewed signed input pins; builds the outer Hub plus verification/archive tools, and Linux DEB/RPM/AppImage when `--installer` is selected. The original `5bb05a2` packages are bound below. | Compilation/container verification is not native GUI acceptance. Existing default artifact IDs/hashes are not proof of freshness. |
 | `.github/workflows/native-gui-helpers.yml`, Linux job | Existing executable `scripts/native-unix-window.py`: PID/start/image hash + XRes owner + same-PID AT-SPI window; `snapshot`, allowlisted native-dialog `click`, and normal `close`. Sealed backends use live parent/FD/seals identity, not a receipt alone. | Synthetic GTK fixture and kernel/helper primitives only; no real packaged-Hub migration/update driver. Helper normal-close receipts deliberately cannot claim a reaped successful exit. |
+| `.github/workflows/native-linux-root-probe-014.yml` | Exact original DEB/source/receipts; actual `dpkg` installation, Root plus one native WebKit child bound by PID/start/UID/image, XRes and canonical AX bus owner/path. Two fixed terms actions, saved acknowledgement and one normal Root close/reap. | Actual native component result `38639742819`, harness `058516d`, product `5bb05a2`. Generic helper/production unchanged. No module/connection/migration acceptance. |
 | `.github/workflows/unified-unix-candidate.yml` | Experimental native DEB/RPM/AppImage compilation and payload/container integrity. | Default read-only packaging, not signed writable migration acceptance. |
 | `.github/workflows/unix-hosted-acceptance.yml` | Metadata/container prerequisite report from the read-only candidate lane. | Deliberately fails/blocks full acceptance; rejects Flatpak and is not the signed writable carrier consumer. |
 
@@ -548,10 +550,97 @@ before the packaging continuation above. These retain that earlier test scope:
 | `python -B scripts/native-unix-window.test.py` | 36 passed, 2 skipped | Mocked owned-window/identity controls; Linux private receipt/kernel cases not run. |
 | `python -B scripts/native-unix-window-fixture.test.py` | 8 passed | Pure driver regressions, no GTK/X11/proc/live-app reads. |
 
-The native Linux follow-up is still an actual current-payload GUI/guide capture;
-it is separate from the single-input disposable Flatpak package experiment above.
-Main has reported a fresh signed Linux outer assembly; a rebuild is not required
-merely to wrap those independently verified unchanged bytes. Flatpak remains
+The remaining native Linux follow-up is actual module/connection UI operation,
+not another unchanged Root-only capture. It is separate from the disposable
+Flatpak package experiment above. Root-only product changes require their own
+fresh artifact binding before this evidence can be applied to them. Flatpak remains
 blocked on reviewed UI/broker admission, caller mapping, native host packaging,
 runtime ABI, portal grant handling and actual sandbox migration/lifecycle tests.
 This document does not authorize production changes or publication.
+
+## Native Root Terms Checkpoint
+
+Actual [run 38639742819/1, job 116111923246](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38639742819/job/116111923246)
+passes at test commit `058516dfc9e7d12c38c9be039ae52a318e2c512e`.
+Scope is exactly `native-deb-root-terms-and-normal-close-only`.
+The immutable product remains assembly `38630742955/1`, source
+`5bb05a21d73c0fc3b2839cbcbd4322832b24aead`, tree
+`f91c61a8e29da84e0dbdbfa642d201cd4c6a3279`, artifact `11927495507`.
+This is an actual disposable DEB install, not a manually staged prefix.
+No product bytes were rebuilt for these harness corrections.
+
+| Pinned item | Bytes | SHA-256 |
+| --- | ---: | --- |
+| Original assembly ZIP | 386824719 | `42c5e1a95605158ab084c4cad1db1a6fb5b49f6fe225db9cea868148cccda725` |
+| `Creator Hub_0.1.14_amd64.deb` | 62780196 | `f0297e74c6ce918b54c248b222af7ac64c3c96c270d281a17a017fb90a7714ec` |
+| Original unbundled Root ELF | 21364752 | `2a09016d9721157afc62ea7163979c75b0c986b05cf0264afda97291b51b3689` |
+| Installed `/usr/bin/creator-hub` | 21364752 | `efca8d6ca5949e787f10c124e26b91202587b34803f65c7cc5c3e9ffb93fdbf9` |
+| `modules.tar.gz` | 56842646 | `c2cffb6f886225d8c841e78497e92c6ede96896e0c5a28c89346254e5fc4a77a` |
+| `builtin-manifest.json` | 3663 | `44de6e0e25890ac2cb20f7f2b16eb3ac151e6b4edb1104c974a9544f291f6fd7` |
+| Original assembly receipt | 888 | `a58370b7a92e4e5ab3400be3765ea289a6a52538d3c4bedb9de98e92b01007a0` |
+| Native saved acknowledgement | 80 | `b1af0762115111f77c97093da5b7e28f662d3bdec3653c1190ebc958bf8fa9b5` |
+| Window-only PNG | 87808 | `0e72d011384bb4ba95ceb4a567097ee3ca64808f30d660d7a8b288fd7956432f` |
+
+The unchanged signed private payload is bound to source
+`a3118106086516751b78a58b5dbd684cff4c63a7`, preparation `38621563945/1`,
+and handoff `77bf64dcf8c82d4e9ad5e4112445a59639425e6315d4723f910bd8058c9a1a62`.
+Writable-mode metadata is not a writable-operation acceptance result.
+
+- Root PID `3404`, start `14007`, direct parent `3386`, all four UIDs `1001`.
+  XID `6291459`, XRes client `6291456` belongs to that Root.
+- WebKit PID `3435`, start `14131`, direct parent Root `3404`, all UIDs `1001`.
+  Its resolved system executable is
+  `/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebProcess`, 14408 bytes,
+  SHA-256 `5375925828be8acc2c0e905cae0d4654da0519ce1b83f2f724a43eae346bd78e`,
+  attributed to `libwebkit2gtk-4.1-0:amd64` `2.50.4-0ubuntu0.22.04.1`.
+- Root/renderer kernel identities, UID tuples, XRes ownership and AX bus
+  owner/PID/UID/path are rechecked. WebKit's well-known and unique bus aliases
+  resolve to the same unique owner; same PID/role alone is insufficient.
+- The actual 940x580 Root-only PNG is nonblank and shows the terms modal.
+  Acknowledgement is absent before input. Exactly one native `check` and one
+  `press` action run (870/906 ms), against the observed exact checkbox/button.
+- The product writes schema `1`, policy `2026-09-28-v1`, accepted timestamp
+  `1792012999783` to the private runner's
+  `XDG_DATA_HOME/CreatorHub/consent/hub-usage-terms.json`. No acknowledgement,
+  browser state or IPC response is seeded. The retained 80-byte copy matches
+  the actual saved bytes and remains identical after Root exit.
+- One normal EWMH close request uses the verified Root window and advertised
+  `WM_DELETE_WINDOW` protocol (1186 ms). The parent reaps Root exit `0`;
+  stdout/stderr are both zero bytes, EOF true, no truncation. Terms are no longer
+  visible. No signal, kill fallback or user/global desktop operation is used.
+- Terms actions retain strict reverse-parent checks. WM close instead verifies
+  every returned AX parent belongs to the same fully verified Root subtree:
+  41 parents, including 30 differing semantic parent edges. Foreign peers,
+  outside parents and nested AX windows remain refused. The generic helper is
+  unchanged; this is not a same-name or all-child-process exemption.
+- Focused suite: 76/76 on Linux; local Windows 75 passed, one POSIX-only skip.
+  The unchanged generic-helper suites also passed locally (36+8, two POSIX skips).
+
+Earlier failures remain failures: `38633338721` installer PATH;
+`38634063716` strict single-PID AX guard; `38637030998`/`38637638644`
+AX reverse-parent refusals; `38638382883`/`38638768876` AX name-bound diagnostics;
+`38639092559` terms/save passed but close refused on immediate semantic parents.
+The later pass does not relabel these reports.
+
+Result artifact `11929453661`, 386702956 bytes, SHA-256
+`5a34844f2341f20d28426bbf279421212e43d5e873a40f8cb97ba7e32d7a0c5f`,
+was downloaded, hash-checked and inspected under
+`artifacts/native-linux-root-38639742819/linux-root-probe/` (`report.json`,
+`native-terms-acknowledgement.json`, `root-window.png`, ownership and worker records).
+All original assembly evidence stays in the retained ZIP.
+Current harness files match tested `058516d`:
+
+```text
+scripts/native-linux-root-probe.py         81e30d24b9a5aa28fb525a8785b949f09f79cdf94d8365171f429f516faf1df7
+scripts/native-linux-root-probe.test.py    99d7dfe5a5b65dfcce19fc6b8d34337b9f838c7afc9ed7da1594eb077fcc5730
+.github/workflows/native-linux-root-probe-014.yml 431f2a2fd18cbf4224e043a9159038973a1c76e32945f715a6ef29171bc96967
+```
+
+This does not cover parent commit `e60db6f5b937ef3036cec8fcf44240ee93787495`
+(Linux no-legacy finish/process discovery). Its new Root assembly must receive
+independent successful run/package/source pins before any repin. It does not
+cover modules, MCP stdio/client connections, product-settings retention,
+standalone retirement, migration, outgoing/signed updates or Flatpak GUI/host
+operations. All broad acceptance flags, including `releaseReady`, remain false.
+Linux retirement/product changes, `linux-deb-retention*` and `flatpak-gui-probe*`
+remain separately owned; this checkpoint does not modify or accept them.
