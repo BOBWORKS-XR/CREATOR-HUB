@@ -39,12 +39,6 @@ jobs:
           - os: ubuntu-22.04
             label: Linux
             args: --bundles appimage,deb,rpm
-          - os: macos-latest
-            label: macOS Apple silicon
-            args: --bundles dmg
-          - os: macos-15-intel
-            label: macOS Intel
-            args: --bundles dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6

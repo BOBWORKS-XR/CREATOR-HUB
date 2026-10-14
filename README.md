@@ -3,6 +3,10 @@
 **Unity tools in one window.** Open Creator SDK / Altspace and Banter projects,
 manage Creator Works MCP and Creator Project Setup, and browse community plugins.
 
+**Platform scope:** macOS support is suspended. The upcoming unified release
+targets Windows and Linux; Flatpak host integration is still under development.
+Existing Mac downloads remain historical builds, not supported unified updates.
+
 ## Next: One Creator Hub Product
 
 Future development is being consolidated into this repository. Project Setup,

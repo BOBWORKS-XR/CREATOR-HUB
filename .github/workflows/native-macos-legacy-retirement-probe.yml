@@ -8,6 +8,7 @@ permissions:
   contents: read
 jobs:
   legacy-baseline:
+    if: ${{ false }} # macOS support suspended; preserve historical workflow only.
     name: legacy baseline (${{ matrix.target }})
     strategy:
       fail-fast: false

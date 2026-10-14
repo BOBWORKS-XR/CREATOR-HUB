@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   repack:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/mac-dmg-repack-014'
+    if: ${{ false }} # macOS support suspended; preserve historical workflow only.
     strategy:
       fail-fast: false
       matrix:

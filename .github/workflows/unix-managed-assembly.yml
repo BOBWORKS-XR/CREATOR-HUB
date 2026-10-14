@@ -1,4 +1,4 @@
-name: Fresh signed14 native packages; Linux default and reviewed Mac inputs (not acceptance)
+name: Fresh signed14 Linux packages (not acceptance)
 on:
   push:
     branches: [validation/unix-assembly-014]
@@ -35,7 +35,7 @@ jobs:
         with:
           script: |
             const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
-            assert.ok(['linux','macos-arm64','macos-intel'].includes(process.env.TARGET));
+            assert.equal(process.env.TARGET,'linux','macOS support is suspended');
             const id=Number(process.env.ASSET_ID),size=Number(process.env.ZIP_BYTES),digest=process.env.ZIP_SHA256;
             assert.ok(Number.isSafeInteger(id)&&id>0&&Number.isSafeInteger(size)&&size>0&&size<=300*1024*1024);
             assert.match(digest,/^[a-f0-9]{64}$/);assert.match(process.env.HANDOFF_SHA256,/^[a-f0-9]{64}$/);
@@ -60,7 +60,7 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":641477926,"zipBytes":58332901,"zipSha256":"679c376684bc705f1cb453e12f421cc5dd729007315454742ff4f94f1ee88001","handoffSha256":"77bf64dcf8c82d4e9ad5e4112445a59639425e6315d4723f910bd8058c9a1a62"}]') }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 65
     env:
       CREATOR_UNIX_HANDOFF_SHA256: ${{ matrix.handoffSha256 }}

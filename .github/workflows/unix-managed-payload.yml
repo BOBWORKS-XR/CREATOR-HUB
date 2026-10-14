@@ -10,7 +10,7 @@ on:
         description: Native payload target; no key, Hub installer or release is produced
         type: choice
         default: all
-        options: [all, linux, macos-arm64, macos-intel]
+        options: [all, linux]
 
 permissions:
   contents: read
@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.platform == 'linux' && '["ubuntu-22.04"]' || inputs.platform == 'macos-arm64' && '["macos-latest"]' || inputs.platform == 'macos-intel' && '["macos-15-intel"]' || '["ubuntu-22.04","macos-latest","macos-15-intel"]') }}
+        os: [ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 65
     steps:

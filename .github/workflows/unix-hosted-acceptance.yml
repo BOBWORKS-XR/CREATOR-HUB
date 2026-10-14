@@ -11,7 +11,7 @@ on:
     inputs:
       platform:
         type: choice
-        options: [linux, macos-arm64, macos-intel]
+        options: [linux]
         default: linux
         description: Matching native package host; no application is launched
       source_run:
@@ -59,7 +59,7 @@ jobs:
   prerequisites:
     if: github.event_name == 'workflow_dispatch'
     needs: fixture
-    runs-on: ${{ inputs.platform == 'linux' && 'ubuntu-22.04' || inputs.platform == 'macos-arm64' && 'macos-latest' || 'macos-15-intel' }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     env:
       CREATOR_UNIX_HOSTED_EXPERIMENT: '1'

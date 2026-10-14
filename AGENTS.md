@@ -2,6 +2,12 @@
 
 ## Unified Product Work
 
+- User decision 2026-10-14: macOS support is suspended. Active release targets are
+  Windows and Linux, with Flatpak still requiring its own host-operation gates.
+  Do not run Mac jobs, publish new Mac artifacts or use Mac acceptance as a
+  release blocker. Preserve historical downloads, source and diagnostic evidence.
+  Resuming Mac support requires a new explicit user request.
+
 - Creator Hub is the approved future single product and canonical source repository.
   Develop MCP in `modules/mcp` and Setup in `modules/project-setup`; their old
   repositories are retained for historical downloads and explicit migration work.

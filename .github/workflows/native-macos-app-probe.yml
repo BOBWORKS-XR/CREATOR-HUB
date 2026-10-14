@@ -8,6 +8,7 @@ permissions:
   actions: read
 jobs:
   probe:
+    if: ${{ false }} # macOS support suspended; preserve historical workflow only.
     strategy:
       fail-fast: false
       matrix:

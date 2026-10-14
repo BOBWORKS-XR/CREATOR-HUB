@@ -15,6 +15,7 @@ permissions:
   actions: read
 jobs:
   select-control:
+    if: ${{ false }} # macOS support suspended; preserve historical workflow only.
     runs-on: ubuntu-latest
     permissions: {}
     outputs:
@@ -48,6 +49,7 @@ jobs:
             assert.ok(include.length===1||selected==='selected-three'&&include.length===3);
             core.setOutput('matrix',JSON.stringify({include}));
   control:
+    if: ${{ false }} # macOS support suspended; preserve historical workflow only.
     name: control (${{ matrix.case }})
     needs: select-control
     strategy:

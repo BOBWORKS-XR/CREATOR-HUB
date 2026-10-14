@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-22.04, macos-latest, macos-15-intel]
+        os: [windows-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -243,6 +243,7 @@ jobs:
             src-tauri/target/release/bundle/rpm/*.rpm
 
   hub-macos:
+    if: ${{ false }} # macOS support suspended; preserve historical workflow only.
     name: Hub (macOS ${{ matrix.label }})
     strategy:
       fail-fast: false

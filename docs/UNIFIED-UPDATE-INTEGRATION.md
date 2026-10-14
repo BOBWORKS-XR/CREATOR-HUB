@@ -3,6 +3,14 @@
 This is development integration, not a release or installed update acceptance.
 PR21 and the source publication guard remain held.
 
+## Active Platform Scope
+
+User decision, 2026-10-14: macOS support is suspended. Stop Mac work and omit Mac
+packages from upcoming releases. Retain old downloads, source and evidence; do
+not alter installed Mac apps or their settings. The Mac results below are
+historical, no longer release blockers. Windows and Linux/Flatpak acceptance
+remain in scope, and their incomplete gates are not waived.
+
 ## Latest Acceptance Checkpoint, 2026-10-14
 
 - [Windows run38620271427](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38620271427)
