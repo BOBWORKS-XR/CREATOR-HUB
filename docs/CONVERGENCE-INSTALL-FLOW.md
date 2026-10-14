@@ -64,12 +64,18 @@ Do not force-close AI clients, Unity or unrelated Node processes.
 - Full native first launch, signed update/restart, actual AI-client reconnect,
   macOS/Linux cleanup and end-to-end uninstall retention are still required.
 
-Current Windows source checks: 291 Root Rust tests pass with 12 explicitly
+Current Windows source checks: 322 Root Rust tests pass with 13 explicitly
 opt-in native tests ignored; strict Clippy passes. Dependency inspection is
 connected to production diagnostics, not removal authorization. The 15 browser
 convergence/startup tests pass, including screenshots at 390 and 1100 pixels.
 MCP has 253 passing Rust tests with seven opt-in tests ignored, including the
 reviewed server-path transition, exact backups and retained recovery scopes.
 Linux-native operation is not inferred from those Windows-hosted tests.
+
+The native Windows compatibility-retirement leaf passes both official baselines
+in run 38572696237: GUI/registration removal, all eight retained stores, all nine
+in-place MCP resources, interrupted retry and old stdio survival/reconnection.
+See NATIVE-LEGACY-GUI-RETIREMENT.md. This leaf is not invoked by the production
+guide yet; it does not complete first-launch or signed update convergence.
 
 Published releases and the user's installed applications remain unchanged.
