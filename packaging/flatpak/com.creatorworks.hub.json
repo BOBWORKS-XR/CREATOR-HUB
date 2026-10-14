@@ -5,6 +5,7 @@
   "runtime-version": "50",
   "sdk": "org.gnome.Sdk",
   "command": "creator-hub",
+  "appstream-compose": false,
   "build-options": { "strip": false, "no-debuginfo": true },
   "finish-args": [
     "--socket=wayland",
@@ -21,7 +22,7 @@
       "install -Dm644 'lib/Creator Hub/modules.tar.gz' '/app/lib/Creator Hub/modules.tar.gz'",
       "install -Dm644 share/applications/com.creatorworks.hub.desktop /app/share/applications/com.creatorworks.hub.desktop",
       "install -Dm644 share/icons/hicolor/128x128/apps/com.creatorworks.hub.png /app/share/icons/hicolor/128x128/apps/com.creatorworks.hub.png",
-      "install -Dm644 share/metainfo/com.creatorworks.hub.metainfo.xml /app/share/metainfo/com.creatorworks.hub.metainfo.xml",
+      "install -Dm644 share/appdata/com.creatorworks.hub.appdata.xml /app/share/appdata/com.creatorworks.hub.appdata.xml",
       "install -Dm644 share/licenses/com.creatorworks.hub/LICENSE /app/share/licenses/com.creatorworks.hub/LICENSE"
     ]
   }]

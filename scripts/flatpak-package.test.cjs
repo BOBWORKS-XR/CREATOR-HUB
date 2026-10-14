@@ -66,6 +66,19 @@ test('desktop, icon, resources, version and Hub license have exact identities', 
   assert.ok(recipe().modules[0]['build-commands'].some(line => line.includes('share/licenses/')));
   assert.ok(recipe().modules[0]['build-commands'].some(line => line.includes("'/app/lib/Creator Hub/modules.tar.gz'")));
 });
+test('optional AppStream composition is disabled and exact XML uses the proven builder appdata location', t => {
+  assert.equal(recipe()['appstream-compose'], false);
+  const changed = recipe(); changed['appstream-compose'] = true;
+  assert.throws(() => pkg.validateRecipe(changed));
+  const f = fixture(t, true); const receipt = pkg.prepare(f.input, f.pins, f.destination);
+  const name = `share/appdata/${pkg.ID}.appdata.xml`;
+  assert.equal(pkg.OUTPUTS[4], name);
+  assert.deepEqual(receipt.files[name], pkg.record(pkg.read(path.join(pkg.RECIPE, `${pkg.ID}.metainfo.xml`), 8192)));
+  assert.equal(fs.existsSync(path.join(f.destination, 'flatpak-input', `share/metainfo/${pkg.ID}.metainfo.xml`)), false);
+  const rerouted = recipe(); rerouted.modules[0]['build-commands'][4] =
+    `install -Dm644 ${name} /app/share/metainfo/${pkg.ID}.metainfo.xml`;
+  assert.throws(() => pkg.validateRecipe(rerouted));
+});
 test('stages only six pinned files, without claiming archive, host or migration acceptance', t => {
   const f = fixture(t); const receipt = pkg.prepare(f.input, f.pins, f.destination);
   assert.deepEqual(pkg.verifyStage(f.destination, receipt), f.manifest);

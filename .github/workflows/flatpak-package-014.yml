@@ -1,4 +1,4 @@
-name: Dependency-pinned unified Flatpak packaging and ABI check (not acceptance)
+name: SDK-compatible unified Flatpak packaging and ABI check (not acceptance)
 on:
   push:
     branches: [validation/flatpak-package-014]
@@ -107,5 +107,10 @@ jobs:
             ${{ runner.temp }}/flatpak-input-binding.json
             ${{ runner.temp }}/reviewed-flatpak-pins.json
             ${{ runner.temp }}/flatpak-stage/flatpak-stage.json
+            ${{ runner.temp }}/flatpak-source/signed-unix-assembly.json
             ${{ runner.temp }}/creator-flatpak-*/flatpak-report.json
+            ${{ runner.temp }}/creator-flatpak-*/build-*/metadata
+            ${{ runner.temp }}/creator-flatpak-*/build-*/manifest.json
+            ${{ runner.temp }}/creator-flatpak-*/build-*/files/manifest.json
+            ${{ runner.temp }}/creator-flatpak-*/build-*/files/share/appdata/*.xml
             ${{ runner.temp }}/creator-flatpak-*/*.flatpak

@@ -12,7 +12,7 @@ const REF = `app/${ID}/x86_64/flatpak-test`;
 const PERMISSIONS = ['--socket=wayland', '--socket=fallback-x11', '--device=dri', '--share=ipc'];
 const INPUTS = ['creator-hub', 'builtin-manifest.json', 'modules.tar.gz'];
 const OUTPUTS = ['bin/creator-hub', 'lib/Creator Hub/modules.tar.gz', `share/applications/${ID}.desktop`,
-  `share/icons/hicolor/128x128/apps/${ID}.png`, `share/metainfo/${ID}.metainfo.xml`, `share/licenses/${ID}/LICENSE`];
+  `share/icons/hicolor/128x128/apps/${ID}.png`, `share/appdata/${ID}.appdata.xml`, `share/licenses/${ID}/LICENSE`];
 const MEMBERS = ['mcp/creator-works-mcp-launcher', 'mcp/server/creator-works-mcp.mjs', 'mcp/server/runtime/node',
   'mcp/server/runtime/LICENSE', 'mcp/server/runtime/VERSION', 'mcp/server/unity-extension/Editor/BanterMCPBridge.cs',
   'mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png', 'mcp/server/LICENSE', 'mcp/server/THIRD_PARTY_NOTICES.md',
@@ -98,7 +98,8 @@ function validateElf(bytes) {
 function validateRecipe(recipe) {
   assert.deepEqual(recipe, {
     'app-id': ID, branch: 'flatpak-test', runtime: 'org.gnome.Platform', 'runtime-version': '50',
-    sdk: 'org.gnome.Sdk', command: 'creator-hub', 'build-options': { strip: false, 'no-debuginfo': true },
+    sdk: 'org.gnome.Sdk', command: 'creator-hub', 'appstream-compose': false,
+    'build-options': { strip: false, 'no-debuginfo': true },
     'finish-args': PERMISSIONS,
     modules: [{ name: 'creator-hub-reviewed-input', buildsystem: 'simple',
       sources: [{ type: 'dir', path: 'flatpak-input' }], 'build-commands': [

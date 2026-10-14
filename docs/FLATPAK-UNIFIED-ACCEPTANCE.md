@@ -50,11 +50,14 @@ The exact six input destinations are:
 /app/lib/Creator Hub/modules.tar.gz
 /app/share/applications/com.creatorworks.hub.desktop
 /app/share/icons/hicolor/128x128/apps/com.creatorworks.hub.png
-/app/share/metainfo/com.creatorworks.hub.metainfo.xml
+/app/share/appdata/com.creatorworks.hub.appdata.xml
 /app/share/licenses/com.creatorworks.hub/LICENSE
 ```
 
 The sixth file retains Hub's MIT license. The icon is the existing 128px Hub PNG.
+Optional `appstream-compose` is false for this private offline experiment; the
+unchanged metainfo XML is installed at builder 1.2.2's exact appdata destination.
+This does not claim composed catalogue metadata or Flathub acceptance.
 The archive stays opaque and unchanged, including Node/backend/router modes,
 signed metadata and third-party license files. `strip:false` and
 `no-debuginfo:true` avoid rewriting pinned ELFs. A local source, owned state dir,
@@ -196,14 +199,24 @@ The test remote is unsigned and private, not a publication or update trust model
 
 ## Current Results And Stop Conditions
 
-- Windows source/temp-fixture tests: 18 passed, zero skipped, no native children.
-- Related archive/package source suites: combined 37 passed, one existing Unix
+- Windows source/temp-fixture tests: 20 passed, zero skipped, no native children.
+- Related archive/package source suites: combined 39 passed, one existing Unix
   mode test skipped on Windows; no native Linux/Flatpak execution implied.
 - Local runner inventory: no `flatpak`, `flatpak-builder`, Docker or Podman. No
   accessible fresh Linux executor; existing workflow reruns cannot execute these
   new uncommitted scripts. User WSL/SSH or user Flatpak provisioning is excluded.
-- Real Flatpak build, bundle export/install/update, Platform linkage and renderer:
-  **not run**. No Flatpak artifact or GTK ABI success is claimed.
+- Actual disposable run `38612495075` reached Flatpak 1.12.7/builder 1.2.2,
+  resolved GNOME 50 Platform/SDK commits and verified the native archive. Its six
+  install commands passed; cleanup then exited 1 in 1,425 ms because the SDK
+  sandbox lacked `appstream-compose`. Stdout/stderr were 1,235/132 bytes. No
+  bundle, app installation, Platform linkage, renderer or migration was tested.
+  Original report: `artifacts/flatpak-package-38612495075/flatpak-package-38612495075-1/creator-flatpak-JCLdAZ/flatpak-report.json`.
+  The narrow recipe correction disables only optional composition and retains
+  exact XML bytes at the builder's observed appdata path. Primary
+  [builder 1.2.2 cleanup source](https://github.com/flatpak/flatpak-builder/blob/1.2.2/src/builder-manifest.c#L2364)
+  proves the unconditional relocation and separate optional composition guard.
+  The regression failed before the correction and passes afterward. Native
+  export/linkage after this correction remains untested; no app rebuild is needed.
 - Existing inspected Linux package receipts label 0.1.12/0.1.13. They were not
   relabeled. Fresh current14 assembly acceptance is main's independently verified
   prerequisite, not replaced by fixture hashes.
