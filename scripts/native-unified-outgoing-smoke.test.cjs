@@ -178,6 +178,37 @@ test('fixed sequence operates B03-style hidden checkbox through its visible labe
       assert.deepEqual(JSON.parse(saved), { auto_start: false });
     } finally { await browser.close(); }
   });
+
+test('restoration readies attached Setup content without navigation, then retains the visible-view requirement',
+  { timeout: 15000 }, async t => {
+    const { chromium } = require('playwright');
+    if (!fs.existsSync(chromium.executablePath())) return t.skip('Chromium unavailable; required by the native workflow before tests');
+    const source = fs.readFileSync(path.join(__dirname, 'native-unified-outgoing-smoke.cjs'), 'utf8');
+    assert.match(source, /const readyFrame = async \(app, visible = true\)/);
+    assert.match(source, /state: visible \? 'visible' : 'attached'/);
+    assert.match(source, /await approveBackend\(app, afterManifest, false\)/);
+    assert.match(source, /await show\(app\); await readyFrame\(app\);/);
+    const start = source.indexOf('  const readyFrame = async');
+    const end = source.indexOf('  const approveBackend = async', start);
+    assert.ok(start >= 0 && end > start);
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      page.setDefaultTimeout(3000);
+      await page.setContent('<div id="view-hub">Apps</div><iframe id="setup-host-frame" style="display:none" srcdoc="<div id=requirements><div class=requirement>Ready</div></div>"></iframe>');
+      const frames = {};
+      const readyFrame = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return readyFrame; })()`, {
+        assert, page, frames, retry: read => read(),
+      }, { timeout: 1000 });
+      await readyFrame('setup', false);
+      assert.equal(await page.locator('#view-hub').isVisible(), true);
+      assert.equal(await page.locator('#setup-host-frame').isVisible(), false);
+      assert.equal(await frames.setup.locator('#requirements .requirement').first().isVisible(), false);
+      await page.locator('#setup-host-frame').evaluate(frame => { frame.style.display = 'block'; });
+      await readyFrame('setup');
+      assert.equal(await frames.setup.locator('#requirements .requirement').first().isVisible(), true);
+    } finally { await browser.close(); }
+  });
 test('cancel retains both drafts, kernel process starts, exact config/preferences/content and absence', () => {
   const initial = before(); checks.cancelPreserved(initial, clone(initial));
   for (const mutate of [value => value.backends.mcp.startTicks = '638000000000000000', value => value.backends.setup.parentPid = 99,

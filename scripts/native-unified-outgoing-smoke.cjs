@@ -142,19 +142,19 @@ async function main() {
     }
     return backend;
   });
-  const readyFrame = async app => {
+  const readyFrame = async (app, visible = true) => {
     frames[app] = await retry(async () => {
       const element = await page.locator(`#${app}-host-frame`).elementHandle();
       const frame = element && await element.contentFrame(); assert.ok(frame); return frame;
     });
-    if (app === 'setup') await frames[app].locator('#requirements .requirement').first().waitFor({ timeout: 90000 });
+    if (app === 'setup') await frames[app].locator('#requirements .requirement').first().waitFor({ state: visible ? 'visible' : 'attached', timeout: 90000 });
     else await frames[app].waitForFunction(() => !document.querySelector('#workspaceControls').disabled);
   };
-  const approveBackend = async (app, manifest) => {
+  const approveBackend = async (app, manifest, visible = true) => {
     backends[app] = await backendFor(app, manifest);
     await press(backends[app], app === 'mcp' ? 'Open MCP in Creator Hub?' : 'Open Setup in Creator Hub?',
       app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub');
-    await readyFrame(app);
+    await readyFrame(app, visible);
     if (app === 'mcp' && await frames.mcp.locator('#connection-guide-close').isVisible()) await frames.mcp.locator('#connection-guide-close').click();
   };
   const sdkRoundTrip = async client => {
@@ -274,7 +274,7 @@ async function main() {
     }, 120); // The replacement is never spawned by this driver.
     await connect(target.TARGET.version, true);
     const afterManifest = moduleManifest();
-    for (const app of ['setup', 'mcp']) await approveBackend(app, afterManifest);
+    for (const app of ['setup', 'mcp']) await approveBackend(app, afterManifest, false);
     await page.waitForFunction(() => document.querySelector('#hosted-restore-message').textContent === 'Your app views have reopened. Select an app from the menu.');
     await verifyConvergence(target.TARGET.version);
     clearInterval(ticketTimer); ticketTimer = null;
