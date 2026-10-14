@@ -53,6 +53,28 @@ PR21 and the source publication guard remain held.
   `get_mcp_reference` call against B04's exact packaged server and exited0;
   no processes using that test runtime remained. This isolated temporary
   connection did not test migrated saved clients, Desktop or signed update.
+- All300 browser UI regressions pass locally with two workers (1.8min), including
+  the mocked migration/settings/terms/help surfaces. This is not native acceptance.
+- [Fresh Linux assembly38630742955](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38630742955)
+  passes at5bb05a2, using the new signed payload and real installer bundles.
+  Native GUI/migration/update acceptance is separate.
+- [Mac archival experiment38633431819](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38633431819)
+  verifies a negative result on Intel and Apple Silicon: moving only the old GUI
+  executable preserves MCP connections but leaves a corrupt, registered app.
+  This technique must not be used for production retirement. See
+  [the measured result](MACOS-LEGACY-RETIREMENT-PROBE.md#native-experiment-result).
+
+### Artifact Reuse
+
+The B04 Windows installer remains
+`7007a87c2818fa809382742fb41fc80ddacf6391d678759112196dd962d0955e`;
+installed image
+`2782921b6bebcf6e811d1240a27d3d47f9c139269aaf6544ff0c6dff85a454ad`.
+The migration and signed-update tests above accepted these same bytes. Test-only
+corrections reuse them; changing product bytes requires relevant native repeats.
+The closed-client and no-op checkbox test failures now have regression checks.
+Passing packaging, a diagnostic, or source tests never substitutes for an
+unimplemented platform feature or its install/update acceptance.
 
 All full-product/public-discovery/live-AI-app and release-ready gates remain
 false. Unix standalone retirement and Flatpak host integration are still

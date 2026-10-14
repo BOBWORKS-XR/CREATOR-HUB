@@ -14,6 +14,15 @@
   real built-in distribution and legacy migration acceptance replace the source-only gate.
 - Generated module Tauri schemas are not intentional source changes; do not stage
   them with feature work solely because a native test rewrote their paths.
+- Before expensive packaging or native acceptance, run focused tests for every
+  changed harness/workflow and parse its native scripts. A harness correction
+  must add a regression for the observed failure.
+- Reuse immutable candidate artifacts for harness-only changes. Record product
+  source separately from test source, and require the same installer/image hashes.
+  Do not rebuild passed product bytes because documentation or tests changed.
+- Classify native failures as product, harness, environment, or unverified.
+  Missing platform integration is unfinished feature work, not merely a build
+  failure or a release that only needs another test. State that distinction early.
 
 - Read `docs/RELEASE-GATES.md` and `docs/HUB-PUBLICATION-CHECKLIST.md` before any
   release work. Prior permission to publish one version is not standing authority
