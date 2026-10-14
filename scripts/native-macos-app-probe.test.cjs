@@ -8,6 +8,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const probe = require('./native-macos-app-probe.cjs');
 const sourcePath = path.join(__dirname, 'native-macos-app-probe.cjs');
 const source = fs.readFileSync(sourcePath, 'utf8');
+const assemblyWorkflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-assembly.yml'), 'utf8').replace(/\r\n/g, '\n');
 const env = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'macOS', RUNNER_ARCH: 'ARM64',
   GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', CREATOR_MACOS_OWNED_GUI_TEST: '1', CREATOR_MACOS_APP_PROBE: '1' };
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'creator-macos-app-probe-tests-')));
@@ -51,6 +52,107 @@ test('CLI requires a caller-supplied independent hash and has no PID, trust, act
     ['--app', '/owned.app', '--hub-sha256', 'a'.repeat(64), '--output', '/new', '--skip-trust'], ['--pid', '42']]) {
     assert.throws(() => probe.options(args));
   }
+});
+
+function assemblyReceipt() {
+  return { schemaVersion: 1, product: 'com.creatorworks.hub.unix-signed-assembly', platform: 'macos', arch: 'x86_64',
+    hubVersion: '0.1.14', assemblyCommit: 'a'.repeat(40), privateSource: { repository: 'BOBWORKS-XR/CREATOR-HUB', repositoryId: 1364807512,
+      workflow: '.github/workflows/unix-managed-payload.yml', event: 'push', sourceCommit: 'b'.repeat(40), buildCommit: 'b'.repeat(40),
+      sourceTree: 'c'.repeat(40), runId: 38599976833, runAttempt: 1 }, handoffSha256: 'd'.repeat(64), mcpMode: 'writable',
+    privateModulesRecompiled: false, privateModulesResigned: false, nativeGuiAccepted: false, releaseReady: false };
+}
+const receiptBytes = value => Buffer.from(JSON.stringify(value, null, 2));
+test('fresh version/source options are all-or-none independent pins, not action or provenance bypasses', () => {
+  const args = ['--app', '/owned.app', '--hub-sha256', 'a'.repeat(64), '--output', '/new',
+    '--expected-version', '0.1.14', '--assembly-receipt', '/signed-unix-assembly.json', '--assembly-receipt-sha256', 'b'.repeat(64)];
+  assert.equal(probe.options(args).expectedVersion, '0.1.14');
+  for (const bad of [args.slice(0, 8), [...args, '--skip-identity'], args.map(v => v === '0.1.14' ? 'latest' : v),
+    args.map(v => v === 'b'.repeat(64) ? 'not-pinned' : v)]) assert.throws(() => probe.options(bad));
+});
+test('fresh Mac workflow preserves exact private input pins, split permissions and Linux no-bundle admission', () => {
+  const expected = [
+    { target: 'linux', os: 'ubuntu-22.04', assetId: 641099820, zipBytes: 55172816, zipSha256: '5036cab13213f56e1e08ab74037a4a719a9591573deb80fda013b25e0ba844f7', handoffSha256: '96f63bb4a5def192b086367fa4a6d00efd297a8cdb106cd4ace4bb35c8e4a3c9' },
+    { target: 'macos-arm64', os: 'macos-latest', assetId: 641099814, zipBytes: 47761280, zipSha256: '75d61ea27e4fa62d28688c8794b25bc917104e23a45c80427debcfaaf9c19871', handoffSha256: 'c051a7e230abb5832a96c738919d0c9cc6ebd740b73533edb0af0b4ebde49670' },
+    { target: 'macos-intel', os: 'macos-15-intel', assetId: 641099811, zipBytes: 49622185, zipSha256: '04191eb7007c274eb290e6de08fd4e6643b1483f8ef9a4ac3007a8f2ddc66884', handoffSha256: '332eab5174d3290c4e973086f3d36ee60390d123f45317923c301fe08ee92fb6' },
+  ];
+  const matrices = [...assemblyWorkflow.matchAll(/fromJSON\(inputs.signed_inputs \|\| '([^']+)'\)/g)];
+  assert.equal(matrices.length, 2); for (const [, value] of matrices) assert.deepEqual(JSON.parse(value), expected);
+  assert.match(assemblyWorkflow, /branches: \[validation\/unix-assembly-014\]\n    paths: \['\.github\/workflows\/unix-managed-assembly.yml'\]/);
+  assert.match(assemblyWorkflow, /permissions:\n  contents: read\njobs:/);
+  assert.equal((assemblyWorkflow.match(/contents: write/g) || []).length, 1);
+  const stage = assemblyWorkflow.split('  stage-input:')[1].split('  assembly:')[0];
+  assert.doesNotMatch(stage, /actions\/checkout|npm ci|build:unified|native-macos-app-probe/);
+  assert.match(stage, /release_id:411494394/); assert.match(stage, /release.tag_name,'v0.1.13-validation'/);
+  assert.match(assemblyWorkflow, /installer=\(\)\n          if \[\[ "\$RUNNER_OS" == 'macOS' \]\]; then installer=\(--installer\); fi/);
+  assert.match(assemblyWorkflow, /ci-signed-unix-hub "\$\{installer\[@\]\}" --managed --experimental-unix --experimental-unix-writable/);
+  assert.doesNotMatch(assemblyWorkflow, /GITHUB_WORKFLOW_REF\s*=|exportVariable\('GITHUB_|contents: write[\s\S]*?\n  assembly:[\s\S]*?contents: write|workflow_dispatch.*create/);
+});
+test('fresh workflow validates primary native package/version pins before probe and retains only owned failure evidence', () => {
+  assert.match(assemblyWorkflow, /assert.equal\(integrity.integrityPassed,true\)/);
+  assert.match(assemblyWorkflow, /assert.deepEqual\(integrity.packages.map\(p=>p.format\),\['app','dmg'\]\)/);
+  assert.match(assemblyWorkflow, /assert.equal\(dmgPin.image.sha256,dmgRecord.sha256\)/);
+  assert.match(assemblyWorkflow, /assert.equal\(info.CFBundleShortVersionString,'0.1.14'\)/);
+  assert.ok(assemblyWorkflow.indexOf("path.join(proof,'package-info.json')")
+    < assemblyWorkflow.indexOf("assert.equal(info.CFBundleShortVersionString,'0.1.14')"));
+  assert.match(assemblyWorkflow, /input:infoPin.bytes,encoding:'utf8',timeout:15000,maxBuffer:65536/);
+  assert.match(assemblyWorkflow, /assemblyPin=probe.pin\(path.join\(output,'signed-unix-assembly.json'\),16384,true\)/);
+  assert.match(assemblyWorkflow, /exportVariable\('ASSEMBLY_RECEIPT_SHA256',assemblyPin.image.sha256\)/);
+  assert.ok(assemblyWorkflow.indexOf('assert.equal(probe.pin(receipt,16384).image.sha256,assemblyPin.image.sha256)')
+    < assemblyWorkflow.indexOf("core.exportVariable('APP_PATH'"));
+  assert.match(assemblyWorkflow, /--expected-version 0.1.14 --assembly-receipt "\$ASSEMBLY_RECEIPT" --assembly-receipt-sha256 "\$ASSEMBLY_RECEIPT_SHA256"/);
+  assert.match(assemblyWorkflow, /unix.verifyResources\(path.join\(app,'Contents\/Resources\/modules'\),manifest\)/);
+  assert.match(assemblyWorkflow, /codesign',\['--verify','--deep','--strict',app\]/);
+  assert.match(assemblyWorkflow, /nativeGuiAccepted:false,mcpAccepted:false,migrationAccepted:false,updateAccepted:false,releaseReady:false/);
+  assert.match(assemblyWorkflow, /native-packages\/\*\.dmg/);
+  assert.match(assemblyWorkflow, /if: always\(\) && runner.os == 'macOS'/);
+  assert.match(assemblyWorkflow, /assert.ok\(probe.sameImage\(image,report.windowBitmap.image\)\)/);
+  assert.doesNotMatch(assemblyWorkflow, /AXUIElementPerformAction|accept_usage_terms|mock.*IPC|CGRequestScreenCaptureAccess|screencapture.*-D|release.*publish/);
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const scripts = [...assemblyWorkflow.matchAll(/^          script: \|\n((?:            .*\n)+)/gm)];
+  assert.equal(scripts.length, 2);
+  for (const [, block] of scripts) assert.doesNotThrow(() => new AsyncFunction(block.split('\n').map(line => line.slice(12)).join('\n')));
+});
+test('source receipt preserves distinct established assembly/private source stamps without inventing verification', () => {
+  const good = assemblyReceipt(), identity = probe.assemblyIdentity(receiptBytes(good), 'x86_64', '0.1.14');
+  assert.equal(identity.assemblyCommit, good.assemblyCommit); assert.deepEqual(identity.privateSource, good.privateSource);
+  for (const mutate of [v => v.hubVersion = '0.1.13', v => v.arch = 'aarch64', v => v.platform = 'linux',
+    v => v.assemblyCommit = 'main', v => v.privateSource.sourceTree = 'unknown', v => v.privateSource.buildCommit = 'e'.repeat(40),
+    v => v.privateSource.repository = 'foreign', v => v.privateSource.workflow = 'other', v => v.privateSource.event = 'workflow_dispatch',
+    v => v.privateSource.runId = 0, v => v.privateSource.runAttempt = '1', v => v.privateSource.token = 'not-allowed',
+    v => v.nativeGuiAccepted = true, v => v.releaseReady = true, v => v.privateModulesRecompiled = true,
+    v => v.handoffSha256 = 'bad', v => v.actionAllowed = true]) {
+    const changed = structuredClone(good); mutate(changed);
+    assert.throws(() => probe.assemblyIdentity(receiptBytes(changed), 'x86_64', '0.1.14'));
+  }
+  const bytes = receiptBytes(good);
+  for (const bad of [Buffer.alloc(16385), Buffer.from('{bad'), Buffer.from(bytes.toString().replace('"schemaVersion": 1', '"schemaVersion": 0, "schemaVersion": 1'))]) {
+    assert.throws(() => probe.assemblyIdentity(bad, 'x86_64', '0.1.14'));
+  }
+  assert.match(source, /artifactToImageBindingVerified: false/);
+  assert.match(source, /provenance: 'not-independently-verified-by-probe'/);
+  assert.match(source, /independent-assembly-receipt-hash-mismatch/);
+});
+
+test('native package versions must be bounded actual strings tied to exact owner/plist, never source-version inference', () => {
+  const { owner } = ownership();
+  const good = { ...rootInspection(owner), command: 'package-identity', package: { bundleIdentifier: 'com.creatorworks.hub',
+    bundleExecutable: 'creator-hub', bundleShortVersion: '0.1.14', bundleVersion: '14', infoPlist: structuredClone(owner.process.infoPlist) } };
+  assert.doesNotThrow(() => probe.validatePackageIdentity(good, owner, '0.1.14'));
+  for (const mutate of [r => r.command = 'inspect-root', r => r.package.bundleShortVersion = '0.1.13', r => r.package.bundleVersion = 14,
+    r => r.package.bundleShortVersion = true, r => r.package.bundleVersion = 'a'.repeat(1000), r => r.package.bundleExecutable = 'foreign',
+    r => r.package.bundleIdentifier = 'foreign', r => r.package.infoPlist.sha256 = 'b'.repeat(64),
+    r => r.process.startSeconds++, r => r.window.id++, r => r.rootNativeCFReferencePreserved = false,
+    r => r.nativeGuiAccepted = true, r => r.package.sourceCommit = 'a'.repeat(40), r => delete r.package.bundleVersion]) {
+    const changed = structuredClone(good); mutate(changed);
+    assert.throws(() => probe.validatePackageIdentity(changed, owner, '0.1.14'));
+  }
+  assert.throws(() => probe.validateRootInspection(good, owner));
+  const native = probe.surfaceSource.split('if package {')[1].split('emit(["command": "inspect-root"')[0];
+  assert.match(native, /imageMatches\(app \+ "\/Contents\/Info.plist", plist, 65536, contents: true\)/);
+  assert.match(native, /let fields = try packageFields\(bytes, plist\)/);
+  assert.match(probe.surfaceSource, /PropertyListSerialization.propertyList\(from: bytes/);
+  assert.match(native, /try checkHeldRoot\(\)[\s\S]*?"command": "package-identity"/);
+  assert.doesNotMatch(native, /Bundle\(|appVersion.*GITHUB|AXUIElementPerformAction|write\(/);
 });
 
 test('new output reservation cannot replace original reports or write inside the pinned app', () => {
@@ -334,6 +436,66 @@ function remoteFacts() {
     rootUnchanged: true, withinLimits: true, metadataOnly: true };
 }
 
+function linkFailure(phase = 'before-metadata') {
+  const read = attribute => ({ attribute, axError: 0, axErrorName: 'success', timeoutSetAXError: 0, messageTimeoutSeconds: 0.2,
+    elapsedMilliseconds: 1, returnedCFTypeID: 5, expectedElementCFTypeID: 5, valuePresent: true, cfEqual: true });
+  return { kind: 'remote-links', phase, node: { path: 'root-window/0/0', depth: 2, role: null, pid: 52, rootPID: 42, windowID: 71,
+    referenceKind: 'traversal-node', referenceScope: 'native-invocation', cfTypeID: 5, pidSource: 'native-read' },
+    parent: { ...read('AXParent'), cfEqual: false }, window: read('AXWindow') };
+}
+test('remote failure metadata distinguishes native read error, missing value, wrong type and unequal CF without accepting any', async () => {
+  const { owner } = ownership();
+  for (const phase of ['before-metadata', 'after-metadata']) for (const parent of [
+    { cfEqual: false }, { axError: -25204, axErrorName: 'cannot-complete', valuePresent: false, returnedCFTypeID: null, cfEqual: null },
+    { valuePresent: false, returnedCFTypeID: null, cfEqual: null }, { returnedCFTypeID: 7, cfEqual: null },
+  ]) {
+    const d = linkFailure(phase); Object.assign(d.parent, parent);
+    assert.doesNotThrow(() => probe.validateLinkFailure(d, 'remote-ax-parent-unverified'));
+    let samples = 0;
+    const result = await probe.rootSurfaceDiagnostic(owner, { inspectRoot: async () => rootInspection(owner), sample: async () => {
+      samples++; return { exitCode: 2, signal: null, timedOut: false, receipt: { complete: false, error: 'remote-ax-parent-unverified', errorDetail: d } };
+    } });
+    assert.equal(samples, 1); assert.equal(result.completed, false); assert.equal(result.reason, 'root-surface-capture-unverified');
+    assert.deepEqual(result.surface.errorDetail, d);
+  }
+  const window = linkFailure(); window.parent.cfEqual = true; window.window.cfEqual = false;
+  assert.doesNotThrow(() => probe.validateLinkFailure(window, 'remote-ax-window-unverified'));
+});
+test('remote diagnostic parser refuses malformed phase/status/type/node/value/equality and metadata cannot grant actions', () => {
+  for (const mutate of [d => d.phase = 'later', d => d.node.depth++, d => d.node.path += '/999', d => d.node.pid = d.node.rootPID,
+    d => d.node.title = 'unexpected', d => d.parent.axError = '0', d => d.parent.axError = 2 ** 40,
+    d => d.parent.returnedCFTypeID = -1, d => d.parent.valuePresent = false, d => d.parent.cfEqual = 'false',
+    d => d.parent.axError = -25204, d => d.parent.messageTimeoutSeconds = 20, d => d.parent.elapsedMilliseconds = Infinity,
+    d => d.parent.cfEqual = true, d => d.parent.actionAllowed = true, d => d.window.attribute = 'AXValue']) {
+    const d = linkFailure(); mutate(d); assert.throws(() => probe.validateLinkFailure(d, 'remote-ax-parent-unverified'));
+  }
+  const links = probe.surfaceSource.split('func remoteLinks')[1].split('func visit')[0];
+  assert.equal(links.match(/AXUIElementCopyAttributeValue\(/g).length, 1);
+  assert.match(links, /let parentRead = link\(kAXParentAttribute, traversalParent\), windowRead = link\(kAXWindowAttribute, window\)/);
+  assert.match(links, /status == \.success \? value : nil/);
+  assert.match(links, /catch let failure as Denied[\s\S]*throw Denied\(failure.reason/);
+  assert.doesNotMatch(links, /kAXRoleAttribute|kAXValueAttribute|AXUIElementPerformAction|Thread.sleep|while |for /);
+});
+test('bounded zero/no-value/unsupported child observations retain numeric facts, not claims of document absence', () => {
+  const node = { ...linkFailure().node, role: 'AXGroup', pid: 42 };
+  const d = { operation: 'AXUIElementGetAttributeValueCount', attribute: 'AXChildren', phase: 'traversal', revision: 0,
+    axError: 0, axErrorName: 'success', timeoutSetAXError: 0, returnedCFTypeID: null, elapsedMilliseconds: 1,
+    count: 0, countExact: '0', countVerified: true, node };
+  for (const [axError, axErrorName] of [[0, 'success'], [-25205, 'attribute-unsupported'], [-25212, 'no-value']]) {
+    assert.doesNotThrow(() => probe.validateChildObservations({ childObservations: [{ ...d, axError, axErrorName, countVerified: axError === 0 }], childObservationsTruncated: false }));
+  }
+  for (const mutate of [v => v.childObservations = Array(33).fill(d), v => v.childObservationsTruncated = 'false',
+    v => v.childObservations[0].count = 1, v => v.childObservations[0].countExact = 'bad', v => v.childObservations[0].axError = -25204,
+    v => v.childObservations[0].axErrorName = 'no-value', v => v.childObservations[0].node.role = null,
+    v => v.childObservations[0].returnedCFTypeID = 5, v => v.childObservations[0].elapsedMilliseconds = -1]) {
+    const v = { childObservations: [structuredClone(d)], childObservationsTruncated: false }; mutate(v);
+    assert.throws(() => probe.validateChildObservations(v));
+  }
+  assert.match(probe.surfaceSource, /childObservations.count < 32/);
+  assert.match(probe.surfaceSource, /else \{ childObservationsTruncated = true \}/);
+  assert.match(probe.surfaceSource, /childObservations = \[\]; childObservationsTruncated = false/);
+});
+
 test('remote read policy requires every native association, identity, fence, bound and metadata-only fact', () => {
   assert.equal(probe.remoteReadPolicy(remoteFacts()).readOnly, true);
   for (const key of Object.keys(remoteFacts())) {
@@ -374,9 +536,9 @@ test('generated Swift enforces the same fail-closed policy; facts are native, no
   for (const key of Object.keys(remoteFacts())) assert.ok(policy.includes(`facts["${key}"] == true`));
   const links = probe.surfaceSource.split('func remoteLinks')[1].split('func visit')[0];
   assert.match(links, /var parentMatches = false, windowMatches = false/);
-  assert.match(links, /let traversalParent = traversalParent, let linked = attr\(item, kAXParentAttribute\), CFGetTypeID\(linked\) == AXUIElementGetTypeID\(\)/);
+  assert.match(links, /let traversalParent = traversalParent, let linked = parentRead\.0, CFGetTypeID\(linked\) == AXUIElementGetTypeID\(\)/);
   assert.match(links, /parentMatches = CFEqual\(linked as! AXUIElement, traversalParent\)/);
-  assert.match(links, /let linked = attr\(item, kAXWindowAttribute\), CFGetTypeID\(linked\) == AXUIElementGetTypeID\(\)/);
+  assert.match(links, /let linked = windowRead\.0, CFGetTypeID\(linked\) == AXUIElementGetTypeID\(\)/);
   assert.match(links, /windowMatches = CFEqual\(linked as! AXUIElement, window\)/);
   assert.doesNotMatch(links, /JSONSerialization|pbi_ppid|pbi_uid|proc_pidpath|kAXRoleAttribute|kAXTitleAttribute|kAXDescriptionAttribute|kAXChildrenAttribute/);
 });
@@ -391,17 +553,17 @@ test('remote metadata is bracketed by native Root/CF/process/link fences before 
   const before = visit.indexOf('if remote {'), metadata = visit.indexOf('kAXRoleAttribute');
   assert.ok(before >= 0 && visit.indexOf('try checkHeldRoot()', before) < metadata);
   assert.ok(visit.indexOf('remoteBefore = try remoteProcess(readPID)', before) < metadata);
-  assert.ok(visit.indexOf('try remoteLinks(item, traversalParent, depth)', before) < metadata);
+  assert.ok(visit.indexOf('try remoteLinks(item, traversalParent, depth, path, readPID, "before-metadata")', before) < metadata);
   const descendants = visit.indexOf('let descendants = try children(item, kAXChildrenAttribute, "traversal", childNode)');
   const after = visit.indexOf('if remote {', descendants), published = visit.indexOf('rows.append(row)');
   assert.ok(descendants > metadata && after > descendants && published > after);
   assert.match(visit.slice(after, published), /try elementPID\(item\) == readPID/);
   assert.match(visit.slice(after, published), /try remoteProcess\(readPID\) == remoteBefore/);
-  assert.match(visit.slice(after, published), /try remoteLinks\(item, traversalParent, depth\)[\s\S]*?try checkHeldRoot\(\)/);
+  assert.match(visit.slice(after, published), /try remoteLinks\(item, traversalParent, depth, path, readPID, "after-metadata"\)[\s\S]*?try checkHeldRoot\(\)/);
   assert.match(visit.slice(published), /try visit\(child, depth \+ 1, path \+ "\/" \+ String\(index\), item\)/);
   // Association checks precede the seen check, so a repeated CF object cannot
   // silently bypass refusal when reached through an inconsistent parent.
-  assert.ok(visit.indexOf('try remoteLinks(item, traversalParent, depth)') < visit.indexOf('if seen.contains'));
+  assert.ok(visit.indexOf('try remoteLinks(item, traversalParent, depth, path, readPID, "before-metadata")') < visit.indexOf('if seen.contains'));
 });
 
 test('remote metadata keeps actual PID, finite traversal/time/message limits and no action/value/permission API', () => {
@@ -693,6 +855,94 @@ async function compileSwift(file, binary) {
   });
   assert.equal(result.code, 0, errors); assert.equal(result.signal, null);
 }
+
+test('SDK link diagnostics and XML/binary package versions execute actual pure branches without live AX reads', { skip: process.platform !== 'darwin' }, async () => {
+  const declarations = probe.surfaceSource.split('\ndo {\n')[0];
+  const links = ('func remoteLinks(' + probe.surfaceSource.split('    func remoteLinks(')[1].split('    func visit(')[0])
+    .replace('AXUIElementSetMessagingTimeout(item, 0.2)', 'fixtureLinkTimeout(item, 0.2)')
+    .replace('AXUIElementCopyAttributeValue(item, name as CFString, &value)', 'fixtureLinkRead(item, name as CFString, &value)');
+  const fixture = declarations + String.raw`
+let pid: Int32 = 42, id: UInt32 = 71
+let window = AXUIElementCreateApplication(42), remote = AXUIElementCreateApplication(52)
+let different = AXUIElementCreateApplication(99)
+let deadline = ProcessInfo.processInfo.systemUptime + 4
+var seen = [AXUIElement](), linkCalls = [String]()
+var parentStatus = AXError.success, windowStatus = AXError.success
+var parentValue: CFTypeRef?, windowValue: CFTypeRef?
+func fixtureLinkTimeout(_ item: AXUIElement, _ seconds: Float) -> AXError { return .success }
+func fixtureLinkRead(_ item: AXUIElement, _ name: CFString, _ value: inout CFTypeRef?) -> AXError {
+    linkCalls.append(name as String)
+    if name as String == kAXParentAttribute { value = parentValue; return parentStatus }
+    value = windowValue; return windowStatus
+}
+` + links + String.raw`
+do {
+    var failures = [[String: Any]]()
+    var nativePlists = [String]()
+    for phase in ["before-metadata", "after-metadata"] {
+        for (status, value, reason) in [(AXError.noValue, nil as CFTypeRef?, "remote-ax-parent-unverified"),
+            (.cannotComplete, nil, "remote-ax-parent-unverified"), (.success, nil, "remote-ax-parent-unverified"),
+            (.success, "wrong" as CFString, "remote-ax-parent-unverified"), (.success, different, "remote-ax-parent-unverified"),
+            (.success, window, "remote-ax-window-unverified")] {
+            parentStatus = status; parentValue = value; windowStatus = .success
+            windowValue = reason == "remote-ax-window-unverified" ? different : window; linkCalls = []
+            var refused = false
+            do { try remoteLinks(remote, window, 2, "root-window/0/0", 52, phase) }
+            catch let failure as Denied {
+                refused = true; try check(failure.reason == reason, "fixture-original-refusal-drift")
+                guard let detail = failure.detail else { throw Denied("fixture-detail-missing") }
+                failures.append(["error": reason, "errorDetail": detail])
+            }
+            try check(refused && linkCalls == [kAXParentAttribute, kAXWindowAttribute], "fixture-extra-read-or-accepted")
+        }
+    }
+    parentStatus = .success; parentValue = window; windowValue = window; linkCalls = []
+    try remoteLinks(remote, window, 2, "root-window/0/0", 52, "before-metadata")
+    try check(linkCalls == [kAXParentAttribute, kAXWindowAttribute], "fixture-valid-read-count")
+    let good: [String: Any] = ["CFBundleIdentifier": "com.creatorworks.hub", "CFBundleExecutable": "creator-hub",
+        "CFBundleShortVersionString": "0.1.14", "CFBundleVersion": "14"]
+    for format in [PropertyListSerialization.PropertyListFormat.xml, .binary] {
+        let data = try PropertyListSerialization.data(fromPropertyList: good, format: format, options: 0)
+        nativePlists.append(data.base64EncodedString())
+        let fields = try packageFields(data, ["sha256": "fixture-only"])
+        try check(fields["bundleShortVersion"] as? String == "0.1.14" && fields["bundleVersion"] as? String == "14", "fixture-version-drift")
+        for (key, value) in [("CFBundleIdentifier", "foreign" as Any), ("CFBundleExecutable", "foreign"),
+            ("CFBundleShortVersionString", NSNumber(value: 14)), ("CFBundleVersion", NSNumber(value: true)),
+            ("CFBundleVersion", ""), ("CFBundleShortVersionString", "1.2.3.4.5"), ("CFBundleVersion", String(repeating: "9", count: 1000))] {
+            var bad = good; bad[key] = value
+            let bytes = try PropertyListSerialization.data(fromPropertyList: bad, format: format, options: 0)
+            var refused = false; do { _ = try packageFields(bytes, [:]) } catch { refused = true }
+            try check(refused, "fixture-coerced-or-malformed-version")
+        }
+        var missing = good; missing.removeValue(forKey: "CFBundleVersion")
+        let bytes = try PropertyListSerialization.data(fromPropertyList: missing, format: format, options: 0)
+        var refused = false; do { _ = try packageFields(bytes, [:]) } catch { refused = true }
+        try check(refused, "fixture-missing-version-accepted")
+    }
+    for data in [Data(), Data(repeating: 0, count: 65537), Data("malformed".utf8)] {
+        var refused = false; do { _ = try packageFields(data, [:]) } catch { refused = true }
+        try check(refused, "fixture-bad-plist-accepted")
+    }
+    emit(["failures": failures, "nativePlists": nativePlists, "packageFixturesVerified": true, "actionAttempted": false])
+} catch { emit(["error": String(describing: error)]); exit(2) }
+`;
+  const file = path.join(scratch, 'link-package-fixture.swift'), binary = path.join(scratch, 'link-package-fixture');
+  fs.writeFileSync(file, fixture, { flag: 'wx' }); await compileSwift(file, binary);
+  const result = spawnSync(binary, [], { encoding: 'utf8', timeout: 15000, maxBuffer: 128 * 1024 });
+  assert.equal(result.status, 0, result.stderr || result.stdout); assert.equal(result.signal, null);
+  const receipt = JSON.parse(result.stdout); assert.equal(receipt.failures.length, 12);
+  for (const d of receipt.failures) probe.validateLinkFailure(d.errorDetail, d.error);
+  assert.equal(receipt.packageFixturesVerified, true); assert.equal(receipt.actionAttempted, false);
+  assert.equal(receipt.nativePlists.length, 2);
+  for (const encoded of receipt.nativePlists) {
+    const parsed = spawnSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', '-'],
+      { input: Buffer.from(encoded, 'base64'), encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
+    assert.equal(parsed.status, 0, parsed.stderr || parsed.stdout); assert.equal(parsed.signal, null);
+    const plist = JSON.parse(parsed.stdout); assert.equal(plist.CFBundleShortVersionString, '0.1.14');
+    assert.equal(plist.CFBundleVersion, '14');
+  }
+  for (const key of Object.keys(probe.acceptance)) assert.equal(receipt[key], false);
+});
 
 test('actual Mac SDK compiles the read-only sampler; local execution refuses before AX inspection', { skip: process.platform !== 'darwin' }, async t => {
   const file = path.join(scratch, 'surface.swift'), binary = path.join(scratch, 'surface');

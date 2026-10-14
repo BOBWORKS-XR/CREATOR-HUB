@@ -422,3 +422,152 @@ handlers, observing native persistence and resulting UI. No mocked IPC, direct
 removal may replace consent. The instrumented build's navigation result remains
 distinct from unchanged-package/native product acceptance. No code, build,
 workflow dispatch, commit or push was performed during this artifact audit.
+
+## Fresh14 Diagnostic Receipt Contract
+
+The sampler now retains the original remote-link refusal plus a bounded
+`errorDetail.kind=remote-links`: initial/post-metadata phase, cached node
+path/depth/PID/Root PID/window ID, and the actual AXParent/AXWindow error,
+messaging-timeout error, elapsed time, returned/expected CF types, value presence
+and CF equality (null when not established). It uses the existing two native
+attribute reads, never a fallback read or action. Peer/process/role/CF fences,
+20-second readiness and 4-second traversal deadlines remain unchanged.
+`axDiagnostics.childObservations` separately retains zero/no-value/unsupported
+child-count results from the latest traversal, at most32 with an explicit
+truncation flag. No-value/unsupported is not a verified zero count. These fields
+are diagnostic facts, never ownership, absence or action authority.
+
+After owner identification, `package-identity.json` records the actual
+CFBundleIdentifier, CFBundleExecutable, CFBundleShortVersionString and
+CFBundleVersion. XML/binary Info.plist is parsed from the same bounded descriptor
+bytes whose hash/device/inode/size were checked against the owner, between
+unchanged native Root fences. Missing/numeric/boolean/malformed version values,
+owner/CF/image drift and an unexpected requested version refuse; there is no
+source-version or display-title fallback. The action helper is unchanged, with
+reviewed LF-normalized SHA256
+`212a8c94149d159da69c4161220333969fbc71bd555ee951c26d9ff04bae2a68`.
+
+The legacy CLI still records actual package identity but source coverage is
+explicitly unresolved. Fresh signed assembly diagnostics add all three options:
+
+```sh
+node scripts/native-macos-app-probe.cjs \
+  --app "$APP_PATH" --hub-sha256 "$HUB_SHA256" --output "$RUNNER_TEMP/root-app-probe" \
+  --expected-version 0.1.14 \
+  --assembly-receipt "$RUNNER_TEMP/package-proof/signed-unix-assembly.json" \
+  --assembly-receipt-sha256 "$ASSEMBLY_RECEIPT_SHA256"
+```
+
+The receipt must be the existing canonical `signed-unix-assembly.json` schema,
+outside the app and inside runner temp, independently hash-pinned, bounded16KiB,
+and architecture/version matched. The report retains `assemblyCommit` separately
+from the private payload's source/build/tree/run/attempt and handoff hash, and
+records the probe checkout independently. These are caller-hash-bound metadata,
+not a new signature or artifact-to-executable proof:
+`artifactToImageBindingVerified:false` remains explicit. The parent must retain
+its independently checked artifact/package-to-image binding. No key is read.
+
+### Parent-Owned Fresh Workflow Hooks
+
+Run `38607998719` assembles the outer source `7eb00ad` with private signed source
+`a517375` from run `38599976833`. Its no-bundle outputs alone are not an `.app`.
+No workflow or build was changed/executed by this diagnostic task. To obtain a
+real current14 capture, the parent needs these bounded hooks:
+
+1. Pin the successful matching Mac job, run/attempt/source, artifact ID/size/ZIP
+   digest and existing assembly receipt. Do not reuse the old run38463917023
+   candidate bindings or substitute the probe checkout SHA for package source.
+2. On each matching Mac runner, use the existing verified nine-file signed input
+   staging and handoff hash. **Packaging must run in the already admitted
+   `.github/workflows/unix-managed-assembly.yml` job**, because the builder
+   checks its exact workflow identity and clean source. A standalone Root probe
+   workflow cannot invoke this builder under current admission; do not spoof
+   `GITHUB_WORKFLOW_REF` or widen admission. Either append the Mac probe hooks
+   to that assembly job, or let a separate probe lane consume its packaged app.
+   The existing signed-assembly command needs the
+   supported `--installer` option to produce and validate an actual native app:
+
+   ```sh
+   npm run build:unified -- ci-mac-root-fresh014 --installer --managed \
+     --experimental-unix --experimental-unix-writable \
+     --signed-unix-input "$RUNNER_TEMP/signed-unix-input"
+   ```
+
+   Keep the existing assembly admission, trusted signatures, private-source diff,
+   resource/hash/mode and native package checks. This compiles only the outer;
+   do not reconstruct an app from raw `creator-hub` or fabricate Info.plist.
+   The resulting assembly commit belongs to this packaging run, not necessarily
+   7eb00ad; the private source must remain the exact verified a517375 inputs.
+3. Stage the actual validated app in a new disposable runner-temp directory and
+   supply its independently bound bundled executable hash, not an assumed hash
+   from the no-bundle binary. Stage/hash-pin its assembly receipt separately.
+4. Run both Mac JS test files on the SDK first, then the fresh CLI above with the
+   unchanged two hosted opt-ins. Retain `package-identity.json`,
+   `assembly-receipt.json`, report source identities, surface detail/child
+   observations, exact-owned bitmap and normal-close/original-child exit proof
+   even when AX readiness refuses. All product acceptance flags stay false.
+
+Local focused checkpoint: 65 tests passed, zero failed, 122 Mac SDK cases skipped
+on Windows. The new SDK fixtures exercise the actual emitted link refusal branches
+and XML/binary plist parsing, but have not run on a Mac in this task. The action
+helper/hash is unchanged; the new sampler still requires native compilation and
+fresh packaged execution. No current14 rendering/terms/navigation acceptance is
+claimed from these tests or downloaded no-bundle artifacts.
+
+Run38607998719's Mac assembly jobs were independently observed completed/success.
+Staged ZIPs are retained in `artifacts/mac-probe-assembly-38607998719/` (ARM at
+the root, Intel in `intel/`); only their bounded assembly JSON was extracted,
+and no candidate code was executed. Both parsed receipts bind outer commit
+`7eb00ad8a61db307c71bb95459ac85b7a957088d` and private commit
+`a517375633f149aed719c8d5d84031f3303c0bcd`, private run38599976833, declared14.
+This is assembly/source metadata, not an installed native bundle-version read.
+
+| Staged Artifact | API ZIP Bytes | Verified API ZIP SHA256 | Extracted Assembly Receipt SHA256 |
+| --- | --- | --- | --- |
+| ARM11916418273 | 54532809 | `0a33c48dda3bbc1846e079a85467af436148d4b4a8430caa622928610c9f40d7` | `ff6205ccba5f24d56956321fe6932e8cfcd31a22151cc745fe7636fd02574883` |
+| Intel11915954494 | 56059062 | `e528730c81f503aee15c3ed8e6cff52093f41f7f3181c8ed1bdfb19800808cae` | `5d76d8d82126efe587f2bfeecee7444e36accfaa7e98497049d5dea3cb87e3a5` |
+
+### Fresh Workflow Checkpoint (Not Run Yet)
+
+The user authorized the admitted `unix-managed-assembly.yml` hook changes. Its
+display name now identifies fresh14 Mac packaging/Root diagnostics; the existing
+single path-filtered validation-branch push and manual input shape are unchanged.
+All6410998xx input IDs, sizes, ZIP/handoff hashes, draft-container checks and
+split stage-input-write/assembly-read permissions remain unchanged. Linux keeps
+the empty installer argument array; only Mac receives `--installer`.
+
+Mac SDK fixtures run before assembly/launch. The existing builder validates the
+real app and DMG, resource/mode/signature integrity and exact build-bound
+descriptor. The new pre-launch hook rechecks primary package/assembly/executable/
+Info.plist pins, parses only pinned plist bytes with native plutil, and records
+raw `Info.plist` plus `package-info.json` before enforcing actual14. Mismatch
+refuses app launch while retaining the actual metadata. The disposable copy is
+resource/signature/image checked before exporting its path/hash. The independent
+assembly receipt SHA comes from the primary build output before copying, not
+from a supplied assertion or the diagnostic receipt itself.
+
+The probe receives all fresh14 options above. Its separate native
+`package-identity.json` must bind the actual live Root and held window. Always-run
+retainers keep DMG, integrity/manifests/source metadata, numeric AX refusal phase,
+normal-close and original-child-exit reports. The PNG is retained only when the
+exact-owned-window bitmap receipt and byte/image pins match; no desktop screenshot
+or alternate window capture is added. All product acceptance flags stay false,
+including when the smaller Root diagnostic completes successfully.
+
+Local checkpoint: 67 focused tests pass, zero fail; 122 SDK cases remain skipped
+on Windows. YAML parsing, inline JavaScript syntax, input/permission/trigger
+guards and whitespace checks pass. The SDK fixture now also verifies the exact
+plutil stdin arguments against Foundation-generated XML/binary plists on Mac.
+No native packaging, workflow run, commit or push was performed locally. The
+parent must review and push this workflow once; source checks do not establish
+actual current14 GUI capture or terms/navigation acceptance.
+
+Concrete real GUI operation already implemented: one verified Root-native close
+button AXPress followed by the live/termination and original-child-exit proof.
+It must still be captured on this fresh app before any current14 claim. The next
+terms operation would be one actual checkbox interaction, observing the normal
+continue-button enable transition without accepting terms yet. It is currently
+blocked by unverified document/control associations and the absence of any
+authorized Root-terms writable action in the helper. Remote read association,
+rendered pixels, source selectors or unit fixtures do not supply that capability;
+no fake IPC, storage seeding, new remote press or blanket CF coercion is added.

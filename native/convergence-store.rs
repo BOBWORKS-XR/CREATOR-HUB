@@ -5,6 +5,13 @@
 #[path = "../modules/mcp/launcher/src-tauri/src/settings_backup.rs"]
 mod storage;
 
+// Shared with the MCP product-settings recognizer once native Unix payload pins
+// are established. This is not enabled migration or an uninstall authority.
+#[cfg(any(unix, test))]
+#[allow(dead_code)]
+#[path = "convergence-server-unix.rs"]
+pub mod unix_server;
+
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
@@ -313,6 +320,10 @@ pub fn validate_import(
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "convergence-store-unix.test.rs"]
+mod unix_store_tests;
 
 #[cfg(test)]
 mod tests {

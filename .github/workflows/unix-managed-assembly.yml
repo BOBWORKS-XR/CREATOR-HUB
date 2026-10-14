@@ -1,4 +1,4 @@
-name: Fresh signed native Unix Hub assembly (not acceptance)
+name: Fresh14 Mac package and owned Root diagnostics; Unix assembly (not acceptance)
 on:
   push:
     branches: [validation/unix-assembly-014]
@@ -91,6 +91,11 @@ jobs:
         run: |
           node --test scripts/assemble-unix-payload.test.cjs scripts/sign-unix-payload.test.cjs scripts/unix-managed-payload.test.cjs
           python3 -B scripts/stage-signed-unix-handoff.test.py
+      - name: Compile and test the exact Mac SDK diagnostic and action-helper guards
+        if: runner.os == 'macOS'
+        env:
+          CREATOR_MACOS_OWNED_GUI_TEST: '1'
+        run: node --test scripts/native-macos-app-probe.test.cjs scripts/native-macos-window.test.cjs
       - uses: actions/download-artifact@v4
         with:
           name: signed-unix-input-${{ matrix.target }}
@@ -104,10 +109,84 @@ jobs:
           temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
           python3 -B scripts/stage-signed-unix-handoff.py "$temp/assembly-signed-input/signed-unix-handoff.zip" "$ZIP_SHA256" "$ZIP_BYTES" "$temp/signed-unix-input"
       - name: Verify trusted handoff and compile only the outer native Hub
+        id: package
+        shell: bash
         run: |
           set -euo pipefail
           temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
-          npm run build:unified -- ci-signed-unix-hub --managed --experimental-unix --experimental-unix-writable --signed-unix-input "$temp/signed-unix-input"
+          installer=()
+          if [[ "$RUNNER_OS" == 'macOS' ]]; then installer=(--installer); fi
+          npm run build:unified -- ci-signed-unix-hub "${installer[@]}" --managed --experimental-unix --experimental-unix-writable --signed-unix-input "$temp/signed-unix-input"
+      - name: Bind the actual packaged Mac app, native version and primary assembly receipt
+        if: runner.os == 'macOS'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+            const {execFileSync}=require('node:child_process');
+            const probe=require('./scripts/native-macos-app-probe.cjs'),unix=require('./scripts/unix-package-payload.cjs');
+            const output=fs.realpathSync('artifacts/unified/ci-signed-unix-hub');
+            const temp=fs.realpathSync(process.env.RUNNER_TEMP),proof=path.join(temp,'fresh-root-package');
+            const arch=process.env.RUNNER_ARCH==='ARM64'?'aarch64':process.env.RUNNER_ARCH==='X64'?'x86_64':null;
+            assert.ok(arch);assert.equal(process.platform,'darwin');
+            const integrityPin=probe.pin(path.join(output,'unix-package-integrity.json'),1048576,true);
+            const integrity=JSON.parse(integrityPin.bytes);
+            assert.equal(integrity.integrityPassed,true);assert.equal(integrity.platform,'macos');assert.equal(integrity.arch,arch);
+            assert.equal(integrity.experimental,true);assert.equal(integrity.mcpMode,'writable');
+            assert.equal(integrity.writableGuiAccepted,false);assert.equal(integrity.releaseReady,false);
+            assert.deepEqual(integrity.packages.map(p=>p.format),['app','dmg']);
+            const [appRecord,dmgRecord]=integrity.packages;
+            assert.equal(appRecord.path,'native-packages/Creator Hub.app');
+            assert.match(dmgRecord.path,/^native-packages\/[^/\\]+\.dmg$/);
+            assert.equal(dmgRecord.hubSha256,appRecord.hubSha256);assert.deepEqual(dmgRecord.files,appRecord.files);
+            const sourceApp=path.join(output,appRecord.path),sourceExe=path.join(sourceApp,'Contents/MacOS/creator-hub');
+            const sourceInfo=path.join(sourceApp,'Contents/Info.plist');
+            const executablePin=probe.pin(sourceExe),infoPin=probe.pin(sourceInfo,65536,true);
+            assert.equal(executablePin.image.sha256,appRecord.hubSha256);
+            const dmgPin=probe.pin(path.join(output,dmgRecord.path),512*1024*1024);
+            assert.equal(dmgPin.image.sha256,dmgRecord.sha256);
+            const assemblyPin=probe.pin(path.join(output,'signed-unix-assembly.json'),16384,true);
+            const source=probe.assemblyIdentity(assemblyPin.bytes,arch,'0.1.14');
+            assert.equal(source.assemblyCommit,process.env.GITHUB_SHA);
+            assert.equal(source.privateSource.sourceCommit,'a517375633f149aed719c8d5d84031f3303c0bcd');
+            assert.equal(source.privateSource.runId,38599976833);assert.equal(source.handoffSha256,process.env.CREATOR_UNIX_HANDOFF_SHA256);
+            fs.mkdirSync(proof,{mode:0o700});
+            const flags={nativeGuiAccepted:false,mcpAccepted:false,migrationAccepted:false,updateAccepted:false,releaseReady:false};
+            fs.writeFileSync(path.join(proof,'Info.plist'),infoPin.bytes,{flag:'wx',mode:0o600});
+            const info=JSON.parse(execFileSync('/usr/bin/plutil',['-convert','json','-o','-','--','-'],
+              {input:infoPin.bytes,encoding:'utf8',timeout:15000,maxBuffer:65536}));
+            fs.writeFileSync(path.join(proof,'package-info.json'),JSON.stringify({schemaVersion:1,diagnosticOnly:true,...flags,
+              phase:'prelaunch-package-identity',primaryInfoPlistImage:infoPin.image,actualBundle:info},null,2),{flag:'wx',mode:0o600});
+            assert.equal(info.CFBundleIdentifier,'com.creatorworks.hub');assert.equal(info.CFBundleExecutable,'creator-hub');
+            assert.equal(info.CFBundleShortVersionString,'0.1.14');
+            assert.equal(typeof info.CFBundleVersion,'string');assert.match(info.CFBundleVersion,/^\d{1,6}(?:\.\d{1,6}){0,3}$/);
+            const app=path.join(proof,'Creator Hub.app'),receipt=path.join(proof,'signed-unix-assembly.json');
+            fs.cpSync(sourceApp,app,{recursive:true,verbatimSymlinks:true,errorOnExist:true,force:false});
+            fs.copyFileSync(path.join(output,'signed-unix-assembly.json'),receipt,fs.constants.COPYFILE_EXCL);
+            const manifest=JSON.parse(probe.pin(path.join(output,'builtin-manifest.json'),1048576,true).bytes);
+            assert.equal(manifest.platform,'macos');assert.equal(manifest.arch,arch);assert.ok(manifest.managedRouting);
+            assert.deepEqual(unix.verifyResources(path.join(app,'Contents/Resources/modules'),manifest),appRecord.files);
+            execFileSync('/usr/bin/codesign',['--verify','--deep','--strict',app],{timeout:30000,maxBuffer:65536});
+            assert.equal(probe.pin(path.join(app,'Contents/MacOS/creator-hub')).image.sha256,executablePin.image.sha256);
+            assert.equal(probe.pin(path.join(app,'Contents/Info.plist'),65536).image.sha256,infoPin.image.sha256);
+            assert.equal(probe.pin(receipt,16384).image.sha256,assemblyPin.image.sha256);
+            for(const [name,expected,max] of [['unix-package-integrity.json',integrityPin.image,1048576],
+              ['signed-unix-assembly.json',assemblyPin.image,16384]]) assert.ok(probe.sameImage(probe.pin(path.join(output,name),max).image,expected));
+            assert.ok(probe.sameImage(probe.pin(sourceExe).image,executablePin.image));
+            assert.ok(probe.sameImage(probe.pin(sourceInfo,65536).image,infoPin.image));
+            fs.writeFileSync(path.join(proof,'package-probe-binding.json'),JSON.stringify({schemaVersion:1,diagnosticOnly:true,...flags,
+              source,primaryAssemblyImage:assemblyPin.image,primaryIntegrityImage:integrityPin.image,
+              primaryExecutableImage:executablePin.image,primaryInfoPlistImage:infoPin.image,dmg:dmgRecord,actualBundle:info},null,2),{flag:'wx',mode:0o600});
+            core.exportVariable('APP_PATH',app);core.exportVariable('HUB_SHA256',appRecord.hubSha256);
+            core.exportVariable('ASSEMBLY_RECEIPT',receipt);core.exportVariable('ASSEMBLY_RECEIPT_SHA256',assemblyPin.image.sha256);
+      - name: Capture fresh14 Root readiness, exact-owned bitmap and normal native close
+        if: runner.os == 'macOS'
+        env:
+          CREATOR_MACOS_APP_PROBE: '1'
+          CREATOR_MACOS_OWNED_GUI_TEST: '1'
+        run: |
+          node scripts/native-macos-app-probe.cjs --app "$APP_PATH" --hub-sha256 "$HUB_SHA256" --output "$RUNNER_TEMP/root-app-probe" \
+            --expected-version 0.1.14 --assembly-receipt "$ASSEMBLY_RECEIPT" --assembly-receipt-sha256 "$ASSEMBLY_RECEIPT_SHA256"
       - name: Retain signed build evidence, not publication or migration acceptance
         if: always()
         uses: actions/upload-artifact@v4
@@ -120,6 +199,50 @@ jobs:
             artifacts/unified/ci-signed-unix-hub/builtin-manifest.pre-wrapper.json
             artifacts/unified/ci-signed-unix-hub/builtin-manifest.preparation.json
             artifacts/unified/ci-signed-unix-hub/signed-unix-assembly.json
+            artifacts/unified/ci-signed-unix-hub/unix-package-integrity.json
+            artifacts/unified/ci-signed-unix-hub/native-packages/*.dmg
             artifacts/unified/ci-signed-unix-hub/creator-hub
             artifacts/unified/ci-signed-unix-hub/modules.tar.gz
             artifacts/unified/ci-signed-unix-hub/modules/
+      - name: Retain only owned fresh14 package metadata and Root diagnostic reports, including refusals
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh14-mac-root-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/fresh-root-package/Info.plist
+            ${{ runner.temp }}/fresh-root-package/package-info.json
+            ${{ runner.temp }}/fresh-root-package/package-probe-binding.json
+            ${{ runner.temp }}/fresh-root-package/signed-unix-assembly.json
+            ${{ runner.temp }}/root-app-probe/*.json
+            ${{ runner.temp }}/root-app-probe/*.stdout
+            ${{ runner.temp }}/root-app-probe/*.stderr
+            ${{ runner.temp }}/root-app-probe/window-bitmap/receipt.json
+      - name: Admit only a completed exact-owned-window bitmap diagnostic
+        if: always() && runner.os == 'macOS'
+        id: bitmap
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+          const probe=require('./scripts/native-macos-app-probe.cjs');
+          const root=path.join(fs.realpathSync(process.env.RUNNER_TEMP),'root-app-probe');
+          try {
+            const report=JSON.parse(fs.readFileSync(path.join(root,'report.json'),'utf8'));
+            if(report.windowBitmap?.completed!==true||report.windowBitmap.diagnosticOnly!==true) process.exit(0);
+            const file=path.join(root,'window-bitmap','root-window.png'),image=probe.bitmapImage(file);
+            assert.ok(probe.sameImage(image,report.windowBitmap.image));
+            for(const key of Object.keys(probe.acceptance)) assert.equal(report.windowBitmap[key],false);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT,'completed=true\n');
+          } catch(error) { if(error.code!=='ENOENT') throw error; }
+          NODE
+      - name: Retain completed owned-window bitmap, never another desktop surface
+        if: always() && runner.os == 'macOS' && steps.bitmap.outputs.completed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh14-mac-bitmap-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/root-app-probe/window-bitmap/root-window.png
+          retention-days: 7
+          if-no-files-found: error

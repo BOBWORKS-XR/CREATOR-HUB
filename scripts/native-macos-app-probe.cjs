@@ -16,10 +16,16 @@ function admission(env, platform, arch) {
   requireThat(env.RUNNER_ARCH === (arch === 'arm64' ? 'ARM64' : 'X64'), 'runner-architecture-mismatch');
 }
 function options(args) {
-  requireThat(args.length === 6 && args[0] === '--app' && args[2] === '--hub-sha256' && args[4] === '--output',
-    'expected --app APP_PATH --hub-sha256 INDEPENDENT_SHA256 --output NEW_DIRECTORY');
+  requireThat([6, 12].includes(args.length) && args[0] === '--app' && args[2] === '--hub-sha256' && args[4] === '--output',
+    'expected --app APP_PATH --hub-sha256 INDEPENDENT_SHA256 --output NEW_DIRECTORY [--expected-version VERSION --assembly-receipt FILE --assembly-receipt-sha256 INDEPENDENT_SHA256]');
   requireThat(/^[a-f0-9]{64}$/.test(args[3]), 'independent-hub-sha256-required');
-  return { app: args[1], hubSha256: args[3], output: args[5] };
+  const result = { app: args[1], hubSha256: args[3], output: args[5] };
+  if (args.length === 12) {
+    requireThat(args[6] === '--expected-version' && args[8] === '--assembly-receipt' && args[10] === '--assembly-receipt-sha256'
+      && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(args[7]) && /^[a-f0-9]{64}$/.test(args[11]), 'independent-package-identity-required');
+    Object.assign(result, { expectedVersion: args[7], assemblyReceipt: args[9], assemblyReceiptSha256: args[11] });
+  }
+  return result;
 }
 function inside(root, value) { return value.startsWith(root + path.sep); }
 function canonical(value) {
@@ -74,6 +80,39 @@ function validateOwner(owner, expected) {
     && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(b[key]))
     && Math.abs(b.x) <= 32768 && Math.abs(b.y) <= 32768 && b.width > 0 && b.height > 0
     && b.width <= 16384 && b.height <= 16384, 'owned-root-window-bounds-unverified');
+}
+function assemblyIdentity(bytes, platformArch, expectedVersion) {
+  requireThat(Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 16384, 'assembly-receipt-size-refused');
+  const value = JSON.parse(bytes.toString('utf8'));
+  const fields = ['schemaVersion', 'product', 'platform', 'arch', 'hubVersion', 'assemblyCommit', 'privateSource', 'handoffSha256',
+    'mcpMode', 'privateModulesRecompiled', 'privateModulesResigned', 'nativeGuiAccepted', 'releaseReady'];
+  const s = value?.privateSource;
+  const sourceFields = ['repository', 'repositoryId', 'workflow', 'event', 'sourceCommit', 'buildCommit', 'sourceTree', 'runId', 'runAttempt'];
+  const sha = v => typeof v === 'string' && /^[a-f0-9]{40}$/.test(v);
+  requireThat(bytes.toString('utf8').trim() === JSON.stringify(value, null, 2)
+    && value && Object.keys(value).length === fields.length && Object.keys(value).every(k => fields.includes(k))
+    && value.schemaVersion === 1 && value.product === 'com.creatorworks.hub.unix-signed-assembly'
+    && value.platform === 'macos' && value.arch === platformArch && value.hubVersion === expectedVersion
+    && sha(value.assemblyCommit) && /^[a-f0-9]{64}$/.test(value.handoffSha256)
+    && value.mcpMode === 'writable' && value.privateModulesRecompiled === false && value.privateModulesResigned === false
+    && value.nativeGuiAccepted === false && value.releaseReady === false
+    && s && Object.keys(s).length === sourceFields.length && Object.keys(s).every(k => sourceFields.includes(k))
+    && s.repository === 'BOBWORKS-XR/CREATOR-HUB' && s.repositoryId === 1364807512
+    && s.workflow === '.github/workflows/unix-managed-payload.yml' && s.event === 'push'
+    && [s.sourceCommit, s.buildCommit, s.sourceTree].every(sha) && s.sourceCommit === s.buildCommit
+    && [s.runId, s.runAttempt].every(v => Number.isSafeInteger(v) && v > 0), 'assembly-receipt-identity-invalid');
+  return { assemblyCommit: value.assemblyCommit, privateSource: s, handoffSha256: value.handoffSha256,
+    hubVersion: value.hubVersion, platform: value.platform, arch: value.arch };
+}
+function validatePackageIdentity(receipt, owner, expectedVersion) {
+  const { package: p, ...inspection } = receipt || {};
+  validateRootInspection({ ...inspection, command: 'inspect-root' }, owner);
+  const fields = ['bundleIdentifier', 'bundleExecutable', 'bundleShortVersion', 'bundleVersion', 'infoPlist'];
+  const version = v => typeof v === 'string' && /^\d{1,6}(?:\.\d{1,6}){0,3}$/.test(v);
+  requireThat(receipt.command === 'package-identity' && p && Object.keys(p).length === fields.length
+    && Object.keys(p).every(k => fields.includes(k)) && p.bundleIdentifier === bundle && p.bundleExecutable === 'creator-hub'
+    && version(p.bundleShortVersion) && version(p.bundleVersion) && isDeepStrictEqual(p.infoPlist, owner.process.infoPlist)
+    && (expectedVersion === undefined || p.bundleShortVersion === expectedVersion), 'native-package-identity-unverified');
 }
 function privateProfile(output) {
   const home = path.join(output, 'private-home');
@@ -242,6 +281,64 @@ function validateChildrenFailure(detail) {
     && (detail.unexpectedChildIndex === null || detail.operation === 'validate-values'), 'ax-children-diagnostic-invalid');
 }
 
+function validateAXNode(node, unknownRole = false) {
+  const fields = ['path', 'depth', 'role', 'pid', 'rootPID', 'windowID', 'referenceKind', 'referenceScope', 'cfTypeID', 'pidSource'];
+  requireThat(node && Object.keys(node).length === fields.length && Object.keys(node).every(k => fields.includes(k))
+    && typeof node.path === 'string' && /^root-window(?:\/[0-9]{1,3}){0,16}$/.test(node.path)
+    && node.depth === node.path.split('/').length - 1 && node.depth <= 16
+    && node.path.split('/').slice(1).every(v => Number(v) < 512)
+    && (unknownRole && node.role === null || typeof node.role === 'string' && Buffer.byteLength(node.role) <= 128)
+    && [node.pid, node.rootPID].every(v => Number.isSafeInteger(v) && v > 0 && v <= 2147483647)
+    && Number.isSafeInteger(node.windowID) && node.windowID > 0 && node.windowID <= 0xffffffff
+    && Number.isSafeInteger(node.cfTypeID) && node.cfTypeID > 0
+    && ['held-root-window', 'traversal-node'].includes(node.referenceKind) && node.referenceScope === 'native-invocation'
+    && node.pidSource === 'native-read', 'ax-metadata-diagnostic-invalid');
+}
+function validateLinkFailure(detail, error) {
+  const fields = ['kind', 'phase', 'node', 'parent', 'window'];
+  requireThat(detail && Object.keys(detail).length === fields.length && Object.keys(detail).every(k => fields.includes(k))
+    && detail.kind === 'remote-links' && ['before-metadata', 'after-metadata'].includes(detail.phase), 'ax-link-diagnostic-invalid');
+  validateAXNode(detail.node, true);
+  requireThat(detail.node.pid !== detail.node.rootPID && detail.node.depth > 0, 'ax-link-diagnostic-invalid');
+  const linkFields = ['attribute', 'axError', 'axErrorName', 'timeoutSetAXError', 'messageTimeoutSeconds', 'elapsedMilliseconds',
+    'returnedCFTypeID', 'expectedElementCFTypeID', 'valuePresent', 'cfEqual'];
+  for (const [key, attribute] of [['parent', 'AXParent'], ['window', 'AXWindow']]) {
+    const v = detail[key];
+    requireThat(v && Object.keys(v).length === linkFields.length && Object.keys(v).every(k => linkFields.includes(k))
+      && v.attribute === attribute && [v.axError, v.timeoutSetAXError].every(n => Number.isInteger(n) && n >= -2147483648 && n <= 2147483647)
+      && ['success', 'failure', 'illegal-argument', 'invalid-ui-element', 'cannot-complete', 'attribute-unsupported', 'not-implemented', 'api-disabled', 'no-value', 'other'].includes(v.axErrorName)
+      && v.messageTimeoutSeconds === 0.2
+      && Number.isFinite(v.elapsedMilliseconds) && v.elapsedMilliseconds >= 0 && typeof v.valuePresent === 'boolean'
+      && (v.returnedCFTypeID === null || Number.isSafeInteger(v.returnedCFTypeID) && v.returnedCFTypeID > 0)
+      && Number.isSafeInteger(v.expectedElementCFTypeID) && v.expectedElementCFTypeID > 0
+      && v.valuePresent === (v.returnedCFTypeID !== null)
+      && (v.cfEqual === null || typeof v.cfEqual === 'boolean')
+      && (v.cfEqual === null || v.axError === 0 && v.valuePresent && v.returnedCFTypeID === v.expectedElementCFTypeID),
+    'ax-link-diagnostic-invalid');
+  }
+  requireThat(['remote-ax-parent-unverified', 'remote-ax-window-unverified'].includes(error)
+    && (error === 'remote-ax-parent-unverified' ? detail.parent.cfEqual !== true
+      : detail.parent.cfEqual === true && detail.window.cfEqual !== true), 'ax-link-diagnostic-invalid');
+}
+function validateChildObservations(value) {
+  requireThat(value && Object.keys(value).length === 2 && Array.isArray(value.childObservations)
+    && value.childObservations.length <= 32 && typeof value.childObservationsTruncated === 'boolean', 'ax-child-observation-invalid');
+  const fields = ['operation', 'attribute', 'phase', 'revision', 'axError', 'axErrorName', 'timeoutSetAXError', 'elapsedMilliseconds',
+    'returnedCFTypeID', 'count', 'countExact', 'countVerified', 'node'];
+  for (const d of value.childObservations) {
+    requireThat(d && Object.keys(d).length === fields.length && Object.keys(d).every(k => fields.includes(k))
+      && d.operation === 'AXUIElementGetAttributeValueCount' && d.attribute === 'AXChildren' && d.phase === 'traversal'
+      && d.returnedCFTypeID === null && Number.isFinite(d.elapsedMilliseconds) && d.elapsedMilliseconds >= 0
+      && Number.isSafeInteger(d.revision) && d.revision >= 0 && Number.isInteger(d.count)
+      && /^-?\d{1,19}$/.test(d.countExact) && Number(d.countExact) === d.count
+      && [0, -25205, -25212].includes(d.axError) && d.countVerified === (d.axError === 0)
+      && (d.axError !== 0 || d.count === 0) && d.axErrorName === ({ 0: 'success', '-25205': 'attribute-unsupported', '-25212': 'no-value' })[d.axError]
+      && Number.isInteger(d.timeoutSetAXError) && d.timeoutSetAXError >= -2147483648 && d.timeoutSetAXError <= 2147483647,
+    'ax-child-observation-invalid');
+    validateAXNode(d.node);
+  }
+}
+
 async function rootSurfaceDiagnostic(owner, io) {
   const result = { diagnosticOnly: true, completed: false, ...acceptance };
   try {
@@ -252,10 +349,16 @@ async function rootSurfaceDiagnostic(owner, io) {
     if (sampleError) throw sampleError;
     const surface = result.surface;
     if (surface?.errorDetail !== undefined) {
-      requireThat(surface.complete === false && ['ax-children-unbounded-or-unreadable', 'ax-children-unreadable'].includes(surface.error),
-        'ax-children-diagnostic-invalid');
-      validateChildrenFailure(surface.errorDetail);
+      if (surface.errorDetail?.kind === 'remote-links') {
+        requireThat(surface.complete === false, 'ax-link-diagnostic-invalid');
+        validateLinkFailure(surface.errorDetail, surface.error);
+      }
+      else {
+        requireThat(surface.complete === false && ['ax-children-unbounded-or-unreadable', 'ax-children-unreadable'].includes(surface.error), 'ax-children-diagnostic-invalid');
+        validateChildrenFailure(surface.errorDetail);
+      }
     }
+    if (surface?.axDiagnostics !== undefined) validateChildObservations(surface.axDiagnostics);
     requireThat(sampled?.exitCode === 0 && sampled.signal === null && !sampled.timedOut && !sampled.error
       && surface?.complete === true && surface.readOnly === true && surface.diagnosticOnly === true
       && surface.actionAttempted === false && surface.permissionRequestsPerformed === false && !surface.error
@@ -286,6 +389,7 @@ struct Denied: Error {
 var rows = [[String: Any]]()
 var changedSnapshots = [[String: Any]](), readiness = [String: Any](), rootRevision = 0
 var nativeRootSnapshot = [String: Any]()
+var childObservations = [[String: Any]](), childObservationsTruncated = false
 func check(_ condition: Bool, _ reason: String) throws { if !condition { throw Denied(reason) } }
 func emit(_ input: [String: Any]) {
     var value = input
@@ -359,6 +463,14 @@ func children(_ item: AXUIElement, _ name: String, _ phase: String, _ node: [Str
             "unexpectedChildCFTypeID": badType.map { $0 as Any } ?? NSNull(),
             "expectedArrayCFTypeID": CFArrayGetTypeID(), "expectedElementCFTypeID": AXUIElementGetTypeID(), "node": node])
     }
+    if name == kAXChildrenAttribute && phase == "traversal" && (status == .noValue || status == .attributeUnsupported || status == .success && count == 0) {
+        if childObservations.count < 32 {
+            childObservations.append(["operation": "AXUIElementGetAttributeValueCount", "attribute": name, "phase": phase, "revision": rootRevision,
+                "axError": status.rawValue, "axErrorName": axErrorName(status), "timeoutSetAXError": timeoutStatus.rawValue,
+                "elapsedMilliseconds": max(0, (ProcessInfo.processInfo.systemUptime - started) * 1000), "returnedCFTypeID": NSNull(),
+                "count": count, "countExact": String(count), "countVerified": status == .success, "node": node])
+        } else { childObservationsTruncated = true }
+    }
     if status == .noValue || status == .attributeUnsupported { return [] }
     if status != .success || count < 0 || count > 512 {
         throw refusal("ax-children-unbounded-or-unreadable", "AXUIElementGetAttributeValueCount", status,
@@ -413,17 +525,19 @@ func remoteProcess(_ pid: Int32) throws -> RemoteProcess {
 func requireRemoteRead(_ facts: [String: Bool]) throws {
 ${remoteReadChecks.map(([key, reason]) => `    try check(facts["${key}"] == true, "${reason}")`).join('\n')}
 }
-func imageMatches(_ name: String, _ expected: [String: Any], _ limit: Int) throws {
+@discardableResult
+func imageMatches(_ name: String, _ expected: [String: Any], _ limit: Int, contents: Bool = false) throws -> Data {
     let fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
     try check(fd >= 0, "image-open-refused"); defer { Darwin.close(fd) }
     var before = stat(), after = stat(), named = stat()
     try check(fstat(fd, &before) == 0 && before.st_mode & S_IFMT == S_IFREG && before.st_uid == getuid()
         && before.st_nlink == 1 && before.st_size > 0 && before.st_size <= Int64(limit), "image-type-owner-or-size-refused")
-    var hash = SHA256(), total = 0, buffer = [UInt8](repeating: 0, count: 65536)
+    var hash = SHA256(), total = 0, buffer = [UInt8](repeating: 0, count: 65536), data = Data()
     while true {
         let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
         try check(count >= 0, "image-read-failed"); if count == 0 { break }
         total += count; try check(total <= limit, "image-grew"); hash.update(data: Data(buffer.prefix(count)))
+        if contents { data.append(contentsOf: buffer.prefix(count)) }
     }
     try check(fstat(fd, &after) == 0 && lstat(name, &named) == 0 && before.st_dev == after.st_dev && before.st_ino == after.st_ino
         && before.st_size == after.st_size && after.st_size == Int64(total) && before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec
@@ -432,6 +546,7 @@ func imageMatches(_ name: String, _ expected: [String: Any], _ limit: Int) throw
     try check(expected["sha256"] as? String == hash.finalize().map { String(format: "%02x", $0) }.joined()
         && expected["device"] as? String == String(after.st_dev) && expected["inode"] as? String == String(after.st_ino)
         && (expected["size"] as? NSNumber)?.int64Value == after.st_size, "pinned-image-drift")
+    return data
 }
 func fence(_ p: [String: Any], _ parent: UInt32) throws {
     guard let pid = (p["pid"] as? NSNumber)?.int32Value, let exe = p["executablePath"] as? String,
@@ -446,11 +561,24 @@ func fence(_ p: [String: Any], _ parent: UInt32) throws {
     try imageMatches(exe, image, 128 * 1024 * 1024)
     try imageMatches(app + "/Contents/Info.plist", plist, 65536)
 }
+func packageFields(_ bytes: Data, _ plist: [String: Any]) throws -> [String: Any] {
+    try check(bytes.count > 0 && bytes.count <= 65536, "package-plist-size-invalid")
+    guard let fields = try PropertyListSerialization.propertyList(from: bytes, options: [], format: nil) as? [String: Any],
+          let identifier = fields["CFBundleIdentifier"] as? String, let executable = fields["CFBundleExecutable"] as? String,
+          let shortVersion = fields["CFBundleShortVersionString"] as? String, let version = fields["CFBundleVersion"] as? String,
+          identifier == "com.creatorworks.hub", executable == "creator-hub",
+          [shortVersion, version].allSatisfy({ $0.range(of: "^[0-9]{1,6}(\\.[0-9]{1,6}){0,3}$", options: .regularExpression) != nil }) else {
+        throw Denied("package-plist-identity-invalid")
+    }
+    return ["bundleIdentifier": identifier, "bundleExecutable": executable, "bundleShortVersion": shortVersion,
+            "bundleVersion": version, "infoPlist": plist]
+}
 do {
     try admitted()
     let args = Array(CommandLine.arguments.dropFirst())
     if args == ["availability"] { emit(["accessibilityTrusted": AXIsProcessTrusted(), "readOnly": true]); exit(0) }
-    let bitmap = args.first == "bitmap-fence", rootOnly = args.first == "inspect-root"
+    let package = args.first == "package-identity"
+    let bitmap = args.first == "bitmap-fence", rootOnly = args.first == "inspect-root" || package
     if bitmap {
         try check(args.count == 3, "bitmap-fence-owner-parent-required")
         if !CGPreflightScreenCaptureAccess() {
@@ -516,6 +644,16 @@ do {
         // Native references are compared only inside this invocation. A JSON
         // receipt is never a CF reference or authority to inspect/action controls.
         try checkHeldRoot()
+        if package {
+            guard let app = p["bundlePath"] as? String, let plist = p["infoPlist"] as? [String: Any] else { throw Denied("package-owner-invalid") }
+            let bytes = try imageMatches(app + "/Contents/Info.plist", plist, 65536, contents: true)
+            let fields = try packageFields(bytes, plist)
+            try checkHeldRoot()
+            emit(["command": "package-identity", "complete": true, "readOnly": true, "rootWindowOnly": true,
+                "accessibilityTrusted": true, "rootNativeCFReferencePreserved": true, "rootReferenceScope": "native-invocation",
+                "process": p, "window": w, "actionAttempted": false, "permissionRequestsPerformed": false,
+                "package": fields]); exit(0)
+        }
         emit(["command": "inspect-root", "complete": true, "readOnly": true, "rootWindowOnly": true,
             "accessibilityTrusted": true, "rootNativeCFReferencePreserved": true, "rootReferenceScope": "native-invocation",
             "process": p, "window": w, "actionAttempted": false, "permissionRequestsPerformed": false]); exit(0)
@@ -538,23 +676,50 @@ do {
     readiness = ["rootWebAreaObserved": false, "notificationsSupported": supported, "observerStatus": observerStatus.rawValue,
                  "changesOnly": true, "rootNativeCFReferencePreserved": true]
     let labelRoles = Set(["AXWindow", "AXWebArea", "AXGroup", "AXHeading", "AXStaticText", "AXButton", "AXCheckBox", "AXRadioButton", "AXLink", "AXTab", "AXTabGroup"])
-    func remoteLinks(_ item: AXUIElement, _ traversalParent: AXUIElement?, _ depth: Int) throws {
+    func remoteLinks(_ item: AXUIElement, _ traversalParent: AXUIElement?, _ depth: Int,
+                     _ path: String, _ readPID: Int32, _ phase: String) throws {
         try check(depth <= 16 && seen.count < 512 && ProcessInfo.processInfo.systemUptime < deadline, "ax-surface-incomplete")
         var parentMatches = false, windowMatches = false
         // Apple kAXParentAttribute is the hierarchy parent; kAXWindowAttribute
         // is the containing window. Neither establishes process/WK ownership.
         // Required native associations: nil/error/wrong CF type never becomes
         // permission. No PID, process name, uid, or launchd ancestry substitutes.
-        if let traversalParent = traversalParent, let linked = attr(item, kAXParentAttribute), CFGetTypeID(linked) == AXUIElementGetTypeID() {
+        func link(_ name: String, _ expected: AXUIElement?) -> (CFTypeRef?, [String: Any]) {
+            // The same single native read as before, with its scalar result retained.
+            let timeout = AXUIElementSetMessagingTimeout(item, 0.2), started = ProcessInfo.processInfo.systemUptime
+            var value: CFTypeRef?
+            let status = AXUIElementCopyAttributeValue(item, name as CFString, &value)
+            let type = value.map { CFGetTypeID($0) }
+            var equal: Bool?
+            if status == .success, let value = value, type == AXUIElementGetTypeID(), let expected = expected {
+                equal = CFEqual(value as! AXUIElement, expected)
+            }
+            return (status == .success ? value : nil, ["attribute": name, "axError": status.rawValue,
+                "axErrorName": axErrorName(status), "timeoutSetAXError": timeout.rawValue, "messageTimeoutSeconds": 0.2,
+                "elapsedMilliseconds": max(0, (ProcessInfo.processInfo.systemUptime - started) * 1000),
+                "returnedCFTypeID": type.map { $0 as Any } ?? NSNull(), "expectedElementCFTypeID": AXUIElementGetTypeID(),
+                "valuePresent": value != nil, "cfEqual": equal.map { $0 as Any } ?? NSNull()])
+        }
+        let parentRead = link(kAXParentAttribute, traversalParent), windowRead = link(kAXWindowAttribute, window)
+        if let traversalParent = traversalParent, let linked = parentRead.0, CFGetTypeID(linked) == AXUIElementGetTypeID() {
             parentMatches = CFEqual(linked as! AXUIElement, traversalParent)
         }
-        if let linked = attr(item, kAXWindowAttribute), CFGetTypeID(linked) == AXUIElementGetTypeID() {
+        if let linked = windowRead.0, CFGetTypeID(linked) == AXUIElementGetTypeID() {
             windowMatches = CFEqual(linked as! AXUIElement, window)
         }
-        try requireRemoteRead(["nodeIdentityVerified": true, "parentMatchesTraversalParent": parentMatches,
-            "windowMatchesHeldRoot": windowMatches, "rootUnchanged": true,
-            "withinLimits": depth <= 16 && seen.count < 512 && ProcessInfo.processInfo.systemUptime < deadline,
-            "metadataOnly": true])
+        do {
+            try requireRemoteRead(["nodeIdentityVerified": true, "parentMatchesTraversalParent": parentMatches,
+                "windowMatchesHeldRoot": windowMatches, "rootUnchanged": true,
+                "withinLimits": depth <= 16 && seen.count < 512 && ProcessInfo.processInfo.systemUptime < deadline,
+                "metadataOnly": true])
+        } catch let failure as Denied {
+            if ["remote-ax-parent-unverified", "remote-ax-window-unverified"].contains(failure.reason) {
+                throw Denied(failure.reason, detail: ["kind": "remote-links", "phase": phase,
+                    "node": childrenNode(item, path, depth, nil, readPID, pid, id, "traversal-node"),
+                    "parent": parentRead.1, "window": windowRead.1])
+            }
+            throw failure
+        }
     }
     func visit(_ item: AXUIElement, _ depth: Int, _ path: String, _ traversalParent: AXUIElement?) throws {
         try check(depth <= 16 && seen.count < 512 && ProcessInfo.processInfo.systemUptime < deadline, "ax-surface-incomplete")
@@ -563,7 +728,7 @@ do {
         if remote {
             try checkHeldRoot()
             remoteBefore = try remoteProcess(readPID)
-            try remoteLinks(item, traversalParent, depth)
+            try remoteLinks(item, traversalParent, depth, path, readPID, "before-metadata")
         } else {
             try pidMatches(item, pid)
             if !CFEqual(item, window), let linked = attr(item, kAXWindowAttribute) {
@@ -590,7 +755,7 @@ do {
         if remote {
             try check(try elementPID(item) == readPID, "remote-ax-pid-drift")
             try check(try remoteProcess(readPID) == remoteBefore, "remote-ax-process-drift")
-            try remoteLinks(item, traversalParent, depth)
+            try remoteLinks(item, traversalParent, depth, path, readPID, "after-metadata")
             try checkHeldRoot()
             row["nativeParentMatchesTraversalParent"] = true; row["nativeWindowMatchesHeldRoot"] = true
             row["rootNativeCFReferencePreserved"] = true; row["readOnly"] = true; row["actionAttempted"] = false
@@ -606,7 +771,8 @@ do {
             observationCount += 1
             deadline = min(readinessDeadline, ProcessInfo.processInfo.systemUptime + 4)
             try checkHeldRoot()
-            rows = []; seen = []; try visit(window, 0, "root-window", nil)
+            rows = []; seen = []; childObservations = []; childObservationsTruncated = false
+            try visit(window, 0, "root-window", nil)
             try checkHeldRoot()
             let snapshot = try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys])
             if snapshot != previousSnapshot {
@@ -627,9 +793,11 @@ do {
     readiness["deadlineExpired"] = readiness["rootWebAreaObserved"] as? Bool != true
     try check(readiness["rootWebAreaObserved"] as? Bool == true, "root-web-area-readiness-unverified")
     emit(["complete": true, "readOnly": true, "nodes": rows, "snapshots": changedSnapshots, "readiness": readiness, "nativeRootSnapshot": nativeRootSnapshot,
+          "axDiagnostics": ["childObservations": childObservations, "childObservationsTruncated": childObservationsTruncated],
           "window": w, "process": p, "actionAttempted": false, "permissionRequestsPerformed": false])
 } catch {
     var failure: [String: Any] = ["complete": false, "readOnly": true, "nodes": rows, "snapshots": changedSnapshots, "readiness": readiness, "nativeRootSnapshot": nativeRootSnapshot,
+          "axDiagnostics": ["childObservations": childObservations, "childObservationsTruncated": childObservationsTruncated],
           "error": (error as? Denied)?.reason ?? "surface-unverified", "actionAttempted": false, "permissionRequestsPerformed": false]
     if let detail = (error as? Denied)?.detail { failure["errorDetail"] = detail }
     emit(failure); exit(2)
@@ -643,12 +811,27 @@ async function probe(args, env) {
   const executable = path.join(request.app, 'Contents/MacOS/creator-hub'), info = path.join(request.app, 'Contents/Info.plist');
   const executablePin = pin(executable), infoPin = pin(info, 65536);
   requireThat(executablePin.image.sha256 === request.hubSha256, 'independent-hub-hash-mismatch');
+  let sourcePin, sourceIdentity = { status: 'unresolved', reason: 'independent-assembly-receipt-not-supplied' };
+  if (request.assemblyReceipt) {
+    canonical(request.assemblyReceipt);
+    requireThat(inside(temporary, request.assemblyReceipt) && !inside(request.app, request.assemblyReceipt)
+      && path.basename(request.assemblyReceipt) === 'signed-unix-assembly.json', 'independent-assembly-receipt-path-required');
+    sourcePin = pin(request.assemblyReceipt, 16384, true);
+    requireThat(sourcePin.image.sha256 === request.assemblyReceiptSha256, 'independent-assembly-receipt-hash-mismatch');
+    sourceIdentity = { status: 'caller-hash-bound-receipt', receiptImage: sourcePin.image,
+      ...assemblyIdentity(sourcePin.bytes, process.arch === 'arm64' ? 'aarch64' : 'x86_64', request.expectedVersion),
+      callerSelectedHubSha256: request.hubSha256, artifactToImageBindingVerified: false,
+      provenance: 'not-independently-verified-by-probe' };
+  }
   const cpu = process.arch === 'arm64' ? 0x0100000c : 0x01000007;
   requireThat(executablePin.head.length >= 8 && executablePin.head.readUInt32LE(0) === 0xfeedfacf
     && executablePin.head.readUInt32LE(4) === cpu, 'exact-native-thin-mach-o-required');
   const output = reserveOutput(temporary, request.app, request.output), report = { schemaVersion: 1, diagnosticOnly: true, scope: 'Owned Root AX surface/window bitmap diagnostics only; not product acceptance.',
     ...acceptance, passed: false, captureCompleted: false, acceptedExit: false, cleanupUncertain: false,
     app: request.app, executable, suppliedHubSha256: request.hubSha256, runnerArchitecture: env.RUNNER_ARCH,
+    packageSourceIdentity: sourceIdentity,
+    probeSourceIdentity: { commit: /^[a-f0-9]{40}$/.test(env.GITHUB_SHA || '') ? env.GITHUB_SHA : null,
+      runId: /^\d{1,15}$/.test(env.GITHUB_RUN_ID || '') ? Number(env.GITHUB_RUN_ID) : null },
     childPid: null, ownedChildExit: null, tools: [],
     windowBitmap: { diagnosticOnly: true, attempted: false, completed: false, reason: 'owned-live-window-not-available', ...acceptance } };
   const write = (name, data) => fs.writeFileSync(path.join(output, name), typeof data === 'string' || Buffer.isBuffer(data) ? data : JSON.stringify(data, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
@@ -692,6 +875,7 @@ async function probe(args, env) {
   };
   try {
     write('plan.json', report);
+    if (sourcePin) write('assembly-receipt.json', sourcePin.bytes);
     const source = pin(path.join(__dirname, 'native-macos-window.swift'), 1024 * 1024, true);
     write('native-macos-window.swift', source.bytes); write('root-surface.swift', surfaceSource);
     const helper = path.join(output, 'native-macos-window'), sampler = path.join(output, 'root-surface');
@@ -707,6 +891,7 @@ async function probe(args, env) {
       requireThat(result.exitCode === 0 && JSON.parse(result.text).accessibilityTrusted === true, 'existing-ax-trust-required-no-prompt');
     }
     requireThat(sameImage(pin(executable).image, executablePin.image) && sameImage(pin(info, 65536).image, infoPin.image), 'root-files-changed-before-launch');
+    if (sourcePin) requireThat(sameImage(pin(request.assemblyReceipt, 16384).image, sourcePin.image), 'assembly-receipt-drift');
     const rootEnv = privateProfile(output), logFD = fs.openSync(path.join(output, 'root.stdout'), 'wx', 0o600), errFD = fs.openSync(path.join(output, 'root.stderr'), 'wx', 0o600);
     try { child = spawn(executable, [], { cwd: rootEnv.HOME, env: rootEnv, stdio: ['ignore', logFD, errFD] }); }
     finally { fs.closeSync(logFD); fs.closeSync(errFD); }
@@ -735,6 +920,16 @@ async function probe(args, env) {
     ownerImage = pin(ownerPath, 8192).image;
     const captureOwnerFence = () => requireThat(!toolUncertain && !ownedExit && sameImage(pin(ownerPath, 8192).image, ownerImage),
       'capture-owner-or-tool-state-unverified');
+    captureOwnerFence();
+    const identityResult = await command(sampler, ['package-identity', ownerPath, String(process.pid)], 'package-identity', 15000, samplerImage);
+    requireThat(identityResult.exitCode === 0, 'native-package-identity-refused');
+    const packageReceipt = JSON.parse(identityResult.text);
+    report.packageIdentity = packageReceipt; report.packageIdentityValidated = false;
+    write('package-identity.json', packageReceipt);
+    validatePackageIdentity(packageReceipt, owner, request.expectedVersion);
+    captureOwnerFence();
+    if (sourcePin) requireThat(sameImage(pin(request.assemblyReceipt, 16384).image, sourcePin.image), 'assembly-receipt-drift');
+    report.packageIdentityValidated = true;
     report.rootSurface = await rootSurfaceDiagnostic(owner, {
       inspectRoot: async stage => {
         captureOwnerFence();
@@ -811,4 +1006,5 @@ if (require.main === module) {
   }).catch(error => { console.log(JSON.stringify({ error: error.message, passed: false, ...acceptance })); process.exitCode = 2; });
 }
 module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, closeAssessment,
-  bitmapArguments, bitmapImage, windowBitmapDiagnostic, remoteReadPolicy, validateRootInspection, validateChildrenFailure, verifiedRootCloseDialog, rootSurfaceDiagnostic, acceptance, surfaceSource };
+  bitmapArguments, bitmapImage, windowBitmapDiagnostic, remoteReadPolicy, validateRootInspection, validateChildrenFailure, verifiedRootCloseDialog,
+  assemblyIdentity, validatePackageIdentity, validateLinkFailure, validateChildObservations, rootSurfaceDiagnostic, acceptance, surfaceSource };
