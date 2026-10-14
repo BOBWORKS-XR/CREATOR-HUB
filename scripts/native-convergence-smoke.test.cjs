@@ -34,5 +34,12 @@ test('actual guide harness fences inspection and distinguishes flow acceptance f
   assert.ok(source.includes('report.repeatMigratedLaunch ='));
   assert.ok(source.includes("'Completed migration must not prompt again because original legacy data was retained'"));
   assert.ok(source.includes('for (const file of retainedAfterMigration) assert.deepEqual(fs.readFileSync(file.file), file.bytes)'));
+  const restarted = source.indexOf('report.repeatMigratedLaunch =');
+  const liveAfterRestart = source.indexOf('await oldClient.listTools', restarted);
+  const closeOldClient = source.indexOf('await oldClient.close(); oldClient = null;');
+  const secondRootClose = source.indexOf("native(child.pid, hub, 'close');", liveAfterRestart);
+  assert.ok(liveAfterRestart > restarted && secondRootClose > liveAfterRestart && closeOldClient > secondRootClose,
+    'Keep the original live stdio connection until both actual Root launches and their normal closes finish');
+  assert.equal(source.split('await oldClient.close(); oldClient = null;').length, 2);
   assert.doesNotMatch(source, /taskkill|\.kill\(|Stop-Process|auth\.json|process\.env\.(?:TAURI_SIGNING_PRIVATE_KEY|CREATOR_HUB_SIGNING_KEY_PATH)/);
 });

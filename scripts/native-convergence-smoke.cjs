@@ -225,7 +225,6 @@ async function main(candidate) {
     for (const file of [config, legacyConfig]) retainedOptions(sourceConfig, fs.readFileSync(file));
     assert.deepEqual(fs.readFileSync(editors), editorBytes);
     assert.ok((await oldClient.listTools({}, { timeout: 10000 })).tools.length > 0);
-    await oldClient.close(); oldClient = null;
     for (const command of [entry, { command: route.command, args: [], env: entry.env }]) {
       const client = new Client({ name: 'post-convergence-reconnect', version: '1' });
       const transport = new StdioClientTransport({ ...command, stderr: 'pipe' });
@@ -280,6 +279,7 @@ async function main(candidate) {
     assert.ok((await oldClient.listTools({}, { timeout: 10000 })).tools.length > 0);
     native(child.pid, hub, 'close');
     await retry(() => assert.notEqual(child.exitCode, null)); assert.equal(child.exitCode, 0);
+    await oldClient.close(); oldClient = null;
     report.checks.push('Actual post-migration restart keeps the approved legacy image, settings, client routes and old live stdio without asking to migrate again');
     report.passed = true;
   } catch (error) {

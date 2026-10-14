@@ -1,4 +1,4 @@
-name: Independent guarded Hub update and completed migration restart (not release)
+name: Guarded Hub update and live-connection migration restart (not release)
 on:
   push:
     branches: [validation/convergence-014]
