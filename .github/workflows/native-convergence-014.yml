@@ -1,4 +1,4 @@
-name: Current Windows convergence with actual backup-drift refusal (not release)
+name: Current Windows fresh installation and backup-drift convergence (not release)
 on:
   push:
     branches: [validation/convergence-014]
@@ -36,6 +36,10 @@ jobs:
     needs: stage-input
     runs-on: windows-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [upgrade-guide, fresh-components]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -61,14 +65,18 @@ jobs:
           "CREATOR_CANDIDATE_SOURCE=$($proof.sourceRevision)" >> $env:GITHUB_ENV
       - run: node --test scripts/native-convergence-smoke.test.cjs scripts/native-installed-baseline.test.cjs scripts/command-permissions.test.cjs
       - name: Exercise real installer and production migration guide
+        if: matrix.lane == 'upgrade-guide'
         env:
           GH_TOKEN: ${{ github.token }}
           CREATOR_CONVERGENCE_NATIVE_TEST: '1'
         run: node scripts/native-convergence-smoke.cjs artifacts/convergence-input/candidate
+      - name: Exercise fresh installation and both built-in module views
+        if: matrix.lane == 'fresh-components'
+        run: node scripts/native-builtin-smoke.cjs artifacts/convergence-input/candidate fresh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-convergence-${{ github.sha }}
+          name: native-convergence-${{ matrix.lane }}-${{ github.sha }}
           path: artifacts/native-suite-*/
           retention-days: 7
           if-no-files-found: warn
