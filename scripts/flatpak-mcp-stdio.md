@@ -64,10 +64,11 @@ verify that run's source/artifact/receipt or derive any product pins from it.
 ## Prepared Probe
 
 `flatpak-mcp-stdio-probe.cjs` exports `probe(work, [baselineStage,
-replacementStage], replace, env)`. It has no CLI, workflow, hardcoded product pins,
+replacementStage], replace, env)`. The probe itself has no CLI, workflow, hardcoded product pins,
 build, deploy, route-activation or host-settings writer. Nothing invokes it
-automatically. Parent coordination and new independently reviewed products are
-required before executing it. Do not reuse old evidence as acceptance of this recipe.
+automatically. Parent coordination and independently reviewed products are
+required before executing it. The new prepared runner below supplies the exact
+pair and an explicitly seeded fixture, not production consent or integration.
 
 Prerequisites on an explicitly opted-in GitHub-hosted Linux x64 disposable runner:
 
@@ -127,12 +128,15 @@ integration, signed updater or release-ready field becomes true on probe success
 ## Local Verification
 
 ```sh
-node --test scripts/flatpak-package.test.cjs scripts/flatpak-mcp-stdio-probe.test.cjs scripts/flatpak-retention.test.cjs scripts/flatpak-replacement-source.test.cjs scripts/flatpak-gui-probe.test.cjs scripts/module-archive.test.cjs
+node --test scripts/flatpak-mcp-stdio-run.test.cjs scripts/flatpak-package.test.cjs scripts/flatpak-mcp-stdio-probe.test.cjs scripts/flatpak-retention.test.cjs scripts/flatpak-replacement-source.test.cjs scripts/flatpak-gui-probe.test.cjs scripts/module-archive.test.cjs
 ```
 
-Review recheck on Windows, Node `v22.22.2`: **83 passed, 1 Linux-only mode test
+Review recheck on Windows, Node `v22.22.2`: **101 passed, 1 Linux-only mode test
 skipped, 0 failed**. `git diff --check` passed. No native build, dispatch, product
 download, deployment, index writes, commit or push was performed for this revision.
+The workflow's narrower preflight is **83 passed / 1 skipped (84 total)**;
+the new runner contributes **18 passed / 0 skipped**. Embedded Python and YAML
+parsed, and every workflow `run` body passed local `bash -n`.
 
 Local fixtures use synthetic ELF bytes and a deliberately opaque non-TAR archive.
 Tests cover the fourth pin and its manifest binding, original/staged byte tampering,
@@ -146,3 +150,100 @@ tampering/substitution refusal. SDK fixtures cover initialize/tool timeout catch
 cleanup error preservation, stderr overflow, and late initialize completion after
 session expiry. The latter failed before adding the immediate post-connect expiry
 check, then passed; no native connection or cryptographic signature was tested here.
+
+## Prepared Seeded SDK Replacement Lane
+
+New source: `.github/workflows/flatpak-mcp-stdio-014.yml`,
+`scripts/flatpak-mcp-stdio-run.cjs`, `scripts/flatpak-mcp-stdio-run.test.cjs`.
+Only those files and this handoff belong to this follow-through. Existing package,
+disposable/probe modules, native code and other agents' helpers are not changed.
+There has been **no push, dispatch, native compilation, installation or SDK run**.
+
+The workflow follows the existing scoped-push pattern, **not** `workflow_dispatch`.
+Both job and admission require repository `BOBWORKS-XR/CREATOR-HUB`, repository ID
+`1364807512`, event `push` and exact ref
+`refs/heads/validation/flatpak-mcp-stdio-014`. The trigger watches only its workflow
+file. Parent review must precede any push that would trigger it. Admission also
+requires the packaging/probe opt-ins plus the distinct
+`CREATOR_FLATPAK_MCP_STDIO_SEEDED_ROUTE=1` authorization for disposable seeding.
+
+### Immutable Pair
+
+| Role | Product Source | Assembly / Attempt | Artifact ID | Original ZIP Bytes |
+| --- | --- | --- | --- | --- |
+| Baseline | `9894b1cd5387bcd6fec2d652f99a7913224e2cc7` | `38643118508 / 1` | `11931797416` | `386830987` |
+| Replacement | `4f3744d5707ed5cd26c2e5a1b10a7d45a5e8d10b` | `38648562557 / 1` | `11934297227` | `380463271` |
+
+```text
+baseline ZIP:    b28ad458fb2560cea7b436ef31ed6913104c88214c29888395a2fc62235a2d19
+replacement ZIP: ce7d02ecd5e72cbce9a0343003726601ab82a103e8e25348cac771d78f0ac881
+router (both):   3b0c316d0b62d970c951ff653913139c20505e1d808dab47343c3cb467e81c93 (786256 bytes)
+production key:  23b3eee2d1c8cb7d705120953cda67ff94a722a207d5be1679c250be8ca90308
+```
+
+The runtime body and distinct signature hashes are recorded above. `plan()` pins
+both source trees, assembly jobs, original receipts and all four raw inputs;
+there is no argument/env override for those pins, the key or product selection.
+The current four-input pins also match
+`artifacts/linux-assembly-38648562557/flatpak-reviewed-pins.json`.
+
+Local non-executing preflight rehashed **both** original ZIPs and checked the
+existing `artifacts/flatpak-stdio-stage-4f3744d` seven-file stage/provenance. Both
+source commits' public-key Git blobs also match the fixed key hash. The LF Git
+blob is 119 bytes; the Windows checkout has CRLF (121 bytes). Production Linux
+checks remain byte-exact against LF, with no key/signature normalization or
+fallback. Synthetic Windows seed tests explicitly model those Linux source bytes.
+
+### Execution And Evidence
+
+1. Reuse the existing remote verifier for exact successful source/tree/run/attempt,
+   repository/job/artifact/version proof and original ZIP digest/size. Check each
+   original source's production public-key blob too. The standard-library bounded
+   ZIP step selects only the four inputs plus the original assembly receipt,
+   rechecks the ZIP and receipt, then invokes the existing seven-file packager.
+2. Compile only the shared native archive decoder and the existing
+   `--example fixture-driver` from the reviewed harness checkout. Hash/pin and
+   recheck both tools before/after use. Do not compile Root, a private app, or the
+   packaged production router; do not regenerate or re-sign any product payload.
+3. Reuse GNOME Platform/SDK 50 and the original offline sandboxed builder recipe.
+   All children use finite private HOME/XDG/temp/installation/empty-GnuPG paths,
+   not GitHub auth, real AI-client settings, projects or desktop/bus environment.
+   No network/home/host/broker/devel grant or GUI launch is added to the app.
+4. The shared decoder verifies and extracts each original archive into a fresh
+   owned directory. Recheck the exact output map, raw hashes, sizes and modes.
+   Copy only the exact MCP generation into the disposable store. Invoke existing
+   production `Store` through the fixture driver with the pinned production public
+   key and original real descriptor/signature: **DISPOSABLE SEEDED ROUTE**, not
+   UI approval, migration or evidence that a real user's route was established.
+5. Seed the baseline app-private store once. Check the replacement's independently
+   signed runtime in a **separate disposable verification store**. The retained
+   baseline store is not reactivated or rewritten during replacement. Build and
+   install baseline, then prebuild/export replacement before opening SDK A; only
+   the bounded exact-ref update occurs while A is live. Existing probe opens B
+   and rechecks both connections and retained baseline signature/body.
+6. A separate fixed SDK connection calls only bundled `get_mcp_reference`,
+   `source=workflows`, `entryId=networking`, `limit=1`. It has no project arguments.
+   Bracket it with selected private ref/location, all seven deployed files/modes,
+   metadata/effective-grant/Platform and retained-route checks; close owned SDK
+   transports and preserve primary/cleanup errors. This is a tool-consumer test,
+   never actual AI-app or Unity operation acceptance.
+
+The compact report includes product vs harness source, helper/key hashes, seeded
+status, bounded command failures, bundle hashes, SDK protocol/retention result and
+all-false acceptance gates. `seededRoute=true` and
+`toolConsumerProtocolRetentionPassed=true` are narrowly scoped result fields, not
+consent or integration claims. `packagedRouterActivationFixIncluded=false` remains
+explicit: both packages contain the old pinned router, not the parent's later fix.
+
+Compact reports/bindings/stage metadata upload **first**, including failures.
+The roughly 800 MB original ZIP pair and generated Flatpaks are not uploaded by
+default. A separate large-evidence step requires successful compact capture and
+explicit repository variable `CREATOR_FLATPAK_STDIO_UPLOAD_LARGE=1`. Original
+artifact identities/digests stay independently bound regardless of that opt-in.
+
+Prepared only. Real native SDK startup, Platform compatibility, replacement,
+transport/process exit, production settings retention, GUI/consent, host AI-client
+configuration, migration, Unity/project operations and the later router activation
+fix remain unaccepted. Parent owns the GTK/component lane and the decision to run
+this isolated protocol experiment after review. Missing refs, artifacts, tools,
+namespaces or libraries must fail with evidence, never broaden permissions.
