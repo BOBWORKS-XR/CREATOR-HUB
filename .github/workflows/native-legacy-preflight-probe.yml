@@ -1,0 +1,53 @@
+name: Public MCP 2.7.7 preflight diagnostic (not acceptance)
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/legacy-preflight-014]
+    paths: ['.github/workflows/native-legacy-preflight-probe.yml']
+permissions:
+  contents: read
+jobs:
+  observe:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [first-dialog-cancel, silent-observe]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Test refusal and receipt contracts without running an installer
+        run: node --test scripts/native-legacy-preflight-probe.test.cjs scripts/native-installed-baseline.test.cjs
+      - name: Download and bind only the immutable public 2.7.7 installer
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ARCH -cne 'X64' -or $env:GITHUB_REPOSITORY -cne 'BOBWORKS-XR/CREATOR-HUB') { throw 'Disposable repository Windows runner required.' }
+          $pin = node -e 'console.log(JSON.stringify(require("./scripts/native-legacy-preflight-probe.cjs").PUBLIC_INSTALLER))' | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Public binding unavailable.' }
+          $directory = 'artifacts/legacy-preflight-input'
+          New-Item -ItemType Directory -Path $directory | Out-Null
+          $installer = Join-Path $directory $pin.asset
+          $url = 'https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/download/v2.7.7/Creator.Works.MCP_2.7.7_x64-setup.exe'
+          Invoke-WebRequest -Uri $url -OutFile $installer -TimeoutSec 120
+          if ((Get-Item -LiteralPath $installer).Length -ne $pin.bytes -or (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -cne $pin.sha256) { throw 'Immutable public installer differs.' }
+          [ordered]@{scope='public-277-preflight-diagnostic'; mode='${{ matrix.mode }}'; url=$url; bytes=$pin.bytes; sha256=$pin.sha256; sourceRevision=$env:GITHUB_SHA; installAccepted=$false; releaseReady=$false} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $directory 'binding.json') -Encoding utf8NoBOM
+      # Separate fresh VMs: cancel before installation, or observe the original /S through real exit.
+      - name: Observe the immutable installer once in the fixed diagnostic mode
+        env:
+          CREATOR_LEGACY_PREFLIGHT_PROBE: '1'
+        run: node scripts/native-legacy-preflight-probe.cjs artifacts/legacy-preflight-input/Creator.Works.MCP_2.7.7_x64-setup.exe ${{ matrix.mode }}
+      - name: Retain bounded receipts even when observation or cancellation fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: legacy-preflight-277-${{ matrix.mode }}-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            artifacts/legacy-preflight-*/report.json
+            artifacts/legacy-preflight-input/binding.json
+          if-no-files-found: warn
+          retention-days: 7
