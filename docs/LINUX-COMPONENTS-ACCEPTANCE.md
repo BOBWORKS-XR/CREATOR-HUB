@@ -424,3 +424,76 @@ and its embedded GitHub script parsed. The Root helper self-hash is unchanged.
 This proves the narrow source/test contracts only. The capture cannot identify
 the other managed window retrospectively; that missing native evidence is still
 required before classifying Setup as a product failure or accepting this flow.
+
+## Corrected Inventory Retry: Strict AX Selection Refused
+
+The one authorized retry was run `38652376421`, attempt 1, test source
+`fefc5288256bee4c4c839381543f324b98efe0de`, job `116154004367`.
+The native step failed at `open-setup`; `setup-decline` exited 1 after 2774 ms:
+`Exact owned accessibility window is missing or ambiguous`. This is a different
+failure from the previous readiness deadline. Upstream bindings, immutable
+4f product/resource/DEB checks and install passed again. Root terms acceptance
+was saved, convergence was skipped normally, and the Setup navigation press
+completed. No native Setup consent input occurred.
+
+Only compact artifact `11935336380`,
+`native-linux-components-capture-38652376421-1`, was downloaded: 40064 bytes,
+SHA-256 `3a30081f9334a8136bb97476387a61530478163a35d77d1964af1175e53a75b7`.
+Its original ZIP and bounded members are retained under
+`artifacts/native-linux-components-38652376421`. The separate original-source
+artifact `11935321543` remains on CI; its 380231296-byte ZIP was not downloaded
+again. Product source is still 4f, private source 773, not current HEAD or b154.
+
+Evidence versus inference:
+
+- **Captured:** Root PID 3461/start 36789/UID 1001, exact installed kernel-image
+  SHA-256 `524e7bc9505f7de4f22e29818ad6ba59b1fb4decf3b7bb2655b362f9240ba968`,
+  Root XRes window 4194307/client 4194304. Root stdout/stderr stayed empty;
+  bitmap capture again refused another managed window. Normal Root close was
+  sent but exit zero/reap/EOF was not verified; no signal was sent.
+- **Control-flow proof, not a retained backend receipt:** this exact error is
+  thrown inside the first strict `snapshot` after `direct_backend`, manifest
+  hash/size/seals, held/current `KernelBinding`, backend UID, exact native XRes
+  PID/title and one matching AX application have passed. The AX top-level
+  name-plus-`DIALOG` filter did not return exactly one window. Thus discovery
+  advanced beyond the old thread-inventory deadline; this is not evidence of
+  an immediate backend exit before discovery.
+- **Confirmed capture gap:** an exception from that first snapshot escaped
+  before the successful-consent or deadline-only observation writes. No backend
+  PID/start/kernel-FD/XID receipt, backend AX tree or exit status survives in
+  this artifact. Those missing values cannot be manufactured retrospectively.
+- **Still unknown:** wrong AX role/name, duplicate candidate or not-yet-registered
+  AX top-level window. A backend exit during that interval is not excluded.
+  No observed `ALERT`, exact AX name or product failure is claimed.
+
+Primary source narrows the next capture, not the input authority:
+[rfd 0.16 GTK message dialog](https://github.com/PolyMeilex/rfd/blob/0.16.0/src/backend/gtk3/message_dialog.rs)
+constructs `GtkMessageDialog`, supplies its window title and custom buttons.
+[GTK 3.24.33 message dialog source](https://github.com/GNOME/gtk/blob/3.24.33/gtk/gtkmessagedialog.c)
+sets the accessible role to `ATK_ROLE_ALERT`; message type can set an accessible
+name such as `Information` independently of the window title. This is a source
+contract, not a captured claim about this runner's actual AX role/name or GTK
+patch version. The generic helper already supports strict `ALERT`; it is
+unchanged. Changing the requested role alone would not prove the title contract.
+
+A failing-first regression reproduced zero diagnostic saves when the strict
+snapshot raises. The failure-only correction writes the already-bound native
+backend/image/receipt/XRes identity **before** that snapshot. On refusal it
+retains bounded AX application counts and only the same sealed backend's
+top-level names/roles and tree. Zero AX applications, ambiguous applications,
+foreign nodes, native identity/window drift and size bounds are recorded/refused.
+Native Root/backend and held image identities are rechecked around the read.
+The diagnostic is explicitly post-failure, read-only, zero-action and not
+authorization; same-PID AX candidates are not invented AX-to-XID associations.
+Capture refusal does not replace the original strict snapshot error.
+
+Input still requests the same exact `DIALOG`/title/button, with no fallback or
+retry on this failure. No role/title/timeout/environment/payload/permission
+change, product rebuild, Zenity input or further native run was performed.
+
+Failure-capture preflight: components 32 passed / 1 skipped, Root 81 / 1 skipped,
+unchanged helper 36 / 2 skipped, fixture source 8 passed, dialog/source 4 passed:
+**161 passed / 4 skipped** on Windows. Python ASTs, workflow YAML and embedded
+GitHub script parsed. These are source/fixture results only; no native role/name
+capture or component operation has been accepted. The generic helper, reviewed
+Root self-hash, workflow and immutable product pins are unchanged.

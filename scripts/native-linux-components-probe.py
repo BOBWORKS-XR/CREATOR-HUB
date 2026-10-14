@@ -297,6 +297,55 @@ def owned_windows(pid, x11):
     return matches
 
 
+def backend_ax_observation(request, helper, x11, atspi, binding, root_record, actual):
+    """Failure-only read of one sealed backend, never a role/input authority."""
+    result = {"readOnly": True, "authorization": False, "actionCount": 0, "verified": False,
+              "timing": "post-strict-snapshot-failure-not-original-trace", "windows": [], "nodes": []}
+    try:
+        require(request.action == "snapshot" and request.receipt is not None, "Diagnostic requires sealed snapshot request")
+
+        def recheck():
+            helper.identity(request, helper.Proc(), binding)
+            require(B.native_process(root_record["pid"], helper) == root_record
+                    and B.native_process(request.pid, helper) == actual, "Backend/Root changed during AX diagnostic")
+
+        recheck()
+        xres = helper.bound_window(request, x11)
+        result["xres"] = {"window": request.window, **xres}
+        # Until the exact backend application is selected, read only PID metadata.
+        apps = [app for app in helper.children(atspi.get_desktop(0), 128) if app.get_process_id() == request.pid]
+        result["applicationCount"] = len(apps)
+        require(len(apps) <= 1, "Ambiguous backend AX applications; no subtree read")
+        pending = []
+        if apps:
+            for window in helper.children(apps[0], 32):
+                require(window.get_process_id() == request.pid, "Foreign backend AX top-level refused")
+                index = len(result["windows"])
+                result["windows"].append({"pid": request.pid, "role": int(window.get_role()),
+                                          "roleName": (window.get_role_name() or "")[:64], "name": (window.get_name() or "")[:256]})
+                pending.append((window, 0, index))
+        while pending:
+            node, depth, index = pending.pop()
+            require(node is not None and len(result["nodes"]) < helper.MAX_NODES and depth < helper.MAX_DEPTH,
+                    "Backend AX diagnostic tree exceeds bound")
+            require(node.get_process_id() == request.pid, "Foreign backend AX diagnostic subtree refused")
+            result["nodes"].append({"windowIndex": index, "depth": depth, "pid": request.pid,
+                                    "role": int(node.get_role()), "roleName": (node.get_role_name() or "")[:64],
+                                    "name": (node.get_name() or "")[:256],
+                                    **{s.lower(): node.get_state_set().contains(getattr(atspi.StateType, s))
+                                       for s in ("SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY")}})
+            budget = min(helper.MAX_CHILDREN, helper.MAX_NODES - len(result["nodes"]) - len(pending))
+            pending.extend((child, depth + 1, index) for child in reversed(helper.children(node, budget)))
+        recheck()
+        require(helper.bound_window(request, x11) == xres, "Backend XRes window changed during AX diagnostic")
+        result["verified"] = True
+        # These are same-PID AX candidates, not a manufactured AX-to-XID match.
+        result["axToXidAssociationVerified"] = False
+    except Exception as error:
+        result["captureRefusal"] = str(error)[:1000]
+    return result
+
+
 def consent(root, action, request, helper, x11, atspi, root_record):
     app, choice = action.split("-", 1)
     require(app in APPS and choice in ("decline", "approve"), "Unknown native consent action")
@@ -327,9 +376,22 @@ def consent(root, action, request, helper, x11, atspi, root_record):
                     args = ["click", str(xid), APPS[app]["title"], "DIALOG",
                             "Not now" if choice == "decline" else APPS[app]["approve"]]
                     req = helper.Request.sealed(args, parsed)
-                    before = helper.perform(helper.Request.sealed(
-                                            ["snapshot", str(xid), APPS[app]["title"], "DIALOG"], parsed),
-                                            atspi, helper.Proc(), x11, binding)
+                    snapshot = helper.Request.sealed(["snapshot", str(xid), APPS[app]["title"], "DIALOG"], parsed)
+                    B.save_json(root / (action + "-backend-window.json"),
+                                {"readOnly": True, "authorization": False, "actionCount": 0, "receipt": value,
+                                 "native": actual, "kernelImage": image, "expectedAxRole": "DIALOG",
+                                 "xres": {"window": xid, **helper.bound_window(snapshot, x11)}})
+                    try:
+                        before = helper.perform(snapshot, atspi, helper.Proc(), x11, binding)
+                    except Exception as error:
+                        diagnostic = {"strictSnapshotError": str(error)[:1000], "readOnly": True, "authorization": False,
+                                      "ax": backend_ax_observation(snapshot, helper, x11, atspi, binding, root_record, actual)}
+                        try:
+                            B.save_json(root / (action + "-backend-ax-refusal.json"), diagnostic)
+                        except Exception as retention_error:
+                            raise RuntimeError(str(error)[:1000] + "; diagnostic retention failed: "
+                                               + type(retention_error).__name__) from error
+                        raise
                     require(B.process_uids(actual["pid"]) == uid_before, "Backend UID changed before consent")
                     result = helper.perform(req, atspi, helper.Proc(), x11, binding)
                     B.save_json(root / (action + "-backend.json"), {"receipt": value, "native": actual})

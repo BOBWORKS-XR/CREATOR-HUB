@@ -320,6 +320,7 @@ class NativeReceiptTests(unittest.TestCase):
                 mock.patch.object(p, "direct_backend", return_value=(actual, image)), \
                 mock.patch.object(p, "dialog_window", return_value=77), \
                 mock.patch.object(helper, "identity"), \
+                mock.patch.object(helper, "bound_window", return_value={"pid": 43, "client": 3}), \
                 mock.patch.object(helper, "KernelBinding", return_value=binding) as bind, \
                 mock.patch.object(helper, "perform", return_value={"actionCount": 1}) as perform:
             result = p.consent(Path("/fixture"), "setup-decline", request, helper, object(), object(), parent)
@@ -328,7 +329,9 @@ class NativeReceiptTests(unittest.TestCase):
         self.assertEqual(perform.call_args_list[1].args[0].button, "Not now")
         bind.assert_called_once()
         binding.close.assert_called_once()
-        save.assert_called_once()
+        self.assertEqual(save.call_count, 2)
+        self.assertFalse(save.call_args_list[0].args[1]["authorization"])
+        self.assertEqual(save.call_args.args[0].name, "setup-decline-backend.json")
 
     def test_deadline_retains_read_only_observation_without_input_or_timing_change(self):
         parent, _actual, _image = self.fixture()
@@ -341,6 +344,120 @@ class NativeReceiptTests(unittest.TestCase):
         helper.perform.assert_not_called()
         self.assertFalse(save.call_args.args[1]["authorization"])
         self.assertTrue(save.call_args.args[1]["readOnly"])
+
+    def test_strict_snapshot_refusal_retains_backend_window_and_ax_without_input(self):
+        parent, actual, image = self.fixture()
+        parent["kernelImageSha256"] = p.B.INSTALLED_HUB_PIN[1]
+        request = types.SimpleNamespace(pid=42, start="100", sha256=p.B.INSTALLED_HUB_PIN[1], executable=parent["executable"])
+        helper, binding = p.B.load_helper(), types.SimpleNamespace(close=mock.Mock())
+        xres = {"pid": 43, "client": 3, "title": p.APPS["setup"]["title"], "mapped": True}
+        def fail_snapshot(*_args):
+            self.assertEqual(save.call_count, 1, "Native identity must survive even if AX read blocks/refuses")
+            raise RuntimeError("Exact owned accessibility window is missing or ambiguous")
+        with mock.patch.object(p.os, "getuid", return_value=parent["uids"][0], create=True), \
+                mock.patch.object(p.B, "native_process", return_value=parent), \
+                mock.patch.object(p.B, "process_uids", return_value=parent["uids"]), \
+                mock.patch.object(p.B, "save_json") as save, \
+                mock.patch.object(p, "direct_backend", return_value=(actual, image)), \
+                mock.patch.object(p, "dialog_window", return_value=77), \
+                mock.patch.object(helper, "identity"), \
+                mock.patch.object(helper, "bound_window", return_value=xres), \
+                mock.patch.object(helper, "KernelBinding", return_value=binding), \
+                mock.patch.object(p, "backend_ax_observation", create=True, return_value={"verified": True}) as observation, \
+                mock.patch.object(helper, "perform", side_effect=fail_snapshot) as perform, \
+                self.assertRaisesRegex(RuntimeError, "Exact owned accessibility window is missing or ambiguous"):
+            p.consent(Path("/fixture"), "setup-decline", request, helper, object(), object(), parent)
+        self.assertEqual(perform.call_count, 1)
+        self.assertEqual(perform.call_args.args[0].action, "snapshot")
+        self.assertEqual(perform.call_args.args[0].role, "DIALOG")
+        self.assertEqual(save.call_count, 2)
+        before, failure = [call.args[1] for call in save.call_args_list]
+        self.assertEqual(before["native"], actual)
+        self.assertEqual(before["kernelImage"], image)
+        self.assertEqual(before["xres"], {"window": 77, **xres})
+        self.assertFalse(before["authorization"])
+        self.assertEqual(failure["ax"], {"verified": True})
+        self.assertIn("accessibility window", failure["strictSnapshotError"])
+        observation.assert_called_once()
+        binding.close.assert_called_once()
+
+    def diagnostic_fixture(self):
+        parent, actual, _image = self.fixture()
+        helper = p.B.load_helper()
+        request = types.SimpleNamespace(action="snapshot", receipt=object(), pid=43, window=77,
+                                        title=p.APPS["setup"]["title"], role="DIALOG")
+        desktop = fixtures.AxNode(0, 14)
+        app = fixtures.AxNode(43, 75, parent=desktop)
+        window = fixtures.AxNode(43, 2, "Information", parent=app)
+        label = fixtures.AxNode(43, 29, p.APPS["setup"]["title"], parent=window)
+        button = fixtures.AxNode(43, 43, "Not now", parent=window, verb="click")
+        for node in (desktop, app, window, label, button):
+            node.get_child_count = lambda node=node: len(node.children)
+            node.get_child_at_index = lambda index, node=node: node.children[index]
+        atspi = types.SimpleNamespace(get_desktop=lambda _: desktop,
+                                     StateType=types.SimpleNamespace(SHOWING=1, ENABLED=2, SENSITIVE=3, DEFUNCT=4, BUSY=5))
+        return parent, actual, helper, request, desktop, app, window, button, atspi
+
+    def test_read_only_ax_diagnostic_records_alert_and_different_name_not_input_authority(self):
+        parent, actual, helper, request, _desktop, _app, _window, button, atspi = self.diagnostic_fixture()
+        with mock.patch.object(helper, "identity") as identity, \
+                mock.patch.object(helper, "bound_window", return_value={"pid": 43, "client": 3}), \
+                mock.patch.object(p.B, "native_process", side_effect=[parent, actual, parent, actual]), \
+                mock.patch.object(helper, "perform") as perform:
+            result = p.backend_ax_observation(request, helper, object(), atspi, object(), parent, actual)
+        self.assertTrue(result["verified"])
+        self.assertTrue(result["readOnly"])
+        self.assertFalse(result["authorization"])
+        self.assertFalse(result["axToXidAssociationVerified"])
+        self.assertEqual(result["windows"][0]["role"], 2)
+        self.assertEqual(result["windows"][0]["name"], "Information")
+        self.assertIn("Not now", [node["name"] for node in result["nodes"]])
+        self.assertEqual(request.role, "DIALOG")
+        self.assertEqual(identity.call_count, 2)
+        perform.assert_not_called()
+        button.action.do_action.assert_not_called()
+        source = (HERE / "native-linux-components-probe.py").read_text().split("def backend_ax_observation(", 1)[1].split("def consent(", 1)[0]
+        for forbidden in (".perform(", "Request.sealed", "do_action(", "get_action_iface", "time.sleep"):
+            self.assertNotIn(forbidden, source)
+
+    def test_ax_registration_absence_and_ambiguity_are_retained_without_guessing_role(self):
+        for count in (0, 2):
+            parent, actual, helper, request, desktop, app, _window, button, atspi = self.diagnostic_fixture()
+            desktop.children = [app]*count
+            with mock.patch.object(helper, "identity"), \
+                    mock.patch.object(helper, "bound_window", return_value={"pid": 43, "client": 3}), \
+                    mock.patch.object(p.B, "native_process", side_effect=[parent, actual, parent, actual]):
+                result = p.backend_ax_observation(request, helper, object(), atspi, object(), parent, actual)
+            self.assertEqual(result["applicationCount"], count)
+            self.assertEqual(result["nodes"], [])
+            self.assertEqual(result["verified"], count == 0)
+            self.assertFalse(result["authorization"])
+            button.action.do_action.assert_not_called()
+
+    def test_ax_diagnostic_foreign_nodes_drift_and_size_bounds_refuse_not_authorize(self):
+        for change in ("foreign", "uid", "start", "image", "ppid", "window", "size"):
+            parent, actual, helper, request, _desktop, _app, window, button, atspi = self.diagnostic_fixture()
+            changed = copy.deepcopy(actual)
+            xres = {"pid": 43, "client": 3}
+            if change == "foreign":
+                button.pid = 99
+                button.get_name = mock.Mock(side_effect=AssertionError("Foreign name must not be read"))
+            elif change in ("uid", "start", "image", "ppid"):
+                field, value = {"uid": ("uids", [9999]*4), "start": ("startTime", "999"),
+                                "image": ("kernelImageSha256", "f"*64), "ppid": ("parentPid", 99)}[change]
+                changed[field] = value
+            elif change == "size":
+                window.children = [button]*(helper.MAX_CHILDREN+1)
+            with mock.patch.object(helper, "identity"), \
+                    mock.patch.object(helper, "bound_window", side_effect=[xres, {**xres, "client": 9}] if change == "window" else [xres, xres]), \
+                    mock.patch.object(p.B, "native_process", side_effect=[parent, actual, parent, changed]):
+                result = p.backend_ax_observation(request, helper, object(), atspi, object(), parent, actual)
+            self.assertFalse(result["verified"], change)
+            self.assertIn("captureRefusal", result, change)
+            self.assertFalse(result["authorization"])
+            button.action.do_action.assert_not_called()
+            if change == "foreign":
+                button.get_name.assert_not_called()
 
     def test_backend_absence_is_not_fabricated_exit_zero_and_pid_reuse_refuses(self):
         helper = types.SimpleNamespace(Proc=lambda: types.SimpleNamespace(exists=lambda _: False))
