@@ -257,11 +257,18 @@ test('restore ticket compares only canonical drive paths with the observed optio
   const extendedKernel = clone(initial);
   Object.values(extendedKernel.backends).forEach(backend => { backend.image = '\\\\?\\' + backend.image; });
   checks.restoreTicket(ticket(initial), extendedKernel);
+  // Rust PathBuf::join retains signed module paths such as "mcp/creator-works-mcp-launcher.exe".
+  const joined = ticket(initial);
+  joined.views[1].path = '\\\\?\\' + initial.backends.mcp.image.replace('\\creator-works', '/creator-works');
+  checks.restoreTicket(joined, initial);
+  const slashDrive = ticket(initial);
+  slashDrive.views.forEach(view => { view.path = view.path.replaceAll('\\', '/'); });
+  checks.restoreTicket(slashDrive, initial);
   for (const image of [
     'D:\\owned\\creator-project-setup.exe', 'C:\\foreign\\creator-project-setup.exe',
     '\\\\server\\owned\\creator-project-setup.exe', '\\\\?\\UNC\\server\\owned\\creator-project-setup.exe',
     '\\\\.\\C:\\owned\\creator-project-setup.exe', '\\??\\C:\\owned\\creator-project-setup.exe',
-    'C:owned\\creator-project-setup.exe', 'C:/owned/creator-project-setup.exe',
+    'C:owned\\creator-project-setup.exe',
     'C:\\owned\\.\\creator-project-setup.exe', 'C:\\owned\\..\\owned\\creator-project-setup.exe',
     'C:\\owned\\\\creator-project-setup.exe', 'C:\\owned\\creator-project-setup.exe:stream',
     '\\\\?\\C:\\owned\\creator-project-setup.exe.', 'C:\\owned \\creator-project-setup.exe',
@@ -300,6 +307,8 @@ test('source fences: original native consent helper, readonly kernel recorder, n
   assert.match(source, /checks\.sameProcess\(owner, record\(owner\.pid\)\)/);
   assert.match(source, /actualNativePermissions:/); assert.match(source, /await sdkRoundTrip\(sdkClient\)/);
   assert.match(source, /target\.readBounded\(ticket, 16 \* 1024\)/);
+  assert.ok(source.indexOf('report.observedRestoreTicket = observedTicket;') < source.indexOf('checks.restoreTicket(observedTicket, before);'),
+    'Retain the bounded actual ticket before comparing representations; do not discard failure evidence');
   assert.doesNotMatch(source, /localStorage\.setItem|sessionStorage\.setItem|window\.CreatorHubNative\s*=|window\.CreatorRuntime\s*=|\.kill\(|taskkill|Stop-Process|writeFileSync\(ticket/);
   const recorder = fs.readFileSync(path.join(__dirname, 'native-unified-outgoing-process.ps1'), 'utf8');
   assert.ok(recorder.indexOf('GITHUB_ACTIONS') < recorder.indexOf('Add-Type'));

@@ -260,7 +260,11 @@ async function main() {
     report.cancelled = cancelled; report.checks.push('Native Cancel preserves both drafts, exact process starts, config/preferences bytes, SDK14 and unrelated runtime.');
     ticketTimer = setInterval(() => {
       if (!observedTicket && !ticketError && fs.existsSync(ticket)) {
-        try { observedTicket = JSON.parse(target.readBounded(ticket, 16 * 1024)); checks.restoreTicket(observedTicket, before); }
+        try {
+          observedTicket = JSON.parse(target.readBounded(ticket, 16 * 1024));
+          report.observedRestoreTicket = observedTicket;
+          checks.restoreTicket(observedTicket, before);
+        }
         catch (error) { ticketError = error; }
       }
     }, 25);

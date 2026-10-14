@@ -1,4 +1,4 @@
-name: Canonical-path B03 14 to outer-only 15 outgoing lab (not release)
+name: Observed-path B03 14 to outer-only 15 outgoing lab (not release)
 on:
   workflow_dispatch:
   push:

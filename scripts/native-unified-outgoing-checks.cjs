@@ -74,7 +74,7 @@ function cancelPreserved(before, after) {
 }
 function restoreImagePath(value) {
   assert.ok(typeof value === 'string' && value.length <= 4096, 'Bounded native image path required');
-  const image = value.startsWith('\\\\?\\') ? value.slice(4) : value;
+  const image = (value.startsWith('\\\\?\\') ? value.slice(4) : value).replaceAll('/', '\\');
   assert.match(image, /^[A-Za-z]:\\/, 'Only absolute Windows drive image paths are comparable');
   const parts = image.slice(3).split('\\');
   assert.ok(parts.every(part => part.length > 0 && part !== '.' && part !== '..'
