@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import zipfile
 
@@ -158,25 +159,71 @@ def child_environment(root, session=False):
     return env
 
 
+class BoundedLog:
+    """Drain native output without constraining the child's own filesystem writes."""
+    def __init__(self, file, limit):
+        self.file, self.limit = Path(file), limit
+        self.stream = self.file.open('xb')
+        self.file.chmod(0o600)
+        self.count, self.kept, self.tail = 0, 0, b''
+        self.digest, self.lock, self.complete = hashlib.sha256(), threading.Lock(), False
+
+    def consume(self, body):
+        with self.lock:
+            self.count += len(body)
+            self.digest.update(body)
+            self.tail = (self.tail + body)[-8192:]
+            retained = body[:max(0, self.limit - self.kept)]
+            self.stream.write(retained)
+            self.stream.flush()
+            self.kept += len(retained)
+
+    def start(self, pipe):
+        def drain():
+            try:
+                while True:
+                    body = pipe.read1(65536)
+                    if not body:
+                        break
+                    self.consume(body)
+            finally:
+                with self.lock:
+                    self.complete = True
+                    self.stream.close()
+                pipe.close()
+        self.thread = threading.Thread(target=drain, daemon=True)
+        self.thread.start()
+        return self
+
+    def summary(self):
+        with self.lock:
+            return {'sourceBytes': self.count, 'sourceSha256': self.digest.hexdigest(), 'retainedBytes': self.kept,
+                    'truncated': self.count > self.limit, 'eof': self.complete,
+                    'tail': self.tail.decode('utf8', 'replace')}
+
+    def finish(self):
+        self.thread.join(timeout=2)
+        return self.summary()
+
+
 def command(root, report, env, label, argv, timeout=30, limit=65536):
     start = time.monotonic()
     stdout, stderr = root / (label + '.stdout'), root / (label + '.stderr')
-    def bounds():
-        import resource
-        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
-    with stdout.open('xb') as out, stderr.open('xb') as err:
-        child = subprocess.Popen(argv, env=env, cwd=root, stdin=subprocess.DEVNULL, stdout=out, stderr=err, preexec_fn=bounds)
-        try:
-            status = child.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            # No kill fallback, even for diagnostic commands. Preserve the PID and partial logs.
-            status = None
+    child = subprocess.Popen(argv, env=env, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    logs = [BoundedLog(stdout, limit).start(child.stdout), BoundedLog(stderr, limit).start(child.stderr)]
+    try:
+        status = child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # No kill fallback, even for diagnostic commands. Preserve the PID and partial logs.
+        status = None
+    captures = [log.finish() for log in logs]
     a, b = stdout.read_bytes(), stderr.read_bytes()
     report['commands'].append({'label': label, 'argv': argv, 'status': status, 'pid': child.pid,
                                'elapsedMs': round((time.monotonic() - start) * 1000), 'stdout': record(a), 'stderr': record(b),
+                               'outputCapture': captures,
                                'stderrTail': b[-4096:].decode('utf8', 'replace') if status != 0 else ''})
     require(status == 0, 'Command failed/timed out: ' + label)
-    require(len(a) <= limit and len(b) <= limit, 'Command output bound exceeded: ' + label)
+    require(all(item['eof'] and not item['truncated'] for item in captures), 'Command log bound/EOF differs: ' + label)
     return a.decode('utf8').strip()
 
 
@@ -291,8 +338,8 @@ def probe(root):
         resource_output = command(root, report, env, 'resource-lookup', ['/usr/bin/flatpak', 'run', '--user', '--command=sh', PINS['ref'], '-c', RESOURCE_SCRIPT])
         require(resource_output == '/app/lib/Creator Hub\n' + PAIR['pins']['files']['modules.tar.gz']['sha256'] + '  /app/lib/Creator Hub/modules.tar.gz', 'Sandbox resource path/hash differs')
         report['resourceLookupProbePassed'] = True
-        manager_log = (root / 'openbox.log').open('xb')
-        manager = subprocess.Popen(['/usr/bin/openbox', '--sm-disable'], env=env, stdout=manager_log, stderr=subprocess.STDOUT)
+        manager = subprocess.Popen(['/usr/bin/openbox', '--sm-disable'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        manager_log = BoundedLog(root / 'openbox.log', 65536).start(manager.stdout)
         spec = importlib.util.spec_from_file_location('flatpak_x11_primitives', HERE / 'native-unix-window.py')
         helper = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = helper
@@ -304,12 +351,10 @@ def probe(root):
                 break
             time.sleep(0.1)
         report['phase'] = 'one-normal-flatpak-launch'
-        def bounds():
-            import resource
-            resource.setrlimit(resource.RLIMIT_FSIZE, (1048576, 1048576))
-        with (root / 'hub.stdout').open('xb') as out, (root / 'hub.stderr').open('xb') as err:
-            child = subprocess.Popen(['/usr/bin/flatpak', 'run', '--user', PINS['ref']], env=env, cwd=root,
-                                     stdin=subprocess.DEVNULL, stdout=out, stderr=err, preexec_fn=bounds)
+        child = subprocess.Popen(['/usr/bin/flatpak', 'run', '--user', PINS['ref']], env=env, cwd=root,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        hub_logs = [BoundedLog(root / name, 1048576).start(pipe)
+                    for name, pipe in (('hub.stdout', child.stdout), ('hub.stderr', child.stderr))]
         report['launchCount'] = 1
         report['launchPid'] = child.pid
         launcher = proc(child.pid)
@@ -363,9 +408,10 @@ def probe(root):
         if child:
             report['launchExitStatus'] = child.poll()
             report['leftRunningAtReport'] = child.poll() is None
-            for name in ('hub.stdout', 'hub.stderr'):
-                body = (root / name).read_bytes()
-                report[name] = {**record(body), 'tail': body[-8192:].decode('utf8', 'replace')}
+            captures = [log.finish() for log in hub_logs]
+            for name, capture in zip(('hub.stdout', 'hub.stderr'), captures):
+                report[name] = capture
+            report['logCaptureComplete'] = all(item['eof'] and not item['truncated'] for item in captures)
         try:
             report['desktopDiagnostic'] = bitmap(root, 0, 'desktop-diagnostic.png')
         except Exception as error:
@@ -377,7 +423,8 @@ def probe(root):
                 report['deploymentRecheckedAfter'] = True
             except Exception as error:
                 report['afterError'] = str(error)[:1000]
-        report['suitePassed'] = bool(report.get('terms') and report['normalCloseReaped'] and report.get('deploymentRecheckedAfter') and not report.get('error'))
+        report['suitePassed'] = bool(report.get('terms') and report['normalCloseReaped'] and report.get('deploymentRecheckedAfter')
+                                     and report.get('logCaptureComplete') and not report.get('error'))
         save(root / 'gui-report.json', report)  # Save before owned desktop session teardown.
         if x11:
             x11.dispose()
@@ -387,7 +434,7 @@ def probe(root):
                 manager.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
-            manager_log.close()
+            manager_log.finish()
     print(json.dumps({key: report.get(key) for key in ('phase', 'suitePassed', 'launchCount', 'launchExitStatus', 'error', 'normalCloseReaped')}))
     return 0 if report['suitePassed'] else 1
 

@@ -117,9 +117,34 @@ class Fixtures(unittest.TestCase):
         source = Path(p.__file__).read_text()
         self.assertNotIn('.kill(', source)
         self.assertNotIn('.terminate(', source)
+        self.assertNotIn('RLIMIT_FSIZE', source)
+        self.assertNotIn('preexec_fn', source)
         self.assertIn('x11.check_close(xid)', source)
         self.assertEqual(source.count("subprocess.Popen(['/usr/bin/flatpak', 'run'"), 1)
         self.assertTrue(all(value is False for value in p.FLAGS.values()))
+
+    def test_bounded_logging_truncates_only_retained_output_not_child_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = p.BoundedLog(Path(directory) / 'out', 4)
+            log.consume(b'hello')
+            log.consume(b' world')
+            result = log.summary()
+            self.assertEqual((Path(directory) / 'out').read_bytes(), b'hell')
+            self.assertEqual(result['sourceBytes'], 11)
+            self.assertEqual(result['sourceSha256'], hashlib.sha256(b'hello world').hexdigest())
+            self.assertTrue(result['truncated'])
+            self.assertFalse(result['eof'])
+            log.stream.close()
+
+    def test_small_log_limit_does_not_limit_owned_installer_fixture_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report = {'commands': []}
+            script = "from pathlib import Path; Path('owned-object').write_bytes(b'x'*131072); print('written')"
+            result = p.command(root, report, None, 'fixture', [sys.executable, '-B', '-c', script], limit=32)
+            self.assertEqual(result, 'written')
+            self.assertEqual((root / 'owned-object').stat().st_size, 131072)
+            self.assertTrue(all(log['eof'] for log in report['commands'][0]['outputCapture']))
 
 
 if __name__ == '__main__':

@@ -85,13 +85,29 @@ node --test scripts/flatpak-gui-probe.test.cjs scripts/flatpak-package.test.cjs 
 python -B scripts/flatpak-gui-probe.test.py
 ```
 
-Pre-dispatch verification: 49 Node tests and 11 Python fixtures pass; Python AST
+Pre-dispatch verification: 49 Node tests and initially 11 Python fixtures pass; Python AST
 and the single-job workflow YAML parse. Actual original-ZIP staging and all 15
 current module members (164,641,396 unpacked bytes) pass offline hash/mode checks.
 The actual pinned product source independently passes the close-route preflight.
 No product executable was run locally.
 
-Initial checkpoint: actual Flatpak GUI remains untested. The bounded job may expose
+Run [38642550553/1](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38642550553),
+test source `e292c4caa16ff766074e27f2f95cafdbde90ed98`, failed at installation;
+`launchCount:0`. All tests, primary bindings, original-ZIP staging and public
+prerequisite provisioning passed. The failed run is not GUI or ABI evidence.
+Its original artifact is `11930707276`, 418,915,929 bytes, API SHA-256
+`54bf8eea2ffb933fec28d2721273b43f29a3b54352c36c2c159824e5c8eb031a`.
+
+The first harness incorrectly inherited a log-oriented file-size limit into
+OSTree installation. The corrected harness drains stdout/stderr into capped
+host-side logs instead, retaining full-stream byte counts/hashes and bounded
+tails; it does not restrict the child's filesystem writes or kill timed-out
+processes. Two regressions check truncation and a 131,072-byte owned synthetic
+installer write under a 32-byte log cap. There are now 13 passing Python fixtures.
+This changes only test logging, not package bytes, runtime or app grants. A small
+capture artifact precedes full evidence upload for bounded failure diagnosis.
+
+Actual Flatpak GUI remains untested at this checkpoint. The bounded job may expose
 missing ABI, desktop or nested WebKit sandbox prerequisites; no workaround is
 authorized. Retain the original failure, screenshot (desktop-only if no owned
 window), stdout/stderr, source binding and bounded `gui-report.json`. All broad

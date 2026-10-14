@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: 24.17.0
       - run: npm ci --ignore-scripts
-      - name: Test parsers, pinned source contracts and fixture refusals before dispatching any app
+      - name: Test parsers, pinned source contracts, capped logs and fixture refusals before dispatching any app
         run: |
           node --test scripts/flatpak-gui-probe.test.cjs scripts/flatpak-package.test.cjs scripts/flatpak-retention.test.cjs
           python3 -B scripts/flatpak-gui-probe.test.py
@@ -48,6 +48,20 @@ jobs:
           export XDG_CACHE_HOME="$root/cache" XDG_RUNTIME_DIR="$root/runtime" TMPDIR="$root/tmp"
           dbus-run-session -- xvfb-run -a --server-args='-screen 0 1280x800x24 -nolisten tcp' \
             /usr/bin/python3 -B scripts/flatpak-gui-probe.py probe
+      - name: Retain compact capture first for bounded diagnosis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-gui-capture-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/flatpak-gui-probe/*.json
+            ${{ runner.temp }}/flatpak-gui-probe/*.txt
+            ${{ runner.temp }}/flatpak-gui-probe/*.stdout
+            ${{ runner.temp }}/flatpak-gui-probe/*.stderr
+            ${{ runner.temp }}/flatpak-gui-probe/*.png
+            ${{ runner.temp }}/flatpak-gui-probe/*.log
       - name: Preserve exact original ZIP, source proof, screenshot, native logs and first failure
         if: always()
         uses: actions/upload-artifact@v4
