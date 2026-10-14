@@ -131,6 +131,18 @@ test('both Linux assembly jobs select the same bounded signed input', () => {
   assert.ok(Number.isSafeInteger(pin.zipBytes) && pin.zipBytes > 0 && pin.zipBytes <= 300 * 1024 * 1024);
   for (const value of [pin.zipSha256, pin.handoffSha256]) assert.match(value, /^[a-f0-9]{64}$/);
 });
+
+test('small Linux receipts are retained before the large immutable package artifact', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-assembly.yml'), 'utf8');
+  const start = workflow.indexOf('name: Retain compact Linux receipts for independent review, without executable payloads');
+  const full = workflow.indexOf('name: Retain signed build evidence, not publication or migration acceptance');
+  assert.ok(start > 0 && start < full);
+  const step = workflow.slice(start, full);
+  assert.match(step, /if: success\(\) && runner\.os == 'Linux'/);
+  const names = [...step.matchAll(/^\s+artifacts\/unified\/ci-signed-unix-hub\/(\S+)\r?$/gm)].map(value => value[1]);
+  assert.deepEqual(names, ['linux-byte-receipts.json', 'builtin-manifest.json', 'signed-unix-assembly.json', 'unix-package-integrity.json']);
+  assert.doesNotMatch(step, /\*|native-packages|modules\/|\.exe|\.AppImage/);
+});
 test('retained pre-wrapper is the signed manifest and original preparation is separately immutable', () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unix-manifest-test-')));
   try {

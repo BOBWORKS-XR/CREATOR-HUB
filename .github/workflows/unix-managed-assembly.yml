@@ -190,6 +190,35 @@ jobs:
         run: |
           node scripts/native-macos-app-probe.cjs --app "$APP_PATH" --hub-sha256 "$HUB_SHA256" --output "$RUNNER_TEMP/root-app-probe" \
             --expected-version 0.1.14 --assembly-receipt "$ASSEMBLY_RECEIPT" --assembly-receipt-sha256 "$ASSEMBLY_RECEIPT_SHA256"
+      - name: Bind compact Linux byte receipts before uploading large packages
+        if: success() && runner.os == 'Linux'
+        run: |
+          node - <<'NODE'
+          const fs=require('node:fs'),crypto=require('node:crypto'),path=require('node:path');
+          const output=path.resolve('artifacts/unified/ci-signed-unix-hub');
+          const files={};
+          for(const name of ['creator-hub','builtin-manifest.json','modules.tar.gz','signed-unix-assembly.json','unix-package-integrity.json']) {
+            const file=path.join(output,name),stat=fs.lstatSync(file);
+            if(!stat.isFile()||stat.isSymbolicLink()||stat.size<=0||stat.size>256*1024*1024)throw Error('Invalid compact-receipt input');
+            const bytes=fs.readFileSync(file);
+            files[name]={bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};
+          }
+          fs.writeFileSync(path.join(output,'linux-byte-receipts.json'),JSON.stringify({schemaVersion:1,
+            sourceCommit:process.env.GITHUB_SHA,runId:Number(process.env.GITHUB_RUN_ID),runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT),
+            files,nativeGuiAccepted:false,migrationAccepted:false,signedUpdateAccepted:false,releaseReady:false},null,2),{flag:'wx'});
+          NODE
+      - name: Retain compact Linux receipts for independent review, without executable payloads
+        if: success() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-linux-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            artifacts/unified/ci-signed-unix-hub/linux-byte-receipts.json
+            artifacts/unified/ci-signed-unix-hub/builtin-manifest.json
+            artifacts/unified/ci-signed-unix-hub/signed-unix-assembly.json
+            artifacts/unified/ci-signed-unix-hub/unix-package-integrity.json
       - name: Retain signed build evidence, not publication or migration acceptance
         if: always()
         uses: actions/upload-artifact@v4
