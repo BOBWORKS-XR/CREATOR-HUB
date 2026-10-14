@@ -128,7 +128,119 @@ and reuses the exact original/candidate DEBs. Candidate: 69,843,476 bytes, SHA-2
 `0f3c7ade0eba54b8d44a8ea5e71d33da0938f96f6c3f4b68502e937532eccd19`.
 The native guard and archive checks still apply; package bytes are not rebuilt.
 
-Corrected native outcome is pending. A green portable preflight is not native
-acceptance. Original/candidate DEBs, command exits/stdout/stderr, before/after
-package captures and `report.json` are retained for seven days. A permanent
-compact evidence record will preserve both outcomes without lifting other gates.
+### Corrected Native Outcome
+
+[38643248531](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38643248531)
+passed on one disposable Ubuntu 22.04 x64 runner. Exact test source:
+`be8fb61d9bd8428fe02ca3c91d1bef7e3eac693f`; package-build source remains
+`a0297d5622681b633ce6364d9b97244ffe892416`. No package bytes were rebuilt.
+The 11 focused portable tests passed before downloading the immutable input.
+
+The normal same-package `dpkg --install` upgrade retained all nine runtime
+resources at their original paths with matching SHA-256/MD5, mode, root UID/GID
+and package ownership. The existing SDK connection survived (PID 3234, process
+start time 27314), both original Node aliases reconnected before/after, and all
+checks returned 53 tools and the same bounded reference SHA-256. Normal dpkg
+replacement changed the live process's `/proc/PID/exe` suffix to `(deleted)`;
+fresh connections used the installed image at the unchanged original path,
+not a relocated cache or alias.
+All five GUI/desktop/icon files and their package ownership were absent afterward;
+fresh-process Gio enumeration no longer listed the desktop ID. Both dpkg
+verification captures were clean. All eight synthetic settings/client/project/
+cache sentinels retained their exact bytes.
+
+**Accepted only:** this package transaction's runtime retention and package-level
+GUI retirement. It does not prove refresh of an already-running desktop shell.
+Native cancellation, tamper, recovery, GUI idle/close, Setup transition, production
+integration, client migration, Flatpak, signed-update and release gates remain
+**false**. This is a real package-manager-supported compatibility mechanism on
+the tested Ubuntu baseline, not authorization to ship or install it elsewhere.
+
+Original/candidate DEBs, command exits/stdout/stderr, before/after captures and
+`report.json` are retained for seven days in artifact `11930573482`, ZIP SHA-256
+`335b3d39fa7c8dbf4fa5ed6337da6de6ef1158c56c1d9abd947d7f6077265dcd`.
+The [permanent evidence summary](evidence/linux-deb-retention-014.json) preserves
+both the failed first capture and the corrected result. Full local captures:
+
+```text
+C:\Users\bobman\AppData\Local\Temp\creator-hub-linux-deb-retention-014-38642404016
+C:\Users\bobman\AppData\Local\Temp\creator-hub-linux-deb-retention-014-38643248531
+```
+
+All commits are independent on `validation/linux-deb-retention-014`, based on
+`058516d`, without switching/updating the shared feature branch or its index.
+The owned new files intentionally remain untracked in that shared checkout;
+unrelated human/agent changes are preserved. No Mac, production, publication,
+auth-file, UI/broker/agent-source, or live user installation work was performed.
+
+## Parent Handoff
+
+No new Setup or production task is started. Preserve the seven untracked mirror
+files below until the parent reviews/integrates the independent branch. The
+accepted executable test source is `be8fb61`, not the later evidence-only tip.
+
+### Minimum Proven Inputs
+
+- Public source/tag: MCP 2.7.7, target
+  `9cd12e28d1dd05057b84166d4718a5d6369eff93`; launcher path/config contracts
+  are linked in the original audit. The DEB bytes, not the version label alone,
+  establish this experiment's payload identity.
+- Original `control`: 297 bytes, SHA-256
+  `1b5ab5aa32886336f2eec3e48690c09286715e7438448813dcaa070c73111213`.
+  Original `md5sums`: 1,265 bytes, SHA-256
+  `556261ac6789876557ddbff925a8652f94ca8649ad251acac64a07f501b1208f`.
+  Exactly these two control members; no maintainer scripts or conffiles. Exact
+  package name/version/architecture, dependencies and descriptions are in
+  `plan.json`; full original controls are retained in the capture.
+- Retain exactly nine files below `/usr/lib/Creator Works MCP/server`, including
+  both native Node names, the executable `.mjs`, both licenses, notices, runtime
+  version, bridge and logo. The permanent evidence gives each original path,
+  byte count, SHA-256 and mode. Installed UID/GID stay 0/0, owned by
+  `creator-works-mcp`. Do not substitute a cache, rename, or copy-back transaction.
+- Candidate control keeps `Package: creator-works-mcp`, `Architecture: amd64`,
+  uses `Version: 2.7.7-1+hub.retention014.1`, and deliberately retains the old
+  dependencies. Only validation metadata/payload changes; no production signing
+  or trust decision has been established for this synthetic package.
+
+### Required Production Boundary: Not Implemented
+
+The disposable proof used `sudo dpkg --install` on its runner-local test DEB.
+**Do not ship that caller-controlled package-path pattern.** The parent's next
+integration must invoke a fixed, trusted privileged helper through the fixed
+system `pkexec`, not elevate an unprivileged/mutable local package handed to Root.
+No helper, polkit policy, or privileged-source contract is implemented or accepted
+here. The trusted helper must itself acquire/verify a trusted package into a
+protected namespace and bind the verified bytes to the actual dpkg input;
+reopening a mutable caller pathname after hashing is not sufficient. UI metadata,
+unprivileged manifests, a version string, or a journal are not install authority.
+
+Minimum proposed version/state policy for that separate implementation:
+
+- Upgrade only the exact approved `creator-works-mcp:amd64` baseline, healthy
+  `install ok installed` at 2.7.7, with expected complete original ownership and
+  file pins. Admit no implicit fresh install, other version/architecture, hold,
+  partial/unpacked/half-configured state, foreign ownership, changed payload,
+  diverted or redirected namespace. These production refusals are not tested.
+- Require an explicitly approved compatibility package identity and strictly
+  greater Debian version, exact retained resource/control allowlists, no hidden
+  scripts or relationship fields, and privileged revalidation before the one
+  normal package transaction. The fixture version is not approved for shipment.
+  No force/downgrade, remove/purge/autoremove, manual dpkg DB mutation, or
+  remove-then-restore fallback.
+- Native review/approval/cancel, real legacy-GUI idle/normal-close, competing
+  package/process changes, tamper refusal and recovery remain acceptance gates.
+  Preserve already-live SDK connections and prove original-path reconnect again
+  through the actual shipped helper/coordinator. The current proof does not lift
+  signed-update, unified-product, client migration, or Flatpak gates.
+
+### Owned File Manifest
+
+```text
+.github/workflows/linux-deb-retention-014.yml
+scripts/linux-deb-retention-probe.py
+scripts/linux-deb-retention-probe.test.py
+scripts/linux-deb-retention-sdk.cjs
+scripts/linux-deb-retention-sdk.test.cjs
+docs/LINUX-DEB-RETENTION-014.md
+docs/evidence/linux-deb-retention-014.json
+```
