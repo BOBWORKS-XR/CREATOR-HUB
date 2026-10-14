@@ -33,7 +33,12 @@ test('PowerShell registration arrays preserve empty, one and three item counts',
 test('native migration dialog buttons are allowlisted without relaxing process or title checks', () => {
   const source = fs.readFileSync(path.join(__dirname, 'native-window.ps1'), 'utf8');
   assert.match(source, /'Move connection' = @\('Review existing MCP connection'\)/);
-  assert.match(source, /'Keep existing' = @\('Review existing MCP connection'\)/);
+  assert.ok(source.includes("'Keep existing' = @('Review existing MCP connection', 'Review existing MCP connections', 'Keep MCP settings working in Hub', 'Move to unified Creator Hub', 'Retire standalone Creator apps')"));
+  for (const [button, title] of [['Back up and continue', 'Move to unified Creator Hub'],
+    ['Move selected connections', 'Review existing MCP connections'],
+    ['Move server path', 'Keep MCP settings working in Hub'], ['Finish migration', 'Retire standalone Creator apps']]) {
+    assert.ok(source.includes(`'${button}' = @('${title}')`));
+  }
   assert.match(source, /window.Current.Name -cnotin \$titles\[\$Value\]/);
   assert.match(source, /ProcessId\(\$dialog\) -ne \$TargetPid/);
 });

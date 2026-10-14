@@ -1,4 +1,4 @@
-// Clean-machine hosting acceptance. Never runs against the user's installed apps.
+// Disposable component hosting checks, not full guide/migration acceptance.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -18,7 +18,7 @@ verifyStage(path.join(directory, 'modules'), descriptor);
 let hub = path.join(directory, 'creator-hub.exe');
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out);
-const report = { sourceRevision: process.env.GITHUB_SHA, candidateSourceRevision: process.env.CREATOR_CANDIDATE_SOURCE || process.env.GITHUB_SHA, hubSha256: crypto.createHash('sha256').update(fs.readFileSync(hub)).digest('hex'), checks: [], passed: false };
+const report = { scope: 'component-built-in-smoke-not-guide-acceptance', releaseReady: false, sourceRevision: process.env.GITHUB_SHA, candidateSourceRevision: process.env.CREATOR_CANDIDATE_SOURCE || process.env.GITHUB_SHA, hubSha256: crypto.createHash('sha256').update(fs.readFileSync(hub)).digest('hex'), checks: [], passed: false };
 const backendPids = new Map();
 const installedMode = process.argv[3];
 let expectedRegistrations = [];
@@ -54,6 +54,12 @@ function registrations() {
   return execFileSync('powershell.exe', ['-NoProfile', '-Command',
     `$expected=${expected}; $found=@(); $names=@('Creator Hub','Creator Works MCP','Creator Project Setup','BANTWORKS MCP'); foreach ($h in @('HKCU:','HKLM:')) { foreach ($n in $names) { if(Test-Path -LiteralPath ($h+'\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'+$n)) { if($n -notin $expected) { throw ('Unexpected app registration: '+$n) }; $found+=$n } } }; foreach($n in $expected) { if($n -notin $found) { throw ('Missing app registration: '+$n) } }`], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
 }
+function registrationSnapshot() {
+  const bytes = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+    "$ErrorActionPreference='Stop'; $records=@(); foreach($h in @('HKCU:','HKLM:')) { foreach($n in @('Creator Hub','Creator Works MCP','Creator Project Setup','BANTWORKS MCP')) { $p=$h+'\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'+$n; if(Test-Path -LiteralPath $p) { $key=Get-Item -LiteralPath $p; $values=@(foreach($name in @($key.GetValueNames() | Sort-Object)) { @{name=$name; kind=[string]$key.GetValueKind($name); value=$key.GetValue($name,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)} }); $records+=@{hive=$h; name=$n; values=$values} } } }; ConvertTo-Json -InputObject $records -Depth 8 -Compress"],
+    { windowsHide: true, encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
+  return JSON.parse(bytes);
+}
 async function backendFor(app) {
   return retry(() => {
     const value = execFileSync('powershell.exe', ['-NoProfile', '-Command',
@@ -81,6 +87,38 @@ async function verifyMigratedJsonConnection(entry) {
     transport.stderr?.resume();
     assert.ok((await client.listTools({}, { timeout: 10000 })).tools.length > 0, 'Actual migrated command must expose MCP tools');
   } finally { await client.close(); }
+}
+async function deferStartupConvergence(page, verifyPreserved) {
+  const supported = await page.evaluate(() => window.CreatorHubNative?.convergencePersistence === true);
+  if (!supported) {
+    verifyPreserved('Startup without Convergence protocol');
+    return { status: 'unsupported', migrationSkipped: true, releaseReady: false };
+  }
+  const status = () => retry(async () => {
+    const result = await page.evaluate(() => window.CreatorHubNative.invoke('convergence_status')
+      .then(value => ({ value }), error => ({ error: String(error) })));
+    if (result.error === 'Another Hub operation is already running.') throw Error(result.error);
+    return result;
+  });
+  const before = await status();
+  assert.ok(before.error || before.value, 'Convergence must return a report or an inspection error');
+  if (before.value) {
+    assert.equal(before.value.enabled, true);
+    assert.equal(typeof before.value.required, 'boolean');
+    assert.equal(before.value.stage, 'review', 'Component smoke must not resume a completed/partial migration');
+    assert.deepEqual(before.value.backups, [], 'Component startup must not prepare migration backups');
+  }
+  const deferred = Boolean(before.error || before.value?.required);
+  const dialog = page.locator('#convergence-dialog');
+  if (deferred) {
+    await dialog.waitFor({ state: 'visible' });
+    verifyPreserved('Before Convergence Later');
+    await page.locator('#convergence-later').click();
+    await dialog.waitFor({ state: 'hidden' });
+  } else assert.equal(await dialog.isVisible(), false, 'Unrequired migration must not block startup');
+  assert.deepEqual(await status(), before, 'Later must not prepare, migrate or retire existing apps');
+  verifyPreserved('After Convergence Later');
+  return { status: deferred ? 'deferred' : 'not-required', migrationSkipped: true, releaseReady: false };
 }
 (async () => {
   registrations();
@@ -155,6 +193,25 @@ async function verifyMigratedJsonConnection(entry) {
     assert.equal(result.status, 2, 'Private backend must not launch a standalone app');
   }
   report.checks.push(installedMode === 'upgrade' ? 'Legacy companion installations retained; private modules reject standalone launch' : 'No companion installations; private modules reject standalone launch');
+  const registrationBefore = registrationSnapshot();
+  const convergenceOutputs = [
+    path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'convergence', 'review-v1.json'),
+    path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'convergence', 'legacy-retirement'),
+    path.join(path.dirname(settings), '.creator-hub-settings-backups'),
+    path.join(path.dirname(settings), '.creator-hub-product-settings'),
+    path.join(path.dirname(settings), 'hosted-operation-outcomes.json'),
+    ...retainedStores.map(store => path.join(path.dirname(store.path), '.creator-hub-settings-backups')),
+    managedLocations(process.env.LOCALAPPDATA).active,
+  ];
+  const verifyStartupPreserved = phase => {
+    assert.deepEqual(settingsBytes(), oldConfig, `${phase}: current MCP settings must stay unchanged`);
+    verifyRetainedStores(phase);
+    for (const client of legacyClients) assert.equal(fs.readFileSync(client.path, 'utf8'), client.content, `${phase}: legacy clients must stay unchanged`);
+    registrations();
+    assert.deepEqual(registrationSnapshot(), registrationBefore, `${phase}: installed-app registration values and types must stay unchanged`);
+    for (const file of convergenceOutputs) assert.equal(fs.existsSync(file), false, `${phase}: no prepare/migrate/retire output may be created`);
+  };
+  verifyStartupPreserved('Before Hub startup');
   webviewPolicy('Enable');
   child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238', WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview') } });
@@ -166,6 +223,9 @@ async function verifyMigratedJsonConnection(entry) {
   page.setDefaultTimeout(60000);
   await page.locator('#usage-terms-checkbox').check();
   await page.locator('#usage-terms-continue').click();
+  await page.locator('#usage-terms-dialog').waitFor({ state: 'hidden' });
+  report.convergence = await deferStartupConvergence(page, verifyStartupPreserved);
+  report.checks.push(`Convergence ${report.convergence.status}: migration skipped; retained settings, clients and registrations unchanged (component checks only)`);
   const inventory = await retry(() => page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: true, preview: true })));
   assert.equal(inventory.supported, true);
   for (const app of inventory.apps) {
@@ -439,7 +499,7 @@ async function verifyMigratedJsonConnection(entry) {
     try { if (fs.existsSync(policy)) webviewPolicy('Restore'); }
     catch (error) { report.policyCleanupError = String(error); report.passed = false; process.exitCode = 1; }
     fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
-    console.log(JSON.stringify(report));
+    console.log(`Native component smoke ${report.passed ? 'passed' : 'failed'}; Convergence ${report.convergence?.status || 'unchecked'}; releaseReady=false. Report: ${path.join(out, 'report.json')}`);
     clearTimeout(watchdog);
     process.exit(process.exitCode || 0);
   });

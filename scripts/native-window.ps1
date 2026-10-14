@@ -90,7 +90,12 @@ foreach ($window in $windows) {
                     'Enable managed routing' = @('Enable managed MCP routing')
                     'Update Hub' = @('Update Creator Hub')
                     'Close view' = @('Close hosted app?'); 'Keep open' = @('Close hosted app?')
-                    'Move connection' = @('Review existing MCP connection'); 'Keep existing' = @('Review existing MCP connection')
+                    'Move connection' = @('Review existing MCP connection')
+                    'Keep existing' = @('Review existing MCP connection', 'Review existing MCP connections', 'Keep MCP settings working in Hub', 'Move to unified Creator Hub', 'Retire standalone Creator apps')
+                    'Back up and continue' = @('Move to unified Creator Hub')
+                    'Move selected connections' = @('Review existing MCP connections')
+                    'Move server path' = @('Keep MCP settings working in Hub')
+                    'Finish migration' = @('Retire standalone Creator apps')
                 }
                 if (-not $titles.ContainsKey($Value) -or $window.Current.Name -cnotin $titles[$Value]) { throw 'Requested task dialog title does not match the expected action.' }
                 if ([NativeTestWindows]::Class($dialog) -ne '#32770' -or [NativeTestWindows]::ProcessId($dialog) -ne $TargetPid -or $button.Current.ProcessId -ne $TargetPid) { throw 'Requested task dialog does not belong to the expected process.' }
