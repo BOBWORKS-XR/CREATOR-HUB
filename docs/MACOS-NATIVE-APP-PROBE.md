@@ -769,3 +769,34 @@ DMG qualification pins are unchanged. No product or action-helper source changed
 the reviewed helper remains212a8c94149d159da69c4161220333969fbc71bd555ee951c26d9ff04bae2a68.
 Native source has not run until the parent stages these files on the validation
 branch. The child inspector cannot be substituted with an old workflow run.
+
+### Actual Intel Terms38633853536
+
+At6f5fb7f, SDK fixtures and original DMG qualification pass. Artifact11926264392
+ZIP is256515 bytes, SHA256
+`0c47a682ebe11e59f132d213cd4bc89d45123831e994a620558a85629a3a347c`.
+Reports/pixels are under `artifacts/mac-terms-readonly-38633853536/intel/`.
+Both actual Root-PID controls are found in one attempt,2.56s elapsed, Root age4.55s.
+Their parent/window CF links, child-list membership and held references pass;
+checkbox is enabled/unchecked, Continue disabled, both expose AXPress. No action
+was attempted. Normal Root close separately passes with PID4885 exit0/noSignal;
+read-only log overflow remains an independent cleanup uncertainty. The pinned
+20.84s bitmap is visually nonblank.
+
+Two concrete inspector assumptions refuse: control AXHidden is noValue(-25212)
+for both controls; checkbox frame-centre hit returns a Root AXGroup that is neither
+the checkbox nor its parent/child peer. Continue's centre peer is exactly its
+Root-owned AXButton. No parent/group/descendant peer is accepted as the checkbox.
+
+Apple's [hidden attribute](https://developer.apple.com/documentation/appkit/nsaccessibility-swift.struct/attribute)
+is an application-hidden flag, not a mandatory arbitrary control flag. Revision2
+records the native owned application's `NSRunningApplication.isHidden` state
+before/after, without fabricating per-control `hidden:false`. Exact target hit
+testing remains mandatory. Apple's [activation point](https://developer.apple.com/documentation/appkit/nsaccessibility-swift.struct/attribute/activationpoint)
+and [screen-coordinate contract](https://developer.apple.com/documentation/appkit/nsaccessibility-c.protocol/accessibilityactivationpoint)
+provide the next finite read-only field: the native control activation point.
+It must be a finite typed AXValue CGPoint inside both control and Root bounds,
+and its native hit peer must be CF-equal to the exact Root-PID target. Centre-hit
+results remain diagnostic. Missing/wrong-type/out-of-bounds points or different
+peers still refuse; no coordinate flip, guessed offset, spatial search, action,
+or fallback authority is added. Revision1 receipts cannot satisfy revision2.

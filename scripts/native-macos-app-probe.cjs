@@ -129,14 +129,15 @@ function validatePackageIdentity(receipt, owner, expectedVersion) {
     && (expectedVersion === undefined || p.bundleShortVersion === expectedVersion), 'native-package-identity-unverified');
 }
 function validateTermsInspection(receipt, owner) {
-  requireThat(receipt?.command === 'terms-inspect' && receipt.complete === true && receipt.readOnly === true
+  requireThat(receipt?.command === 'terms-inspect' && receipt.inspectionRevision === 2 && receipt.complete === true && receipt.readOnly === true
     && receipt.actionAttempted === false && receipt.permissionRequestsPerformed === false
     && receipt.actionAuthorityEstablished === false && receipt.termsAccepted === false
     && Object.keys(acceptance).every(key => receipt[key] === false)
     && isDeepStrictEqual(receipt.process, owner.process) && isDeepStrictEqual(receipt.window, owner.window)
     && receipt.package?.bundleShortVersion === '0.1.14' && receipt.package.bundleIdentifier === bundle
     && receipt.package.bundleExecutable === 'creator-hub' && isDeepStrictEqual(receipt.package.infoPlist, owner.process.infoPlist)
-    && receipt.active === true && receipt.candidateCount === 2 && Number.isSafeInteger(receipt.visitedNodeCount)
+    && receipt.active === true && receipt.applicationHidden === false && receipt.applicationHiddenSource === 'NSRunningApplication.isHidden'
+    && receipt.candidateCount === 2 && Number.isSafeInteger(receipt.visitedNodeCount)
     && receipt.rootNativeCFReferencePreserved === true && receipt.rootReferenceScope === 'native-invocation'
     && receipt.visitedNodeCount > 0 && receipt.visitedNodeCount <= 512
     && Array.isArray(receipt.reads) && receipt.reads.length <= 256 && Array.isArray(receipt.controls) && receipt.controls.length === 2,
@@ -147,7 +148,8 @@ function validateTermsInspection(receipt, owner) {
   ]);
   for (const control of receipt.controls) {
     requireThat(expected.get(control.role) === control.title && control.pid === owner.process.pid && control.windowID === owner.window.id
-      && typeof control.enabled === 'boolean' && typeof control.hidden === 'boolean'
+      && typeof control.enabled === 'boolean' && control.hitPeerPointSource === 'native-activation-point' && control.activationPointWithinBounds === true
+      && Number.isFinite(control.activationPoint?.x) && Number.isFinite(control.activationPoint?.y)
       && control.parentCFMatches === true && control.windowCFMatches === true && control.nativeReferencesStable === true
       && control.contained === true && control.hitPeerAXError === 0 && control.hitPeerPIDAXError === 0
       && control.hitPeerPID === owner.process.pid && control.hitPeerCFMatches === true

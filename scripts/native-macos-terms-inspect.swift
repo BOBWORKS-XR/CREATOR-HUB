@@ -7,7 +7,7 @@ import Darwin
 let termsHeading = "Terms of use and risk acknowledgement"
 let termsCheckbox = "I have read and agree to these terms, including the risk assumption and liability limitations above."
 let termsContinue = "Accept and continue"
-let termsFactNames = ["rootPID", "role", "title", "parentCF", "windowCF", "documentCF", "containerCF", "contained", "hitPeerCF", "hitPeerPID", "pressSupported", "referencesStable", "stateTyped"]
+let termsFactNames = ["rootPID", "role", "title", "parentCF", "windowCF", "documentCF", "containerCF", "contained", "activationPoint", "hitPeerCF", "hitPeerPID", "pressSupported", "referencesStable", "stateTyped"]
 func requireTermsFacts(_ facts: [String: Bool]) throws {
     for name in termsFactNames { try check(facts[name] == true, "terms-control-" + name + "-unverified") }
 }
@@ -25,6 +25,17 @@ func termsChecked(_ raw: CFTypeRef) throws -> Int {
 }
 func termsLinkMatches(_ raw: CFTypeRef, _ expected: AXUIElement) -> Bool {
     return CFGetTypeID(raw) == AXUIElementGetTypeID() && CFEqual(raw as! AXUIElement, expected)
+}
+func termsPoint(_ raw: CFTypeRef) throws -> CGPoint {
+    try check(CFGetTypeID(raw) == AXValueGetTypeID(), "terms-activation-point-type-unverified")
+    var point = CGPoint.zero
+    try check(AXValueGetValue(raw as! AXValue, .cgPoint, &point) && point.x.isFinite && point.y.isFinite, "terms-activation-point-unverified")
+    return point
+}
+func termsPointInside(_ point: CGPoint, _ bounds: [String: Double]) -> Bool {
+    guard let x = bounds["x"], let y = bounds["y"], let width = bounds["width"], let height = bounds["height"] else { return false }
+    let px = Double(point.x), py = Double(point.y)
+    return px.isFinite && py.isFinite && px >= x && py >= y && px < x + width && py < y + height
 }
 struct TermsCandidate {
     let item: AXUIElement, parent: AXUIElement, container: AXUIElement, document: AXUIElement
@@ -90,7 +101,7 @@ func captureTerms() throws {
     try check(pid > 0 && id > 0 && (w["pid"] as? NSNumber)?.int32Value == pid && p["bundleIdentifier"] as? String == "com.creatorworks.hub"
         && ["x", "y", "width", "height"].allSatisfy { expected[$0]?.isFinite == true }
         && (expected["width"] ?? 0) > 0 && (expected["height"] ?? 0) > 0, "terms-root-owner-refused")
-    termsResult = ["command": "terms-inspect", "process": p, "window": w]
+    termsResult = ["command": "terms-inspect", "inspectionRevision": 2, "process": p, "window": w]
     try fence(p, parent)
     let package = try packageFields(imageMatches(app + "/Contents/Info.plist", plist, 65536, contents: true), plist)
     try check(package["bundleShortVersion"] as? String == "0.1.14", "terms-exact-version-required")
@@ -117,6 +128,7 @@ func captureTerms() throws {
     try check(try termsBounds(window, "root", "root-window") == expected, "terms-root-mapping-unverified")
     func heldRoot() throws {
         try checkCG(); try check(AXIsProcessTrusted(), "terms-ax-trust-lost")
+        guard let running = NSRunningApplication(processIdentifier: pid), running.isActive, !running.isHidden else { throw Denied("terms-owned-application-not-visible") }
         try pidMatches(window, pid)
         let current = try children(root, kAXWindowsAttribute, "terms-root-recheck", node)
         try check(current.count == 1 && CFEqual(current[0], window), "terms-root-cf-drift")
@@ -169,6 +181,9 @@ func captureTerms() throws {
     let active = NSRunningApplication(processIdentifier: pid)?.isActive == true
     termsResult["active"] = active
     try check(active, "terms-root-not-active")
+    guard let running = NSRunningApplication(processIdentifier: pid), !running.isHidden else { throw Denied("terms-owned-application-not-visible") }
+    termsResult["applicationHidden"] = running.isHidden
+    termsResult["applicationHiddenSource"] = "NSRunningApplication.isHidden"
     var stateFailures = [[String: Any]]()
     for candidate in candidates {
       do {
@@ -199,8 +214,15 @@ func captureTerms() throws {
             }
         }
         field("enabled") { try termsBoolean(termsRead(candidate.item, kAXEnabledAttribute, "control", candidate.path)) }
-        field("hidden") { try termsBoolean(termsRead(candidate.item, "AXHidden", "control", candidate.path)) }
+        // AXHidden describes the application, not arbitrary leaf controls. Do not
+        // turn the observed noValue into a fabricated per-control false value.
         if role == "AXCheckBox" { field("checked") { try termsChecked(termsRead(candidate.item, kAXValueAttribute, "control", candidate.path)) } }
+        var activationPoint: CGPoint?
+        field("activationPoint") {
+            let point = try termsPoint(termsRead(candidate.item, NSAccessibility.Attribute.activationPoint.rawValue, "control", candidate.path))
+            activationPoint = point
+            return ["x": Double(point.x), "y": Double(point.y)]
+        }
         row["fieldErrors"] = fieldErrors
         try termsLimit()
         var actions: CFArray?
@@ -210,7 +232,14 @@ func captureTerms() throws {
         guard actionStatus == .success, let rawActions = actions, CFGetTypeID(rawActions) == CFArrayGetTypeID(),
             let names = rawActions as? [String], names.count <= 32, names.allSatisfy({ $0.utf8.count <= 128 }) else { throw Denied("terms-actions-unverified") }
         row["actions"] = names
-        let point = CGPoint(x: bounds["x"]! + bounds["width"]! / 2, y: bounds["y"]! + bounds["height"]! / 2)
+        let center = CGPoint(x: bounds["x"]! + bounds["width"]! / 2, y: bounds["y"]! + bounds["height"]! / 2)
+        var centerPeer: AXUIElement?
+        row["centerHitPeerAXError"] = AXUIElementCopyElementAtPosition(root, Float(center.x), Float(center.y), &centerPeer).rawValue
+        row["centerHitPeerCFMatches"] = centerPeer.map { CFEqual($0, candidate.item) } ?? false
+        let point = activationPoint ?? center
+        let activationVerified = activationPoint.map { termsPointInside($0, bounds) && termsPointInside($0, expected) } ?? false
+        row["hitPeerPointSource"] = activationPoint != nil ? "native-activation-point" : "unverified-center-diagnostic-only"
+        row["activationPointWithinBounds"] = activationVerified
         var peer: AXUIElement?
         let peerStatus = AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &peer)
         var peerPID: pid_t = 0
@@ -241,10 +270,10 @@ func captureTerms() throws {
         row["nativeReferencesStable"] = stable; row["contained"] = contained
         try requireTermsFacts(["rootPID": true, "role": role == candidate.role, "title": title == candidate.title,
             "parentCF": true, "windowCF": true, "documentCF": true, "containerCF": CFEqual(candidate.container, groups[0]),
-            "contained": contained, "hitPeerCF": peerStatus == .success && peerEqual, "hitPeerPID": peerPIDStatus == .success && peerPID == pid,
+            "contained": contained, "activationPoint": activationVerified, "hitPeerCF": peerStatus == .success && peerEqual, "hitPeerPID": peerPIDStatus == .success && peerPID == pid,
             "pressSupported": names.contains(kAXPressAction), "referencesStable": stable, "stateTyped": fieldErrors.isEmpty])
       } catch let failure as Denied {
-        let metadataFailures = ["stateTyped", "hitPeerCF", "hitPeerPID", "pressSupported", "contained"].map { "terms-control-" + $0 + "-unverified" }
+        let metadataFailures = ["stateTyped", "activationPoint", "hitPeerCF", "hitPeerPID", "pressSupported", "contained"].map { "terms-control-" + $0 + "-unverified" }
         if !metadataFailures.contains(failure.reason) { throw failure }
         stateFailures.append(["path": candidate.path, "error": failure.reason])
       }

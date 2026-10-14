@@ -17,13 +17,15 @@ after(() => {
 });
 const owner = { process: { pid: 42, infoPlist: { sha256: 'fixture' } }, window: { id: 17, pid: 42 } };
 function receipt() {
-  const control = { path: 'root-window/0', pid: 42, windowID: 17, enabled: true, hidden: false,
+  const control = { path: 'root-window/0', pid: 42, windowID: 17, enabled: true,
+    activationPoint: { x: 20, y: 30 }, activationPointWithinBounds: true, hitPeerPointSource: 'native-activation-point',
     parentCFMatches: true, windowCFMatches: true, nativeReferencesStable: true, contained: true,
     hitPeerAXError: 0, hitPeerPIDAXError: 0, hitPeerPID: 42, hitPeerCFMatches: true,
     actionsAXError: 0, actions: ['AXPress'] };
-  return { ...probe.acceptance, command: 'terms-inspect', complete: true, readOnly: true,
+  return { ...probe.acceptance, command: 'terms-inspect', inspectionRevision: 2, complete: true, readOnly: true,
     actionAttempted: false, permissionRequestsPerformed: false, actionAuthorityEstablished: false, termsAccepted: false,
     process: structuredClone(owner.process), window: structuredClone(owner.window), active: true,
+    applicationHidden: false, applicationHiddenSource: 'NSRunningApplication.isHidden',
     rootNativeCFReferencePreserved: true, rootReferenceScope: 'native-invocation',
     candidateCount: 2, visitedNodeCount: 34, reads: [],
     package: { bundleIdentifier: 'com.creatorworks.hub', bundleExecutable: 'creator-hub', bundleShortVersion: '0.1.14', infoPlist: structuredClone(owner.process.infoPlist) },
@@ -45,16 +47,18 @@ test('typed read-only control snapshot permits disabled Continue as observed sta
   for (const state of [0, 1]) { r.controls[0].checked = state; probe.validateTermsInspection(r, owner); }
 });
 test('missing/error/drifted per-control association, state, peer, identity and promoted flags refuse', () => {
-  const mutations = [r => r.complete = false, r => r.actionAttempted = true, r => r.actionAuthorityEstablished = true,
+  const mutations = [r => r.complete = false, r => r.inspectionRevision = 1, r => r.actionAttempted = true, r => r.actionAuthorityEstablished = true,
     r => r.termsAccepted = true, r => r.nativeGuiAccepted = true, r => r.process.pid++, r => r.window.id++,
     r => r.active = false, r => r.candidateCount = 3, r => r.visitedNodeCount = 513, r => r.reads = Array(257).fill({}),
     r => r.rootNativeCFReferencePreserved = false, r => r.rootReferenceScope = 'serialized-authority',
+    r => r.applicationHidden = true, r => delete r.applicationHidden, r => r.applicationHiddenSource = 'control-noValue',
     r => r.package.bundleShortVersion = '0.1.13', r => r.controls.push(structuredClone(r.controls[0])),
     r => r.controls[1] = structuredClone(r.controls[0])];
   for (const field of ['parentCFMatches', 'windowCFMatches', 'nativeReferencesStable', 'contained', 'hitPeerCFMatches']) {
     mutations.push(r => r.controls[0][field] = false, r => delete r.controls[0][field]);
   }
-  mutations.push(r => r.controls[0].enabled = 'true', r => r.controls[0].hidden = null, r => r.controls[0].role = 'AXGroup',
+  mutations.push(r => r.controls[0].enabled = 'true', r => r.controls[0].activationPoint = null,
+    r => r.controls[0].activationPointWithinBounds = false, r => r.controls[0].hitPeerPointSource = 'bounds-center', r => r.controls[0].role = 'AXGroup',
     r => r.controls[0].title = 'Other', r => r.controls[0].pid++, r => r.controls[0].hitPeerPID++,
     r => r.controls[0].windowID++, r => r.controls[0].hitPeerAXError = -25204, r => r.controls[0].hitPeerPIDAXError = -25202,
     r => r.controls[0].actionsAXError = -25204, r => r.controls[0].actions = [], r => r.controls[0].actions = ['AXPress', {}],
@@ -137,6 +141,15 @@ do {
     try check(try termsChecked(NSNumber(value: 0)) == 0 && termsChecked(NSNumber(value: 1)) == 1, "fixture-checked-drift")
     let one = AXUIElementCreateApplication(42), other = AXUIElementCreateApplication(43)
     try check(termsLinkMatches(one, one) && !termsLinkMatches(other, one) && !termsLinkMatches("wrong" as CFString, one), "fixture-link-coercion")
+    var point = CGPoint(x: 10, y: 20)
+    let rawPoint = AXValueCreate(.cgPoint, &point)!
+    try check(try termsPoint(rawPoint) == point && termsPointInside(point, ["x": 0, "y": 0, "width": 40, "height": 40]), "fixture-point-drift")
+    for raw in ["wrong" as CFString, NSNumber(value: 1), NSNull()] as [CFTypeRef] {
+        var refused = false; do { _ = try termsPoint(raw) } catch { refused = true }
+        try check(refused, "fixture-point-coerced")
+    }
+    try check(!termsPointInside(CGPoint(x: Double.nan, y: 20), ["x": 0, "y": 0, "width": 40, "height": 40])
+        && !termsPointInside(CGPoint(x: 100, y: 20), ["x": 0, "y": 0, "width": 40, "height": 40]), "fixture-outside-point-accepted")
     for reason in ["terms-native-association-unverified", "terms-root-cf-drift", "terms-owner-bytes-drift", "terms-boolean-type-unverified", "owned-process-start-drift"] {
         try check(!termsReadinessPending(reason, nil, [:]), "fixture-unsafe-readiness-retry")
     }
