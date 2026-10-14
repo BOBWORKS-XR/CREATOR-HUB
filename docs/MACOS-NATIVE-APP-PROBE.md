@@ -260,6 +260,17 @@ errors/PID disappearance still cannot pass. Whole-tree/consent action authority
 is unchanged; Intel remote-child close selection remains refused. Native runtime
 validation of this changed helper remains pending.
 
+Run 38572700956 compiles the new helper and its SDK fixtures on both Mac targets.
+The ARM close still returns `process-start-drift`, followed by exact owned-child
+exit zero and kernel absence. The final live recheck previously conflated a
+failed/missing kernel read with actual drift. It now captures bytes/errno and
+uses the same exact kernel classifier: only definitive absence becomes
+`expected-process-absent`; start/UID/PID drift and unavailable reads still refuse.
+Generic drift is not whitelisted. No retries, timing or pre-action authority
+changed. Twelve additional pure distinction fixtures pass locally; a fresh
+native result remains pending. Intel pre-action foreign-element refusal and
+missing Root WebArea remain separate gaps.
+
 ```sh
 node --test scripts/native-macos-app-probe.test.cjs
 ```

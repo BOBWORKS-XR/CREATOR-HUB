@@ -174,6 +174,29 @@ test('expected kernel identity is checked before live AppKit metadata and immedi
   assert.match(source, /try visit\(axWindow, 0, "window", nil, false, nil\)\s*if let value = attribute\(axWindow, kAXCloseButtonAttribute\)/);
 });
 
+test('final process recheck captures errno and distinguishes definitive absence before the unchanged drift guard', () => {
+  const process = source.split('func process(_ pid:')[1].split('func process(_ expected:')[0];
+  const final = process.split('var rechecked = proc_bsdinfo()')[1].split('return ProcessIdentity')[0];
+  assert.match(final, /errno = 0\s*let recheckedBytes = proc_pidinfo/);
+  assert.match(final, /recheckedErrno = errno/);
+  assert.equal(final.match(/proc_pidinfo\(/g).length, 1);
+  assert.match(final, /if let expected = expectedKernel/);
+  assert.match(final, /KernelObservation\(bytes: recheckedBytes, error: recheckedErrno/);
+  assert.match(final, /try validateExpectedFinalKernel\(sample, expected, bytes: Int32\(MemoryLayout<proc_bsdinfo>.size\), missingErrno: ESRCH\)/);
+  assert.ok(final.indexOf('validateExpectedFinalKernel(') < final.indexOf('guard recheckedBytes =='));
+  for (const field of ['pbi_pid', 'pbi_uid', 'pbi_ruid', 'pbi_start_tvsec', 'pbi_start_tvusec']) {
+    assert.ok(final.includes(`rechecked.${field} == info.${field}`));
+  }
+  assert.match(final, /else \{ throw Refusal\("process-start-drift"\) \}/);
+  assert.doesNotMatch(final, /while |sleep|PerformAction|observe\(/);
+  const classifier = source.split('func validateExpectedFinalKernel')[1].split('func closeTerminationTransition')[0];
+  assert.match(classifier, /guard try expectedKernelPresent\(sample, expected, bytes: bytes, missingErrno: missingErrno\) else/);
+  assert.match(classifier, /throw Refusal\("expected-process-absent"\)/);
+  assert.doesNotMatch(classifier, /catch|process-start-drift|return true|proc_pidinfo/);
+  const transitions = source.split('func closeTerminationTransition')[1].split('struct TerminationInputs')[0];
+  assert.doesNotMatch(transitions, /process-start-drift|expected-kernel-unavailable|expected-kernel-identity-drift/);
+});
+
 test('SDK compatibility uses the exact kernel path bound and public AX sheet hierarchy', () => {
   assert.match(source, /let processPathBufferBytes = 4096\b/);
   assert.match(source, /\[CChar\]\(repeating: 0, count: processPathBufferBytes\)/);
@@ -333,6 +356,38 @@ for (const [name, mutate, error] of cases) {
     assert.equal(receipt.nativeActionsAvailable, false);
     assert.equal(receipt.nativeGuiAccepted, false);
     assert.equal(receipt.releaseReady, false);
+    if (error) assert.equal(receipt.error, error); else assert.equal(receipt.fixtureAccepted, true);
+  });
+}
+
+const finalRecheckCases = [
+  ['same expected process', () => {}, null],
+  ['definitive final absence', f => {
+    f.finalKernel = { bytes: 0, error: 3, pid: 0, uid: 0, realUID: 0, startSeconds: 0, startMicroseconds: 0 };
+  }, 'expected-process-absent'],
+  ['final PID changed', f => { f.finalKernel.pid++; }, 'expected-kernel-identity-drift'],
+  ['final uid changed', f => { f.finalKernel.uid++; }, 'expected-kernel-identity-drift'],
+  ['final real uid changed', f => { f.finalKernel.realUID++; }, 'expected-kernel-identity-drift'],
+  ['final start seconds changed', f => { f.finalKernel.startSeconds++; }, 'expected-kernel-identity-drift'],
+  ['final start microseconds changed', f => { f.finalKernel.startMicroseconds++; }, 'expected-kernel-identity-drift'],
+  ['final bytes zero without ESRCH', f => { f.finalKernel.bytes = 0; }, 'expected-kernel-unavailable'],
+  ['final permission failure', f => { f.finalKernel.bytes = 0; f.finalKernel.error = 1; }, 'expected-kernel-unavailable'],
+  ['final partial structure with ESRCH', f => { f.finalKernel.bytes--; f.finalKernel.error = 3; }, 'expected-kernel-unavailable'],
+  ['final full structure with error', f => { f.finalKernel.error = 3; }, 'expected-kernel-unavailable'],
+  ['final negative byte count', f => { f.finalKernel.bytes = -1; f.finalKernel.error = 3; }, 'expected-kernel-unavailable'],
+];
+
+for (const [name, mutate, error] of finalRecheckCases) {
+  test(`Swift final-recheck fixture: ${name}`, { skip: !nativeMac }, () => {
+    const value = fixture(), p = value.owner.process;
+    value.finalKernel = { bytes: 136, error: 0, pid: p.pid, uid: p.image.uid, realUID: p.image.uid,
+      startSeconds: p.startSeconds, startMicroseconds: p.startMicroseconds };
+    mutate(value);
+    const result = spawnSync(fixtureBinary, [], { input: JSON.stringify(value), encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+    assert.equal(result.status, error ? 1 : 0, result.stderr || result.stdout);
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(receipt.nativeActionsAvailable, false); assert.equal(receipt.nativeGuiAccepted, false); assert.equal(receipt.releaseReady, false);
+    assert.notEqual(receipt.postTerminationVerified, true); assert.equal('termination' in receipt, false);
     if (error) assert.equal(receipt.error, error); else assert.equal(receipt.fixtureAccepted, true);
   });
 }

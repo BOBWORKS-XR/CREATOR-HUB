@@ -177,6 +177,13 @@ func expectedKernelPresent(_ sample: KernelObservation, _ expected: ProcessIdent
     return true
 }
 
+func validateExpectedFinalKernel(_ sample: KernelObservation, _ expected: ProcessIdentity,
+                                 bytes: Int32, missingErrno: Int32) throws {
+    guard try expectedKernelPresent(sample, expected, bytes: bytes, missingErrno: missingErrno) else {
+        throw Refusal("expected-process-absent")
+    }
+}
+
 func closeTerminationTransition(_ reason: String?) -> Bool {
     guard let reason = reason else { return true }
     return ["expected-process-absent", "native-app-not-ready", "native-bundle-id-unverified",
@@ -251,12 +258,16 @@ struct Fixture: Decodable {
     let after: Observation?
     let action: Action
     let termination: TerminationInputs?
+    let finalKernel: KernelObservation?
 }
 do {
     let data = try FileHandle.standardInput.read(upToCount: 65537) ?? Data()
     guard data.count <= 65536 else { throw Refusal("fixture-too-large") }
     let fixture = try JSONDecoder().decode(Fixture.self, from: data)
     _ = try validateAction(fixture.owner, fixture.before, fixture.immediate, fixture.action)
+    if let sample = fixture.finalKernel {
+        try validateExpectedFinalKernel(sample, fixture.owner.process, bytes: 136, missingErrno: 3)
+    }
     if let input = fixture.termination {
         guard fixture.after == nil else { throw Refusal("termination-must-not-forge-after") }
         let termination = try validateNativeTermination(fixture.owner, fixture.before, fixture.immediate, fixture.action, input,
@@ -395,7 +406,14 @@ func process(_ pid: Int32, appPath: String, executable: String, expectedHash: St
     let plist = try image(appPath + "/Contents/Info.plist", limit: 65536)
     guard Bundle(path: appPath)?.bundleIdentifier == bundle else { throw Refusal("bundle-identity-drift") }
     var rechecked = proc_bsdinfo()
-    guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &rechecked, Int32(MemoryLayout<proc_bsdinfo>.size)) == Int32(MemoryLayout<proc_bsdinfo>.size),
+    errno = 0
+    let recheckedBytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &rechecked, Int32(MemoryLayout<proc_bsdinfo>.size)), recheckedErrno = errno
+    if let expected = expectedKernel {
+        let sample = KernelObservation(bytes: recheckedBytes, error: recheckedErrno, pid: rechecked.pbi_pid, uid: rechecked.pbi_uid,
+                                       realUID: rechecked.pbi_ruid, startSeconds: rechecked.pbi_start_tvsec, startMicroseconds: rechecked.pbi_start_tvusec)
+        try validateExpectedFinalKernel(sample, expected, bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH)
+    }
+    guard recheckedBytes == Int32(MemoryLayout<proc_bsdinfo>.size),
           rechecked.pbi_pid == info.pbi_pid, rechecked.pbi_uid == info.pbi_uid,
           rechecked.pbi_ruid == info.pbi_ruid,
           rechecked.pbi_start_tvsec == info.pbi_start_tvsec,

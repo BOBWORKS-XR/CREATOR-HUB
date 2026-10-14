@@ -398,7 +398,7 @@ test('remote metadata keeps actual PID, finite traversal/time/message limits and
 test('reviewed close-termination helper still refuses foreign nodes before its sole action', () => {
   const helper = fs.readFileSync(path.join(__dirname, 'native-macos-window.swift'));
   // Reviewed post-close-only change; native traversal/consent authority is unchanged.
-  assert.equal(crypto.createHash('sha256').update(helper).digest('hex'), '3f60dc5295a02537b19d02589c0e173522ff534c66ae127a273b404411a66008');
+  assert.equal(crypto.createHash('sha256').update(helper).digest('hex'), '5933abddcd9b6d14f767acdccd326be315aa7df3349d9ed475dc82260a38f067');
   const swift = helper.toString('utf8');
   assert.match(swift, /AXUIElementGetPid\(item, &pid\) == \.success, pid == expected else \{ throw Refusal\("foreign-ax-element"\)/);
   assert.match(swift, /do \{ try axPID\(item, identity.pid\) \}[\s\S]*?catch \{ throw Refusal\("foreign-ax-element"/);

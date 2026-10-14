@@ -73,6 +73,15 @@ the compatibility guarantee and require review before production retirement.
   is responsible. The scripting dependency has been removed rather than its
   deadline extended. Nine real native extractor tests and seventeen snapshot
   tests pass locally; native hosted/official-installer acceptance is pending.
+- Run 38572696237 at `dff82df` passes both exact official-installer fixtures.
+  GUI/uninstaller/default shortcuts and their registrations are retired;
+  all nine MCP compatibility resources and all eight synthetic persistent
+  stores remain unchanged. Existing MCP stdio survives interrupted retirement,
+  resumes after native re-review, reconnects at the same old paths and exits
+  normally on EOF. Idempotent repeat and unknown-journal refusal pass. Local
+  reports are `artifacts/legacy-retirement-38572696237/`. Root 322 tests and strict
+  Clippy pass. This is leaf acceptance, not production coordinator or release
+  acceptance; no user-PC app was changed.
 - The older complete-uninstaller acceptance remains preserved at run 38542947181;
   it does not establish this separate compatibility-retirement operation.
 - Production coordinator/native consent, GUI quiescence, signed-router reconnect,
