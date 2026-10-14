@@ -1,4 +1,4 @@
-name: Actual Windows convergence with bounded baseline refusal diagnostics (not release)
+name: Actual Windows convergence with environment-isolated diagnostic tests (not release)
 on:
   push:
     branches: [validation/convergence-014]

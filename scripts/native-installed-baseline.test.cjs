@@ -91,8 +91,12 @@ test('PowerShell metadata parser accepts only known command fields and bounded e
 });
 
 test('new diagnostics refuse local execution before any source/output/process inspection', async () => {
-  assert.throws(() => failureDiagnostics({}, baselines[1], 'never-inspected'), /restricted to a disposable/);
-  await assert.rejects(readOnlyProbe('never-launched', [], 'preflight'), /restricted to a disposable/);
+  for (const [key, value] of [['GITHUB_ACTIONS', 'false'], ['RUNNER_ENVIRONMENT', 'self-hosted'], ['RUNNER_OS', 'Linux']]) {
+    const { api, context } = isolatedModule({ filesystem: new Proxy({}, { get() { assert.fail('No filesystem inspection before refusal'); } }) });
+    context.process.env[key] = value;
+    assert.throws(() => api.failureDiagnostics({}, baselines[1], 'never-inspected'), /restricted to a disposable/);
+    await assert.rejects(api.readOnlyProbe('never-launched', [], 'preflight'), /restricted to a disposable/);
+  }
 });
 
 test('owned native probe records actual exit, bytes and EOF without echoing raw stdout/stderr', async () => {
