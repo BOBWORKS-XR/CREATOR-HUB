@@ -24,6 +24,12 @@ PR21 and the source publication guard remain held.
   after completed migration, not only a restart after a fresh settings save.
   Root tests: 352 passed, 13 platform-specific ignored; strict Clippy passed.
   MCP tests: 277 passed; Setup packaging scripts: 15 passed.
+- Exact B04 also passes [signed-update run38632184514](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38632184514):
+  unmodified public0.1.12 actual Update button, native cancellation, signed
+  installation, automatic restart, exact version/hash/registry, saved preferences
+  and unmanaged content, both real embedded modules and managed SDK reconnect.
+  Controlled TLS served all five pinned routes and cleanup verified; public
+  discovery, migrated live AI clients and release readiness remain false.
 - [Prepared payload run38621563945](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38621563945)
   passes Linux, Apple Silicon and Intel native product-settings tests at a311810.
   This covers exact old-server recognition and owned test-root alias handling,
