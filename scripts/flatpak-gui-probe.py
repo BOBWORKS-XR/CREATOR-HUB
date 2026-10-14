@@ -227,7 +227,18 @@ def command(root, report, env, label, argv, timeout=30, limit=65536):
     return a.decode('utf8').strip()
 
 
-def deployment(root, report, env, label):
+def node_executable(env):
+    cache = Path(env.get('RUNNER_TOOL_CACHE', ''))
+    executable = Path(env.get('CREATOR_FLATPAK_GUI_NODE', ''))
+    expected = cache / 'node/24.17.0/x64/bin/node'
+    require(cache.is_absolute() and executable.is_absolute() and executable == expected,
+            'Exact setup-node tool-cache executable required')
+    require(executable.is_file() and not executable.is_symlink() and executable.resolve() == executable,
+            'Ordinary setup-node executable required')
+    return str(executable)
+
+
+def deployment(root, report, env, label, node):
     def info(option):
         return command(root, report, env, label + '-' + option, ['/usr/bin/flatpak', 'info', '--user', '--show-' + option, PINS['ref']])
     require(info('ref') == PINS['ref'] and info('commit') == PINS['appCommit'], 'Pinned installed ref/commit differs')
@@ -241,7 +252,7 @@ def deployment(root, report, env, label):
         else:
             write(target, body.encode())
     require(command(root, report, env, label + '-runtime', ['/usr/bin/flatpak', 'info', '--system', '--show-commit', PINS['runtime']]) == PINS['runtimeCommit'], 'Pinned Platform commit unavailable/different')
-    command(root, report, env, label + '-bytes', ['/usr/bin/node', str(HERE / 'flatpak-gui-probe.cjs'), 'verify-deployment', str(root), str(location)])
+    command(root, report, env, label + '-bytes', [node, str(HERE / 'flatpak-gui-probe.cjs'), 'verify-deployment', str(root), str(location)])
     return location
 
 
@@ -329,8 +340,11 @@ def probe(root):
         require(record(read(root / 'input/current.flatpak', 268435456)) == PINS['bundle'], 'Bundle changed before install')
         source = unique_json(read(root.parent / 'flatpak-gui-source.json', 1048576))
         require(source['source']['normalCloseSourceAvailable'] is True and source['source']['productSource'] == PAIR['pins']['sourceCommit'], 'Source-bound close route absent')
+        node = node_executable(os.environ)
+        report['nodeExecutable'] = node
+        require(command(root, report, env, 'node-version', [node, '--version']) == 'v24.17.0', 'Setup-node version differs')
         command(root, report, env, 'install', ['/usr/bin/flatpak', 'install', '--user', '--bundle', '--noninteractive', '--assumeyes', '--no-deps', '--no-related', str(root / 'input/current.flatpak')], 120)
-        location = deployment(root, report, env, 'before')
+        location = deployment(root, report, env, 'before', node)
         descriptor = unique_json(read(root / 'input/builtin-manifest.json', 65536))
         report['archive'] = verify_archive(location / 'files/lib/Creator Hub/modules.tar.gz', descriptor)
         for flag, args in [('elf-program-headers', ['-lW']), ('elf-needed', ['-dW']), ('elf-symbol-versions', ['-VW'])]:
@@ -418,7 +432,7 @@ def probe(root):
             report['desktopCaptureError'] = str(error)[:500]
         if 'location' in locals():
             try:
-                require(deployment(root, report, env, 'after') == location, 'Deployment changed after launch')
+                require(deployment(root, report, env, 'after', node) == location, 'Deployment changed after launch')
                 require(record(read(root / 'input/current.flatpak', 268435456)) == PINS['bundle'], 'Bundle changed during probe')
                 report['deploymentRecheckedAfter'] = True
             except Exception as error:

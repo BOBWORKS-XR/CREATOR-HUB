@@ -46,6 +46,7 @@ jobs:
           root="$RUNNER_TEMP/flatpak-gui-probe"
           export HOME="$root/home" XDG_CONFIG_HOME="$root/config" XDG_DATA_HOME="$root/data"
           export XDG_CACHE_HOME="$root/cache" XDG_RUNTIME_DIR="$root/runtime" TMPDIR="$root/tmp"
+          export CREATOR_FLATPAK_GUI_NODE="$(node -p 'process.execPath')"
           dbus-run-session -- xvfb-run -a --server-args='-screen 0 1280x800x24 -nolisten tcp' \
             /usr/bin/python3 -B scripts/flatpak-gui-probe.py probe
       - name: Retain compact capture first for bounded diagnosis

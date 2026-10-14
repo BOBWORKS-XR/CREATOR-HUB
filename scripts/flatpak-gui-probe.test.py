@@ -146,6 +146,19 @@ class Fixtures(unittest.TestCase):
             self.assertEqual((root / 'owned-object').stat().st_size, 131072)
             self.assertTrue(all(log['eof'] for log in report['commands'][0]['outputCapture']))
 
+    def test_setup_node_path_is_explicit_not_assumed_system_node(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory).resolve()
+            executable = cache / 'node/24.17.0/x64/bin/node'
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b'fixture only, never executed')
+            env = {'RUNNER_TOOL_CACHE': str(cache), 'CREATOR_FLATPAK_GUI_NODE': str(executable)}
+            self.assertEqual(p.node_executable(env), str(executable))
+            for value in ('', '/usr/bin/node', str(cache / 'node/24.16.0/x64/bin/node')):
+                with self.assertRaises(RuntimeError):
+                    p.node_executable({**env, 'CREATOR_FLATPAK_GUI_NODE': value})
+            self.assertNotIn("['/usr/bin/node'", Path(p.__file__).read_text())
+
 
 if __name__ == '__main__':
     unittest.main()

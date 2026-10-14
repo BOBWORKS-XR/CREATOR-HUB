@@ -112,3 +112,33 @@ missing ABI, desktop or nested WebKit sandbox prerequisites; no workaround is
 authorized. Retain the original failure, screenshot (desktop-only if no owned
 window), stdout/stderr, source binding and bounded `gui-report.json`. All broad
 acceptance fields remain false even if this narrow capture suite passes.
+
+### Second Prelaunch Failure
+
+[38643108880/1](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38643108880),
+test source `3b92a936a96ebc18168e1bc6fbfa182eba6ea388`, is **confirmed harness
+failure**, not product failure or demonstrated ABI incompatibility. Installation
+now returns 0 in 2,723 ms, with 56 stdout bytes and no stderr. Exact ref/deployment,
+Platform commit, metadata and effective-permission reads all return 0. Then the
+host verifier cannot start: `ENOENT: /usr/bin/node`. `launchCount` remains zero.
+The retained PNG is a blank desktop diagnostic, **not Hub render evidence**.
+
+Source/context contract: `actions/setup-node@v6` is configured for Node 24.17.0;
+its actual run log confirms `node: v24.17.0`, but it does not install a system
+`/usr/bin/node`. The [setup-node v6 implementation](https://github.com/actions/setup-node/blob/v6/src/distributions/base-distribution.ts)
+uses the version/architecture tool cache and adds its `bin` to PATH;
+[Node's process.execPath contract](https://nodejs.org/api/process.html#processexecpath)
+returns the absolute running executable. The correction passes that path to the **host
+verifier only**, requires its ordinary exact setup-node tool-cache path and checks
+`--version` before installation. That environment variable is not in the Flatpak
+child allowlist. No sleeps, app launch arguments, package, runtime, permissions,
+WebKit behavior or product source changes. A regression refuses missing, system
+and wrong-version paths; there are now 14 passing Python fixtures plus 49 Node tests.
+
+Compact capture artifact `11930663137` is 5,463 bytes (API SHA-256
+`5f0acb9351b9b5c745558ce9d5868cb710db9481a20aa15fc6cac3f9503091a8`),
+downloaded to `artifacts/flatpak-gui-capture-38643108880/`. Full preserved evidence
+artifact `11931198007` is 418,919,912 bytes (API SHA-256
+`7d98ec6595e5024d1a7d22fa4352d93dfc411b62c7c2e03f358208ab52757e22`).
+These API digests are not claims that the download CLI retained original artifact
+ZIP bytes for local digest verification; the package-input ZIP is independently pinned.
