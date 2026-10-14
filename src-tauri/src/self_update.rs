@@ -184,6 +184,7 @@ fn raw_installed_location(_handle: &tauri::AppHandle) -> Result<PathBuf, String>
         let exe =
             tauri::utils::platform::current_exe().map_err(|_| "Cannot check this Hub package.")?;
         let target = Target::native()?;
+        crate::linux_update::preflight(target.package)?;
         let location = if target.package == "appimage" {
             let env = _handle.env();
             let appdir = PathBuf::from(
@@ -448,7 +449,11 @@ pub async fn install_hub_update(
         installed_location(&handle)?;
         #[cfg(target_os = "macos")]
         crate::mac_update::install(&bytes, &installed, &release.executable_sha256, || installed_location(&handle).map(|_| ()))?;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        if crate::linux_update::install(&bytes, release.byte_length, &release.sha256, Target::native()?.package)? == crate::linux_update::Outcome::Cancelled {
+            return Ok("Hub update cancelled at system authorization. Nothing was installed. Your settings and retained MCP connections were kept; closed app views can be reopened from Hub.".into());
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         update.install(bytes).map_err(|_| "Hub could not complete its update. Retry from the installed app; your settings and runtime generations were retained.")?;
         #[cfg(unix)]
         handle.request_restart();

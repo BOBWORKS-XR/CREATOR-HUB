@@ -18,6 +18,8 @@ mod hosted_restore;
 mod installation_identity;
 mod installer_preflight;
 mod launch;
+#[cfg(any(target_os = "linux", test))]
+mod linux_update;
 #[cfg(any(windows, test))]
 #[allow(dead_code)]
 mod legacy_removal_windows;

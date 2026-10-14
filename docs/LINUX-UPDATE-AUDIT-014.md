@@ -1,9 +1,46 @@
 # Linux Update Audit Checkpoint
 
-2026-10-15. Source audit only; no Linux in-app update has been accepted by this
-check. Windows' scoped installer tests are separate. Mac work remains suspended.
+2026-10-15. No full Linux in-app update has been accepted. The later standalone
+mechanism test below is separate from signed update/authentication/restart.
+Windows' scoped installer tests are separate. Mac work remains suspended.
 
-## Evidence
+## Sealed Input Implementation Checkpoint
+
+Disposable [run 38653560191](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38653560191)
+at `1e38681` passes the actual `pkexec` to `dpkg --install /proc/self/fd/0`
+handoff. The generated 622-byte test package remains exact with all four kernel
+seals; write, shrink and growth attempts refuse. Its original pathname is removed
+before privilege; installed package/version/content match. Original compact result
+is retained locally under `artifacts/linux-sealed-update-38653560191`.
+
+This uses a temporary, explicitly permissive action **only on a disposable runner**,
+removed in `finally`; it is never production policy. Actual user authentication,
+native Cancel, signed catalog/update, view restoration and restart remain false.
+
+Original failed runs are preserved: `38652808744` assumed a JavaScript rule
+backend absent from Ubuntu 22.04's polkit 0.105; `38653046783` required exit0
+although the 0.105 `pkaction` source retains exit1 after successful output;
+`38653403405` captured two additional empty metadata lines. The corrected readiness
+check binds that exact native output, known version and empty stderr. It does not
+broaden the executable, package target or authentication authority.
+
+New production source `src-tauri/src/linux_update.rs` is a separate **unaccepted
+integration**: verified DEB bytes go to a sealed inherited descriptor; fixed,
+root-protected system tools get one system-agent attempt, with no in-app password
+collection or sudo/terminal fallback. Exit126 returns cancellation without restart;
+127 and uncertain/nonzero outcomes return actionable errors without automatic repair.
+Unsupported formats or missing tools refuse before confirmation or view closure.
+RPM, AppImage and Flatpak automatic updates are not established by this DEB work.
+
+The actual Root source is compiled independently through
+`native/linux-update-check`, avoiding a full GUI build for kernel/command tests.
+Portable tests and native-target strict Clippy pass, three integration/source
+regressions pass, and Windows Root tests pass (358, with 13 opt-in tests ignored).
+Real Linux execution of this Rust source, native authentication cancellation and
+the exact signed Hub install/restart remain pending; the Python mechanism does
+not substitute for those gates. No user-PC app or settings were changed.
+
+## Original Dependency Audit
 
 - Correct as-is: `self_update.rs` checks the signed descriptor, downloaded bytes,
   separate installer signature, exact package target and installed/restart path
@@ -45,8 +82,8 @@ before/after settings, owned backend lifetimes and normal restart/reconnect.
 5. Test approved install, automatic restart, exact version/executable hash,
    settings, embedded views and both old/fresh MCP connections.
 
-A sealed-descriptor handoff or a fixed trusted helper are possible designs,
-not accepted implementations. Investigate the actual OS/tool contracts before
-choosing either; do not replace one unproven authority boundary with another.
+A sealed-descriptor DEB handoff is now implemented and scoped separately above,
+but is not full signed-update acceptance. A fixed trusted helper remains an
+alternative, not an accepted replacement merely because its source exists.
 The existing Linux retirement helper prerequisite is a different operation and
 does not prove this update flow. Publication remains held.
