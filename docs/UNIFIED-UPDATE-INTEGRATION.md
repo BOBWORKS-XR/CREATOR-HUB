@@ -24,6 +24,32 @@ remain in scope, and their incomplete gates are not waived.
   Clippy and 61 assembly/source regressions passed. A fresh Linux assembly runs
   real process fixtures and Root tests before packaging. Native acceptance of
   these new Linux branches is pending; tested Windows installer bytes are unchanged.
+  [Assembly38643118508](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38643118508)
+  at `9894b1c` passes 320 native Linux Root tests (12 opt-in tests ignored),
+  including the actual owned-process fixture and all no-retirement cases, then
+  builds/integrity-checks DEB, RPM and AppImage. The initial `38642264467`
+  failure was two existing host-dependent assertions, not a failed product
+  refusal; their corrected tests retain both original refusal invariants.
+  Native first-launch/migration/update acceptance is still separate.
+  The original ZIP and all three package hashes were independently verified
+  locally; [the bound receipt](evidence/linux-assembly-38643118508.json) records
+  the exact bytes. This assembly predates the Setup GTK dialog correction below.
+- Linux Setup's `xdg-portal` message backend invokes external Zenity, but the
+  released package does not declare it. The actual native component run
+  `38645211366` displayed a declined-opening error without a consent input;
+  Zenity's original runner presence/launch error is not directly established.
+  Source `77367ae` changes only Linux Setup to the GTK backend already used by
+  Hub/MCP. Its new private payload is being built in `38647206970`; successful
+  native permission/operation tests are still required. The actual selected
+  Windows Cargo feature trees before/after are identical (2,896 lines), and
+  Setup's Windows Rust tests pass (135 unit plus two integration tests; 13 ignored).
+  Existing accepted Windows installer bytes were not changed.
+- [Debian transition38643248531](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38643248531)
+  proves a same-package runtime-only upgrade can retire the GUI/desktop/icons
+  while preserving all nine original runtime files, a live SDK connection,
+  both original-path Node reconnects and eight synthetic settings sentinels.
+  See [the package proof](LINUX-DEB-RETENTION-014.md). It is not wired into Hub's
+  privileged approved migration flow; Setup and interruption/recovery remain open.
 - [Linux run38639742819](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38639742819)
   uses the unchanged real DEB from assembly `5bb05a2`: the 940x580 terms window
   is nonblank, native checkbox/button actions save the real acknowledgement,
