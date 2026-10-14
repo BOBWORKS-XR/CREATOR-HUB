@@ -184,3 +184,16 @@ test('runner source confines install/update to owned exact ref and does not laun
   assert.ok(!/shell:\s*true|flatpak-spawn|--filesystem|--allow=devel|--force-clean|--delete-data|\['kill'|\['uninstall'|sudo/.test(source));
   assert.ok(!runner.ABI_SCRIPT.includes('creator-hub --')); assert.ok(runner.ABI_SCRIPT.includes('ldd /app/bin/creator-hub'));
 });
+
+test('real package workflow installs locked Node dependencies before contract tests or staging', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../.github/workflows/flatpak-package-014.yml'), 'utf8');
+  const dependencies = source.indexOf('run: npm ci --ignore-scripts');
+  const preflight = source.indexOf('run: node --test scripts/flatpak-package.test.cjs');
+  const download = source.indexOf('downloadArtifact(');
+  assert.ok(dependencies >= 0 && dependencies < preflight && preflight < download);
+  assert.ok(source.includes("assert.equal(run.conclusion,'success')"));
+  assert.ok(source.includes("assert.equal(artifact.expired,false)"));
+  assert.ok(source.includes('11916403015'));
+  assert.ok(source.includes('e875b1cd071a42f9c264295b05425708df2e0d4574aa0d88e9136e919ce6f780'));
+  assert.doesNotMatch(source, /contents: write|--filesystem|--allow=devel|flatpak-spawn|release (?:create|edit|upload)/);
+});
