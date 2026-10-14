@@ -5,6 +5,13 @@ const os = require('node:os');
 const path = require('node:path');
 const pkg = require('./flatpak-package.cjs');
 const runner = require('./flatpak-disposable.cjs');
+const stdio = { MEMBER: pkg.ROUTING[0], INPUT: pkg.ROUTER_INPUT, OUTPUT: pkg.ROUTER_OUTPUT };
+
+function elf(suffix = '') {
+  const bytes = Buffer.alloc(64); Buffer.from([127, 69, 76, 70, 2, 1]).copy(bytes);
+  bytes.writeUInt16LE(3, 16); bytes.writeUInt16LE(62, 18);
+  return Buffer.concat([bytes, Buffer.from(suffix)]);
+}
 
 const recipe = () => JSON.parse(pkg.read(path.join(pkg.RECIPE, `${pkg.ID}.json`), 65536));
 function fixture(t, managed = false) {
@@ -17,7 +24,7 @@ function fixture(t, managed = false) {
   const input = path.join(root, 'input'); fs.mkdirSync(input);
   const members = [...pkg.MEMBERS, ...(managed ? pkg.ROUTING : [])];
   const hashes = Object.fromEntries(members.map(name => [name, pkg.sha256(name)]));
-  const payload = Buffer.from('Synthetic archive: staging does not claim native member verification.');
+  const payload = Buffer.from('Synthetic opaque archive: only the shared native decoder verifies members.');
   const manifest = { schemaVersion: 1, platform: 'linux', arch: 'x86_64', modules: {
     mcp: { executable: pkg.MEMBERS[0], version: '2.7.7', files: Object.fromEntries(pkg.MEMBERS.slice(0, 9).map(name => [name, hashes[name]])) },
     setup: { executable: pkg.MEMBERS[9], version: '0.3.7', files: { [pkg.MEMBERS[9]]: hashes[pkg.MEMBERS[9]] } },
@@ -25,15 +32,30 @@ function fixture(t, managed = false) {
   payloadArchive: { schemaVersion: 1, file: 'modules.tar.gz', ...pkg.record(payload), unpackedSize: members.length,
     files: Object.fromEntries(members.map(name => [name, { size: 1,
       mode: [pkg.MEMBERS[0], pkg.MEMBERS[2], pkg.MEMBERS[9], pkg.ROUTING[0]].includes(name) ? 0o755 : 0o644 }])) } };
+  const router = managed ? elf('synthetic raw assembly router') : null;
+  if (router) {
+    manifest.managedRouting.files[stdio.MEMBER] = pkg.sha256(router);
+    manifest.payloadArchive.files[stdio.MEMBER].size = router.length;
+    manifest.payloadArchive.unpackedSize += router.length - 1;
+  }
   const descriptor = Buffer.from(JSON.stringify(manifest, null, 2));
-  const header = Buffer.alloc(64); Buffer.from([127, 69, 76, 70, 2, 1]).copy(header);
-  header.writeUInt16LE(3, 16); header.writeUInt16LE(62, 18);
-  const bytes = { 'creator-hub': Buffer.concat([header, descriptor]), 'builtin-manifest.json': descriptor, 'modules.tar.gz': payload };
-  for (const [name, value] of Object.entries(bytes)) fs.writeFileSync(path.join(input, name), value);
+  const bytes = { 'creator-hub': elf(descriptor), 'builtin-manifest.json': descriptor, 'modules.tar.gz': payload,
+    ...(router ? { [stdio.INPUT]: router } : {}) };
+  for (const [name, value] of Object.entries(bytes)) {
+    fs.mkdirSync(path.dirname(path.join(input, name)), { recursive: true });
+    fs.writeFileSync(path.join(input, name), value);
+  }
   const pins = { schemaVersion: 1, version: '0.1.14', platform: 'linux', arch: 'x86_64',
     mcpMode: managed ? 'writable' : 'read-only', sourceCommit: 'a'.repeat(40), sourceTree: 'b'.repeat(40),
     runId: 1, runAttempt: 1, inputArtifactSha256: 'c'.repeat(64), files: Object.fromEntries(Object.entries(bytes).map(([name, value]) => [name, pkg.record(value)])) };
   return { root, input, pins, manifest, bytes, destination: path.join(root, 'stage') };
+}
+function rewrite(f) {
+  const descriptor = Buffer.from(JSON.stringify(f.manifest, null, 2));
+  f.bytes['creator-hub'] = elf(descriptor); f.bytes['builtin-manifest.json'] = descriptor;
+  for (const [name, bytes] of Object.entries(f.bytes)) {
+    fs.writeFileSync(path.join(f.input, name), bytes); f.pins.files[name] = pkg.record(bytes);
+  }
 }
 const metadata = () => `[Application]\nname=${pkg.ID}\nruntime=org.gnome.Platform/x86_64/50\nsdk=org.gnome.Sdk/x86_64/50\ncommand=creator-hub\n[Context]\nshared=ipc;\nsockets=wayland;fallback-x11;\ndevices=dri;\n`;
 const env = () => ({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
@@ -122,6 +144,132 @@ test('managed routing input map and archive bytes survive unchanged without sign
   assert.deepEqual(actual.managedRouting, f.manifest.managedRouting);
   assert.equal(Object.keys(actual.payloadArchive.files).length, 15);
   assert.equal(receipt.mcpAccepted, false); assert.equal(receipt.migrationAccepted, false);
+  assert.equal(Object.keys(receipt.files).length, 7);
+  assert.deepEqual(pkg.read(path.join(f.destination, 'flatpak-input', stdio.OUTPUT)), f.bytes[stdio.INPUT]);
+  assert.deepEqual(receipt.files[stdio.OUTPUT], { size: actual.payloadArchive.files[stdio.MEMBER].size,
+    sha256: actual.managedRouting.files[stdio.MEMBER] });
+});
+
+test('read-only inputs have no callable router; writable recipe installs the exact fixed executable', t => {
+  const f = fixture(t); const receipt = pkg.prepare(f.input, f.pins, f.destination);
+  assert.equal(Object.keys(receipt.files).length, 6);
+  assert.equal(fs.existsSync(path.join(f.destination, 'flatpak-input', stdio.OUTPUT)), false);
+  assert.equal(recipe().modules[0]['build-commands'].at(-1),
+    `if test -f ${stdio.OUTPUT}; then install -Dm755 ${stdio.OUTPUT} /app/${stdio.OUTPUT}; fi`);
+  for (const command of [`install -Dm755 bin/creator-hub /app/${stdio.OUTPUT}`,
+    `install -Dm755 ${stdio.OUTPUT} /app/bin/router`, `chmod 777 /app/${stdio.OUTPUT}`]) {
+    const changed = recipe(); changed.modules[0]['build-commands'].splice(-1, 1, command);
+    assert.throws(() => pkg.validateRecipe(changed));
+  }
+});
+
+test('historical three-file writable pins are readable but cannot authorize staging or recheck', t => {
+  const f = fixture(t, true), historical = structuredClone(f.pins);
+  delete historical.files[stdio.INPUT]; pkg.validatePins(historical);
+  assert.throws(() => pkg.prepare(f.input, historical, f.destination), /independently reviewed raw router pin is required/);
+  assert.equal(fs.existsSync(f.destination), false);
+  const receipt = pkg.prepare(f.input, f.pins, f.destination);
+  delete receipt.provenance.files[stdio.INPUT];
+  assert.throws(() => pkg.verifyStage(f.destination, receipt), /independently reviewed raw router pin is required/);
+});
+
+test('read-only, alternate-path, extra and malformed raw-router pins refuse', t => {
+  for (const mutate of [p => { p.mcpMode = 'read-only'; }, p => {
+    p.files['modules/routing/../creator-hub-mcp-router'] = p.files[stdio.INPUT]; delete p.files[stdio.INPUT];
+  }, p => { p.files['arbitrary-router'] = p.files[stdio.INPUT]; }, p => { p.files[stdio.INPUT].size = 0; },
+  p => { p.files[stdio.INPUT].sha256 = 'not-a-hash'; }]) {
+    const f = fixture(t, true); mutate(f.pins);
+    assert.throws(() => pkg.prepare(f.input, f.pins, f.destination));
+    assert.equal(fs.existsSync(f.destination), false);
+  }
+});
+
+test('missing or tampered libexec copy refuses even when its receipt is edited', t => {
+  const f = fixture(t, true); const receipt = pkg.prepare(f.input, f.pins, f.destination);
+  const file = path.join(f.destination, 'flatpak-input', stdio.OUTPUT);
+  fs.writeFileSync(file, elf('substitute'));
+  assert.throws(() => pkg.verifyStage(f.destination, receipt), /Staged bytes changed/);
+  receipt.files[stdio.OUTPUT] = pkg.record(pkg.read(file));
+  assert.throws(() => pkg.verifyStage(f.destination, receipt), /independently reviewed raw router pin/);
+  fs.unlinkSync(file);
+  assert.throws(() => pkg.verifyStage(f.destination, receipt), /Unexpected staged file/);
+});
+
+test('libexec hard links and redirected ancestors are refused', t => {
+  const f = fixture(t, true); const receipt = pkg.prepare(f.input, f.pins, f.destination);
+  const directory = path.join(f.destination, 'flatpak-input', 'libexec');
+  const file = path.join(directory, 'creator-hub-mcp-router'), linked = path.join(f.root, 'linked-router');
+  fs.linkSync(file, linked);
+  assert.throws(() => pkg.verifyStage(f.destination, receipt), /Bounded ordinary/);
+  fs.unlinkSync(linked);
+  const moved = path.join(f.root, 'redirected-libexec'); fs.renameSync(directory, moved);
+  fs.symlinkSync(moved, directory, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(() => pkg.verifyStage(f.destination, receipt), /Redirected path/);
+});
+
+test('Linux stage recheck refuses changed router executable modes', { skip: process.platform !== 'linux' }, t => {
+  const f = fixture(t, true); const receipt = pkg.prepare(f.input, f.pins, f.destination);
+  const file = path.join(f.destination, 'flatpak-input', stdio.OUTPUT);
+  for (const mode of [0o644, 0o777, 0o4755]) {
+    fs.chmodSync(file, mode); assert.throws(() => pkg.verifyStage(f.destination, receipt), /mode differs/);
+  }
+  fs.chmodSync(file, 0o755); pkg.verifyStage(f.destination, receipt);
+});
+
+test('raw router pin, routing digest, bound size, native ELF and mode must match before stage writes', t => {
+  for (const kind of ['pin', 'digest', 'size', 'elf', 'mode']) {
+    const f = fixture(t, true);
+    if (kind === 'digest') f.manifest.managedRouting.files[stdio.MEMBER] = 'd'.repeat(64);
+    if (kind === 'size') { f.manifest.payloadArchive.files[stdio.MEMBER].size++; f.manifest.payloadArchive.unpackedSize++; }
+    if (kind === 'elf') {
+      f.bytes[stdio.INPUT][18] = 183;
+      f.manifest.managedRouting.files[stdio.MEMBER] = pkg.sha256(f.bytes[stdio.INPUT]);
+    }
+    if (kind === 'mode') f.manifest.payloadArchive.files[stdio.MEMBER].mode = 0o644;
+    rewrite(f);
+    if (kind === 'pin') f.pins.files[stdio.INPUT].sha256 = 'd'.repeat(64);
+    assert.throws(() => pkg.prepare(f.input, f.pins, f.destination));
+    assert.equal(fs.existsSync(f.destination), false, `${kind} must refuse before stage creation`);
+  }
+});
+
+test('fourth input refuses missing, changed, hard-linked, redirected and non-file raw routers', t => {
+  for (const kind of ['missing', 'changed', 'hardlink', 'redirected', 'directory', 'empty']) {
+    const f = fixture(t, true), file = path.join(f.input, stdio.INPUT);
+    if (kind === 'missing') fs.unlinkSync(file);
+    if (kind === 'changed') fs.appendFileSync(file, 'changed');
+    if (kind === 'hardlink') fs.linkSync(file, path.join(f.root, 'linked'));
+    if (kind === 'redirected') {
+      const directory = path.dirname(file), moved = path.join(f.root, 'redirected-routing');
+      fs.renameSync(directory, moved); fs.symlinkSync(moved, directory, process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    if (kind === 'directory') { fs.unlinkSync(file); fs.mkdirSync(file); }
+    if (kind === 'empty') fs.writeFileSync(file, '');
+    assert.throws(() => pkg.prepare(f.input, f.pins, f.destination), undefined, kind);
+    assert.equal(fs.existsSync(f.destination), false);
+  }
+});
+
+test('raw-router input drift after copying refuses publication of a stage receipt', t => {
+  const f = fixture(t, true), write = fs.writeFileSync;
+  const target = path.join(f.destination, 'flatpak-input', stdio.OUTPUT);
+  t.mock.method(fs, 'writeFileSync', (file, ...args) => {
+    const result = write(file, ...args);
+    if (file === target) write(path.join(f.input, stdio.INPUT), elf('changed after copy'));
+    return result;
+  });
+  assert.throws(() => pkg.prepare(f.input, f.pins, f.destination), /Input drift: modules\/routing\/creator-hub-mcp-router/);
+  assert.equal(fs.existsSync(path.join(f.destination, 'flatpak-stage.json')), false);
+});
+
+test('managed archive remains opaque and unchanged; packaging adds no TAR or zlib decoder', t => {
+  const f = fixture(t, true);
+  const receipt = pkg.prepare(f.input, f.pins, f.destination);
+  assert.deepEqual(pkg.read(path.join(f.destination, 'flatpak-input', pkg.OUTPUTS[1])), f.bytes['modules.tar.gz']);
+  assert.equal(receipt.archiveMembersVerified, false);
+  assert.equal(fs.existsSync(path.join(__dirname, 'flatpak-mcp-stdio-archive.cjs')), false);
+  const source = fs.readFileSync(path.join(__dirname, 'flatpak-package.cjs'), 'utf8');
+  assert.doesNotMatch(source, /flatpak-mcp-stdio-archive|node:zlib|crc32|inflate|gunzip/);
 });
 test('producer-mode mismatch refuses before creating a stage', t => {
   const f = fixture(t); f.pins.mcpMode = 'writable';

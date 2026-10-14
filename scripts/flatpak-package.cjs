@@ -11,6 +11,8 @@ const ID = 'com.creatorworks.hub';
 const REF = `app/${ID}/x86_64/flatpak-test`;
 const PERMISSIONS = ['--socket=wayland', '--socket=fallback-x11', '--device=dri', '--share=ipc'];
 const INPUTS = ['creator-hub', 'builtin-manifest.json', 'modules.tar.gz'];
+const ROUTER_INPUT = 'modules/routing/creator-hub-mcp-router';
+const ROUTER_OUTPUT = 'libexec/creator-hub-mcp-router';
 const OUTPUTS = ['bin/creator-hub', 'lib/Creator Hub/modules.tar.gz', `share/applications/${ID}.desktop`,
   `share/icons/hicolor/128x128/apps/${ID}.png`, `share/appdata/${ID}.appdata.xml`, `share/licenses/${ID}/LICENSE`];
 const MEMBERS = ['mcp/creator-works-mcp-launcher', 'mcp/server/creator-works-mcp.mjs', 'mcp/server/runtime/node',
@@ -61,7 +63,10 @@ function validatePins(pins) {
   for (const name of ['sourceCommit', 'sourceTree']) assert.match(pins[name], /^[a-f0-9]{40}$/);
   assert.match(pins.inputArtifactSha256, /^[a-f0-9]{64}$/);
   for (const name of ['runId', 'runAttempt']) assert.ok(Number.isSafeInteger(pins[name]) && pins[name] > 0);
-  assert.deepEqual(Object.keys(pins.files).sort(), [...INPUTS].sort());
+  // Historical three-file pin records remain readable, but cannot stage a writable package.
+  const router = Object.hasOwn(pins.files, ROUTER_INPUT);
+  assert.ok(!router || pins.mcpMode === 'writable', 'Read-only pins cannot authorize a router');
+  assert.deepEqual(Object.keys(pins.files).sort(), [...INPUTS, ...(router ? [ROUTER_INPUT] : [])].sort());
   for (const value of Object.values(pins.files)) {
     assert.deepEqual(Object.keys(value).sort(), ['sha256', 'size']);
     assert.match(value.sha256, /^[a-f0-9]{64}$/);
@@ -95,6 +100,14 @@ function validateElf(bytes) {
   assert.ok([2, 3].includes(bytes.readUInt16LE(16)), 'Executable ELF required');
 }
 
+function validateRouter(bytes, manifest, pin) {
+  assert.ok(pin, 'An independently reviewed raw router pin is required');
+  assert.deepEqual(pin, { sha256: manifest.managedRouting.files[ROUTING[0]],
+    size: manifest.payloadArchive.files[ROUTING[0]].size }, 'Raw router pin differs from the bound manifest');
+  assert.deepEqual(record(bytes), pin, 'Stdio entrypoint differs from the independently reviewed raw router pin');
+  validateElf(bytes);
+}
+
 function validateRecipe(recipe) {
   assert.deepEqual(recipe, {
     'app-id': ID, branch: 'flatpak-test', runtime: 'org.gnome.Platform', 'runtime-version': '50',
@@ -106,11 +119,12 @@ function validateRecipe(recipe) {
         'install -Dm755 bin/creator-hub /app/bin/creator-hub',
         "install -Dm644 'lib/Creator Hub/modules.tar.gz' '/app/lib/Creator Hub/modules.tar.gz'",
         ...OUTPUTS.slice(2).map(name => `install -Dm644 ${name} /app/${name}`),
+        `if test -f ${ROUTER_OUTPUT}; then install -Dm755 ${ROUTER_OUTPUT} /app/${ROUTER_OUTPUT}; fi`,
       ] }],
   }, 'Only the reviewed offline recipe is allowed');
 }
 
-function inventory(root) {
+function inventory(root, manifest) {
   const files = {};
   function visit(directory) {
     assert.ok(ordinary(directory).isDirectory());
@@ -121,17 +135,17 @@ function inventory(root) {
     }
   }
   visit(root);
-  assert.deepEqual(Object.keys(files).sort(), [...OUTPUTS].sort(), 'Unexpected staged file');
+  assert.deepEqual(Object.keys(files).sort(), [...OUTPUTS, ...(manifest?.managedRouting ? [ROUTER_OUTPUT] : [])].sort(), 'Unexpected staged file');
   return files;
 }
 
 function verifyStage(destination, expected) {
   validatePins(expected.provenance);
   validateRecipe(JSON.parse(read(path.join(destination, `${ID}.json`), 65536)));
-  assert.deepEqual(inventory(path.join(destination, 'flatpak-input')), expected.files, 'Staged bytes changed');
   const manifestBytes = read(path.join(destination, 'builtin-manifest.json'), 65536);
   assert.deepEqual(record(manifestBytes), expected.provenance.files['builtin-manifest.json']);
   const manifest = JSON.parse(manifestBytes); validateDescriptor(manifest);
+  assert.deepEqual(inventory(path.join(destination, 'flatpak-input'), manifest), expected.files, 'Staged bytes changed');
   assert.equal(Boolean(manifest.managedRouting), expected.provenance.mcpMode === 'writable');
   const hub = read(path.join(destination, 'flatpak-input', OUTPUTS[0])); validateElf(hub);
   assert.ok(hub.includes(manifestBytes), 'Hub does not embed the exact archive descriptor');
@@ -139,12 +153,18 @@ function verifyStage(destination, expected) {
   assert.deepEqual(expected.files[OUTPUTS[1]], expected.provenance.files['modules.tar.gz']);
   assert.equal(manifest.payloadArchive.sha256, expected.files[OUTPUTS[1]].sha256);
   assert.equal(manifest.payloadArchive.size, expected.files[OUTPUTS[1]].size);
+  if (manifest.managedRouting) {
+    const file = path.join(destination, 'flatpak-input', ROUTER_OUTPUT);
+    validateRouter(read(file), manifest, expected.provenance.files[ROUTER_INPUT]);
+    if (process.platform === 'linux') assert.equal(ordinary(file).mode & 0o7777, 0o755, 'Stdio entrypoint mode differs');
+  }
   return manifest;
 }
 
 function prepare(input, pins, destination) {
   validatePins(pins);
-  const bytes = Object.fromEntries(INPUTS.map(name => {
+  const names = [...INPUTS, ...(Object.hasOwn(pins.files, ROUTER_INPUT) ? [ROUTER_INPUT] : [])];
+  const bytes = Object.fromEntries(names.map(name => {
     const value = read(path.join(input, name), name.endsWith('.json') ? 65536 : LIMIT);
     assert.deepEqual(record(value), pins.files[name], `Reviewed input differs: ${name}`);
     return [name, value];
@@ -154,6 +174,8 @@ function prepare(input, pins, destination) {
   assert.ok(bytes['creator-hub'].includes(bytes['builtin-manifest.json']), 'Exact embedded descriptor required');
   assert.equal(Boolean(manifest.managedRouting), pins.mcpMode === 'writable', 'Reviewed producer mode differs');
   assert.deepEqual(record(bytes['modules.tar.gz']), { size: manifest.payloadArchive.size, sha256: manifest.payloadArchive.sha256 });
+  const router = manifest.managedRouting ? bytes[ROUTER_INPUT] : null;
+  if (manifest.managedRouting) validateRouter(router, manifest, pins.files[ROUTER_INPUT]);
   const recipeBytes = read(path.join(RECIPE, `${ID}.json`), 65536); validateRecipe(JSON.parse(recipeBytes));
   const assets = [bytes['creator-hub'], bytes['modules.tar.gz'], read(path.join(RECIPE, `${ID}.desktop`), 8192),
     read(path.join(ROOT, 'src-tauri', 'icons', '128x128.png'), 1024 * 1024),
@@ -168,13 +190,19 @@ function prepare(input, pins, destination) {
     fs.writeFileSync(file, assets[index], { flag: 'wx', mode: index === 0 ? 0o755 : 0o644 });
     if (process.platform === 'linux') fs.chmodSync(file, index === 0 ? 0o755 : 0o644);
   }
+  if (router) {
+    const file = path.join(destination, 'flatpak-input', ROUTER_OUTPUT);
+    fs.mkdirSync(path.dirname(file), { mode: 0o755 });
+    fs.writeFileSync(file, router, { flag: 'wx', mode: 0o755 });
+    if (process.platform === 'linux') fs.chmodSync(file, 0o755);
+  }
   fs.writeFileSync(path.join(destination, `${ID}.json`), recipeBytes, { flag: 'wx', mode: 0o644 });
   fs.writeFileSync(path.join(destination, 'builtin-manifest.json'), bytes['builtin-manifest.json'], { flag: 'wx', mode: 0o644 });
   const result = { schemaVersion: 1, scope: 'offline-flatpak-packaging-only', provenance: pins,
-    files: inventory(path.join(destination, 'flatpak-input')), archiveMembersVerified: false, ...acceptance() };
+    files: inventory(path.join(destination, 'flatpak-input'), manifest), archiveMembersVerified: false, ...acceptance() };
   verifyStage(destination, result);
   // Recheck original inputs after publication; a partial stage is never accepted.
-  for (const name of INPUTS) assert.deepEqual(record(read(path.join(input, name))), pins.files[name], `Input drift: ${name}`);
+  for (const name of names) assert.deepEqual(record(read(path.join(input, name))), pins.files[name], `Input drift: ${name}`);
   fs.writeFileSync(path.join(destination, 'flatpak-stage.json'), `${JSON.stringify(result, null, 2)}\n`, { flag: 'wx' });
   return result;
 }
@@ -186,5 +214,5 @@ if (require.main === module) {
     console.log(JSON.stringify({ staged: true, archiveMembersVerified: result.archiveMembersVerified, ...acceptance() }));
   } catch (error) { console.error(String(error.message).slice(0, 1000)); process.exitCode = 1; }
 }
-module.exports = { ROOT, RECIPE, ID, REF, PERMISSIONS, INPUTS, OUTPUTS, MEMBERS, ROUTING, LIMIT, sha256, record, acceptance,
-  ordinary, read, validatePins, validateDescriptor, validateElf, validateRecipe, inventory, verifyStage, prepare };
+module.exports = { ROOT, RECIPE, ID, REF, PERMISSIONS, INPUTS, ROUTER_INPUT, ROUTER_OUTPUT, OUTPUTS, MEMBERS, ROUTING, LIMIT, sha256, record, acceptance,
+  ordinary, read, validatePins, validateDescriptor, validateElf, validateRouter, validateRecipe, inventory, verifyStage, prepare };
