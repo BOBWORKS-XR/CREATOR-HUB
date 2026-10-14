@@ -1,4 +1,4 @@
-name: Current Windows fresh installation and backup-drift convergence (not release)
+name: Current Windows fresh repeat launch and backup-drift convergence (not release)
 on:
   push:
     branches: [validation/convergence-014]

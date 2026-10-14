@@ -5,6 +5,12 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, 'native-builtin-smoke.cjs'), 'utf8');
+test('fresh installed component flow checks actual repeat startup after its explicit save', () => {
+  assert.ok(source.includes("if (installedMode === 'fresh')"));
+  assert.ok(source.includes('report.repeatFreshLaunch ='));
+  assert.ok(source.includes("'Repeat startup must preserve the explicit Hub save'"));
+  assert.ok(source.includes("'An already configured fresh Hub must not ask to migrate its own settings on every launch'"));
+});
 const start = source.indexOf('async function deferStartupConvergence(');
 const end = source.indexOf('\n(async () => {', start);
 assert.ok(start > 0 && end > start, 'The bounded startup helper must precede the native runner');

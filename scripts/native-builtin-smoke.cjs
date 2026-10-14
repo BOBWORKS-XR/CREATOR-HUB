@@ -466,6 +466,28 @@ async function deferStartupConvergence(page, verifyPreserved) {
   verifyRetainedStores('Failed payload and recovered retry');
   report.checks.push('Corrupt packaged candidate refuses startup without changing settings or disrupting an active SDK stdio client on the retained generation');
   report.checks.push('Restoring exact candidate bytes permits a successful embedded retry on the same retained generation; active stdio client remains usable. This is failure recovery, not signed-update acceptance');
+  if (installedMode === 'fresh') {
+    await page.waitForFunction(() => !document.querySelector('#check-updates').disabled);
+    native(child.pid, hub, 'close');
+    await retry(() => assert.equal(child.exitCode, 0), 15);
+    await browser.close(); browser = null;
+    child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238', WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview') } });
+    browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'));
+    page = await retry(() => {
+      const found = browser.contexts().flatMap(context => context.pages()).find(p => p.url().includes('tauri.localhost'));
+      assert.ok(found); return found;
+    });
+    await page.waitForFunction(() => window.CreatorHubNative?.convergencePersistence === true);
+    const repeat = await page.evaluate(() => window.CreatorHubNative.invoke('convergence_status'));
+    report.repeatFreshLaunch = { required: repeat.required, stage: repeat.stage, legacyApps: repeat.legacyApps,
+      settings: repeat.settings, message: repeat.message };
+    assert.deepEqual(fs.readFileSync(settings), expectedConfig, 'Repeat startup must preserve the explicit Hub save');
+    registrations(); verifyRetainedStores('Repeat fresh Hub launch');
+    await page.screenshot({ path: path.join(out, 'repeat-fresh-launch.png') });
+    assert.equal(repeat.required, false, 'An already configured fresh Hub must not ask to migrate its own settings on every launch');
+    report.checks.push('Actual repeat fresh-profile launch preserves saved settings without presenting legacy migration');
+  }
   report.passed = true;
 })().catch(error => {
   report.error = String(error.stack || error);
