@@ -75,19 +75,11 @@ func emit(_ value: [String: Any]) {
 }
 func experimentRoot(_ folder: String) throws -> String {
     try admitted()
-    try need(environment["CREATOR_MACOS_LEGACY_ARCHIVE_EXPERIMENT"] == "1", "archive-experiment-opt-in-required")
+    try need(environment["CREATOR_MACOS_LEGACY_STANDARD_TRASH_EXPERIMENT"] == "1", "standard-trash-experiment-opt-in-required")
     let temporary = URL(fileURLWithPath: environment["RUNNER_TEMP"] ?? "").resolvingSymlinksInPath().path
-    try need(folder == temporary + "/macos-legacy-retirement-probe/mcp/whole-bundle-archive-experiment"
+    try need(folder == temporary + "/macos-legacy-retirement-probe/mcp/standard-trash-experiment"
         && URL(fileURLWithPath: folder).resolvingSymlinksInPath().path == folder, "fixed-experiment-folder-required")
     return folder
-}
-func ownedBackup() throws -> String {
-    guard let run = environment["GITHUB_RUN_ID"], let attempt = environment["GITHUB_RUN_ATTEMPT"],
-        run.range(of: "^[0-9]{1,16}$", options: .regularExpression) != nil,
-        attempt.range(of: "^[0-9]{1,4}$", options: .regularExpression) != nil else { throw Refusal(message: "fixed-run-identity-required") }
-    let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/CreatorHubLegacyRetirementProbe/\(run)-\(attempt)").path
-    try need(URL(fileURLWithPath: root).resolvingSymlinksInPath().path == root, "linked-backup-path-refused")
-    return root
 }
 func directoryImage(_ filename: String) throws -> [String: Any] {
     var value = stat()
@@ -116,10 +108,10 @@ func waitForBarrier(_ file: String, seconds: Double) throws {
 }
 func review(_ phase: String, folder: String) throws -> NSApplication.ModalResponse {
     let alert = NSAlert()
-    alert.messageText = "MCP whole-bundle archival experiment"
-    alert.informativeText = "Disposable runner only. Temporarily move the complete pinned Creator Works MCP.app into this test's owned Application Support backup, then restore the exact bundle. Its old Node/server paths will be absent during the test. Existing clients are NOT migrated. Measure signatures, registration and connections without modifying app bytes or settings. Cancel leaves the app unchanged."
-    alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Archive app")
-    alert.window.title = "MCP whole-bundle archival experiment"
+    alert.messageText = "MCP standard Trash experiment"
+    alert.informativeText = "Disposable runner only. Use FileManager's standard Trash operation on the complete pinned Creator Works MCP.app, verify the returned Trash URL and launch refusal, then restore the exact bundle without overwrite. Trash will NOT be emptied. Old Node/server paths will be absent. This test does NOT migrate clients; real cleanup must first back up and migrate recognized clients to the verified Hub router and stop for unknown or unmigrated connections. Cancel leaves the app unchanged."
+    alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Move to Trash")
+    alert.window.title = "MCP standard Trash experiment"
     NSApp.activate(ignoringOtherApps: true)
     DispatchQueue.main.async {
         do { try exclusiveRecord(folder + "/review-\(phase)-ready.json", ["phase": phase, "pid": getpid(), "nativeModal": true]) }
@@ -141,7 +133,7 @@ func helperIdentity(_ pid: Int32, _ parent: UInt32, _ hash: String) throws {
         && (try image(own))["sha256"] as? String == hash, "review-helper-image-refused")
 }
 func pressReview(_ pid: Int32, _ parent: UInt32, _ hash: String, _ phase: String) throws {
-    try need(environment["CREATOR_MACOS_LEGACY_ARCHIVE_EXPERIMENT"] == "1" && ["cancel", "approve"].contains(phase), "fixed-review-phase-required")
+    try need(environment["CREATOR_MACOS_LEGACY_STANDARD_TRASH_EXPERIMENT"] == "1" && ["cancel", "approve"].contains(phase), "fixed-review-phase-required")
     try helperIdentity(pid, parent, hash)
     try need(AXIsProcessTrusted(), "native-review-accessibility-unavailable")
     let app = AXUIElementCreateApplication(pid)
@@ -155,13 +147,13 @@ func pressReview(_ pid: Int32, _ parent: UInt32, _ hash: String, _ phase: String
     while selected == nil && ProcessInfo.processInfo.systemUptime < deadline {
         if let windows = attr(app, kAXWindowsAttribute) as? [AXUIElement], windows.count == 1 {
             let window = windows[0]
-            if attr(window, kAXTitleAttribute) as? String == "MCP whole-bundle archival experiment" {
+            if attr(window, kAXTitleAttribute) as? String == "MCP standard Trash experiment" {
                 var queue = [(window, 0)], found = [AXUIElement](), count = 0
                 while !queue.isEmpty && count < 32 {
                     let (item, depth) = queue.removeFirst(); count += 1
                     var owner: pid_t = 0
                     try need(AXUIElementGetPid(item, &owner) == .success && owner == pid, "foreign-native-review-control")
-                    let title = phase == "cancel" ? "Cancel" : "Archive app"
+                    let title = phase == "cancel" ? "Cancel" : "Move to Trash"
                     if attr(item, kAXRoleAttribute) as? String == kAXButtonRole && attr(item, kAXTitleAttribute) as? String == title { found.append(item) }
                     if depth < 4, let children = attr(item, kAXChildrenAttribute) as? [AXUIElement] {
                         try need(children.count <= 32, "review-children-unbounded"); queue += children.map { ($0, depth + 1) }
@@ -184,7 +176,7 @@ func pressReview(_ pid: Int32, _ parent: UInt32, _ hash: String, _ phase: String
     try need(result == .success, "native-review-press-refused-no-retry")
     emit(["diagnosticOnly": true, "retirementMutationAttempted": false, "nativeAXPress": true, "nativeModalVerified": true, "phase": phase, "pid": pid])
 }
-func archiveExperiment(_ folder: String, receipt: String) throws {
+func trashExperiment(_ folder: String, receipt: String) throws {
     _ = try experimentRoot(folder)
     try need(receipt == URL(fileURLWithPath: folder).deletingLastPathComponent().path + "/owned-process.json", "fixed-old-gui-receipt-required")
     _ = try image(receipt)
@@ -193,22 +185,26 @@ func archiveExperiment(_ folder: String, receipt: String) throws {
         old["product"] as? String == "mcp" else { throw Refusal(message: "old-mcp-receipt-invalid") }
     let app = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Creator Works MCP.app").path
     let sourceDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications").path
-    let sourceName = "Creator Works MCP.app", source = app, targetDirectory = try ownedBackup()
-    let archivedName = sourceName, archived = targetDirectory + "/" + archivedName
+    let sourceName = "Creator Works MCP.app", source = app
+    let trashRoot = try FileManager.default.url(for: .trashDirectory, in: .userDomainMask,
+        appropriateFor: URL(fileURLWithPath: source), create: true)
+    let targetDirectory = trashRoot.path
+    _ = try directoryImage(targetDirectory)
     let guiSuffix = "/Contents/MacOS/creator-works-mcp-launcher"
     let sourceFD = open(sourceDirectory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
     let targetFD = open(targetDirectory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-    try need(sourceFD >= 0 && targetFD >= 0, "archive-directory-open-refused")
+    try need(sourceFD >= 0 && targetFD >= 0, "trash-directory-open-refused")
     defer { Darwin.close(sourceFD); Darwin.close(targetFD) }
     var sourceDir = stat(), targetDir = stat()
     try need(fstat(sourceFD, &sourceDir) == 0 && fstat(targetFD, &targetDir) == 0 && sourceDir.st_uid == getuid()
-        && targetDir.st_uid == getuid() && sourceDir.st_dev == targetDir.st_dev, "archive-directory-ownership-or-volume-refused")
+        && targetDir.st_uid == getuid() && sourceDir.st_dev == targetDir.st_dev, "trash-directory-ownership-or-volume-refused")
     func namespace() throws {
         var a = stat(), b = stat()
         try need(lstat(sourceDirectory, &a) == 0 && lstat(targetDirectory, &b) == 0
             && a.st_dev == sourceDir.st_dev && a.st_ino == sourceDir.st_ino && a.st_mode == sourceDir.st_mode
             && b.st_dev == targetDir.st_dev && b.st_ino == targetDir.st_ino && b.st_mode == targetDir.st_mode
-            && URL(fileURLWithPath: sourceDirectory).resolvingSymlinksInPath().path == sourceDirectory, "archive-parent-namespace-drift")
+            && URL(fileURLWithPath: sourceDirectory).resolvingSymlinksInPath().path == sourceDirectory
+            && URL(fileURLWithPath: targetDirectory).resolvingSymlinksInPath().path == targetDirectory, "trash-parent-namespace-drift")
     }
     func closed() throws {
         var state = proc_bsdinfo(); errno = 0
@@ -225,80 +221,93 @@ func archiveExperiment(_ folder: String, receipt: String) throws {
         && NSDictionary(dictionary: try directoryImage(source)).isEqual(to: beforeBundle), "cancel-mutated-bundle")
     try exclusiveRecord(folder + "/cancelled.json", ["nativeCancel": true, "originalGuiUnchanged": true])
     try waitForBarrier(folder + "/cancel-verified.json", seconds: 30)
-    try need(try review("approve", folder: folder) == .alertSecondButtonReturn, "native-archive-approval-declined")
+    try need(try review("approve", folder: folder) == .alertSecondButtonReturn, "native-trash-approval-declined")
     try namespace(); try closed()
     try need(NSDictionary(dictionary: try image(source + guiSuffix)).isEqual(to: before)
         && NSDictionary(dictionary: try directoryImage(source)).isEqual(to: beforeBundle), "bundle-drift-after-native-review")
-    try exclusiveRecord(folder + "/00-intent.json", ["nativeApproval": true, "temporaryExperiment": true, "source": source, "archive": archived,
+    try exclusiveRecord(folder + "/00-intent.json", ["nativeApproval": true, "temporaryExperiment": true, "source": source, "trashRoot": targetDirectory,
         "image": before, "bundleDirectory": beforeBundle, "originalRuntimePathsPreserved": false, "clientsMigrated": false])
-    var moved = false, restored = false
+    var returnedURL: URL? = nil
+    func restore(_ afterFailure: Bool) throws {
+        guard let trashed = returnedURL else { return }
+        try namespace()
+        try need(trashed.deletingLastPathComponent().path == targetDirectory
+            && NSDictionary(dictionary: try image(trashed.path + guiSuffix)).isEqual(to: before)
+            && NSDictionary(dictionary: try directoryImage(trashed.path)).isEqual(to: beforeBundle)
+            && renameatx_np(targetFD, trashed.lastPathComponent, sourceFD, sourceName, UInt32(RENAME_EXCL)) == 0,
+            "trash-experiment-restore-refused-no-overwrite")
+        try need(fsync(sourceFD) == 0 && fsync(targetFD) == 0
+            && NSDictionary(dictionary: try image(source + guiSuffix)).isEqual(to: before)
+            && NSDictionary(dictionary: try directoryImage(source)).isEqual(to: beforeBundle), "restore-image-or-sync-refused")
+        try exclusiveRecord(folder + "/02-restored.json", ["restored": true, "afterFailure": afterFailure, "image": before, "bundleDirectory": beforeBundle])
+    }
     do {
-        let sentinel = try image(targetDirectory + "/collision-sentinel.app/marker.bin")
-        let sentinelDirectory = try directoryImage(targetDirectory + "/collision-sentinel.app")
-        errno = 0
-        let collision = renameatx_np(sourceFD, sourceName, targetFD, "collision-sentinel.app", UInt32(RENAME_EXCL)), code = errno
-        try need(collision == -1 && code == EEXIST && NSDictionary(dictionary: try image(source + guiSuffix)).isEqual(to: before)
-            && NSDictionary(dictionary: try directoryImage(source)).isEqual(to: beforeBundle)
-            && NSDictionary(dictionary: try directoryImage(targetDirectory + "/collision-sentinel.app")).isEqual(to: sentinelDirectory)
-            && NSDictionary(dictionary: try image(targetDirectory + "/collision-sentinel.app/marker.bin")).isEqual(to: sentinel), "native-no-overwrite-collision-refusal-unverified")
         try namespace(); try closed()
-        try need(renameatx_np(sourceFD, sourceName, targetFD, archivedName, UInt32(RENAME_EXCL)) == 0, "exclusive-whole-bundle-archive-refused")
-        moved = true
-        try need(fsync(sourceFD) == 0 && fsync(targetFD) == 0 && NSDictionary(dictionary: try image(archived + guiSuffix)).isEqual(to: before)
-            && NSDictionary(dictionary: try directoryImage(archived)).isEqual(to: beforeBundle), "archived-bundle-identity-or-sync-refused")
-        try exclusiveRecord(folder + "/01-archived.json", ["nativeApproval": true, "wholeBundleArchived": true, "collisionRefused": true,
+        var result: NSURL? = nil
+        try FileManager.default.trashItem(at: URL(fileURLWithPath: source), resultingItemURL: &result)
+        guard let result = result else { throw Refusal(message: "standard-trash-returned-url-unavailable") }
+        returnedURL = result as URL
+        var relationship = FileManager.URLRelationship.other
+        try FileManager.default.getRelationship(&relationship, of: .trashDirectory, in: .userDomainMask, toItemAt: result as URL)
+        try need(relationship == .contains && returnedURL!.deletingLastPathComponent().path == targetDirectory
+            && !FileManager.default.fileExists(atPath: source)
+            && NSDictionary(dictionary: try image(returnedURL!.path + guiSuffix)).isEqual(to: before)
+            && NSDictionary(dictionary: try directoryImage(returnedURL!.path)).isEqual(to: beforeBundle), "standard-trash-location-or-original-identity-unverified")
+        try need(fsync(sourceFD) == 0 && fsync(targetFD) == 0, "standard-trash-directory-sync-refused")
+        try exclusiveRecord(folder + "/01-trashed.json", ["nativeApproval": true, "standardTrash": true,
+            "trashPath": returnedURL!.path, "trashURL": returnedURL!.absoluteString, "nativeTrashRelationship": "contains",
             "image": before, "bundleDirectory": beforeBundle, "originalRuntimePathsPreserved": false, "clientsMigrated": false])
         try waitForBarrier(folder + "/restore-now.json", seconds: 180)
     } catch {
-        if moved {
-            try namespace()
-            try need(NSDictionary(dictionary: try image(archived + guiSuffix)).isEqual(to: before)
-                && NSDictionary(dictionary: try directoryImage(archived)).isEqual(to: beforeBundle)
-                && renameatx_np(targetFD, archivedName, sourceFD, sourceName, UInt32(RENAME_EXCL)) == 0, "experiment-restore-refused-no-overwrite")
-            restored = true; _ = fsync(sourceFD); _ = fsync(targetFD)
-            try exclusiveRecord(folder + "/02-restored.json", ["restored": true, "afterFailure": true, "image": try image(source + guiSuffix), "bundleDirectory": try directoryImage(source)])
-        }
+        try restore(true)
         throw error
     }
-    if moved && !restored {
-        try namespace()
-        try need(NSDictionary(dictionary: try image(archived + guiSuffix)).isEqual(to: before)
-            && NSDictionary(dictionary: try directoryImage(archived)).isEqual(to: beforeBundle)
-            && renameatx_np(targetFD, archivedName, sourceFD, sourceName, UInt32(RENAME_EXCL)) == 0, "experiment-restore-refused-no-overwrite")
-        try need(fsync(sourceFD) == 0 && fsync(targetFD) == 0 && NSDictionary(dictionary: try image(source + guiSuffix)).isEqual(to: before)
-            && NSDictionary(dictionary: try directoryImage(source)).isEqual(to: beforeBundle), "restore-image-or-sync-refused")
-        try exclusiveRecord(folder + "/02-restored.json", ["restored": true, "afterFailure": false, "image": before, "bundleDirectory": beforeBundle])
-    }
-    emit(["diagnosticOnly": true, "retirementMutationAttempted": true, "temporaryWholeBundleArchive": true, "restored": true, "productionAuthority": false])
+    try restore(false)
+    emit(["diagnosticOnly": true, "retirementMutationAttempted": true, "standardTrash": true, "restored": true, "productionAuthority": false])
 }
-func archivedLaunch(_ folder: String) throws {
+func trashLaunch(_ folder: String, location: String) throws {
     _ = try experimentRoot(folder)
-    _ = try image(folder + "/01-archived.json")
-    let app = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Creator Works MCP.app")
-    try need(!FileManager.default.fileExists(atPath: app.path), "old-app-url-still-present-no-launch-measurement")
+    _ = try image(folder + "/01-trashed.json")
+    let old = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Creator Works MCP.app")
+    try need(!FileManager.default.fileExists(atPath: old.path), "old-app-url-still-present-no-launch-measurement")
+    guard let record = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: folder + "/01-trashed.json"))) as? [String: Any],
+        let trashPath = record["trashPath"] as? String else { throw Refusal(message: "standard-trash-result-required") }
+    let trashed = URL(fileURLWithPath: trashPath)
+    var relationship = FileManager.URLRelationship.other
+    try FileManager.default.getRelationship(&relationship, of: .trashDirectory, in: .userDomainMask, toItemAt: trashed)
+    try need(relationship == .contains && ["old", "trash"].contains(location), "native-trash-launch-scope-refused")
+    let app = location == "old" ? old : trashed
     let config = NSWorkspace.OpenConfiguration(); config.activates = false; config.createsNewApplicationInstance = true
     var result: [String: Any]? = nil
     NSWorkspace.shared.openApplication(at: app, configuration: config) { native, error in
         var value: [String: Any] = ["diagnosticOnly": true, "retirementMutationAttempted": false,
             "launchReturnedApplication": native != nil]
         if let native = native { value["pid"] = native.processIdentifier; value["bundlePath"] = native.bundleURL?.path }
-        if let error = error as NSError? { value["errorDomain"] = error.domain; value["errorCode"] = error.code; value["errorDescription"] = error.localizedDescription }
+        var errors = [[String: Any]](), current = error as NSError?
+        while let observed = current, errors.count < 4 {
+            errors.append(["domain": observed.domain, "code": observed.code, "description": observed.localizedDescription])
+            current = observed.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        value["errors"] = errors; value["location"] = location; value["launchPath"] = app.path
+        value["trashPolicyError"] = errors.contains { ($0["domain"] as? String) == NSOSStatusErrorDomain && ($0["code"] as? Int) == Int(kLSAppInTrashErr) }
         result = value
     }
     let deadline = Date().addingTimeInterval(10)
     while result == nil && Date() < deadline { _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1)) }
     guard let result = result else { throw Refusal(message: "native-launch-measurement-deadline") }
-    emit(result)
+    var receipt = result
+    receipt["runningLegacyGuiPIDsAfter"] = NSRunningApplication.runningApplications(withBundleIdentifier: "com.creatorworks.unitymcp.preview").map { $0.processIdentifier }
+    emit(receipt)
 }
 do {
     try admitted()
     let args = Array(CommandLine.arguments.dropFirst())
-    if args.count == 2 && args[0] == "archived-launch" {
-        try archivedLaunch(args[1])
+    if args.count == 3 && args[0] == "trash-launch" {
+        try trashLaunch(args[1], location: args[2])
     } else if args.count == 5 && args[0] == "press-review", let pid = Int32(args[1]), let parent = UInt32(args[2]) {
         try pressReview(pid, parent, args[3], args[4])
-    } else if args.count == 3 && args[0] == "archive-experiment" {
-        try archiveExperiment(args[1], receipt: args[2])
+    } else if args.count == 3 && args[0] == "trash-experiment" {
+        try trashExperiment(args[1], receipt: args[2])
     } else if args.count == 2 && args[0] == "registration" {
         let (_, _, bundle) = try spec(args[1])
         let urls = LSCopyApplicationURLsForBundleIdentifier(bundle as CFString, nil)?.takeRetainedValue() as? [URL] ?? []

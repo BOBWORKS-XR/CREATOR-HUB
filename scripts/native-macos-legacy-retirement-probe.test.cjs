@@ -73,44 +73,57 @@ test('bounded probe retains both runtime names, uses EOF, and never kills/remove
   assert.match(native, /owned-process-or-image-drift-no-close/);
   assert.match(native, /registrationRemovalAuthority": false/);
 });
-test('one temporary MCP whole-bundle experiment has native decline/approve and exclusive restore, never generic replay', () => {
+test('one standard Trash proof uses native decline/approve, system API and exclusive restore, never generic replay', () => {
   const script = fs.readFileSync(path.join(__dirname, 'native-macos-legacy-retirement-probe.cjs'), 'utf8');
   const native = fs.readFileSync(path.join(__dirname, 'native-macos-legacy-retirement-probe.swift'), 'utf8');
-  assert.match(native, /CREATOR_MACOS_LEGACY_ARCHIVE_EXPERIMENT/);
+  assert.match(native, /CREATOR_MACOS_LEGACY_STANDARD_TRASH_EXPERIMENT/);
   assert.match(native, /first-native-review-must-cancel/);
-  assert.match(native, /native-archive-approval-declined/);
+  assert.match(native, /native-trash-approval-declined/);
   assert.match(native, /AXUIElementPerformAction\(button, kAXPressAction/);
   assert.match(native, /native-review-modal-unverified/);
   assert.match(native, /O_CREAT \| O_EXCL \| O_NOFOLLOW/);
-  assert.match(native, /renameatx_np\(sourceFD, sourceName, targetFD, archivedName, UInt32\(RENAME_EXCL\)\)/);
-  assert.match(native, /renameatx_np\(targetFD, archivedName, sourceFD, sourceName, UInt32\(RENAME_EXCL\)\)/);
-  assert.match(native, /collision == -1 && code == EEXIST/);
+  assert.match(native, /FileManager\.default\.trashItem\(at: URL\(fileURLWithPath: source\), resultingItemURL: &result\)/);
+  assert.equal((native.match(/\.trashItem\(/g) || []).length, 1);
+  assert.match(native, /renameatx_np\(targetFD, trashed\.lastPathComponent, sourceFD, sourceName, UInt32\(RENAME_EXCL\)\)/);
   assert.match(native, /old-mcp-kernel-or-native-app-not-absent/);
-  assert.match(script, /result\.stdioWhileArchived = await stdio\.list/);
-  assert.match(script, /bundleSignatureWhileArchived/);
-  assert.match(script, /registrationWhileArchived/);
-  assert.match(script, /launchWhileArchived/);
+  assert.match(script, /result\.stdioWhileTrashed = await stdio\.list/);
+  assert.match(script, /bundleSignatureWhileTrashed/);
+  assert.match(script, /registrationWhileTrashed/);
+  assert.match(script, /trashUrlLaunch/);
   assert.match(script, /bundleSignatureRestored/);
   assert.match(script, /result\.error = error\.message/);
   assert.doesNotMatch(native, /replay|unregister|LSRegisterURL|removeItem|removefile\(/);
 });
-test('whole-bundle archival explicitly measures lost old paths instead of claiming compatibility or migration', () => {
+test('standard Trash checks the OS-returned location and policy error, not another archive hiding trick', () => {
   const script = fs.readFileSync(path.join(__dirname, 'native-macos-legacy-retirement-probe.cjs'), 'utf8');
   const native = fs.readFileSync(path.join(__dirname, 'native-macos-legacy-retirement-probe.swift'), 'utf8');
-  assert.match(native, /Library\/Application Support\/CreatorHubLegacyRetirementProbe/);
+  assert.match(native, /FileManager\.default\.url\(for: \.trashDirectory/);
+  assert.match(native, /getRelationship\(&relationship, of: \.trashDirectory/);
+  assert.match(native, /relationship == \.contains/);
   assert.match(native, /sourceName = "Creator Works MCP.app"/);
-  assert.match(native, /directoryImage\(archived\)/);
+  assert.match(native, /directoryImage\(returnedURL!\.path\)/);
   assert.match(native, /old-app-url-still-present-no-launch-measurement/);
   assert.match(native, /workspacePreferredPath/);
   assert.match(script, /originalRuntimePathsPreserved: false, clientsMigrated: false/);
   assert.match(script, /result\.oldAppUrlAbsent = !fs\.existsSync\(app\)/);
   assert.match(script, /result\.oldPathReconnects\[alias\] = await oldPathReconnect/);
-  assert.match(script, /result\.archivePathReconnects\[alias\]/);
-  assert.match(script, /result\.referenceWhileArchived = await stdio\.reference/);
+  assert.doesNotMatch(script, /archivePathReconnects|CreatorHubLegacyRetirementProbe/);
+  assert.match(script, /result\.referenceWhileTrashed = await stdio\.reference/);
   assert.match(script, /source: 'workflows', entryId: 'networking', limit: 1/);
   assert.match(script, /error\.code === 'ENOENT' && child\.pid === undefined/);
-  assert.match(script, /isDeepStrictEqual\(result\.archivedDirectories, result\.beforeDirectories\)/);
+  assert.match(script, /isDeepStrictEqual\(result\.trashedDirectories, result\.beforeDirectories\)/);
+  assert.match(script, /trashUrlLaunch\.trashPolicyError === true/);
+  assert.match(native, /Int\(kLSAppInTrashErr\)/);
+  assert.match(native, /runningLegacyGuiPIDsAfter/);
   assert.doesNotMatch(script, /members: pkg\.members\.filter/);
+});
+test('primary Apple Trash and launch contracts are recorded before the native proof', () => {
+  const doc = fs.readFileSync(path.join(__dirname, '../docs/MACOS-LEGACY-TRASH-CONTRACT.md'), 'utf8');
+  assert.match(doc, /support\.apple\.com\/en-us\/102610/);
+  assert.match(doc, /developer\.apple\.com\/documentation\/foundation\/filemanager\/trashitem/);
+  assert.match(doc, /developer\.apple\.com\/documentation\/coreservices\/klsappintrasherr/);
+  assert.match(doc, /-10660/);
+  assert.match(doc, /Unknown or unmigrated/);
 });
 test('dedicated workflow cannot select arbitrary input, self-hosted machines or other branches', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/native-macos-legacy-retirement-probe.yml'), 'utf8');

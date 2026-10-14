@@ -234,7 +234,7 @@ function createStdio(node, server, config, output, label) {
 async function run(env = process.env) {
   admission(env, process.platform, process.arch); // Must precede filesystem or process inspection.
   check(process.argv.length === 2, 'no-arbitrary-inputs-supported');
-  check(env.CREATOR_MACOS_LEGACY_ARCHIVE_EXPERIMENT === '1', 'explicit-reversible-experiment-opt-in-required');
+  check(env.CREATOR_MACOS_LEGACY_STANDARD_TRASH_EXPERIMENT === '1', 'explicit-standard-trash-experiment-opt-in-required');
   const temporary = canonical(fs.realpathSync(env.RUNNER_TEMP)), home = canonical(os.homedir());
   const output = path.join(temporary, 'macos-legacy-retirement-probe'); fs.mkdirSync(output, { mode: 0o700 });
   const apps = path.join(home, 'Applications');
@@ -253,25 +253,18 @@ async function run(env = process.env) {
     check(receipt.diagnosticOnly === true && receipt.retirementMutationAttempted === false, 'native-scope-drift');
     return { ...result, receipt };
   }
-  async function archiveExperiment(app, pkg, row, stdio, folder) {
+  async function trashExperiment(app, pkg, row, stdio, folder) {
     check(row.facts.normalExit && stdio && row.exactOriginalMembersPreserved === undefined, 'closed-pinned-live-stdio-baseline-required');
-    const experiment = path.join(folder, 'whole-bundle-archive-experiment'); fs.mkdirSync(experiment, { mode: 0o700 });
-    check(/^[0-9]{1,16}$/.test(env.GITHUB_RUN_ID) && /^[0-9]{1,4}$/.test(env.GITHUB_RUN_ATTEMPT), 'fixed-run-identity-required');
-    const support = canonical(path.join(home, 'Library/Application Support'));
-    const backupBase = path.join(support, 'CreatorHubLegacyRetirementProbe'); fs.mkdirSync(backupBase, { mode: 0o700 });
-    const backup = path.join(backupBase, `${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`); fs.mkdirSync(backup, { mode: 0o700 });
-    const archiveApp = path.join(backup, `${pkg.name}.app`), collision = path.join(backup, 'collision-sentinel.app');
-    fs.mkdirSync(collision, { mode: 0o700 });
-    fs.writeFileSync(path.join(collision, 'marker.bin'), 'DO NOT OVERWRITE: native whole-bundle archive collision fixture\n', { flag: 'wx', mode: 0o600 });
-    const sentinel = pin(path.join(collision, 'marker.bin')), sentinelDirectory = directoryInventory(collision);
+    const experiment = path.join(folder, 'standard-trash-experiment'); fs.mkdirSync(experiment, { mode: 0o700 });
+    let trashApp;
     const result = { diagnosticOnly: true, productionAuthority: false, nativeCancel: false, nativeApprove: false,
-      temporaryWholeBundleArchive: false, restored: false, experimentPassed: false,
-      originalRuntimePathsPreserved: false, clientsMigrated: false, oldApp: app, archiveApp,
+      standardTrash: false, restored: false, experimentPassed: false,
+      originalRuntimePathsPreserved: false, clientsMigrated: false, oldApp: app,
       beforeDirectories: directoryInventory(app) };
-    row.archiveExperiment = result; report.nativeReviewAttempted = true;
-    const out = fs.openSync(path.join(experiment, 'archive-host.stdout'), 'wx', 0o600), err = fs.openSync(path.join(experiment, 'archive-host.stderr'), 'wx', 0o600);
+    row.trashExperiment = result; report.nativeReviewAttempted = true;
+    const out = fs.openSync(path.join(experiment, 'trash-host.stdout'), 'wx', 0o600), err = fs.openSync(path.join(experiment, 'trash-host.stderr'), 'wx', 0o600);
     let host;
-    try { host = spawn(helper, ['archive-experiment', experiment, path.join(folder, 'owned-process.json')], { env, stdio: ['ignore', out, err] }); }
+    try { host = spawn(helper, ['trash-experiment', experiment, path.join(folder, 'owned-process.json')], { env, stdio: ['ignore', out, err] }); }
     finally { fs.closeSync(out); fs.closeSync(err); }
     let ended = false;
     const exit = new Promise(resolve => { host.once('error', error => { ended = true; resolve({ error: error.message }); });
@@ -279,7 +272,7 @@ async function run(env = process.env) {
     async function waitRecord(name, ms = 30000) {
       const file = path.join(experiment, name), deadline = Date.now() + ms;
       while (!fs.existsSync(file)) {
-        check(!ended, `archive-host-exited-before-${name}`); check(Date.now() < deadline, `archive-host-${name}-deadline`); await pause(100);
+        check(!ended, `trash-host-exited-before-${name}`); check(Date.now() < deadline, `trash-host-${name}-deadline`); await pause(100);
       }
       pin(file, 8192); return JSON.parse(fs.readFileSync(file, 'utf8'));
     }
@@ -291,34 +284,33 @@ async function run(env = process.env) {
       check(result.cancel.nativeCancel === true && isDeepStrictEqual(inventory(app, pkg), row.before)
         && isDeepStrictEqual(directoryInventory(app), result.beforeDirectories), 'native-cancel-bundle-drift');
       result.stdioAfterCancel = await stdio.list(); result.nativeCancel = true;
-      result.referenceBeforeArchive = await stdio.reference();
+      result.referenceBeforeTrash = await stdio.reference();
       barrier('cancel-verified.json');
       await waitRecord('review-approve-ready.json');
       await native(['press-review', String(host.pid), String(process.pid), helperPin.sha256, 'approve'], experiment, 'press-native-approve');
-      result.archived = await waitRecord('01-archived.json'); result.nativeApprove = result.archived.nativeApproval === true;
-      check(result.archived.wholeBundleArchived === true && result.archived.collisionRefused === true, 'exclusive-whole-bundle-archive-unverified');
-      result.temporaryWholeBundleArchive = true; report.retirementMutationAttempted = true;
+      result.trashed = await waitRecord('01-trashed.json'); result.nativeApprove = result.trashed.nativeApproval === true;
+      check(result.trashed.standardTrash === true && result.trashed.nativeTrashRelationship === 'contains'
+        && typeof result.trashed.trashPath === 'string', 'native-standard-trash-result-unverified');
+      trashApp = canonical(result.trashed.trashPath); result.trashApp = trashApp;
+      result.standardTrash = true; report.retirementMutationAttempted = true;
       result.oldAppUrlAbsent = !fs.existsSync(app); check(result.oldAppUrlAbsent, 'old-app-url-remains');
-      result.archivedMembers = inventory(archiveApp, pkg); result.archivedDirectories = directoryInventory(archiveApp);
-      check(isDeepStrictEqual(result.archivedMembers, row.before) && isDeepStrictEqual(result.archivedDirectories, result.beforeDirectories), 'whole-bundle-member-or-directory-identity-drift');
-      result.bundleSignatureWhileArchived = await execute('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', archiveApp], experiment, 'archived-bundle-signature', 30000, true);
-      result.gatekeeperWhileArchived = await execute('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=2', archiveApp], experiment, 'archived-gatekeeper', 30000, true);
-      result.registrationWhileArchived = (await native(['registration', 'mcp'], experiment, 'archived-registration')).receipt;
-      result.launchWhileArchived = (await native(['archived-launch', experiment], experiment, 'archived-native-launch')).receipt;
-      result.stdioWhileArchived = await stdio.list();
-      result.referenceWhileArchived = await stdio.reference();
-      result.oldPathReconnects = {}; result.archivePathReconnects = {};
-      const oldServer = path.join(app, 'Contents/Resources/server'), server = path.join(archiveApp, 'Contents/Resources/server');
+      result.trashedMembers = inventory(trashApp, pkg); result.trashedDirectories = directoryInventory(trashApp);
+      check(isDeepStrictEqual(result.trashedMembers, row.before) && isDeepStrictEqual(result.trashedDirectories, result.beforeDirectories), 'trashed-bundle-member-or-directory-identity-drift');
+      result.bundleSignatureWhileTrashed = await execute('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', trashApp], experiment, 'trashed-bundle-signature', 30000, true);
+      result.registrationWhileTrashed = (await native(['registration', 'mcp'], experiment, 'trashed-registration')).receipt;
+      result.oldUrlLaunchWhileTrashed = (await native(['trash-launch', experiment, 'old'], experiment, 'old-url-native-launch')).receipt;
+      result.trashUrlLaunch = (await native(['trash-launch', experiment, 'trash'], experiment, 'trash-url-native-launch')).receipt;
+      result.stdioWhileTrashed = await stdio.list();
+      result.referenceWhileTrashed = await stdio.reference();
+      result.oldPathReconnects = {};
+      const oldServer = path.join(app, 'Contents/Resources/server');
       for (const alias of ['node', 'node.exe']) {
         result.oldPathReconnects[alias] = await oldPathReconnect(path.join(oldServer, 'runtime', alias), path.join(oldServer, 'creator-works-mcp.mjs'));
-        const node = path.join(server, 'runtime', alias);
-        const signature = await execute('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', node], experiment, `archived-${alias}-signature`);
-        const connection = createStdio(node, path.join(server, 'creator-works-mcp.mjs'), path.join(folder, 'launcher-config.json'), experiment, `archived-reconnect-${alias}`);
-        try { result.archivePathReconnects[alias] = { ...await connection.start(), signatureExit: signature.exitCode, reference: await connection.reference() }; }
-        finally { result.archivePathReconnects[alias] = { ...result.archivePathReconnects[alias], exit: await connection.close() }; }
       }
-      check(isDeepStrictEqual(pin(path.join(collision, 'marker.bin')), sentinel)
-        && isDeepStrictEqual(directoryInventory(collision), sentinelDirectory), 'collision-sentinel-changed');
+      result.nativeTrashPolicyAccepted = result.bundleSignatureWhileTrashed.exitCode === 0
+        && result.trashUrlLaunch.launchReturnedApplication === false && result.trashUrlLaunch.trashPolicyError === true
+        && result.oldUrlLaunchWhileTrashed.launchReturnedApplication === false
+        && result.trashUrlLaunch.runningLegacyGuiPIDsAfter?.length === 0;
     } catch (error) {
       result.error = error.message;
       throw error;
@@ -326,11 +318,11 @@ async function run(env = process.env) {
       if (!ended) barrier('restore-now.json');
       result.hostExit = await Promise.race([exit, pause(30000).then(() => ({ deadlineExpired: true }))]);
       if (result.hostExit.deadlineExpired) host.unref();
-      if (result.temporaryWholeBundleArchive || fs.existsSync(path.join(experiment, '02-restored.json'))) {
+      if (result.standardTrash || fs.existsSync(path.join(experiment, '02-restored.json'))) {
         result.restoration = await waitRecord('02-restored.json', 1000);
         result.restored = result.restoration.restored === true && isDeepStrictEqual(inventory(app, pkg), row.before)
-          && isDeepStrictEqual(directoryInventory(app), result.beforeDirectories) && !fs.existsSync(archiveApp);
-        check(result.restored && result.hostExit.exitCode === 0 && !result.hostExit.signal, 'temporary-whole-bundle-restoration-unverified');
+          && isDeepStrictEqual(directoryInventory(app), result.beforeDirectories) && (!trashApp || !fs.existsSync(trashApp));
+        check(result.restored && result.hostExit.exitCode === 0 && !result.hostExit.signal, 'standard-trash-restoration-unverified');
         result.bundleSignatureRestored = await execute('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app], experiment, 'restored-bundle-signature');
         result.registrationRestored = (await native(['registration', 'mcp'], experiment, 'restored-registration')).receipt;
       } else {
@@ -338,7 +330,7 @@ async function run(env = process.env) {
         check(result.noMutationOriginalIntact, 'no-archive-original-gui-drift');
       }
     }
-    result.experimentPassed = result.nativeCancel && result.nativeApprove && result.temporaryWholeBundleArchive && result.restored;
+    result.experimentPassed = result.nativeCancel && result.nativeApprove && result.standardTrash && result.restored && result.nativeTrashPolicyAccepted;
   }
   try {
     for (const product of ['setup', 'mcp']) {
@@ -411,7 +403,7 @@ async function run(env = process.env) {
         }
         if (stdio) {
           row.stdioAfterNormalClose = await stdio.list();
-          if (row.facts.normalExit) await archiveExperiment(app, pkg, row, stdio, folder);
+          if (row.facts.normalExit) await trashExperiment(app, pkg, row, stdio, folder);
           const server = path.join(app, 'Contents/Resources/server');
           row.reconnect = {};
           for (const alias of ['node', 'node.exe']) {
@@ -425,7 +417,7 @@ async function run(env = process.env) {
         row.after = inventory(app, pkg);
         check(isDeepStrictEqual(row.after, row.before), 'original-bundle-or-runtime-file-drift');
         row.exactOriginalMembersPreserved = true;
-        if (!row.archiveExperiment?.experimentPassed) row.blockers.push(missingContract(row.facts));
+        if (!row.trashExperiment?.experimentPassed) row.blockers.push(missingContract(row.facts));
       } catch (error) { row.blockers.push(error.message); }
       finally {
         if (stdio) { try { row.stdioEofExit = await stdio.close(); } catch (error) { row.blockers.push(error.message); } }
@@ -438,7 +430,7 @@ async function run(env = process.env) {
     }
     report.captureComplete = report.products.length === 2;
   } catch (error) { report.error = error.message; }
-  report.experimentPassed = report.products.find(row => row.product === 'mcp')?.archiveExperiment?.experimentPassed === true;
+  report.experimentPassed = report.products.find(row => row.product === 'mcp')?.trashExperiment?.experimentPassed === true;
   report.passed = report.experimentPassed && report.products.every(row => row.facts.normalExit && row.exactOriginalMembersPreserved);
   fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2), { flag: 'wx', mode: 0o600 });
   console.log(JSON.stringify({ ...scope, captureComplete: report.captureComplete === true,

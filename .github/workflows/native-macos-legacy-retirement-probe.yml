@@ -1,4 +1,4 @@
-name: Native public Mac legacy whole-bundle reversible archive experiment
+name: Native public Mac standard Trash and exact restore proof
 on:
   workflow_dispatch:
   push:
@@ -28,10 +28,10 @@ jobs:
         run: node --test scripts/native-macos-legacy-retirement-probe.test.cjs native/legacy-retirement-unix-proof.test.cjs
       - name: Compile the dedicated diagnostic (no production helper or product rebuild)
         run: swiftc scripts/native-macos-legacy-retirement-probe.swift -o "$RUNNER_TEMP/native-macos-legacy-retirement-probe"
-      - name: Native Cancel then whole-bundle archive, measure compatibility break and exact restore
+      - name: Native Cancel then standard Trash, document launch refusal and exact restore
         env:
           CREATOR_MACOS_LEGACY_RETIREMENT_PROBE: '1'
-          CREATOR_MACOS_LEGACY_ARCHIVE_EXPERIMENT: '1'
+          CREATOR_MACOS_LEGACY_STANDARD_TRASH_EXPERIMENT: '1'
         run: node scripts/native-macos-legacy-retirement-probe.cjs
       - name: Retain diagnostic reports and bounded tool outputs, never home or credential archives
         if: always()
@@ -48,6 +48,6 @@ jobs:
             ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/*.json
             ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/*.stdout
             ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/*.stderr
-            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/whole-bundle-archive-experiment/*.json
-            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/whole-bundle-archive-experiment/*.stdout
-            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/whole-bundle-archive-experiment/*.stderr
+            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/standard-trash-experiment/*.json
+            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/standard-trash-experiment/*.stdout
+            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/standard-trash-experiment/*.stderr
