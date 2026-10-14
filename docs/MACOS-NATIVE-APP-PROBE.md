@@ -309,3 +309,116 @@ refusal without launching any app. Windows skips that native compile case.
 No synthetic test establishes Root AX mapping or native package provenance.
 Actual Mac Root capture/normal closure, direct14 native GUI, MCP, migration and
 signed native update/restart acceptance remain separate TBD gates.
+
+## Actual Run 38597644861: Component Results Only
+
+The diagnostic/helper revision is `829238e`, but both input app packages remain
+the old experimental artifacts (parent identified as **0.1.13**) from run `38463917023`, source
+`8ba08a390ce888ea8e478cbcc79f52d7ca73587b`, build `5283fd05252d6bbe3253d41ded4064ec50cddbc7`.
+This is not a current 0.1.14 app capture. Evidence is retained under
+`artifacts/mac-root-probe-38597644861/{intel,arm}/root-app-probe/`; the separately
+downloaded bitmaps are under each architecture's `bitmap/root-window.png`.
+Version qualification: the bound source's `tauri.conf.json` declares 0.1.14,
+while these native receipts pin Info.plist bytes without exposing its embedded
+bundle version. The artifact audit therefore verifies the exact old input
+hashes, not an independently read native 0.1.13 version. Fresh current14 capture
+must retain the embedded bundle version as well as its source/build/image pins.
+
+Component-level observations, not new product acceptance flags:
+
+| Component | Intel | ARM |
+| --- | --- | --- |
+| Native helper/sampler compilation receipts | exit0, no signal | exit0, no signal |
+| Root-only read-only inspection before/after | complete, held Root CF preserved | complete, held Root CF preserved |
+| Finite native close-dialog scope | absent, windowCount1, childCount5 | absent, windowCount1, childCount5 |
+| Exact normal Root close and original child exit | accepted, PID4873, code0/no signal | accepted, PID2718, code0/no signal |
+| Separate native termination postcondition | verified; live identity false | verified; live identity false |
+| Exact-owned-window bitmap capture | complete | complete |
+| AX document/surface capture | refused | readiness unverified |
+
+The parent reports native SDK fixtures passed on both architectures. The local
+artifact review independently verifies both compiler receipts, close stdout and
+report bindings. Both termination receipts retain the original expected process
+and window, verified image bindings and window absence, and two kernel reads
+with bytes0/errno3. Neither forges a live `after` identity. The reviewed helper
+source SHA256 is `212a8c94149d159da69c4161220333969fbc71bd555ee951c26d9ff04bae2a68`.
+
+Both PNGs are 1052x692 and match their receipts: Intel 226195 bytes/SHA256
+`66e27f5ce8980a8e7737f07216ea03a58a0dfcd99c31716d9fdea556c2329426`;
+ARM 234136 bytes/SHA256
+`de889102948528efe52647f1aa5c28098b89142db3d065cb134aecedbd9599aa`.
+Direct visual inspection shows a centered terms modal, rendered Hub content and
+the macOS label on both. This establishes nonblank rendering for these exact old
+inputs only, not current14 or operability. Finite **native** dialog absence does
+not assert absence of the visibly present HTML terms modal.
+
+The overall report still has `passed:false`, `captureCompleted:false`,
+`acceptedExit:true`, `cleanupUncertain:false` and error
+`root-surface-capture-unverified` on both. All native GUI/MCP/migration/update/
+release acceptance flags remain false.
+
+### Precise Surface Failure And Remaining Unknowns
+
+- Intel: sampler exit2/no signal/not timed out, error
+  `remote-ax-parent-unverified`, only Root AXWindow and Root AXGroup retained,
+  no completed snapshot. The rejected remote node/path/PID, AXParent status,
+  returned CF type, parent CF equality and initial/post-read phase are not
+  emitted. `attr()` collapses unsuccessful reads to nil, and `remoteLinks()`
+  reports the same refusal for missing/error/wrong-type/unequal parent links.
+  The remote containing-window result is also not emitted. Association remains
+  unknown; refusal is correct. No remote action is authorized.
+- Intel's sampler source SHA256
+  `1303c22e19b70ac88aba5a7180d0ec19ad7d5dee8a926d03220533075ada74cc`
+  and app image hash are unchanged from run `38575009554`, which captured 34
+  nodes including a WebArea. A sampler-code regression is not established;
+  the cause of the differing native association result remains unknown.
+- ARM: sampler exit2/no signal/not timed out, error
+  `root-web-area-readiness-unverified`. Its 20-second readiness deadline expires
+  with observerStatus0, one observation/changed snapshot at revision0, seven
+  Root-owned window/chrome nodes and no AXWebArea. No relevant notification
+  produced a second observation. The child helper also maps native no-value/
+  unsupported status to an empty list, so the receipt does not distinguish an
+  empty content container from unavailable AX children. It cannot prove a blank
+  app, a permanently absent document, or broken terms/navigation.
+
+### Smallest Next Capture And Driver Contract
+
+First use exact fresh **current14** Intel/ARM candidates with source/build/artifact,
+executable and Info.plist pins and disposable profiles; do not relabel these old
+inputs. Retain the same Root fences, bitmap and close/owned-exit receipts. A
+future authorized metadata-only sampler change should retain the original
+refusal and capture numeric AXParent/AXWindow read errors, CF types, native link
+equalities, rejected node path/depth/PID and initial/post-read phase. ARM also
+needs actual content-group child read status/count and notification revision,
+not empty-list inference. No extra authority, action, blind retry or longer
+deadline follows from this diagnostic contract.
+
+An owned AX document route remains read-only until exact native associations and
+control mapping are proven. Even a successful remote read association is not
+authority to press its checkbox/button; the existing consent helper is unchanged.
+
+The native WebKit inspector is not an established driver for the unchanged
+current release. Apple's [inspectable-content contract](https://developer.apple.com/documentation/safari-developer-tools/enabling-inspecting-content-in-your-apps)
+requires app opt-in (default false). The pinned Wry 0.55.1 source enables it only
+under debug/devtools with the corresponding webview setting; current Root Cargo
+features do not enable devtools. [Tauri's inspector guide](https://v2.tauri.app/develop/debug/#using-the-inspector-in-production)
+likewise distinguishes debug/feature-enabled builds from ordinary release inputs.
+
+If AX exposure remains unavailable, a source-supported alternative is a separate,
+test-only [embedded Tauri WebDriver](https://v2.tauri.app/develop/tests/webdriver/)
+diagnostic build. The documented Mac route requires an embedded app plugin;
+external `tauri-driver` does not attach to an unchanged Mac WKWebView. This is a
+proposal, not an installed or validated driver. Before implementation, review
+exact plugin versions/session isolation and native binding to the caller-owned
+Root process, main webview and held native window. Do not expose a production
+endpoint or substitute title/PID/name/UID alone for that binding.
+
+The first driver contract is read-only: unique visible
+`#usage-terms-dialog`, terms version, checkbox unchecked, continue disabled, and
+the pinned current14 document. A later separately authorized test may exercise
+ordinary checkbox/button and navigation interactions through their real
+handlers, observing native persistence and resulting UI. No mocked IPC, direct
+`accept_usage_terms` call, storage seeding, checked-state assignment or CSS-modal
+removal may replace consent. The instrumented build's navigation result remains
+distinct from unchanged-package/native product acceptance. No code, build,
+workflow dispatch, commit or push was performed during this artifact audit.

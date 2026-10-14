@@ -299,6 +299,9 @@ fn recheck_durable_settings(plan: &Plan) -> Result<(), String> {
             saved.recheck()?;
         }
     }
+    for backup in &plan.retained_images {
+        backup.recheck()?;
+    }
     Ok(())
 }
 
@@ -688,6 +691,7 @@ pub async fn migrate_convergence_connections(handle: tauri::AppHandle) -> Result
         transfer?;
         close?;
         // Review is not live-client acceptance or permission to uninstall.
+        recheck(plan)?;
         save_review_at(&record_path()?)?;
         plan.report.stage = "connections-reviewed";
         plan.report.message = retirement_diagnostics(plan, &manager).unwrap_or_else(|reason|
@@ -933,6 +937,20 @@ mod tests {
         fs::remove_file(&before_image).unwrap();
         assert!(can_retain(&plan).is_err());
         assert!(!before_image.exists());
+    }
+
+    #[test]
+    fn missing_backup_refuses_finished_journal_refresh_before_review_publication() {
+        let (_temp, base, mut plan) = fixture_plan();
+        let backup = plan.stores[0].retain_reviewed().unwrap();
+        let image = backup.path().to_path_buf();
+        plan.retained_images.push(backup);
+        write_outcome(&base, "returned-ok");
+        fs::remove_file(&image).unwrap();
+        assert!(recheck_durable_settings(&plan).is_err());
+        assert!(refresh_finished_outcome_journal(&mut plan, &base).is_err());
+        assert!(recheck(&plan).is_err());
+        assert!(!image.exists());
     }
 
     #[test]
