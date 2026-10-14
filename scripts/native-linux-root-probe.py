@@ -710,7 +710,16 @@ def owned_walk(window, ownership, atspi):
                 "Owned AX tree exceeds bounds")
         ownership.node(node)
         if parent is not None:
-            require(node.get_parent() == parent, "AX subtree escaped the bound Root window")
+            # AT-SPI get_parent may use a local cache. Read the live Parent
+            # property before deciding; a null/foreign parent still refuses.
+            # https://docs.gtk.org/atspi2/method.Accessible.clear_cache.html
+            node.clear_cache()
+            actual_parent = node.get_parent()
+            require(actual_parent == parent, "AX subtree escaped the bound Root window: " + json.dumps({
+                "depth": depth, "pid": node.get_process_id(), "role": int(node.get_role()),
+                "expectedParentPid": parent.get_process_id(), "expectedParentRole": int(parent.get_role()),
+                "actualParentPid": actual_parent.get_process_id() if actual_parent is not None else None,
+                "actualParentRole": int(actual_parent.get_role()) if actual_parent is not None else None}))
             require(node.get_role() not in (atspi.Role.FRAME, atspi.Role.WINDOW, atspi.Role.APPLICATION),
                     "Foreign/nested AX window refused")
         require(node not in nodes, "Cyclic/duplicate AX subtree refused")

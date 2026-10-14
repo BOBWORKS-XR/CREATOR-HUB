@@ -512,6 +512,9 @@ class AxNode:
     def get_parent(self):
         return self.parent
 
+    def clear_cache(self):
+        pass
+
     def get_state_set(self):
         return types.SimpleNamespace(contains=lambda state: state in self.states)
 
@@ -630,6 +633,19 @@ class OwnershipTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "identity changed"):
             p.perform_owned("check-terms", self.request, self.helper, self.atspi, binding)
         self.checkbox.action.do_action.assert_not_called()
+
+    def test_reverse_parent_is_fresh_not_stale_cache_and_still_refuses_foreign(self):
+        binding = self.fixture()
+        self.heading.get_parent = mock.Mock(return_value=None)
+        def refresh():
+            self.heading.get_parent.return_value = self.web
+        self.heading.clear_cache = mock.Mock(side_effect=refresh)
+        p.owned_walk(self.window, binding, self.atspi)
+        self.heading.clear_cache.assert_called_once_with()
+        self.heading.clear_cache.side_effect = None
+        self.heading.get_parent.return_value = AxNode(99, 23, "Foreign")
+        with self.assertRaisesRegex(RuntimeError, '"actualParentPid": 99'):
+            p.owned_walk(self.window, binding, self.atspi)
 
     def test_one_exact_unchecked_checkbox_action_not_arbitrary_click(self):
         binding = self.fixture()
