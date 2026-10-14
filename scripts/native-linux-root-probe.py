@@ -657,14 +657,79 @@ def validate_peer(peer, root):
     require(int(peer["startTime"]) >= int(root["startTime"]), "WebKit peer predates Root")
 
 
+class AxReferences:
+    """Canonical AX wire identity, not Python proxy equality or PID-only equality.
+
+    WebKit AccessibilityAtspi.cpp registerRoot uses m_busName (well-known);
+    AccessibilityRootAtspi.cpp reference/parentReference use uniqueName().
+    Both names must resolve to the same unique owner AND exact object path.
+    https://github.com/WebKit/WebKit/blob/webkitgtk-2.50.4/Source/WebCore/accessibility/atspi/AccessibilityAtspi.cpp
+    """
+    def __init__(self, resolve, aliases=None, window=None):
+        self.resolve = resolve
+        self.aliases, self.window = dict(aliases or {}), window
+        require(len(self.aliases) <= 8, "AX bus alias inventory exceeds bound")
+
+    def identity(self, node, ownership):
+        require(node is not None, "Missing AX wire reference")
+        name, path = node.app.bus_name, node.path
+        require(isinstance(name, str) and len(name) <= 128 and re.fullmatch(r"(?::[0-9]+\.[0-9]+|org\.[A-Za-z0-9_.-]+)", name)
+                and isinstance(path, str) and len(path) <= 256 and re.fullmatch(r"/org/a11y/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+", path),
+                "Invalid bounded native AX bus/object reference")
+        if name not in self.aliases:
+            require(len(self.aliases) < 8, "AX bus alias inventory exceeds bound")
+            peer = self.resolve(name)
+            require(re.fullmatch(r":[0-9]+\.[0-9]+", peer["owner"]), "Unique AX bus owner required")
+            self.aliases[name] = peer
+        peer = self.aliases[name]
+        allowed = [ownership.root] + ([ownership.renderer] if ownership.renderer is not None else [])
+        require(any(peer["pid"] == item["pid"] and peer["uid"] == item["uids"][1] for item in allowed)
+                and peer["pid"] == node.get_process_id(), "AX bus owner is not the bound Root/renderer")
+        return [peer["owner"], path]
+
+    def recheck(self):
+        for name, expected in self.aliases.items():
+            require(self.resolve(name) == expected, "AX bus unique owner/PID/UID changed")
+
+
+def native_ax_references(saved=None):
+    from gi.repository import Gio, GLib
+    session = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    address = session.call_sync("org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus", "GetAddress", None,
+                                GLib.VariantType.new("(s)"), Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+    require(isinstance(address, str) and 0 < len(address) <= 1024 and address.startswith("unix:")
+            and ";" not in address and "\x00" not in address, "One local native AX bus required; no network fallback")
+    bus = Gio.DBusConnection.new_for_address_sync(address, Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                                                 | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+
+    def resolve(name):
+        def query(method, target, signature):
+            return bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", method,
+                GLib.Variant("(s)", (target,)), GLib.VariantType.new(signature), Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+        owner = query("GetNameOwner", name, "(s)")
+        pid, uid = query("GetConnectionUnixProcessID", owner, "(u)"), query("GetConnectionUnixUser", owner, "(u)")
+        require(query("GetNameOwner", name, "(s)") == owner, "AX bus owner changed during native attribution")
+        return {"owner": owner, "pid": pid, "uid": uid}
+
+    try:
+        references = AxReferences(resolve, (saved or {}).get("aliases"), (saved or {}).get("window"))
+        references.recheck()
+        return references, bus
+    except Exception:
+        bus.close_sync(None)
+        raise
+
+
 class RootOwnership:
     """One pinned Root/XRes frame plus one pinned native renderer, never all peers."""
     def __init__(self, request, helper, x11, root_record, xres, system_file, renderer=None,
-                 reader=None, system_check=None):
+                 reader=None, system_check=None, references=None):
         self.request, self.helper, self.x11 = request, helper, x11
         self.root, self.xres, self.system_file, self.renderer = root_record, xres, system_file, renderer
         self.reader = reader or (lambda pid, full: native_process(pid, helper, full))
         self.system_check = system_check or verify_system_webkit
+        self.references = references
+        require(references is not None, "Native AX reference binding required")
         require(root_record["pid"] == request.pid and root_record["startTime"] == request.start
                 and root_record["executable"] == request.executable
                 and root_record["kernelImageSha256"] == request.sha256, "Root binding differs from native request")
@@ -679,6 +744,7 @@ class RootOwnership:
         require(self.helper.bound_window(self.request, self.x11) == self.xres, "Bound Root XRes window changed")
         if full:
             require(self.system_check() == self.system_file, "Bound system WebKit provenance changed")
+            self.references.recheck()
 
     def node(self, node):
         self.recheck()
@@ -695,14 +761,22 @@ class RootOwnership:
 
     def evidence(self):
         return {"root": self.root, "xres": self.xres, "renderer": self.renderer,
+                "axReferences": {"aliases": dict(self.references.aliases), "window": self.references.window},
                 "policy": "one-native-direct-child-WebKit-in-exact-Root-frame"}
+
+    def same_node(self, a, b):
+        return a is not None and b is not None and self.references.identity(a, self) == self.references.identity(b, self)
 
 
 def owned_walk(window, ownership, atspi):
     helper, request = ownership.helper, ownership.request
     require(window.get_process_id() == request.pid and window.get_role() == atspi.Role.FRAME
             and window.get_name() == request.title, "Foreign AX window refused")
-    nodes, pending = [], [(window, None, 0)]
+    nodes, seen, pending = [], set(), [(window, None, 0)]
+    window_ref = ownership.references.identity(window, ownership)
+    if ownership.references.window is None:
+        ownership.references.window = window_ref
+    require(window_ref == ownership.references.window, "Bound Root AX window wire identity changed")
     ownership.recheck(full=True)
     while pending:
         node, parent, depth = pending.pop()
@@ -715,19 +789,23 @@ def owned_walk(window, ownership, atspi):
             # https://docs.gtk.org/atspi2/method.Accessible.clear_cache.html
             node.clear_cache()
             actual_parent = node.get_parent()
-            require(actual_parent == parent, "AX subtree escaped the bound Root window: " + json.dumps({
+            require(ownership.same_node(actual_parent, parent), "AX subtree escaped the bound Root window: " + json.dumps({
                 "depth": depth, "pid": node.get_process_id(), "role": int(node.get_role()),
+                "expectedParentRef": ownership.references.identity(parent, ownership),
+                "actualParentRef": ownership.references.identity(actual_parent, ownership) if actual_parent is not None else None,
                 "expectedParentPid": parent.get_process_id(), "expectedParentRole": int(parent.get_role()),
                 "actualParentPid": actual_parent.get_process_id() if actual_parent is not None else None,
                 "actualParentRole": int(actual_parent.get_role()) if actual_parent is not None else None}))
             require(node.get_role() not in (atspi.Role.FRAME, atspi.Role.WINDOW, atspi.Role.APPLICATION),
                     "Foreign/nested AX window refused")
-        require(node not in nodes, "Cyclic/duplicate AX subtree refused")
+        reference = tuple(ownership.references.identity(node, ownership))
+        require(reference not in seen, "Cyclic/duplicate AX subtree refused")
+        seen.add(reference)
         nodes.append(node)
         budget = min(helper.MAX_CHILDREN, helper.MAX_NODES - len(nodes) - len(pending))
         pending.extend((child, node, depth + 1) for child in reversed(helper.children(node, budget)))
     ownership.recheck(full=True)
-    require(helper.select_window(request, atspi) == window, "Owned AX window changed during traversal")
+    require(ownership.same_node(helper.select_window(request, atspi), window), "Owned AX window changed during traversal")
     return nodes
 
 
@@ -740,7 +818,7 @@ def snapshot_owned(request, helper, atspi, ownership):
             for s in ("SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY", "CHECKED")}} for n in nodes],
         "controls": control_metadata(nodes, helper, atspi), "ownership": ownership.evidence()}
     ownership.recheck(full=True)
-    require(helper.select_window(request, atspi) == window, "Owned AX window changed during snapshot")
+    require(ownership.same_node(helper.select_window(request, atspi), window), "Owned AX window changed during snapshot")
     return result
 
 
@@ -834,11 +912,11 @@ def perform_owned(action, request, helper, atspi, ownership):
     if action == "close":
         ownership.x11.check_close(request.window)
     ownership.recheck(full=True)
-    require(helper.select_window(request, atspi) == window, "AX frame changed before native action")
+    require(ownership.same_node(helper.select_window(request, atspi), window), "AX frame changed before native action")
     current_nodes = owned_walk(window, ownership, atspi)
     if selected is not None:
         current, interface, verb = terms_control(current_nodes, action, helper, atspi)
-        require(ownership.renderer is not None and current == selected
+        require(ownership.renderer is not None and ownership.same_node(current, selected)
                 and current.get_process_id() == ownership.renderer["pid"],
                 "Terms control changed or is not in the bound WebKit child")
     terms_visible = any(n.get_name() == TERMS and n.get_state_set().contains(atspi.StateType.SHOWING) for n in current_nodes)
@@ -1006,7 +1084,7 @@ def worker(root, args):
     helper = load_helper()
     helper.ensure_runner(os.environ, sys.platform, platform.machine())
     request = helper.Request.parse(["snapshot", pid, start, str(paths(root)["creator-hub"]), INSTALLED_HUB_PIN[1], xid, TITLE, "FRAME"])
-    proc, x11 = helper.Proc(), None
+    proc, x11, ax_bus = helper.Proc(), None, None
     helper.identity(request, proc)
     record = proc.stat(request.pid)
     require(int(record[record.rfind(")") + 2:].split()[1]) == os.getppid(), "Worker target is not its parent's Root child")
@@ -1055,15 +1133,21 @@ def worker(root, args):
         renderer_path = root / "renderer-ownership.json"
         renderer = unique_json(bounded_read(renderer_path, 8192)) if renderer_path.exists() else None
         require(action == "snapshot" or renderer is not None, "Native input requires a completed owned renderer snapshot")
-        ownership = RootOwnership(request, helper, x11, saved["root"], saved["xres"], saved["systemWebKit"]["file"], renderer)
+        refs_saved = None if renderer is None else unique_json(bounded_read(root / "ax-ownership.json", 8192))
+        references, ax_bus = native_ax_references(refs_saved)
+        ownership = RootOwnership(request, helper, x11, saved["root"], saved["xres"], saved["systemWebKit"]["file"], renderer,
+                                  references=references)
         if action == "snapshot":
             value = snapshot_ready(request, helper, Atspi, proc, x11, ownership)
             require(ownership.renderer is not None, "Root snapshot has no verified native WebKit child")
             require(renderer is None, "Initial owned snapshot cannot replace an existing renderer binding")
             save_json(renderer_path, ownership.renderer)
+            save_json(root / "ax-ownership.json", {"aliases": references.aliases, "window": references.window})
             return value
         return perform_owned(action, request, helper, Atspi, ownership)
     finally:
+        if ax_bus is not None:
+            ax_bus.close_sync(None)
         if x11 is not None:
             x11.dispose()
 

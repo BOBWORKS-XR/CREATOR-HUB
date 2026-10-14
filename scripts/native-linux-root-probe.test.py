@@ -491,6 +491,8 @@ class SourceGuardTests(unittest.TestCase):
 class AxNode:
     def __init__(self, pid, role, name="", parent=None, states=(1, 2, 3), verb=None):
         self.pid, self.role, self.name, self.parent = pid, role, name, parent
+        self.app = types.SimpleNamespace(bus_name=f":1.{pid}")
+        self.path = f"/org/a11y/atspi/accessible/n{id(self)}"
         self.states, self.children = set(states), []
         self.action = types.SimpleNamespace(get_n_actions=lambda: 1, get_action_name=lambda _: verb,
                                             do_action=mock.Mock(return_value=True)) if verb else None
@@ -553,8 +555,11 @@ class OwnershipTests(unittest.TestCase):
                 value.pop("kernelImageSha256")
             return value
         self.reader = mock.Mock(side_effect=read)
+        self.bus_records = {f":1.{pid}": {"owner": f":1.{pid}", "pid": pid, "uid": 1000} for pid in (42, 43, 99)}
+        self.references = p.AxReferences(lambda name: dict(self.bus_records[name]))
         self.ownership = p.RootOwnership(self.request, self.helper, self.x11, copy.deepcopy(root), dict(self.info),
-                                          dict(self.system), reader=self.reader, system_check=lambda: dict(self.system))
+                                          dict(self.system), reader=self.reader, system_check=lambda: dict(self.system),
+                                          references=self.references)
         return self.ownership
 
     def test_only_measured_direct_child_is_bound_and_both_rechecked_per_node(self):
@@ -644,8 +649,61 @@ class OwnershipTests(unittest.TestCase):
         self.heading.clear_cache.assert_called_once_with()
         self.heading.clear_cache.side_effect = None
         self.heading.get_parent.return_value = AxNode(99, 23, "Foreign")
-        with self.assertRaisesRegex(RuntimeError, '"actualParentPid": 99'):
+        with self.assertRaisesRegex(RuntimeError, "AX bus owner is not the bound"):
             p.owned_walk(self.window, binding, self.atspi)
+
+    def test_webkit_well_known_and_unique_bus_aliases_need_same_owner_and_exact_path(self):
+        binding = self.fixture()
+        p.owned_walk(self.window, binding, self.atspi)
+        alias = "org.webkit.WebProcess.fixture"
+        self.bus_records[alias] = dict(self.bus_records[":1.43"])
+        proxy = AxNode(43, 20)
+        proxy.app.bus_name, proxy.path = alias, self.web.path
+        self.assertIsNot(proxy, self.web)
+        self.assertTrue(binding.same_node(proxy, self.web))
+        proxy.path += "_other"
+        self.assertFalse(binding.same_node(proxy, self.web))
+        proxy.path = self.web.path
+        self.bus_records[alias]["owner"] = ":1.444"
+        with self.assertRaisesRegex(RuntimeError, "unique owner/PID/UID changed"):
+            binding.recheck(full=True)
+
+    def test_same_pid_path_but_other_bus_connection_is_not_same_ax_object(self):
+        binding = self.fixture()
+        p.owned_walk(self.window, binding, self.atspi)
+        proxy = AxNode(43, 20)
+        proxy.app.bus_name, proxy.path = ":1.444", self.web.path
+        self.bus_records[":1.444"] = {"owner": ":1.444", "pid": 43, "uid": 1000}
+        self.assertFalse(binding.same_node(proxy, self.web))
+
+    def test_ax_alias_wrong_uid_pid_or_changed_owner_refuses(self):
+        for field, value in (("uid", 0), ("pid", 99), ("owner", "not.unique")):
+            with self.subTest(field=field):
+                binding = self.fixture()
+                self.bus_records[":1.42"][field] = value
+                with self.assertRaises(RuntimeError):
+                    p.owned_walk(self.window, binding, self.atspi)
+
+    def test_changed_ax_window_path_refuses_even_same_pid_role_and_title(self):
+        binding = self.fixture()
+        p.owned_walk(self.window, binding, self.atspi)
+        self.window.path += "_other"
+        with self.assertRaisesRegex(RuntimeError, "wire identity changed"):
+            p.owned_walk(self.window, binding, self.atspi)
+
+    def test_malformed_ax_bus_or_object_path_and_alias_overflow_refuse(self):
+        for field, value in (("bus", "tcp:foreign"), ("bus", "x" * 129), ("path", "/foreign"),
+                             ("path", "/org/a11y/../foreign"), ("path", "/org/a11y/" + "x" * 257)):
+            with self.subTest(field=field, value=value):
+                binding = self.fixture()
+                if field == "bus":
+                    self.window.app.bus_name = value
+                else:
+                    self.window.path = value
+                with self.assertRaisesRegex(RuntimeError, "Invalid bounded"):
+                    p.owned_walk(self.window, binding, self.atspi)
+        with self.assertRaisesRegex(RuntimeError, "inventory exceeds"):
+            p.AxReferences(None, {str(i): {} for i in range(9)})
 
     def test_one_exact_unchecked_checkbox_action_not_arbitrary_click(self):
         binding = self.fixture()
