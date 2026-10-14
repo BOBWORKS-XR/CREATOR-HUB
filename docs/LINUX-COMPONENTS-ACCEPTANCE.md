@@ -305,3 +305,55 @@ embedded GitHub script parsed. Tests include unknown/missing/mixed candidate
 refusals, original source binding preservation, detached complete candidate
 selection, worker-label propagation, early old-component dispatch hold and
 helper self-hash consistency. No test fixture is a real new assembly pin.
+
+## Activated 4f GTK3 Baseline
+
+The complete candidate block is now populated from the reviewed successful
+assembly `38648562557`, attempt 1, source
+`4f3744d5707ed5cd26c2e5a1b10a7d45a5e8d10b`, tree
+`cfda3105bfa144c05e7b68ccb92a7aa738ee6e52`, Linux job `116141491681`.
+Primary API success/source/job/artifact metadata was independently read; parent
+verified the complete original ZIP and independently rehashed all native packages.
+`artifacts/linux-assembly-38648562557/review/pins-review.json` was read directly.
+
+- Original artifact `11934297227`, `signed-unix-hub-linux-38648562557-1`,
+  380463271 bytes, SHA-256
+  `ce7d02ecd5e72cbce9a0343003726601ab82a103e8e25348cac771d78f0ac881`.
+- Raw Root 21411480 bytes, SHA-256
+  `b40b823f7e41e8d62b50246053d4887409e18c5daf5db370731c219bcd04f76d`.
+- Native DEB 61510742 bytes, SHA-256
+  `f95718e41af6b05f3206af503f310a57b300fafe4b9e7da5d48ae050a9a2a6d7`.
+- Actual extracted DEB `/usr/bin/creator-hub` 21411480 bytes, mode 0755,
+  independently BSD-tar hashed by parent:
+  `524e7bc9505f7de4f22e29818ad6ba59b1fb4decf3b7bb2655b362f9240ba968`.
+- Manifest 3663 bytes, SHA-256
+  `802b5604e9a8446c96adb73a4408b5bd2c90c0e2303f67c191e0e28332793ff2`.
+- Payload archive 55567186 bytes, SHA-256
+  `7892f8256102bbfb995852a154fe0350a71642965a2f7f6642f8031cc92ac983`.
+- Original assembly receipt 875 bytes, SHA-256
+  `b930d76288f00fbd9694f0437852857e9dd77cca5c4371a987463992a47a421b`.
+- Native package integrity receipt 6026 bytes, SHA-256
+  `3d68a010025156d5a20eda862360acb09b7b3c19cb1693c36433ecd74a6f88f4`.
+
+The Root helper self-hash was refreshed to
+`d2848cd8110015982b9becee81aa259e333e6e0a9878bb152e2ae015f1e282f6`;
+the component loader, export and workflow recheck it. The original candidate is
+not overwritten and remains prohibited for component CLI dispatch. The new
+candidate's metadata is independently checked before any native package launch.
+
+This is the **4f GTK3 baseline only**, private source 773, unchanged MCP and the
+old retained router image. It **does not include router fix `b154e36`** or any
+newer working-tree production change. Product and test source stay separate in
+the actual report. No Root/private build, Mac lane, Zenity provisioning/input,
+seeded legal acceptance, migration, signed-update or final-release claim is part
+of this run. Original failure cases and artifacts remain preserved. Actual
+component operation remains pending the authorized native report.
+
+Activation preflight passed: Root 81 / 1 skipped, components 26 / 1 skipped,
+unchanged helper 36 / 2 skipped, native fixture source tests 8, dialog/source
+preflight 4: 155 passed and 4 skipped in total on Windows. YAML/embedded script
+syntax and compact-first upload ordering parsed. Read-only local verification
+also rehashed the original ZIP, checked all six fixed members' hashes/sizes/
+Unix modes, verified the complete payload inventory and native integrity receipt,
+and matched the exact raw-to-DEB Tauri marker transform to the installed hash.
+No application or installer was executed for that local verification.

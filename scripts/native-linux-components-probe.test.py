@@ -122,6 +122,17 @@ class ContractTests(unittest.TestCase):
             subject.main()
         paths.assert_not_called()
 
+    def test_reviewed_gtk3_export_binds_new_backend_hash_and_current_helper_without_native_access(self):
+        subject = load("components_gtk3_reviewed_candidate", HERE / "native-linux-components-probe.py")
+        value = subject.configure_component_candidate(subject.B.GTK3_CANDIDATE)
+        self.assertEqual(value["SOURCE"], "4f3744d5707ed5cd26c2e5a1b10a7d45a5e8d10b")
+        self.assertEqual(value["helperSha256"], hashlib.sha256((HERE / "native-linux-root-probe.py").read_bytes()).hexdigest())
+        self.assertEqual(subject.APPS["setup"]["hash"], "c960edfdd2f86d1ef994ef639b0d3e1b35041acb78935bf5d61dd7f69f32978c")
+        self.assertEqual(subject.APPS["setup"]["size"], 16554072)
+        self.assertEqual(subject.APPS["mcp"]["hash"], p.APPS["mcp"]["hash"])
+        source = (HERE / "native-linux-components-probe.py").read_text()
+        self.assertIn("excludes router fix b154e36", source)
+
     def test_compact_capture_upload_precedes_separate_original_zip_and_keeps_refusals(self):
         body = (HERE.parent / ".github/workflows/native-linux-components-014.yml").read_text()
         compact = body.split("      - name: Retain compact owned capture first", 1)[1]

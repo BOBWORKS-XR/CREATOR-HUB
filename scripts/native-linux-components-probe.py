@@ -17,7 +17,7 @@ import time
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
-ROOT_SHA = "90e2e94f1c0e291bd02b89e6f8240bcc2e4abb3ad3a103673f1508008353b660"
+ROOT_SHA = "d2848cd8110015982b9becee81aa259e333e6e0a9878bb152e2ae015f1e282f6"
 SCOPE = "pinned-native-deb-embedded-components-only"
 FALSE_GATES = {key: False for key in ("releaseReady", "migrationAccepted", "retirementAccepted",
                                     "signedUpdateAccepted", "flatpakHostIntegrationAccepted",
@@ -466,6 +466,7 @@ def wait_backend_gone(record, helper, capture):
 def probe(root, env):
     report = {"scope": SCOPE, **FALSE_GATES, "phase": "verify", "workers": [], "backends": [],
               "candidate": B.SELECTED_CANDIDATE, "productSource": B.SOURCE, "privateSource": B.PRIVATE_SOURCE,
+              "productScope": "4f3744d GTK3 baseline; excludes router fix b154e36; not final release acceptance",
               "testSource": env.get("GITHUB_SHA"), "testRunId": env.get("GITHUB_RUN_ID"),
               "componentsAccepted": False, "normalExitVerified": False, "backendExitCodesObserved": False}
     child, capture, start, xid, failure = None, None, None, None, None

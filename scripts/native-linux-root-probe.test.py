@@ -1085,6 +1085,21 @@ class CandidatePinTests(unittest.TestCase):
                     COMPONENT_PINS=copy.deepcopy(subject.GTK3_PREPARATION["components"]))
         return pins
 
+    def test_reviewed_actual_gtk3_assembly_is_separate_from_original_and_pins_installed_deb_image(self):
+        subject = self.subject()
+        subject.validate_candidate_pins(subject.GTK3_REVIEWED_PINS)
+        value = subject.configure_candidate(subject.GTK3_CANDIDATE)
+        self.assertEqual(value["SOURCE"], "4f3744d5707ed5cd26c2e5a1b10a7d45a5e8d10b")
+        self.assertEqual(value["RUN"], 38648562557)
+        self.assertEqual(value["ARTIFACT"], 11934297227)
+        self.assertEqual(value["ZIP_SHA"], "ce7d02ecd5e72cbce9a0343003726601ab82a103e8e25348cac771d78f0ac881")
+        self.assertEqual(value["DEB_PIN"][:2], (61510742, "f95718e41af6b05f3206af503f310a57b300fafe4b9e7da5d48ae050a9a2a6d7"))
+        self.assertEqual(value["INSTALLED_HUB_PIN"][:2], (21411480, "524e7bc9505f7de4f22e29818ad6ba59b1fb4decf3b7bb2655b362f9240ba968"))
+        self.assertEqual(value["COMPONENT_PINS"]["setup"], (16554072, "c960edfdd2f86d1ef994ef639b0d3e1b35041acb78935bf5d61dd7f69f32978c"))
+        self.assertEqual(subject.ORIGINAL_REVIEWED_PINS["SOURCE"], "5bb05a21d73c0fc3b2839cbcbd4322832b24aead")
+        with self.assertRaises(RuntimeError):
+            subject.validate_source(source_fixture())
+
     def test_original_authority_is_exact_and_still_refuses_every_original_source_mutation(self):
         subject = self.subject()
         original = copy.deepcopy(subject.ORIGINAL_REVIEWED_PINS)

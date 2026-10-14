@@ -81,7 +81,25 @@ GTK3_PREPARATION = {
 }
 # Populate ONLY from the new successful outer assembly's API, original ZIP,
 # native DEB and original receipts. Preparation alone cannot authorize staging.
-GTK3_REVIEWED_PINS = None
+GTK3_REVIEWED_PINS = {
+    "SOURCE": "4f3744d5707ed5cd26c2e5a1b10a7d45a5e8d10b", "TREE": "cfda3105bfa144c05e7b68ccb92a7aa738ee6e52",
+    "RUN": 38648562557, "ATTEMPT": 1, "JOB": 116141491681,
+    "ARTIFACT": 11934297227, "ARTIFACT_NAME": "signed-unix-hub-linux-38648562557-1",
+    "ZIP_SIZE": 380463271, "ZIP_SHA": "ce7d02ecd5e72cbce9a0343003726601ab82a103e8e25348cac771d78f0ac881",
+    "PINS": {
+        "creator-hub": (21411480, "b40b823f7e41e8d62b50246053d4887409e18c5daf5db370731c219bcd04f76d", 0o755),
+        "builtin-manifest.json": (3663, "802b5604e9a8446c96adb73a4408b5bd2c90c0e2303f67c191e0e28332793ff2", 0o644),
+        "modules.tar.gz": (55567186, "7892f8256102bbfb995852a154fe0350a71642965a2f7f6642f8031cc92ac983", 0o644),
+        "signed-unix-assembly.json": (875, "b930d76288f00fbd9694f0437852857e9dd77cca5c4371a987463992a47a421b", 0o644),
+    },
+    "DEB_NAME": "Creator Hub_0.1.14_amd64.deb",
+    "DEB_PIN": (61510742, "f95718e41af6b05f3206af503f310a57b300fafe4b9e7da5d48ae050a9a2a6d7", 0o644),
+    "INSTALLED_HUB_PIN": (21411480, "524e7bc9505f7de4f22e29818ad6ba59b1fb4decf3b7bb2655b362f9240ba968", 0o755),
+    "INTEGRITY_PIN": (6026, "3d68a010025156d5a20eda862360acb09b7b3c19cb1693c36433ecd74a6f88f4", 0o644),
+    "PRIVATE_SOURCE": "77367ae881413d6868e484f77e12a48c5aa58b00", "PRIVATE_RUN": 38647206970, "PRIVATE_ATTEMPT": 1,
+    "HANDOFF_SHA": "75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae",
+    "COMPONENT_PINS": copy.deepcopy(GTK3_PREPARATION["components"]),
+}
 SELECTED_CANDIDATE = ORIGINAL_CANDIDATE
 _candidate_configured = False
 TITLE = "Creator Hub - Development Preview"

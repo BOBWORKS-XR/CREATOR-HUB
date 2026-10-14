@@ -1,4 +1,4 @@
-name: Pinned Linux 14 native embedded components (not migration acceptance)
+name: Pinned Linux 14 GTK components (4f baseline, not migration acceptance)
 
 on:
   workflow_dispatch:
@@ -29,6 +29,9 @@ jobs:
         run: |
           python3 -B scripts/native-linux-root-probe.test.py
           python3 -B scripts/native-linux-components-probe.test.py
+          python3 -B scripts/native-unix-window.test.py
+          python3 -B scripts/native-unix-window-fixture.test.py
+          node --test scripts/linux-dialog-backend.test.cjs
       - name: Refuse staging until complete reviewed GTK3 outer assembly pins are available
         run: python3 -B scripts/native-linux-components-probe.py candidate-pins > "$RUNNER_TEMP/linux-components-reviewed-pins.json"
       - name: Verify exact successful native assembly and source before downloading original ZIP
