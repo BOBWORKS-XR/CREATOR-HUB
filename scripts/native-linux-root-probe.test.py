@@ -702,6 +702,10 @@ class OwnershipTests(unittest.TestCase):
                     self.window.path = value
                 with self.assertRaisesRegex(RuntimeError, "Invalid bounded"):
                     p.owned_walk(self.window, binding, self.atspi)
+        binding = self.fixture()
+        self.window.app.bus_name = "not-a-bus-name"
+        with self.assertRaisesRegex(RuntimeError, '"bus": "not-a-bus-name"'):
+            p.owned_walk(self.window, binding, self.atspi)
         with self.assertRaisesRegex(RuntimeError, "inventory exceeds"):
             p.AxReferences(None, {str(i): {} for i in range(9)})
 

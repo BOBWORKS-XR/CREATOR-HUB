@@ -675,7 +675,9 @@ class AxReferences:
         name, path = node.app.bus_name, node.path
         require(isinstance(name, str) and len(name) <= 128 and re.fullmatch(r"(?::[0-9]+\.[0-9]+|org\.[A-Za-z0-9_.-]+)", name)
                 and isinstance(path, str) and len(path) <= 256 and re.fullmatch(r"/org/a11y/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+", path),
-                "Invalid bounded native AX bus/object reference")
+                "Invalid bounded native AX bus/object reference: " + json.dumps({
+                    "bus": name[:128] if isinstance(name, str) else None, "busType": type(name).__name__,
+                    "path": path[:256] if isinstance(path, str) else None, "pathType": type(path).__name__}))
         if name not in self.aliases:
             require(len(self.aliases) < 8, "AX bus alias inventory exceeds bound")
             peer = self.resolve(name)
