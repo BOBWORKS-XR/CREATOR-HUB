@@ -27,20 +27,48 @@ pins remain the baseline. No old release bytes, signatures or metadata change.
 - Related LaunchServices registration paths are read-only observations, not
   authority to unregister an installed app.
 
-## Deliberate Stop
+## One Reversible Experiment
 
-No archive or removal operation is implemented. A successful normal GUI exit does
-not establish native review/cancellation, an exclusive install/namespace
-reservation, no-overwrite durable archive/recovery, or supported registration
-removal. There is also no native busy-workflow exercise yet. The probe records the
-first concrete failure and the missing retirement contract; it never force-stops
-an app, removes/re-signs a bundle, alters quarantine, edits a package database or
-seeds legal consent. Apps stay installed in the disposable runner. That is **not**
-completion of the user's Hub-only requirement.
+After the measured normal-close/stdio baseline, exercise **only MCP's GUI
+executable**. A dedicated native NSAlert must first be cancelled, followed by a
+whole-bundle byte/inode check and a live stdio check. A second fresh native alert
+must be approved. The VM-only driver targets only the exact owned helper PID,
+parent, kernel executable and hash, native modal window and enabled AX button;
+it performs an actual AXPress, not a fabricated receipt or consent flag.
 
-The workflow deliberately returns failure even when its baseline capture completes.
-Every migration, retirement, updater and release acceptance flag remains false.
-No user-PC application/settings changes or credentials are involved.
+Keep both source/destination directory descriptors open. Write exclusive synced
+intent/archived/restored records under this one experiment's folder. First prove
+actual `RENAME_EXCL` collision refusal with an existing sentinel. Then archive
+only `Contents/MacOS/creator-works-mcp-launcher` into that folder, without overwrite.
+All nine original server/resource paths remain. Do not edit Info.plist, move the
+app bundle or re-sign anything. [Apple's native rename flags](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/stdio.h)
+provide the exclusive primitive; native execution must establish its actual result.
+
+While it is absent, measure strict bundle signature, Gatekeeper assessment,
+LaunchServices registration, an absolute-URL native launch attempt, the already
+live stdio connection and reconnects through **both original Node aliases**.
+Restore the exact archived inode with another exclusive rename and verify the
+whole bundle and strict signature again. A barrier deadline restores only this
+live experiment's verified before-image; journals never replay or grant authority.
+This is not a generic recovery framework or a production retirement helper.
+
+The workflow may pass for a complete, measured and restored experiment. Product
+migration, permanent retirement, installer/update and release acceptance flags
+stay false. Busy-workflow refusal, competing external installers and crash/power
+loss recovery are not claimed. No user-PC application/settings change, credential
+access, forced process stop or security bypass is involved.
+
+## Baseline Already Captured
+
+[Run 38632099882](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38632099882),
+commit `47accf85f10aa70fc7e570d41c8a61aa8976acba`, completed both Intel and ARM
+captures. Both pinned apps passed strict signature and normal Quit/exit 0, with
+every original file unchanged. On each architecture the existing MCP stdio PID
+returned 53 tools before and after GUI close; both original Node aliases
+reconnected with 53 tools and exited normally on EOF. Synthetic isolated server
+config bytes were unchanged. Gatekeeper assessment rejected all four old app
+copies (exit 3); no bypass was attempted. That run intentionally stopped before
+archival and returned failure. It is retained, not replaced by this experiment.
 
 ## Verification
 

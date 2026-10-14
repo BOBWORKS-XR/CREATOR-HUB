@@ -66,12 +66,33 @@ test('bounded probe retains both runtime names, uses EOF, and never kills/remove
   assert.match(script, /row\.stdioBefore = await stdio\.start/);
   assert.match(script, /row\.stdioAfterNormalClose = await stdio\.list/);
   assert.match(script, /child\.stdin\.end\(\)/);
-  assert.match(script, /process\.exitCode = 1/);
+  assert.match(script, /process\.exitCode = report\.passed \? 0 : 1/);
   assert.doesNotMatch(script + native, /(?:SIGKILL|SIGTERM|forceTerminate|\.kill\(|unlinkSync\(|renameSync\(|rmSync\(|--force|--remove-signature|--sign\b|spctl[^\n]*--master-disable)/);
   assert.match(native, /native\.terminate\(\)/);
   assert.match(native, /info\.pbi_ppid == parent/);
   assert.match(native, /owned-process-or-image-drift-no-close/);
   assert.match(native, /registrationRemovalAuthority": false/);
+});
+test('one temporary MCP GUI-only experiment has native decline/approve and exclusive restore, never generic replay', () => {
+  const script = fs.readFileSync(path.join(__dirname, 'native-macos-legacy-retirement-probe.cjs'), 'utf8');
+  const native = fs.readFileSync(path.join(__dirname, 'native-macos-legacy-retirement-probe.swift'), 'utf8');
+  assert.match(native, /CREATOR_MACOS_LEGACY_ARCHIVE_EXPERIMENT/);
+  assert.match(native, /first-native-review-must-cancel/);
+  assert.match(native, /native-archive-approval-declined/);
+  assert.match(native, /AXUIElementPerformAction\(button, kAXPressAction/);
+  assert.match(native, /native-review-modal-unverified/);
+  assert.match(native, /O_CREAT \| O_EXCL \| O_NOFOLLOW/);
+  assert.match(native, /renameatx_np\(sourceFD, sourceName, targetFD, archivedName, UInt32\(RENAME_EXCL\)\)/);
+  assert.match(native, /renameatx_np\(targetFD, archivedName, sourceFD, sourceName, UInt32\(RENAME_EXCL\)\)/);
+  assert.match(native, /collision == -1 && code == EEXIST/);
+  assert.match(native, /old-mcp-kernel-or-native-app-not-absent/);
+  assert.match(script, /result\.stdioWhileArchived = await stdio\.list/);
+  assert.match(script, /bundleSignatureWhileArchived/);
+  assert.match(script, /registrationWhileArchived/);
+  assert.match(script, /launchWhileArchived/);
+  assert.match(script, /bundleSignatureRestored/);
+  assert.match(script, /result\.error = error\.message/);
+  assert.doesNotMatch(native, /replay|unregister|LSRegisterURL|removeItem|removefile\(/);
 });
 test('dedicated workflow cannot select arbitrary input, self-hosted machines or other branches', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/native-macos-legacy-retirement-probe.yml'), 'utf8');

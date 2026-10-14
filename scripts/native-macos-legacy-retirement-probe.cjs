@@ -192,6 +192,7 @@ function createStdio(node, server, config, output, label) {
 async function run(env = process.env) {
   admission(env, process.platform, process.arch); // Must precede filesystem or process inspection.
   check(process.argv.length === 2, 'no-arbitrary-inputs-supported');
+  check(env.CREATOR_MACOS_LEGACY_ARCHIVE_EXPERIMENT === '1', 'explicit-reversible-experiment-opt-in-required');
   const temporary = canonical(fs.realpathSync(env.RUNNER_TEMP)), home = canonical(os.homedir());
   const output = path.join(temporary, 'macos-legacy-retirement-probe'); fs.mkdirSync(output, { mode: 0o700 });
   const apps = path.join(home, 'Applications');
@@ -209,6 +210,79 @@ async function run(env = process.env) {
     try { receipt = JSON.parse(result.stdout); } catch { throw Error(`${label}-native-receipt-invalid`); }
     check(receipt.diagnosticOnly === true && receipt.retirementMutationAttempted === false, 'native-scope-drift');
     return { ...result, receipt };
+  }
+  async function archiveExperiment(app, pkg, row, stdio, folder) {
+    check(row.facts.normalExit && stdio && row.exactOriginalMembersPreserved === undefined, 'closed-pinned-live-stdio-baseline-required');
+    const experiment = path.join(folder, 'gui-archive-experiment'); fs.mkdirSync(experiment, { mode: 0o700 });
+    fs.writeFileSync(path.join(experiment, 'collision-sentinel.bin'), 'DO NOT OVERWRITE: native GUI-only archive collision fixture\n', { flag: 'wx', mode: 0o600 });
+    const sentinel = pin(path.join(experiment, 'collision-sentinel.bin'));
+    const result = { diagnosticOnly: true, productionAuthority: false, nativeCancel: false, nativeApprove: false,
+      temporaryGuiOnlyArchive: false, restored: false, experimentPassed: false };
+    row.archiveExperiment = result; report.nativeReviewAttempted = true;
+    const out = fs.openSync(path.join(experiment, 'archive-host.stdout'), 'wx', 0o600), err = fs.openSync(path.join(experiment, 'archive-host.stderr'), 'wx', 0o600);
+    let host;
+    try { host = spawn(helper, ['archive-experiment', experiment, path.join(folder, 'owned-process.json')], { env, stdio: ['ignore', out, err] }); }
+    finally { fs.closeSync(out); fs.closeSync(err); }
+    let ended = false;
+    const exit = new Promise(resolve => { host.once('error', error => { ended = true; resolve({ error: error.message }); });
+      host.once('exit', (exitCode, signal) => { ended = true; resolve({ exitCode, signal }); }); });
+    async function waitRecord(name, ms = 30000) {
+      const file = path.join(experiment, name), deadline = Date.now() + ms;
+      while (!fs.existsSync(file)) {
+        check(!ended, `archive-host-exited-before-${name}`); check(Date.now() < deadline, `archive-host-${name}-deadline`); await pause(100);
+      }
+      pin(file, 8192); return JSON.parse(fs.readFileSync(file, 'utf8'));
+    }
+    function barrier(name) { fs.writeFileSync(path.join(experiment, name), JSON.stringify({ ownedExperiment: true }), { flag: 'wx', mode: 0o600 }); }
+    try {
+      await waitRecord('review-cancel-ready.json');
+      await native(['press-review', String(host.pid), String(process.pid), helperPin.sha256, 'cancel'], experiment, 'press-native-cancel');
+      result.cancel = await waitRecord('cancelled.json');
+      check(result.cancel.nativeCancel === true && isDeepStrictEqual(inventory(app, pkg), row.before), 'native-cancel-bundle-drift');
+      result.stdioAfterCancel = await stdio.list(); result.nativeCancel = true;
+      barrier('cancel-verified.json');
+      await waitRecord('review-approve-ready.json');
+      await native(['press-review', String(host.pid), String(process.pid), helperPin.sha256, 'approve'], experiment, 'press-native-approve');
+      result.archived = await waitRecord('01-archived.json'); result.nativeApprove = result.archived.nativeApproval === true;
+      check(result.archived.guiOnlyArchived === true && result.archived.collisionRefused === true, 'exclusive-gui-only-archive-unverified');
+      result.temporaryGuiOnlyArchive = true; report.retirementMutationAttempted = true;
+      const guiRelative = `Contents/MacOS/${pkg.exe}`, original = row.before.find(file => file.relative === guiRelative);
+      check(!fs.existsSync(path.join(app, guiRelative)) && isDeepStrictEqual(pin(path.join(experiment, `${pkg.exe}.retained`)),
+        { bytes: original.bytes, sha256: original.sha256, identity: original.identity }), 'archived-original-gui-identity-mismatch');
+      result.retainedMembers = inventory(app, { ...pkg, members: pkg.members.filter(file => file.relative !== guiRelative) });
+      check(isDeepStrictEqual(result.retainedMembers, row.before.filter(file => file.relative !== guiRelative)), 'non-gui-member-changed');
+      result.bundleSignatureWhileArchived = await execute('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app], experiment, 'archived-bundle-signature', 30000, true);
+      result.gatekeeperWhileArchived = await execute('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=2', app], experiment, 'archived-gatekeeper', 30000, true);
+      result.registrationWhileArchived = (await native(['registration', 'mcp'], experiment, 'archived-registration')).receipt;
+      result.launchWhileArchived = (await native(['archived-launch', experiment], experiment, 'archived-native-launch')).receipt;
+      result.stdioWhileArchived = await stdio.list(); result.reconnectWhileArchived = {};
+      const server = path.join(app, 'Contents/Resources/server');
+      for (const alias of ['node', 'node.exe']) {
+        const node = path.join(server, 'runtime', alias);
+        const signature = await execute('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', node], experiment, `archived-${alias}-signature`);
+        const connection = createStdio(node, path.join(server, 'creator-works-mcp.mjs'), path.join(folder, 'launcher-config.json'), experiment, `archived-reconnect-${alias}`);
+        try { result.reconnectWhileArchived[alias] = { ...await connection.start(), signatureExit: signature.exitCode }; }
+        finally { result.reconnectWhileArchived[alias] = { ...result.reconnectWhileArchived[alias], exit: await connection.close() }; }
+      }
+      check(isDeepStrictEqual(pin(path.join(experiment, 'collision-sentinel.bin')), sentinel), 'collision-sentinel-changed');
+    } catch (error) {
+      result.error = error.message;
+      throw error;
+    } finally {
+      if (!ended) barrier('restore-now.json');
+      result.hostExit = await Promise.race([exit, pause(30000).then(() => ({ deadlineExpired: true }))]);
+      if (result.hostExit.deadlineExpired) host.unref();
+      if (result.temporaryGuiOnlyArchive || fs.existsSync(path.join(experiment, '02-restored.json'))) {
+        result.restoration = await waitRecord('02-restored.json', 1000);
+        result.restored = result.restoration.restored === true && isDeepStrictEqual(inventory(app, pkg), row.before);
+        check(result.restored && result.hostExit.exitCode === 0 && !result.hostExit.signal, 'temporary-gui-archive-restoration-unverified');
+        result.bundleSignatureRestored = await execute('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app], experiment, 'restored-bundle-signature');
+      } else {
+        result.noMutationOriginalIntact = isDeepStrictEqual(inventory(app, pkg), row.before);
+        check(result.noMutationOriginalIntact, 'no-archive-original-gui-drift');
+      }
+    }
+    result.experimentPassed = result.nativeCancel && result.nativeApprove && result.temporaryGuiOnlyArchive && result.restored;
   }
   try {
     for (const product of ['setup', 'mcp']) {
@@ -229,6 +303,7 @@ async function run(env = process.env) {
         mounted = true;
         await execute('/usr/bin/ditto', [path.join(mount, `${pkg.name}.app`), app], folder, 'per-user-copy', 30000);
         row.before = inventory(app, pkg); row.facts.exactBundle = true;
+        await execute('/usr/bin/hdiutil', ['detach', mount], folder, 'detach-before-native-launch', 30000); mounted = false;
         const info = await execute('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', path.join(app, 'Contents/Info.plist')], folder, 'plist');
         const plist = JSON.parse(info.stdout);
         check(plist.CFBundleIdentifier === pkg.bundle && plist.CFBundleExecutable === pkg.exe
@@ -280,6 +355,7 @@ async function run(env = process.env) {
         }
         if (stdio) {
           row.stdioAfterNormalClose = await stdio.list();
+          if (row.facts.normalExit) await archiveExperiment(app, pkg, row, stdio, folder);
           const server = path.join(app, 'Contents/Resources/server');
           row.reconnect = {};
           for (const alias of ['node', 'node.exe']) {
@@ -293,7 +369,7 @@ async function run(env = process.env) {
         row.after = inventory(app, pkg);
         check(isDeepStrictEqual(row.after, row.before), 'original-bundle-or-runtime-file-drift');
         row.exactOriginalMembersPreserved = true;
-        row.blockers.push(missingContract(row.facts));
+        if (!row.archiveExperiment?.experimentPassed) row.blockers.push(missingContract(row.facts));
       } catch (error) { row.blockers.push(error.message); }
       finally {
         if (stdio) { try { row.stdioEofExit = await stdio.close(); } catch (error) { row.blockers.push(error.message); } }
@@ -306,11 +382,12 @@ async function run(env = process.env) {
     }
     report.captureComplete = report.products.length === 2;
   } catch (error) { report.error = error.message; }
-  report.passed = false; // Capturing a baseline never establishes retirement acceptance.
+  report.experimentPassed = report.products.find(row => row.product === 'mcp')?.archiveExperiment?.experimentPassed === true;
+  report.passed = report.experimentPassed && report.products.every(row => row.facts.normalExit && row.exactOriginalMembersPreserved);
   fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2), { flag: 'wx', mode: 0o600 });
   console.log(JSON.stringify({ ...scope, captureComplete: report.captureComplete === true,
     products: report.products.map(({ product, facts, blockers }) => ({ product, facts, blockers })) }));
-  process.exitCode = 1; // Deliberately red until a native retirement contract is demonstrated.
+  process.exitCode = report.passed ? 0 : 1; // A measured/restored experiment is not production acceptance.
 }
 module.exports = { admission, packageFor, inventory, pin, missingContract, scope, products, branch };
 if (require.main === module) run().catch(error => { console.error(error.message); process.exitCode = 1; });
