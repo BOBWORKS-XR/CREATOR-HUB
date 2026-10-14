@@ -265,6 +265,24 @@ test('PowerShell AST parses and native workflow compiles only the exact test ada
   assert.doesNotMatch(workflow, /pull_request/);
   assert.match(workflow, /cargo test --manifest-path src-tauri\/Cargo\.toml --locked --no-run --message-format=json/);
   assert.match(workflow, /legacy_removal_windows::tests:: --skip native_windows_pinned_removal/);
-  assert.match(source, /--exact', 'legacy_removal_windows::tests::native_windows_pinned_removal', '--ignored'/);
+  assert.match(source, /else \{ 'legacy_removal_windows::tests::native_windows_pinned_removal' \}/);
+  assert.match(source, /if \(\$AdapterMode -ceq 'retirement'\) \{ 'legacy_retirement_windows::tests::native_windows_pinned_retirement' \}/);
+  assert.match(source, /@\('--exact', \$selector, '--ignored', '--nocapture'\)/);
+  assert.match(source, /Retirement requires the exact Root adapter test; no fallback uninstaller is allowed/);
+  assert.match(workflow, /-AdapterMode retirement/);
   assert.doesNotMatch(workflow, /cargo (?:build|run)|--release|build:unified|assemble-unix|secrets\.|npm ci|permissions:\s+write/);
+});
+
+test('GUI retirement is a distinct leaf result, never a full payload-removal or release claim', windowsOnly, () => {
+  powershell(String.raw`
+    $report=@{status='passed';error=$null;caughtFailure=$false;errors=@();registrationAndPayloadAbsent=$false;
+      guiRetiredCompatibilityRetained=$true;retentionPassed=$false;releaseReady=$true;productAccepted=$true;migrationAccepted=$true}
+    Complete-LegacyReport $report 5 5
+    if(-not $report.retentionPassed -or $report.registrationAndPayloadAbsent -or $report.releaseReady -or $report.migrationAccepted) {
+      throw 'Retirement was confused with complete payload removal or release acceptance.'
+    }
+    $report.errors=@('compatibility server changed')
+    Complete-LegacyReport $report 5 5
+    if($report.retentionPassed) { throw 'Runtime preservation failure was ignored.' }
+  `);
 });

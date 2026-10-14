@@ -1,4 +1,4 @@
-name: Published legacy uninstall retention (disposable only)
+name: Published legacy GUI retirement and runtime retention (disposable only)
 
 on:
   push:
@@ -45,14 +45,18 @@ jobs:
           $bin = [string]$bins[0].executable
           & $bin legacy_removal_windows::tests:: --skip native_windows_pinned_removal
           if ($LASTEXITCODE -ne 0) { throw 'Root adapter pure regressions failed.' }
+          & $bin legacy_retirement_windows::tests:: --skip native_windows_pinned_retirement
+          if ($LASTEXITCODE -ne 0) { throw 'Root retirement handle/journal regressions failed.' }
+          & $bin legacy_shortcuts_windows::tests::
+          if ($LASTEXITCODE -ne 0) { throw 'Root shortcut ownership regressions failed.' }
           "executable=$bin" >> $env:GITHUB_OUTPUT
-      - name: Validate sanitized module environment with actual MCP and Setup removal and data retention
+      - name: Validate exact GUI retirement, interruption/retry and unchanged MCP runtime and stores
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           CREATOR_LEGACY_RETENTION_EXPERIMENT: '1'
         run: |
-          & ./scripts/native-legacy-uninstall-retention.ps1 -Product '${{ matrix.product }}' -OutputDirectory (Join-Path $env:RUNNER_TEMP 'legacy-retention-${{ matrix.product }}') -AdapterTestExecutable '${{ steps.adapter.outputs.executable }}'
+          & ./scripts/native-legacy-uninstall-retention.ps1 -Product '${{ matrix.product }}' -OutputDirectory (Join-Path $env:RUNNER_TEMP 'legacy-retention-${{ matrix.product }}') -AdapterTestExecutable '${{ steps.adapter.outputs.executable }}' -AdapterMode retirement
       - name: Preserve official bytes, generated uninstaller provenance, synthetic before-images and failures
         if: always()
         uses: actions/upload-artifact@v4

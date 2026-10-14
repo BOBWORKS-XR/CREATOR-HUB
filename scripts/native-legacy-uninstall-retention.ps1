@@ -1,7 +1,8 @@
 param(
     [ValidateSet('mcp', 'setup')][string]$Product = 'mcp',
     [string]$OutputDirectory = '',
-    [string]$AdapterTestExecutable = ''
+    [string]$AdapterTestExecutable = '',
+    [ValidateSet('removal', 'retirement')][string]$AdapterMode = 'removal'
 )
 
 function Require-Legacy($Condition, [string]$Message) {
@@ -213,7 +214,8 @@ function Assert-LegacyResidual($OriginalRoot, $CurrentRoot, $OriginalFile, $Curr
 }
 
 function Complete-LegacyReport($Report, [int]$Seeded, [int]$Expected) {
-    if ($Report.caughtFailure -or $Report.error -or $Report.errors.Count -gt 0 -or $Seeded -ne $Expected -or -not $Report.registrationAndPayloadAbsent) {
+    $operationAccepted = $Report.registrationAndPayloadAbsent -or $Report.guiRetiredCompatibilityRetained
+    if ($Report.caughtFailure -or $Report.error -or $Report.errors.Count -gt 0 -or $Seeded -ne $Expected -or -not $operationAccepted) {
         $Report.status = 'failed'
     }
     $Report.retentionPassed = $Report.status -ceq 'passed'
@@ -235,7 +237,8 @@ function Invoke-LegacyRetention([string]$Id, [string]$Output) {
     $report = [ordered]@{ schemaVersion = 1; scope = 'disposable-official-legacy-uninstall-retention-only'; status = 'failed'
         product = $Id; pin = $pin; runId = $env:GITHUB_RUN_ID; harnessSource = $env:GITHUB_SHA
         releaseReady = $false; productAccepted = $false; migrationAccepted = $false; retentionPassed = $false
-        registrationAndPayloadAbsent = $false; caughtFailure = $false; error = $null
+        registrationAndPayloadAbsent = $false; guiRetiredCompatibilityRetained = $false; adapterMode = $AdapterMode
+        caughtFailure = $false; error = $null
         tools = [Collections.Generic.List[object]]::new(); persistentStores = @(); errors = @() }
     $failure = $null; $installerProof = $null; $seeded = @(); $before = @(); $installRoot = $null
     function Tool([string]$File, [string[]]$Arguments, [string]$Label, [int]$Timeout = 120000, [switch]$GitHub) {
@@ -253,11 +256,12 @@ function Invoke-LegacyRetention([string]$Id, [string]$Output) {
         $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.WindowStyle = 'Hidden'; $psi.WorkingDirectory = $Output
         $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.Environment.Clear()
         foreach ($entry in $nativeEnv.GetEnumerator()) { $psi.Environment[$entry.Key] = $entry.Value }
-        if ($Label -ceq 'run-root-pinned-removal-adapter') {
+        if ($Label -cin @('run-root-pinned-removal-adapter', 'run-root-pinned-retirement-adapter')) {
             foreach ($name in @('GITHUB_ACTIONS', 'RUNNER_ENVIRONMENT', 'RUNNER_OS', 'RUNNER_ARCH', 'GITHUB_REPOSITORY', 'GITHUB_REF', 'CREATOR_LEGACY_RETENTION_EXPERIMENT')) {
                 $psi.Environment[$name] = [Environment]::GetEnvironmentVariable($name)
             }
             $psi.Environment['CREATOR_LEGACY_RETENTION_PRODUCT'] = $pin.id
+            if ($AdapterMode -ceq 'retirement') { $psi.Environment['CREATOR_LEGACY_RETIREMENT_EXPERIMENT'] = '1' }
         }
         if ($GitHub) {
             $psi.Environment['GH_TOKEN'] = $env:GH_TOKEN; $psi.Environment['GH_CONFIG_DIR'] = $ghHome
@@ -358,15 +362,24 @@ function Invoke-LegacyRetention([string]$Id, [string]$Output) {
                 [IO.Path]::GetFileName($AdapterTestExecutable) -cmatch '^creator_hub-[a-f0-9]{16}\.exe$') 'Exact freshly compiled Root unit-test executable required.'
             $adapter = Get-LegacyFileProof $AdapterTestExecutable
             $report.adapterTest = $adapter
-            $null = Tool $AdapterTestExecutable @('--exact', 'legacy_removal_windows::tests::native_windows_pinned_removal', '--ignored', '--nocapture') 'run-root-pinned-removal-adapter' 240000
+            $selector = if ($AdapterMode -ceq 'retirement') { 'legacy_retirement_windows::tests::native_windows_pinned_retirement' }
+                else { 'legacy_removal_windows::tests::native_windows_pinned_removal' }
+            $null = Tool $AdapterTestExecutable @('--exact', $selector, '--ignored', '--nocapture') "run-root-pinned-$AdapterMode-adapter" 240000
             Assert-LegacyRetained $adapter (Get-LegacyFileProof $AdapterTestExecutable)
         } else {
+            Require-Legacy ($AdapterMode -ceq 'removal') 'Retirement requires the exact Root adapter test; no fallback uninstaller is allowed.'
             # _?= must be last and unquoted, even with spaces; no shell/registry command execution.
             $null = Tool $uninstaller @('/S', "_?=$installRoot") 'uninstall-exact-owned-baseline' 180000
         }
         Require-Legacy (@(Get-LegacyRegistrations $pin).Count -eq 0) 'Legacy app registration survived uninstall.'
         Require-Legacy (-not (Test-Path -LiteralPath (Join-Path $installRoot $pin.executable))) 'Legacy executable survived uninstall.'
         foreach ($entry in $before | Where-Object { $_.type -ceq 'file' -and $_.name -cne 'uninstall.exe' }) {
+            if ($AdapterMode -ceq 'retirement' -and $entry.name.StartsWith('server\', [StringComparison]::Ordinal)) {
+                $after = Get-LegacyFileProof (Join-Path $installRoot $entry.name)
+                Require-Legacy ($after.sha256 -ceq $entry.sha256 -and $after.bytes -eq $entry.bytes -and
+                    $after.created -eq $entry.created -and $after.modified -eq $entry.modified) 'Compatibility server changed during GUI retirement.'
+                continue
+            }
             Require-Legacy (-not (Test-Path -LiteralPath (Join-Path $installRoot $entry.name))) 'A known installed payload file survived uninstall; no cleanup deletion is attempted.'
         }
         if (Test-Path -LiteralPath $uninstaller) {
@@ -376,14 +389,20 @@ function Invoke-LegacyRetention([string]$Id, [string]$Output) {
             Require-Legacy (-not (Test-Path -LiteralPath $uninstaller)) 'Exact residual uninstaller removal failed.'
             $report.exactResidualUninstallerRemoved = $true
         }
-        if (Test-Path -LiteralPath $installRoot) {
+        if ($AdapterMode -ceq 'removal' -and (Test-Path -LiteralPath $installRoot)) {
             Assert-LegacyPath $installRoot $local
             Assert-LegacyRetained $rootIdentity (Get-LegacyRootIdentity $installRoot)
             Require-Legacy (@(Get-ChildItem -LiteralPath $installRoot -Force).Count -eq 0) 'Install root has residual entries; no recursive cleanup is allowed.'
             Remove-Item -LiteralPath $installRoot
         }
-        Require-Legacy (-not (Test-Path -LiteralPath $installRoot)) 'Owned fixture install root survived normal uninstall/empty-root removal.'
-        $report.registrationAndPayloadAbsent = $true
+        if ($AdapterMode -ceq 'removal') {
+            Require-Legacy (-not (Test-Path -LiteralPath $installRoot)) 'Owned fixture install root survived normal uninstall/empty-root removal.'
+        } else {
+            Require-Legacy (-not (Test-Path -LiteralPath $uninstaller)) 'Destructive old uninstaller was not retired.'
+            $report.guiRetiredCompatibilityRetained = $true
+            $report.compatibilityRuntimeRetained = ($Id -ceq 'mcp')
+        }
+        $report.registrationAndPayloadAbsent = $AdapterMode -ceq 'removal'
         $report.status = 'passed'
     } catch { $failure = $_; $report.caughtFailure = $true; $report.status = 'failed'; $report.error = $_.Exception.Message }
     finally {

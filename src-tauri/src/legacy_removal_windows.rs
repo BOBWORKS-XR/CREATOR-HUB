@@ -145,6 +145,20 @@ const SETUP: Pin = Pin {
     ],
 };
 
+pub(super) fn accepted_files(app: AppId) -> &'static [(&'static str, u64, &'static str)] {
+    match app {
+        AppId::Mcp => MCP.files,
+        AppId::Setup => SETUP.files,
+    }
+}
+
+pub(super) fn accepted_version(app: AppId) -> &'static str {
+    match app {
+        AppId::Mcp => MCP.version,
+        AppId::Setup => SETUP.version,
+    }
+}
+
 #[derive(PartialEq, Eq)]
 struct FileIdentity {
     created: Option<SystemTime>,
