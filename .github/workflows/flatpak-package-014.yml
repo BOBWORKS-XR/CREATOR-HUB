@@ -1,4 +1,4 @@
-name: Canonical sandbox unified Flatpak packaging and ABI check (not acceptance)
+name: Parsed native linkage and unified Flatpak package check (not acceptance)
 on:
   push:
     branches: [validation/flatpak-package-014]

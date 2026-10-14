@@ -207,6 +207,51 @@ test('runtime linkage requires the native loader and rejects missing libraries/s
     `${known}\nversion GLIBC_2.99 not found`, `${known}\nELF error`, 'not a dynamic executable']) assert.equal(runner.linkageMatches(text), false);
   assert.ok(runner.ABI_SCRIPT.endsWith('2>&1'), 'Capture linker stderr within the bounded probe output');
 });
+test('captured Platform linkage does not mistake resolved libgpg-error for a diagnostic', () => {
+  // Selected unmodified rows from run 38617207622's retained Platform probe.
+  const captured = [
+    '\tlibssl.so.3 => /usr/lib/x86_64-linux-gnu/libssl.so.3 (0x00007f6fdd1ea000)',
+    '\tlibcrypto.so.3 => /usr/lib/x86_64-linux-gnu/libcrypto.so.3 (0x00007f6fdbc00000)',
+    '\tlibwebkit2gtk-4.1.so.0 => /usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0 (0x00007f6fd5a00000)',
+    '\tlibgtk-3.so.0 => /usr/lib/x86_64-linux-gnu/libgtk-3.so.0 (0x00007f6fd5200000)',
+    '\tlibjavascriptcoregtk-4.1.so.0 => /usr/lib/x86_64-linux-gnu/libjavascriptcoregtk-4.1.so.0 (0x00007f6fd2e00000)',
+    '\t/lib64/ld-linux-x86-64.so.2 (0x00007f6fdd2fe000)',
+    '\tlibgpg-error.so.0 => /usr/lib/x86_64-linux-gnu/libgpg-error.so.0 (0x00007f6fd0344000)',
+  ].join('\n');
+  assert.equal(Buffer.byteLength(captured), 579);
+  assert.equal(pkg.sha256(captured), 'abb34ddf5c86516edda132a79d5eb643bb4887528a6c98c68347b7d51f871156');
+  assert.equal(runner.linkageMatches(captured), true);
+  assert.deepEqual(runner.linkageDiagnostics(captured), { loaderFound: true, resolvedLineCount: 7,
+    unrecognizedLineCount: 0, unrecognizedLines: [], selectedLibraries: Object.fromEntries([
+      'libssl.so.3', 'libcrypto.so.3', 'libwebkit2gtk-4.1.so.0', 'libgtk-3.so.0',
+      'libjavascriptcoregtk-4.1.so.0', 'libgpg-error.so.0',
+    ].map(name => [name, `/usr/lib/x86_64-linux-gnu/${name}`])) });
+});
+test('linkage rows refuse real diagnostics, unresolved paths and malformed or missing loader proof', () => {
+  const loader = '/lib64/ld-linux-x86-64.so.2 (0x3)';
+  assert.equal(runner.linkageMatches(`libinvalid-error.so => /usr/lib/libinvalid-error.so (0x1)\n${loader}`), true);
+  for (const line of ['libgpg-error.so.0 => not found', '/app/bin/creator-hub: version GLIBC_2.99 not found',
+    'ERROR: ld.so: object cannot be preloaded', 'ELF error', 'invalid ELF header', 'not a dynamic executable',
+    'undefined symbol: known_function', 'libssl.so.3 => relative/libssl.so.3 (0x1)',
+    'libssl.so.3 => /usr/lib/libssl.so.3', 'libssl.so.3 => /usr/lib/libssl.so.3 (not found)',
+    '/lib64/ld-linux-x86-64.so.2 (0x3) ignored warning']) {
+    const text = `${loader}\n${line}`;
+    assert.equal(runner.linkageMatches(text), false);
+    assert.equal(runner.linkageDiagnostics(text).unrecognizedLineCount, 1);
+  }
+  for (const text of ['ld-linux-x86-64.so.2', 'linux-vdso.so.1 (0x1)',
+    'libssl.so.3 => /usr/lib/libssl.so.3 (0x1)']) assert.equal(runner.linkageMatches(text), false);
+});
+test('static linkage diagnostics keep existing output bound and limit refusal summaries', () => {
+  assert.throws(() => runner.linkageDiagnostics('x'.repeat(65537)), /Bounded linker output/);
+  const diagnostics = runner.linkageDiagnostics(Array(12).fill('x'.repeat(400)).join('\n'));
+  assert.equal(diagnostics.unrecognizedLineCount, 12);
+  assert.equal(diagnostics.unrecognizedLines.length, 8);
+  assert.ok(diagnostics.unrecognizedLines.every(line => line.length === 300));
+  const source = pkg.read(path.join(__dirname, 'flatpak-disposable.cjs'), 65536).toString();
+  assert.ok(source.includes('report.builds[index].linkageDiagnostics = linkageDiagnostics(linkage);'));
+  assert.ok(source.includes('{ timeout: 30000, maxBuffer: 65536 }'));
+});
 test('runner source confines install/update to owned exact ref and does not launch the product', () => {
   const source = pkg.read(path.join(__dirname, 'flatpak-disposable.cjs'), 65536).toString();
   assert.ok(source.includes('env: childEnv')); assert.ok(source.includes('timeout: 600000')); assert.ok(source.includes('maxBuffer: 1024 * 1024'));

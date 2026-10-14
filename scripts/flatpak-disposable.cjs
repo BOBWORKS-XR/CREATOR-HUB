@@ -67,8 +67,31 @@ function parseMetadata(text) {
   return sections;
 }
 
+function linkageDiagnostics(text) {
+  assert.ok(typeof text === 'string' && Buffer.byteLength(text) <= 65536, 'Bounded linker output required');
+  const selected = ['libssl.so.3', 'libcrypto.so.3', 'libgtk-3.so.0', 'libwebkit2gtk-4.1.so.0',
+    'libjavascriptcoregtk-4.1.so.0', 'libgpg-error.so.0'];
+  const diagnostics = { loaderFound: false, resolvedLineCount: 0, unrecognizedLineCount: 0,
+    unrecognizedLines: [], selectedLibraries: {} };
+  // Accept only glibc trace success rows; library names such as libgpg-error are not diagnostics.
+  for (const line of text.split(/\r?\n/).map(value => value.trim()).filter(Boolean)) {
+    const resolved = /^([A-Za-z0-9_.+-]+) => (\/[^\s()]+) \(0x[0-9a-fA-F]+\)$/.exec(line);
+    const direct = /^(\/[^\s()]+|linux-vdso\.so\.1) \(0x[0-9a-fA-F]+\)$/.exec(line);
+    if (!resolved && !direct) {
+      diagnostics.unrecognizedLineCount++;
+      if (diagnostics.unrecognizedLines.length < 8) diagnostics.unrecognizedLines.push(line.slice(0, 300));
+      continue;
+    }
+    diagnostics.resolvedLineCount++;
+    if (resolved && selected.includes(resolved[1])) diagnostics.selectedLibraries[resolved[1]] = resolved[2];
+    if (direct && /\/ld-linux-x86-64\.so\.2$/.test(direct[1])) diagnostics.loaderFound = true;
+  }
+  return diagnostics;
+}
+
 function linkageMatches(text) {
-  return /ld-linux-x86-64\.so\.2/.test(text) && !/not found|not a dynamic executable|invalid|error/i.test(text);
+  const diagnostics = linkageDiagnostics(text);
+  return diagnostics.loaderFound && diagnostics.unrecognizedLineCount === 0;
 }
 
 function verifyFiles(root, expected) {
@@ -156,6 +179,7 @@ function run(stages, decoder, decoderSha256, env = process.env) {
       if (index) report.packageDeploymentChanged = true;
       const linkage = command(`platform-linkage-${index}`, FLATPAK, ['run', '--user', '--sandbox', '--command=sh', pkg.REF, '-c', ABI_SCRIPT], { timeout: 30000, maxBuffer: 65536 });
       report.builds[index].linkage = linkage;
+      report.builds[index].linkageDiagnostics = linkageDiagnostics(linkage);
       report.builds[index].runtimeLinkProbePassed = linkageMatches(linkage);
       assert.ok(report.builds[index].runtimeLinkProbePassed, 'Runtime linker prerequisites failed');
       if (index === 0) {
@@ -189,4 +213,4 @@ if (require.main === module) {
     if (!report.suitePassed) process.exitCode = 1;
   } catch (error) { console.error(String(error.message).slice(0, 1000)); process.exitCode = 1; }
 }
-module.exports = { FLATPAK, BUILDER, RUNTIME, SDK, ABI_SCRIPT, RETENTION_SCRIPT, admission, childEnvironment, inside, parseMetadata, linkageMatches, verifyFiles, run };
+module.exports = { FLATPAK, BUILDER, RUNTIME, SDK, ABI_SCRIPT, RETENTION_SCRIPT, admission, childEnvironment, inside, parseMetadata, linkageDiagnostics, linkageMatches, verifyFiles, run };

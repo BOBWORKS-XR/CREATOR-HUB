@@ -199,8 +199,8 @@ The test remote is unsigned and private, not a publication or update trust model
 
 ## Current Results And Stop Conditions
 
-- Windows source/temp-fixture tests: 21 passed, zero skipped, no native children.
-- Related archive/package source suites: combined 40 passed, one existing Unix
+- Windows source/temp-fixture tests: 24 passed, zero skipped, no native children.
+- Related archive/package source suites: combined 43 passed, one existing Unix
   mode test skipped on Windows; no native Linux/Flatpak execution implied.
 - Local runner inventory: no `flatpak`, `flatpak-builder`, Docker or Podman. No
   accessible fresh Linux executor; existing workflow reruns cannot execute these
@@ -235,6 +235,40 @@ The test remote is unsigned and private, not a publication or update trust model
   and passes afterward, including the original three refusal controls. No native
   rerun was started. Packaged-byte verification, bundle/install/update, ABI,
   renderer and host/MCP/migration acceptance remain untested or false.
+- Actual [run 38617207622, job 116035251224](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38617207622/job/116035251224),
+  source `6b370f1ec0a87c2e75b8eff900f966020e1d8a75`: build, exact packaged/deployed
+  byte checks, bundle creation, isolated installation and permission checks
+  reached the Platform probe. `platform-linkage-0` exited 0 in 129 ms with 11,429
+  stdout bytes and no stderr; stdout SHA-256 is
+  `dfc43bd2b4ac88e435e2259415743eb8d187ef489d25c723096045d75b75ea00`.
+  **Confirmed broken verifier, not a demonstrated ABI failure:** the substring
+  `error` matched the successfully resolved `libgpg-error.so.0`. All 137 retained
+  trace rows have success format; there are no missing-library or diagnostic rows.
+  GTK3, WebKit4.1, JavaScriptCore4.1 and OpenSSL resolve to the recorded Platform's
+  `/usr/lib/x86_64-linux-gnu` paths. The narrow verifier correction accepts only
+  resolved-library, vDSO and absolute native-loader success rows, grounded in the
+  [glibc trace-output source](https://raw.githubusercontent.com/bminor/glibc/master/elf/rtld.c).
+  Unknown rows, actual loader errors, missing libraries/symbol versions, malformed
+  rows and missing loader proof refuse. Reports now include bounded selected-library
+  paths and diagnostic-row summaries from the same output; no extra command runs.
+  The seven-row capture regression (579 bytes, SHA-256
+  `abb34ddf5c86516edda132a79d5eb643bb4887528a6c98c68347b7d51f871156`) failed
+  before the correction and passes afterward. Offline re-evaluation of the full
+  retained trace passes; it does not rewrite the original `suitePassed:false` or
+  `runtimeLinkProbePassed:false`. Original report and trace remain at
+  `artifacts/flatpak-package-38617207622/flatpak-package-38617207622-1/creator-flatpak-xniNE7/flatpak-report.json`.
+  Artifact `11920068187` was independently downloaded and checked: 60,194,476
+  bytes, SHA-256 `f84076b60f12abcb0cc45299bf32541d8779369808958e712e6f5dd87337f50c`.
+  Its actual `creator-hub-0.flatpak` is 60,177,040 bytes, verified SHA-256
+  `fdf6d4bbb03037ac581cc520a99447da4657144f30061208d1c141a81784a7c2`.
+  Recipe SHA-256 remains
+  `4f900874409f7096705338ad54e635a93d0e9d37029a7a9a95a75eef05ed8fe0`;
+  all four grants, three socket-refusal controls, runtime, process environment,
+  deadlines and output limits are unchanged. No app rebuild or native rerun was
+  performed. Private-fixture probing was not reached; update/replacement, actual
+  ELF execution/relocations, GTK/WebKit rendering, resources, backend ABI and
+  host/MCP/migration acceptance remain untested or false. This is static outer-Hub
+  dependency resolution and package-install evidence only, not full runtime acceptance.
 - Existing inspected Linux package receipts label 0.1.12/0.1.13. They were not
   relabeled. Fresh current14 assembly acceptance is main's independently verified
   prerequisite, not replaced by fixture hashes.
