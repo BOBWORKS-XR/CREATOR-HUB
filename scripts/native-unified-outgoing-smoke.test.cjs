@@ -48,16 +48,17 @@ test('fixed MCP target sequence creates settings from the false default, verifyi
   async function exercise(save) {
     let checked = false, saved = null, pending = null;
     const events = [];
-    const setChecked = async value => {
-      events.push(value ? 'check' : 'uncheck');
-      if (checked === value) return; // Playwright emits no change for the existing false default.
-      checked = value; pending = { auto_start: value };
+    const clickLabel = async () => {
+      checked = !checked;
+      events.push(`click:${checked}`);
+      pending = { auto_start: checked };
     };
     const run = vm.runInNewContext(`(async () => { ${sequence} })()`, {
       assert, JSON, config: 'fixed-mcp-settings',
       frames: { mcp: { locator(selector) {
-        assert.equal(selector, '#autoConfig');
-        return { check: () => setChecked(true), uncheck: () => setChecked(false) };
+        if (selector === '#autoConfig') return { isChecked: async () => checked };
+        assert.equal(selector, 'label[for="autoConfig"]');
+        return { click: clickLabel };
       } } },
       bytes(file) { assert.equal(file, 'fixed-mcp-settings'); return saved; },
       async retry(read) {
@@ -71,16 +72,66 @@ test('fixed MCP target sequence creates settings from the false default, verifyi
     }, { timeout: 1000 });
     if (!save) {
       await assert.rejects(run);
-      assert.deepEqual(events, ['check'], 'No uncheck before the first real save is verified');
+      assert.deepEqual(events, ['click:true'], 'No second toggle before the first real save is verified');
       return;
     }
     await run;
-    assert.deepEqual(events, ['check', 'verified:true', 'uncheck', 'verified:false']);
+    assert.deepEqual(events, ['click:true', 'verified:true', 'click:false', 'verified:false']);
     assert.deepEqual(JSON.parse(saved), { auto_start: false });
   }
   await exercise(true);
   await exercise(false);
 });
+
+test('fixed sequence operates B03-style hidden checkbox through its visible label and real change events',
+  { timeout: 15000 }, async t => {
+    const { chromium } = require('playwright');
+    if (!fs.existsSync(chromium.executablePath())) return t.skip('Chromium unavailable; required by the native workflow before tests');
+    const source = fs.readFileSync(path.join(__dirname, 'native-unified-outgoing-smoke.cjs'), 'utf8');
+    const opened = "await frames.mcp.locator('.advanced-section summary').click();";
+    const start = source.indexOf(opened);
+    const end = source.indexOf("await frames.mcp.locator('#mcpServerPath').fill(", start);
+    assert.ok(start >= 0 && end > start);
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      page.setDefaultTimeout(3000);
+      let saved = null, verified = 0;
+      const writes = [];
+      await page.exposeFunction('recordPreference', value => {
+        assert.equal(typeof value, 'boolean');
+        writes.push(value); saved = JSON.stringify({ auto_start: value });
+      });
+      await page.setContent(`<style>
+        .toggle { display: inline-block; height: 24px; position: relative; width: 43px; }
+        .toggle input { height: 0; opacity: 0; width: 0; }
+        .toggle-slider { position: absolute; inset: 0; }
+        </style><label for="autoConfig">Follow Active Project</label>
+        <label class="toggle"><input type="checkbox" id="autoConfig"><span class="toggle-slider"></span></label>
+        <script>
+        window.savedCount = 0;
+        document.querySelector('#autoConfig').addEventListener('change', async event => {
+          await window.recordPreference(event.target.checked);
+          window.savedCount++;
+        });
+        </script>`);
+      assert.equal(await page.locator('#autoConfig').isVisible(), false);
+      assert.equal(await page.locator('label[for="autoConfig"]').isVisible(), true);
+      await assert.rejects(page.locator('#autoConfig').check({ timeout: 200 }), /Timeout/);
+      assert.deepEqual(writes, []);
+      await vm.runInNewContext(`(async () => { ${source.slice(start + opened.length, end)} })()`, {
+        assert, JSON, frames: { mcp: page }, config: 'fixed-mcp-settings',
+        bytes(file) { assert.equal(file, 'fixed-mcp-settings'); return saved; },
+        async retry(read) {
+          await page.waitForFunction(count => window.savedCount >= count, ++verified);
+          read();
+        },
+      }, { timeout: 1000 });
+      assert.deepEqual(writes, [true, false]);
+      assert.equal(verified, 2);
+      assert.deepEqual(JSON.parse(saved), { auto_start: false });
+    } finally { await browser.close(); }
+  });
 test('cancel retains both drafts, kernel process starts, exact config/preferences/content and absence', () => {
   const initial = before(); checks.cancelPreserved(initial, clone(initial));
   for (const mutate of [value => value.backends.mcp.startTicks = '638000000000000000', value => value.backends.setup.parentPid = 99,
