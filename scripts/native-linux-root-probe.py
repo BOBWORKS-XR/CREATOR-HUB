@@ -673,10 +673,13 @@ class AxReferences:
     def identity(self, node, ownership):
         require(node is not None, "Missing AX wire reference")
         name, path = node.app.bus_name, node.path
-        require(isinstance(name, str) and len(name) <= 128 and re.fullmatch(r"(?::[0-9]+\.[0-9]+|org\.[A-Za-z0-9_.-]+)", name)
+        # D-Bus names allow 255 ASCII bytes; observed sandboxed WebKit names
+        # include both the app hash and process UUID and exceed 128.
+        # https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names
+        require(isinstance(name, str) and len(name) <= 255 and re.fullmatch(r"(?::[0-9]+\.[0-9]+|org\.[A-Za-z0-9_.-]+)", name)
                 and isinstance(path, str) and len(path) <= 256 and re.fullmatch(r"/org/a11y/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+", path),
                 "Invalid bounded native AX bus/object reference: " + json.dumps({
-                    "bus": name[:128] if isinstance(name, str) else None, "busType": type(name).__name__,
+                    "bus": name[:255] if isinstance(name, str) else None, "busType": type(name).__name__,
                     "path": path[:256] if isinstance(path, str) else None, "pathType": type(path).__name__}))
         if name not in self.aliases:
             require(len(self.aliases) < 8, "AX bus alias inventory exceeds bound")

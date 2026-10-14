@@ -668,6 +668,21 @@ class OwnershipTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unique owner/PID/UID changed"):
             binding.recheck(full=True)
 
+    def test_observed_long_sandboxed_webkit_bus_shape_requires_same_native_owner(self):
+        binding = self.fixture()
+        p.owned_walk(self.window, binding, self.atspi)
+        alias = "org.webkit.app-" + "9b3c78de1e245fd6201807867fbfb99167b53009df74dc2a7b966fa427c1b696" \
+            + ".Sandboxed.WebProcess-feddcf24-3fea-431d-b647-4c7000000000"
+        self.assertGreater(len(alias), 128)
+        self.assertLessEqual(len(alias), 255)
+        self.bus_records[alias] = dict(self.bus_records[":1.43"])
+        proxy = AxNode(43, 20)
+        proxy.app.bus_name, proxy.path = alias, self.web.path
+        self.assertTrue(binding.same_node(proxy, self.web))
+        self.bus_records[alias]["uid"] = 0
+        with self.assertRaisesRegex(RuntimeError, "unique owner/PID/UID changed"):
+            binding.recheck(full=True)
+
     def test_same_pid_path_but_other_bus_connection_is_not_same_ax_object(self):
         binding = self.fixture()
         p.owned_walk(self.window, binding, self.atspi)
@@ -692,7 +707,7 @@ class OwnershipTests(unittest.TestCase):
             p.owned_walk(self.window, binding, self.atspi)
 
     def test_malformed_ax_bus_or_object_path_and_alias_overflow_refuse(self):
-        for field, value in (("bus", "tcp:foreign"), ("bus", "x" * 129), ("path", "/foreign"),
+        for field, value in (("bus", "tcp:foreign"), ("bus", "org." + "x" * 252), ("path", "/foreign"),
                              ("path", "/org/a11y/../foreign"), ("path", "/org/a11y/" + "x" * 257)):
             with self.subTest(field=field, value=value):
                 binding = self.fixture()
