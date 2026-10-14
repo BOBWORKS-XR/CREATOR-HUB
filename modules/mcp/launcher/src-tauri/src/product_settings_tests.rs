@@ -9,7 +9,11 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        let paths = Paths::new(root.path()).unwrap();
+        #[cfg(unix)]
+        let base = root.path().canonicalize().unwrap();
+        #[cfg(not(unix))]
+        let base = root.path().to_path_buf();
+        let paths = Paths::new(&base).unwrap();
         for path in [&paths.current, &paths.legacy] {
             storage::private_directory(path.parent().unwrap()).unwrap()
         }
@@ -136,6 +140,265 @@ fn missing_server_field_can_be_reviewed_without_inventing_other_defaults() {
         serde_json::from_slice::<serde_json::Value>(&writes[0].after).unwrap(),
         expected
     );
+}
+
+const PREVIOUS_UNIX_FIXTURE: &[u8] = b"disposable pinned previous release server; never executed";
+
+fn unix_fixture_servers(fixture: &Fixture) -> (PathBuf, UnixPreviousServers) {
+    #[cfg(unix)]
+    let base = fixture.root.path().canonicalize().unwrap();
+    #[cfg(not(unix))]
+    let base = fixture.root.path().to_path_buf();
+    let native_data = base.join("native-data");
+    let home = base.join("native-home");
+    let paths = unix_previous_paths("linux", &native_data, Some(&home)).unwrap();
+    let old = paths[0].clone();
+    fs::create_dir_all(old.parent().unwrap()).unwrap();
+    fs::write(&old, PREVIOUS_UNIX_FIXTURE).unwrap();
+    let previous = UnixPreviousServers::new(
+        paths,
+        PREVIOUS_UNIX_FIXTURE.len(),
+        &format!("{:x}", Sha256::digest(PREVIOUS_UNIX_FIXTURE)),
+    );
+    (old, previous)
+}
+
+fn unix_fixture_settings(fixture: &Fixture, old: &Path) -> Vec<u8> {
+    let mut value: serde_json::Value = serde_json::from_slice(&fixture.legacy()).unwrap();
+    value["mcp_server_path"] = serde_json::json!(old);
+    value["auto_start"] = false.into();
+    value["allow_all_tests"] = false.into();
+    let before = serde_json::to_vec_pretty(&value).unwrap();
+    fs::write(&fixture.paths.legacy, &before).unwrap();
+    fs::write(&fixture.paths.current, &before).unwrap();
+    before
+}
+
+#[test]
+fn unix_native_paths_are_finite_and_independent_of_configured_server() {
+    let fixture = Fixture::new();
+    let data = fixture.root.path().join("native-data");
+    let home = fixture.root.path().join("native-home");
+    let linux = unix_previous_paths("linux", &data, Some(&home)).unwrap();
+    assert_eq!(linux.len(), 7);
+    assert_eq!(
+        linux[0],
+        data.join("creator-works-mcp/server/creator-works-mcp.mjs")
+    );
+    assert_eq!(linux[3], data.join("bantworks-mcp/server/banter-mcp.mjs"));
+    assert_eq!(linux[5], data.join("banter-mcp/server/banter-mcp.mjs"));
+    assert_eq!(
+        linux[6],
+        Path::new("/usr/lib/Creator Works MCP/server/creator-works-mcp.mjs")
+    );
+    let mac = unix_previous_paths("macos", &data, Some(&home)).unwrap();
+    assert_eq!(mac.len(), 8);
+    assert_eq!(
+        mac[6],
+        Path::new(
+            "/Applications/Creator Works MCP.app/Contents/Resources/server/creator-works-mcp.mjs"
+        )
+    );
+    assert_eq!(
+        mac[7],
+        home.join(
+            "Applications/Creator Works MCP.app/Contents/Resources/server/creator-works-mcp.mjs"
+        )
+    );
+    assert!(unix_previous_paths("freebsd", &data, Some(&home)).is_err());
+    assert_eq!(UNIX_277_SERVER_BYTES, 1_221_209);
+    assert_eq!(
+        UNIX_277_SERVER_SHA,
+        "8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149"
+    );
+    assert!(!data.exists());
+    assert!(!home.exists());
+}
+
+#[test]
+fn unix_recognizer_rechecks_captured_server_and_keeps_exact_backups_through_transaction() {
+    let fixture = Fixture::new();
+    let (old, previous) = unix_fixture_servers(&fixture);
+    let original = unix_fixture_settings(&fixture, &old);
+    let before = inventory(&fixture.paths).unwrap();
+    let server = fixture.root.path().join("verified/server.mjs");
+    let recognizes = |path: &Path| previous.recognizes(path);
+    let writes = server_writes(&fixture.paths, &before, &server, recognizes).unwrap();
+    assert_eq!(previous.captured.borrow().len(), 1);
+    assert_eq!(fs::read(&fixture.paths.current).unwrap(), original);
+    assert!(!fixture.paths.journal.exists());
+    // Simulated native approval; reuse the original server binding, not a new
+    // hash derived from the configuration or a freshly changed source file.
+    assert_eq!(
+        server_writes(&fixture.paths, &before, &server, recognizes)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(previous.captured.borrow().len(), 1);
+    preserve(&fixture.paths, &before).unwrap();
+    let transaction = recovery::Transaction::prepare(
+        &fixture.paths.journal,
+        writes
+            .iter()
+            .map(|write| {
+                recovery::ReviewedWrite::new(
+                    "MCP retained server path",
+                    &write.path,
+                    &write.before,
+                    &write.after,
+                )
+            })
+            .collect(),
+    )
+    .unwrap();
+    assert!(transaction.resume(|_| true).unwrap().completed);
+    let mut expected: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    expected["mcp_server_path"] = serde_json::json!(server);
+    for path in [&fixture.paths.current, &fixture.paths.legacy] {
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(fs::read(backup_path(path, &original)).unwrap(), original);
+    }
+    assert_eq!(fs::read(old).unwrap(), PREVIOUS_UNIX_FIXTURE);
+    assert!(server_writes(
+        &fixture.paths,
+        &inventory(&fixture.paths).unwrap(),
+        &server,
+        recognizes
+    )
+    .unwrap()
+    .is_empty());
+}
+
+#[test]
+fn unix_changed_or_missing_previous_payload_after_review_refuses_before_publication() {
+    for remove in [false, true] {
+        let fixture = Fixture::new();
+        let (old, previous) = unix_fixture_servers(&fixture);
+        let original = unix_fixture_settings(&fixture, &old);
+        let before = inventory(&fixture.paths).unwrap();
+        let server = fixture.root.path().join("verified/server.mjs");
+        let recognizes = |path: &Path| previous.recognizes(path);
+        assert_eq!(
+            server_writes(&fixture.paths, &before, &server, recognizes)
+                .unwrap()
+                .len(),
+            2
+        );
+        if remove {
+            fs::remove_file(&old).unwrap();
+        } else {
+            let mut changed = PREVIOUS_UNIX_FIXTURE.to_vec();
+            changed[0] ^= 1;
+            fs::write(&old, changed).unwrap();
+        }
+        assert!(server_writes(&fixture.paths, &before, &server, recognizes).is_err());
+        assert_eq!(fs::read(&fixture.paths.current).unwrap(), original);
+        assert_eq!(fs::read(&fixture.paths.legacy).unwrap(), original);
+        assert!(!fixture.paths.journal.exists());
+    }
+}
+
+#[test]
+fn unix_custom_same_bytes_bad_pin_and_conflicting_stores_are_not_adopted() {
+    let fixture = Fixture::new();
+    let (old, previous) = unix_fixture_servers(&fixture);
+    let custom = fixture.root.path().join("custom/creator-works-mcp.mjs");
+    fs::create_dir(custom.parent().unwrap()).unwrap();
+    fs::write(&custom, PREVIOUS_UNIX_FIXTURE).unwrap();
+    let original = unix_fixture_settings(&fixture, &custom);
+    let server = fixture.root.path().join("verified/server.mjs");
+    assert!(server_writes(
+        &fixture.paths,
+        &inventory(&fixture.paths).unwrap(),
+        &server,
+        |path| previous.recognizes(path)
+    )
+    .is_err());
+    assert!(previous.captured.borrow().is_empty());
+    assert_eq!(fs::read(&fixture.paths.current).unwrap(), original);
+    let original = unix_fixture_settings(&fixture, &old);
+    let bad = UnixPreviousServers::new(
+        vec![old.clone()],
+        PREVIOUS_UNIX_FIXTURE.len(),
+        &"0".repeat(64),
+    );
+    assert!(server_writes(
+        &fixture.paths,
+        &inventory(&fixture.paths).unwrap(),
+        &server,
+        |path| bad.recognizes(path)
+    )
+    .is_err());
+    fs::write(&fixture.paths.current, after()).unwrap();
+    assert!(server_writes(
+        &fixture.paths,
+        &inventory(&fixture.paths).unwrap(),
+        &server,
+        |_| panic!("conflict must refuse before recognition")
+    )
+    .is_err());
+    assert_eq!(fs::read(&fixture.paths.legacy).unwrap(), original);
+    assert!(!fixture.paths.journal.exists());
+}
+
+#[test]
+#[ignore = "Requires freshly checksum-verified public v2.7.7 extraction in an explicit proof directory"]
+fn public_unix_277_pin_recognizes_extracted_fixture_before_and_after_review() {
+    let proof = std::env::var_os("CREATOR_UNIX_277_PROOF_DIR")
+        .expect("explicit public-package proof directory, never live native data");
+    let body = storage::read_bytes(&PathBuf::from(proof).join("deb/server/creator-works-mcp.mjs"))
+        .unwrap()
+        .expect("freshly extracted public server");
+    assert_eq!(body.len(), UNIX_277_SERVER_BYTES);
+    assert_eq!(format!("{:x}", Sha256::digest(&body)), UNIX_277_SERVER_SHA);
+    let fixture = Fixture::new();
+    let (old, _) = unix_fixture_servers(&fixture);
+    fs::write(&old, &body).unwrap();
+    let previous = UnixPreviousServers::new(
+        vec![old.clone()],
+        UNIX_277_SERVER_BYTES,
+        UNIX_277_SERVER_SHA,
+    );
+    let original = unix_fixture_settings(&fixture, &old);
+    let before = inventory(&fixture.paths).unwrap();
+    let server = fixture.root.path().join("verified/server.mjs");
+    for _ in 0..2 {
+        let writes = server_writes(&fixture.paths, &before, &server, |path| {
+            previous.recognizes(path)
+        })
+        .unwrap();
+        assert_eq!(writes.len(), 2);
+        assert!(writes.iter().all(|write| write.before == original));
+        assert_eq!(previous.captured.borrow().len(), 1);
+        assert_eq!(fs::read(&fixture.paths.current).unwrap(), original);
+    }
+    let mut changed = body;
+    changed[0] ^= 1;
+    fs::write(&old, changed).unwrap();
+    assert!(server_writes(&fixture.paths, &before, &server, |path| {
+        previous.recognizes(path)
+    })
+    .is_err());
+    assert!(!fixture.paths.journal.exists());
+    assert_eq!(fs::read(&fixture.paths.current).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_linked_cache_payload_and_live_path_selection_in_unit_tests_refuse() {
+    let fixture = Fixture::new();
+    let (old, previous) = unix_fixture_servers(&fixture);
+    let real = fixture.root.path().canonicalize().unwrap().join("real.mjs");
+    fs::write(&real, PREVIOUS_UNIX_FIXTURE).unwrap();
+    fs::remove_file(&old).unwrap();
+    std::os::unix::fs::symlink(&real, &old).unwrap();
+    assert!(previous.recognizes(&old).is_err());
+    assert!(UnixPreviousServers::native().is_err());
+    assert_eq!(fs::read(real).unwrap(), PREVIOUS_UNIX_FIXTURE);
 }
 
 #[test]

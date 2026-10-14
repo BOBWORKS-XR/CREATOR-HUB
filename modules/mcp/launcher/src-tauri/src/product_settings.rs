@@ -1,7 +1,12 @@
 //! Protect the existing shared launcher store; do not introduce a Hub settings copy.
 use crate::{client_migration::recovery, settings_backup as storage};
+#[cfg(any(unix, test))]
+#[path = "../../../../../native/convergence-server-unix.rs"]
+mod unix_server;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+#[cfg(any(unix, test))]
+use std::{cell::RefCell, collections::BTreeMap};
 use std::{
     fs::{self, File},
     io::Write,
@@ -246,6 +251,7 @@ fn server_writes(
     Ok(writes)
 }
 
+#[cfg(not(unix))]
 fn official_previous_server(path: &Path) -> Result<bool, String> {
     // This hash is the server from the byte-verified published 2.7.7 Windows
     // installer. Other versions/platform payloads remain unverified, not guessed.
@@ -266,6 +272,113 @@ fn official_previous_server(path: &Path) -> Result<bool, String> {
     let bytes = storage::read_bytes(path)?
         .ok_or("The previous MCP server is missing; old apps were kept.")?;
     Ok(bytes.len() == 1_221_209 && format!("{:x}", Sha256::digest(&bytes)) == SHA)
+}
+
+// Extracted independently from every checksum-verified public v2.7.7 Unix asset:
+// DEB db47aed5f5acd4e00e8e0782361444de228c4181eeea4970f90116f1f16cf10b
+// RPM 9217fbdfd814d168b2b501bf6bb82661dfcf0482b95b4a67b285d29391dcfa75
+// AppImage 75829fe6def919eb5ff9cc9560d4211e86d316069dfa3c6fc652df3c8fbb09de
+// ARM DMG e4e8ac91938cc32f53c8390003ad6eed0d577d46931083c3182d87df66e5ba78
+// Intel DMG ef6efca28df84da4f5ea01f4bcee24e8ae77964d84b65c3b9a808fbdb755a79e
+// https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/tag/v2.7.7
+#[cfg(any(unix, test))]
+const UNIX_277_SERVER_BYTES: usize = 1_221_209;
+#[cfg(any(unix, test))]
+const UNIX_277_SERVER_SHA: &str =
+    "8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149";
+
+#[cfg(any(unix, test))]
+fn unix_previous_paths(
+    os: &str,
+    native_data: &Path,
+    native_home: Option<&Path>,
+) -> Result<Vec<PathBuf>, String> {
+    if !matches!(os, "linux" | "macos") {
+        return Err("Previous MCP server review is unavailable on this Unix platform.".into());
+    }
+    // The public 2.7.7 launcher canonicalizes its native persistent cache root.
+    // Never canonicalize the configured path or follow a cache leaf alias.
+    let data = fs::canonicalize(native_data).unwrap_or_else(|_| native_data.to_path_buf());
+    let mut paths = Vec::new();
+    for directory in ["creator-works-mcp", "bantworks-mcp", "banter-mcp"] {
+        for name in ["creator-works-mcp.mjs", "banter-mcp.mjs"] {
+            paths.push(data.join(directory).join("server").join(name));
+        }
+    }
+    if os == "linux" {
+        paths.push(PathBuf::from(
+            "/usr/lib/Creator Works MCP/server/creator-works-mcp.mjs",
+        ));
+    } else {
+        let member = "Creator Works MCP.app/Contents/Resources/server/creator-works-mcp.mjs";
+        paths.push(PathBuf::from("/Applications").join(member));
+        if let Some(home) = native_home {
+            paths.push(home.join("Applications").join(member));
+        }
+    }
+    Ok(paths)
+}
+
+#[cfg(any(unix, test))]
+struct UnixPreviousServers {
+    paths: Vec<PathBuf>,
+    bytes: usize,
+    sha256: String,
+    captured: RefCell<BTreeMap<PathBuf, unix_server::PreviousServerSnapshot>>,
+}
+
+#[cfg(any(unix, test))]
+impl UnixPreviousServers {
+    fn new(paths: Vec<PathBuf>, bytes: usize, sha256: &str) -> Self {
+        Self {
+            paths,
+            bytes,
+            sha256: sha256.to_owned(),
+            captured: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    #[cfg(unix)]
+    fn native() -> Result<Self, String> {
+        #[cfg(test)]
+        {
+            Err("Unit tests require explicit disposable previous-server paths.".into())
+        }
+        #[cfg(not(test))]
+        {
+            let data = dirs::data_local_dir()
+                .or_else(dirs::data_dir)
+                .ok_or("Native MCP data directory is unavailable.")?;
+            let home = dirs::home_dir();
+            Ok(Self::new(
+                unix_previous_paths(std::env::consts::OS, &data, home.as_deref())?,
+                UNIX_277_SERVER_BYTES,
+                UNIX_277_SERVER_SHA,
+            ))
+        }
+    }
+
+    fn recognizes(&self, configured: &Path) -> Result<bool, String> {
+        if let Some(previous) = self.captured.borrow().get(configured) {
+            return previous.recognizes(configured);
+        }
+        let Some(expected) = self.paths.iter().find(|path| path.as_path() == configured) else {
+            return Ok(false);
+        };
+        let previous =
+            unix_server::PreviousServerSnapshot::inspect(unix_server::NativeServerPin {
+                path: expected,
+                bytes: self.bytes,
+                sha256: &self.sha256,
+            })?;
+        let recognized = previous.recognizes(configured)?;
+        if recognized {
+            self.captured
+                .borrow_mut()
+                .insert(expected.clone(), previous);
+        }
+        Ok(recognized)
+    }
 }
 
 pub(super) fn native_review_server(app: &tauri::AppHandle) -> Result<ServerTransition, String> {
@@ -298,7 +411,13 @@ pub(super) fn native_review_server(app: &tauri::AppHandle) -> Result<ServerTrans
         );
     }
     let before = inventory(&paths)?;
-    let writes = server_writes(&paths, &before, &runtime.server, official_previous_server)?;
+    #[cfg(unix)]
+    let previous = UnixPreviousServers::native()?;
+    #[cfg(unix)]
+    let recognized = |path: &Path| previous.recognizes(path);
+    #[cfg(not(unix))]
+    let recognized = official_previous_server;
+    let writes = server_writes(&paths, &before, &runtime.server, recognized)?;
     if writes.is_empty() {
         return Ok(ServerTransition {
             changed: false,
@@ -316,7 +435,7 @@ pub(super) fn native_review_server(app: &tauri::AppHandle) -> Result<ServerTrans
         return Err("MCP settings changed during review; nothing was overwritten.".into());
     }
     // Revalidate the exact old payload after the user has reviewed the change.
-    let _ = server_writes(&paths, &before, &runtime.server, official_previous_server)?;
+    let _ = server_writes(&paths, &before, &runtime.server, recognized)?;
     preserve(&paths, &before)?;
     let transaction = recovery::Transaction::prepare(
         &paths.journal,
