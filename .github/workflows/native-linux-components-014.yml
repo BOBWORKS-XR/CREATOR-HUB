@@ -1,0 +1,118 @@
+name: Pinned Linux 14 native embedded components (not migration acceptance)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/linux-components-014]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  components:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    env:
+      CREATOR_LINUX_COMPONENTS_PROBE: '1'
+      CREATOR_LINUX_ROOT_PROBE: '1'
+      CREATOR_UNIX_WINDOW_TEST: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Test probe contracts without launching an application
+        run: |
+          python3 -B scripts/native-linux-root-probe.test.py
+          python3 -B scripts/native-linux-components-probe.test.py
+      - name: Verify exact successful native assembly and source before downloading original ZIP
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            assert.equal(`${context.repo.owner}/${context.repo.repo}`,'BOBWORKS-XR/CREATOR-HUB');
+            assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
+            assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted');assert.equal(process.env.RUNNER_OS,'Linux');assert.equal(process.env.RUNNER_ARCH,'X64');
+            const repo=context.repo,sha='5bb05a21d73c0fc3b2839cbcbd4322832b24aead',tree='f91c61a8e29da84e0dbdbfa642d201cd4c6a3279';
+            const runId=38630742955,artifactId=11927495507,zipSize=386824719;
+            const zipSha='42c5e1a95605158ab084c4cad1db1a6fb5b49f6fe225db9cea868148cccda725';
+            const {data:run}=await github.rest.actions.getWorkflowRun({...repo,run_id:runId});
+            assert.equal(run.id,runId);assert.equal(run.run_attempt,1);assert.equal(run.head_sha,sha);
+            assert.equal(run.repository.id,1364807512);assert.equal(run.status,'completed');assert.equal(run.conclusion,'success');
+            assert.equal(run.event,'push');assert.equal(run.head_branch,'validation/unix-assembly-014');
+            assert.equal(run.path,'.github/workflows/unix-managed-assembly.yml');
+            const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:artifactId});
+            assert.equal(artifact.id,artifactId);assert.equal(artifact.name,'signed-unix-hub-linux-38630742955-1');
+            assert.equal(artifact.expired,false);assert.equal(artifact.size_in_bytes,zipSize);assert.equal(artifact.digest,`sha256:${zipSha}`);
+            assert.equal(artifact.workflow_run.id,runId);assert.equal(artifact.workflow_run.head_sha,sha);
+            assert.equal(artifact.workflow_run.repository_id,1364807512);assert.equal(artifact.workflow_run.head_repository_id,1364807512);
+            const {data:page}=await github.rest.actions.listJobsForWorkflowRunAttempt({...repo,run_id:runId,attempt_number:1,per_page:100});
+            assert.ok(page.jobs.length<=16&&page.total_count===page.jobs.length);
+            const jobs=page.jobs.filter(j=>j.name.startsWith('assembly (linux,'));assert.equal(jobs.length,1);
+            const job=jobs[0];assert.equal(job.id,116081506373);assert.equal(job.run_id,runId);assert.equal(job.run_attempt,1);assert.equal(job.conclusion,'success');
+            const {data:commit}=await github.rest.git.getCommit({...repo,commit_sha:sha});
+            assert.equal(commit.sha,sha);assert.equal(commit.tree.sha,tree);
+            async function source(file) {
+              const {data}=await github.rest.repos.getContent({...repo,path:file,ref:sha});
+              assert.equal(data.encoding,'base64');assert.ok(typeof data.content==='string'&&data.content.length<=131072);
+              const bytes=Buffer.from(data.content,'base64');assert.ok(bytes.length>0&&bytes.length<=65536);
+              return JSON.parse(bytes.toString('utf8'));
+            }
+            const packageJson=await source('package.json'),tauri=await source('src-tauri/tauri.conf.json');
+            assert.equal(packageJson.name,'creator-hub');assert.equal(packageJson.version,'0.1.14');
+            assert.equal(tauri.version,'0.1.14');assert.equal(tauri.productName,'Creator Hub');assert.equal(tauri.identifier,'com.creatorworks.hub');
+            assert.equal(tauri.app.windows[0].title,'Creator Hub - Development Preview');
+            const binding={run:{id:run.id,run_attempt:run.run_attempt,head_sha:run.head_sha,status:run.status,conclusion:run.conclusion,
+              repository:{id:run.repository.id},event:run.event,head_branch:run.head_branch,path:run.path},
+              artifact:{id:artifact.id,name:artifact.name,expired:artifact.expired,size_in_bytes:artifact.size_in_bytes,digest:artifact.digest,workflow_run:artifact.workflow_run},
+              job:{id:job.id,run_id:job.run_id,run_attempt:job.run_attempt,conclusion:job.conclusion,name:job.name},
+              commit:{sha:commit.sha,tree:{sha:commit.tree.sha}},package:packageJson,tauri};
+            const root=fs.realpathSync(process.env.RUNNER_TEMP);
+            const originalBinding=JSON.stringify(binding,null,2)+'\n';assert.ok(Buffer.byteLength(originalBinding)<=196608);
+            fs.writeFileSync(path.join(root,'linux-root-source-binding.json'),originalBinding,{flag:'wx',mode:0o600});
+            const {data}=await github.rest.actions.downloadArtifact({...repo,artifact_id:artifactId,archive_format:'zip'});
+            assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer,'Native Octokit ZIP bytes required');
+            const bytes=Buffer.from(data);assert.equal(bytes.length,zipSize);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),zipSha);
+            fs.writeFileSync(path.join(root,'linux-root-input.zip'),bytes,{flag:'wx',mode:0o600});
+      - name: Verify exact original DEB, assembly receipts and every payload resource/mode
+        run: python3 -B scripts/native-linux-root-probe.py stage
+      - name: Provision native GUI runtime only on this disposable runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libayatana-appindicator3-1 \
+            libxdo3 librsvg2-2 python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core \
+            libx11-6 libxres1 dbus-x11 xvfb xauth openbox
+      - name: Inspect control metadata and install only the exact fresh DEB on this disposable runner
+        run: python3 -B scripts/native-linux-root-probe.py install
+      - name: Native Root terms, both module consent decline and retry, real operation, isolated preference, normal close
+        env:
+          GDK_BACKEND: x11
+          NO_AT_BRIDGE: '0'
+        run: |
+          set -euo pipefail
+          temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          mkdir -m 700 "$temp/linux-components-session"
+          mkdir -m 700 "$temp/linux-components-session/runtime" "$temp/linux-components-session/home"
+          export XDG_RUNTIME_DIR="$temp/linux-components-session/runtime"
+          export HOME="$temp/linux-components-session/home"
+          dbus-run-session -- xvfb-run -a --server-args='-screen 0 1280x800x24' sh -eu -c '
+            openbox --sm-disable >"$RUNNER_TEMP/linux-components-session/openbox.log" 2>&1 & manager=$!
+            trap '\''openbox --exit; wait "$manager"'\'' EXIT
+            /usr/bin/python3 -B "$GITHUB_WORKSPACE/scripts/native-linux-components-probe.py" probe
+          '
+      - name: Retain scoped capture, refusals and original assembly evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-components-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/linux-root-input.zip
+            ${{ runner.temp }}/linux-root-source-binding.json
+            ${{ runner.temp }}/linux-root-probe/*.json
+            ${{ runner.temp }}/linux-root-probe/*.stdout
+            ${{ runner.temp }}/linux-root-probe/*.stderr
+            ${{ runner.temp }}/linux-root-probe/root-window.png
+            ${{ runner.temp }}/linux-components-session/openbox.log
