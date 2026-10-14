@@ -150,10 +150,16 @@ fn inspect() -> Result<Plan, String> {
     // Validate even when legacy apps exist; do not short-circuit a newer policy.
     let already_reviewed = reviewed_at(&record_path()?)?;
     let pending_retirement = retirement_pending()?;
+    let already_using_hub = legacy_apps.is_empty()
+        && !pending_retirement
+        && snapshots[0].bytes().is_some()
+        && creator_hub_mcp_router::Store::installed()
+            .and_then(|store| store.resolve())
+            .is_ok_and(|runtime| settings_use_verified_runtime(&snapshots, &runtime.server));
     let required = migration_required(
         legacy_apps.len(),
         settings.len(),
-        already_reviewed,
+        already_reviewed || already_using_hub,
         pending_retirement,
     );
     Ok(Plan {
@@ -172,11 +178,41 @@ fn inspect() -> Result<Plan, String> {
             retirement_available: false,
             message: if pending_retirement {
                 "An earlier standalone-app cleanup was interrupted. Review fresh backups and connections before resuming; no saved operation is replayed."
+            } else if already_using_hub {
+                "Your MCP settings already use Hub's verified runtime. No standalone apps were found."
             } else {
                 "Hub can take over your existing settings without moving your Unity projects. Old apps stay installed until connection and retirement checks pass."
             }.into(),
         },
     })
+}
+
+fn settings_use_verified_runtime(
+    snapshots: &[stores::Snapshot],
+    verified_server: &std::path::Path,
+) -> bool {
+    let Some(current) = snapshots
+        .iter()
+        .find(|saved| saved.store() == stores::Store::McpCurrent)
+        .and_then(stores::Snapshot::bytes)
+    else {
+        return false;
+    };
+    if snapshots.iter().any(stores::Snapshot::needs_outcome_review)
+        || snapshots
+            .iter()
+            .find(|saved| saved.store() == stores::Store::McpLegacy)
+            .and_then(stores::Snapshot::bytes)
+            .is_some_and(|legacy| legacy != current)
+    {
+        return false;
+    }
+    // Compare only with the independently verified native runtime path. A saved
+    // path cannot select a file to inspect or authorize standalone retirement.
+    serde_json::from_slice::<Value>(current)
+        .ok()
+        .and_then(|value| value["mcp_server_path"].as_str().map(PathBuf::from))
+        .is_some_and(|configured| configured.is_absolute() && configured == verified_server)
 }
 
 fn migration_required(apps: usize, settings: usize, reviewed: bool, pending: bool) -> bool {
@@ -876,6 +912,54 @@ mod tests {
         fs::write(path, serde_json::to_vec(&json!({"revision":1,"records":[{
             "session":"a".repeat(64),"id":1,"command":"review_existing_client_connections","outcome":outcome
         }]})).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn verified_hub_settings_do_not_become_legacy_merely_after_a_save() {
+        let (temp, base, mut plan) = fixture_plan();
+        let server = temp.path().join("verified-runtime/creator-works-mcp.mjs");
+        assert!(!settings_use_verified_runtime(&plan.stores, &server));
+        let file = stores::Store::McpCurrent.path(&base).unwrap();
+        let body = serde_json::to_vec(&json!({"channels":[],"auto_start":false,"mcp_server_path":server,"unknown":"preserve"})).unwrap();
+        fs::write(&file, &body).unwrap();
+        plan.stores[0] = stores::Snapshot::inspect(stores::Store::McpCurrent, &base).unwrap();
+        assert!(settings_use_verified_runtime(&plan.stores, &server));
+        assert!(
+            !server.exists(),
+            "The pure comparison must not open any configured server file"
+        );
+        assert!(!settings_use_verified_runtime(
+            &plan.stores,
+            &temp.path().join("foreign.mjs")
+        ));
+        let legacy = stores::Store::McpLegacy.path(&base).unwrap();
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, &body).unwrap();
+        plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &base).unwrap();
+        assert!(settings_use_verified_runtime(&plan.stores, &server));
+        fs::write(&legacy, br#"{"channels":[],"auto_start":true}"#).unwrap();
+        plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &base).unwrap();
+        assert!(!settings_use_verified_runtime(&plan.stores, &server));
+        plan.stores[1] = stores::Snapshot::inspect(
+            stores::Store::McpLegacy,
+            &stores::Roots {
+                config: temp.path().join("absent"),
+                local_data: base.local_data.clone(),
+            },
+        )
+        .unwrap();
+        write_outcome(&base, "accepted");
+        plan.stores[2] =
+            stores::Snapshot::inspect(stores::Store::McpHostedOutcomes, &base).unwrap();
+        assert!(!settings_use_verified_runtime(&plan.stores, &server));
+        assert_eq!(fs::read(file).unwrap(), body);
+    }
+
+    #[test]
+    fn owned_settings_still_cannot_skip_existing_or_interrupted_app_retirement() {
+        assert!(!migration_required(0, 2, true, false));
+        assert!(migration_required(1, 2, true, false));
+        assert!(migration_required(0, 2, true, true));
     }
 
     #[test]

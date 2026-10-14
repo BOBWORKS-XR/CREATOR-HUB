@@ -1,4 +1,4 @@
-name: Previous Unix server review and native payload preparation (not acceptance)
+name: Prepared native Unix payload and previous-server tests (not acceptance)
 
 on:
   push:
@@ -62,12 +62,12 @@ jobs:
           cargo clippy --release --locked --manifest-path native/unix-transfer/Cargo.toml --all-targets -- -D warnings
           cargo test --release --locked --manifest-path native/unix-transfer/Cargo.toml
           cargo build --release --locked --manifest-path native/unix-transfer/Cargo.toml
-      - name: Test native product settings and previous Unix server recognition
-        run: cargo test --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --features experimental-unix-hosting product_settings -- --quiet
       - name: Prepare only native private modules and router, without selecting a signing key
         env:
           TAURI_CLI_VERBOSITY: '1'
         run: npm run build:unified -- ci-unsigned-unix-payload --managed --experimental-unix --experimental-unix-writable --prepare-managed-unix
+      - name: Test native product settings after build-bound launcher resources exist
+        run: cargo test --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --features experimental-unix-hosting product_settings -- --quiet
       - name: Preserve and verify actual native payload bytes and Unix modes
         run: |
           set -euo pipefail
