@@ -1,0 +1,19 @@
+{
+  "runId": 38624468436,
+  "runAttempt": 1,
+  "jobId": 116059992516,
+  "sourceCommit": "9d015402bbbcb9b6c584cedd88815a4867d7739a",
+  "sourceTree": "127a53c3b8854407e27c74a60d3303662e16df33",
+  "artifactId": 11923252154,
+  "artifactName": "flatpak-package-38624468436-1",
+  "artifact": {"size": 358586204, "sha256": "d0826ea15fa19d3d4745aa75f8ae5ef781c082434a008b57e4a97929bac63e46"},
+  "prefix": "creator-flatpak-YBM5PV",
+  "bundle": {"size": 60176800, "sha256": "09582f687b5bc0c84f370f122b949a7adf2112910bd64f23287c205ea66fb976"},
+  "report": {"size": 47303, "sha256": "2b531e19f085377eb28eda25a1d881d2edf5a85566f9a42c6466b2f57344d79b"},
+  "appCommit": "32745d5e9f4d01e0c732272b3c02d5d9c11cb462677d5c52c2d0417192464d5c",
+  "runtimeCommit": "0bd5091046708e64bc882e8349877cfbae713f6a1e2d0487a5f10af820a2d792",
+  "ref": "app/com.creatorworks.hub/x86_64/flatpak-test",
+  "runtime": "runtime/org.gnome.Platform/x86_64/50",
+  "title": "Creator Hub - Development Preview",
+  "terms": "Terms of use and risk acknowledgement"
+}
