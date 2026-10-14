@@ -1,0 +1,14 @@
+bf84a0b7f3878b6cec82ae0d54086874  usr/bin/creator-works-mcp-launcher
+de9b393fbf70c5c04281320d8aa3aaa5  usr/lib/Creator Works MCP/server/LICENSE
+9f816753e8bdfe4576cb87159a0cd60c  usr/lib/Creator Works MCP/server/runtime/LICENSE
+a8fd0b69281376109c05f7653b5319b2  usr/lib/Creator Works MCP/server/runtime/node
+22c03d8fb1a8cc942889b0bdfd9b20aa  usr/lib/Creator Works MCP/server/runtime/VERSION
+a8fd0b69281376109c05f7653b5319b2  usr/lib/Creator Works MCP/server/runtime/node.exe
+00f6894f0bb765ee3bf261d7294da74f  usr/lib/Creator Works MCP/server/creator-works-mcp.mjs
+095e91481555e8b8110482d97656da69  usr/lib/Creator Works MCP/server/THIRD_PARTY_NOTICES.md
+1a47746f06cf946a3b704bbc72c0eb2c  usr/lib/Creator Works MCP/server/unity-extension/Editor/CreatorWorksMCPLogo.png
+3a6b0553e63305f9924fcd9687216e4d  usr/lib/Creator Works MCP/server/unity-extension/Editor/BanterMCPBridge.cs
+316cfb65fe2870aa87039bf7c2f7c399  usr/share/icons/hicolor/32x32/apps/creator-works-mcp-launcher.png
+04f313816675353ed974afb822ebb742  usr/share/icons/hicolor/256x256@2/apps/creator-works-mcp-launcher.png
+bca29252eb7a62eb635251168fb2fc57  usr/share/icons/hicolor/128x128/apps/creator-works-mcp-launcher.png
+7ff43b0ec3db5f1e99685e9949f0b84f  usr/share/applications/Creator Works MCP.desktop

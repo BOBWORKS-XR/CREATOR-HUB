@@ -1,0 +1,31 @@
+name: Linux DEB helper unprivileged fixtures (not transaction acceptance)
+on:
+  push:
+    branches: [validation/linux-deb-helper-fixtures-014]
+    paths: ['.github/workflows/linux-deb-helper-fixtures-014.yml']
+permissions:
+  contents: read
+jobs:
+  helper-fixtures:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' && github.ref == 'refs/heads/validation/linux-deb-helper-fixtures-014' && github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      CREATOR_LINUX_DEB_HELPER_FIXTURES: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Pure syntax preflight, versions and unprivileged helper fixtures with original logs
+        run: python3 -B scripts/linux-deb-helper-fixtures-probe.py
+      - name: Retain compact source, environment, exits and original logs even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb-helper-fixtures-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/linux-deb-helper-fixtures/result.json
+            ${{ runner.temp }}/linux-deb-helper-fixtures/*.stdout
+            ${{ runner.temp }}/linux-deb-helper-fixtures/*.stderr
