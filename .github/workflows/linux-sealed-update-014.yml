@@ -25,7 +25,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends policykit-1
           sudo systemctl start polkit
-      - name: Install one disposable fixture through actual pkexec and a sealed inherited descriptor
+      - name: Observe the exact native action, then install one sealed fixture through pkexec
         run: python3 -B scripts/linux-sealed-update-probe.py
       - name: Retain original result, including failures and false full-flow gates
         if: always()

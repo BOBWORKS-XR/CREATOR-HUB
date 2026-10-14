@@ -51,6 +51,21 @@ class ProbeTests(unittest.TestCase):
         self.assertNotIn("/rules.d/", p.POLICY.as_posix())
         self.assertIn("never install", action.find("message").text.lower())
 
+    def test_0105_pkaction_success_exit_one_needs_exact_complete_action_and_no_error(self):
+        stdout = (p.ACTION + ":\n  description:       Disposable sealed package mechanism test\n"
+                  "  message:           Disposable runner only; never install this policy on a user PC\n"
+                  "  vendor:            Creator Hub disposable test only\n  implicit any:      yes\n"
+                  "  implicit inactive: yes\n  implicit active:   yes\n"
+                  "  annotation:        org.freedesktop.policykit.exec.path -> /usr/bin/dpkg\n\n")
+        record = {"stdout": stdout, "stderr": "", "exitCode": 1}
+        self.assertTrue(p.action_observed(record, "pkexec version 0.105\n"))
+        self.assertFalse(p.action_observed(record, "pkexec version 126\n"))
+        for changed in [{"stderr": "Error"}, {"stdout": ""}, {"exitCode": 127},
+                        {"stdout": stdout.replace("/usr/bin/dpkg", "/bin/sh")},
+                        {"stdout": stdout.replace("implicit any:      yes", "implicit any:      no")}]:
+            with self.subTest(changed=changed):
+                self.assertFalse(p.action_observed({**record, **changed}, "pkexec version 0.105\n"))
+
     @unittest.skipUnless(platform.system() == "Linux", "Linux kernel seals required")
     def test_real_seals_refuse_writes_shrink_growth_and_preserve_content(self):
         import fcntl

@@ -36,6 +36,18 @@ def policy_xml():
 '''
 
 
+def action_observed(record, version):
+    # The 0.105 pkaction source never resets its initial ret=1 after printing.
+    # Admit that version's exit only with the complete exact expected action.
+    expected = [ACTION + ":", "  description:       Disposable sealed package mechanism test",
+                "  message:           Disposable runner only; never install this policy on a user PC",
+                "  vendor:            Creator Hub disposable test only",
+                "  implicit any:      yes", "  implicit inactive: yes", "  implicit active:   yes",
+                "  annotation:        org.freedesktop.policykit.exec.path -> /usr/bin/dpkg", ""]
+    allowed = (0, 1) if version == "pkexec version 0.105\n" else (0,)
+    return record["exitCode"] in allowed and record["stderr"] == "" and record["stdout"] == "\n".join(expected) + "\n"
+
+
 def require(value, message):
     if not value:
         raise RuntimeError(message)
@@ -117,7 +129,8 @@ def run(root, report):
         deadline = time.monotonic() + 10
         while True:
             ready = command(["/usr/bin/pkaction", "--action-id", ACTION, "--verbose"], env, accepted=(0, 1))
-            if ready["exitCode"] == 0 and ACTION in ready["stdout"]:
+            report["policyObservationLast"] = ready
+            if action_observed(ready, report["pkexecVersion"]["stdout"]):
                 report["policyObserved"] = ready
                 break
             require(time.monotonic() < deadline, "Test-only action was not observed by polkit")
