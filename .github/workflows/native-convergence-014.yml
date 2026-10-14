@@ -1,4 +1,4 @@
-name: Reviewed legacy snapshots and completed migration restart (not release)
+name: Independent guarded Hub update and completed migration restart (not release)
 on:
   push:
     branches: [validation/convergence-014]
@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [upgrade-guide, fresh-components]
+        lane: [upgrade-guide, fresh-components, hub-only-upgrade]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -73,6 +73,14 @@ jobs:
       - name: Exercise fresh installation and both built-in module views
         if: matrix.lane == 'fresh-components'
         run: node scripts/native-builtin-smoke.cjs artifacts/convergence-input/candidate fresh
+      - name: Qualify the guarded Hub update independently of legacy installer bootstrap
+        if: matrix.lane == 'hub-only-upgrade'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREATOR_HUB_ONLY_UPGRADE_TEST: '1'
+        run: |
+          node --test scripts/native-hub-only-upgrade.test.cjs
+          node scripts/native-hub-only-upgrade.cjs artifacts/convergence-input/candidate
       - uses: actions/upload-artifact@v4
         if: always()
         with:
