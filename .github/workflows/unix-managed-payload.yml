@@ -1,4 +1,4 @@
-name: Unsigned native Unix payload preparation (not acceptance)
+name: Current recovery-source Unix payload preparation (not acceptance)
 
 on:
   push:
