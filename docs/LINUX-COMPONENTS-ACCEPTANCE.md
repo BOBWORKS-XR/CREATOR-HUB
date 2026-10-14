@@ -497,3 +497,25 @@ unchanged helper 36 / 2 skipped, fixture source 8 passed, dialog/source 4 passed
 GitHub script parsed. These are source/fixture results only; no native role/name
 capture or component operation has been accepted. The generic helper, reviewed
 Root self-hash, workflow and immutable product pins are unchanged.
+
+## One Capture-Only Follow-up
+
+The authorized diagnostic follow-up reuses the 1455b6a failure capture and exact
+4f product. An explicit `capture-only` entry point and fixed `setup-capture`
+worker stop before any component permission input even if the strict snapshot
+unexpectedly succeeds. Root terms, convergence skip and Setup navigation are
+still real native actions. A strict snapshot refusal retains its original error;
+a successful snapshot is saved with the bounded read-only AX observation and
+then intentionally refuses further input. Neither path can fall through to the
+full component loop or managed-routing approval. The workflow's native command
+is temporarily capture-only; no product, system environment, timeout, title,
+requested `DIALOG` role, generic helper or immutable input pin is changed.
+
+A failing-first regression covers capture-only behavior, including the case
+where strict snapshot succeeds. Preflight: components 34 passed / 1 skipped,
+Root 81 / 1 skipped, unchanged helper 36 / 2 skipped, fixture source 8 and dialog
+source 4 passed: **163 passed / 4 skipped**, plus Python/YAML/JavaScript syntax.
+The dedicated validation branch is authorized for one such native run, not an
+automatic repeat or a product rebuild. Actual AX evidence must precede any
+role/name input-contract correction; this checkpoint contains no new native
+result or component acceptance.

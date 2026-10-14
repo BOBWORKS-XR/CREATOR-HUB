@@ -348,7 +348,7 @@ def backend_ax_observation(request, helper, x11, atspi, binding, root_record, ac
 
 def consent(root, action, request, helper, x11, atspi, root_record):
     app, choice = action.split("-", 1)
-    require(app in APPS and choice in ("decline", "approve"), "Unknown native consent action")
+    require(app in APPS and (choice in ("decline", "approve") or action == "setup-capture"), "Unknown native consent action")
     deadline, routing, observed, matched = time.monotonic() + 20, None, {}, None
     while time.monotonic() < deadline:
         helper.identity(request, helper.Proc())
@@ -373,9 +373,6 @@ def consent(root, action, request, helper, x11, atspi, root_record):
                 if xid:
                     uid_before = B.process_uids(actual["pid"])
                     require(uid_before == root_record["uids"], "Native backend UID changed")
-                    args = ["click", str(xid), APPS[app]["title"], "DIALOG",
-                            "Not now" if choice == "decline" else APPS[app]["approve"]]
-                    req = helper.Request.sealed(args, parsed)
                     snapshot = helper.Request.sealed(["snapshot", str(xid), APPS[app]["title"], "DIALOG"], parsed)
                     B.save_json(root / (action + "-backend-window.json"),
                                 {"readOnly": True, "authorization": False, "actionCount": 0, "receipt": value,
@@ -392,6 +389,14 @@ def consent(root, action, request, helper, x11, atspi, root_record):
                             raise RuntimeError(str(error)[:1000] + "; diagnostic retention failed: "
                                                + type(retention_error).__name__) from error
                         raise
+                    if choice == "capture":
+                        B.save_json(root / (action + "-backend-ax.json"),
+                                    {"readOnly": True, "authorization": False, "strictSnapshot": before,
+                                     "ax": backend_ax_observation(snapshot, helper, x11, atspi, binding, root_record, actual)})
+                        raise RuntimeError("Capture-only stop before component consent input")
+                    args = ["click", str(xid), APPS[app]["title"], "DIALOG",
+                            "Not now" if choice == "decline" else APPS[app]["approve"]]
+                    req = helper.Request.sealed(args, parsed)
                     require(B.process_uids(actual["pid"]) == uid_before, "Backend UID changed before consent")
                     result = helper.perform(req, atspi, helper.Proc(), x11, binding)
                     B.save_json(root / (action + "-backend.json"), {"receipt": value, "native": actual})
@@ -413,7 +418,7 @@ def worker(root, args):
     require(len(args) == 4, "Expected fixed worker action and owned Root PID/start/XID")
     action, pid, start, xid = args
     require(action in CONTROLS or action in ("navigation", "setup-declined", "mcp-declined", "setup-ready",
-            "mcp-ready", "mcp-saved", "setup-decline", "setup-approve", "mcp-decline", "mcp-approve", "failure-snapshot"),
+            "mcp-ready", "mcp-saved", "setup-decline", "setup-approve", "setup-capture", "mcp-decline", "mcp-approve", "failure-snapshot"),
             "Unknown bounded component worker")
     B.verify_stage(root)
     manifest_pins(root)
@@ -432,7 +437,7 @@ def worker(root, args):
     x11, bus = helper.X11(), None
     try:
         helper.bound_window(request, x11)
-        if action.endswith(("-decline", "-approve")):
+        if action.endswith(("-decline", "-approve")) or action == "setup-capture":
             return consent(root, action, request, helper, x11, Atspi, saved["root"])
         renderer = B.unique_json(B.bounded_read(root / "renderer-ownership.json", 8192))
         refs = B.unique_json(B.bounded_read(root / "ax-ownership.json", 8192))
@@ -545,12 +550,13 @@ def wait_backend_gone(record, helper, capture):
     require(backend_gone(record, helper), "Declined backend was not reaped")
 
 
-def probe(root, env):
+def probe(root, env, capture_only=False):
     report = {"scope": SCOPE, **FALSE_GATES, "phase": "verify", "workers": [], "backends": [],
               "candidate": B.SELECTED_CANDIDATE, "productSource": B.SOURCE, "privateSource": B.PRIVATE_SOURCE,
               "productScope": "4f3744d GTK3 baseline; excludes router fix b154e36; not final release acceptance",
               "testSource": env.get("GITHUB_SHA"), "testRunId": env.get("GITHUB_RUN_ID"),
-              "componentsAccepted": False, "normalExitVerified": False, "backendExitCodesObserved": False}
+              "componentsAccepted": False, "normalExitVerified": False, "backendExitCodesObserved": False,
+              "captureOnly": capture_only}
     child, capture, start, xid, failure = None, None, None, None, None
     helper = B.load_helper()
     try:
@@ -587,6 +593,11 @@ def probe(root, env):
             call(root, env_child, "skip-migration", child, start, xid, capture, report)
         report["migrationSkipped"] = True
         fixture_check(root, before)
+        if capture_only:
+            report["phase"] = "capture-setup"
+            call(root, env_child, "view-setup", child, start, xid, capture, report)
+            call(root, env_child, "setup-capture", child, start, xid, capture, report)
+            raise RuntimeError("Capture-only worker unexpectedly returned; further input refused")
         for app in ("setup", "mcp"):
             report["phase"] = "open-" + app
             call(root, env_child, "view-" + app, child, start, xid, capture, report)
@@ -668,8 +679,8 @@ def main():
         print(json.dumps(selected, ensure_ascii=True))
         return
     root = B.ordinary(os.environ["RUNNER_TEMP"]) / "linux-root-probe"
-    require(args and (args == ["probe"] or args[0] == "worker"), "Use candidate-pins, probe or fixed internal worker")
-    result = probe(root, os.environ) if args == ["probe"] else worker(root, args[1:])
+    require(args and (args in (["probe"], ["capture-only"]) or args[0] == "worker"), "Use candidate-pins, probe, capture-only or fixed internal worker")
+    result = probe(root, os.environ, capture_only=args == ["capture-only"]) if args[0] != "worker" else worker(root, args[1:])
     body = json.dumps(result, ensure_ascii=True)
     require(len(body.encode()) <= (B.MAX_JSON if args[0] == "worker" else 1048576), "Component output exceeds bounds")
     print(body if args[0] == "worker" else json.dumps({"phase": result["phase"], **FALSE_GATES}))

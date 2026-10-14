@@ -87,7 +87,7 @@ class ContractTests(unittest.TestCase):
                         "run.run_attempt,pins.ATTEMPT", "job.run_attempt,pins.ATTEMPT", "pins.helperSha256",
                         "Buffer.isBuffer(data)||data instanceof ArrayBuffer", "persist-credentials: false", "if: always()",
                         "ubuntu-22.04", "CREATOR_LINUX_COMPONENTS_PROBE", "validation/linux-components-014",
-                        "native-linux-components-probe.py\" probe", "linux-root-probe/*.json", "linux-root-input.zip"):
+                        "native-linux-components-probe.py\" capture-only", "linux-root-probe/*.json", "linux-root-input.zip"):
             self.assertIn(literal, body)
         self.assertLess(body.index("native-linux-components-probe.test.py"), body.index("downloadArtifact("))
         self.assertLess(body.index("candidate-pins >"), body.index("getWorkflowRun("))
@@ -380,6 +380,44 @@ class NativeReceiptTests(unittest.TestCase):
         self.assertIn("accessibility window", failure["strictSnapshotError"])
         observation.assert_called_once()
         binding.close.assert_called_once()
+
+    def test_capture_only_stops_without_input_even_when_strict_snapshot_passes(self):
+        parent, actual, image = self.fixture()
+        request = types.SimpleNamespace(pid=42, start="100", sha256=p.B.INSTALLED_HUB_PIN[1], executable=parent["executable"])
+        helper, binding = p.B.load_helper(), types.SimpleNamespace(close=mock.Mock())
+        with mock.patch.object(p.os, "getuid", return_value=parent["uids"][0], create=True), \
+                mock.patch.object(p.B, "native_process", return_value=parent), \
+                mock.patch.object(p.B, "process_uids", return_value=parent["uids"]), \
+                mock.patch.object(p.B, "save_json") as save, \
+                mock.patch.object(p, "direct_backend", return_value=(actual, image)), \
+                mock.patch.object(p, "dialog_window", return_value=77), \
+                mock.patch.object(helper, "identity"), \
+                mock.patch.object(helper, "bound_window", return_value={"pid": 43, "client": 3}), \
+                mock.patch.object(helper, "KernelBinding", return_value=binding), \
+                mock.patch.object(p, "backend_ax_observation", return_value={"verified": True}), \
+                mock.patch.object(helper, "perform", return_value={"actionCount": 0}) as perform, \
+                self.assertRaisesRegex(RuntimeError, "Capture-only stop before component consent input"):
+            p.consent(Path("/fixture"), "setup-capture", request, helper, object(), object(), parent)
+        self.assertEqual(perform.call_count, 1)
+        self.assertEqual(perform.call_args.args[0].action, "snapshot")
+        self.assertEqual(save.call_count, 2)
+        self.assertEqual(save.call_args.args[0].name, "setup-capture-backend-ax.json")
+        self.assertFalse(save.call_args.args[1]["authorization"])
+        binding.close.assert_called_once()
+
+    def test_capture_only_cli_has_no_fallthrough_to_component_flow(self):
+        subject = load("components_capture_only", HERE / "native-linux-components-probe.py")
+        with mock.patch.object(subject, "admission"), mock.patch.dict(os.environ, {"RUNNER_TEMP": "/fixture"}, clear=True), \
+                mock.patch.object(subject.B, "ordinary", return_value=Path("/fixture")), \
+                mock.patch.object(subject.sys, "argv", ["probe", "capture-only"]), \
+                mock.patch.object(subject, "probe", return_value={"phase": "capture"}) as probe, \
+                mock.patch("sys.stdout", new_callable=io.StringIO):
+            subject.main()
+        self.assertTrue(probe.call_args.kwargs["capture_only"])
+        source = (HERE / "native-linux-components-probe.py").read_text().split("def probe(", 1)[1].split("def main(", 1)[0]
+        capture = source.split("if capture_only:", 1)[1].split('for app in ("setup", "mcp"):', 1)[0]
+        self.assertIn('"setup-capture"', capture)
+        self.assertIn("raise RuntimeError", capture)
 
     def diagnostic_fixture(self):
         parent, actual, _image = self.fixture()
