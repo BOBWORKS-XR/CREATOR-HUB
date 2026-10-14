@@ -77,9 +77,24 @@ func experimentRoot(_ folder: String) throws -> String {
     try admitted()
     try need(environment["CREATOR_MACOS_LEGACY_ARCHIVE_EXPERIMENT"] == "1", "archive-experiment-opt-in-required")
     let temporary = URL(fileURLWithPath: environment["RUNNER_TEMP"] ?? "").resolvingSymlinksInPath().path
-    try need(folder == temporary + "/macos-legacy-retirement-probe/mcp/gui-archive-experiment"
+    try need(folder == temporary + "/macos-legacy-retirement-probe/mcp/whole-bundle-archive-experiment"
         && URL(fileURLWithPath: folder).resolvingSymlinksInPath().path == folder, "fixed-experiment-folder-required")
     return folder
+}
+func ownedBackup() throws -> String {
+    guard let run = environment["GITHUB_RUN_ID"], let attempt = environment["GITHUB_RUN_ATTEMPT"],
+        run.range(of: "^[0-9]{1,16}$", options: .regularExpression) != nil,
+        attempt.range(of: "^[0-9]{1,4}$", options: .regularExpression) != nil else { throw Refusal(message: "fixed-run-identity-required") }
+    let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/CreatorHubLegacyRetirementProbe/\(run)-\(attempt)").path
+    try need(URL(fileURLWithPath: root).resolvingSymlinksInPath().path == root, "linked-backup-path-refused")
+    return root
+}
+func directoryImage(_ filename: String) throws -> [String: Any] {
+    var value = stat()
+    try need(lstat(filename, &value) == 0 && value.st_mode & S_IFMT == S_IFDIR && value.st_uid == getuid()
+        && URL(fileURLWithPath: filename).resolvingSymlinksInPath().path == filename, "owned-ordinary-bundle-directory-required")
+    return ["device": String(value.st_dev), "inode": String(value.st_ino), "mode": String(value.st_mode),
+        "uid": value.st_uid, "links": String(value.st_nlink)]
 }
 func exclusiveRecord(_ filename: String, _ value: [String: Any]) throws {
     let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
@@ -101,10 +116,10 @@ func waitForBarrier(_ file: String, seconds: Double) throws {
 }
 func review(_ phase: String, folder: String) throws -> NSApplication.ModalResponse {
     let alert = NSAlert()
-    alert.messageText = "MCP GUI-only archival experiment"
-    alert.informativeText = "Disposable runner only. Temporarily archive only Creator Works MCP's GUI executable, leaving all original Node/server paths in place, measure signatures and connections, then restore the exact executable. No settings migration or security bypass. Cancel leaves the app unchanged."
-    alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Archive GUI")
-    alert.window.title = "MCP GUI-only archival experiment"
+    alert.messageText = "MCP whole-bundle archival experiment"
+    alert.informativeText = "Disposable runner only. Temporarily move the complete pinned Creator Works MCP.app into this test's owned Application Support backup, then restore the exact bundle. Its old Node/server paths will be absent during the test. Existing clients are NOT migrated. Measure signatures, registration and connections without modifying app bytes or settings. Cancel leaves the app unchanged."
+    alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Archive app")
+    alert.window.title = "MCP whole-bundle archival experiment"
     NSApp.activate(ignoringOtherApps: true)
     DispatchQueue.main.async {
         do { try exclusiveRecord(folder + "/review-\(phase)-ready.json", ["phase": phase, "pid": getpid(), "nativeModal": true]) }
@@ -140,13 +155,13 @@ func pressReview(_ pid: Int32, _ parent: UInt32, _ hash: String, _ phase: String
     while selected == nil && ProcessInfo.processInfo.systemUptime < deadline {
         if let windows = attr(app, kAXWindowsAttribute) as? [AXUIElement], windows.count == 1 {
             let window = windows[0]
-            if attr(window, kAXTitleAttribute) as? String == "MCP GUI-only archival experiment" {
+            if attr(window, kAXTitleAttribute) as? String == "MCP whole-bundle archival experiment" {
                 var queue = [(window, 0)], found = [AXUIElement](), count = 0
                 while !queue.isEmpty && count < 32 {
                     let (item, depth) = queue.removeFirst(); count += 1
                     var owner: pid_t = 0
                     try need(AXUIElementGetPid(item, &owner) == .success && owner == pid, "foreign-native-review-control")
-                    let title = phase == "cancel" ? "Cancel" : "Archive GUI"
+                    let title = phase == "cancel" ? "Cancel" : "Archive app"
                     if attr(item, kAXRoleAttribute) as? String == kAXButtonRole && attr(item, kAXTitleAttribute) as? String == title { found.append(item) }
                     if depth < 4, let children = attr(item, kAXChildrenAttribute) as? [AXUIElement] {
                         try need(children.count <= 32, "review-children-unbounded"); queue += children.map { ($0, depth + 1) }
@@ -177,10 +192,12 @@ func archiveExperiment(_ folder: String, receipt: String) throws {
         let pid = old["pid"] as? Int32, let expected = old["image"] as? [String: Any], let hash = old["hash"] as? String,
         old["product"] as? String == "mcp" else { throw Refusal(message: "old-mcp-receipt-invalid") }
     let app = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Creator Works MCP.app").path
-    let sourceDirectory = app + "/Contents/MacOS", sourceName = "creator-works-mcp-launcher", source = sourceDirectory + "/" + sourceName
-    let archivedName = "creator-works-mcp-launcher.retained", archived = folder + "/" + archivedName
+    let sourceDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications").path
+    let sourceName = "Creator Works MCP.app", source = app, targetDirectory = try ownedBackup()
+    let archivedName = sourceName, archived = targetDirectory + "/" + archivedName
+    let guiSuffix = "/Contents/MacOS/creator-works-mcp-launcher"
     let sourceFD = open(sourceDirectory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-    let targetFD = open(folder, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    let targetFD = open(targetDirectory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
     try need(sourceFD >= 0 && targetFD >= 0, "archive-directory-open-refused")
     defer { Darwin.close(sourceFD); Darwin.close(targetFD) }
     var sourceDir = stat(), targetDir = stat()
@@ -188,7 +205,7 @@ func archiveExperiment(_ folder: String, receipt: String) throws {
         && targetDir.st_uid == getuid() && sourceDir.st_dev == targetDir.st_dev, "archive-directory-ownership-or-volume-refused")
     func namespace() throws {
         var a = stat(), b = stat()
-        try need(lstat(sourceDirectory, &a) == 0 && lstat(folder, &b) == 0
+        try need(lstat(sourceDirectory, &a) == 0 && lstat(targetDirectory, &b) == 0
             && a.st_dev == sourceDir.st_dev && a.st_ino == sourceDir.st_ino && a.st_mode == sourceDir.st_mode
             && b.st_dev == targetDir.st_dev && b.st_ino == targetDir.st_ino && b.st_mode == targetDir.st_mode
             && URL(fileURLWithPath: sourceDirectory).resolvingSymlinksInPath().path == sourceDirectory, "archive-parent-namespace-drift")
@@ -200,54 +217,65 @@ func archiveExperiment(_ folder: String, receipt: String) throws {
             "old-mcp-kernel-or-native-app-not-absent")
     }
     try namespace(); try closed()
-    let before = try image(source)
+    let before = try image(source + guiSuffix), beforeBundle = try directoryImage(source)
     try need(NSDictionary(dictionary: before).isEqual(to: expected) && before["sha256"] as? String == hash, "reviewed-gui-image-drift")
     NSApplication.shared.setActivationPolicy(.regular); NSApp.finishLaunching()
     try need(try review("cancel", folder: folder) == .alertFirstButtonReturn, "first-native-review-must-cancel")
-    try need(NSDictionary(dictionary: try image(source)).isEqual(to: before), "cancel-mutated-gui")
+    try need(NSDictionary(dictionary: try image(source + guiSuffix)).isEqual(to: before)
+        && NSDictionary(dictionary: try directoryImage(source)).isEqual(to: beforeBundle), "cancel-mutated-bundle")
     try exclusiveRecord(folder + "/cancelled.json", ["nativeCancel": true, "originalGuiUnchanged": true])
     try waitForBarrier(folder + "/cancel-verified.json", seconds: 30)
     try need(try review("approve", folder: folder) == .alertSecondButtonReturn, "native-archive-approval-declined")
     try namespace(); try closed()
-    try need(NSDictionary(dictionary: try image(source)).isEqual(to: before), "gui-drift-after-native-review")
-    try exclusiveRecord(folder + "/00-intent.json", ["nativeApproval": true, "temporaryExperiment": true, "source": source, "archive": archived, "image": before])
+    try need(NSDictionary(dictionary: try image(source + guiSuffix)).isEqual(to: before)
+        && NSDictionary(dictionary: try directoryImage(source)).isEqual(to: beforeBundle), "bundle-drift-after-native-review")
+    try exclusiveRecord(folder + "/00-intent.json", ["nativeApproval": true, "temporaryExperiment": true, "source": source, "archive": archived,
+        "image": before, "bundleDirectory": beforeBundle, "originalRuntimePathsPreserved": false, "clientsMigrated": false])
     var moved = false, restored = false
     do {
-        let sentinel = try image(folder + "/collision-sentinel.bin")
+        let sentinel = try image(targetDirectory + "/collision-sentinel.app/marker.bin")
+        let sentinelDirectory = try directoryImage(targetDirectory + "/collision-sentinel.app")
         errno = 0
-        let collision = renameatx_np(sourceFD, sourceName, targetFD, "collision-sentinel.bin", UInt32(RENAME_EXCL)), code = errno
-        try need(collision == -1 && code == EEXIST && NSDictionary(dictionary: try image(source)).isEqual(to: before)
-            && NSDictionary(dictionary: try image(folder + "/collision-sentinel.bin")).isEqual(to: sentinel), "native-no-overwrite-collision-refusal-unverified")
+        let collision = renameatx_np(sourceFD, sourceName, targetFD, "collision-sentinel.app", UInt32(RENAME_EXCL)), code = errno
+        try need(collision == -1 && code == EEXIST && NSDictionary(dictionary: try image(source + guiSuffix)).isEqual(to: before)
+            && NSDictionary(dictionary: try directoryImage(source)).isEqual(to: beforeBundle)
+            && NSDictionary(dictionary: try directoryImage(targetDirectory + "/collision-sentinel.app")).isEqual(to: sentinelDirectory)
+            && NSDictionary(dictionary: try image(targetDirectory + "/collision-sentinel.app/marker.bin")).isEqual(to: sentinel), "native-no-overwrite-collision-refusal-unverified")
         try namespace(); try closed()
-        try need(renameatx_np(sourceFD, sourceName, targetFD, archivedName, UInt32(RENAME_EXCL)) == 0, "exclusive-gui-only-archive-refused")
+        try need(renameatx_np(sourceFD, sourceName, targetFD, archivedName, UInt32(RENAME_EXCL)) == 0, "exclusive-whole-bundle-archive-refused")
         moved = true
-        try need(fsync(sourceFD) == 0 && fsync(targetFD) == 0 && NSDictionary(dictionary: try image(archived)).isEqual(to: before), "archived-gui-identity-or-sync-refused")
-        try exclusiveRecord(folder + "/01-archived.json", ["nativeApproval": true, "guiOnlyArchived": true, "collisionRefused": true, "image": before])
+        try need(fsync(sourceFD) == 0 && fsync(targetFD) == 0 && NSDictionary(dictionary: try image(archived + guiSuffix)).isEqual(to: before)
+            && NSDictionary(dictionary: try directoryImage(archived)).isEqual(to: beforeBundle), "archived-bundle-identity-or-sync-refused")
+        try exclusiveRecord(folder + "/01-archived.json", ["nativeApproval": true, "wholeBundleArchived": true, "collisionRefused": true,
+            "image": before, "bundleDirectory": beforeBundle, "originalRuntimePathsPreserved": false, "clientsMigrated": false])
         try waitForBarrier(folder + "/restore-now.json", seconds: 180)
     } catch {
         if moved {
             try namespace()
-            try need(NSDictionary(dictionary: try image(archived)).isEqual(to: before)
+            try need(NSDictionary(dictionary: try image(archived + guiSuffix)).isEqual(to: before)
+                && NSDictionary(dictionary: try directoryImage(archived)).isEqual(to: beforeBundle)
                 && renameatx_np(targetFD, archivedName, sourceFD, sourceName, UInt32(RENAME_EXCL)) == 0, "experiment-restore-refused-no-overwrite")
             restored = true; _ = fsync(sourceFD); _ = fsync(targetFD)
-            try exclusiveRecord(folder + "/02-restored.json", ["restored": true, "afterFailure": true, "image": try image(source)])
+            try exclusiveRecord(folder + "/02-restored.json", ["restored": true, "afterFailure": true, "image": try image(source + guiSuffix), "bundleDirectory": try directoryImage(source)])
         }
         throw error
     }
     if moved && !restored {
         try namespace()
-        try need(NSDictionary(dictionary: try image(archived)).isEqual(to: before)
+        try need(NSDictionary(dictionary: try image(archived + guiSuffix)).isEqual(to: before)
+            && NSDictionary(dictionary: try directoryImage(archived)).isEqual(to: beforeBundle)
             && renameatx_np(targetFD, archivedName, sourceFD, sourceName, UInt32(RENAME_EXCL)) == 0, "experiment-restore-refused-no-overwrite")
-        try need(fsync(sourceFD) == 0 && fsync(targetFD) == 0 && NSDictionary(dictionary: try image(source)).isEqual(to: before), "restore-image-or-sync-refused")
-        try exclusiveRecord(folder + "/02-restored.json", ["restored": true, "afterFailure": false, "image": before])
+        try need(fsync(sourceFD) == 0 && fsync(targetFD) == 0 && NSDictionary(dictionary: try image(source + guiSuffix)).isEqual(to: before)
+            && NSDictionary(dictionary: try directoryImage(source)).isEqual(to: beforeBundle), "restore-image-or-sync-refused")
+        try exclusiveRecord(folder + "/02-restored.json", ["restored": true, "afterFailure": false, "image": before, "bundleDirectory": beforeBundle])
     }
-    emit(["diagnosticOnly": true, "retirementMutationAttempted": true, "temporaryGuiOnlyArchive": true, "restored": true, "productionAuthority": false])
+    emit(["diagnosticOnly": true, "retirementMutationAttempted": true, "temporaryWholeBundleArchive": true, "restored": true, "productionAuthority": false])
 }
 func archivedLaunch(_ folder: String) throws {
     _ = try experimentRoot(folder)
     _ = try image(folder + "/01-archived.json")
     let app = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Creator Works MCP.app")
-    try need(!FileManager.default.fileExists(atPath: app.path + "/Contents/MacOS/creator-works-mcp-launcher"), "gui-not-archived-no-launch-measurement")
+    try need(!FileManager.default.fileExists(atPath: app.path), "old-app-url-still-present-no-launch-measurement")
     let config = NSWorkspace.OpenConfiguration(); config.activates = false; config.createsNewApplicationInstance = true
     var result: [String: Any]? = nil
     NSWorkspace.shared.openApplication(at: app, configuration: config) { native, error in
@@ -274,9 +302,11 @@ do {
     } else if args.count == 2 && args[0] == "registration" {
         let (_, _, bundle) = try spec(args[1])
         let urls = LSCopyApplicationURLsForBundleIdentifier(bundle as CFString, nil)?.takeRetainedValue() as? [URL] ?? []
+        let preferred = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle)
         try need(urls.count <= 32, "registration-inventory-unbounded")
         emit(["diagnosticOnly": true, "retirementMutationAttempted": false, "bundle": bundle,
-            "registeredPaths": urls.map { $0.path }, "registrationRemovalAuthority": false])
+            "registeredPaths": urls.map { $0.path }, "registeredPathExists": urls.map { FileManager.default.fileExists(atPath: $0.path) },
+            "workspacePreferredPath": preferred?.path as Any? ?? NSNull(), "registrationRemovalAuthority": false])
     } else if args.count == 5 && args[0] == "inspect", let pid = Int32(args[2]), let parent = UInt32(args[3]) {
         emit(try inspect(args[1], pid, parent, args[4]))
     } else if args.count == 2 && args[0] == "close" {

@@ -105,6 +105,36 @@ function missingContract(facts) {
   // An exited child is not fresh consent, an exclusive install reservation, or registration removal authority.
   return 'native-reviewed-no-overwrite-archive-and-registration-contract-not-established';
 }
+function directoryInventory(app) {
+  const rows = [];
+  function visit(folder, relative) {
+    canonical(folder);
+    const stat = fs.lstatSync(folder, { bigint: true });
+    check(stat.isDirectory() && stat.uid === BigInt(process.getuid()) && rows.length < 24, 'bundle-directory-unverified');
+    rows.push({ relative, identity: identity(stat) });
+    for (const name of fs.readdirSync(folder).sort()) {
+      const file = path.join(folder, name), child = fs.lstatSync(file);
+      check(!child.isSymbolicLink(), 'linked-bundle-child-refused');
+      if (child.isDirectory()) visit(file, relative === '.' ? name : `${relative}/${name}`);
+    }
+  }
+  visit(app, '.'); return rows;
+}
+async function oldPathReconnect(node, server) {
+  check(!fs.existsSync(node) && !fs.existsSync(server), 'old-runtime-path-still-present');
+  const child = spawn(node, [server], { stdio: 'ignore' });
+  let timer;
+  try {
+    return await new Promise((resolve, reject) => {
+      timer = setTimeout(() => { child.unref(); reject(Error('old-path-spawn-outcome-unknown')); }, 5000);
+      child.once('error', error => {
+        if (error.code === 'ENOENT' && child.pid === undefined) resolve({ spawned: false, errorCode: error.code, oldNodeAbsent: true, oldServerAbsent: true });
+        else reject(Error(`old-path-unexpected-spawn-error-${error.code}`));
+      });
+      child.once('exit', (code, signal) => reject(Error(`unexpected-old-path-process-${code}-${signal}`)));
+    });
+  } finally { clearTimeout(timer); }
+}
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function execute(file, args, output, label, ms = 15000, allowFailure = false) {
   const stdout = path.join(output, `${label}.stdout`), stderr = path.join(output, `${label}.stderr`);
@@ -178,6 +208,18 @@ function createStdio(node, server, config, output, label) {
       check(Array.isArray(result.tools) && result.tools.length > 0 && result.tools.length <= 1024, 'stdio-tools-unverified');
       return { tools: result.tools.length, pid: child.pid };
     },
+    async reference() {
+      // Public 2.7.7 source implements this using bundled constants only: no Editor/network/file write.
+      const result = await request('tools/call', { name: 'get_mcp_reference',
+        arguments: { source: 'workflows', entryId: 'networking', limit: 1 } });
+      check(result.isError !== true && Array.isArray(result.content) && result.content.length === 1
+        && result.content[0].type === 'text' && Buffer.byteLength(result.content[0].text) <= 16384, 'readonly-reference-result-unverified');
+      const value = JSON.parse(result.content[0].text);
+      check(value.success === true && value.source === 'workflows' && value.returned === 1
+        && value.entries?.[0]?.entryId === 'networking', 'readonly-reference-content-unverified');
+      return { success: true, pid: child.pid, source: value.source, entryId: value.entries[0].entryId,
+        responseSha256: crypto.createHash('sha256').update(result.content[0].text).digest('hex') };
+    },
     async close() {
       child.stdin.end();
       let timer;
@@ -213,11 +255,19 @@ async function run(env = process.env) {
   }
   async function archiveExperiment(app, pkg, row, stdio, folder) {
     check(row.facts.normalExit && stdio && row.exactOriginalMembersPreserved === undefined, 'closed-pinned-live-stdio-baseline-required');
-    const experiment = path.join(folder, 'gui-archive-experiment'); fs.mkdirSync(experiment, { mode: 0o700 });
-    fs.writeFileSync(path.join(experiment, 'collision-sentinel.bin'), 'DO NOT OVERWRITE: native GUI-only archive collision fixture\n', { flag: 'wx', mode: 0o600 });
-    const sentinel = pin(path.join(experiment, 'collision-sentinel.bin'));
+    const experiment = path.join(folder, 'whole-bundle-archive-experiment'); fs.mkdirSync(experiment, { mode: 0o700 });
+    check(/^[0-9]{1,16}$/.test(env.GITHUB_RUN_ID) && /^[0-9]{1,4}$/.test(env.GITHUB_RUN_ATTEMPT), 'fixed-run-identity-required');
+    const support = canonical(path.join(home, 'Library/Application Support'));
+    const backupBase = path.join(support, 'CreatorHubLegacyRetirementProbe'); fs.mkdirSync(backupBase, { mode: 0o700 });
+    const backup = path.join(backupBase, `${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`); fs.mkdirSync(backup, { mode: 0o700 });
+    const archiveApp = path.join(backup, `${pkg.name}.app`), collision = path.join(backup, 'collision-sentinel.app');
+    fs.mkdirSync(collision, { mode: 0o700 });
+    fs.writeFileSync(path.join(collision, 'marker.bin'), 'DO NOT OVERWRITE: native whole-bundle archive collision fixture\n', { flag: 'wx', mode: 0o600 });
+    const sentinel = pin(path.join(collision, 'marker.bin')), sentinelDirectory = directoryInventory(collision);
     const result = { diagnosticOnly: true, productionAuthority: false, nativeCancel: false, nativeApprove: false,
-      temporaryGuiOnlyArchive: false, restored: false, experimentPassed: false };
+      temporaryWholeBundleArchive: false, restored: false, experimentPassed: false,
+      originalRuntimePathsPreserved: false, clientsMigrated: false, oldApp: app, archiveApp,
+      beforeDirectories: directoryInventory(app) };
     row.archiveExperiment = result; report.nativeReviewAttempted = true;
     const out = fs.openSync(path.join(experiment, 'archive-host.stdout'), 'wx', 0o600), err = fs.openSync(path.join(experiment, 'archive-host.stderr'), 'wx', 0o600);
     let host;
@@ -238,33 +288,37 @@ async function run(env = process.env) {
       await waitRecord('review-cancel-ready.json');
       await native(['press-review', String(host.pid), String(process.pid), helperPin.sha256, 'cancel'], experiment, 'press-native-cancel');
       result.cancel = await waitRecord('cancelled.json');
-      check(result.cancel.nativeCancel === true && isDeepStrictEqual(inventory(app, pkg), row.before), 'native-cancel-bundle-drift');
+      check(result.cancel.nativeCancel === true && isDeepStrictEqual(inventory(app, pkg), row.before)
+        && isDeepStrictEqual(directoryInventory(app), result.beforeDirectories), 'native-cancel-bundle-drift');
       result.stdioAfterCancel = await stdio.list(); result.nativeCancel = true;
+      result.referenceBeforeArchive = await stdio.reference();
       barrier('cancel-verified.json');
       await waitRecord('review-approve-ready.json');
       await native(['press-review', String(host.pid), String(process.pid), helperPin.sha256, 'approve'], experiment, 'press-native-approve');
       result.archived = await waitRecord('01-archived.json'); result.nativeApprove = result.archived.nativeApproval === true;
-      check(result.archived.guiOnlyArchived === true && result.archived.collisionRefused === true, 'exclusive-gui-only-archive-unverified');
-      result.temporaryGuiOnlyArchive = true; report.retirementMutationAttempted = true;
-      const guiRelative = `Contents/MacOS/${pkg.exe}`, original = row.before.find(file => file.relative === guiRelative);
-      check(!fs.existsSync(path.join(app, guiRelative)) && isDeepStrictEqual(pin(path.join(experiment, `${pkg.exe}.retained`)),
-        { bytes: original.bytes, sha256: original.sha256, identity: original.identity }), 'archived-original-gui-identity-mismatch');
-      result.retainedMembers = inventory(app, { ...pkg, members: pkg.members.filter(file => file.relative !== guiRelative) });
-      check(isDeepStrictEqual(result.retainedMembers, row.before.filter(file => file.relative !== guiRelative)), 'non-gui-member-changed');
-      result.bundleSignatureWhileArchived = await execute('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app], experiment, 'archived-bundle-signature', 30000, true);
-      result.gatekeeperWhileArchived = await execute('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=2', app], experiment, 'archived-gatekeeper', 30000, true);
+      check(result.archived.wholeBundleArchived === true && result.archived.collisionRefused === true, 'exclusive-whole-bundle-archive-unverified');
+      result.temporaryWholeBundleArchive = true; report.retirementMutationAttempted = true;
+      result.oldAppUrlAbsent = !fs.existsSync(app); check(result.oldAppUrlAbsent, 'old-app-url-remains');
+      result.archivedMembers = inventory(archiveApp, pkg); result.archivedDirectories = directoryInventory(archiveApp);
+      check(isDeepStrictEqual(result.archivedMembers, row.before) && isDeepStrictEqual(result.archivedDirectories, result.beforeDirectories), 'whole-bundle-member-or-directory-identity-drift');
+      result.bundleSignatureWhileArchived = await execute('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', archiveApp], experiment, 'archived-bundle-signature', 30000, true);
+      result.gatekeeperWhileArchived = await execute('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=2', archiveApp], experiment, 'archived-gatekeeper', 30000, true);
       result.registrationWhileArchived = (await native(['registration', 'mcp'], experiment, 'archived-registration')).receipt;
       result.launchWhileArchived = (await native(['archived-launch', experiment], experiment, 'archived-native-launch')).receipt;
-      result.stdioWhileArchived = await stdio.list(); result.reconnectWhileArchived = {};
-      const server = path.join(app, 'Contents/Resources/server');
+      result.stdioWhileArchived = await stdio.list();
+      result.referenceWhileArchived = await stdio.reference();
+      result.oldPathReconnects = {}; result.archivePathReconnects = {};
+      const oldServer = path.join(app, 'Contents/Resources/server'), server = path.join(archiveApp, 'Contents/Resources/server');
       for (const alias of ['node', 'node.exe']) {
+        result.oldPathReconnects[alias] = await oldPathReconnect(path.join(oldServer, 'runtime', alias), path.join(oldServer, 'creator-works-mcp.mjs'));
         const node = path.join(server, 'runtime', alias);
         const signature = await execute('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', node], experiment, `archived-${alias}-signature`);
         const connection = createStdio(node, path.join(server, 'creator-works-mcp.mjs'), path.join(folder, 'launcher-config.json'), experiment, `archived-reconnect-${alias}`);
-        try { result.reconnectWhileArchived[alias] = { ...await connection.start(), signatureExit: signature.exitCode }; }
-        finally { result.reconnectWhileArchived[alias] = { ...result.reconnectWhileArchived[alias], exit: await connection.close() }; }
+        try { result.archivePathReconnects[alias] = { ...await connection.start(), signatureExit: signature.exitCode, reference: await connection.reference() }; }
+        finally { result.archivePathReconnects[alias] = { ...result.archivePathReconnects[alias], exit: await connection.close() }; }
       }
-      check(isDeepStrictEqual(pin(path.join(experiment, 'collision-sentinel.bin')), sentinel), 'collision-sentinel-changed');
+      check(isDeepStrictEqual(pin(path.join(collision, 'marker.bin')), sentinel)
+        && isDeepStrictEqual(directoryInventory(collision), sentinelDirectory), 'collision-sentinel-changed');
     } catch (error) {
       result.error = error.message;
       throw error;
@@ -272,17 +326,19 @@ async function run(env = process.env) {
       if (!ended) barrier('restore-now.json');
       result.hostExit = await Promise.race([exit, pause(30000).then(() => ({ deadlineExpired: true }))]);
       if (result.hostExit.deadlineExpired) host.unref();
-      if (result.temporaryGuiOnlyArchive || fs.existsSync(path.join(experiment, '02-restored.json'))) {
+      if (result.temporaryWholeBundleArchive || fs.existsSync(path.join(experiment, '02-restored.json'))) {
         result.restoration = await waitRecord('02-restored.json', 1000);
-        result.restored = result.restoration.restored === true && isDeepStrictEqual(inventory(app, pkg), row.before);
-        check(result.restored && result.hostExit.exitCode === 0 && !result.hostExit.signal, 'temporary-gui-archive-restoration-unverified');
+        result.restored = result.restoration.restored === true && isDeepStrictEqual(inventory(app, pkg), row.before)
+          && isDeepStrictEqual(directoryInventory(app), result.beforeDirectories) && !fs.existsSync(archiveApp);
+        check(result.restored && result.hostExit.exitCode === 0 && !result.hostExit.signal, 'temporary-whole-bundle-restoration-unverified');
         result.bundleSignatureRestored = await execute('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app], experiment, 'restored-bundle-signature');
+        result.registrationRestored = (await native(['registration', 'mcp'], experiment, 'restored-registration')).receipt;
       } else {
         result.noMutationOriginalIntact = isDeepStrictEqual(inventory(app, pkg), row.before);
         check(result.noMutationOriginalIntact, 'no-archive-original-gui-drift');
       }
     }
-    result.experimentPassed = result.nativeCancel && result.nativeApprove && result.temporaryGuiOnlyArchive && result.restored;
+    result.experimentPassed = result.nativeCancel && result.nativeApprove && result.temporaryWholeBundleArchive && result.restored;
   }
   try {
     for (const product of ['setup', 'mcp']) {

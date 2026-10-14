@@ -1,4 +1,4 @@
-name: Native public Mac legacy GUI-only reversible archive experiment
+name: Native public Mac legacy whole-bundle reversible archive experiment
 on:
   workflow_dispatch:
   push:
@@ -28,7 +28,7 @@ jobs:
         run: node --test scripts/native-macos-legacy-retirement-probe.test.cjs native/legacy-retirement-unix-proof.test.cjs
       - name: Compile the dedicated diagnostic (no production helper or product rebuild)
         run: swiftc scripts/native-macos-legacy-retirement-probe.swift -o "$RUNNER_TEMP/native-macos-legacy-retirement-probe"
-      - name: Native Cancel then reviewed GUI-only archive, measure original runtimes and restore
+      - name: Native Cancel then whole-bundle archive, measure compatibility break and exact restore
         env:
           CREATOR_MACOS_LEGACY_RETIREMENT_PROBE: '1'
           CREATOR_MACOS_LEGACY_ARCHIVE_EXPERIMENT: '1'
@@ -48,6 +48,6 @@ jobs:
             ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/*.json
             ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/*.stdout
             ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/*.stderr
-            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/gui-archive-experiment/*.json
-            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/gui-archive-experiment/*.stdout
-            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/gui-archive-experiment/*.stderr
+            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/whole-bundle-archive-experiment/*.json
+            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/whole-bundle-archive-experiment/*.stdout
+            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/whole-bundle-archive-experiment/*.stderr

@@ -73,7 +73,7 @@ test('bounded probe retains both runtime names, uses EOF, and never kills/remove
   assert.match(native, /owned-process-or-image-drift-no-close/);
   assert.match(native, /registrationRemovalAuthority": false/);
 });
-test('one temporary MCP GUI-only experiment has native decline/approve and exclusive restore, never generic replay', () => {
+test('one temporary MCP whole-bundle experiment has native decline/approve and exclusive restore, never generic replay', () => {
   const script = fs.readFileSync(path.join(__dirname, 'native-macos-legacy-retirement-probe.cjs'), 'utf8');
   const native = fs.readFileSync(path.join(__dirname, 'native-macos-legacy-retirement-probe.swift'), 'utf8');
   assert.match(native, /CREATOR_MACOS_LEGACY_ARCHIVE_EXPERIMENT/);
@@ -93,6 +93,24 @@ test('one temporary MCP GUI-only experiment has native decline/approve and exclu
   assert.match(script, /bundleSignatureRestored/);
   assert.match(script, /result\.error = error\.message/);
   assert.doesNotMatch(native, /replay|unregister|LSRegisterURL|removeItem|removefile\(/);
+});
+test('whole-bundle archival explicitly measures lost old paths instead of claiming compatibility or migration', () => {
+  const script = fs.readFileSync(path.join(__dirname, 'native-macos-legacy-retirement-probe.cjs'), 'utf8');
+  const native = fs.readFileSync(path.join(__dirname, 'native-macos-legacy-retirement-probe.swift'), 'utf8');
+  assert.match(native, /Library\/Application Support\/CreatorHubLegacyRetirementProbe/);
+  assert.match(native, /sourceName = "Creator Works MCP.app"/);
+  assert.match(native, /directoryImage\(archived\)/);
+  assert.match(native, /old-app-url-still-present-no-launch-measurement/);
+  assert.match(native, /workspacePreferredPath/);
+  assert.match(script, /originalRuntimePathsPreserved: false, clientsMigrated: false/);
+  assert.match(script, /result\.oldAppUrlAbsent = !fs\.existsSync\(app\)/);
+  assert.match(script, /result\.oldPathReconnects\[alias\] = await oldPathReconnect/);
+  assert.match(script, /result\.archivePathReconnects\[alias\]/);
+  assert.match(script, /result\.referenceWhileArchived = await stdio\.reference/);
+  assert.match(script, /source: 'workflows', entryId: 'networking', limit: 1/);
+  assert.match(script, /error\.code === 'ENOENT' && child\.pid === undefined/);
+  assert.match(script, /isDeepStrictEqual\(result\.archivedDirectories, result\.beforeDirectories\)/);
+  assert.doesNotMatch(script, /members: pkg\.members\.filter/);
 });
 test('dedicated workflow cannot select arbitrary input, self-hosted machines or other branches', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/native-macos-legacy-retirement-probe.yml'), 'utf8');

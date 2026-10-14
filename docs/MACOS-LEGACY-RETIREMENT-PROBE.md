@@ -27,7 +27,7 @@ pins remain the baseline. No old release bytes, signatures or metadata change.
 - Related LaunchServices registration paths are read-only observations, not
   authority to unregister an installed app.
 
-## One Reversible Experiment
+## Historical GUI-Only Experiment
 
 After the measured normal-close/stdio baseline, exercise **only MCP's GUI
 executable**. A dedicated native NSAlert must first be cancelled, followed by a
@@ -116,3 +116,27 @@ Changed implementation paths are only the dedicated workflow and
 its compact evidence and the original audit's follow-up link record the result.
 The 32 portable refusal/source checks passed before native execution. The later
 evidence regression checks recorded results only; they do not rerun native code.
+
+## Next Bounded Experiment: Complete Bundle
+
+The next native run changes **one mutation variable**: instead of removing only
+the executable, exclusively rename the complete pinned per-user MCP `.app` into
+`~/Library/Application Support/CreatorHubLegacyRetirementProbe/<run>-<attempt>/`.
+Reuse the same source, baselines, native Cancel/Approve, held directory descriptors,
+collision refusal, three exclusive journal records and exact restoration.
+
+Capture every file and directory inode/metadata before, at the archive and after
+restoration; verify the complete archived bundle with native strict codesign.
+Measure old-URL absence, LaunchServices URLs/existence and NSWorkspace's preferred
+URL, plus an actual old-URL launch attempt. Keep the original stdio connection
+alive and call `tools/list` and bounded `get_mcp_reference` before/while archived.
+The public 2.7.7 reference implementation uses bundled constants only; use source
+`workflows`, entry `networking`, limit 1, never Unity or project operations.
+
+Actually attempt both old bundled-Node commands, capture their refusal, then
+measure both new archive-path connections and read-only references. **Moving the
+runtime changes its paths. This is not original-path preservation or client/settings
+migration.** Existing unsupported or unmigrated clients must block eventual product
+cleanup. Restore the exact bundle after the measurement, retaining any failure;
+no new recovery framework, symlink, signing change, production deletion or Root
+wiring is part of this experiment. No additional hypothesis/run loop is planned.
