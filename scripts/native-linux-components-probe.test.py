@@ -230,14 +230,54 @@ class OwnershipTests(unittest.TestCase):
 
 
 class NativeReceiptTests(unittest.TestCase):
+    def task_listing(self, *tids):
+        listing = mock.MagicMock()
+        listing.__enter__.return_value = [types.SimpleNamespace(name=str(tid), is_dir=lambda **_: True) for tid in tids]
+        return listing
+
+    def test_worker_thread_child_is_not_lost_when_leader_has_no_child(self):
+        files = {"/proc/42/task/42/children": b"", "/proc/42/task/45/children": b"43 "}
+        def opener(path, _mode):
+            return io.BytesIO(files[path])
+        with mock.patch.object(p.os, "scandir", return_value=self.task_listing(42, 45)):
+            self.assertEqual(p.proc_children(42, opener), [43])
+
     def test_procfs_children_is_bounded_without_an_ordinary_file_size_assumption(self):
         opener = mock.Mock(return_value=io.BytesIO(b"43 44 "))
-        self.assertEqual(p.proc_children(42, opener), [43, 44])
+        with mock.patch.object(p.os, "scandir", return_value=self.task_listing(42)):
+            self.assertEqual(p.proc_children(42, opener), [43, 44])
         opener.assert_called_once_with("/proc/42/task/42/children", "rb")
-        self.assertEqual(p.proc_children(42, lambda *_: io.BytesIO(b"")), [])
+        with mock.patch.object(p.os, "scandir", return_value=self.task_listing(42)):
+            self.assertEqual(p.proc_children(42, lambda *_: io.BytesIO(b"")), [])
         for body in (b"1 ", b"42 ", b"43 43 ", b"0", b"01", b"43\x00", b"9 "*33, b"9"*4097):
-            with self.subTest(body=body[:20]), self.assertRaises(RuntimeError):
+            with mock.patch.object(p.os, "scandir", return_value=self.task_listing(42)), \
+                    self.subTest(body=body[:20]), self.assertRaises(RuntimeError):
                 p.proc_children(42, lambda *_: io.BytesIO(body))
+
+    def test_task_inventory_and_aggregate_child_bounds_and_vanished_worker(self):
+        for tids in ((45,), (42, 42), (42, "bad"), (42, 0), tuple(range(42, 299))):
+            with mock.patch.object(p.os, "scandir", return_value=self.task_listing(*tids)), \
+                    self.subTest(tids=tids[:3]), self.assertRaises(RuntimeError):
+                p.proc_children(42, lambda *_: io.BytesIO(b""))
+        linked = self.task_listing(42)
+        linked.__enter__.return_value[0].is_dir = mock.Mock(return_value=False)
+        with mock.patch.object(p.os, "scandir", return_value=linked), self.assertRaises(RuntimeError):
+            p.proc_children(42, lambda *_: io.BytesIO(b""))
+        linked.__enter__.return_value[0].is_dir.assert_called_once_with(follow_symlinks=False)
+        def gone(path, _mode):
+            if path == "/proc/42/task/45/children":
+                raise FileNotFoundError("Exited worker fixture")
+            return io.BytesIO(b"43 ")
+        with mock.patch.object(p.os, "scandir", return_value=self.task_listing(42, 45)):
+            self.assertEqual(p.proc_children(42, gone), [43])
+        with mock.patch.object(p.os, "scandir", return_value=self.task_listing(42)), \
+                self.assertRaisesRegex(RuntimeError, "leader disappeared"):
+            p.proc_children(42, mock.Mock(side_effect=FileNotFoundError("Exited Root fixture")))
+        def many(path, _mode):
+            children = range(100, 132) if path == "/proc/42/task/42/children" else range(132, 164)
+            return io.BytesIO((" ".join(map(str, children)) + " ").encode())
+        with mock.patch.object(p.os, "scandir", return_value=self.task_listing(42, 45)), self.assertRaisesRegex(RuntimeError, "aggregate"):
+            p.proc_children(42, many)
 
     def fixture(self):
         parent = {"pid": 42, "startTime": "100", "uids": [os.getuid()]*4 if hasattr(os, "getuid") else [1000]*4,

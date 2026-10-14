@@ -209,15 +209,35 @@ def ready_snapshot(snapshot, state):
 
 def proc_children(pid, opener=open):
     require(type(pid) is int and 1 < pid < 2**31, "Invalid owned Root PID")
-    # procfs reports zero st_size; ordinary-file hashing cannot read this API.
-    with opener(f"/proc/{pid}/task/{pid}/children", "rb") as stream:
-        body = stream.read(4097)
-    require(re.fullmatch(rb"(?:[1-9][0-9]*\s*)*", body) and len(body.split()) <= 32,
-            "Root child inventory exceeds bound")
-    require(len(body) <= 4096 and len(set(body.split())) == len(body.split()), "Ambiguous/oversized Root child inventory")
-    result = [int(word) for word in body.split()]
-    require(all(1 < child < 2**31 and child != pid for child in result), "Invalid direct-child PID")
-    return result
+    # children belongs to ONE task, not the process: worker-thread spawns must
+    # be inventoried too. Never infer complete absence from this racy API.
+    # https://man7.org/linux/man-pages/man5/proc_tid_children.5.html
+    tasks = []
+    with os.scandir(f"/proc/{pid}/task") as entries:
+        for entry in entries:
+            require(len(tasks) < 256 and re.fullmatch(r"[1-9][0-9]{0,9}", entry.name)
+                    and 1 < int(entry.name) < 2**31 and entry.is_dir(follow_symlinks=False), "Invalid/bounded Root task inventory")
+            tasks.append(int(entry.name))
+    require(pid in tasks and len(set(tasks)) == len(tasks), "Root leader missing or duplicate task inventory")
+    result = set()
+    for tid in sorted(tasks):
+        try:
+            # procfs reports zero st_size; ordinary-file hashing cannot read it.
+            with opener(f"/proc/{pid}/task/{tid}/children", "rb") as stream:
+                body = stream.read(4097)
+        except FileNotFoundError:
+            require(tid != pid, "Root leader disappeared during inventory")
+            continue
+        words = body.split()
+        require(len(body) <= 4096 and re.fullmatch(rb"(?:[1-9][0-9]*\s*)*", body) and len(words) <= 32
+                and len(set(words)) == len(words), "Ambiguous/oversized Root child inventory")
+        children = [int(word) for word in words]
+        require(all(1 < child < 2**31 and child != pid for child in children), "Invalid direct-child PID")
+        result.update(children)
+        require(len(result) <= 32, "Root aggregate child inventory exceeds bound")
+    # Inventory only. direct_backend independently rechecks native PPID, UID,
+    # start, manifest hash/size and seals before any dialog can be authorized.
+    return sorted(result)
 
 
 def direct_backend(root_record, app, helper, observed=None):

@@ -357,3 +357,70 @@ also rehashed the original ZIP, checked all six fixed members' hashes/sizes/
 Unix modes, verified the complete payload inventory and native integrity receipt,
 and matched the exact raw-to-DEB Tauri marker transform to the installed hash.
 No application or installer was executed for that local verification.
+
+## Actual 4f GTK3 Run: Consent Discovery Unverified
+
+Run `38651341483`, test source
+`64c89e92f86ee91187d16ea90399859e77b593f0`, job `116150612796`, failed at
+`open-setup`: `Exact native component consent readiness deadline: setup-decline`.
+The worker exited after 20484 ms. Exact upstream source/artifact/ZIP, resource
+hash/mode/receipt, actual DEB install and Root ownership checks passed. Root
+terms acceptance/save, convergence `Continue for now` and one native
+`View Creator Project Setup` press passed. No Setup consent input occurred;
+neither module operation nor preference-save acceptance was reached.
+
+Compact artifact `11934663714`, `native-linux-components-capture-38651341483-1`,
+40763 bytes, SHA-256
+`33048b32ca33d25d5091f1df9474c8848a43caeddcd9bdd21107b24fd7a4bc63`,
+was downloaded and rehashed independently. Original ZIP and bounded extracted
+reports are retained under `artifacts/native-linux-components-38651341483`.
+The original product remains the exact 4f assembly/ZIP/DEB/installed-image pins
+above, not current HEAD or the newer router fix. No product rebuild is required
+for this harness correction, and no original failure evidence is overwritten.
+
+Actual captured process/window evidence:
+
+- Root PID 3391/start 12714, UID 1001, installed kernel-image SHA-256
+  `524e7bc9505f7de4f22e29818ad6ba59b1fb4decf3b7bb2655b362f9240ba968`;
+  XRes Root window 4194307/client 4194304, exact Root title.
+- The child observation recorded only system `WebKitNetworkProcess` PID
+  3415/start 12741 and `WebKitWebProcess` PID 3419/start 12742, both direct
+  children with UID 1001 and recorded kernel-image hashes. `matchedBackend` is
+  null: no actual Setup image, native Setup window or Setup exit status was bound.
+- The owned Root AX snapshot shows the Setup opening surface, not a recorded
+  declined result. Bitmap capture correctly refused `Other managed windows
+  present`; the capture does not record that other window's owner. Its existence
+  does not prove a Setup dialog or authorize any input.
+- One owned Root `WM_DELETE_WINDOW` was sent. Root was not reaped as zero:
+  `rootExitCode` is null, output EOF is false, `normalExitVerified` is false,
+  and disposable session teardown was required. No signal/force-kill was sent.
+
+Classification: **confirmed harness inventory defect; actual product cause
+unverified**. The previous `/proc/PID/task/PID/children` read covers only the
+leader task. It can miss a child spawned by another Root thread. The primary
+[proc children contract](https://man7.org/linux/man-pages/man5/proc_tid_children.5.html)
+states that this list is per-task and may omit live children during exits;
+[kernel proc documentation](https://docs.kernel.org/filesystems/proc.html)
+defines the per-thread task directory and native parent/UID fields. Neither an
+empty list nor this capture establishes process absence. Early Setup exit versus
+an undiscovered live child/window therefore remains **unknown**, not a proven
+product refusal or a proven GTK dialog.
+
+A failing-first pure regression reproduces leader children empty while worker
+thread children contain the backend PID. The minimal fix inventories at most
+256 Root tasks, reads at most 4096 bytes per task and retains at most 32 distinct
+child PIDs. Invalid/symlink task entries, a missing leader, oversized/ambiguous
+lists and aggregate overflow refuse. A worker disappearing during the read is
+not absence proof. Inventory is not authority: exact native PPID/UID/start,
+manifest hash/size, executable seals, held/current image, XRes and strict
+single-process GTK title/button checks remain unchanged. Read-only observed-child
+diagnostics never authorize input. No titles, deadlines, environment, sandbox,
+ownership allowlist or payload bytes changed; no automatic repeat is dispatched.
+
+Correction preflight on Windows: components 28 passed / 1 skipped, Root 81 /
+1 skipped, unchanged native helper 36 / 2 skipped, fixture source 8 passed,
+dialog/source 4 passed: **157 passed / 4 skipped**. Python ASTs, workflow YAML
+and its embedded GitHub script parsed. The Root helper self-hash is unchanged.
+This proves the narrow source/test contracts only. The capture cannot identify
+the other managed window retrospectively; that missing native evidence is still
+required before classifying Setup as a product failure or accepting this flow.
