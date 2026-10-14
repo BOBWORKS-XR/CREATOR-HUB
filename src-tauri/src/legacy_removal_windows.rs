@@ -41,6 +41,7 @@ fn uninstall_command(path: &Path) -> Result<std::process::Command, String> {
         "ProgramFiles(x86)",
         "ProgramW6432",
         "PROCESSOR_ARCHITECTURE",
+        "NUMBER_OF_PROCESSORS",
         "TEMP",
         "TMP",
     ] {
@@ -48,7 +49,19 @@ fn uninstall_command(path: &Path) -> Result<std::process::Command, String> {
             command.env(name, value);
         }
     }
-    command.env("PATH", system.join("System32"));
+    command.env(
+        "PATH",
+        std::env::join_paths([
+            system.join("System32"),
+            system.clone(),
+            system.join("System32/WindowsPowerShell/v1.0"),
+        ])
+        .map_err(|_| "Cannot establish the sanitized Windows tool path.")?,
+    );
+    command.env(
+        "PSModulePath",
+        system.join("System32/WindowsPowerShell/v1.0/Modules"),
+    );
     Ok(command)
 }
 
@@ -535,6 +548,44 @@ mod tests {
                 assert_eq!(hash.len(), 64);
                 assert!(hash.bytes().all(|c| c.is_ascii_hexdigit()));
             }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn uninstall_environment_matches_sanitized_system_modules_without_injection() {
+        let command = uninstall_command(Path::new("fixture-uninstaller.exe")).unwrap();
+        let values: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        assert_eq!(
+            values
+                .get(std::ffi::OsStr::new("PSModulePath"))
+                .copied()
+                .flatten(),
+            Some(
+                system
+                    .join("System32/WindowsPowerShell/v1.0/Modules")
+                    .as_os_str()
+            )
+        );
+        let expected = std::env::join_paths([
+            system.join("System32"),
+            system.clone(),
+            system.join("System32/WindowsPowerShell/v1.0"),
+        ])
+        .unwrap();
+        assert_eq!(
+            values.get(std::ffi::OsStr::new("PATH")).copied().flatten(),
+            Some(expected.as_os_str())
+        );
+        for forbidden in [
+            "NODE_OPTIONS",
+            "NODE_PATH",
+            "GH_TOKEN",
+            "PSModuleAnalysisCachePath",
+            "RUSTC_WRAPPER",
+        ] {
+            assert!(!values.contains_key(std::ffi::OsStr::new(forbidden)));
         }
     }
 
