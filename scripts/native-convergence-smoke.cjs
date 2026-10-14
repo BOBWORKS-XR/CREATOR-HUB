@@ -65,9 +65,9 @@ async function main(candidate) {
   const manifest = JSON.parse(fs.readFileSync(path.join(candidate, 'builtin-manifest.json')));
   assert.equal(manifest.managedRouting?.protocol, 1);
   verifyStage(path.join(candidate, 'modules'), manifest);
-  const out = path.resolve('artifacts', `native-convergence-${Date.now()}`);
+  const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
   fs.mkdirSync(out, { recursive: true });
-  const report = { harnessSourceRevision: process.env.GITHUB_SHA,
+  const report = { scope: 'actual-first-launch-convergence-not-signed-update', harnessSourceRevision: process.env.GITHUB_SHA,
     candidateSourceRevision: process.env.CREATOR_CANDIDATE_SOURCE, checks: [], passed: false,
     liveAiAppAccepted: false, signedInAppUpdateAccepted: false, releaseReady: false };
   let child, browser, page, oldClient, oldTransport, policyEnabled = false;

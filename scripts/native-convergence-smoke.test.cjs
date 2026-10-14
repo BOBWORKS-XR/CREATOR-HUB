@@ -21,6 +21,7 @@ test('migration comparison permits only the reviewed server field', () => {
 test('actual guide harness fences inspection and distinguishes flow acceptance from release', () => {
   const source = fs.readFileSync(path.join(__dirname, 'native-convergence-smoke.cjs'), 'utf8');
   assert.match(source, /async function main\(candidate\)[\s\S]*?admission\(\); requireDisposable\(\);[\s\S]*?JSON\.parse\(fs\.readFileSync/);
+  assert.ok(source.includes("path.resolve('artifacts', `native-suite-${Date.now()}`)"), 'Keep the existing owned WebView policy-directory contract');
   for (const step of ['#convergence-prepare', '#convergence-connections', '#convergence-retire', 'Move selected connections', 'Move server path', 'Finish migration']) assert.ok(source.includes(step));
   assert.match(source, /oldClient\.listTools[\s\S]*?registrationNames\(\), \['Creator Hub'\][\s\S]*?oldClient\.listTools/);
   assert.match(source, /signedInAppUpdateAccepted: false/); assert.match(source, /liveAiAppAccepted: false/); assert.match(source, /releaseReady: false/);

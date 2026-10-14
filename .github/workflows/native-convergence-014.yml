@@ -1,4 +1,4 @@
-name: Actual Windows first-launch convergence (not release)
+name: Actual Windows first-launch convergence with owned policy directory (not release)
 on:
   push:
     branches: [validation/convergence-014]
@@ -69,6 +69,6 @@ jobs:
         if: always()
         with:
           name: native-convergence-${{ github.sha }}
-          path: artifacts/native-convergence-*/
+          path: artifacts/native-suite-*/
           retention-days: 7
           if-no-files-found: warn
