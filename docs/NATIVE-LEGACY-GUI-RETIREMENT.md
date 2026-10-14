@@ -40,11 +40,16 @@ the compatibility guarantee and require review before production retirement.
 ## Evidence And Remaining Gates
 
 - Local Windows: five handle/journal/reservation regressions and seventeen
-  shortcut inspector regressions pass. Root suite: 313 passed, twelve ignored,
+  shortcut inspector regressions pass (eighteen after the generated-path
+  regression). Root suite before that additional regression: 313 passed, twelve ignored,
   one native-retirement test separately excluded; strict Clippy passes.
 - The disposable official-installer workflow now exercises interrupted retirement,
   native resume and idempotence, exact runtime/store retention, and existing
-  legacy stdio plus same-path reconnection. Its current run is pending.
+  legacy stdio plus same-path reconnection. Run 38561260878 refused both products
+  before mutation: the shortcut reader generated a PowerShell path containing
+  forward slashes, rejected by its exact-path guard. Original reports remain in
+  `artifacts/legacy-retirement-38561260878/`. Component-wise joins now pass a new
+  no-spawn native-command regression; the corrected native run remains pending.
 - The older complete-uninstaller acceptance remains preserved at run 38542947181;
   it does not establish this separate compatibility-retirement operation.
 - Production coordinator/native consent, GUI quiescence, signed-router reconnect,

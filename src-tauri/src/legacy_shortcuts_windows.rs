@@ -557,8 +557,22 @@ mod native {
         let home = folder(0x28)?;
         let local = folder(0x1c)?;
         let roaming = folder(0x1a)?;
-        let executable = system.join("WindowsPowerShell/v1.0/powershell.exe");
-        reject_redirects(&executable)?;
+        let command = command_with_folders(path, &system, &windows, &home, &local, &roaming)?;
+        reject_redirects(Path::new(command.get_program()))?;
+        Ok(command)
+    }
+
+    // Pure construction lets fixtures check exact OS spellings without inspection/spawn.
+    pub(super) fn command_with_folders(
+        path: &Path,
+        system: &Path,
+        windows: &Path,
+        home: &Path,
+        local: &Path,
+        roaming: &Path,
+    ) -> Result<Command, String> {
+        let powershell = system.join("WindowsPowerShell").join("v1.0");
+        let executable = powershell.join("powershell.exe");
         let mut command = platform::command(&executable);
         command
             .env_clear()
@@ -577,16 +591,13 @@ mod native {
             .env(
                 "PATH",
                 std::env::join_paths([
-                    system.clone(),
-                    windows,
-                    system.join("WindowsPowerShell/v1.0"),
+                    system.to_path_buf(),
+                    windows.to_path_buf(),
+                    powershell.clone(),
                 ])
                 .map_err(|_| "Cannot sanitize system PATH.")?,
             )
-            .env(
-                "PSModulePath",
-                system.join("WindowsPowerShell/v1.0/Modules"),
-            )
+            .env("PSModulePath", powershell.join("Modules"))
             .env("CREATOR_HUB_SHORTCUT_READ_PATH", path);
         let utf16: Vec<_> = READ_SCRIPT
             .encode_utf16()
@@ -952,6 +963,41 @@ mod tests {
             "C:/a.lnk",
         ] {
             assert!(ordinary_local_path(Path::new(path)).is_err(), "{path}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_program_and_environment_have_ordinary_spellings_without_spawning() {
+        let system = Path::new(r"C:\Windows\System32");
+        let windows = Path::new(r"C:\Windows");
+        let home = Path::new(r"C:\Users\Fixture User");
+        let local = home.join("AppData").join("Local");
+        let roaming = home.join("AppData").join("Roaming");
+        let shortcut = Path::new(r"C:\Fixtures\Space Name\shortcut.retired.lnk");
+        let command =
+            native::command_with_folders(shortcut, system, windows, home, &local, &roaming)
+                .unwrap();
+        ordinary_local_path(Path::new(command.get_program())).unwrap_or_else(|error| {
+            panic!("{error} Generated program: {:?}", command.get_program())
+        });
+        assert_eq!(
+            command.get_program().to_str().unwrap(),
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        );
+        ordinary_local_path(command.get_current_dir().unwrap()).unwrap();
+        for (key, value) in command.get_envs() {
+            let value = value.expect("The cleared environment uses explicit finite values");
+            if key.eq_ignore_ascii_case("PATH") {
+                let entries: Vec<_> = std::env::split_paths(value).collect();
+                assert_eq!(entries.len(), 3);
+                for entry in entries {
+                    ordinary_local_path(&entry).unwrap();
+                }
+            } else {
+                ordinary_local_path(Path::new(value))
+                    .unwrap_or_else(|error| panic!("{error} Environment {key:?}: {value:?}"));
+            }
         }
     }
 

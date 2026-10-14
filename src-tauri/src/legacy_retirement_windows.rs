@@ -949,6 +949,12 @@ mod tests {
         assert_eq!(installed.len(), 1);
         assert_eq!(installed[0].app(), app);
         let plan = RetirementPlan::inspect(app).unwrap();
+        assert!(plan
+            .retire_after_native_review(|| Err("synthetic cancelled native review".into()))
+            .is_err());
+        assert!(plan.root.join("uninstall.exe").exists());
+        assert!(plan.root.join(app.exe()).exists());
+        assert!(!plan.archive.join("before.json").exists());
         let mut existing = (app == AppId::Mcp).then(|| LegacySession::start(&plan.root));
         if let Some(session) = &mut existing {
             session.tools(2);
@@ -968,6 +974,17 @@ mod tests {
         assert!(plan.archive.join("before.json").exists());
         assert!(plan.archive.join("0.retired").exists());
         assert!(!plan.root.join("uninstall.exe").exists());
+        let journal = plan.archive.join("before.json");
+        let original = fs::read(&journal).unwrap();
+        fs::write(&journal, b"{\"policy\":999}").unwrap();
+        assert!(
+            RetirementPlan::inspect(app).is_err(),
+            "unknown journal must never replay a cleanup"
+        );
+        assert_eq!(fs::read(&journal).unwrap(), b"{\"policy\":999}");
+        assert!(plan.root.join(app.exe()).exists());
+        // Restore only the evidence this synthetic fixture deliberately changed.
+        fs::write(&journal, original).unwrap();
         if let Some(session) = &mut existing {
             session.tools(3);
         }
