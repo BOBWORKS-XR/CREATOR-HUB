@@ -466,11 +466,19 @@ fn registration(_: &Pin) -> Result<Option<PathBuf>, String> {
 }
 
 pub(super) fn inspect() -> Result<Vec<Plan>, String> {
+    inspect_selected(&[&MCP, &SETUP])
+}
+
+pub(super) fn inspect_app(app: AppId) -> Result<Option<Plan>, String> {
+    Ok(inspect_selected(&[if app == AppId::Mcp { &MCP } else { &SETUP }])?.pop())
+}
+
+fn inspect_selected(pins: &[&'static Pin]) -> Result<Vec<Plan>, String> {
     if !cfg!(all(windows, target_arch = "x86_64")) {
         return Err("Native old-app removal is not accepted on this platform yet.".into());
     }
     let mut plans = Vec::new();
-    for pin in [&MCP, &SETUP] {
+    for &pin in pins {
         let registered = platform::registered(pin.app)?;
         let Some(root) = registration(pin)? else {
             if !registered.is_empty()

@@ -364,15 +364,43 @@ pub(super) struct RetirementPlan {
     saved: Record,
 }
 
+fn archive_path(app: AppId) -> Result<PathBuf, String> {
+    Ok(manager::child_dir("convergence")?
+        .join("legacy-retirement")
+        .join(format!("{}-{}", app.id(), legacy::accepted_version(app))))
+}
+
+/// Inspect durable evidence even when the original GUI is already archived.
+/// A receipt is not authority to replay an operation or select its paths.
+pub(super) fn journal_status(app: AppId) -> Result<Option<bool>, String> {
+    let archive = archive_path(app)?;
+    platform::reject_links(&archive)?;
+    let before = archive.join("before.json");
+    let completed = archive.join("completed.json");
+    platform::reject_links(&before)?;
+    platform::reject_links(&completed)?;
+    if !before
+        .try_exists()
+        .map_err(|_| "Cannot inspect retirement evidence.")?
+    {
+        if completed
+            .try_exists()
+            .map_err(|_| "Cannot inspect retirement result.")?
+        {
+            return Err("Retirement result has no before-images; review is required.".into());
+        }
+        return Ok(None);
+    }
+    RetirementPlan::inspect(app)?.completed().map(Some)
+}
+
 impl RetirementPlan {
     pub(super) fn inspect(app: AppId) -> Result<Self, String> {
         let root = platform::default_exe(app)?
             .parent()
             .ok_or("Old app directory unavailable.")?
             .to_path_buf();
-        let archive = manager::child_dir("convergence")?
-            .join("legacy-retirement")
-            .join(format!("{}-{}", app.id(), legacy::accepted_version(app)));
+        let archive = archive_path(app)?;
         platform::reject_links(&archive)?;
         let journal = archive.join("before.json");
         if journal
@@ -393,11 +421,7 @@ impl RetirementPlan {
             plan.recheck()?;
             return Ok(plan);
         }
-        let plans = legacy::inspect()?;
-        let source = plans
-            .iter()
-            .find(|plan| plan.app() == app)
-            .ok_or("No accepted old app was found.")?;
+        let source = legacy::inspect_app(app)?.ok_or("No accepted old app was found.")?;
         source.recheck()?;
         if source.root() != root {
             return Err("Old app identity differs.".into());
@@ -459,6 +483,59 @@ impl RetirementPlan {
                 gui_retired_compatibility_retained: false,
             },
         })
+    }
+
+    pub(super) fn app(&self) -> AppId {
+        self.app
+    }
+
+    /// Exact native-derived GUI targets only; server resources are never targets.
+    pub(super) fn mutation_paths(&self) -> Result<Vec<PathBuf>, String> {
+        let mut paths: Vec<_> = gui_files(self.app)
+            .iter()
+            .map(|(name, _, _)| self.root.join(name))
+            .collect();
+        paths.extend(
+            crate::legacy_shortcuts_windows::native_candidates(self.app)?
+                .into_iter()
+                .map(|(_, path)| path),
+        );
+        Ok(paths)
+    }
+
+    pub(super) fn completed(&self) -> Result<bool, String> {
+        self.recheck()?;
+        let receipt = self.archive.join("completed.json");
+        platform::reject_links(&receipt)?;
+        if !receipt
+            .try_exists()
+            .map_err(|_| "Cannot inspect retirement result.")?
+        {
+            return Ok(false);
+        }
+        let mut expected = self.saved.clone();
+        expected.gui_retired_compatibility_retained = true;
+        if manager::bounded_read(&receipt, MAX_JOURNAL)?
+            != serde_json::to_vec(&expected).map_err(|_| "Cannot verify retirement result.")?
+        {
+            return Err("Unknown retirement result; before-images were kept.".into());
+        }
+        self.require_gui_absent()?;
+        for path in crate::legacy_shortcuts_windows::native_candidates(self.app)? {
+            if path
+                .1
+                .try_exists()
+                .map_err(|_| "Cannot inspect retired shortcut.")?
+            {
+                return Err("A retired shortcut reappeared; review is required.".into());
+            }
+        }
+        if registration_values(self.app, false)?.is_some()
+            || registration_values(self.app, true)?.is_some()
+        {
+            return Err("A retired app registration reappeared; review is required.".into());
+        }
+        Ok(true)
     }
 
     fn check_root(&self, held: &File) -> Result<(), String> {
@@ -949,6 +1026,7 @@ mod tests {
         assert_eq!(installed.len(), 1);
         assert_eq!(installed[0].app(), app);
         let plan = RetirementPlan::inspect(app).unwrap();
+        assert_eq!(journal_status(app).unwrap(), None);
         assert!(plan
             .retire_after_native_review(|| Err("synthetic cancelled native review".into()))
             .is_err());
@@ -972,6 +1050,7 @@ mod tests {
         });
         assert!(interrupted.is_err());
         assert!(plan.archive.join("before.json").exists());
+        assert_eq!(journal_status(app).unwrap(), Some(false));
         assert!(plan.archive.join("0.retired").exists());
         assert!(!plan.root.join("uninstall.exe").exists());
         let journal = plan.archive.join("before.json");
@@ -990,6 +1069,7 @@ mod tests {
         }
         let resumed = RetirementPlan::inspect(app).unwrap();
         resumed.retire_after_native_review(|| Ok(())).unwrap();
+        assert_eq!(journal_status(app).unwrap(), Some(true));
         assert!(platform::registered(app).unwrap().is_empty());
         assert!(!plan.root.join(app.exe()).exists());
         resumed.recheck().unwrap();

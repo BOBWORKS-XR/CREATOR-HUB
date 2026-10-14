@@ -20,6 +20,15 @@ directions in PROJECT-SETUP-IN-HUB.md and SHARED-MCP-DIRECTION.md.
 
 ## Current State
 
+2026-10-14: Windows first-launch migration now coordinates exact backups,
+reviewed client/server routing, cooperative closing of verified idle old GUIs,
+and explicit native approval of GUI-only retirement. Settings and all old MCP
+Node/server paths remain in place. Partial journals are detected even without
+the original GUI; fresh review is required to resume. Full packaged migration,
+signed updates, writable Mac/Linux operation and Flatpak remain release gates.
+See [the current flow](CONVERGENCE-INSTALL-FLOW.md). The dated notes below retain
+the previous stages and do not establish current release readiness.
+
 Development update, 2026-10-13: managed signed routing, selected-client journaled
 conversion/recovery, snapshot-bound Windows setup writers, native updater
 validation and explicitly experimental read-only Unix packaging are now in the

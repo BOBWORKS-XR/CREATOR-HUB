@@ -1,6 +1,8 @@
 # Unified Installation Flow
 
-Work in progress for Hub 0.1.14. This is not accepted removal or release evidence.
+Work in progress for Hub 0.1.14. The Windows coordinator now invokes the tested
+GUI-retirement leaf, but full packaged coordinator acceptance is still pending.
+This is not release evidence.
 
 Hub takes over the existing Creator settings files in their established OS data
 locations. It does not need to move Unity projects or create a second copy of
@@ -18,8 +20,9 @@ installs without prior Creator data or standalone applications skip it.
 5. Review existing supported client routes through the existing native, journaled
    migration APIs. Never replace custom/foreign entries silently.
 6. Verify signed managed-router activation and retained runtime resources.
-7. Independently prove safe standalone removal, then retain all app data and
-   uninstall only the source-bound legacy application resources.
+7. After another native approval, retire source-bound standalone GUI files,
+   default shortcuts and installed-app entries. Keep all data and old MCP
+   Node/server resources at their original paths for existing connections.
 
 Steps 1-6 have source implementation and unit coverage. The reviewed MCP server
 path transition now retains exact before-images and changes only that field,
@@ -31,15 +34,25 @@ Windows removal has a production adapter for the exact accepted MCP 2.7.7 and
 Setup 0.3.7 installations. It validates registration, every installed payload,
 uninstaller identity, ordinary paths and normal process exit. Extra/changed files
 and custom installs refuse; there is no recursive cleanup or forced process stop.
-The guide does not invoke removal yet. The bounded native dependency inventory
-is now integrated as a negative check after reviewed connection migration.
-Project/profile/managed/plugin scopes and other launch contexts remain unresolved;
-ordinary files being absent or routed does not clear those checks. Diagnostics
-are shown without exposing config contents. Step 7 remains blocked pending
-complete dependency/retained-runtime handling, full native coordinator acceptance,
-platform-specific cleanup and full native-flow tests.
-The guide says cleanup is pending; it does not claim completion. A review record
-is not permission to uninstall, live-client acceptance or publisher verification.
+The guide invokes the separate GUI-retirement operation, not the destructive
+whole-directory uninstaller. A distinct negative dependency snapshot checks the
+exact native-derived GUI/uninstaller/default-shortcut files and known client
+configs. All concrete blockers and changed settings/environment refuse. Unknown
+project/profile/managed/plugin/launch contexts remain explicit and require native
+approval of custom-GUI integration risk; they still refuse full runtime deletion.
+The guide cannot infer completeness from registration, absence or migration count.
+
+Before backups, approval permits verified idle GUI windows to close normally.
+Busy or unverified windows are not force-closed. Node and AI-client connections
+are not stopped. If normal close saves changed settings, Check again restarts a
+fresh review; it cannot bypass uncertain workflow/backend recovery.
+
+Startup examines before-images even when the original GUI is already archived.
+An unfinished journal requires fresh backups and connection review, never replay
+of persisted paths or authority. Unknown receipts refuse. Partial cleanup returns
+an honest pending report rather than a stale untouched-installation label. Only
+verified completion of every current native plan enables the completion screen.
+A review/completion record is not live-client acceptance or publisher signing.
 
 ## Removal Checks
 
@@ -64,10 +77,12 @@ Do not force-close AI clients, Unity or unrelated Node processes.
 - Full native first launch, signed update/restart, actual AI-client reconnect,
   macOS/Linux cleanup and end-to-end uninstall retention are still required.
 
-Current Windows source checks: 322 Root Rust tests pass with 13 explicitly
+Current Windows source checks: 337 Root Rust tests pass with 13 explicitly
 opt-in native tests ignored; strict Clippy passes. Dependency inspection is
-connected to production diagnostics, not removal authorization. The 15 browser
-convergence/startup tests pass, including screenshots at 390 and 1100 pixels.
+connected to a distinct negative gate, not itself removal authorization. The 18
+browser convergence/startup tests pass, including screenshots at 390 and 1100
+pixels. The guide has 26 isolated controller regressions for explicit cleanup,
+native readiness, cancellation, partial reports, refresh and duplicate refusal.
 MCP has 253 passing Rust tests with seven opt-in tests ignored, including the
 reviewed server-path transition, exact backups and retained recovery scopes.
 Linux-native operation is not inferred from those Windows-hosted tests.
@@ -75,7 +90,8 @@ Linux-native operation is not inferred from those Windows-hosted tests.
 The native Windows compatibility-retirement leaf passes both official baselines
 in run 38572696237: GUI/registration removal, all eight retained stores, all nine
 in-place MCP resources, interrupted retry and old stdio survival/reconnection.
-See NATIVE-LEGACY-GUI-RETIREMENT.md. This leaf is not invoked by the production
-guide yet; it does not complete first-launch or signed update convergence.
+See NATIVE-LEGACY-GUI-RETIREMENT.md. Source integration now invokes this leaf;
+the earlier native run did not exercise the new production coordinator. Fresh
+packaged first-launch and signed update convergence acceptance remain required.
 
 Published releases and the user's installed applications remain unchanged.

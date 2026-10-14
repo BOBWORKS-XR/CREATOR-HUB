@@ -4,7 +4,7 @@
   "windows": ["main"],
   "permissions": ["core:event:allow-listen", "core:event:allow-unlisten",
     "allow-usage-terms-status", "allow-accept-usage-terms", "allow-hub-preferences-status", "allow-set-hub-preference",
-    "allow-convergence-status", "allow-prepare-convergence", "allow-migrate-convergence-connections",
+    "allow-convergence-status", "allow-prepare-convergence", "allow-migrate-convergence-connections", "allow-refresh-convergence", "allow-retire-convergence-apps",
     "allow-open-resource", "allow-open-plugins-website", "allow-app-inventory", "allow-download-app", "allow-install-app", "allow-disconnect-mcp",
     "allow-hub-update-status", "allow-download-hub-update", "allow-install-hub-update",
     "allow-pending-hosted-restore", "allow-restore-hosted-app", "allow-complete-hosted-restore",

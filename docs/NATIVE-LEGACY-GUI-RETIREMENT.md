@@ -1,7 +1,9 @@
 # Legacy GUI Retirement
 
-This is a Windows native leaf under test, not completed convergence or release
-acceptance. The production guide does not invoke it yet.
+The Windows native leaf has passed official-installer fixtures. The production
+guide now invokes it after backups, reviewed connections, snapshot freshness and
+separate native approval. Its packaged end-to-end acceptance remains pending;
+the leaf result is not completed convergence or release acceptance.
 
 ## Scope
 
@@ -87,6 +89,14 @@ the compatibility guarantee and require review before production retirement.
 - Production coordinator/native consent, GUI quiescence, signed-router reconnect,
   next Hub update/uninstall survival, live AI-client acceptance, and independent
   macOS/Linux layouts remain gates. Flatpak host integration remains unaccepted.
+
+Source integration on 2026-10-14 adds explicit retirement/refresh phases, native
+cooperative GUI close and startup inspection of unfinished journals even when
+the original GUI is absent. Per-app inspection no longer requires an unrelated
+product's already-retired GUI to remain installed. Full-directory removal keeps
+its original unknown-scope refusal; the separate GUI-file negative check retains
+unknown diagnostics and requires custom-GUI risk approval. Source tests pass;
+these changes still need a new current-payload native acceptance run.
 
 Native rename contract: [FILE_RENAME_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info)
 and [SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle).

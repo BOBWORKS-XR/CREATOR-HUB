@@ -28,6 +28,7 @@ pub struct Report {
     settings: Vec<&'static str>,
     legacy_apps: Vec<LegacyApp>,
     backups: Vec<PathBuf>,
+    retirement_available: bool,
     message: String,
 }
 
@@ -35,6 +36,8 @@ struct Plan {
     stores: Vec<stores::Snapshot>,
     report: Report,
     retry_allowed: bool,
+    #[cfg(windows)]
+    retirement_dependencies: Option<crate::convergence_dependencies::GuiRetirementSnapshot>,
 }
 
 #[derive(Default)]
@@ -145,10 +148,18 @@ fn inspect() -> Result<Plan, String> {
     let legacy_apps = legacy_apps()?;
     // Validate even when legacy apps exist; do not short-circuit a newer policy.
     let already_reviewed = reviewed_at(&record_path()?)?;
-    let required = !legacy_apps.is_empty() || (!settings.is_empty() && !already_reviewed);
+    let pending_retirement = retirement_pending()?;
+    let required = migration_required(
+        legacy_apps.len(),
+        settings.len(),
+        already_reviewed,
+        pending_retirement,
+    );
     Ok(Plan {
         stores: snapshots,
         retry_allowed: true,
+        #[cfg(windows)]
+        retirement_dependencies: None,
         report: Report {
             enabled: true,
             required,
@@ -156,9 +167,100 @@ fn inspect() -> Result<Plan, String> {
             settings,
             legacy_apps,
             backups: vec![],
-            message: "Hub can take over your existing settings without moving your Unity projects. Old apps stay installed until connection and removal checks pass.".into(),
+            retirement_available: false,
+            message: if pending_retirement {
+                "An earlier standalone-app cleanup was interrupted. Review fresh backups and connections before resuming; no saved operation is replayed."
+            } else {
+                "Hub can take over your existing settings without moving your Unity projects. Old apps stay installed until connection and retirement checks pass."
+            }.into(),
         },
     })
+}
+
+fn migration_required(apps: usize, settings: usize, reviewed: bool, pending: bool) -> bool {
+    pending || apps != 0 || (settings != 0 && !reviewed)
+}
+
+fn retirement_pending() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        let mut pending = false;
+        for app in [AppId::Mcp, AppId::Setup] {
+            pending |= crate::legacy_retirement_windows::journal_status(app)? == Some(false);
+        }
+        Ok(pending)
+    }
+    #[cfg(not(windows))]
+    Ok(false)
+}
+
+#[cfg(windows)]
+fn retirement_plans(
+    plan: &Plan,
+) -> Result<Vec<crate::legacy_retirement_windows::RetirementPlan>, String> {
+    let mut result = Vec::new();
+    let mut matched = 0;
+    for app in [AppId::Mcp, AppId::Setup] {
+        let exe = platform::default_exe(app)?;
+        let found = plan
+            .report
+            .legacy_apps
+            .iter()
+            .filter(|old| old.name == app.name() && platform::same_path(&old.path, &exe))
+            .count();
+        if found > 1 {
+            return Err("Ambiguous old app locations; no app was retired.".into());
+        }
+        matched += found;
+        let journal = crate::legacy_retirement_windows::journal_status(app)?;
+        if found != 0 || journal == Some(false) {
+            result.push(crate::legacy_retirement_windows::RetirementPlan::inspect(
+                app,
+            )?);
+        }
+    }
+    if matched != plan.report.legacy_apps.len() {
+        return Err("Custom or unverified app locations were kept. Review them before retiring standalone apps.".into());
+    }
+    Ok(result)
+}
+
+fn close_reviewed_guis(plan: &Plan) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        // Inspection binds exact accepted GUI bytes/registration before any close.
+        for app in retirement_plans(plan)? {
+            let exe = platform::default_exe(app.app())?;
+            let state = platform::running_gui(app.app(), &exe)?;
+            if state.other_copy {
+                return Err("Another standalone app copy is open. Close it and choose Check again; no copy was force-closed.".into());
+            }
+            if state.gui.is_empty() {
+                continue;
+            }
+            platform::window_action(&state.gui, &exe, true)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let state = platform::running_gui(app.app(), &exe)?;
+                if state.other_copy {
+                    return Err("An app copy appeared while closing; review again.".into());
+                }
+                if state.gui.is_empty() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err("The old app has not closed normally. Save your work, close it, then choose Check again. No process was killed.".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        recheck(plan).map_err(|_| "The app saved changed settings while closing. They were kept; choose Check again to review their latest contents.".into())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = plan;
+        Ok(())
+    }
 }
 
 fn require_builtin() -> Result<(), String> {
@@ -325,6 +427,23 @@ pub async fn convergence_status(handle: tauri::AppHandle) -> Result<Report, Stri
 }
 
 #[tauri::command]
+pub async fn refresh_convergence(handle: tauri::AppHandle) -> Result<Report, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        require_builtin()?;
+        let _operation = handle.state::<manager::Manager>().begin()?;
+        let state = handle.state::<Convergence>();
+        let mut saved = state.0.lock().map_err(|_| "Migration state is unavailable.")?;
+        if saved.as_ref().is_some_and(|plan| !plan.retry_allowed) {
+            return Err("The previous migration has an uncertain workflow or backend exit. Review recovery before restarting the guide.".into());
+        }
+        let fresh = inspect()?;
+        let report = fresh.report.clone();
+        *saved = Some(fresh);
+        Ok(report)
+    }).await.map_err(|_| "Migration refresh failed; existing data were kept.")?
+}
+
+#[tauri::command]
 pub async fn prepare_convergence(handle: tauri::AppHandle) -> Result<Report, String> {
     tauri::async_runtime::spawn_blocking(move || {
         require_builtin()?;
@@ -338,12 +457,14 @@ pub async fn prepare_convergence(handle: tauri::AppHandle) -> Result<Report, Str
         }
         can_retain(plan)?;
         let approved = handle.dialog().message(
-            "Let Creator Hub use your existing MCP and Project Setup settings?\n\nExact local backups will be kept. Settings remain in their current locations; Unity projects are not moved or edited. Existing AI connections are reviewed separately before changing them.\n\nNo standalone app, AI client or Unity process is stopped or removed by this step. Cancel leaves the current setup unchanged."
+            "Let Creator Hub use your existing MCP and Project Setup settings?\n\nHub will ask verified idle standalone app windows to close normally, then keep exact local backups. Busy or unverified apps are not force-closed. AI clients, Unity and Node connections stay open.\n\nSettings remain in their current locations; Unity projects are not moved or edited. Existing AI connections are reviewed separately before changing them. No standalone installation is removed by this step. Cancel leaves the current setup unchanged."
         ).title("Move to unified Creator Hub").kind(MessageDialogKind::Info)
             .buttons(MessageDialogButtons::OkCancelCustom("Back up and continue".into(), "Keep existing".into())).blocking_show();
         if !approved {
             return Err("Migration was cancelled. Existing apps and settings were kept.".into());
         }
+        can_retain(plan)?;
+        close_reviewed_guis(plan)?;
         can_retain(plan)?;
         let mut backups = Vec::new();
         for snapshot in &plan.stores {
@@ -561,9 +682,8 @@ pub async fn migrate_convergence_connections(handle: tauri::AppHandle) -> Result
         // Review is not live-client acceptance or permission to uninstall.
         save_review_at(&record_path()?)?;
         plan.report.stage = "connections-reviewed";
-        plan.report.message = removal_diagnostics(plan, &manager).unwrap_or_else(|reason| {
-            format!("Connections are reviewed; old apps were kept. Removal check paused: {reason}")
-        });
+        plan.report.message = retirement_diagnostics(plan, &manager).unwrap_or_else(|reason|
+            format!("Connections are reviewed; standalone cleanup paused: {reason}. Choose Check again to review a fresh plan."));
         Ok(plan.report.clone())
     })
     .await
@@ -572,45 +692,132 @@ pub async fn migrate_convergence_connections(handle: tauri::AppHandle) -> Result
     })?
 }
 
-fn removal_diagnostics(plan: &Plan, manager: &manager::Manager) -> Result<String, String> {
+fn retirement_diagnostics(plan: &mut Plan, manager: &manager::Manager) -> Result<String, String> {
     let _operation = manager.begin()?;
     recheck(plan)?;
-    if plan.report.legacy_apps.is_empty() {
-        return Ok("Settings and existing connections are reviewed. No standalone app was found to remove. Native connection acceptance remains a separate release check.".into());
-    }
     #[cfg(windows)]
     {
-        let installations = crate::legacy_removal_windows::inspect()?;
-        if installations.len() != plan.report.legacy_apps.len() {
-            return Err("Existing app locations changed; removal remains paused.".into());
-        }
-        for installation in &installations {
-            installation.recheck()?;
-        }
-        let roots: Vec<_> = installations
+        plan.retirement_dependencies = None;
+        plan.report.retirement_available = false;
+        let installations = retirement_plans(plan)?;
+        let paths = installations
             .iter()
-            .map(|app| app.root().to_path_buf())
-            .collect();
+            .map(|app| app.mutation_paths())
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            plan.report.retirement_available = true;
+            return Ok("Settings and connections are reviewed. No standalone app remains to retire; finish migration to continue.".into());
+        }
         let store = creator_hub_mcp_router::Store::installed()?;
         let _runtime = store.resolve()?;
         let router = store.router()?;
-        let dependencies = crate::convergence_dependencies::snapshot(&roots, &router.command);
-        let report = dependencies.report();
-        if report.requires_retention {
-            return Ok(format!("Old apps were kept. Removal checks found {} dependency blockers and {} unresolved configuration scopes. Custom/project client contexts must be reviewed before cleanup; names and installed status cannot prove it safe.", report.blockers.len(), report.inventory.unresolved.len()));
-        }
-        dependencies
-            .recheck()
-            .map_err(|_| "Client settings changed during the removal check; old apps were kept.")?;
-        Ok("Removal dependencies passed this inspection. Old apps were kept pending the complete native removal and connection acceptance flow.".into())
+        let dependencies =
+            crate::convergence_dependencies::gui_retirement_snapshot(&paths, &router.command);
+        dependencies.recheck().map_err(|_| {
+            "Known client settings or GUI dependencies need review; standalone apps were kept."
+        })?;
+        plan.retirement_dependencies = Some(dependencies);
+        plan.report.retirement_available = true;
+        Ok("Ready to retire verified standalone app entries after your approval. All settings and old MCP Node/server paths stay in place. Custom launchers that open the old GUI or find it through its app registration need separate review; unknown client scopes do not authorize deleting the retained runtime.".into())
     }
     #[cfg(not(windows))]
     Ok("Settings and existing connections are reviewed. Old apps were kept: native removal and connection acceptance are not completed on this platform.".into())
 }
 
+#[tauri::command]
+pub async fn retire_convergence_apps(handle: tauri::AppHandle) -> Result<Report, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        require_builtin()?;
+        let _operation = handle.state::<manager::Manager>().begin()?;
+        let state = handle.state::<Convergence>();
+        let mut saved = state.0.lock().map_err(|_| "Migration state is unavailable.")?;
+        let plan = saved.as_mut().ok_or("Review migration before retiring apps.")?;
+        if plan.report.stage != "connections-reviewed" || !plan.report.retirement_available {
+            return Err("Back up settings and review current connections before retiring standalone apps.".into());
+        }
+        can_retain(plan)?;
+        #[cfg(windows)]
+        {
+            let installations = retirement_plans(plan)?;
+            let store = creator_hub_mcp_router::Store::installed()?;
+            let runtime = store.resolve()?;
+            let router = store.router()?;
+            let dependencies = plan.retirement_dependencies.as_ref();
+            let preflight = || {
+                can_retain(plan)?;
+                if !installations.is_empty() {
+                    dependencies.ok_or("The reviewed client snapshot is unavailable; check again.")?
+                        .recheck().map_err(|_| "Client settings changed or a GUI dependency appeared. Cleanup paused; retained files were kept.")?;
+                }
+                let fresh_runtime = store.resolve()?;
+                let fresh_router = store.router()?;
+                if fresh_runtime.generation != runtime.generation || fresh_router.command != router.command {
+                    return Err("The signed MCP route changed; cleanup paused.".into());
+                }
+                Ok::<_, String>(())
+            };
+            preflight()?;
+            let approved = handle.dialog().message(
+                "Finish moving to Creator Hub?\n\nHub will retire only the verified standalone MCP/Project Setup windows, default shortcuts and installed-app entries. Settings, AI-client options, Unity projects and local backups are kept. Old Node/server files remain at the same paths so existing MCP connections can continue and reconnect.\n\nCustom launchers that start the old GUI or look it up through its installed-app registration must be reviewed separately. They are not converted by this step. Only continue if you do not need those standalone GUI integrations. AI clients, Unity and Node processes are never force-closed.\n\nAn interrupted cleanup can be reviewed and resumed on next launch. Cancel leaves all installations unchanged."
+            ).title("Retire standalone Creator apps").kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom("Finish migration".into(), "Keep existing".into())).blocking_show();
+            if !approved {
+                return Err("Standalone retirement was cancelled. Apps and settings were kept.".into());
+            }
+            let result = (|| {
+                preflight()?;
+                for app in &installations {
+                    // Original GUIs were cooperatively closed before backup/review.
+                    // The leaf reserves exact files exclusively, refusing a reopened GUI.
+                    app.retire_after_native_review(preflight)?;
+                    if !app.completed()? {
+                        return Err("Standalone retirement did not record a verified completion.".into());
+                    }
+                }
+                preflight()?;
+                Ok::<_, String>(())
+            })();
+            match result {
+                Ok(()) => {
+                    plan.report.stage = "complete";
+                    plan.report.required = false;
+                    plan.report.retirement_available = false;
+                    plan.report.legacy_apps.clear();
+                    plan.retirement_dependencies = None;
+                    plan.report.message = "Migration complete. Use MCP and Project Setup in Creator Hub. Your settings and backups are kept; retained old MCP runtime paths continue to support existing connections.".into();
+                }
+                Err(reason) => {
+                    // Return the current phase even after a partial mutation. Never
+                    // let the renderer keep presenting an untouched installation.
+                    plan.report.message = format!("Standalone cleanup paused: {reason}. Some app entries may already be retired. Settings and compatibility runtime files were kept. Retry here, or choose Check again for a fresh backup/connection review.");
+                    if let Ok(current) = legacy_apps() {
+                        plan.report.legacy_apps = current;
+                    }
+                }
+            }
+            Ok(plan.report.clone())
+        }
+        #[cfg(not(windows))]
+        Err("Native standalone retirement is not accepted on this platform. Existing apps and data were kept.".into())
+    }).await.map_err(|_| "Cleanup outcome is unknown. Keep the retained files and review migration on next launch.")?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_retirement_requires_review_even_without_any_original_gui() {
+        assert!(migration_required(0, 0, true, true));
+        assert!(migration_required(0, 4, true, true));
+        assert!(migration_required(1, 4, true, false));
+        assert!(!migration_required(0, 4, true, false));
+        assert!(migration_required(0, 1, false, false));
+        assert!(!migration_required(0, 0, false, false));
+    }
 
     fn fixture_plan() -> (tempfile::TempDir, stores::Roots, Plan) {
         let temp = tempfile::tempdir().unwrap();
@@ -635,6 +842,8 @@ mod tests {
                 .map(|kind| stores::Snapshot::inspect(kind, &roots).unwrap())
                 .collect(),
             retry_allowed: true,
+            #[cfg(windows)]
+            retirement_dependencies: None,
             report: Report {
                 enabled: true,
                 required: true,
@@ -642,6 +851,7 @@ mod tests {
                 settings: vec![],
                 legacy_apps: vec![],
                 backups: vec![],
+                retirement_available: false,
                 message: String::new(),
             },
         };

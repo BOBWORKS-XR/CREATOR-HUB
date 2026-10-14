@@ -352,6 +352,17 @@ fn gui_name(app: AppId, name: &str) -> bool {
 }
 
 pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
+    running_inner(app, exe, true)
+}
+
+/// GUI-only migration keeps all old Node/server paths and connections intact.
+/// Do not turn unrelated Node command visibility into a GUI-close requirement.
+#[cfg(windows)]
+pub fn running_gui(app: AppId, exe: &Path) -> Result<Running, String> {
+    running_inner(app, exe, false)
+}
+
+fn running_inner(app: AppId, exe: &Path, inspect_runtime: bool) -> Result<Running, String> {
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -389,7 +400,7 @@ pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
                 }
             }
         }
-        if app == AppId::Mcp && (name == "node.exe" || name == "node") {
+        if inspect_runtime && app == AppId::Mcp && (name == "node.exe" || name == "node") {
             let command = process
                 .cmd()
                 .iter()

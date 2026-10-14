@@ -38,6 +38,8 @@ fn main() {
             "convergence_status",
             "prepare_convergence",
             "migrate_convergence_connections",
+            "refresh_convergence",
+            "retire_convergence_apps",
             "open_resource",
             "open_plugins_website",
             "community_catalogue",

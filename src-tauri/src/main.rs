@@ -26,10 +26,10 @@ mod legacy_removal_windows;
 mod legacy_retirement_windows;
 #[cfg(windows)]
 #[allow(dead_code)]
-mod legacy_shortcuts_windows;
+mod legacy_shortcut_native_windows;
 #[cfg(windows)]
 #[allow(dead_code)]
-mod legacy_shortcut_native_windows;
+mod legacy_shortcuts_windows;
 #[cfg(any(target_os = "macos", test))]
 mod mac_update;
 mod manager;
@@ -349,8 +349,10 @@ fn main() {
         preferences::hub_preferences_status,
         preferences::set_hub_preference,
         convergence::convergence_status,
+        convergence::refresh_convergence,
         convergence::prepare_convergence,
         convergence::migrate_convergence_connections,
+        convergence::retire_convergence_apps,
         plugins_retirement::open_plugins_website,
         open_resource,
         community_catalogue,

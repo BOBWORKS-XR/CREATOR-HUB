@@ -7,7 +7,7 @@ const source = fs.readFileSync(path.join(__dirname, '../src/convergence.js'), 'u
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const report = (changes = {}) => ({ enabled: true, required: true, stage: 'review', settings: ['creator-works-mcp/launcher-config.json'],
-  legacyApps: [{ name: 'Creator Works MCP', path: 'C:\\Disposable\\MCP\\launcher.exe' }], backups: [], message: 'Review the existing installation.', ...changes });
+  legacyApps: [{ name: 'Creator Works MCP', path: 'C:\\Disposable\\MCP\\launcher.exe' }], backups: [], retirementAvailable: false, message: 'Review the existing installation.', ...changes });
 
 function fixture(handler = () => report(), capability = true) {
   class Element {
@@ -24,14 +24,14 @@ function fixture(handler = () => report(), capability = true) {
     close() { this.open = false; this.closed++; }
     focus() { document.activeElement = this; }
   }
-  const elements = Object.fromEntries(['dialog', 'title', 'summary', 'details', 'error', 'prepare', 'connections', 'later'].map(id => [id, new Element()]));
+  const elements = Object.fromEntries(['dialog', 'title', 'summary', 'details', 'error', 'prepare', 'connections', 'retire', 'refresh', 'later'].map(id => [id, new Element()]));
   const main = new Element(), alreadyLocked = new Element(), focus = new Element(); alreadyLocked.inert = true;
   const calls = []; let lookups = 0;
   const document = { body: { children: [main, elements.dialog, alreadyLocked] }, activeElement: focus,
     querySelector(selector) { lookups++; return elements[selector.replace('#convergence-', '')] || null; },
     createElement(name) { assert.equal(name, 'li'); return new Element(); } };
   const native = { invoke(command, ...args) {
-    assert.ok(['convergence_status', 'prepare_convergence', 'migrate_convergence_connections'].includes(command), 'No cleanup, client paths or generic commands');
+    assert.ok(['convergence_status', 'refresh_convergence', 'prepare_convergence', 'migrate_convergence_connections', 'retire_convergence_apps'].includes(command), 'Only bounded native migration phases');
     assert.deepEqual(args, [], 'No renderer paths, reports or client selections are native arguments');
     calls.push(command); return handler(command);
   } };
@@ -183,4 +183,60 @@ test('missing modal nodes reject without mutations; unavailable modal restores i
   const other = fixture(); other.elements.dialog.showModal = () => { throw Error('Modal unavailable'); };
   await assert.rejects(other.window.CreatorConvergence.run(), /Modal unavailable/);
   assert.equal(other.main.inert, false); assert.equal(other.alreadyLocked.inert, true); assert.equal(other.elements.prepare.listeners.get('click').size, 0);
+});
+
+test('retirement requires an explicit button and a native-ready reviewed phase', async () => {
+  const f = fixture(command => command === 'retire_convergence_apps'
+    ? report({ stage: 'complete', required: false, legacyApps: [], message: 'Settings and runtime paths retained.' })
+    : report({ stage: 'connections-reviewed', retirementAvailable: true }));
+  const done = f.window.CreatorConvergence.run(); await tick();
+  assert.deepEqual(f.calls, ['convergence_status']);
+  assert.equal(f.elements.retire.hidden, false); assert.equal(f.elements.retire.disabled, false);
+  f.click('prepare'); f.click('connections'); assert.deepEqual(f.calls, ['convergence_status']);
+  f.click('retire'); await tick();
+  assert.deepEqual(f.calls, ['convergence_status', 'retire_convergence_apps']);
+  assert.equal(f.elements.dialog.open, true); assert.equal(f.elements.retire.hidden, true);
+  assert.equal(f.elements.refresh.hidden, true); assert.equal(f.elements.later.textContent, 'Continue in Hub');
+  assert.match(f.elements.summary.textContent, /retained/); f.click('later'); await done;
+});
+
+test('retirement in flight prevents duplicate mutation, refresh and dismissal', async () => {
+  const wait = deferred();
+  const f = fixture(command => command === 'convergence_status'
+    ? report({ stage: 'connections-reviewed', retirementAvailable: true }) : wait.promise);
+  const done = f.window.CreatorConvergence.run(); await tick();
+  f.click('retire'); f.click('retire'); f.click('refresh'); f.click('later');
+  assert.deepEqual(f.calls, ['convergence_status', 'retire_convergence_apps']);
+  assert.equal(f.elements.refresh.disabled, true); assert.equal(f.elements.later.disabled, true);
+  wait.resolve(report({ stage: 'connections-reviewed', retirementAvailable: true, message: 'Cleanup paused; some entries are retired, retained files remain.' })); await tick();
+  assert.match(f.elements.details.children[0].textContent, /some entries are retired/);
+  assert.equal(f.elements.retire.disabled, false); f.click('later'); await done;
+});
+
+test('Check again resets to a native fresh review, not a fabricated backup or cleanup', async () => {
+  const f = fixture(command => command === 'refresh_convergence'
+    ? report({ message: 'Latest settings inspected.' })
+    : report({ stage: 'connections-reviewed', retirementAvailable: true }));
+  const done = f.window.CreatorConvergence.run(); await tick(); f.click('refresh'); await tick();
+  assert.deepEqual(f.calls, ['convergence_status', 'refresh_convergence']);
+  assert.equal(f.elements.prepare.hidden, false); assert.equal(f.elements.retire.hidden, true);
+  f.click('retire'); assert.equal(f.calls.length, 2); f.click('later'); await done;
+});
+
+test('unaccepted retirement and inconsistent completion reports cannot enable cleanup', async () => {
+  for (const status of [report({ stage: 'connections-reviewed' }), report({ stage: 'review', retirementAvailable: true }),
+    report({ stage: 'complete', required: true }), report({ stage: 'complete', required: false, legacyApps: [] , retirementAvailable: true }),
+    report({ retirementAvailable: 'true' })]) {
+    const f = fixture(() => status), done = f.window.CreatorConvergence.run(); await tick();
+    assert.equal(f.elements.retire.disabled, true); f.click('retire');
+    assert.deepEqual(f.calls, ['convergence_status']); f.click('later'); await done;
+  }
+});
+
+test('failed refresh keeps previous native phase but does not advance it', async () => {
+  const f = fixture(command => command === 'refresh_convergence'
+    ? Promise.reject(Error('Uncertain workflow needs recovery.')) : report({ stage: 'backed-up' }));
+  const done = f.window.CreatorConvergence.run(); await tick(); f.click('refresh'); await tick();
+  assert.match(f.elements.error.textContent, /recovery/); assert.equal(f.elements.connections.hidden, false);
+  assert.equal(f.elements.retire.hidden, true); f.click('later'); await done;
 });

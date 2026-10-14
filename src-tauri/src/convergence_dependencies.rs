@@ -22,6 +22,10 @@
 //! establish a complete effective config in this source; do not guess a filename.
 //! This bounded inventory therefore keeps removal refused even if every ordinary
 //! file is absent or routed. An empty dependency list never authorizes removal.
+//! The distinct gui_retirement_snapshot checks only exact native-derived GUI,
+//! uninstaller and default-shortcut files while ALL server/runtime paths remain
+//! intact. Unknown scopes remain diagnostics requiring separate native approval
+//! of unknown custom-GUI integrations, not permission for runtime deletion.
 //! Rechecking is a freshness guard, not an atomic uninstall transaction or proof
 //! against ancestor replacement, hard-link aliases, or concurrent client launch.
 
@@ -29,10 +33,10 @@
 #[path = "../../native/legacy-dependencies.rs"]
 mod dependencies;
 
-#[cfg(test)]
-use dependencies::BlockerKind;
 pub use dependencies::{Blocker, Client};
-use dependencies::{ConfigDocument, ConfigFormat, Coverage, DocumentContent, Inspection};
+use dependencies::{
+    BlockerKind, ConfigDocument, ConfigFormat, Coverage, DocumentContent, Inspection,
+};
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
@@ -228,6 +232,106 @@ pub struct DependencySnapshot {
     removal_roots: Vec<PathBuf>,
     router: PathBuf,
     report: CheckReport,
+}
+
+/// Distinct GUI-only negative gate. Unknown diagnostics are never discarded or
+/// promoted to complete coverage. Neither false nor a successful recheck approves
+/// retirement: the native coordinator must separately approve the unknown
+/// custom-GUI integration risk and preserve every server/runtime path.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiRetirementReport {
+    pub inventory: InventoryReport,
+    pub blockers: Vec<Blocker>,
+    pub requires_retention: bool,
+    pub requires_unknown_custom_gui_approval: bool,
+}
+
+/// Opaque GUI-file-only plan, intentionally distinct from DependencySnapshot.
+/// Native code must independently pin GUI/uninstaller/default-shortcut provenance,
+/// native-confirmed missing leaves in resumable plans, and signed router identity.
+/// No target bytes, paths, frontend inputs or mutation authority are exposed.
+pub struct GuiRetirementSnapshot {
+    inventory: Inventory,
+    paths: Vec<PathBuf>,
+    router: PathBuf,
+    report: GuiRetirementReport,
+}
+
+/// Capture exact native-derived GUI file paths, NOT install/runtime directories.
+/// Accepts 1..=8 basic absolute, link-free regular files or missing leaves with
+/// existing directory parents. This is not a provenance or approval assertion.
+/// The caller must retain all server/runtime paths, independently recheck the
+/// native plan/router, and obtain separate unknown custom-GUI risk approval.
+pub fn gui_retirement_snapshot(paths: &[PathBuf], verified_router: &Path) -> GuiRetirementSnapshot {
+    GuiRetirementSnapshot::capture(inspect(), paths, verified_router, &Context::current())
+}
+
+impl GuiRetirementSnapshot {
+    fn capture(
+        inventory: Inventory,
+        paths: &[PathBuf],
+        verified_router: &Path,
+        current: &Context,
+    ) -> Self {
+        let report = inventory.gui_retirement_check_context(paths, verified_router, current);
+        Self {
+            inventory,
+            // Preserve an over-limit sentinel without copying unbounded inputs.
+            paths: paths.iter().take(9).cloned().collect(),
+            router: verified_router.to_owned(),
+            report,
+        }
+    }
+
+    pub fn report(&self) -> &GuiRetirementReport {
+        &self.report
+    }
+
+    /// Rechecks all config bytes/absence, native env/context and target shape.
+    /// Ok means no KNOWN negative dependency, not complete coverage or approval.
+    /// Unknown diagnostics still require separate native risk approval; provenance,
+    /// retained server/runtime identity and router identity need parent rechecks.
+    pub fn recheck(&self) -> Result<(), GuiRetirementReport> {
+        self.recheck_context(&Context::current())
+    }
+
+    fn recheck_context(&self, current: &Context) -> Result<(), GuiRetirementReport> {
+        let mut report =
+            self.inventory
+                .gui_retirement_check_context(&self.paths, &self.router, current);
+        // An invalid capture cannot become a usable review by changing its
+        // targets later. Keep fresh findings too; a new native review is required.
+        if self.report.requires_retention {
+            report.requires_retention = true;
+            report
+                .inventory
+                .unresolved
+                .extend(self.report.inventory.unresolved.iter().cloned());
+            report.inventory.unresolved.sort();
+            report.inventory.unresolved.dedup();
+            report.blockers.extend(self.report.blockers.iter().cloned());
+            report.blockers.sort();
+            report.blockers.dedup();
+        }
+        if report.requires_retention {
+            Err(report)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn unknown_gui_integration(kind: IssueKind) -> bool {
+    matches!(
+        kind,
+        IssueKind::UnknownProjectScopes
+            | IssueKind::UnknownProfileScopes
+            | IssueKind::UnknownManagedScopes
+            | IssueKind::UnknownPluginScopes
+            | IssueKind::UnknownLaunchEnvironment
+            | IssueKind::UnknownAlternateContext
+    )
 }
 
 /// Capture a native removal plan's dependencies. This never approves removal.
@@ -618,6 +722,83 @@ impl Inventory {
     }
 
     fn check_context(&self, targets: NativeRemovalTargets<'_>, current: &Context) -> CheckReport {
+        self.check_paths_context(targets, current, self.valid_targets(&targets))
+    }
+
+    fn gui_retirement_check_context(
+        &self,
+        paths: &[PathBuf],
+        verified_router: &Path,
+        current: &Context,
+    ) -> GuiRetirementReport {
+        let targets = NativeRemovalTargets {
+            removal_roots: paths,
+            verified_router,
+        };
+        let valid_targets = self.valid_gui_targets(&targets);
+        let mut report = self.check_paths_context(targets, current, valid_targets);
+        if valid_targets {
+            // Unknown alternate scope coverage must not hide a concrete inherited
+            // path dependency (e.g. OPENCODE_CONFIG with an unknown extension).
+            for key in [
+                "HOME",
+                "USERPROFILE",
+                "APPDATA",
+                "XDG_CONFIG_HOME",
+                "CODEX_HOME",
+                "CLAUDE_CONFIG_DIR",
+                "OPENCODE_CONFIG",
+                "OPENCODE_CONFIG_DIR",
+            ] {
+                if self
+                    .context
+                    .env_path(key)
+                    .is_ok_and(|path| path.is_some_and(|path| under_any(&path, paths)))
+                {
+                    report.inventory.unresolved.push(Issue {
+                        client: None,
+                        scope: key,
+                        kind: IssueKind::RemovedEnvironmentDependency,
+                    });
+                }
+            }
+            report.inventory.unresolved.sort();
+            report.inventory.unresolved.dedup();
+        }
+        let requires_retention = report
+            .inventory
+            .unresolved
+            .iter()
+            .any(|issue| !unknown_gui_integration(issue.kind))
+            || report
+                .blockers
+                .iter()
+                .any(|blocker| blocker.kind != BlockerKind::UnknownScopes);
+        let requires_unknown_custom_gui_approval = report
+            .inventory
+            .unresolved
+            .iter()
+            .any(|issue| unknown_gui_integration(issue.kind))
+            || report
+                .blockers
+                .iter()
+                .any(|blocker| blocker.kind == BlockerKind::UnknownScopes);
+        GuiRetirementReport {
+            inventory: report.inventory,
+            blockers: report.blockers,
+            requires_retention,
+            requires_unknown_custom_gui_approval,
+        }
+    }
+
+    // Shared freshness, environment and pure-parser checks; each plan kind has
+    // its own native target validator and negative-gate interpretation.
+    fn check_paths_context(
+        &self,
+        targets: NativeRemovalTargets<'_>,
+        current: &Context,
+        valid_targets: bool,
+    ) -> CheckReport {
         let mut report = self.report();
         let mut add_issue = |client, scope, kind| {
             report.unresolved.push(Issue {
@@ -640,7 +821,6 @@ impl Inventory {
                 }
             }
         }
-        let valid_targets = self.valid_targets(&targets);
         if !valid_targets {
             add_issue(
                 None,
@@ -714,6 +894,39 @@ impl Inventory {
             blockers,
             requires_retention,
         }
+    }
+
+    fn valid_gui_targets(&self, targets: &NativeRemovalTargets<'_>) -> bool {
+        let paths = targets.removal_roots;
+        if paths.is_empty()
+            || paths.len() > 8
+            || no_links(targets.verified_router).is_err()
+            || !fs::symlink_metadata(targets.verified_router).is_ok_and(|meta| meta.is_file())
+            || under_any(targets.verified_router, paths)
+        {
+            return false;
+        }
+        for (index, path) in paths.iter().enumerate() {
+            if no_links(path).is_err()
+                || paths[..index]
+                    .iter()
+                    .any(|other| within(path, other) || within(other, path))
+            {
+                return false;
+            }
+            match fs::symlink_metadata(path) {
+                Ok(meta) if meta.is_file() => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    if !path.parent().is_some_and(|parent| {
+                        fs::symlink_metadata(parent).is_ok_and(|meta| meta.is_dir())
+                    }) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 
     fn valid_targets(&self, targets: &NativeRemovalTargets<'_>) -> bool {
@@ -1669,6 +1882,457 @@ mod tests {
         assert!(issue(&f.check(&inventory), IssueKind::InventoryLimit));
     }
 
+    fn gui_snapshot(f: &Fixture, paths: &[PathBuf]) -> GuiRetirementSnapshot {
+        GuiRetirementSnapshot::capture(f.inventory(), paths, &f.router, &f.context)
+    }
+
+    fn gui_issue(report: &GuiRetirementReport, kind: IssueKind) -> bool {
+        report
+            .inventory
+            .unresolved
+            .iter()
+            .any(|issue| issue.kind == kind)
+    }
+
+    #[test]
+    fn gui_retirement_retained_node_and_server_do_not_authorize_full_removal() {
+        let f = Fixture::new(Os::Windows);
+        let gui = f.old.join("standalone.exe");
+        f.write(&gui, "native-gui-fixture");
+        f.write(&f.old.join("node"), "retained-node-fixture");
+        f.write(&f.old.join("server.mjs"), "retained-server-fixture");
+        let config = f.home(".claude.json");
+        let before = f.old_json();
+        f.write(&config, &before);
+        let snapshot = gui_snapshot(&f, std::slice::from_ref(&gui));
+        assert!(!snapshot.report().requires_retention);
+        assert!(snapshot.report().requires_unknown_custom_gui_approval);
+        assert!(snapshot
+            .report()
+            .blockers
+            .iter()
+            .all(|blocker| blocker.kind == BlockerKind::UnknownScopes));
+        assert!(snapshot.recheck_context(&f.context).is_ok());
+        let full = f.check(&f.inventory());
+        assert!(full.requires_retention);
+        assert!(blocked(
+            &full,
+            Client::ClaudeCode,
+            BlockerKind::InstalledCommand
+        ));
+        assert_eq!(fs::read(config).unwrap(), before.as_bytes());
+        assert_eq!(fs::read(gui).unwrap(), b"native-gui-fixture");
+        assert_eq!(
+            fs::read(f.old.join("node")).unwrap(),
+            b"retained-node-fixture"
+        );
+        assert_eq!(fs::read_dir(&f.old).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn gui_retirement_unknown_labels_remain_explicit_and_require_separate_approval() {
+        let mut f = Fixture::new(Os::Windows);
+        f.context
+            .env
+            .insert("CLAUDE_CONFIG_DIR", f.home("alternate").into_os_string());
+        let gui = f.old.join("missing-resume.exe");
+        let snapshot = gui_snapshot(&f, &[gui]);
+        for kind in [
+            IssueKind::UnknownProjectScopes,
+            IssueKind::UnknownProfileScopes,
+            IssueKind::UnknownManagedScopes,
+            IssueKind::UnknownPluginScopes,
+            IssueKind::UnknownLaunchEnvironment,
+            IssueKind::UnknownAlternateContext,
+        ] {
+            assert!(gui_issue(snapshot.report(), kind));
+        }
+        for client in CLIENTS {
+            assert!(snapshot.report().blockers.iter().any(|blocker| {
+                blocker.client == client && blocker.kind == BlockerKind::UnknownScopes
+            }));
+        }
+        assert!(!snapshot.report().requires_retention);
+        assert!(snapshot.report().requires_unknown_custom_gui_approval);
+        assert!(snapshot.recheck_context(&f.context).is_ok());
+        assert!(f.check(&f.inventory()).requires_retention);
+    }
+
+    #[test]
+    fn gui_retirement_exact_and_descendant_commands_refuse_but_siblings_do_not() {
+        for mode in [0, 1, 2] {
+            let f = Fixture::new(Os::Windows);
+            let gui = f.old.join("standalone.exe");
+            f.write(&gui, "native-gui-fixture");
+            let command = match mode {
+                0 => gui.clone(),
+                1 => gui.join("descendant"),
+                _ => gui.with_file_name("standalone.exe-sibling"),
+            };
+            let mcp =
+                json!({"mcpServers":{"private-renamed-server":{"command":command,"args":[]}}})
+                    .to_string();
+            for path in [
+                f.home(".claude.json"),
+                f.home(".gemini/config/mcp_config.json"),
+                f.config("Claude/claude_desktop_config.json"),
+            ] {
+                f.write(&path, &mcp);
+            }
+            f.write(
+                &f.home(".codex/config.toml"),
+                format!(
+                    "[mcp_servers.private-renamed-server]\ncommand='{}'\nargs=[]\n",
+                    command.display()
+                ),
+            );
+            f.write(
+                &f.config("opencode/opencode.jsonc"),
+                json!({
+                    "mcp":{"private-renamed-server":{"type":"local","command":[command]}}
+                })
+                .to_string(),
+            );
+            let snapshot = gui_snapshot(&f, &[gui]);
+            assert_eq!(snapshot.report().requires_retention, mode != 2);
+            for client in CLIENTS {
+                assert_eq!(
+                    snapshot.report().blockers.iter().any(|blocker| {
+                        blocker.client == client && blocker.kind == BlockerKind::InstalledCommand
+                    }),
+                    mode != 2
+                );
+            }
+            assert_eq!(snapshot.recheck_context(&f.context).is_err(), mode != 2);
+        }
+    }
+
+    #[test]
+    fn gui_retirement_keeps_concrete_pure_parser_blockers() {
+        let f = Fixture::new(Os::Windows);
+        let gui = f.old.join("missing-resume.exe");
+        for (entry, expected) in [
+            (
+                json!({"command":f.old.join("node"),"args":[]}),
+                BlockerKind::UnverifiedCreatorRoute,
+            ),
+            (
+                json!({"command":f.router,"args":[],"type":"http"}),
+                BlockerKind::InvalidTransport,
+            ),
+            (
+                json!({"command":f.router,"args":[],"env":{"NODE_PATH":"retained"}}),
+                BlockerKind::InvalidEnvironment,
+            ),
+            (
+                json!({"command":f.router,"args":[],"env":{"CREATOR_WORKS_LAUNCHER_CONFIG":gui}}),
+                BlockerKind::LauncherConfigRemoved,
+            ),
+            (
+                json!({"command":f.router,"args":[],"env":{"CREATOR_WORKS_LAUNCHER_CONFIG":"relative"}}),
+                BlockerKind::UnresolvedLauncherConfig,
+            ),
+            (json!(null), BlockerKind::InvalidDocument),
+        ] {
+            f.write(
+                &f.home(".claude.json"),
+                json!({"mcpServers":{"creator-works":entry}}).to_string(),
+            );
+            let snapshot = gui_snapshot(&f, std::slice::from_ref(&gui));
+            assert!(snapshot.report().requires_retention);
+            assert!(snapshot
+                .report()
+                .blockers
+                .iter()
+                .any(|blocker| blocker.kind == expected));
+            assert!(snapshot.recheck_context(&f.context).is_err());
+        }
+    }
+
+    #[test]
+    fn gui_retirement_missing_resume_and_regular_file_paths_are_bounded() {
+        let f = Fixture::new(Os::Windows);
+        let paths: Vec<_> = (0..8)
+            .map(|index| f.old.join(format!("gui-{index}")))
+            .collect();
+        for path in &paths[..3] {
+            f.write(path, "native-gui-fixture");
+        }
+        let snapshot = gui_snapshot(&f, &paths);
+        assert!(!snapshot.report().requires_retention);
+        assert!(snapshot.recheck_context(&f.context).is_ok());
+        // Resumable native plans may already have removed an exact GUI leaf.
+        fs::remove_file(&paths[0]).unwrap();
+        assert!(snapshot.recheck_context(&f.context).is_ok());
+        assert!(!paths[3].exists());
+    }
+
+    #[test]
+    fn gui_retirement_invalid_targets_and_router_refuse() {
+        let f = Fixture::new(Os::Windows);
+        let gui = f.old.join("standalone.exe");
+        f.write(&gui, "native-gui-fixture");
+        for paths in [
+            vec![],
+            vec![PathBuf::from("relative")],
+            vec![f.old.clone()],
+            vec![f.home("")],
+            vec![gui.clone(), gui.clone()],
+            vec![gui.clone(), gui.join("descendant")],
+            vec![f.router.clone()],
+            vec![f.old.join("missing-parent/gui")],
+            vec![f.old.join("../escaped")],
+            (0..9)
+                .map(|index| f.old.join(format!("gui-{index}")))
+                .collect(),
+        ] {
+            let snapshot = gui_snapshot(&f, &paths);
+            assert!(gui_issue(
+                snapshot.report(),
+                IssueKind::InvalidRemovalTargets
+            ));
+            assert!(snapshot.report().requires_retention);
+            assert!(snapshot.recheck_context(&f.context).is_err());
+            assert!(snapshot.paths.len() <= 9);
+        }
+        for router in [
+            PathBuf::from("relative"),
+            f.old.clone(),
+            f.old.join("missing-router"),
+        ] {
+            let snapshot = GuiRetirementSnapshot::capture(
+                f.inventory(),
+                std::slice::from_ref(&gui),
+                &router,
+                &f.context,
+            );
+            assert!(gui_issue(
+                snapshot.report(),
+                IssueKind::InvalidRemovalTargets
+            ));
+            assert!(snapshot.recheck_context(&f.context).is_err());
+        }
+        let snapshot = gui_snapshot(&f, std::slice::from_ref(&gui));
+        fs::remove_file(&gui).unwrap();
+        fs::create_dir(&gui).unwrap();
+        assert!(gui_issue(
+            &snapshot.recheck_context(&f.context).unwrap_err(),
+            IssueKind::InvalidRemovalTargets
+        ));
+    }
+
+    #[test]
+    fn gui_retirement_changed_new_and_deleted_configs_refuse() {
+        for mode in [0, 1, 2] {
+            let f = Fixture::new(Os::Windows);
+            let config = f.config("opencode/opencode.json");
+            if mode != 0 {
+                f.write(&config, "{}");
+            }
+            let snapshot = gui_snapshot(&f, &[f.old.join("missing-resume.exe")]);
+            assert!(!snapshot.report().requires_retention);
+            if mode == 2 {
+                fs::remove_file(&config).unwrap();
+            } else {
+                f.write(&config, "{\"mcp\":{}}");
+            }
+            let report = snapshot.recheck_context(&f.context).unwrap_err();
+            assert!(gui_issue(&report, IssueKind::ChangedSinceInspection));
+            assert!(!gui_issue(
+                snapshot.report(),
+                IssueKind::ChangedSinceInspection
+            ));
+        }
+    }
+
+    #[test]
+    fn gui_retirement_invalid_capture_cannot_be_healed_by_target_mutation() {
+        let f = Fixture::new(Os::Windows);
+        let gui = f.old.join("invalid-directory-target");
+        fs::create_dir(&gui).unwrap();
+        let snapshot = gui_snapshot(&f, std::slice::from_ref(&gui));
+        assert!(gui_issue(
+            snapshot.report(),
+            IssueKind::InvalidRemovalTargets
+        ));
+        fs::remove_dir(&gui).unwrap();
+        assert!(gui_issue(
+            &snapshot.recheck_context(&f.context).unwrap_err(),
+            IssueKind::InvalidRemovalTargets
+        ));
+        f.write(&gui, "new-native-gui-fixture");
+        assert!(gui_issue(
+            &snapshot.recheck_context(&f.context).unwrap_err(),
+            IssueKind::InvalidRemovalTargets
+        ));
+        assert!(gui_snapshot(&f, &[gui]).recheck_context(&f.context).is_ok());
+    }
+
+    #[test]
+    fn gui_retirement_all_environment_and_native_context_changes_refuse() {
+        for key in ENV {
+            let mut f = Fixture::new(Os::Windows);
+            let snapshot = gui_snapshot(&f, &[f.old.join("missing-resume.exe")]);
+            f.context.env.insert(key, "changed-context-sentinel".into());
+            assert!(gui_issue(
+                &snapshot.recheck_context(&f.context).unwrap_err(),
+                IssueKind::ChangedSinceInspection
+            ));
+        }
+        for mode in [0, 1, 2] {
+            let mut f = Fixture::new(Os::Windows);
+            let snapshot = gui_snapshot(&f, &[f.old.join("missing-resume.exe")]);
+            match mode {
+                0 => f.context.os = Os::Mac,
+                1 => f.context.home = Some(f.old.clone()),
+                _ => f.context.config = Some(f.old.clone()),
+            }
+            assert!(gui_issue(
+                &snapshot.recheck_context(&f.context).unwrap_err(),
+                IssueKind::ChangedSinceInspection
+            ));
+        }
+    }
+
+    #[test]
+    fn gui_retirement_known_removed_config_and_process_dependencies_refuse() {
+        for key in [
+            "OPENCODE_CONFIG",
+            "CREATOR_WORKS_LAUNCHER_CONFIG",
+            "BANTWORKS_LAUNCHER_CONFIG",
+        ] {
+            let mut f = Fixture::new(Os::Windows);
+            let gui = f.old.join("native-derived.json");
+            f.write(&gui, "{}");
+            f.context.env.insert(key, gui.clone().into_os_string());
+            let snapshot = gui_snapshot(&f, &[gui]);
+            assert!(gui_issue(
+                snapshot.report(),
+                if key == "OPENCODE_CONFIG" {
+                    IssueKind::RemovedConfiguration
+                } else {
+                    IssueKind::RemovedEnvironmentDependency
+                }
+            ));
+            assert!(snapshot.recheck_context(&f.context).is_err());
+        }
+        for key in [
+            "NODE_OPTIONS",
+            "NODE_PATH",
+            "CREATOR_WORKS_LAUNCHER_CONFIG",
+            "BANTWORKS_LAUNCHER_CONFIG",
+        ] {
+            let mut f = Fixture::new(Os::Windows);
+            f.context.env.insert(key, "relative-or-opaque".into());
+            let snapshot = gui_snapshot(&f, &[f.old.join("missing-resume.exe")]);
+            assert!(gui_issue(
+                snapshot.report(),
+                IssueKind::UnresolvedEnvironment
+            ));
+            assert!(snapshot.recheck_context(&f.context).is_err());
+        }
+    }
+
+    #[test]
+    fn gui_retirement_unknown_alternate_scopes_do_not_hide_removed_environment_paths() {
+        for key in [
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "XDG_CONFIG_HOME",
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "OPENCODE_CONFIG",
+            "OPENCODE_CONFIG_DIR",
+        ] {
+            let mut f = Fixture::new(Os::Windows);
+            let gui = f.old.join("missing-resume.exe");
+            f.context.env.insert(key, gui.clone().into_os_string());
+            let snapshot = gui_snapshot(&f, &[gui]);
+            assert!(
+                gui_issue(snapshot.report(), IssueKind::RemovedEnvironmentDependency),
+                "{key}"
+            );
+            assert!(snapshot.recheck_context(&f.context).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn gui_retirement_invalid_oversized_and_nonregular_configs_refuse() {
+        for mode in [0, 1, 2, 3] {
+            let f = Fixture::new(Os::Windows);
+            let path = f.home(".claude.json");
+            match mode {
+                0 => f.write(&path, "private-invalid-sentinel"),
+                1 => f.write(&path, "{\"mcpServers\":{},\"mcpServers\":{}}"),
+                2 => f.write(&path, vec![b' '; MAX_BYTES + 1]),
+                _ => fs::create_dir(&path).unwrap(),
+            }
+            let snapshot = gui_snapshot(&f, &[f.old.join("missing-resume.exe")]);
+            assert!(snapshot.report().requires_retention);
+            assert!(snapshot.recheck_context(&f.context).is_err());
+            let serialized = serde_json::to_string(snapshot.report()).unwrap();
+            assert!(!serialized.contains("private-invalid-sentinel"));
+            assert!(!serialized.contains(&f.old.to_string_lossy().to_string()));
+        }
+    }
+
+    #[test]
+    fn gui_retirement_only_six_unknown_issue_kinds_are_nonblocking() {
+        let f = Fixture::new(Os::Windows);
+        for kind in [
+            IssueKind::UnsupportedPlatform,
+            IssueKind::MissingNativeRoot,
+            IssueKind::InvalidPath,
+            IssueKind::ForbiddenScope,
+            IssueKind::LinkedPath,
+            IssueKind::Unreadable,
+            IssueKind::NonRegularFile,
+            IssueKind::Oversized,
+            IssueKind::InventoryLimit,
+            IssueKind::InvalidDocument,
+            IssueKind::ChangedSinceInspection,
+            IssueKind::InvalidRemovalTargets,
+            IssueKind::RemovedConfiguration,
+            IssueKind::UnresolvedEnvironment,
+            IssueKind::RemovedEnvironmentDependency,
+        ] {
+            let mut inventory = f.inventory();
+            inventory.issue(None, "known-negative-fixture", kind);
+            let snapshot = GuiRetirementSnapshot::capture(
+                inventory,
+                &[f.old.join("missing-resume.exe")],
+                &f.router,
+                &f.context,
+            );
+            assert!(snapshot.report().requires_retention, "{kind:?}");
+            assert!(snapshot.recheck_context(&f.context).is_err(), "{kind:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn gui_retirement_unreadable_configs_refuse_at_capture_and_recheck() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let f = Fixture::new(Os::Windows);
+        let path = f.home(".claude.json");
+        f.write(&path, "{}");
+        let paths = [f.old.join("missing-resume.exe")];
+        let before = gui_snapshot(&f, &paths);
+        let _reservation = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .unwrap();
+        let during = gui_snapshot(&f, &paths);
+        assert!(gui_issue(during.report(), IssueKind::Unreadable));
+        assert!(during.recheck_context(&f.context).is_err());
+        assert!(gui_issue(
+            &before.recheck_context(&f.context).unwrap_err(),
+            IssueKind::ChangedSinceInspection
+        ));
+    }
+
     #[cfg(windows)]
     #[test]
     fn unreadable_reserved_config_is_not_absent() {
@@ -1704,6 +2368,9 @@ mod tests {
         assert!(output.status.success());
         let inventory = f.inventory();
         assert!(issue(&f.check(&inventory), IssueKind::LinkedPath));
+        let gui = gui_snapshot(&f, &[link.join("missing-resume.exe")]);
+        assert!(gui_issue(gui.report(), IssueKind::InvalidRemovalTargets));
+        assert!(gui.recheck_context(&f.context).is_err());
         // Remove only this disposable junction, never the target directory.
         fs::remove_dir(&link).unwrap();
         assert!(f.old.is_dir());

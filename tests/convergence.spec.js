@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
-async function load(page, { required = true, failPrepare = false, holdPrepare = false } = {}) {
-  await page.addInitScript(({ required, failPrepare, holdPrepare }) => {
+async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false } = {}) {
+  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement }) => {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     localStorage.setItem('creator-hub.auto-download', 'false');
     window.__CREATOR_HUB_CONVERGENCE_PROTOCOL__ = 1;
@@ -9,7 +9,7 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
     window.report = {
       enabled: true, required, stage: 'review', settings: ['MCP project selection and options'],
       legacyApps: required ? [{ name: 'Creator Works MCP', path: 'C:/fixture-only/Creator Works MCP/launcher.exe' }] : [],
-      backups: [], message: 'Your saved projects and settings stay where they are.',
+      backups: [], retirementAvailable: false, message: 'Your saved projects and settings stay where they are.',
     };
     window.__TAURI__ = {
       event: { listen: async () => () => {} },
@@ -23,7 +23,17 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
           return window.report;
         }
         if (command === 'migrate_convergence_connections') {
-          window.report = { ...window.report, stage: 'connections-reviewed', message: 'Reviewed, not uninstalled.' };
+          window.report = { ...window.report, stage: 'connections-reviewed', retirementAvailable: retirementReady, message: 'Reviewed, not uninstalled.' };
+          return window.report;
+        }
+        if (command === 'retire_convergence_apps') {
+          window.report = pauseRetirement
+            ? { ...window.report, message: 'Cleanup paused; some app entries may already be retired. Settings and runtime files were kept.' }
+            : { ...window.report, stage: 'complete', required: false, retirementAvailable: false, legacyApps: [], message: 'Migration complete. Settings and backups kept; old MCP runtime paths remain available.' };
+          return window.report;
+        }
+        if (command === 'refresh_convergence') {
+          window.report = { ...window.report, stage: 'review', retirementAvailable: false, backups: [], message: 'Fresh native review required before resuming interrupted cleanup.' };
           return window.report;
         }
         if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
@@ -33,9 +43,43 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
         return null;
       } },
     };
-  }, { required, failPrepare, holdPrepare });
+  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement });
   await page.goto('http://127.0.0.1:4188');
 }
+
+for (const width of [1100, 390]) test(`explicit cleanup and completion stay readable at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 844 });
+  await load(page, { retirementReady: true });
+  await page.locator('#convergence-prepare').click();
+  await page.locator('#convergence-connections').click();
+  await expect(page.locator('#convergence-retire')).toBeVisible();
+  expect(await page.evaluate(() => window.calls.some(call => call.command === 'retire_convergence_apps'))).toBe(false);
+  await page.screenshot({ path: testInfo.outputPath('convergence-retirement-ready.png') });
+  await page.locator('#convergence-retire').click();
+  await expect(page.locator('#convergence-title')).toHaveText('Migration complete');
+  await expect(page.locator('#convergence-summary')).toContainText('Settings and backups kept');
+  await expect(page.locator('#convergence-retire')).not.toBeVisible();
+  await expect(page.locator('#convergence-refresh')).not.toBeVisible();
+  const overflow = await page.locator('#convergence-dialog').evaluate(node => node.scrollWidth > node.clientWidth);
+  expect(overflow).toBe(false);
+  await page.screenshot({ path: testInfo.outputPath('convergence-complete.png') });
+  await page.locator('#convergence-later').click();
+  await expect(page.locator('#convergence-dialog')).not.toBeVisible();
+});
+
+test('partial cleanup is visible and Check again starts a fresh review', async ({ page }) => {
+  await load(page, { retirementReady: true, pauseRetirement: true });
+  await page.locator('#convergence-prepare').click();
+  await page.locator('#convergence-connections').click();
+  await page.locator('#convergence-retire').click();
+  await expect(page.locator('#convergence-details')).toContainText('some app entries may already be retired');
+  await expect(page.locator('#convergence-retire')).toBeEnabled();
+  await page.locator('#convergence-refresh').click();
+  await expect(page.locator('#convergence-title')).toHaveText('Move to unified Creator Hub');
+  await expect(page.locator('#convergence-prepare')).toBeEnabled();
+  await expect(page.locator('#convergence-retire')).not.toBeVisible();
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'retire_convergence_apps').length)).toBe(1);
+});
 
 test('first-launch convergence precedes app checks, automatic view restoration and navigation', async ({ page }) => {
   await load(page);
