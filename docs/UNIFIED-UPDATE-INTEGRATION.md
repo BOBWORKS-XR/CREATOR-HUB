@@ -13,6 +13,22 @@ remain in scope, and their incomplete gates are not waived.
 
 ## Latest Acceptance Checkpoint, 2026-10-14
 
+- Native Linux updater-source tests and strict Clippy pass in `38654369500`
+  (`76ed726`), alongside the sealed-input `pkexec`/`dpkg` fixture. New DEB source
+  honors authorization cancellation without another password/sudo attempt; this
+  is not packaged signed-update/restart acceptance. Windows Root tests pass
+  (358, with 13 opt-in tests ignored). See [the update boundary](LINUX-UPDATE-AUDIT-014.md).
+- Native Flatpak seeded protocol/retention passes `38654573421` (`f303c49`):
+  53 tools, a surviving original connection, successful new connection and one
+  read-only reference call after real deployment replacement. Existing route and
+  retained signature stay unchanged. No extra permissions or product rebuild;
+  host settings, AI config, Unity, consent, migration and release remain false.
+  See [the exact scoped result](../scripts/flatpak-mcp-stdio.md#native-protocol-result).
+- Unprivileged Linux helper fixtures pass `38653151014` at `54a980f`: actual
+  lock/handoff, descriptor, signal and tiny-DEB tests. The experimental helper
+  remains disabled by default, unintegrated and unaccepted for actual retirement.
+  [Known-regression gates](RELEASE-REGRESSIONS.md) now map recurring user reports
+  to source checks and required installed-path evidence.
 - Linux-only source `e60db6f` allows reviewed migration to finish when no known
   standalone installation exists. It rechecks settings, backups, app inventory
   and the signed route before and after native approval. Any detected old app

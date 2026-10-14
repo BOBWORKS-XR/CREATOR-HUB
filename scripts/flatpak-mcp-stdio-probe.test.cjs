@@ -6,6 +6,7 @@ const path = require('node:path');
 const { PassThrough } = require('node:stream');
 const probe = require('./flatpak-mcp-stdio-probe.cjs');
 const pkg = require('./flatpak-package.cjs');
+const sandbox = require('./flatpak-disposable.cjs');
 
 function retainedFixture(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-flatpak-retained-fixture-'));
@@ -205,8 +206,24 @@ test('failed new session or lost retained connection closes only the owned sessi
   }
 });
 
-test('probe refuses the real Windows machine before reading stores or launching Flatpak', () => {
-  assert.throws(() => probe.probe('/not/owned', [], () => {}, {}), /Disposable native Linux|GITHUB|Linux/);
+test('empty environment refuses without effects on native, Linux and Windows admission paths', t => {
+  const effects = [], admission = sandbox.admission;
+  const unexpected = name => () => { effects.push(name); throw Error(`Unexpected ${name}`); };
+  for (const name of ['inside', 'childEnvironment']) t.mock.method(sandbox, name, unexpected(name));
+  for (const name of ['read', 'verifyStage']) t.mock.method(pkg, name, unexpected(name));
+  const stages = new Proxy([], { get: unexpected('stage access') });
+  const replace = unexpected('replacement');
+  assert.throws(() => probe.probe('/not/owned', stages, replace, {}), { code: 'ERR_ASSERTION', name: 'AssertionError' });
+  for (const platform of ['linux', 'win32']) {
+    let admitted = false;
+    const mock = t.mock.method(sandbox, 'admission', env => { admission(env, platform, 'x64'); admitted = true; });
+    assert.throws(() => probe.probe('/not/owned', stages, replace, {}), { code: 'ERR_ASSERTION', name: 'AssertionError' });
+    assert.equal(mock.mock.callCount(), 1);
+    assert.deepEqual(mock.mock.calls[0].arguments, [{}]);
+    assert.equal(admitted, false);
+    mock.mock.restore();
+  }
+  assert.deepEqual(effects, []);
 });
 
 test('cleanup errors preserve the original SDK failure', async () => {

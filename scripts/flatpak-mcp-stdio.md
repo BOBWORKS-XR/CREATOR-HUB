@@ -157,7 +157,9 @@ New source: `.github/workflows/flatpak-mcp-stdio-014.yml`,
 `scripts/flatpak-mcp-stdio-run.cjs`, `scripts/flatpak-mcp-stdio-run.test.cjs`.
 Only those files and this handoff belong to this follow-through. Existing package,
 disposable/probe modules, native code and other agents' helpers are not changed.
-There has been **no push, dispatch, native compilation, installation or SDK run**.
+At the original preparation checkpoint there had been **no push, dispatch,
+native compilation, installation or SDK run**. The first scoped run below
+supersedes that preparation-only workflow status.
 
 The workflow follows the existing scoped-push pattern, **not** `workflow_dispatch`.
 Both job and admission require repository `BOBWORKS-XR/CREATOR-HUB`, repository ID
@@ -247,3 +249,60 @@ configuration, migration, Unity/project operations and the later router activati
 fix remain unaccepted. Parent owns the GTK/component lane and the decision to run
 this isolated protocol experiment after review. Missing refs, artifacts, tools,
 namespaces or libraries must fail with evidence, never broaden permissions.
+
+## First Scoped Run Checkpoint
+
+Parent integrated `a940cc2ac2e47ecf45d5a37a5893105ee5026340` and authorized one
+scoped push test. The validation ref was already at that commit when tracking
+started; no duplicate push, dispatch or rerun was made by this agent.
+
+- Run: [38653580310, attempt 1](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38653580310).
+- Job: `116157954770`, `seeded-stdio`; completed with failure in portable preflight.
+- Native Linux preflight: **83 passed, 1 failed, 0 skipped (84 total)**.
+- Confirmed broken, harness only: `scripts/flatpak-mcp-stdio-probe.test.cjs:209`
+  expects `/Disposable native Linux|GITHUB|Linux/` from an empty-environment probe.
+  Linux passes the platform check, then correctly refuses `GITHUB_ACTIONS`
+  being absent. Node's generated `ERR_ASSERTION` message contains `undefined`
+  versus `'true'`, not any of the expected words. The test therefore fails on
+  the refusal message, not because admission allowed execution.
+- Correct as-is: admission refused the unowned/empty context before stores or
+  Flatpak could be reached. Do not weaken that guard or introduce a Linux bypass.
+- Source/artifact download verification, staging, helper compilation, GNOME
+  setup, route seeding, Flatpak packaging/update and SDK execution were all skipped.
+- Capture limitation: the compact upload step ran with `if-no-files-found: warn`,
+  found no staged/report paths because preflight came first, and produced **zero
+  artifacts**, confirmed by the run artifacts API. This is a preflight-capture
+  gap, not an artifact-upload success or a product runtime failure.
+
+Local capture: `artifacts/flatpak-stdio-38653580310-capture-wfL6dy/`. `capture.json` records classification,
+source/run/attempt/job identity, false gates, and SHA-256/size records for intact
+failed-step output, compact-upload warning, run/job metadata and zero-artifact
+response. The five captured source files total 30,803 bytes; nothing was deleted.
+
+Scope outcome: **protocol/retention untested**, `seededRoute=false`,
+`toolConsumerProtocolRetentionPassed=false`, and every host/migration/update/
+release acceptance gate remains false. No runtime or product defect is established
+by this attempt. There was no automatic retry, native rebuild, permission change,
+broker work, or code patch after the failure.
+
+Smallest follow-up for parent review: make the negative test assert the structured
+admission refusal independently of platform-specific wording, retaining explicit
+no-I/O/no-launch coverage. Separately, preserve preflight output in a bounded
+compact-capture path even if product staging has not begun. Neither correction
+nor another native attempt is authorized by the completed one-run instruction;
+both remain for parent decision.
+
+## Native Protocol Result
+
+Authorized repeat [38654573421](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38654573421)
+at test-only `f303c49` passes native Linux preflight and the seeded SDK experiment.
+Same immutable assembly inputs and seven-file stages; no extra permissions or
+Root rebuild. The official SDK lists 53 tools; connection A survives the real
+deployment replacement and B connects afterward. One read-only
+`get_mcp_reference` request succeeds. The active receipt, retained generation and
+baseline signature stay unchanged, and both package signatures verify.
+
+Compact artifact `11936385954` is 12,728 bytes and was independently digest-checked
+once under `artifacts/flatpak-stdio-38654573421-compact-hNhX08`. Only the scoped
+protocol/retention result is true. Host settings/AI configuration, Unity/project
+operations, consent, migration and signed-update/release gates remain false.
