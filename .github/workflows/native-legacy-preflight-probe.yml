@@ -23,6 +23,12 @@ jobs:
           node-version: 24
       - name: Test refusal and receipt contracts without running an installer
         run: node --test scripts/native-legacy-preflight-probe.test.cjs scripts/native-installed-baseline.test.cjs
+      - name: Parse the native observer without executing it
+        shell: pwsh
+        run: |
+          $tokens = $null; $errors = $null
+          [Management.Automation.Language.Parser]::ParseFile((Join-Path $pwd 'scripts/native-legacy-preflight-probe.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count) { throw 'Native diagnostic source failed parsing.' }
       - name: Download and bind only the immutable public 2.7.7 installer
         shell: pwsh
         run: |

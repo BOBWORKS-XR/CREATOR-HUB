@@ -53,7 +53,8 @@ $receipt = [ordered]@{
     installerRerun=$false; processesKilled=$false; installAccepted=$false; releaseReady=$false
 }
 function ErrorIdentity($Record) {
-    return [ordered]@{ type=$Record.Exception.GetType().FullName; hresult=$Record.Exception.HResult }
+    return [ordered]@{ type=$Record.Exception.GetType().FullName; hresult=$Record.Exception.HResult
+        line=[int]$Record.InvocationInfo.ScriptLineNumber }
 }
 $image = $null; $algorithm = $null; $installerProcess = $null; $subscription = $null; $stopSubscription = $null
 $sourceIdentifier = 'CreatorLegacyPreflight-' + [Guid]::NewGuid().ToString('N')
@@ -128,7 +129,13 @@ public static class LegacyPreflightWitness {
             if ($current.ProcessId -ne $receipt.installerPid) { throw 'Foreign dialog control refused.' }
             $total += $current.Name.Length
             if ($current.Name.Length -gt 8192 -or $total -gt 32768) { throw 'Dialog text exceeds its bound.' }
-            $controls += [ordered]@{ name=$current.Name; id=$current.AutomationId; type=$current.ControlType.ProgrammaticName; processId=$current.ProcessId }
+            $nativeClass = $null
+            if ($current.NativeWindowHandle -ne 0 -and
+                [LegacyPreflightWitness]::Owner([IntPtr]$current.NativeWindowHandle) -eq $receipt.installerPid) {
+                $nativeClass = [LegacyPreflightWitness]::Class([IntPtr]$current.NativeWindowHandle)
+            }
+            $controls += [ordered]@{ name=$current.Name; id=$current.AutomationId; type=$current.ControlType.ProgrammaticName
+                processId=$current.ProcessId; nativeClass=$nativeClass }
         }
         return [ordered]@{ title=$title; handle=$Handle.ToInt64(); class=[LegacyPreflightWitness]::Class($Handle); processId=$receipt.installerPid; controls=@($controls) }
     }
@@ -201,7 +208,7 @@ public static class LegacyPreflightWitness {
                 else { 'unrecognized-dialog' }
             if ($Mode -ceq 'silent-observe') { Start-Sleep -Milliseconds 100; continue }
             $cancel = @($receipt.firstDialog.controls | Where-Object {
-                $_.type -ceq 'ControlType.Button' -and $_.id -ceq '2' -and $_.name.Replace('&','').Trim() -ceq 'Cancel'
+                $_.nativeClass -ceq 'Button' -and $_.id -ceq '2' -and $_.name.Replace('&','').Trim() -ceq 'Cancel'
             })
             if ($cancel.Count -ne 1 -or $installerProcess.HasExited -or
                 -not [LegacyPreflightWitness]::Button($dialogs[0], [uint32]$receipt.installerPid, 2, $true)) {
@@ -214,7 +221,7 @@ public static class LegacyPreflightWitness {
                 'Are you sure you want to quit Creator Works MCP Setup?', 'Are you sure you want to quit Creator Works MCP 2.7.7 Setup?')
             $lines = @($candidate.controls | ForEach-Object { $_.name.Trim() })
             $yes = @($candidate.controls | Where-Object {
-                $_.type -ceq 'ControlType.Button' -and $_.id -ceq '6' -and $_.name.Replace('&','').Trim() -ceq 'Yes'
+                $_.nativeClass -ceq 'Button' -and $_.id -ceq '6' -and $_.name.Replace('&','').Trim() -ceq 'Yes'
             })
             if (@($confirmation | Where-Object { $_ -cin $lines }).Count -eq 1 -and
                 $yes.Count -eq 1 -and -not $installerProcess.HasExited -and

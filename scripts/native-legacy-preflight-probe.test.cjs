@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
+const { execFileSync } = require('node:child_process');
 const { PUBLIC_INSTALLER, MODES, admission, validateReceipt } = require('./native-legacy-preflight-probe.cjs');
 
 const source = fs.readFileSync(path.join(__dirname, 'native-legacy-preflight-probe.cjs'), 'utf8');
@@ -21,8 +22,8 @@ function receipt() {
     installerIs64Bit: false,
     firstDialog: { title: 'Creator Works MCP Setup', handle: 101, class: '#32770', processId: 4000,
       controls: [{ name: 'Setup could not verify access to Creator Works MCP files. Check result: timeout',
-        id: '65535', type: 'ControlType.Text', processId: 4000 },
-      { name: 'Cancel', id: '2', type: 'ControlType.Button', processId: 4000 }] },
+        id: '65535', type: 'ControlType.Text', processId: 4000, nativeClass: 'Static' },
+      { name: 'Cancel', id: '2', type: 'ControlType.Button', processId: 4000, nativeClass: 'Button' }] },
     laterDialogs: [], classification: 'preflight-unavailable',
     powerShellChildren: [{ pid: 4001, parentPid: 4000, observedAt: '2026-10-14T18:00:01Z',
       image: 'C:\\Windows\\SysWOW64\\WindowsPowerShell\\v1.0\\powershell.exe', imageSha256: 'a'.repeat(64),
@@ -98,8 +99,8 @@ test('missing dialog, unverified cancellation, installed files/registration, dri
   for (const change of [{ firstDialog: null }, { cancelPosted: false }, { installerExited: false, installerExitCode: null },
     { firstDialog: { ...receipt().firstDialog, controls: [receipt().firstDialog.controls[0]] } },
     { defaultDirectoryAbsent: false }, { uninstallRegistrationAbsent: false }, { productRegistrationAbsent: false },
-    { observerError: { type: 'System.InvalidOperationException', hresult: -1 } }, { installerBytesUnchanged: false },
-    { error: { type: 'System.InvalidOperationException', hresult: -1 } }]) {
+    { observerError: { type: 'System.InvalidOperationException', hresult: -1, line: 180 } }, { installerBytesUnchanged: false },
+    { error: { type: 'System.InvalidOperationException', hresult: -1, line: 180 } }]) {
     assert.equal(decode({ ...receipt(), ...change }).capturedAndCancelled, false);
   }
 });
@@ -134,14 +135,24 @@ test('fixed silent mode can capture exit 10 or 0 but cannot silently claim insta
     assert.equal(decoded.report.releaseReady, false);
   }
   for (const change of [{ installerExited: false, installerExitCode: null }, { installerBytesUnchanged: false },
-    { error: { type: 'System.InvalidOperationException', hresult: -1 } },
-    { observerError: { type: 'System.InvalidOperationException', hresult: -1 } }]) {
+    { error: { type: 'System.InvalidOperationException', hresult: -1, line: 180 } },
+    { observerError: { type: 'System.InvalidOperationException', hresult: -1, line: 180 } }]) {
     assert.equal(decode({ ...silentReceipt(), ...change }, 'silent-observe').observationComplete, false);
   }
   assert.throws(() => decode(silentReceipt()));
   assert.throws(() => decode(receipt(), 'silent-observe'));
   assert.throws(() => decode({ ...silentReceipt(), cancelPosted: true }, 'silent-observe'));
   assert.throws(() => decode({ ...silentReceipt(), installAccepted: true }, 'silent-observe'));
+});
+
+test('NSIS UIA Pane is permitted only when its captured native class is Button and native cancellation was posted', () => {
+  const value = receipt();
+  value.firstDialog.controls[1].type = 'ControlType.Pane';
+  assert.equal(decode(value).capturedAndCancelled, true);
+  value.firstDialog.controls[1].nativeClass = 'Pane';
+  assert.equal(decode(value).capturedAndCancelled, false);
+  value.firstDialog.controls[1].nativeClass = null;
+  assert.equal(decode(value).capturedAndCancelled, false);
 });
 
 test('custom diagnostic modes refuse before filesystem or any worker', async () => {
@@ -277,3 +288,44 @@ test('native source observes before starting, holds public bytes, and permits on
   assert.doesNotMatch(native, /Stop-Process|taskkill|TerminateProcess|\.Kill\(|CommandLine|\.ArgumentList|\/UPDATE|\/TIMEOUT|InstallFiles|InvokePattern/);
   assert.doesNotMatch(source, /\.kill\(|killSignal|execFileSync|process\.env\[[^\]]+\]\s*=/);
 });
+
+test('owned start/stop event processing works against synthetic events without any real installer or process query',
+  { skip: process.platform !== 'win32' }, () => {
+    const functions = native.slice(native.indexOf('    function ReadStarts'), native.indexOf('    # Subscribe before'));
+    const script = `
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+Add-Type -TypeDefinition @'
+public static class LegacyPreflightWitness {
+  public static string[] Image(uint pid, long startedBy) {
+    return new[]{System.Environment.GetEnvironmentVariable("SystemRoot") + @"\\SysWOW64\\WindowsPowerShell\\v1.0\\powershell.exe", "32", null};
+  }
+}
+'@
+$receipt = [ordered]@{installerPid=4000; powerShellChildren=@(); observerError=$null}
+$sourceIdentifier='fixture-start'; $stopIdentifier='fixture-stop'
+function ErrorIdentity($Record) { throw $Record }
+function Get-FileHash { [pscustomobject]@{Hash=('a' * 64)} }
+function Remove-Event { param($EventIdentifier) }
+function Get-Event {
+  param($SourceIdentifier)
+  $row = if ($SourceIdentifier -eq 'fixture-start') {
+    [pscustomobject]@{ProcessID=4001; ParentProcessID=4000; ProcessName='powershell.exe'; TIME_CREATED=[DateTime]::UtcNow.AddSeconds(-2).ToFileTimeUtc()}
+  } else {
+    [pscustomobject]@{ProcessID=4001; ProcessName='powershell.exe'; TIME_CREATED=[DateTime]::UtcNow.ToFileTimeUtc(); ExitStatus=11}
+  }
+  [pscustomobject]@{SourceEventArgs=[pscustomobject]@{NewEvent=$row}; EventIdentifier=1}
+}
+${functions}
+ReadStarts
+ReadStops
+$receipt | ConvertTo-Json -Depth 8 -Compress
+`;
+    const shell = path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe');
+    const result = JSON.parse(execFileSync(shell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+      { encoding: 'utf8', windowsHide: true, timeout: 15000 }));
+    assert.equal(result.powerShellChildren.length, 1);
+    assert.equal(result.powerShellChildren[0].is64Bit, false);
+    assert.equal(result.powerShellChildren[0].exitStatus, 11);
+    assert.equal(result.observerError, null);
+  });

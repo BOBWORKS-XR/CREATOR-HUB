@@ -47,9 +47,10 @@ function dialog(value, installerPid) {
   assert.ok(Array.isArray(value.controls) && value.controls.length <= 128);
   let total = value.title.length;
   for (const control of value.controls) {
-    keys(control, 'name id type processId');
+    keys(control, 'name id type processId nativeClass');
     string(control.name, 8192); string(control.id, 128); string(control.type, 128);
     assert.equal(control.processId, installerPid); total += control.name.length;
+    if (control.nativeClass !== null) string(control.nativeClass, 128);
   }
   assert.ok(total <= 32768, 'Dialog exceeds its capture bound');
 }
@@ -87,8 +88,9 @@ function validateReceipt(bytes, mode = 'first-dialog-cancel') {
   }
   for (const field of ['observerError', 'error']) {
     if (report[field] !== null) {
-      keys(report[field], 'type hresult'); string(report[field].type, 256);
+      keys(report[field], 'type hresult line'); string(report[field].type, 256);
       assert.ok(Number.isInteger(report[field].hresult));
+      assert.ok(Number.isInteger(report[field].line) && report[field].line >= 0 && report[field].line <= 4096);
     }
   }
   for (const field of ['cancelPosted', 'confirmationPosted', 'installerExited', 'defaultDirectoryAbsent',
@@ -97,7 +99,7 @@ function validateReceipt(bytes, mode = 'first-dialog-cancel') {
   for (const field of ['originalNsExecReturnCaptured', 'originalPowerShellModulesCaptured', 'installerRerun',
     'processesKilled', 'installAccepted', 'releaseReady']) assert.equal(report[field], false);
   // A diagnostic success is only captured evidence plus verified cancellation, never installation acceptance.
-  const cancelObserved = report.firstDialog?.controls.filter(control => control.type === 'ControlType.Button'
+  const cancelObserved = report.firstDialog?.controls.filter(control => control.nativeClass === 'Button'
     && control.id === '2' && control.name.replaceAll('&', '').trim() === 'Cancel').length === 1;
   assert.equal(report.installerExited, report.installerExitCode !== null);
   const intact = report.installerBytesUnchanged && report.error === null && report.observerError === null;
