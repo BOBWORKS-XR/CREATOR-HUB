@@ -39,11 +39,34 @@ remain in scope, and their incomplete gates are not waived.
   `38645211366` displayed a declined-opening error without a consent input;
   Zenity's original runner presence/launch error is not directly established.
   Source `77367ae` changes only Linux Setup to the GTK backend already used by
-  Hub/MCP. Its new private payload is being built in `38647206970`; successful
+  Hub/MCP. Its new private payload passed `38647206970`, was independently
+  acquired/verified and signed with the existing release key. Outer assembly
+  [38648562557](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38648562557)
+  passes 320 native Root tests (12 opt-in tests ignored), then builds all three
+  Linux formats. Original artifact `11934297227`, all three package hashes and
+  the actual DEB executable were independently verified locally. Successful
   native permission/operation tests are still required. The actual selected
   Windows Cargo feature trees before/after are identical (2,896 lines), and
   Setup's Windows Rust tests pass (135 unit plus two integration tests; 13 ignored).
   Existing accepted Windows installer bytes were not changed.
+- Router source `b154e36` corrects a separately reproduced repeat-install bug:
+  activation rejected an equivalent descriptor solely because its valid signature
+  file differed. Incoming and retained signatures now both require trusted-key
+  verification; the exact retained body/signature are kept rather than repaired
+  or rewritten. The regression fails before the patch and passes afterward;
+  25 router tests pass (one opt-in audit ignored), strict Clippy passes, and
+  Windows Root tests pass (356 plus 13 ignored). The GTK assembly above predates
+  this patch. Existing installers are frozen prior evidence, not acceptance of
+  this new source; final packaged/native checks remain required.
+- Flatpak source `3d44f1f` adds a fixed libexec MCP stdio entrypoint from an
+  independently pinned original raw router, with no extra sandbox permissions.
+  The shared native archive decoder remains the only archive parser. Its
+  prepared replacement probe keeps the baseline signature for an unchanged
+  runtime descriptor; independently re-signed package metadata need not have
+  identical signature-file bytes. 83 focused tests pass, one Linux mode test
+  is skipped on Windows. See [the bounded prerequisite](../scripts/flatpak-mcp-stdio.md).
+  Actual Flatpak SDK/replacement, host settings, Unity/projects and migration
+  are not accepted by these source/fixture tests.
 - [Debian transition38643248531](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38643248531)
   proves a same-package runtime-only upgrade can retire the GUI/desktop/icons
   while preserving all nine original runtime files, a live SDK connection,
