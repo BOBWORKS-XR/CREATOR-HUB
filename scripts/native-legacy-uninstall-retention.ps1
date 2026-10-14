@@ -151,6 +151,16 @@ function Get-LegacyStores($Pin, [string]$Roaming, [string]$Local) {
     return ,$stores
 }
 
+function Convert-LegacyRegistryRecord([Collections.IDictionary]$Record) {
+    $named = [ordered]@{}
+    foreach ($entry in $Record.GetEnumerator()) {
+        $name = if ([string]$entry.Key -ceq '') { 'defaultValue' } else { [string]$entry.Key }
+        Require-Legacy (-not $named.Contains($name)) 'Registry report field collision; unnamed value must not be lost.'
+        $named[$name] = $entry.Value
+    }
+    return [pscustomobject]$named
+}
+
 function Get-LegacyRegistrations($Pin, [switch]$Manufacturer) {
     $subkey = if ($Manufacturer) { "Software\Creator Works\$($Pin.product)" }
         else { "Software\Microsoft\Windows\CurrentVersion\Uninstall\$($Pin.product)" }
@@ -164,7 +174,7 @@ function Get-LegacyRegistrations($Pin, [switch]$Manufacturer) {
                 foreach ($name in @('', 'DisplayName', 'DisplayVersion', 'Publisher', 'InstallLocation', 'UninstallString', 'QuietUninstallString')) {
                     $record[$name] = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
                 }
-                $records += [pscustomobject]$record
+                $records += (Convert-LegacyRegistryRecord $record)
             } finally { $key.Dispose() } }
         } finally { $base.Dispose() }
     } }

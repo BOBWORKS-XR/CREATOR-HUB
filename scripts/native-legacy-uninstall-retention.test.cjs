@@ -141,6 +141,26 @@ test('registration identity cannot authorize MSI, machine scope, extra flags, wr
   `);
 });
 
+test('populated registry records retain the unnamed/default value under a valid report property', windowsOnly, () => {
+  const result = JSON.parse(powershell(expectRefusal + String.raw`
+    $raw=[ordered]@{hive='CurrentUser';view='Registry64';key='Software\Creator Works\Creator Works MCP';
+      ''='C:\fixture\Local\Creator Works MCP';DisplayVersion='2.7.7'}
+    $mapped=Convert-LegacyRegistryRecord $raw
+    if($mapped.PSObject.Properties.Name -contains '') { throw 'Empty report property survived.' }
+    if($mapped.defaultValue -cne $raw[''] -or $mapped.DisplayVersion -cne $raw['DisplayVersion']) { throw 'Registry value was dropped or changed.' }
+    $raw['']=$null;$absent=Convert-LegacyRegistryRecord $raw
+    if($null -ne $absent.defaultValue -or $absent.PSObject.Properties.Name -notcontains 'defaultValue') { throw 'Absent default-value evidence was lost.' }
+    $raw['defaultValue']='collision';Refuses { Convert-LegacyRegistryRecord $raw }
+    $mapped | ConvertTo-Json -Compress
+  `));
+  assert.equal(result.defaultValue, 'C:\\fixture\\Local\\Creator Works MCP');
+  assert.equal(result.DisplayVersion, '2.7.7');
+  const source = fs.readFileSync(script, 'utf8');
+  assert.match(source, /foreach \(\$name in @\('', 'DisplayName'/);
+  assert.match(source, /\$key\.GetValue\(\$name,/);
+  assert.match(source, /\$records \+= \(Convert-LegacyRegistryRecord \$record\)/);
+});
+
 test('nonzero, timeout and incomplete logs fail instead of accepting an apparent tool pass', windowsOnly, () => {
   powershell(expectRefusal + String.raw`
     Assert-LegacyToolExit $true 0 $true

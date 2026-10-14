@@ -151,7 +151,7 @@ transfer validation, backups/recovery and client/runtime reference checks before
 removing old applications: retaining settings alone does not keep deleted old
 installed server paths working. Main owns that product integration and admission.
 
-The focused suite has 15 tests, including original-error/preservation-failure
+The focused suite has 16 tests, including original-error/preservation-failure
 precedence, nonzero/hang/log-drain refusal, canonical residual cleanup plans and
 the directory-mtime versus creation/owner contract. These checks do not produce
 native uninstaller pins; those come only from the retained workflow receipts.
@@ -173,3 +173,16 @@ record the actual temp-path spelling, so a specific 8.3 alias is not confirmed.
 Microsoft documents short-name expansion in
 [Path.GetFullPath](https://learn.microsoft.com/en-us/dotnet/api/system.io.path.getfullpath).
 No production path/reparse/ownership guard or native timeout was relaxed.
+
+Second native run `38486711648` (source `2a190311299c32ad5ab18b0a2086789b49f17e94`)
+passed both pure suites and executed both exact published installers with exit
+zero. Neither uninstaller ran and no persistent store was seeded: registration
+collection failed while casting an ordered dictionary containing the unnamed
+registry value (`''`) into a PSCustomObject. PowerShell rejects an empty property
+name. The collector still reads `GetValue('')` unchanged and now maps only that
+report key to `defaultValue` before conversion. Named values remain unchanged;
+field collisions refuse rather than dropping either value. A populated pure
+dictionary regression covers both a real default-value string and an absent
+value without accessing the PC registry. Original reports remain under
+`artifacts/legacy-retention-38486711648/`. This failure is harness serialization,
+not evidence of uninstall failure or retention acceptance.
