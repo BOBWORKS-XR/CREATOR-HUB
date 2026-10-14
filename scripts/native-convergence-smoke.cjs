@@ -255,6 +255,32 @@ async function main(candidate) {
     });
     native(child.pid, hub, 'close');
     await retry(() => assert.notEqual(child.exitCode, null)); assert.equal(child.exitCode, 0);
+    await browser.close(); browser = null;
+    const retainedAfterMigration = [config, legacyConfig, editors, ...clients.map(client => client.path)]
+      .map(file => ({ file, bytes: fs.readFileSync(file) }));
+    child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238',
+      WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview') } });
+    browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'));
+    page = await retry(() => {
+      const found = browser.contexts().flatMap(context => context.pages()).find(view => view.url().includes('tauri.localhost'));
+      assert.ok(found); return found;
+    });
+    page.setDefaultTimeout(45000);
+    await page.waitForFunction(() => window.CreatorHubNative && !document.querySelector('#check-updates').disabled
+      && document.querySelector('#catalog-status')?.textContent === 'Update check complete. Installation always needs your approval.');
+    report.repeatMigratedLaunch = await page.evaluate(() => window.CreatorHubNative.invoke('convergence_status'));
+    assert.equal(report.repeatMigratedLaunch.required, false, 'Completed migration must not prompt again because original legacy data was retained');
+    assert.deepEqual(report.repeatMigratedLaunch.legacyApps, []);
+    assert.equal(await page.locator('#convergence-dialog').isVisible(), false);
+    assert.equal(await page.locator('#usage-terms-dialog').isVisible(), false, 'Actual accepted terms must survive restart');
+    for (const file of retainedAfterMigration) assert.deepEqual(fs.readFileSync(file.file), file.bytes);
+    for (const file of retainedFiles) assert.equal(hash(file.file), file.sha256);
+    assert.deepEqual(registrationNames(), ['Creator Hub']);
+    assert.ok((await oldClient.listTools({}, { timeout: 10000 })).tools.length > 0);
+    native(child.pid, hub, 'close');
+    await retry(() => assert.notEqual(child.exitCode, null)); assert.equal(child.exitCode, 0);
+    report.checks.push('Actual post-migration restart keeps the approved legacy image, settings, client routes and old live stdio without asking to migrate again');
     report.passed = true;
   } catch (error) {
     report.error = String(error); report.stack = error.stack;

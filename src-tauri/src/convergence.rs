@@ -6,6 +6,7 @@ mod stores;
 use crate::{builtin, catalog::AppId, hosted::Hosting, manager, platform};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{fs, path::PathBuf, sync::Mutex};
 use tauri::Manager as _;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -52,24 +53,56 @@ struct ReviewRecord {
     connections_reviewed: bool,
     // This deliberately never records or authorizes standalone removal.
     standalone_removal_accepted: bool,
+    #[serde(default)]
+    retained_legacy_sha256: Option<String>,
 }
 
 fn record_path() -> Result<PathBuf, String> {
     Ok(manager::child_dir("convergence")?.join("review-v1.json"))
 }
 
-fn reviewed_at(path: &std::path::Path) -> Result<bool, String> {
+fn read_review_at(path: &std::path::Path) -> Result<Option<ReviewRecord>, String> {
     match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err("Cannot inspect Hub's retained migration review.".into()),
         Ok(_) => {}
     }
     let saved: ReviewRecord = serde_json::from_slice(&manager::bounded_read(path, 2048)?)
         .map_err(|_| "The migration review needs inspection; old apps were kept.")?;
-    if saved.policy != POLICY || saved.standalone_removal_accepted {
+    if saved.policy != POLICY
+        || saved.standalone_removal_accepted
+        || saved.retained_legacy_sha256.as_ref().is_some_and(|hash| {
+            hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
         return Err("Unknown migration review; old apps were kept.".into());
     }
-    Ok(saved.stores_retained && saved.connections_reviewed)
+    Ok(Some(saved))
+}
+
+fn reviewed_at(path: &std::path::Path) -> Result<bool, String> {
+    Ok(read_review_at(path)?
+        .is_some_and(|saved| saved.stores_retained && saved.connections_reviewed))
+}
+
+fn legacy_image_hash(snapshots: &[stores::Snapshot]) -> Option<String> {
+    snapshots
+        .iter()
+        .find(|saved| saved.store() == stores::Store::McpLegacy)
+        .and_then(stores::Snapshot::bytes)
+        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn reviewed_snapshots_at(
+    path: &std::path::Path,
+    snapshots: &[stores::Snapshot],
+) -> Result<bool, String> {
+    Ok(read_review_at(path)?.is_some_and(|saved| {
+        saved.stores_retained
+            && saved.connections_reviewed
+            && !snapshots.iter().any(stores::Snapshot::needs_outcome_review)
+            && saved.retained_legacy_sha256 == legacy_image_hash(snapshots)
+    }))
 }
 
 fn roots() -> Result<stores::Roots, String> {
@@ -148,7 +181,7 @@ fn inspect() -> Result<Plan, String> {
     }
     let legacy_apps = legacy_apps()?;
     // Validate even when legacy apps exist; do not short-circuit a newer policy.
-    let already_reviewed = reviewed_at(&record_path()?)? && !settings_need_review(&snapshots);
+    let already_reviewed = reviewed_snapshots_at(&record_path()?, &snapshots)?;
     let pending_retirement = retirement_pending()?;
     let already_using_hub = legacy_apps.is_empty()
         && !pending_retirement
@@ -440,8 +473,16 @@ fn refresh_reviewed_server_paths(
     Ok(())
 }
 
-fn save_review_at(path: &std::path::Path) -> Result<(), String> {
+fn save_review_at(path: &std::path::Path, snapshots: &[stores::Snapshot]) -> Result<(), String> {
     reviewed_at(path)?;
+    for saved in snapshots {
+        saved.recheck()?;
+    }
+    if snapshots.iter().any(stores::Snapshot::needs_outcome_review) {
+        return Err(
+            "An unfinished operation still needs review; existing records were kept.".into(),
+        );
+    }
     manager::atomic_write(
         path,
         &serde_json::to_vec(&ReviewRecord {
@@ -449,10 +490,11 @@ fn save_review_at(path: &std::path::Path) -> Result<(), String> {
             stores_retained: true,
             connections_reviewed: true,
             standalone_removal_accepted: false,
+            retained_legacy_sha256: legacy_image_hash(snapshots),
         })
         .map_err(|_| "Cannot record migration review.")?,
     )?;
-    if !reviewed_at(path)? {
+    if !reviewed_snapshots_at(path, snapshots)? {
         return Err("Migration review could not be verified; old apps were kept.".into());
     }
     Ok(())
@@ -735,7 +777,7 @@ pub async fn migrate_convergence_connections(handle: tauri::AppHandle) -> Result
         close?;
         // Review is not live-client acceptance or permission to uninstall.
         recheck(plan)?;
-        save_review_at(&record_path()?)?;
+        save_review_at(&record_path()?, &plan.stores)?;
         plan.report.stage = "connections-reviewed";
         plan.report.message = retirement_diagnostics(plan, &manager).unwrap_or_else(|reason|
             format!("Connections are reviewed; standalone cleanup paused: {reason}. Choose Check again to review a fresh plan."));
@@ -970,40 +1012,47 @@ mod tests {
     }
 
     #[test]
-    fn prior_review_does_not_hide_new_conflicts_or_pending_outcomes() {
+    fn review_keeps_approved_legacy_image_but_not_new_edits_or_pending_outcomes() {
         let (_temp, roots, mut plan) = fixture_plan();
-        let prior_review = true;
-        assert!(!settings_need_review(&plan.stores));
-        assert!(!migration_required(0, 1, prior_review, false));
+        let review = roots.config.join("review.json");
         let legacy = stores::Store::McpLegacy.path(&roots).unwrap();
         fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        fs::write(&legacy, br#"{"channels":[],"auto_start":true}"#).unwrap();
-        plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &roots).unwrap();
-        assert!(settings_need_review(&plan.stores));
-        assert!(migration_required(
-            0,
-            2,
-            prior_review && !settings_need_review(&plan.stores),
-            false
-        ));
         fs::write(&legacy, plan.stores[0].bytes().unwrap()).unwrap();
         plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &roots).unwrap();
-        assert!(!settings_need_review(&plan.stores));
+        save_review_at(&review, &plan.stores).unwrap();
+        assert!(reviewed_snapshots_at(&review, &plan.stores).unwrap());
+        let current = stores::Store::McpCurrent.path(&roots).unwrap();
+        fs::write(&current, br#"{"channels":[],"auto_start":false,"futureOption":"kept","mcp_server_path":"C:/verified/runtime.mjs"}"#).unwrap();
+        plan.stores[0] = stores::Snapshot::inspect(stores::Store::McpCurrent, &roots).unwrap();
+        // Migration changes the active path while keeping its original image.
+        assert!(settings_need_review(&plan.stores));
+        assert!(reviewed_snapshots_at(&review, &plan.stores).unwrap());
+        let original_legacy = fs::read(&legacy).unwrap();
+        fs::write(&legacy, br#"{"channels":[],"auto_start":true}"#).unwrap();
+        plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &roots).unwrap();
+        assert!(!reviewed_snapshots_at(&review, &plan.stores).unwrap());
+        fs::write(&legacy, &original_legacy).unwrap();
+        plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &roots).unwrap();
         write_outcome(&roots, "accepted");
         plan.stores[2] =
             stores::Snapshot::inspect(stores::Store::McpHostedOutcomes, &roots).unwrap();
-        assert!(settings_need_review(&plan.stores));
-        assert!(migration_required(
-            0,
-            3,
-            prior_review && !settings_need_review(&plan.stores),
-            false
-        ));
+        assert!(!reviewed_snapshots_at(&review, &plan.stores).unwrap());
+        let review_bytes = fs::read(&review).unwrap();
+        assert!(save_review_at(&review, &plan.stores).is_err());
+        assert_eq!(fs::read(&review).unwrap(), review_bytes);
         write_outcome(&roots, "returned-ok");
         plan.stores[2] =
             stores::Snapshot::inspect(stores::Store::McpHostedOutcomes, &roots).unwrap();
-        assert!(!settings_need_review(&plan.stores));
-        assert!(!migration_required(0, 3, prior_review, false));
+        assert!(reviewed_snapshots_at(&review, &plan.stores).unwrap());
+        assert!(!migration_required(
+            0,
+            3,
+            reviewed_snapshots_at(&review, &plan.stores).unwrap(),
+            false
+        ));
+        fs::remove_file(&legacy).unwrap();
+        plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &roots).unwrap();
+        assert!(!reviewed_snapshots_at(&review, &plan.stores).unwrap());
     }
 
     #[test]
@@ -1142,10 +1191,10 @@ mod tests {
         let path = temp.path().join("future.json");
         let bytes = br#"{"policy":2,"stores_retained":true,"connections_reviewed":true,"standalone_removal_accepted":false}"#;
         fs::write(&path, bytes).unwrap();
-        assert!(save_review_at(&path).is_err());
+        assert!(save_review_at(&path, &[]).is_err());
         assert_eq!(fs::read(&path).unwrap(), bytes);
         let fresh = temp.path().join("current.json");
-        save_review_at(&fresh).unwrap();
+        save_review_at(&fresh, &[]).unwrap();
         assert!(reviewed_at(&fresh).unwrap());
     }
 
@@ -1228,6 +1277,7 @@ mod tests {
                     stores_retained: true,
                     connections_reviewed: true,
                     standalone_removal_accepted: false,
+                    retained_legacy_sha256: None,
                 })
                 .unwrap(),
             )

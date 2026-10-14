@@ -31,5 +31,8 @@ test('actual guide harness fences inspection and distinguishes flow acceptance f
   assert.ok(source.includes("event.listen('close-blocked'"));
   assert.ok(source.includes('for (const file of [backupReport.backups[0], config])'));
   assert.ok(source.includes("'Refusal must not repair or overwrite changed evidence'"));
+  assert.ok(source.includes('report.repeatMigratedLaunch ='));
+  assert.ok(source.includes("'Completed migration must not prompt again because original legacy data was retained'"));
+  assert.ok(source.includes('for (const file of retainedAfterMigration) assert.deepEqual(fs.readFileSync(file.file), file.bytes)'));
   assert.doesNotMatch(source, /taskkill|\.kill\(|Stop-Process|auth\.json|process\.env\.(?:TAURI_SIGNING_PRIVATE_KEY|CREATOR_HUB_SIGNING_KEY_PATH)/);
 });
