@@ -1,0 +1,35 @@
+name: Linux sealed package privilege handoff (disposable mechanism only)
+on:
+  push:
+    branches: [validation/linux-sealed-update-014]
+    paths: ['.github/workflows/linux-sealed-update-014.yml']
+permissions:
+  contents: read
+jobs:
+  sealed-package:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' && github.ref == 'refs/heads/validation/linux-sealed-update-014'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      CREATOR_LINUX_SEALED_UPDATE_PROBE: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Pure and native kernel fixture preflight
+        run: python3 -B scripts/linux-sealed-update-probe.test.py
+      - name: Provision system authorization, no app or Rust build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends policykit-1
+          sudo systemctl start polkit
+      - name: Install one disposable fixture through actual pkexec and a sealed inherited descriptor
+        run: python3 -B scripts/linux-sealed-update-probe.py
+      - name: Retain original result, including failures and false full-flow gates
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-sealed-update-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/linux-sealed-update-probe/result.json

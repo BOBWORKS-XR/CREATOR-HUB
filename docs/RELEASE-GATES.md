@@ -6,6 +6,12 @@ installers and release tags still require the relevant acceptance gates and
 recorded package evidence. A preview must not be advertised as
 completed adoption. Runtime acceptance is distinct from source/unit tests.
 
+The [known-regression checklist](RELEASE-REGRESSIONS.md) records recurring user
+reports, automated coverage and the installed-path proof required before release.
+Consult it before native dispatch or packaging; reuse frozen product bytes for
+harness-only corrections. Windows and Linux/Flatpak are the active platforms;
+macOS support is suspended, with historical evidence retained.
+
 ## Current Hub Publishing Requirements (2026-09-16)
 
 Follow [Required Hub Release Gates](HUB-PUBLICATION-CHECKLIST.md) for the new
