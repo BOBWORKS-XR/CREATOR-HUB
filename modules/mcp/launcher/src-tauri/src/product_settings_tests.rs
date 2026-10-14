@@ -2,18 +2,36 @@ use super::*;
 
 static FORM_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+struct OwnedTempDir {
+    _owner: tempfile::TempDir,
+    path: PathBuf,
+}
+impl OwnedTempDir {
+    fn new() -> Self {
+        let owner = tempfile::tempdir().unwrap();
+        // Resolve only our new fixture root, not a protected settings or link target.
+        #[cfg(unix)]
+        let path = owner.path().canonicalize().unwrap();
+        #[cfg(not(unix))]
+        let path = owner.path().to_path_buf();
+        Self {
+            _owner: owner,
+            path,
+        }
+    }
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 struct Fixture {
-    root: tempfile::TempDir,
+    root: OwnedTempDir,
     paths: Paths,
 }
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
-        #[cfg(unix)]
-        let base = root.path().canonicalize().unwrap();
-        #[cfg(not(unix))]
-        let base = root.path().to_path_buf();
-        let paths = Paths::new(&base).unwrap();
+        let root = OwnedTempDir::new();
+        let paths = Paths::new(root.path()).unwrap();
         for path in [&paths.current, &paths.legacy] {
             storage::private_directory(path.parent().unwrap()).unwrap()
         }
@@ -684,7 +702,7 @@ fn removal_original(client: &str) -> String {
 #[test]
 fn reachable_removal_hooks_pass_exact_parsed_before_image_and_refuse_external_edits() {
     for client in ["codex", "claude", "antigravity", "opencode"] {
-        let fixture = tempfile::tempdir().unwrap();
+        let fixture = OwnedTempDir::new();
         let path = fixture.path().join("client-config");
         let original = removal_original(client);
         fs::write(&path, &original).unwrap();
@@ -709,7 +727,7 @@ fn reachable_removal_hooks_pass_exact_parsed_before_image_and_refuse_external_ed
 #[test]
 fn reachable_removal_hooks_preserve_unrelated_fields_and_exact_backups() {
     for client in ["codex", "claude", "antigravity", "opencode"] {
-        let fixture = tempfile::tempdir().unwrap();
+        let fixture = OwnedTempDir::new();
         let path = fixture.path().join("client-config");
         let original = removal_original(client);
         fs::write(&path, &original).unwrap();
@@ -766,7 +784,7 @@ fn reachable_removal_hooks_preserve_unrelated_fields_and_exact_backups() {
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[test]
 fn project_launcher_preference_hook_is_bound_to_the_loaded_document() {
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = OwnedTempDir::new();
     let project = fixture.path().to_str().unwrap();
     let state = fixture.path().join(".bantworks-mcp/state");
     fs::create_dir_all(&state).unwrap();
@@ -806,7 +824,7 @@ fn project_launcher_preference_hook_is_bound_to_the_loaded_document() {
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[test]
 fn feedback_hook_preserves_unknown_preferences_and_stops_on_stale_second_file() {
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = OwnedTempDir::new();
     fs::create_dir_all(fixture.path().join("Assets")).unwrap();
     fs::create_dir_all(fixture.path().join("ProjectSettings")).unwrap();
     let folder = fixture.path().join(".bantworks-mcp/feedback");
@@ -857,7 +875,7 @@ fn feedback_hook_preserves_unknown_preferences_and_stops_on_stale_second_file() 
 #[test]
 fn removal_does_not_publish_missing_or_unowned_entries() {
     for client in ["codex", "claude", "antigravity", "opencode"] {
-        let fixture = tempfile::tempdir().unwrap();
+        let fixture = OwnedTempDir::new();
         let path = fixture.path().join("client-config");
         removal_fixture(client, &path, |_, _, _| panic!("No creation on removal")).unwrap();
         let original = removal_original(client).replace("creator-hub-v1", "foreign-owner");
@@ -872,7 +890,7 @@ fn removal_does_not_publish_missing_or_unowned_entries() {
 
 #[test]
 fn standalone_project_writer_hook_retains_the_original_serialized_schema() {
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = OwnedTempDir::new();
     let project = fixture.path().to_str().unwrap();
     crate::update_unity_launcher_settings_using(
         project,

@@ -148,7 +148,7 @@ fn inspect() -> Result<Plan, String> {
     }
     let legacy_apps = legacy_apps()?;
     // Validate even when legacy apps exist; do not short-circuit a newer policy.
-    let already_reviewed = reviewed_at(&record_path()?)?;
+    let already_reviewed = reviewed_at(&record_path()?)? && !settings_need_review(&snapshots);
     let pending_retirement = retirement_pending()?;
     let already_using_hub = legacy_apps.is_empty()
         && !pending_retirement
@@ -187,6 +187,19 @@ fn inspect() -> Result<Plan, String> {
     })
 }
 
+fn settings_need_review(snapshots: &[stores::Snapshot]) -> bool {
+    let current = snapshots
+        .iter()
+        .find(|saved| saved.store() == stores::Store::McpCurrent)
+        .and_then(stores::Snapshot::bytes);
+    snapshots.iter().any(stores::Snapshot::needs_outcome_review)
+        || snapshots
+            .iter()
+            .find(|saved| saved.store() == stores::Store::McpLegacy)
+            .and_then(stores::Snapshot::bytes)
+            .is_some_and(|legacy| current.is_some_and(|current| legacy != current))
+}
+
 fn settings_use_verified_runtime(
     snapshots: &[stores::Snapshot],
     verified_server: &std::path::Path,
@@ -198,13 +211,7 @@ fn settings_use_verified_runtime(
     else {
         return false;
     };
-    if snapshots.iter().any(stores::Snapshot::needs_outcome_review)
-        || snapshots
-            .iter()
-            .find(|saved| saved.store() == stores::Store::McpLegacy)
-            .and_then(stores::Snapshot::bytes)
-            .is_some_and(|legacy| legacy != current)
-    {
+    if settings_need_review(snapshots) {
         return false;
     }
     // Compare only with the independently verified native runtime path. A saved
@@ -960,6 +967,43 @@ mod tests {
         assert!(!migration_required(0, 2, true, false));
         assert!(migration_required(1, 2, true, false));
         assert!(migration_required(0, 2, true, true));
+    }
+
+    #[test]
+    fn prior_review_does_not_hide_new_conflicts_or_pending_outcomes() {
+        let (_temp, roots, mut plan) = fixture_plan();
+        let prior_review = true;
+        assert!(!settings_need_review(&plan.stores));
+        assert!(!migration_required(0, 1, prior_review, false));
+        let legacy = stores::Store::McpLegacy.path(&roots).unwrap();
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, br#"{"channels":[],"auto_start":true}"#).unwrap();
+        plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &roots).unwrap();
+        assert!(settings_need_review(&plan.stores));
+        assert!(migration_required(
+            0,
+            2,
+            prior_review && !settings_need_review(&plan.stores),
+            false
+        ));
+        fs::write(&legacy, plan.stores[0].bytes().unwrap()).unwrap();
+        plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &roots).unwrap();
+        assert!(!settings_need_review(&plan.stores));
+        write_outcome(&roots, "accepted");
+        plan.stores[2] =
+            stores::Snapshot::inspect(stores::Store::McpHostedOutcomes, &roots).unwrap();
+        assert!(settings_need_review(&plan.stores));
+        assert!(migration_required(
+            0,
+            3,
+            prior_review && !settings_need_review(&plan.stores),
+            false
+        ));
+        write_outcome(&roots, "returned-ok");
+        plan.stores[2] =
+            stores::Snapshot::inspect(stores::Store::McpHostedOutcomes, &roots).unwrap();
+        assert!(!settings_need_review(&plan.stores));
+        assert!(!migration_required(0, 3, prior_review, false));
     }
 
     #[test]
