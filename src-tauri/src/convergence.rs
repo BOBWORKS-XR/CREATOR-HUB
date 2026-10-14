@@ -334,7 +334,19 @@ fn close_reviewed_guis(plan: &Plan) -> Result<(), String> {
         }
         recheck(plan).map_err(|_| "The app saved changed settings while closing. They were kept; choose Check again to review their latest contents.".into())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // Published Unix GUIs do not expose the verified idle-close protocol.
+        // Detect them by their kernel image; never substitute a signal for close.
+        for app in [AppId::Mcp, AppId::Setup] {
+            let state = platform::running_gui(app, &platform::default_exe(app)?)?;
+            if !state.gui.is_empty() || state.other_copy {
+                return Err(format!("Close the standalone {} window, then choose Check again. Its settings and all Node/AI connections were kept; Hub did not force-close any process.", app.name()));
+            }
+        }
+        recheck(plan)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = plan;
         Ok(())
@@ -820,8 +832,41 @@ fn retirement_diagnostics(plan: &mut Plan, manager: &manager::Manager) -> Result
         plan.report.retirement_available = true;
         Ok("Ready to retire verified standalone app entries after your approval. All settings and old MCP Node/server paths stay in place. Custom launchers that open the old GUI or find it through its app registration need separate review; unknown client scopes do not authorize deleting the retained runtime.".into())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        plan.report.retirement_available = false;
+        require_no_retirement(plan, &legacy_apps()?)?;
+        plan.report.retirement_available = true;
+        Ok("Settings and connections are reviewed. No known standalone app was found; finish migration to continue. No installation will be removed.".into())
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     Ok("Settings and existing connections are reviewed. Old apps were kept: native removal and connection acceptance are not completed on this platform.".into())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn require_no_retirement(plan: &Plan, current: &[LegacyApp]) -> Result<(), String> {
+    if !plan.report.legacy_apps.is_empty() || !current.is_empty() {
+        return Err("Standalone apps are still present or the installation changed. Native Linux removal is not available yet; apps and data were kept.".into());
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn finish_without_retirement(
+    plan: &mut Plan,
+    preflight: impl Fn(&Plan) -> Result<(), String>,
+    approve: impl FnOnce() -> bool,
+) -> Result<Report, String> {
+    preflight(plan)?;
+    if !approve() {
+        return Err("Migration completion was cancelled. Apps and settings were kept.".into());
+    }
+    preflight(plan)?;
+    plan.report.stage = "complete";
+    plan.report.required = false;
+    plan.report.retirement_available = false;
+    plan.report.message = "Migration complete. Use MCP and Project Setup in Creator Hub. Your reviewed settings and backups are kept. No standalone installation was removed.".into();
+    Ok(plan.report.clone())
 }
 
 #[tauri::command]
@@ -897,7 +942,26 @@ pub async fn retire_convergence_apps(handle: tauri::AppHandle) -> Result<Report,
             }
             Ok(plan.report.clone())
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let store = creator_hub_mcp_router::Store::installed()?;
+            let runtime = store.resolve()?;
+            let router = store.router()?;
+            finish_without_retirement(plan, |plan| {
+                can_retain(plan)?;
+                require_no_retirement(plan, &legacy_apps()?)?;
+                let fresh_runtime = store.resolve()?;
+                let fresh_router = store.router()?;
+                if fresh_runtime.generation != runtime.generation || fresh_router.command != router.command {
+                    return Err("The signed MCP route changed; check again before completing migration.".into());
+                }
+                Ok(())
+            }, || handle.dialog().message(
+                "Finish moving to Creator Hub?\n\nYour settings backups and existing AI connections have been reviewed. No known standalone MCP or Project Setup installation was found. This step only finishes the guide; it does not remove an app, change client settings, move projects or stop a connection.\n\nCancel keeps the guide open."
+            ).title("Finish Creator Hub migration").kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom("Finish migration".into(), "Keep reviewing".into())).blocking_show())
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         Err("Native standalone retirement is not accepted on this platform. Existing apps and data were kept.".into())
     }).await.map_err(|_| "Cleanup outcome is unknown. Keep the retained files and review migration on next launch.")?
 }
@@ -954,6 +1018,95 @@ mod tests {
             },
         };
         (temp, roots, plan)
+    }
+
+    #[test]
+    fn no_retirement_completion_rechecks_after_native_approval_and_keeps_data() {
+        let (_temp, _base, mut plan) = fixture_plan();
+        plan.report.stage = "connections-reviewed";
+        plan.report.retirement_available = true;
+        let before = plan.stores[0].bytes().unwrap().to_vec();
+        let checks = std::cell::Cell::new(0);
+        let result = finish_without_retirement(
+            &mut plan,
+            |plan| {
+                checks.set(checks.get() + 1);
+                can_retain(plan)?;
+                require_no_retirement(plan, &[])
+            },
+            || {
+                assert_eq!(checks.get(), 1);
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(checks.get(), 2);
+        assert_eq!(result.stage, "complete");
+        assert!(!result.required);
+        assert!(!result.retirement_available);
+        assert_eq!(plan.stores[0].bytes().unwrap(), before);
+        plan.stores[0].recheck().unwrap();
+        assert!(result
+            .message
+            .contains("No standalone installation was removed"));
+    }
+
+    #[test]
+    fn no_retirement_completion_cancellation_and_post_approval_drift_stay_pending() {
+        for approve in [false, true] {
+            let (_temp, base, mut plan) = fixture_plan();
+            plan.report.stage = "connections-reviewed";
+            plan.report.retirement_available = true;
+            let original = plan.stores[0].bytes().unwrap().to_vec();
+            let file = stores::Store::McpCurrent.path(&base).unwrap();
+            let checks = std::cell::Cell::new(0);
+            let result = finish_without_retirement(
+                &mut plan,
+                |plan| {
+                    checks.set(checks.get() + 1);
+                    can_retain(plan)?;
+                    require_no_retirement(plan, &[])
+                },
+                || {
+                    if approve {
+                        fs::write(&file, b"changed during approval").unwrap();
+                    }
+                    approve
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(checks.get(), if approve { 2 } else { 1 });
+            assert_eq!(plan.report.stage, "connections-reviewed");
+            assert!(plan.report.required);
+            if !approve {
+                assert_eq!(fs::read(file).unwrap(), original);
+            }
+        }
+    }
+
+    #[test]
+    fn existing_or_new_standalone_apps_cannot_use_no_retirement_completion() {
+        for (reviewed, current) in [(true, false), (false, true), (true, true)] {
+            let (_temp, _base, mut plan) = fixture_plan();
+            plan.report.stage = "connections-reviewed";
+            plan.report.retirement_available = true;
+            let app = || LegacyApp {
+                name: "Creator Works MCP".into(),
+                path: PathBuf::from("/usr/bin/creator-works-mcp-launcher"),
+            };
+            if reviewed {
+                plan.report.legacy_apps.push(app());
+            }
+            let current = if current { vec![app()] } else { vec![] };
+            assert!(finish_without_retirement(
+                &mut plan,
+                |plan| { require_no_retirement(plan, &current) },
+                || panic!("An existing app must refuse before native approval")
+            )
+            .is_err());
+            assert_eq!(plan.report.stage, "connections-reviewed");
+            assert!(plan.report.required);
+        }
     }
 
     fn write_outcome(roots: &stores::Roots, outcome: &str) {

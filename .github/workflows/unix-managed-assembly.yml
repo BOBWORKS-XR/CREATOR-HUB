@@ -93,6 +93,10 @@ jobs:
         run: |
           node --test scripts/assemble-unix-payload.test.cjs scripts/sign-unix-payload.test.cjs scripts/unix-managed-payload.test.cjs
           python3 -B scripts/stage-signed-unix-handoff.test.py
+      - name: Test Linux migration completion and real owned GUI process detection before packaging
+        run: >-
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml
+          --target-dir artifacts/unix-verifier-target
       - name: Compile and test the exact Mac SDK diagnostic and action-helper guards
         if: runner.os == 'macOS'
         env:

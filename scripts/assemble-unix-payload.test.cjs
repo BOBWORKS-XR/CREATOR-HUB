@@ -93,6 +93,16 @@ test('both cargo tool builds explicitly bind the same target directories as thei
     assert.notEqual(target, '/inherited-cargo-override');
   }
 });
+
+test('Linux assembly runs actual Root migration and process tests before compiling a package', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-assembly.yml'), 'utf8');
+  const step = workflow.indexOf('name: Test Linux migration completion and real owned GUI process detection before packaging');
+  const build = workflow.indexOf('name: Verify trusted handoff and compile only the outer native Hub');
+  assert.ok(step > 0 && step < build);
+  assert.match(workflow.slice(step, workflow.indexOf('      - ', step)),
+    /cargo test --release --locked --manifest-path src-tauri\/Cargo\.toml\s+--target-dir artifacts\/unix-verifier-target/);
+  assert.doesNotMatch(workflow.slice(step, workflow.indexOf('      - ', step)), /continue-on-error|--ignored|--skip/);
+});
 test('retained pre-wrapper is the signed manifest and original preparation is separately immutable', () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unix-manifest-test-')));
   try {
