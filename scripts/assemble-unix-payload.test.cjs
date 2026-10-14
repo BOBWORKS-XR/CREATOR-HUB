@@ -96,6 +96,9 @@ test('both cargo tool builds explicitly bind the same target directories as thei
 
 test('Linux assembly runs actual Root migration and process tests before compiling a package', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-assembly.yml'), 'utf8');
+  const triggers = workflow.slice(0, workflow.indexOf('permissions:'));
+  assert.match(triggers, /branches: \[validation\/unix-assembly-014\]/);
+  assert.doesNotMatch(triggers, /paths:/, 'Explicit source validation pushes must not require a dummy workflow edit');
   const step = workflow.indexOf('name: Test Linux migration completion and real owned GUI process detection before packaging');
   const build = workflow.indexOf('name: Verify trusted handoff and compile only the outer native Hub');
   assert.ok(step > 0 && step < build);

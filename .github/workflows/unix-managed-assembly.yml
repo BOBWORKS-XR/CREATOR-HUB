@@ -2,7 +2,6 @@ name: Fresh signed14 Linux packages (not acceptance)
 on:
   push:
     branches: [validation/unix-assembly-014]
-    paths: ['.github/workflows/unix-managed-assembly.yml']
   workflow_dispatch:
     inputs:
       signed_inputs:

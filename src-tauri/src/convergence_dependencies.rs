@@ -1501,7 +1501,13 @@ mod tests {
         let f = Fixture::new(Os::Windows);
         f.write(&f.home(".codex"), "not-a-directory");
         let report = f.check(&f.inventory());
-        assert!(issue(&report, IssueKind::NonRegularFile));
+        // Linux rejects the leaf with ENOTDIR before traversal reaches the file.
+        // Both native error classifications must remain an explicit refusal.
+        assert!(matches!(
+            read_config(&f.home(".codex/config.toml")),
+            Image::Refused(IssueKind::NonRegularFile | IssueKind::Unreadable)
+        ));
+        assert!(report.requires_retention);
         assert!(report
             .inventory
             .scopes

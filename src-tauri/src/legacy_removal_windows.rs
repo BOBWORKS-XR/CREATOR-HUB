@@ -559,7 +559,11 @@ mod tests {
             let paths: BTreeSet<_> = pin.files.iter().map(|(name, _, _)| *name).collect();
             assert_eq!(paths.len(), pin.files.len());
             assert!(paths.contains("uninstall.exe"));
-            assert!(paths.contains(pin.app.exe()));
+            let windows_gui = match pin.app {
+                AppId::Mcp => "creator-works-mcp-launcher.exe",
+                AppId::Setup => "creator-project-setup.exe",
+            };
+            assert!(paths.contains(windows_gui));
             for (name, bytes, hash) in pin.files {
                 assert!(
                     !name.starts_with('/')
