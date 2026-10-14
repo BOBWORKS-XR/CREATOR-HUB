@@ -21,6 +21,18 @@ of defect-free releases. Source tests do not replace the installed checks below.
 | A native test misses a backend spawned by a worker thread | `scripts/native-linux-components-probe.test.py` (`fefc528`) | Actual same-package retry with exact kernel image/parent/UID/start/seals and XRes/AX ownership; inventory alone never authorizes input |
 | Native harness errors trigger repeated expensive rebuilds | Focused changed-harness tests, Python/script/YAML preflight | Bind test source separately from product source; reuse immutable original installers for test-only corrections; retain first failure and compact captures |
 
+Native preflight also checks these captured boundaries:
+
+- GTK message X titles are not necessarily AX names. Bind the captured role,
+  exact context and native frame; never select a generic `Information` dialog.
+- Cargo may hard-link final build output. Stage a fresh verified copy before
+  strict installed-image checks; do not weaken package/resource link checks.
+- Read the workflow's actual event/branch before pushing a validation ref, then
+  verify the resulting run's source. A push alone is not a dispatched test.
+- Preserve unrelated dpkg diversions/statoverrides. The experimental helper's
+  reject-any policy still needs a reviewed target-scoped contract before it can
+  support normal hosts; do not clear global system records to make tests pass.
+
 ## Still Open
 
 - Linux privileged update authentication/cancellation and exact installed restart
