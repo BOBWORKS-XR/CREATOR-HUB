@@ -576,16 +576,16 @@ mod native {
         let mut command = platform::command(&executable);
         command
             .env_clear()
-            .current_dir(&system)
+            .current_dir(system)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env("SystemRoot", &windows)
-            .env("windir", &windows)
+            .env("SystemRoot", windows)
+            .env("windir", windows)
             .env("ComSpec", system.join("cmd.exe"))
             .env("USERPROFILE", home)
             .env("APPDATA", roaming)
-            .env("LOCALAPPDATA", &local)
+            .env("LOCALAPPDATA", local)
             .env("TEMP", local.join("Temp"))
             .env("TMP", local.join("Temp"))
             .env(
