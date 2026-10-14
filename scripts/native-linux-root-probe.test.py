@@ -786,6 +786,39 @@ class OwnershipTests(unittest.TestCase):
         self.x11.close_window.side_effect = close
         self.assertEqual(p.perform_owned("close", self.request, self.helper, self.atspi, binding)["actionCount"], 1)
 
+    def test_wm_close_accepts_observed_semantic_parent_only_inside_full_owned_subtree(self):
+        binding = self.fixture()
+        section = AxNode(43, 109, parent=self.web)
+        heading = AxNode(43, 94, parent=section)
+        text = AxNode(43, 82, "fixture text", parent=section)
+        text.parent = heading
+        with self.assertRaisesRegex(RuntimeError, "AX subtree escaped"):
+            p.owned_walk(self.window, binding, self.atspi)
+        result = p.perform_owned("close", self.request, self.helper, self.atspi, binding)
+        self.assertEqual(result["actionCount"], 1)
+        self.assertEqual(result["ownership"]["wmCloseParentContainment"]["semanticEdges"], 1)
+        self.x11.close_window.assert_called_once_with(77, self.info)
+
+    def test_wm_close_still_refuses_outside_same_pid_parent_and_foreign_windows(self):
+        for kind in ("outside-parent", "foreign-peer", "frame", "window", "application", "uid", "image", "pid-reuse"):
+            with self.subTest(kind=kind):
+                binding = self.fixture()
+                if kind == "outside-parent":
+                    self.heading.parent = AxNode(43, 94)
+                elif kind == "foreign-peer":
+                    AxNode(99, 20, parent=self.web)
+                elif kind in ("frame", "window", "application"):
+                    AxNode(43, {"frame": 23, "window": 69, "application": 75}[kind], parent=self.web)
+                elif kind == "uid":
+                    self.records[43]["uids"] = [0] * 4
+                elif kind == "image":
+                    self.records[43]["kernelImageSha256"] = "f" * 64
+                else:
+                    self.records[43]["startTime"] = "99"
+                with self.assertRaises(RuntimeError):
+                    p.perform_owned("close", self.request, self.helper, self.atspi, binding)
+                self.x11.close_window.assert_not_called()
+
 
 class AcknowledgementTests(unittest.TestCase):
     def fixture(self, root, value):

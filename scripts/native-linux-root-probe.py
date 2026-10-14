@@ -734,6 +734,7 @@ class RootOwnership:
         self.reader = reader or (lambda pid, full: native_process(pid, helper, full))
         self.system_check = system_check or verify_system_webkit
         self.references = references
+        self.close_parent_containment = None
         require(references is not None, "Native AX reference binding required")
         require(root_record["pid"] == request.pid and root_record["startTime"] == request.start
                 and root_record["executable"] == request.executable
@@ -767,17 +768,18 @@ class RootOwnership:
     def evidence(self):
         return {"root": self.root, "xres": self.xres, "renderer": self.renderer,
                 "axReferences": {"aliases": dict(self.references.aliases), "window": self.references.window},
+                "wmCloseParentContainment": self.close_parent_containment,
                 "policy": "one-native-direct-child-WebKit-in-exact-Root-frame"}
 
     def same_node(self, a, b):
         return a is not None and b is not None and self.references.identity(a, self) == self.references.identity(b, self)
 
 
-def owned_walk(window, ownership, atspi):
+def owned_walk(window, ownership, atspi, wm_close=False):
     helper, request = ownership.helper, ownership.request
     require(window.get_process_id() == request.pid and window.get_role() == atspi.Role.FRAME
             and window.get_name() == request.title, "Foreign AX window refused")
-    nodes, seen, pending = [], set(), [(window, None, 0)]
+    nodes, seen, parent_refs, mismatches, pending = [], set(), [], [], [(window, None, 0)]
     window_ref = ownership.references.identity(window, ownership)
     if ownership.references.window is None:
         ownership.references.window = window_ref
@@ -794,13 +796,25 @@ def owned_walk(window, ownership, atspi):
             # https://docs.gtk.org/atspi2/method.Accessible.clear_cache.html
             node.clear_cache()
             actual_parent = node.get_parent()
-            require(ownership.same_node(actual_parent, parent), "AX subtree escaped the bound Root window: " + json.dumps({
+            same_parent = ownership.same_node(actual_parent, parent)
+            detail = {
                 "depth": depth, "pid": node.get_process_id(), "role": int(node.get_role()),
                 "expectedParentRef": ownership.references.identity(parent, ownership),
                 "actualParentRef": ownership.references.identity(actual_parent, ownership) if actual_parent is not None else None,
                 "expectedParentPid": parent.get_process_id(), "expectedParentRole": int(parent.get_role()),
                 "actualParentPid": actual_parent.get_process_id() if actual_parent is not None else None,
-                "actualParentRole": int(actual_parent.get_role()) if actual_parent is not None else None}))
+                "actualParentRole": int(actual_parent.get_role()) if actual_parent is not None else None}
+            if wm_close:
+                # WM close targets the bound XRes frame, not an HTML control.
+                # A semantic parent may differ from the GetChildren edge, but
+                # must independently occur in this SAME fully owned AX subtree.
+                # EWMH 4.1: https://specifications.freedesktop.org/wm/latest/ar01s04.html
+                require(actual_parent is not None, "WM-close AX parent is absent")
+                parent_refs.append(tuple(detail["actualParentRef"]))
+                if not same_parent:
+                    mismatches.append(detail)
+            else:
+                require(same_parent, "AX subtree escaped the bound Root window: " + json.dumps(detail))
             require(node.get_role() not in (atspi.Role.FRAME, atspi.Role.WINDOW, atspi.Role.APPLICATION),
                     "Foreign/nested AX window refused")
         reference = tuple(ownership.references.identity(node, ownership))
@@ -810,6 +824,10 @@ def owned_walk(window, ownership, atspi):
         budget = min(helper.MAX_CHILDREN, helper.MAX_NODES - len(nodes) - len(pending))
         pending.extend((child, node, depth + 1) for child in reversed(helper.children(node, budget)))
     ownership.recheck(full=True)
+    if wm_close:
+        require(all(ref in seen for ref in parent_refs), "WM-close AX parent escaped the fully verified Root subtree")
+        ownership.close_parent_containment = {"checkedParents": len(parent_refs), "semanticEdges": len(mismatches),
+                                               "examples": mismatches[:4]}
     require(ownership.same_node(helper.select_window(request, atspi), window), "Owned AX window changed during traversal")
     return nodes
 
@@ -912,13 +930,13 @@ def terms_control(nodes, action, helper, atspi):
 def perform_owned(action, request, helper, atspi, ownership):
     require(action in ("check-terms", "accept-terms", "close"), "Unreviewed native action refused")
     window = helper.select_window(request, atspi)
-    nodes = owned_walk(window, ownership, atspi)
+    nodes = owned_walk(window, ownership, atspi, wm_close=action == "close")
     selected = terms_control(nodes, action, helper, atspi)[0] if action != "close" else None
     if action == "close":
         ownership.x11.check_close(request.window)
     ownership.recheck(full=True)
     require(ownership.same_node(helper.select_window(request, atspi), window), "AX frame changed before native action")
-    current_nodes = owned_walk(window, ownership, atspi)
+    current_nodes = owned_walk(window, ownership, atspi, wm_close=action == "close")
     if selected is not None:
         current, interface, verb = terms_control(current_nodes, action, helper, atspi)
         require(ownership.renderer is not None and ownership.same_node(current, selected)
