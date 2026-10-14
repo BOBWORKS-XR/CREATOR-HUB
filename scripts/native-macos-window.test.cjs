@@ -208,6 +208,60 @@ test('SDK compatibility uses the exact kernel path bound and public AX sheet hie
   assert.match(source, /buttons.count == 1, !observed.hasDialog/);
 });
 
+test('Root close has a finite tri-state gate and never traverses or authorizes remote descendants', () => {
+  const close = source.split('func observeRootClose')[1].split('func nativeTermination')[0];
+  assert.match(close, /owner.process.bundleIdentifier == "com.creatorworks.hub"/);
+  assert.match(close, /windows.count == 1, CFEqual\(windows\[0\], window\)/);
+  assert.match(close, /closeBoolean\(window, kAXModalAttribute\)/);
+  assert.equal(close.match(/closeChildren\(window, kAXChildrenAttribute\)/g).length, 1);
+  assert.ok(close.indexOf('try axPID(child, owner.process.pid)') < close.indexOf('closeAttribute(child, kAXParentAttribute)'));
+  assert.match(close, /CFEqual\(parent, window\), windowMatchesRoot: CFEqual\(linkedWindow, window\)/);
+  assert.match(close, /try requireRootCloseDialogs\(evidence\(\)\)/);
+  assert.match(close, /closeAttribute\(window, kAXCloseButtonAttribute\)/);
+  assert.match(close, /nativeChildren.filter\(\{ CFEqual\(\$0, close\) \}\).count == 1/);
+  assert.match(close, /try axPID\(close, owner.process.pid\)/);
+  assert.match(close, /CFEqual\(held, window\)/);
+  assert.match(close, /systemUptime \+ 4/);
+  assert.doesNotMatch(close, /visit\(|children\(child|closeChildren\(child|foreignChildDiagnostic|requireRemoteRead|PerformAction|sleep|kAXTitleAttribute|kAXValueAttribute/);
+  const gate = source.split('func rootCloseDialogEvidence')[1].split('struct Observation')[0];
+  assert.match(gate, /state = RootDialogState.unknown/);
+  assert.match(gate, /input.rootModal == false/);
+  assert.match(gate, /input.windowCount == 1/);
+  assert.match(gate, /input.rootSubrole == "AXStandardWindow"/);
+  assert.match(gate, /children.count < 512/);
+  assert.match(gate, /role == "AXSheet" \|\| child.subrole == "AXDialog"/);
+  assert.match(gate, /evidence.state == \.absent/);
+});
+
+test('Root close uses before/immediate/final Root-only selections but inspect and consent retain full-tree authority', () => {
+  const entry = source.slice(source.indexOf('func nativeMain()'));
+  assert.match(entry, /let rootClose = args\[0\] == "close" && owner.process.bundleIdentifier == "com.creatorworks.hub"/);
+  assert.equal(entry.match(/rootClose \? observeRootClose\(owner\)/g).length, 3);
+  assert.match(entry, /let before = try \(rootClose \? observeRootClose\(owner\) : observe\(owner\)\)/);
+  assert.match(entry, /let immediate = try \(rootClose \? observeRootClose\(owner\) : observe\(owner\)\)/);
+  assert.match(entry, /let fence = try \(rootClose \? observeRootClose\(owner\) : observe\(owner, controls: false\)\)/);
+  assert.match(entry, /selectControl\(owner, fence.value, \.closeWindow\)/);
+  assert.match(entry, /CFEqual\(finalClose, target\)/);
+  assert.match(entry, /CFEqual\(target, original\)/);
+  assert.match(entry, /CFEqual\(firstWindow, lastWindow\)/);
+  assert.match(entry, /CFEqual\(fenceWindow, lastWindow\)/);
+  assert.equal(entry.match(/AXUIElementPerformAction\(/g).length, 1);
+  assert.match(source, /throw Refusal\("foreign-ax-element", diagnostic:/);
+  assert.match(source, /guard observed.hasDialog else \{ throw Refusal\("native-consent-dialog-missing"\)/);
+  assert.match(source, /failure\["closeDialog"\] = evidence/);
+});
+
+test('Root close inventory requires successful typed bounded reads, not missing attributes or numeric Boolean coercion', () => {
+  const children = source.split('func closeChildren')[1].split('func observeRootClose')[0];
+  assert.match(children, /AXUIElementGetAttributeValueCount[^\n]*== \.success, count >= 0, count < 512/);
+  assert.match(children, /CFArrayGetCount\(array\) == count/);
+  assert.match(children, /CFGetTypeID\(Unmanaged<CFTypeRef>.fromOpaque\(raw\).takeUnretainedValue\(\)\) == AXUIElementGetTypeID\(\)/);
+  assert.doesNotMatch(children, /attributeUnsupported|noValue|return nil|while /);
+  const boolean = source.split('func closeBoolean')[1].split('func closeChildren')[0];
+  assert.match(boolean, /CFGetTypeID\(value\) == CFBooleanGetTypeID\(\)/);
+  assert.doesNotMatch(boolean, /NSNumber|boolValue/);
+});
+
 before(() => {
   if (!nativeMac) return;
   scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-macos-window-tests-'));
@@ -357,6 +411,106 @@ for (const [name, mutate, error] of cases) {
     assert.equal(receipt.nativeGuiAccepted, false);
     assert.equal(receipt.releaseReady, false);
     if (error) assert.equal(receipt.error, error); else assert.equal(receipt.fixtureAccepted, true);
+  });
+}
+
+function rootCloseFixture() {
+  const value = terminationFixture(); delete value.termination;
+  value.after = structuredClone(value.immediate);
+  const child = { pid: value.owner.process.pid, role: 'AXGroup', subrole: null, subroleVerified: true,
+    parentMatchesRoot: true, windowMatchesRoot: true };
+  value.rootCloseDialogs = { windowCount: 1, rootSubrole: 'AXStandardWindow', rootModal: false,
+    children: [child, { ...child, role: 'AXButton', subrole: 'AXCloseButton' }], withinLimits: true };
+  return value;
+}
+
+const rootCloseCases = [
+  ['ordinary native Root window', () => {}, null],
+  ['modal Root window', f => { f.rootCloseDialogs.rootModal = true; }, 'present'],
+  ['native dialog window subrole', f => { f.rootCloseDialogs.rootSubrole = 'AXDialog'; }, 'present'],
+  ['first-order native sheet', f => { f.rootCloseDialogs.children[0].role = 'AXSheet'; }, 'present'],
+  ['first-order native dialog', f => { f.rootCloseDialogs.children[0].subrole = 'AXDialog'; }, 'present'],
+  ['missing modality', f => { f.rootCloseDialogs.rootModal = null; }, 'unknown'],
+  ['missing Root subrole', f => { f.rootCloseDialogs.rootSubrole = null; }, 'unknown'],
+  ['alternate Root subrole', f => { f.rootCloseDialogs.rootSubrole = 'AXFloatingWindow'; }, 'unknown'],
+  ['missing window inventory', f => { f.rootCloseDialogs.windowCount = null; }, 'unknown'],
+  ['extra window', f => { f.rootCloseDialogs.windowCount = 2; }, 'unknown'],
+  ['missing child inventory', f => { f.rootCloseDialogs.children = null; }, 'unknown'],
+  ['child limit', f => { f.rootCloseDialogs.children = Array(512).fill(f.rootCloseDialogs.children[0]); }, 'unknown'],
+  ['deadline or count uncertainty', f => { f.rootCloseDialogs.withinLimits = false; }, 'unknown'],
+  ['foreign direct child even with matching links', f => { f.rootCloseDialogs.children[0].pid++; }, 'unknown'],
+  ['wrong native parent', f => { f.rootCloseDialogs.children[0].parentMatchesRoot = false; }, 'unknown'],
+  ['wrong native window', f => { f.rootCloseDialogs.children[0].windowMatchesRoot = false; }, 'unknown'],
+  ['unreadable child role', f => { f.rootCloseDialogs.children[0].role = null; }, 'unknown'],
+  ['unknown native role', f => { f.rootCloseDialogs.children[0].role = 'AXUnknown'; }, 'unknown'],
+  ['unverified subrole absence', f => { f.rootCloseDialogs.children[0].subroleVerified = false; }, 'unknown'],
+  ['renamed or unsupported dialog subrole', f => { f.rootCloseDialogs.children[0].subrole = 'AXCustomDialog'; }, 'unknown'],
+  ['oversized role', f => { f.rootCloseDialogs.children[0].role = 'x'.repeat(129); }, 'unknown'],
+];
+
+test('Root close fixture contract is finite, with no remote subtree or actions supplied as coverage', () => {
+  const value = rootCloseFixture();
+  assert.equal(value.action, 'close-window'); assert.equal(value.rootCloseDialogs.children.length, 2);
+  assert.equal(value.rootCloseDialogs.rootModal, false);
+  assert.equal('remoteNodes' in value.rootCloseDialogs, false);
+  assert.equal('children' in value.rootCloseDialogs.children[0], false);
+  value.rootCloseDialogs.children = Array(512).fill(value.rootCloseDialogs.children[0]);
+  assert.ok(Buffer.byteLength(JSON.stringify(value)) <= 65536);
+});
+
+for (const [name, mutate, refusedState] of rootCloseCases) {
+  test(`Swift Root-close scope fixture: ${name}`, { skip: !nativeMac }, () => {
+    const value = rootCloseFixture(); mutate(value);
+    const result = spawnSync(fixtureBinary, [], { input: JSON.stringify(value), encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+    assert.equal(result.status, refusedState ? 1 : 0, result.stderr || result.stdout);
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(receipt.nativeActionsAvailable, false); assert.equal(receipt.nativeGuiAccepted, false); assert.equal(receipt.releaseReady, false);
+    assert.equal(receipt.closeDialog.state, refusedState ?? 'absent');
+    assert.equal(receipt.closeDialog.scope, 'root-standard-window-first-order-native-dialogs');
+    if (refusedState) assert.equal(receipt.error, `normal-close-dialog-${refusedState}`);
+    else assert.equal(receipt.fixtureAccepted, true);
+  });
+}
+
+for (const state of ['unknown', 'present']) {
+  test(`Swift close selection refuses ${state} scope even when hasDialog is false`, { skip: !nativeMac }, () => {
+    const value = rootCloseFixture(); delete value.rootCloseDialogs;
+    value.immediate.closeDialog = { scope: 'root-standard-window-first-order-native-dialogs', state, windowCount: 1, childCount: 2 };
+    const result = spawnSync(fixtureBinary, [], { input: JSON.stringify(value), encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+    assert.equal(result.status, 1, result.stdout);
+    assert.equal(JSON.parse(result.stdout).error, `normal-close-dialog-${state}`);
+  });
+}
+
+test('Swift Root-close scope cannot bypass existing post-action identity validation', { skip: !nativeMac }, () => {
+  const value = rootCloseFixture(); value.after.process.startSeconds++;
+  const result = spawnSync(fixtureBinary, [], { input: JSON.stringify(value), encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(result.status, 1, result.stdout); assert.equal(JSON.parse(result.stdout).error, 'process-identity-drift');
+});
+
+test('Swift Root-close facts cannot authorize a consent action', { skip: !nativeMac }, () => {
+  const value = fixture(); value.rootCloseDialogs = rootCloseFixture().rootCloseDialogs;
+  const result = spawnSync(fixtureBinary, [], { input: JSON.stringify(value), encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(result.status, 1, result.stdout); assert.equal(JSON.parse(result.stdout).error, 'normal-close-root-scope-required');
+});
+
+test('Swift Root-close fixture input remains bounded before oversized child data can be admitted', { skip: !nativeMac }, () => {
+  const value = rootCloseFixture(); value.rootCloseDialogs.children = Array(1024).fill(value.rootCloseDialogs.children[0]);
+  const input = JSON.stringify(value); assert.ok(Buffer.byteLength(input) > 65536);
+  const result = spawnSync(fixtureBinary, [], { input, encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(result.status, 1, result.stdout); assert.equal(JSON.parse(result.stdout).error, 'fixture-too-large');
+});
+
+for (const [name, mutate] of [
+  ['numeric modal value', f => { f.rootCloseDialogs.rootModal = 0; }],
+  ['string modal value', f => { f.rootCloseDialogs.rootModal = 'false'; }],
+  ['non-array children', f => { f.rootCloseDialogs.children = {}; }],
+  ['malformed role', f => { f.rootCloseDialogs.children[0].role = {}; }],
+]) {
+  test(`Swift Root-close malformed fixture: ${name}`, { skip: !nativeMac }, () => {
+    const value = rootCloseFixture(); mutate(value);
+    const result = spawnSync(fixtureBinary, [], { input: JSON.stringify(value), encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+    assert.equal(result.status, 1, result.stdout); assert.notEqual(JSON.parse(result.stdout).fixtureAccepted, true);
   });
 }
 

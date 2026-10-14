@@ -118,6 +118,47 @@ refuse. Normal close uses the window's native AX close button and refuses while
 any native dialog is present. There are no arbitrary labels, coordinates, title
 matching, AppleScript, focus forcing, retries, signals or kill fallback.
 
+## Root Close-Only Scope
+
+Only `close` for `com.creatorworks.hub` now uses `observeRootClose`. `inspect`,
+all consent `press` actions, and legacy app close retain the original complete
+same-PID traversal. No remote node can be an action target. Root close resolves
+the held window's [AXCloseButton](https://developer.apple.com/documentation/applicationservices/kaxclosebuttonattribute)
+directly; it does not enter content-container descendants.
+
+The finite scope is `root-standard-window-first-order-native-dialogs`, not
+global client/dialog coverage. An absent result requires one exact held Root
+AX window, `AXStandardWindow`, an explicit typed `AXModal=false`, and a complete
+bounded first-order native-child inventory. Each inspected child must have Root
+PID and native parent/window CF links to that held window. Only the declared
+ordinary content/chrome roles and subroles are supported. Native `AXSheet`,
+`AXDialog`, or modal Root state is present; extra windows, alternate layouts,
+unreadable/wrong-type/missing required attributes or links, foreign direct
+children, and exhausted bounds are unknown and refuse. Missing optional
+subrole is accepted only on a supported role after native no-value/unsupported
+status, not after communication/type errors.
+
+Primary boundaries are Apple's [first-order AXChildren](https://developer.apple.com/documentation/applicationservices/kaxchildrenattribute),
+[window modality](https://developer.apple.com/documentation/applicationservices/kaxmodalattribute),
+and [native sheet-parent relationship](https://developer.apple.com/documentation/appkit/nswindow/sheetparent).
+This is an ordinary native-window/sheet boundary, not proof that arbitrary
+nested/custom accessibility providers or HTML dialogs contain no dialog.
+Alternate provider/layout support must not be inferred from these receipts.
+
+Before, immediate, and final pre-action selections repeat this gate and retain
+the same Root window/close-button CF references, process/image/CG pins, active,
+enabled, visible, hit-test and AXPress checks. The existing live-after or distinct
+native-termination postcondition remains mandatory. Caller acceptance now also
+requires the explicit absent scope and its original child exit0/no signal.
+Unknown refusals include bounded `closeDialog` stage/count/role diagnostics.
+Four-second and 200ms messaging bounds, no retry/kill/permission policy, and
+all false product-acceptance flags are unchanged.
+
+Local Windows tests establish JS/source guards only. The added SDK scope,
+malformed-input and post-identity fixtures are skipped here. A new Intel/ARM
+native run must qualify the actual Root layout and close behavior; the reviewed
+source hash is a source pin, not native acceptance.
+
 ## Identity and Evidence
 
 Checks bind PID plus kernel start seconds/microseconds, process UID, kernel and

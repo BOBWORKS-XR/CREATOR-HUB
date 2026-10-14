@@ -3,8 +3,9 @@ import Foundation
 struct Refusal: Error, CustomStringConvertible {
     let description: String
     let diagnostic: [String: Any]?
-    init(_ message: String, diagnostic: [String: Any]? = nil) {
-        description = message; self.diagnostic = diagnostic
+    let closeDialog: [String: Any]?
+    init(_ message: String, diagnostic: [String: Any]? = nil, closeDialog: [String: Any]? = nil) {
+        description = message; self.diagnostic = diagnostic; self.closeDialog = closeDialog
     }
 }
 
@@ -60,6 +61,64 @@ struct Control: Codable, Equatable {
     let pressSupported: Bool
 }
 
+enum RootDialogState: String, Codable { case present, absent, unknown }
+let rootCloseDialogScope = "root-standard-window-first-order-native-dialogs"
+
+struct RootCloseChild: Codable {
+    let pid: Int32
+    let role: String?
+    let subrole: String?
+    let subroleVerified: Bool
+    let parentMatchesRoot: Bool
+    let windowMatchesRoot: Bool
+}
+
+struct RootCloseDialogInputs: Codable {
+    let windowCount: Int?
+    let rootSubrole: String?
+    let rootModal: Bool?
+    let children: [RootCloseChild]?
+    let withinLimits: Bool
+}
+
+struct RootCloseDialogEvidence: Codable, Equatable {
+    let scope: String
+    let state: RootDialogState
+    let windowCount: Int?
+    let childCount: Int?
+}
+
+func rootCloseDialogEvidence(_ input: RootCloseDialogInputs, _ pid: Int32) -> RootCloseDialogEvidence {
+    var state = RootDialogState.unknown
+    if input.rootModal == true || input.rootSubrole == "AXDialog" { state = .present }
+    else if pid > 0, input.withinLimits, input.windowCount == 1, input.rootSubrole == "AXStandardWindow",
+            input.rootModal == false, let children = input.children, children.count < 512 {
+        state = .absent
+        for child in children {
+            guard child.pid == pid, child.parentMatchesRoot, child.windowMatchesRoot,
+                  let role = child.role, role.utf8.count <= 128, child.subroleVerified,
+                  (child.subrole?.utf8.count ?? 0) <= 128 else { state = .unknown; break }
+            if role == "AXSheet" || child.subrole == "AXDialog" { state = .present; break }
+            // This finite gate supports only the ordinary Root window's native
+            // content containers and chrome. It is not a descendant/HTML audit.
+            guard ["AXGroup", "AXButton", "AXStaticText"].contains(role) else { state = .unknown; break }
+            if let subrole = child.subrole,
+               !["AXContentArea", "AXCloseButton", "AXMinimizeButton", "AXZoomButton", "AXFullScreenButton"].contains(subrole) {
+                state = .unknown; break
+            }
+        }
+    }
+    return RootCloseDialogEvidence(scope: rootCloseDialogScope, state: state, windowCount: input.windowCount,
+                                   childCount: input.children?.count)
+}
+
+func requireRootCloseDialogs(_ evidence: RootCloseDialogEvidence) throws {
+    guard evidence.scope == rootCloseDialogScope, evidence.state == .absent, evidence.windowCount == 1,
+          let count = evidence.childCount, count >= 0, count < 512 else {
+        throw Refusal("normal-close-dialog-" + evidence.state.rawValue, closeDialog: (try? object(evidence)) as? [String: Any])
+    }
+}
+
 struct Observation: Codable {
     let process: ProcessIdentity
     let window: WindowIdentity?
@@ -69,6 +128,7 @@ struct Observation: Codable {
     let truncated: Bool
     let hasDialog: Bool
     let controls: [Control]
+    var closeDialog: RootCloseDialogEvidence? = nil
 }
 
 enum Action: String, Codable, Equatable {
@@ -130,6 +190,10 @@ func selectControl(_ owner: Owner, _ observed: Observation, _ action: Action) th
         }
         chosen = action.selectsDecline ? declined[0] : approved[0]
     } else {
+        if let evidence = observed.closeDialog {
+            guard owner.process.bundleIdentifier == "com.creatorworks.hub" else { throw Refusal("normal-close-root-scope-required") }
+            try requireRootCloseDialogs(evidence)
+        }
         let buttons = observed.controls.filter { $0.path == "close-button" }
         guard buttons.count == 1, !observed.hasDialog else {
             throw Refusal("normal-close-unverified-or-dialog-present")
@@ -259,12 +323,22 @@ struct Fixture: Decodable {
     let action: Action
     let termination: TerminationInputs?
     let finalKernel: KernelObservation?
+    let rootCloseDialogs: RootCloseDialogInputs?
 }
 do {
     let data = try FileHandle.standardInput.read(upToCount: 65537) ?? Data()
     guard data.count <= 65536 else { throw Refusal("fixture-too-large") }
     let fixture = try JSONDecoder().decode(Fixture.self, from: data)
     _ = try validateAction(fixture.owner, fixture.before, fixture.immediate, fixture.action)
+    var closeEvidence: RootCloseDialogEvidence?
+    if let input = fixture.rootCloseDialogs {
+        guard fixture.action == .closeWindow, fixture.owner.process.bundleIdentifier == "com.creatorworks.hub" else {
+            throw Refusal("normal-close-root-scope-required")
+        }
+        let evidence = rootCloseDialogEvidence(input, fixture.owner.process.pid)
+        try requireRootCloseDialogs(evidence)
+        closeEvidence = evidence
+    }
     if let sample = fixture.finalKernel {
         try validateExpectedFinalKernel(sample, fixture.owner.process, bytes: 136, missingErrno: 3)
     }
@@ -272,14 +346,22 @@ do {
         guard fixture.after == nil else { throw Refusal("termination-must-not-forge-after") }
         let termination = try validateNativeTermination(fixture.owner, fixture.before, fixture.immediate, fixture.action, input,
                                                         bytes: 136, missingErrno: 3)
-        emit(["fixtureAccepted": true, "nativeActionsAvailable": false, "closeOutcome": "native-termination",
-              "postIdentityVerified": false, "postTerminationVerified": true, "termination": try object(termination)])
+        var receipt: [String: Any] = ["fixtureAccepted": true, "nativeActionsAvailable": false, "closeOutcome": "native-termination",
+              "postIdentityVerified": false, "postTerminationVerified": true, "termination": try object(termination)]
+        if let evidence = closeEvidence { receipt["closeDialog"] = try object(evidence) }
+        emit(receipt)
     } else {
         guard let after = fixture.after else { throw Refusal("fixture-after-required") }
         try validateIdentity(fixture.owner, after, allowGone: true)
-        emit(["fixtureAccepted": true, "nativeActionsAvailable": false])
+        var receipt: [String: Any] = ["fixtureAccepted": true, "nativeActionsAvailable": false]
+        if let evidence = closeEvidence { receipt["closeDialog"] = try object(evidence) }
+        emit(receipt)
     }
-} catch { emit(["error": String(describing: error), "nativeActionsAvailable": false]); exit(1) }
+} catch {
+    var failure: [String: Any] = ["error": String(describing: error), "nativeActionsAvailable": false]
+    if let evidence = (error as? Refusal)?.closeDialog { failure["closeDialog"] = evidence }
+    emit(failure); exit(1)
+}
 #elseif os(macOS)
 import AppKit
 import ApplicationServices
@@ -663,6 +745,132 @@ func observe(_ owner: Owner, controls: Bool = true, allowGone: Bool = false) thr
                                                accessibilityTrusted: true, active: active, truncated: false, hasDialog: hasDialog, controls: found), elements: native, axWindow: axWindow)
 }
 
+func closeAttribute(_ item: AXUIElement, _ key: String, optional: Bool = false) throws -> CFTypeRef? {
+    guard AXUIElementSetMessagingTimeout(item, 0.2) == .success else { throw Refusal("normal-close-message-timeout-unverified") }
+    var value: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(item, key as CFString, &value)
+    if optional && (status == .noValue || status == .attributeUnsupported) { return nil }
+    guard status == .success, let value = value else { throw Refusal("normal-close-attribute-unreadable") }
+    return value
+}
+
+func closeString(_ item: AXUIElement, _ key: String, optional: Bool = false) throws -> String? {
+    guard let value = try closeAttribute(item, key, optional: optional) else { return nil }
+    guard CFGetTypeID(value) == CFStringGetTypeID(), let text = value as? String, text.utf8.count <= 128 else {
+        throw Refusal("normal-close-string-type-unverified")
+    }
+    return text
+}
+
+func closeBoolean(_ item: AXUIElement, _ key: String, optional: Bool = false) throws -> Bool? {
+    guard let value = try closeAttribute(item, key, optional: optional) else { return nil }
+    guard CFGetTypeID(value) == CFBooleanGetTypeID() else { throw Refusal("normal-close-boolean-type-unverified") }
+    return CFBooleanGetValue(value as! CFBoolean)
+}
+
+func closeChildren(_ item: AXUIElement, _ key: String) throws -> [AXUIElement] {
+    guard AXUIElementSetMessagingTimeout(item, 0.2) == .success else { throw Refusal("normal-close-message-timeout-unverified") }
+    var count = 0
+    guard AXUIElementGetAttributeValueCount(item, key as CFString, &count) == .success, count >= 0, count < 512 else {
+        throw Refusal("normal-close-child-inventory-unverified")
+    }
+    if count == 0 { return [] }
+    var array: CFArray?
+    guard AXUIElementCopyAttributeValues(item, key as CFString, 0, count, &array) == .success, let array = array,
+          CFGetTypeID(array) == CFArrayGetTypeID(), CFArrayGetCount(array) == count else {
+        throw Refusal("normal-close-child-inventory-unverified")
+    }
+    for index in 0..<count {
+        guard let raw = CFArrayGetValueAtIndex(array, index),
+              CFGetTypeID(Unmanaged<CFTypeRef>.fromOpaque(raw).takeUnretainedValue()) == AXUIElementGetTypeID() else {
+            throw Refusal("normal-close-child-type-unverified")
+        }
+    }
+    guard let result = array as? [AXUIElement], result.count == count else { throw Refusal("normal-close-child-type-unverified") }
+    return result
+}
+
+func observeRootClose(_ owner: Owner) throws -> NativeObservation {
+    let deadline = ProcessInfo.processInfo.systemUptime + 4
+    var windowCount: Int?, rootSubrole: String?, rootModal: Bool?, childFacts: [RootCloseChild]?
+    var stage = "root-identity", childIndex: Int?
+    func evidence() -> RootCloseDialogEvidence {
+        rootCloseDialogEvidence(RootCloseDialogInputs(windowCount: windowCount, rootSubrole: rootSubrole, rootModal: rootModal,
+            children: childFacts, withinLimits: ProcessInfo.processInfo.systemUptime < deadline), owner.process.pid)
+    }
+    do {
+        guard owner.process.bundleIdentifier == "com.creatorworks.hub" else { throw Refusal("normal-close-root-scope-required") }
+        let base = try observe(owner, controls: false)
+        try validateIdentity(owner, base.value)
+        guard let window = base.axWindow else { throw Refusal("normal-close-root-reference-unverified") }
+        let root = AXUIElementCreateApplication(owner.process.pid)
+        stage = "window-inventory"
+        let windows = try closeChildren(root, kAXWindowsAttribute)
+        windowCount = windows.count
+        guard windows.count == 1, CFEqual(windows[0], window) else { throw Refusal("normal-close-extra-or-changed-window") }
+        try axPID(windows[0], owner.process.pid)
+        stage = "root-subrole"
+        rootSubrole = try closeString(window, kAXSubroleAttribute)
+        stage = "root-modal"
+        rootModal = try closeBoolean(window, kAXModalAttribute)
+        stage = "child-inventory"
+        let nativeChildren = try closeChildren(window, kAXChildrenAttribute)
+        var facts = [RootCloseChild]()
+        // First-order native chrome/sheet inventory only. No recursive child or
+        // remote metadata read is needed to select the window's AXCloseButton.
+        stage = "child-metadata"
+        for (index, child) in nativeChildren.enumerated() {
+            childIndex = index
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw Refusal("normal-close-incomplete") }
+            try axPID(child, owner.process.pid)
+            let parent = try element(closeAttribute(child, kAXParentAttribute)), linkedWindow = try element(closeAttribute(child, kAXWindowAttribute))
+            facts.append(RootCloseChild(pid: owner.process.pid, role: try closeString(child, kAXRoleAttribute),
+                subrole: try closeString(child, kAXSubroleAttribute, optional: true), subroleVerified: true,
+                parentMatchesRoot: CFEqual(parent, window), windowMatchesRoot: CFEqual(linkedWindow, window)))
+        }
+        childFacts = facts
+        stage = "dialog-scope"; childIndex = nil
+        try requireRootCloseDialogs(evidence())
+        stage = "close-control"
+        let close = try element(closeAttribute(window, kAXCloseButtonAttribute))
+        try axPID(close, owner.process.pid)
+        guard nativeChildren.filter({ CFEqual($0, close) }).count == 1,
+              try closeString(close, kAXRoleAttribute) == kAXButtonRole,
+              try closeString(close, kAXSubroleAttribute) == "AXCloseButton" else { throw Refusal("normal-close-subrole-unverified") }
+        let parentWindow = try element(closeAttribute(close, kAXWindowAttribute))
+        guard CFEqual(parentWindow, window) else { throw Refusal("control-window-mismatch") }
+        let bounds = try axBounds(close), b = owner.window.bounds
+        let contained = bounds.x >= b.x && bounds.y >= b.y && bounds.x + bounds.width <= b.x + b.width && bounds.y + bounds.height <= b.y + b.height
+        var actions: CFArray?
+        guard AXUIElementCopyActionNames(close, &actions) == .success, let names = actions as? [String], names.count <= 32 else {
+            throw Refusal("ax-actions-unreadable")
+        }
+        let control = Control(path: "close-button", role: kAXButtonRole, title: "", pid: owner.process.pid, windowID: owner.window.id,
+            dialog: nil, enabled: try closeBoolean(close, kAXEnabledAttribute), hidden: try closeBoolean(close, "AXHidden", optional: true) == true,
+            showing: contained && hitMatches(root, close, bounds, owner.process.pid), pressSupported: names.contains(kAXPressAction))
+        try validateControl(owner, control)
+        stage = "post-root-fence"
+        let after = try observe(owner, controls: false)
+        guard let held = after.axWindow, CFEqual(held, window), ProcessInfo.processInfo.systemUptime < deadline else {
+            throw Refusal("normal-close-root-reference-drift")
+        }
+        try validateIdentity(owner, after.value)
+        var value = Observation(process: after.value.process, window: after.value.window, windowMissingVerified: false,
+            accessibilityTrusted: after.value.accessibilityTrusted, active: after.value.active, truncated: false, hasDialog: false, controls: [control])
+        let finalEvidence = evidence()
+        try requireRootCloseDialogs(finalEvidence)
+        value.closeDialog = finalEvidence
+        return NativeObservation(value: value, elements: ["close-button": close], axWindow: held)
+    } catch {
+        var detail = (try? object(evidence())) as? [String: Any] ?? [:]
+        detail["stage"] = stage; detail["childIndex"] = childIndex.map { $0 as Any } ?? NSNull()
+        detail["rootSubrole"] = rootSubrole.map { $0 as Any } ?? NSNull()
+        detail["rootModal"] = rootModal.map { $0 as Any } ?? NSNull()
+        if let facts = childFacts { detail["firstOrderMetadata"] = facts.prefix(16).compactMap { try? object($0) } }
+        throw Refusal(String(describing: error), closeDialog: detail)
+    }
+}
+
 func nativeTermination(_ owner: Owner, _ before: Observation, _ immediate: Observation, _ beforeKernel: KernelObservation,
                        _ firstKernel: KernelObservation, _ liveFailure: String?, _ result: AXError) throws -> NativeTermination {
     try admission(); try trustedAX()
@@ -772,22 +980,27 @@ func nativeMain() {
               args.count == (args[0] == "press" ? 3 : 2) else { throw Refusal("unknown-native-command") }
         try trustedAX()
         let owner = try ownerFile(args[1])
-        let before = try observe(owner)
+        let rootClose = args[0] == "close" && owner.process.bundleIdentifier == "com.creatorworks.hub"
+        let before = try (rootClose ? observeRootClose(owner) : observe(owner))
         if args[0] == "inspect" {
             try validateIdentity(owner, before.value)
             emit(["observation": try object(before.value), "permissionRequestsPerformed": false]); return
         }
         guard let action = args[0] == "close" ? Action.closeWindow : Action(rawValue: args[2]),
               args[0] != "press" || action != .closeWindow else { throw Refusal("unknown-native-action") }
-        let immediate = try observe(owner)
+        let immediate = try (rootClose ? observeRootClose(owner) : observe(owner))
         beforeEvidence = try object(immediate.value)
         let selected = try validateAction(owner, before.value, immediate.value, action)
         guard let target = immediate.elements[selected.path], let original = before.elements[selected.path],
               CFEqual(target, original), let firstWindow = before.axWindow, let lastWindow = immediate.axWindow,
               CFEqual(firstWindow, lastWindow) else { throw Refusal("native-control-reference-drift") }
         // A final identity fence precedes the one allowed AXPress. No focus or retry.
-        let fence = try observe(owner, controls: false)
+        let fence = try (rootClose ? observeRootClose(owner) : observe(owner, controls: false))
         try validateIdentity(owner, fence.value)
+        if rootClose {
+            _ = try selectControl(owner, fence.value, .closeWindow)
+            guard let finalClose = fence.elements["close-button"], CFEqual(finalClose, target) else { throw Refusal("native-control-reference-drift") }
+        }
         guard fence.value.active, let fenceWindow = fence.axWindow, CFEqual(fenceWindow, lastWindow) else {
             throw Refusal("native-window-reference-drift")
         }
@@ -856,6 +1069,7 @@ func nativeMain() {
         if let started = actionStarted { failure["actionStartedUptime"] = started }
         if let returned = actionReturned { failure["actionReturnedUptime"] = returned }
         if let diagnostic = (error as? Refusal)?.diagnostic { failure["foreignElement"] = diagnostic }
+        if let evidence = (error as? Refusal)?.closeDialog { failure["closeDialog"] = evidence }
         if attempted, let owner = closeOwner {
             failure["action"] = "close-window"; failure["axAction"] = "AXPress"
             if let result = axResult { failure["axResult"] = result }

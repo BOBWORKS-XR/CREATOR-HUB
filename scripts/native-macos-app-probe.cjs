@@ -83,10 +83,18 @@ function privateProfile(output) {
   return { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: home, CFFIXED_USER_HOME: home, TMPDIR: path.join(home, 'tmp') + '/',
     XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local/share'), XDG_CACHE_HOME: path.join(home, '.cache') };
 }
+function verifiedRootCloseDialog(value) {
+  const fields = ['scope', 'state', 'windowCount', 'childCount'];
+  return !!value && Object.keys(value).length === fields.length && Object.keys(value).every(key => fields.includes(key))
+    && value.scope === 'root-standard-window-first-order-native-dialogs' && value.state === 'absent'
+    && value.windowCount === 1 && Number.isSafeInteger(value.childCount) && value.childCount >= 0 && value.childCount < 512;
+}
 function acceptedExit(close, exit, owner) {
   const before = close?.before, after = close?.after;
-  const beforeBound = !!owner && isDeepStrictEqual(before?.process, owner.process) && isDeepStrictEqual(before?.window, owner.window)
-    && before.accessibilityTrusted === true && before.active === true && before.truncated === false;
+  const beforeBound = !!owner?.process && isDeepStrictEqual(before?.process, owner.process) && isDeepStrictEqual(before?.window, owner.window)
+    && before.accessibilityTrusted === true && before.active === true && before.truncated === false
+    && (owner.process.bundleIdentifier !== 'com.creatorworks.hub'
+      || before.hasDialog === false && verifiedRootCloseDialog(before.closeDialog));
   const common = close?.action === 'close-window' && close.axAction === 'AXPress' && close.actionAttempted === true
     && close.forceKillPerformed === false && close.permissionRequestsPerformed === false
     && !close.error && !close.postProcessStatus && beforeBound && exit?.pid === owner.process.pid
@@ -803,4 +811,4 @@ if (require.main === module) {
   }).catch(error => { console.log(JSON.stringify({ error: error.message, passed: false, ...acceptance })); process.exitCode = 2; });
 }
 module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, closeAssessment,
-  bitmapArguments, bitmapImage, windowBitmapDiagnostic, remoteReadPolicy, validateRootInspection, validateChildrenFailure, rootSurfaceDiagnostic, acceptance, surfaceSource };
+  bitmapArguments, bitmapImage, windowBitmapDiagnostic, remoteReadPolicy, validateRootInspection, validateChildrenFailure, verifiedRootCloseDialog, rootSurfaceDiagnostic, acceptance, surfaceSource };

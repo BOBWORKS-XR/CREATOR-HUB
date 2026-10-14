@@ -267,8 +267,8 @@ failed/missing kernel read with actual drift. It now captures bytes/errno and
 uses the same exact kernel classifier: only definitive absence becomes
 `expected-process-absent`; start/UID/PID drift and unavailable reads still refuse.
 Generic drift is not whitelisted. No retries, timing or pre-action authority
-changed. Twelve additional pure distinction fixtures pass locally; a fresh
-native result remains pending. Intel pre-action foreign-element refusal and
+changed. Twelve additional distinction fixtures were added; Windows ran source
+guards only and skipped SDK execution. Intel pre-action foreign-element refusal and
 missing Root WebArea remain separate gaps.
 
 Run 38575009554 at `b6042b1` accepts ARM's normal Root termination with the exact
@@ -278,6 +278,25 @@ the Root surface capture but its unchanged whole-tree close selector refuses a
 foreign descendant before acting. These separate results do not constitute
 writable GUI, migration, update or release acceptance; those flags remain false.
 Reports are retained under `artifacts/mac-root-probe-38575009554/`.
+
+The next checkpoint adds a Root-only close selector with the explicit finite
+`root-standard-window-first-order-native-dialogs` tri-state described in
+[the helper contract](MACOS-NATIVE-WINDOW.md#root-close-only-scope). It does not
+traverse the nested Intel remote content or authorize remote input. Present or
+unknown native dialog/sheet coverage refuses; the caller rejects missing or
+malformed scope evidence even with exit0. Original receipts remain unchanged.
+
+Next native run, without workflow changes: use the existing Root-surface Intel
+and ARM matrix with the reviewed source revision. First run
+`node --test scripts/native-macos-window.test.cjs scripts/native-macos-app-probe.test.cjs`
+on each Mac SDK. Only if those fixtures/compilation pass, run the existing
+caller-pinned Root probe once per architecture, retaining helper source/binary
+hashes, normal-close stdout, `closeDialog` proof/refusal, live/termination
+postcondition, and exact `ownedChildExit`. Intel success requires Root capture
+plus normal close and original exit0/no signal. ARM's missing WebArea remains
+a separate capture gap even if normal close succeeds. Do not widen the scope,
+change timing, retry actions, or claim native product acceptance from the hash
+pin or fixture results.
 
 ```sh
 node --test scripts/native-macos-app-probe.test.cjs

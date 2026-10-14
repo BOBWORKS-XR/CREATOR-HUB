@@ -93,6 +93,10 @@ function ownership() {
   window: { id: 71, pid: 42, bounds: { x: 1, y: 2, width: 400, height: 300 } } };
   return { owner, expected };
 }
+
+function closeDialog() {
+  return { scope: 'root-standard-window-first-order-native-dialogs', state: 'absent', windowCount: 1, childCount: 6 };
+}
 test('owner binding refuses foreign PID/path/hash/plist/start stamp/window and invalid bounds', () => {
   const good = ownership(); assert.doesNotThrow(() => probe.validateOwner(good.owner, good.expected));
   for (const mutate of [o => o.process.pid++, o => o.process.executablePath = '/foreign', o => o.process.bundlePath = '/foreign.app',
@@ -117,7 +121,8 @@ test('fresh profile cannot inherit accounts, client settings, app injection vari
 
 test('capture and accepted exit require more than a successful close call or exit zero', () => {
   const { owner } = ownership();
-  const observation = { process: owner.process, window: owner.window, accessibilityTrusted: true, active: true, truncated: false };
+  const observation = { process: owner.process, window: owner.window, accessibilityTrusted: true, active: true, truncated: false,
+    hasDialog: false, closeDialog: closeDialog() };
   const close = { action: 'close-window', axAction: 'AXPress', actionAttempted: true, postIdentityVerified: true,
     forceKillPerformed: false, permissionRequestsPerformed: false, before: observation, after: observation };
   const exit = { pid: owner.process.pid, code: 0, signal: null };
@@ -154,7 +159,7 @@ test('ARM refusal contract keeps close acceptance false while reporting only the
 test('native termination is distinct from live process identity and requires exact owned exit and all postconditions', () => {
   const { owner } = ownership();
   const before = { process: owner.process, window: owner.window, accessibilityTrusted: true, active: true,
-    truncated: false, hasDialog: false, controls: [{ path: 'close-button', role: 'AXButton', pid: owner.process.pid,
+    truncated: false, hasDialog: false, closeDialog: closeDialog(), controls: [{ path: 'close-button', role: 'AXButton', pid: owner.process.pid,
       windowID: owner.window.id, enabled: true, hidden: false, showing: true, pressSupported: true }] };
   const close = { action: 'close-window', axAction: 'AXPress', actionAttempted: true, axResult: 0,
     closeOutcome: 'native-termination', postIdentityVerified: false, postTerminationVerified: true,
@@ -172,6 +177,8 @@ test('native termination is distinct from live process identity and requires exa
     c => c.forceKillPerformed = true, c => c.permissionRequestsPerformed = true,
     c => c.error = 'native-bundle-id-unverified', c => c.postProcessStatus = { state: 'absent' },
     c => c.before.hasDialog = true, c => c.before.controls[0].pid++, c => c.before.controls[0].enabled = false,
+    c => delete c.before.closeDialog, c => c.before.closeDialog.state = 'unknown',
+    c => c.before.closeDialog.state = 'present', c => c.before.closeDialog.scope = 'all-client-absence',
     c => c.before.controls.push(structuredClone(c.before.controls[0])),
     c => c.termination.expectedProcess.startSeconds++, c => c.termination.expectedWindow.id++,
     c => c.termination.kernelMissingVerified = false, c => c.termination.windowMissingVerified = false,
@@ -196,7 +203,8 @@ test('successful-shaped close output cannot accept a reused PID, unknown post-id
   const close = { action: 'close-window', axAction: 'AXPress', actionAttempted: true, postIdentityVerified: true,
     forceKillPerformed: false, permissionRequestsPerformed: false };
   assert.equal(probe.acceptedExit(close, exit, owner), false);
-  const observation = { process: owner.process, window: owner.window, accessibilityTrusted: true, active: true, truncated: false };
+  const observation = { process: owner.process, window: owner.window, accessibilityTrusted: true, active: true, truncated: false,
+    hasDialog: false, closeDialog: closeDialog() };
   const valid = { ...close, before: observation, after: observation };
   assert.equal(probe.acceptedExit(valid, { ...exit, pid: exit.pid + 1 }, owner), false);
   assert.equal(probe.acceptedExit({ ...valid, after: { ...observation, process: { ...owner.process, startSeconds: owner.process.startSeconds + 1 } } }, exit, owner), false);
@@ -210,6 +218,23 @@ test('Root readiness polling preserves the native CF window and stores changes o
   assert.match(probe.surfaceSource, /CFEqual\(current\[0\], window\)/);
   assert.match(probe.surfaceSource, /rootWebAreaObserved/);
   assert.doesNotMatch(probe.surfaceSource, /Thread.sleep|usleep\(|sleep\(/);
+});
+
+test('caller refuses missing/present/unknown or malformed finite close scope despite exit0 and other pins', () => {
+  const { owner } = ownership(), exit = { pid: owner.process.pid, code: 0, signal: null };
+  const observation = { process: owner.process, window: owner.window, accessibilityTrusted: true, active: true,
+    truncated: false, hasDialog: false, closeDialog: closeDialog() };
+  const receipt = { action: 'close-window', axAction: 'AXPress', actionAttempted: true, postIdentityVerified: true,
+    forceKillPerformed: false, permissionRequestsPerformed: false, before: observation, after: observation };
+  assert.equal(probe.acceptedExit(receipt, exit, owner), true);
+  for (const value of [undefined, null, {}, { ...closeDialog(), state: 'unknown' }, { ...closeDialog(), state: 'present' },
+    { ...closeDialog(), scope: 'all-client-absence' }, { ...closeDialog(), windowCount: 2 },
+    { ...closeDialog(), childCount: -1 }, { ...closeDialog(), childCount: 512 }, { ...closeDialog(), childCount: '6' },
+    { ...closeDialog(), actionAllowed: true }]) {
+    assert.equal(probe.verifiedRootCloseDialog(value), false);
+    assert.equal(probe.acceptedExit({ ...receipt, before: { ...observation, closeDialog: value } }, exit, owner), false);
+  }
+  assert.equal(probe.acceptedExit(receipt, exit, {}), false);
 });
 
 test('window bitmap refuses false/unknown permission and never calls capture without exact owned fences', async () => {
@@ -395,12 +420,12 @@ test('remote metadata keeps actual PID, finite traversal/time/message limits and
   assert.doesNotMatch(probe.surfaceSource, /AXUIElementPerformAction|AXUIElementSetAttributeValue|AXUIElementCopyActionNames|kAXPressAction|kAXCloseButtonAttribute|kAXValueAttribute|CreateSystemWide|AXIsProcessTrustedWithOptions|CGRequestScreenCaptureAccess|NSRunningApplication/);
 });
 
-test('reviewed close-termination helper still refuses foreign nodes before its sole action', () => {
+test('reviewed Root close helper retains native target and consent authority before its sole action', () => {
   const helper = fs.readFileSync(path.join(__dirname, 'native-macos-window.swift'));
-  // Reviewed post-close-only change; native traversal/consent authority is unchanged.
+  // Reviewed finite Root close scope; consent traversal and native target authority are unchanged.
   const reviewedSource = helper.toString('utf8').replace(/\r\n/g, '\n');
   const sourceHash = value => crypto.createHash('sha256').update(value.replace(/\r\n/g, '\n'), 'utf8').digest('hex');
-  assert.equal(sourceHash(reviewedSource), '5933abddcd9b6d14f767acdccd326be315aa7df3349d9ed475dc82260a38f067');
+  assert.equal(sourceHash(reviewedSource), '212a8c94149d159da69c4161220333969fbc71bd555ee951c26d9ff04bae2a68');
   assert.equal(sourceHash(reviewedSource.replace(/\n/g, '\r\n')), sourceHash(reviewedSource));
   const swift = helper.toString('utf8');
   assert.match(swift, /AXUIElementGetPid\(item, &pid\) == \.success, pid == expected else \{ throw Refusal\("foreign-ax-element"\)/);
