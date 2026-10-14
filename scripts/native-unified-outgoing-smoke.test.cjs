@@ -83,6 +83,52 @@ test('fixed MCP target sequence creates settings from the false default, verifyi
   await exercise(false);
 });
 
+test('fresh connection waits for asynchronously opened terms; restoration only verifies the native receipt', async () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-unified-outgoing-smoke.cjs'), 'utf8');
+  const start = source.indexOf('    if (!restoring) {', source.indexOf('  const connect = async'));
+  const end = source.indexOf('    if (restoring) await page.waitForFunction', start);
+  assert.ok(start >= 0 && end > start);
+  const sequence = source.slice(start, end);
+  async function exercise(restoring, accepted, save = true) {
+    let visible = false, checked = false;
+    const events = [];
+    const run = vm.runInNewContext(`(async () => { ${sequence} })()`, {
+      assert, restoring,
+      page: {
+        locator(selector) {
+          if (selector === '#usage-terms-dialog') return {
+            async waitFor({ state }) {
+              events.push(`wait:${state}`);
+              if (state === 'visible') visible = true; // Native status resolution opens the initially hidden dialog later.
+              else { assert.equal(accepted, true); visible = false; }
+            },
+          };
+          if (selector === '#usage-terms-checkbox') return { async check() {
+            assert.equal(visible, true); checked = true; events.push('check');
+          } };
+          assert.equal(selector, '#usage-terms-continue');
+          return { async click() {
+            assert.equal(visible && checked, true); events.push('accept-ui');
+            accepted = save;
+          } };
+        },
+        async evaluate(read) { assert.match(String(read), /invoke\('usage_terms_status'\)/); events.push('native-status'); return accepted; },
+      },
+      retry: read => read(),
+    }, { timeout: 1000 });
+    if (!accepted && (restoring || !save)) {
+      await assert.rejects(run, /Native terms receipt must be saved and survive restart/);
+      assert.equal(events.includes('wait:hidden'), false);
+      if (restoring) assert.deepEqual(events, ['native-status'], 'Never accept terms on behalf of a restored app');
+    } else await run;
+    return events;
+  }
+  assert.deepEqual(await exercise(false, false), ['wait:visible', 'check', 'accept-ui', 'native-status', 'wait:hidden']);
+  await exercise(false, false, false);
+  assert.deepEqual(await exercise(true, true), ['native-status', 'wait:hidden']);
+  await exercise(true, false);
+});
+
 test('fixed sequence operates B03-style hidden checkbox through its visible label and real change events',
   { timeout: 15000 }, async t => {
     const { chromium } = require('playwright');

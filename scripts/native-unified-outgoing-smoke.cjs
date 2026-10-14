@@ -101,10 +101,12 @@ async function main() {
     });
     page.setDefaultTimeout(30000);
     await page.waitForFunction(() => window.CreatorHubNative);
-    if (await page.locator('#usage-terms-dialog').isVisible()) {
-      assert.equal(restoring, false, 'Terms receipt did not survive; do not invent a replacement');
+    if (!restoring) {
+      await page.locator('#usage-terms-dialog').waitFor({ state: 'visible' });
       await page.locator('#usage-terms-checkbox').check(); await page.locator('#usage-terms-continue').click();
     }
+    await retry(async () => assert.equal(await page.evaluate(() => window.CreatorHubNative.invoke('usage_terms_status')), true,
+      'Native terms receipt must be saved and survive restart; do not invent a replacement'));
     await page.locator('#usage-terms-dialog').waitFor({ state: 'hidden' });
     if (restoring) await page.waitForFunction(() => document.querySelector('#convergence-dialog')?.open ||
       !document.querySelector('#hosted-restore').classList.contains('hidden'));
