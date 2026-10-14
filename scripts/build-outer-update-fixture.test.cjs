@@ -54,8 +54,8 @@ test('compile child strips signing material and injection flags without changing
 });
 
 test('fixture pins current reviewed input, checks signed payloads and retains explicit unaccepted scope', () => {
-  assert.equal(BASELINE.commit, '42a35d17c8f0c2f5e61ecaa6ce21aafb2725312f');
-  assert.equal(BASELINE.hashes['installer.exe'], 'b3a42b8d67ef94edefa9cefa9e3791a196febb9d88a2163d38dcfed49c09c13d');
+  assert.equal(BASELINE.commit, 'a914bb96abaca8837f586c25c341d24fe58fe73d');
+  assert.equal(BASELINE.hashes['installer.exe'], 'edc47ecca5e80ce950d5b8ecf6bb32c46fa531e163b9d6ab7722b143a02a4e7a');
   const source = fs.readFileSync(path.join(__dirname, 'build-outer-update-fixture.cjs'), 'utf8');
   assert.ok(source.includes("['verify-package-input', 'verify-managed-runtime', 'verify-release']"));
   assert.ok(source.includes('privateModulesRecompiled: false, privateModulesResigned: false, privateKeyIncluded: false'));

@@ -33,6 +33,14 @@ function input(f = fixture()) {
     pins: { ...Object.fromEntries(Object.entries(bytes).map(([name, value]) => [name, hash(value)])), executable: 'a'.repeat(64) } };
 }
 
+function outgoingInput() {
+  const f = fixture('0.1.15');
+  f.release.assetName = 'Creator_Hub_0.1.15_x64-acceptance-only-setup.exe';
+  f.release.minHubVersion = '0.1.14';
+  f.update = updaterManifest(applications.hub, f.targetVersion, f.release.assetName, f.encodedSignature);
+  return input(f);
+}
+
 function request(contract, route, overrides = {}, state = lab.newState()) {
   const res = new EventEmitter();
   res.writeHead = (status, headers) => { res.status = status; res.headers = headers; };
@@ -234,6 +242,77 @@ test('baseline assertion cannot accept fixture installer/executable bytes or cha
   const before = lab.baselineFor('0.1.13');
   assert.throws(() => lab.assertBaselineBytes('0.1.13', Buffer.from('fixture'), Buffer.from('fixture')), /Unmodified public baseline installer required/);
   assert.deepEqual(lab.baselineFor('0.1.13'), before);
+});
+
+test('fixed outgoing factory uses actual accepted B03 14 while the public factory remains pinned to 12', () => {
+  const contract = lab.createUnifiedOutgoingContract(outgoingInput());
+  assert.equal(contract.targetVersion, '0.1.15');
+  assert.deepEqual(contract.baseline, { version: '0.1.14',
+    installer: 'edc47ecca5e80ce950d5b8ecf6bb32c46fa531e163b9d6ab7722b143a02a4e7a',
+    exe: 'dd74917a67e360a479158d81149a385ad813da9213661959928543a8f366dfca' });
+  assert.ok(Object.isFrozen(contract.baseline) && Object.isFrozen(contract.actualScope));
+  assert.equal(lab.createContract(input(fixture('0.1.15'))).baseline.version, '0.1.12');
+  assert.equal(lab.baselineFor('0.1.15').version, '0.1.12');
+  assert.throws(() => lab.createContract(outgoingInput()), /intermediate Hub/);
+  assert.throws(() => lab.assertUnifiedOutgoingBaselineBytes(Buffer.from('B02'), Buffer.from('version-masquerade')),
+    /Exact accepted B03/);
+  const report = lab.labReport(contract, lab.newState());
+  assert.equal(report.actualScope.kind, 'unified-outgoing-14-15');
+  assert.equal(report.actualScope.baseline, 'accepted-unmodified-unified-0.1.14-B03');
+  for (const field of ['publicDiscovery', 'liveAiAcceptance', 'productAcceptance', 'releaseReady']) {
+    assert.equal(report.actualScope[field], false);
+  }
+  for (const field of ['publicDiscovery', 'releaseReady', 'nativeAcceptanceTested', 'signaturesVerifiedByHarness', 'baselineActuallyTested']) {
+    assert.equal(report[field], false);
+  }
+});
+
+test('outgoing factory refuses baseline overrides, alternate versions/assets and intermediary targets', () => {
+  for (const targetVersion of ['0.1.14', '0.1.15-fixture', '0.1.15+lab', '0.1.16']) {
+    assert.throws(() => lab.createUnifiedOutgoingContract({ ...outgoingInput(), targetVersion }));
+  }
+  for (const field of ['baseline', 'baselineVersion', 'actualScope', 'driver', 'signingKey']) {
+    assert.throws(() => lab.createUnifiedOutgoingContract({ ...outgoingInput(), [field]: 'unreviewed' }), /Unexpected outgoing input/);
+  }
+  for (const [field, value] of [['minHubVersion', '0.1.12'], ['minHubVersion', '0.1.15'],
+    ['assetName', 'Creator.Hub_0.1.15_x64-setup.exe']]) {
+    const data = outgoingInput();
+    const descriptor = JSON.parse(data.descriptor); descriptor[field] = value;
+    data.descriptor = Buffer.from(JSON.stringify(descriptor)); data.pins.descriptor = hash(data.descriptor);
+    assert.throws(() => lab.createUnifiedOutgoingContract(data));
+  }
+});
+
+test('outgoing contracts reuse every shared hash, bound, signature encoding and exact five-route check', () => {
+  for (const name of ['descriptor', 'descriptorSignature', 'installer', 'manifest']) {
+    const data = outgoingInput(); data[name] = Buffer.concat([data[name], Buffer.from('changed')]);
+    assert.throws(() => lab.createUnifiedOutgoingContract(data), /SHA-256 mismatch/);
+  }
+  for (const name of ['descriptor', 'manifest', 'descriptorSignature']) {
+    const data = outgoingInput(); data[name] = Buffer.alloc(name === 'descriptorSignature' ? lab.LIMITS.signature + 1 : lab.LIMITS.metadata + 1);
+    assert.throws(() => lab.createUnifiedOutgoingContract(data), /outside bounds/);
+  }
+  const encodedMetadata = outgoingInput();
+  encodedMetadata.descriptorSignature = Buffer.from(encodedMetadata.descriptorSignature.toString('base64'));
+  encodedMetadata.pins.descriptorSignature = hash(encodedMetadata.descriptorSignature);
+  assert.throws(() => lab.createUnifiedOutgoingContract(encodedMetadata), /Invalid plain minisig/);
+  const plainManifest = outgoingInput(); const manifest = JSON.parse(plainManifest.manifest);
+  manifest.platforms['windows-x86_64'].signature = 'untrusted comment: not base64';
+  plainManifest.manifest = Buffer.from(JSON.stringify(manifest)); plainManifest.pins.manifest = hash(plainManifest.manifest);
+  assert.throws(() => lab.createUnifiedOutgoingContract(plainManifest), /Invalid Tauri base64 signature/);
+
+  const data = outgoingInput(); const contract = lab.createUnifiedOutgoingContract(data);
+  assert.equal(contract.routes.length, 5);
+  const prefix = '/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.15/';
+  assert.deepEqual(contract.routes.map(route => route.path), [lab.FEED_PATH, `${prefix}${lab.DESCRIPTOR}`,
+    `${prefix}${lab.DESCRIPTOR}.minisig`, `${prefix}Creator_Hub_0.1.15_x64-acceptance-only-setup.exe`, `${prefix}latest.json`]);
+  data.installer.fill(0);
+  for (const route of contract.routes) {
+    const response = request(contract, route).res;
+    assert.equal(response.status, 200); assert.equal(hash(response.bytes), route.sha256);
+    assert.equal(request(contract, route, { url: `${route.path}&alias=1` }).res.status, 404);
+    assert.equal(request(contract, route, { headers: { host: route.host, authorization: 'DO-NOT-LOG' } }).res.status, 400);
+  }
 });
 
 test('each runner guard is mandatory; proxy refuses before TLS initialization', async () => {

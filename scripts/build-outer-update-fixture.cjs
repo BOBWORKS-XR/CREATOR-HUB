@@ -16,17 +16,17 @@ const FROM = '0.1.14', TO = '0.1.15', META = 128 * 1024, MAX = 512 * 1024 * 1024
 const VERSION_SOURCE_LIMIT = 1024 * 1024;
 const VERSIONS = ['package.json', 'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock'];
 const BASELINE = Object.freeze({
-  directory: 'artifacts/unified/unified-014-reviewed-20261014-02',
-  commit: '42a35d17c8f0c2f5e61ecaa6ce21aafb2725312f', tree: '44284a8498f2068dcb6d5c013d1118a5d5275b60',
+  directory: 'artifacts/unified/unified-014-repeat-20261014-03',
+  commit: 'a914bb96abaca8837f586c25c341d24fe58fe73d', tree: '041a2dc95abbd99dc4619df8c033132275789fd7',
   hashes: {
-    'builtin-manifest.json': 'a3ba844887a57490482cab8a70c92715f2885d86508f702ee90b73f3de7840c6',
-    'creator-hub.exe': 'af7318e061692b8d13d88e454f9986fe1809b1a1fa878f94974267102daeca9d',
-    'installer.exe': 'b3a42b8d67ef94edefa9cefa9e3791a196febb9d88a2163d38dcfed49c09c13d',
-    'installer-extracted/creator-hub.exe': '9c52bdee2a53dee1caaa535b0fb40d23e1bdce9ea72fae5e817f9f82dd221ecc',
-    'installer-checksum.json': 'b744d0ec64501f7749d52ae7bfa7798ba9df9cba1a958ca3616bfd2262c218af',
-    'mcp-runtime.json': 'a662c80957ff14b077332b15d58f69a9f94d079b44a5869eeb96783b22928e7c',
-    'modules/routing/router.json.sig': 'f80375cf6749f3cfebc70c74063be3d9a83d97aa0702f1a658099ea97884a918',
-    'modules/routing/runtime.json.sig': '986fa6e2d106308b43c698e1137fc676d3be298139bd00bcaca9bed8da7ee9c8',
+    'builtin-manifest.json': '2dff1bf72723703afb8e0fd66e17b4af3b6510675c042bc9a4fb08f75f6c9464',
+    'creator-hub.exe': 'a7ca6d37711eeb937d8c018e7971ccf10708c64f5c69436b40ace4ad3c920dff',
+    'installer.exe': 'edc47ecca5e80ce950d5b8ecf6bb32c46fa531e163b9d6ab7722b143a02a4e7a',
+    'installer-extracted/creator-hub.exe': 'dd74917a67e360a479158d81149a385ad813da9213661959928543a8f366dfca',
+    'installer-checksum.json': '6711ec4b70df554bb79f3f47de5f2290dfde5605b8aa7a33e16f01602a87ca94',
+    'mcp-runtime.json': '68e32d4c1afe42e66756dbbecd9306c41442584780bf3e1f41355d8b6f1b0d19',
+    'modules/routing/router.json.sig': 'fe26177fba3a4168972e6da65238b178a19935a2c6617a70d2fe033969d58b84',
+    'modules/routing/runtime.json.sig': '846ca909afbdc85f30785c1ec5f1ccb8688504edfddcc2b2bf23dda1ec321e83',
   },
 });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');

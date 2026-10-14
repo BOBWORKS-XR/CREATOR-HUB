@@ -1,0 +1,140 @@
+name: Accepted B03 14 to outer-only 15 outgoing lab (not release)
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/unified-outgoing-014]
+    paths: ['.github/workflows/native-unified-outgoing-lab.yml']
+permissions:
+  contents: read
+jobs:
+  stage-input:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Read the exact private input without extracting or executing code
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:GITHUB_REPOSITORY -cne 'BOBWORKS-XR/CREATOR-HUB') { throw 'Disposable repository Windows runner required.' }
+          New-Item -ItemType Directory -Path outgoing-input | Out-Null
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2026-03-10' }
+          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/411494394' -Headers $headers
+          if ($release.id -ne 411494394 -or $release.draft -ne $true -or $release.tag_name -cne 'v0.1.13-validation') { throw 'Unexpected private validation release.' }
+          $assets = @($release.assets | Where-Object name -CEQ 'outgoing-lab-reviewed-a914bb9-20261014.zip')
+          if ($assets.Count -ne 1 -or $assets[0].id -ne 641402829 -or $assets[0].state -cne 'uploaded' -or $assets[0].size -ne 76991135 -or $assets[0].digest -cne 'sha256:aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a') { throw 'Exact outgoing input is unavailable.' }
+          $headers.Accept = 'application/octet-stream'
+          Invoke-WebRequest -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/641402829' -Headers $headers -OutFile outgoing-input/fixture.zip -MaximumRedirection 5 -TimeoutSec 300
+          if ((Get-Item -LiteralPath outgoing-input/fixture.zip).Length -ne 76991135 -or (Get-FileHash -LiteralPath outgoing-input/fixture.zip -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a') { throw 'Outgoing archive differs.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: outgoing-lab-signed-input
+          path: outgoing-input/fixture.zip
+          retention-days: 7
+          if-no-files-found: error
+  outgoing-lab:
+    needs: stage-input
+    permissions:
+      contents: read
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - run: npx playwright install chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: outgoing-lab-signed-input
+          path: artifacts/outgoing-lab-input
+      - name: Bind and extract exactly seven regular bounded files
+        shell: pwsh
+        run: |
+          function Assert-OutgoingEntries($Entries) {
+            $expected = @('baseline.exe', 'builtin-manifest.json', 'fixture-receipt.json',
+              'Creator_Hub_0.1.15_x64-acceptance-only-setup.exe', 'creator-hub-windows-x86_64.json',
+              'creator-hub-windows-x86_64.json.minisig', 'latest.json')
+            if ($Entries.Count -ne 7) { throw 'Exactly seven outgoing input files required.' }
+            foreach ($entry in $Entries) {
+              if ($entry.FullName -cnotin $expected -or @($Entries | Where-Object FullName -CEQ $entry.FullName).Count -ne 1) { throw 'Unknown, aliased or duplicate archive entry refused.' }
+              $mode = ($entry.ExternalAttributes -shr 16) -band 0xF000
+              if ($mode -notin @(0, 0x8000) -or ($entry.ExternalAttributes -band 0x410)) { throw 'Linked or nonregular archive entry refused.' }
+              $limit = if ($entry.FullName -cin @('baseline.exe', 'Creator_Hub_0.1.15_x64-acceptance-only-setup.exe')) { 512MB }
+                elseif ($entry.FullName -ceq 'creator-hub-windows-x86_64.json.minisig') { 4096 }
+                else { 32768 }
+              if ($entry.Length -lt 1 -or $entry.Length -gt $limit) { throw 'Archive entry exceeds its fixed bound.' }
+            }
+          }
+          $zip = 'artifacts/outgoing-lab-input/fixture.zip'
+          if ((Get-Item -LiteralPath $zip).Length -ne 76991135 -or (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a') { throw 'Outgoing archive differs.' }
+          $root = 'artifacts/outgoing-lab-input/staged'
+          $archive = [IO.Compression.ZipFile]::OpenRead((Join-Path (Get-Location) $zip))
+          try {
+            Assert-OutgoingEntries @($archive.Entries)
+            New-Item -ItemType Directory -Path $root | Out-Null
+            foreach ($entry in $archive.Entries) { [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path (Join-Path (Get-Location) $root) $entry.FullName)) }
+          } finally { $archive.Dispose() }
+          if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a') { throw 'Outgoing archive changed during extraction.' }
+      - name: Test public and outgoing guards without starting the native lab
+        run: node --test scripts/self-update-lab-feed.test.cjs scripts/native-self-update-lab.test.cjs scripts/self-update-baselines.test.cjs scripts/native-unified-outgoing-target.test.cjs scripts/native-unified-outgoing-lab.test.cjs scripts/native-unified-outgoing-smoke.test.cjs
+      - name: Validate fixed source contract and write only local lab configuration
+        shell: pwsh
+        run: |
+          $prepare = @'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const target = require('./scripts/native-unified-outgoing-target.cjs');
+          const root = path.resolve('artifacts/outgoing-lab-input/staged');
+          const receipt = JSON.parse(target.readBounded(path.join(root, 'fixture-receipt.json'), target.LIMITS.metadata));
+          assert.equal(receipt.kind, 'outgoing-unified-14-outer-only-15-acceptance-fixture');
+          assert.equal(receipt.baseline.version, target.BASELINE.version);
+          assert.equal(receipt.baseline.sourceCommit, target.BASELINE.sourceCommit);
+          assert.equal(receipt.targetVersion, target.TARGET.version);
+          assert.equal(receipt.acceptanceOnly, true);
+          for (const field of ['privateKeyIncluded', 'releaseReady', 'outgoingNativeUpdateTested', 'viewsRestored']) assert.equal(receipt[field], false);
+          assert.deepEqual(receipt.pins, target.TARGET.pins);
+          const baseline = target.readBounded(path.join(root, 'baseline.exe'), target.LIMITS.installer);
+          assert.equal(target.hash(baseline), target.BASELINE.installer);
+          const config = { schemaVersion: 1, kind: target.KIND, baselineVersion: target.BASELINE.version,
+            targetVersion: target.TARGET.version, directory: root, builtinManifestPath: path.join(root, 'builtin-manifest.json'),
+            pins: { ...target.TARGET.pins } };
+          const contract = target.loadContract(config);
+          fs.writeFileSync('artifacts/outgoing-lab-input/lab-config.json', JSON.stringify(config), { flag: 'wx' });
+          fs.writeFileSync('artifacts/outgoing-lab-input/input-binding.json', JSON.stringify({
+            kind: 'unified-outgoing-14-15-input-binding', harnessSourceRevision: process.env.GITHUB_SHA,
+            baselineSourceRevision: target.BASELINE.sourceCommit, baseline: contract.baseline, targetVersion: contract.targetVersion,
+            archiveSha256: 'aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a',
+            routeCount: contract.routes.length, actualScope: contract.actualScope, signaturesVerifiedHere: false,
+            nativeAcceptanceTested: false, publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false,
+            releaseReady: false }), { flag: 'wx' });
+          '@
+          node -e $prepare
+          if ($LASTEXITCODE -ne 0) { throw 'Outgoing source contract refused before trust setup.' }
+      - name: Exercise only the fixed B03 to outer-only 15 outgoing scenario
+        shell: pwsh
+        run: |
+          $contract = Join-Path (Get-Location) 'artifacts/outgoing-lab-input/lab-config.json'
+          $baseline = Join-Path (Get-Location) 'artifacts/outgoing-lab-input/staged/baseline.exe'
+          & ./scripts/native-self-update-lab.ps1 -Scenario 'unified-outgoing-14-15' -ContractPath $contract -BaselineInstallerPath $baseline -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/outgoing-lab-lifecycle.jsonl
+          $result = $LASTEXITCODE
+          if ($null -eq $result -or $result -ne 0) { throw 'Outgoing lab or owned cleanup failed; retain original reports.' }
+      - name: Retain scoped reports and owned UI screenshots without input binaries or WebView profiles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unified-outgoing-B03-14-15-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            artifacts/outgoing-lab-input/input-binding.json
+            artifacts/outgoing-lab-lifecycle.jsonl
+            artifacts/native-suite-*/report.json
+            artifacts/native-suite-*/*.png
+          if-no-files-found: warn
+          retention-days: 7

@@ -14,6 +14,9 @@ const runner = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RU
 const publicContract = { targetVersion: '0.1.13', pins: { installer: '1'.repeat(64), executable: '2'.repeat(64) } };
 const probe = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8', timeout: 10000, windowsHide: true });
 const hasPwsh = !probe.error && probe.status === 0;
+const outgoingWorkflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/native-unified-outgoing-lab.yml'), 'utf8');
+const workflowBlocks = [...outgoingWorkflow.matchAll(/^        run: \|\r?\n((?:          [^\r\n]*(?:\r?\n|$))+)/gm)]
+  .map(match => match[1].replace(/^          /gm, ''));
 
 function powershell(command, env = process.env) {
   // Always poison an actual subprocess guard, including on CI. Mock runner objects stay in vm only.
@@ -24,7 +27,7 @@ function powershell(command, env = process.env) {
 
 function isolatedFunctions(names, body) {
   // Parse/extract only whitelisted pure or mocked functions; never execute the script body.
-  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Resolve-LabNode', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure', 'Get-LabProcessRecord', 'Get-LabImagePath', 'Set-LabPhase'].includes(name)));
+  assert.ok(names.every(name => ['New-LabStartInfo', 'Resolve-LabBaseline', 'Resolve-UnifiedOutgoingLabBaseline', 'Resolve-LabNode', 'Assert-LabRootAbsent', 'Remove-LabRoot', 'Get-LabFailure', 'Get-LabProcessRecord', 'Get-LabImagePath', 'Set-LabPhase'].includes(name)));
   const result = powershell(`$ErrorActionPreference='Stop'; $PSScriptRoot='${__dirname.replaceAll("'", "''")}'; $tokens=$null; $errors=$null;
     $ast=[System.Management.Automation.Language.Parser]::ParseFile('${helper.replaceAll("'", "''")}',[ref]$tokens,[ref]$errors);
     foreach ($name in @(${names.map(name => `'${name}'`).join(',')})) {
@@ -33,6 +36,22 @@ function isolatedFunctions(names, body) {
       $definition=$node.Extent.Text.Replace('$PSScriptRoot', "'${__dirname.replaceAll("'", "''")}'");
       . ([scriptblock]::Create($definition))
     }
+    ${body}`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  return result.stdout.trim();
+}
+
+function isolatedOutgoingEntries(body) {
+  const block = workflowBlocks.find(value => value.includes('function Assert-OutgoingEntries'));
+  assert.ok(block);
+  const encoded = Buffer.from(block).toString('base64');
+  const result = powershell(`$ErrorActionPreference='Stop'; $tokens=$null; $errors=$null;
+    $code=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'));
+    $ast=[System.Management.Automation.Language.Parser]::ParseInput($code,[ref]$tokens,[ref]$errors);
+    if ($errors.Count) { throw 'Invalid workflow syntax' }
+    $nodes=@($ast.FindAll({param($item) $item -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -ceq 'Assert-OutgoingEntries'},$true));
+    if ($nodes.Count -ne 1) { throw 'Missing exact pure archive validator' }
+    . ([scriptblock]::Create($nodes[0].Extent.Text));
     ${body}`);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   return result.stdout.trim();
@@ -164,6 +183,131 @@ test('mock baseline checker accepts only the original reviewed hash and refuses 
     }
     'original-baseline-required'`);
   assert.equal(output, 'original-baseline-required');
+});
+
+test('scenario allowlist preserves public-stable default and uses only the fixed outgoing feed/driver names', () => {
+  assert.match(source, /ValidateSet\('public-stable','unified-outgoing-14-15'\)\]\[string\]\$Scenario = 'public-stable'/);
+  assert.match(source, /\$feedPath = Resolve-LabFile \(Join-Path \$PSScriptRoot 'native-unified-outgoing-target\.cjs'\)/);
+  assert.match(source, /\$driverPath = Resolve-LabFile \(Join-Path \$PSScriptRoot 'native-unified-outgoing-smoke\.cjs'\)/);
+  assert.match(source, /Resolve-UnifiedOutgoingLabBaseline \$BaselineInstallerPath/);
+  assert.match(source, /Test-Path Env:CREATOR_HOSTED_UPDATE_FIXTURE/);
+  const check = source.indexOf('$BaselineInstallerPath = Resolve-UnifiedOutgoingLabBaseline $BaselineInstallerPath');
+  assert.ok(check < source.indexOf('$caKey = [Security.Cryptography.RSACng]::new(2048)'));
+  assert.ok(check < source.indexOf('$rootStore.Add($publicRoot)'));
+  assert.doesNotMatch(source.slice(0, source.indexOf('$ErrorActionPreference')), /\$(?:DriverPath|FeedPath|ChildExecutable|ChildArgument)/);
+  assert.match(source, /actualScope=\$actualScope; liveAiAcceptance=\$false; productAcceptance=\$false/);
+  assert.match(source, /accepted-unmodified-B03-0\.1\.14-to-outer-only-0\.1\.15-fixture-lab-only/);
+});
+
+test('both literal scenarios still refuse local execution before files, processes or trust', { skip: !hasPwsh }, () => {
+  for (const scenario of ['public-stable', 'unified-outgoing-14-15']) {
+    const result = powershell(`function global:Get-Item { throw 'LOCAL_INSPECTION_SENTINEL' };
+      & '${helper.replaceAll("'", "''")}' -Scenario '${scenario}' -ContractPath 'Z:\\ABSENT-CONTRACT.json' -BaselineInstallerPath 'Z:\\ABSENT-INSTALLER.exe'`);
+    assert.equal(result.status, 1); assert.equal(result.stdout, '');
+    assert.match(result.stderr, /disposable GitHub-hosted Windows runner required/);
+    assert.doesNotMatch(result.stderr, /LOCAL_INSPECTION_SENTINEL|ABSENT-CONTRACT|ABSENT-INSTALLER/);
+  }
+});
+
+test('dedicated outgoing workflow freezes one private ZIP and separates write-token staging from read-only execution', () => {
+  assert.match(outgoingWorkflow, /workflow_dispatch:/);
+  assert.doesNotMatch(outgoingWorkflow, /inputs:|push:|workflow_call:|schedule:/);
+  const staging = outgoingWorkflow.slice(outgoingWorkflow.indexOf('  stage-input:'), outgoingWorkflow.indexOf('  outgoing-lab:'));
+  const execution = outgoingWorkflow.slice(outgoingWorkflow.indexOf('  outgoing-lab:'));
+  assert.match(staging, /permissions:\r?\n      contents: write/);
+  assert.match(staging, /releases\/411494394/);
+  assert.match(staging, /id -ne 641402829/);
+  assert.match(staging, /outgoing-lab-reviewed-a914bb9-20261014\.zip/);
+  assert.match(staging, /size -ne 76991135/);
+  assert.match(staging, /digest -cne 'sha256:aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a'/);
+  assert.match(staging, /releases\/assets\/641402829/);
+  assert.match(staging, /Get-FileHash.*aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a/);
+  assert.doesNotMatch(staging, /checkout|setup-node|node |npm |cargo |Expand-Archive|ExtractToFile|Process\]::Start|Get-Content|\.ps1|release.*(?:edit|upload)|secrets\./);
+  assert.match(execution, /permissions:\r?\n      contents: read/);
+  assert.match(execution, /persist-credentials: false/);
+  assert.doesNotMatch(execution, /GH_TOKEN|GITHUB_TOKEN|github\.token|secrets\./);
+  assert.match(execution, /directory: root, builtinManifestPath: path\.join\(root, 'builtin-manifest\.json'\)/);
+  assert.match(execution, /const contract = target\.loadContract\(config\)/);
+  assert.ok(execution.indexOf('target.loadContract(config)') < execution.indexOf('& ./scripts/native-self-update-lab.ps1'));
+  assert.match(execution, /-Scenario 'unified-outgoing-14-15'/);
+  assert.match(execution, /-TimeoutSeconds 480/);
+  assert.match(execution, /\$result = \$LASTEXITCODE/);
+  assert.match(execution, /\$null -eq \$result -or \$result -ne 0/);
+  assert.doesNotMatch(execution, /continue-on-error|CREATOR_HOSTED_UPDATE_FIXTURE|SkipCertificateCheck|TLS_REJECT|ServerCertificateValidationCallback/);
+  const capture = execution.slice(execution.indexOf('      - name: Retain scoped reports'));
+  assert.match(capture, /if: always\(\)/);
+  assert.match(capture, /native-suite-\*\/report\.json/);
+  assert.match(capture, /native-suite-\*\/\*\.png/);
+  assert.doesNotMatch(capture.slice(capture.indexOf('          path: |')), /fixture\.zip|baseline\.exe|lab-config\.json|\.pfx|webview|native-suite-\*\/\s*$/im);
+  assert.match(execution, /publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false/);
+  assert.match(execution, /signaturesVerifiedHere: false/);
+});
+
+test('all dedicated workflow PowerShell blocks parse without downloading, extracting or touching trust', { skip: !hasPwsh }, () => {
+  assert.equal(workflowBlocks.length, 4);
+  for (const block of workflowBlocks) {
+    const encoded = Buffer.from(block).toString('base64');
+    const result = powershell(`$tokens=$null; $errors=$null;
+      $code=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'));
+      [void][System.Management.Automation.Language.Parser]::ParseInput($code,[ref]$tokens,[ref]$errors);
+      if ($errors.Count) { $errors | ForEach-Object { $_.Message }; exit 1 }`);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  }
+});
+
+test('pure seven-entry archive guard refuses extras, aliases, duplicate, link, directory, empty and oversized files', { skip: !hasPwsh }, () => {
+  const result = isolatedOutgoingEntries(`
+    function Entries {
+      @('baseline.exe','builtin-manifest.json','fixture-receipt.json','Creator_Hub_0.1.15_x64-acceptance-only-setup.exe',
+        'creator-hub-windows-x86_64.json','creator-hub-windows-x86_64.json.minisig','latest.json') | ForEach-Object {
+        [pscustomobject]@{FullName=$_;ExternalAttributes=0;Length=10}
+      }
+    }
+    $entries=@(Entries); Assert-OutgoingEntries $entries;
+    $entries[0].ExternalAttributes=0x8000 -shl 16; Assert-OutgoingEntries $entries;
+    foreach ($change in @('missing','extra','traversal','case','duplicate','symlink','reparse','directory','empty','metadata-bound','signature-bound','installer-bound')) {
+      $entries=@(Entries);
+      switch ($change) {
+        'missing' { $entries=$entries[0..5] }
+        'extra' { $entries+= [pscustomobject]@{FullName='extra.exe';ExternalAttributes=0;Length=10} }
+        'traversal' { $entries[0].FullName='../baseline.exe' }
+        'case' { $entries[0].FullName='Baseline.exe' }
+        'duplicate' { $entries[1].FullName='baseline.exe' }
+        'symlink' { $entries[0].ExternalAttributes=0xA000 -shl 16 }
+        'reparse' { $entries[0].ExternalAttributes=0x400 }
+        'directory' { $entries[0].ExternalAttributes=0x10 }
+        'empty' { $entries[0].Length=0 }
+        'metadata-bound' { $entries[1].Length=32769 }
+        'signature-bound' { $entries[5].Length=4097 }
+        'installer-bound' { $entries[0].Length=536870913 }
+      }
+      $refused=$false; try { Assert-OutgoingEntries $entries } catch { $refused=$true };
+      if (-not $refused) { throw ('Invalid archive shape accepted: '+$change) }
+    }
+    'exact-bounded-regular-seven-only'`);
+  assert.equal(result, 'exact-bounded-regular-seven-only');
+});
+
+test('mock outgoing baseline accepts B03 only, never public12/B02/masquerade or malformed files', { skip: !hasPwsh }, () => {
+  const pin = require('./self-update-lab-feed.cjs').UNIFIED_OUTGOING_BASELINE.installer;
+  assert.ok(source.includes(`$pin = '${pin}'`));
+  const output = isolatedFunctions(['Resolve-UnifiedOutgoingLabBaseline'], `
+    $script:pin='${pin}'; $script:bytes=1234; $script:hashCalls=0;
+    function Resolve-LabFile($Path) { if ($Path -cne 'C:\\reviewed\\B03-installer.exe') { throw 'Invalid input' }; return $Path }
+    function Get-Item { param($LiteralPath); return @{Length=$script:bytes} }
+    function Get-FileHash { param($LiteralPath,$Algorithm); if ($Algorithm -cne 'SHA256') { throw 'Wrong algorithm' }; $script:hashCalls++; return @{Hash=$script:pin.ToUpperInvariant()} }
+    $path='C:\\reviewed\\B03-installer.exe';
+    if ((Resolve-UnifiedOutgoingLabBaseline $path) -cne $path -or $script:hashCalls -ne 1) { throw 'B03 not checked' }
+    foreach ($badPin in @('0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18','b3a42b8d67ef94edefa9cefa9e3791a196febb9d88a2163d38dcfed49c09c13d','a' * 64)) {
+      $script:pin=$badPin; $refused=$false; try { [void](Resolve-UnifiedOutgoingLabBaseline $path) } catch { $refused=$true };
+      if (-not $refused) { throw 'Foreign baseline accepted' }
+    }
+    foreach ($length in @(0,536870913)) {
+      $script:bytes=$length; $before=$script:hashCalls; $refused=$false; try { [void](Resolve-UnifiedOutgoingLabBaseline $path) } catch { $refused=$true };
+      if (-not $refused -or $script:hashCalls -ne $before) { throw 'Invalid size not refused first' }
+    }
+    'exact-B03-only'`);
+  assert.equal(output, 'exact-B03-only');
 });
 
 test('isolated child environment strips credentials/bypass, scopes loopback and preserves parent values', { skip: !hasPwsh }, () => {

@@ -3,7 +3,8 @@
 // descriptorSignature,installer,manifest,executable}}. Paths are absolute;
 // pins must come from external review of already-signed, immutable inputs.
 // The VM caller owns temporary Windows trust/proxy setup and its recovery.
-// A native harness must call assertBaselineBytes before using public 0.1.12.
+// Native callers separately bind public12 or accepted B03 with the matching
+// baseline assertion. Neither contract factory accepts a baseline override.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -18,6 +19,12 @@ const FEED_PATH = '/repos/BOBWORKS-XR/CREATOR-HUB/releases?per_page=10';
 const LIMITS = Object.freeze({ feed: 256 * 1024, metadata: 32 * 1024, signature: 4096,
   installer: 512 * 1024 * 1024, headers: 8192, connections: 16, requests: 128,
   idleMs: 30000, durationMs: 600000, servedBytes: 1025 * 1024 * 1024 });
+const UNIFIED_OUTGOING_BASELINE = Object.freeze({ version: '0.1.14',
+  installer: 'edc47ecca5e80ce950d5b8ecf6bb32c46fa531e163b9d6ab7722b143a02a4e7a',
+  exe: 'dd74917a67e360a479158d81149a385ad813da9213661959928543a8f366dfca' });
+const UNIFIED_OUTGOING_SCOPE = Object.freeze({ kind: 'unified-outgoing-14-15',
+  baseline: 'accepted-unmodified-unified-0.1.14-B03', target: 'outer-only-0.1.15-acceptance-fixture',
+  labDiscovery: true, publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false, releaseReady: false });
 const contracts = new WeakMap();
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -74,8 +81,7 @@ function tauriSignature(value) {
   plainMinisig(minisigText(decoded));
 }
 
-function createContract({ targetVersion, descriptor, descriptorSignature, installer, manifest, pins }) {
-  const baseline = baselineFor(targetVersion);
+function validatedContract({ targetVersion, descriptor, descriptorSignature, installer, manifest, pins }, baseline, policy = {}) {
   keys(pins, ['descriptor', 'descriptorSignature', 'installer', 'manifest', 'executable'], 'SHA-256 pins');
   for (const pin of Object.values(pins)) assert.match(pin, /^[a-f0-9]{64}$/, 'Invalid SHA-256 pin');
   const supplied = { descriptor: bounded(descriptor, LIMITS.metadata, 'Descriptor'),
@@ -95,6 +101,9 @@ function createContract({ targetVersion, descriptor, descriptorSignature, instal
   }
   version(release.minHubVersion);
   assert.ok(semver.lte(release.minHubVersion, baseline.version), 'Target requires an intermediate Hub');
+  for (const [field, expected] of Object.entries(policy.descriptor || {})) {
+    assert.equal(release[field], expected, `Outgoing descriptor ${field} mismatch`);
+  }
   assert.ok(typeof release.assetName === 'string' && release.assetName.length <= 160 &&
     /^[A-Za-z0-9._-]+\.exe$/.test(release.assetName) && !release.assetName.includes('..'), 'Invalid exact installer asset name');
   plainMinisig(minisigText(descriptorSignature));
@@ -117,9 +126,21 @@ function createContract({ targetVersion, descriptor, descriptorSignature, instal
       type: index === 2 ? 'application/octet-stream' : index === 1 ? 'text/plain; charset=utf-8' : 'application/json' })),
   ].map(route => ({ ...route, bytes: Buffer.from(route.bytes), sha256: hash(route.bytes) }));
   const contract = Object.freeze({ targetVersion, baseline, pins: Object.freeze({ ...pins }),
+    ...(policy.actualScope ? { actualScope: policy.actualScope } : {}),
     routes: Object.freeze(routes.map(({ host, path: routePath, sha256 }) => Object.freeze({ host, path: routePath, sha256 }))) });
   contracts.set(contract, routes);
   return contract;
+}
+
+function createContract(input) {
+  return validatedContract(input, baselineFor(input.targetVersion));
+}
+
+function createUnifiedOutgoingContract(input) {
+  keys(input, ['targetVersion', 'descriptor', 'descriptorSignature', 'installer', 'manifest', 'pins'], 'outgoing input');
+  assert.equal(input.targetVersion, '0.1.15', 'Only the reviewed outer-only 0.1.15 fixture is admitted');
+  return validatedContract(input, UNIFIED_OUTGOING_BASELINE, { actualScope: UNIFIED_OUTGOING_SCOPE,
+    descriptor: { assetName: 'Creator_Hub_0.1.15_x64-acceptance-only-setup.exe', minHubVersion: '0.1.14' } });
 }
 
 function readBounded(file, max) {
@@ -164,6 +185,14 @@ function assertBaselineBytes(targetVersion, installer, executable) {
   assert.equal(hash(bounded(installer, LIMITS.installer, 'Baseline installer')), baseline.installer, 'Unmodified public baseline installer required');
   assert.equal(hash(bounded(executable, LIMITS.installer, 'Baseline executable')), baseline.exe, 'Unmodified public baseline executable required');
   return baseline;
+}
+
+function assertUnifiedOutgoingBaselineBytes(installer, executable) {
+  assert.equal(hash(bounded(installer, LIMITS.installer, 'Baseline installer')), UNIFIED_OUTGOING_BASELINE.installer,
+    'Exact accepted B03 0.1.14 baseline installer required');
+  assert.equal(hash(bounded(executable, LIMITS.installer, 'Baseline executable')), UNIFIED_OUTGOING_BASELINE.exe,
+    'Exact installed B03 0.1.14 baseline executable required; no version masquerade');
+  return UNIFIED_OUTGOING_BASELINE;
 }
 
 function connectHost(authority) {
@@ -217,6 +246,8 @@ function requestHandler(contract, state) {
 function labReport(contract, state) {
   return { kind: 'prepublication-lab-feed-contract-only', labDiscovery: true, publicDiscovery: false,
     releaseReady: false, nativeAcceptanceTested: false, signaturesVerifiedByHarness: false, baselineActuallyTested: false,
+    actualScope: contract.actualScope || { kind: 'public-stable', baseline: 'unmodified-public-0.1.12',
+      labDiscovery: true, publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false, releaseReady: false },
     baseline: contract.baseline, targetVersion: contract.targetVersion,
     requests: [...state.served.values()], rejectedRequestCount: state.rejected };
 }
@@ -314,8 +345,9 @@ async function main() {
   fs.writeFileSync(path.resolve(process.argv[3]), `${JSON.stringify(proxy.report(), null, 2)}\n`, { flag: 'wx' });
 }
 
-module.exports = { DESCRIPTOR, FEED_PATH, LIMITS, assertRunner, baselineFor, createContract, loadContract,
-  readBounded, assertBaselineBytes, connectHost, newState, requestHandler, labReport, startLabProxy };
+module.exports = { DESCRIPTOR, FEED_PATH, LIMITS, UNIFIED_OUTGOING_BASELINE, assertRunner, baselineFor, createContract,
+  createUnifiedOutgoingContract, loadContract, readBounded, assertBaselineBytes, assertUnifiedOutgoingBaselineBytes,
+  connectHost, newState, requestHandler, labReport, startLabProxy };
 if (require.main === module) main().catch(() => {
   // Do not serialize TLS control input, parser errors, headers or candidate contents.
   console.error('Lab feed refused or failed; no native/public acceptance established.'); process.exitCode = 1;

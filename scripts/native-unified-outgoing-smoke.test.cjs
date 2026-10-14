@@ -1,0 +1,114 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { BASELINE, TARGET } = require('./native-unified-outgoing-target.cjs');
+const checks = require('./native-unified-outgoing-checks.cjs');
+const clone = value => structuredClone(value);
+const processRecord = (pid, parentPid, image) => ({ pid, parentPid, image: `C:\\owned\\${image}`, startTicks: String(638123456789000000n + BigInt(pid)), kernelIdentityVerified: true });
+function before() {
+  const saved = { present: true, size: 20, sha256: 'a'.repeat(64) };
+  return { root: processRecord(100, 90, 'creator-hub.exe'), backends: {
+    setup: processRecord(101, 100, 'creator-project-setup.exe'), mcp: processRecord(102, 100, 'creator-works-mcp-launcher.exe') },
+    sdkRouter: processRecord(120, 90, 'creator-hub-mcp-router.exe'), sdkNode: processRecord(121, 120, 'node.exe'),
+    unrelated: processRecord(130, 90, 'node.exe'), executableSha256: BASELINE.exe,
+    stores: { mcp: { ...saved }, preferences: { ...saved }, setup: { present: false }, installedContent: { ...saved } },
+    preferences: { 'preview-channel': false, 'auto-download': true, 'restore-hosted-views': true },
+    activeRoute: { schemaVersion: 1, hubVersion: BASELINE.version, descriptorSha256: BASELINE.runtimeDescriptor, generation: 'f'.repeat(64) },
+    forms: { setup: 'Setup draft', mcp: 'MCP draft' }, ticketExists: false, rootExit: { code: null, signal: null } };
+}
+function ticket(value) {
+  return { schemaVersion: 1, fromVersion: '0.1.14', toVersion: '0.1.15', created: 1792000000,
+    views: ['setup', 'mcp'].map(app => ({ app, path: value.backends[app].image, bundled: true })) };
+}
+function updated() {
+  const initial = before(), after = clone(initial);
+  after.root = processRecord(200, 190, 'creator-hub.exe');
+  after.backends = { setup: processRecord(201, 200, 'creator-project-setup.exe'), mcp: processRecord(202, 200, 'creator-works-mcp-launcher.exe') };
+  after.executableSha256 = TARGET.pins.executable; after.forms = null;
+  after.activeRoute = { ...after.activeRoute, hubVersion: TARGET.version, descriptorSha256: TARGET.runtimeDescriptor };
+  return { initial, after, evidence: { originalExit: { code: 0, signal: null }, manualTargetLaunches: 0,
+    footerVersion: '0.1.15', registryVersion: '0.1.15', originalBackendsAbsent: true, observedTicket: ticket(initial), pendingRestore: [],
+    restoreMessage: 'Your app views have reopened. Select an app from the menu.', restoredFrames: ['setup', 'mcp'],
+    existingSdkRoundTrip: true, newRouterRoundTrips: 2, actualNativePermissions: true } };
+}
+test('synthetic receipt contracts never establish native/product/public/AI acceptance', () => {
+  const report = checks.newReport();
+  for (const flag of ['passed', 'outgoingHostedUpdateTested', 'publicDiscovery', 'liveAiAcceptance', 'editorAcceptance', 'productAcceptance', 'releaseReady']) assert.equal(report[flag], false);
+});
+test('cancel retains both drafts, kernel process starts, exact config/preferences/content and absence', () => {
+  const initial = before(); checks.cancelPreserved(initial, clone(initial));
+  for (const mutate of [value => value.backends.mcp.startTicks = '638000000000000000', value => value.backends.setup.parentPid = 99,
+    value => value.root.pid = 99, value => value.sdkRouter.image = 'C:\\foreign\\creator-hub-mcp-router.exe',
+    value => value.sdkNode.pid++, value => value.unrelated.startTicks = '638000000000000000',
+    value => value.forms.setup = '', value => value.forms.mcp = 'lost', value => value.stores.mcp.sha256 = 'b'.repeat(64),
+    value => value.stores.preferences.size++, value => value.stores.setup = { present: true, size: 20, sha256: 'a'.repeat(64) },
+    value => value.preferences['restore-hosted-views'] = false, value => value.ticketExists = true,
+    value => value.rootExit = { code: 0, signal: null }, value => value.executableSha256 = TARGET.pins.executable]) {
+    const after = clone(initial); mutate(after); assert.throws(() => checks.cancelPreserved(initial, after));
+  }
+});
+test('genuine distinct automatic15 restart with both restored views and retained SDK14/router/Node', () => {
+  const value = updated(); checks.approvedUpdate(value.initial, value.after, value.evidence);
+  for (const [field, replacement] of [['originalExit', { code: 1, signal: null }], ['originalExit', { code: 0, signal: 'SIGTERM' }],
+    ['manualTargetLaunches', 1], ['footerVersion', '0.1.14'], ['registryVersion', '0.1.14'], ['originalBackendsAbsent', false],
+    ['observedTicket', null], ['pendingRestore', ['mcp']], ['restoreMessage', 'Reopening...'], ['restoredFrames', ['mcp']],
+    ['existingSdkRoundTrip', false], ['newRouterRoundTrips', 1], ['actualNativePermissions', false]]) {
+    const sample = updated(); sample.evidence[field] = replacement;
+    assert.throws(() => checks.approvedUpdate(sample.initial, sample.after, sample.evidence));
+  }
+  for (const mutate of [value => value.root.pid = 100, value => value.root.image = 'C:\\other\\creator-hub.exe',
+    value => value.backends.mcp.pid = 102, value => value.backends.mcp.parentPid = 100,
+    value => value.backends.setup.kernelIdentityVerified = false, value => value.sdkNode.startTicks = '638000000000000000',
+    value => value.unrelated.pid = 131, value => value.stores.mcp.present = false, value => value.ticketExists = true,
+    value => value.executableSha256 = BASELINE.exe, value => value.root.startTicks = '638000000000000000',
+    value => value.activeRoute.descriptorSha256 = BASELINE.runtimeDescriptor, value => value.activeRoute.hubVersion = BASELINE.version]) {
+    const sample = updated(); mutate(sample.after);
+    assert.throws(() => checks.approvedUpdate(sample.initial, sample.after, sample.evidence));
+  }
+});
+test('activation must move from the exact14 descriptor to signed15; unchanged private generation is allowed', () => {
+  const initial = before(); checks.activeRoute(initial.activeRoute, BASELINE.version);
+  for (const mutate of [value => value.schemaVersion = 2, value => value.descriptorSha256 = TARGET.runtimeDescriptor,
+    value => value.generation = '../foreign', value => value.hubVersion = TARGET.version, value => value.extra = true]) {
+    const value = clone(initial.activeRoute); mutate(value); assert.throws(() => checks.activeRoute(value, BASELINE.version));
+  }
+  const after = clone(initial); after.activeRoute.generation = 'e'.repeat(64);
+  assert.throws(() => checks.cancelPreserved(initial, after));
+});
+test('observed native restore ticket cannot be empty, duplicate, foreign, legacy or wrong version', () => {
+  const initial = before(); checks.restoreTicket(ticket(initial), initial);
+  for (const mutate of [value => value.fromVersion = '0.1.12', value => value.toVersion = '0.1.14',
+    value => value.schemaVersion = 2, value => value.created = -1, value => value.views = [],
+    value => value.views[1] = clone(value.views[0]), value => value.views[0].path = 'C:\\foreign\\setup.exe',
+    value => value.views[0].bundled = false, value => value.views[0].extra = true, value => value.extra = true]) {
+    const value = ticket(initial); mutate(value); assert.throws(() => checks.restoreTicket(value, initial));
+  }
+});
+test('missing or aliased process/store identity never proves preservation', () => {
+  for (const mutate of [value => delete value.backends.setup, value => value.sdkRouter = value.backends.mcp,
+    value => value.sdkNode.parentPid = value.root.pid, value => value.unrelated = value.sdkNode,
+    value => value.stores = {}, value => value.stores.preferences = { present: false },
+    value => value.root.startTicks = '', value => value.root.image = 'relative',
+    value => value.backends.setup.image = 'C:\\owned\\renamed.exe']) {
+    const value = before(); mutate(value); assert.throws(() => checks.snapshotShape(value));
+  }
+});
+test('source fences: original native consent helper, readonly kernel recorder, no spoofed IPC/terms/tickets/manual15/process kills', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-unified-outgoing-smoke.cjs'), 'utf8');
+  assert.ok(source.indexOf('assertAdmission();') < source.indexOf('target.selectLab('));
+  assert.equal((source.match(/spawn\(hub,/g) || []).length, 1);
+  assert.match(source, /native-window\.ps1/); assert.match(source, /CommandButton_\(1000\|1001\)/);
+  assert.match(source, /checks\.sameProcess\(owner, record\(owner\.pid\)\)/);
+  assert.match(source, /actualNativePermissions:/); assert.match(source, /await sdkRoundTrip\(sdkClient\)/);
+  assert.match(source, /target\.readBounded\(ticket, 16 \* 1024\)/);
+  assert.doesNotMatch(source, /localStorage\.setItem|sessionStorage\.setItem|window\.CreatorHubNative\s*=|window\.CreatorRuntime\s*=|\.kill\(|taskkill|Stop-Process|writeFileSync\(ticket/);
+  const recorder = fs.readFileSync(path.join(__dirname, 'native-unified-outgoing-process.ps1'), 'utf8');
+  assert.ok(recorder.indexOf('GITHUB_ACTIONS') < recorder.indexOf('Add-Type'));
+  assert.match(recorder, /QueryFullProcessImageName/); assert.match(recorder, /SafeHandle/); assert.match(recorder, /StartTime/);
+  assert.match(recorder, /entries.Count -gt 128/);
+  assert.doesNotMatch(recorder, /CommandLine|Stop-Process|TerminateProcess|WriteProcessMemory|Start-Process/);
+  const wrapper = fs.readFileSync(path.join(__dirname, 'native-unified-outgoing-lab.ps1'), 'utf8');
+  assert.match(wrapper, /-Scenario 'unified-outgoing-14-15'/);
+  assert.doesNotMatch(wrapper, /RootStore|\.Add\(|Certificate|proxyBootstrap|Resolve-LabBaseline/);
+});

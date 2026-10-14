@@ -1,5 +1,6 @@
 # VM-only transport lifecycle, not an update acceptance receipt. Requires pwsh 7.
-param([string]$ContractPath = '', [string]$BaselineInstallerPath = '', [int]$TimeoutSeconds = 300, [switch]$CleanupWatch)
+param([string]$ContractPath = '', [string]$BaselineInstallerPath = '', [int]$TimeoutSeconds = 300, [switch]$CleanupWatch,
+    [ValidateSet('public-stable','unified-outgoing-14-15')][string]$Scenario = 'public-stable')
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows') {
     [Console]::Error.WriteLine('Lab lifecycle refused: disposable GitHub-hosted Windows runner required.')
     exit 1
@@ -27,6 +28,15 @@ function Resolve-LabBaseline([string]$Path) {
     if ($item.Length -lt 1 -or $item.Length -gt 512MB) { throw 'Baseline installer size refused.' }
     $pin = '0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18'
     if ((Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() -cne $pin) { throw 'Unmodified public 0.1.12 baseline installer required.' }
+    return $full
+}
+
+function Resolve-UnifiedOutgoingLabBaseline([string]$Path) {
+    $full = Resolve-LabFile $Path
+    $item = Get-Item -LiteralPath $full
+    if ($item.Length -lt 1 -or $item.Length -gt 512MB) { throw 'Baseline installer size refused.' }
+    $pin = 'edc47ecca5e80ce950d5b8ecf6bb32c46fa531e163b9d6ab7722b143a02a4e7a'
+    if ((Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() -cne $pin) { throw 'Exact accepted B03 0.1.14 baseline installer required; no B02 or version masquerade.' }
     return $full
 }
 
@@ -324,18 +334,33 @@ $trustOwned = $false; $failed = $false; $cleanupVerified = $true; $systemTlsVeri
 $driverExitCode = $null; $feedResult = $null; $rootThumbprint = $null; $leafThumbprint = $null
 $phase = 'timeout'; $failureDetails = $null
 $script:processIdentityFailure = $null
+$actualScope = if ($Scenario -ceq 'public-stable') { 'unmodified-public-0.1.12-lab-only' }
+    else { 'accepted-unmodified-B03-0.1.14-to-outer-only-0.1.15-fixture-lab-only' }
 try {
     Set-LabPhase 'timeout'
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 480) { throw 'Driver timeout must be 1..480 seconds.' }
-    # The exact five-route proxy cannot bootstrap public 0.1.12. Stage it publicly beforehand.
+    # The exact five-route proxy cannot bootstrap either baseline. Stage reviewed bytes beforehand.
     Set-LabPhase 'baseline'
-    $BaselineInstallerPath = Resolve-LabBaseline $BaselineInstallerPath
+    if ($Scenario -ceq 'public-stable') {
+        $BaselineInstallerPath = Resolve-LabBaseline $BaselineInstallerPath
+    } else {
+        if (Test-Path Env:CREATOR_HOSTED_UPDATE_FIXTURE) { throw 'Outgoing baseline version masquerade refused.' }
+        $BaselineInstallerPath = Resolve-UnifiedOutgoingLabBaseline $BaselineInstallerPath
+    }
     Set-LabPhase 'contract'
     $ContractPath = Resolve-LabFile $ContractPath
     Set-LabPhase 'feed-path'
-    $feedPath = Resolve-LabFile (Join-Path $PSScriptRoot 'self-update-lab-feed.cjs')
+    if ($Scenario -ceq 'public-stable') {
+        $feedPath = Resolve-LabFile (Join-Path $PSScriptRoot 'self-update-lab-feed.cjs')
+    } else {
+        $feedPath = Resolve-LabFile (Join-Path $PSScriptRoot 'native-unified-outgoing-target.cjs')
+    }
     Set-LabPhase 'driver-path'
-    $driverPath = Resolve-LabFile (Join-Path $PSScriptRoot 'native-self-update-smoke.cjs')
+    if ($Scenario -ceq 'public-stable') {
+        $driverPath = Resolve-LabFile (Join-Path $PSScriptRoot 'native-self-update-smoke.cjs')
+    } else {
+        $driverPath = Resolve-LabFile (Join-Path $PSScriptRoot 'native-unified-outgoing-smoke.cjs')
+    }
     Set-LabPhase 'node-path'
     $nodePath = Resolve-LabNode
     Set-LabPhase 'pwsh-path'
@@ -421,7 +446,8 @@ try {
     Test-LabSystemTls $ready.proxyUrl 'github.com' $leafThumbprint
     Test-LabSystemTls $ready.proxyUrl 'api.github.com' $leafThumbprint
     $systemTlsVerified = $true
-    [ordered]@{kind='lab-lifecycle-ready'; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; systemTlsVerified=$true; trustScope='disposable-vm-local-machine';
+    [ordered]@{kind='lab-lifecycle-ready'; scenario=$Scenario; actualScope=$actualScope; liveAiAcceptance=$false; productAcceptance=$false; releaseReady=$false;
+        labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; systemTlsVerified=$true; trustScope='disposable-vm-local-machine';
         proxyUrl=$ready.proxyUrl; rootThumbprint=$publicRoot.Thumbprint; leafThumbprint=$leafThumbprint; proxy=$proxyRecord; cleanupWatcher=$watcherRecord} | ConvertTo-Json -Depth 4 -Compress
 
     Set-LabPhase 'driver-start'
@@ -485,6 +511,7 @@ try {
     foreach ($resource in @($leaf, $unsignedLeaf, $ca, $leafKey, $caKey, $publicRoot, $rootStore, $driver, $proxy, $validator, $watcher)) { if ($resource) { $resource.Dispose() } }
 }
 [ordered]@{kind='lab-lifecycle-result'; lifecycleSucceeded=(-not $failed -and $cleanupVerified); cleanupVerified=$cleanupVerified;
+    scenario=$Scenario; actualScope=$actualScope; liveAiAcceptance=$false; productAcceptance=$false;
     systemTlsVerified=$systemTlsVerified; trustScope='disposable-vm-local-machine'; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; releaseReady=$false;
     driverExitCode=$driverExitCode; failureDetails=$failureDetails; processIdentityFailure=$script:processIdentityFailure; rootThumbprint=$rootThumbprint; leafThumbprint=$leafThumbprint; driver=$driverRecord; proxy=$proxyRecord; cleanupWatcher=$watcherRecord;
     servedRouteCount=$(if ($feedResult) { $feedResult.servedRouteCount } else { $null });
