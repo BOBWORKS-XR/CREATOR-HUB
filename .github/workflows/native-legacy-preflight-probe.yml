@@ -23,7 +23,7 @@ jobs:
           node-version: 24
       - name: Test refusal and receipt contracts without running an installer
         run: node --test scripts/native-legacy-preflight-probe.test.cjs scripts/native-installed-baseline.test.cjs
-      - name: Parse the native observer without executing it
+      - name: Parse the bounded native observer without executing it
         shell: pwsh
         run: |
           $tokens = $null; $errors = $null

@@ -120,6 +120,7 @@ public static class LegacyPreflightWitness {
         if ([LegacyPreflightWitness]::Owner($Handle) -ne $receipt.installerPid) { throw 'Dialog owner changed.' }
         $window = [Windows.Automation.AutomationElement]::FromHandle($Handle)
         $title = $window.Current.Name
+        if ($null -eq $title) { return $null }
         if ($title.Length -gt 4096) { throw 'Dialog title exceeds its bound.' }
         $children = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
         if ($children.Count -gt 128) { throw 'Dialog control count exceeds its bound.' }
@@ -139,6 +140,13 @@ public static class LegacyPreflightWitness {
         }
         return [ordered]@{ title=$title; handle=$Handle.ToInt64(); class=[LegacyPreflightWitness]::Class($Handle); processId=$receipt.installerPid; controls=@($controls) }
     }
+    function ReadImageHash([string]$Path) {
+        $binary = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            if ($binary.Length -gt 16777216) { throw 'Owned PowerShell image exceeds its hash bound.' }
+            return [BitConverter]::ToString($algorithm.ComputeHash($binary)).Replace('-','').ToLowerInvariant()
+        } finally { $binary.Dispose() }
+    }
     function ReadStarts {
         foreach ($event in @(Get-Event -SourceIdentifier $sourceIdentifier -ErrorAction SilentlyContinue)) {
             try {
@@ -151,7 +159,7 @@ public static class LegacyPreflightWitness {
                 $known = @((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'),
                     (Join-Path $env:SystemRoot 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'))
                 if ($null -ne $details[0] -and $details[0] -iin $known) {
-                    $hash = (Get-FileHash -LiteralPath $details[0] -Algorithm SHA256).Hash.ToLowerInvariant()
+                    $hash = ReadImageHash $details[0]
                 }
                 $receipt.powerShellChildren += [ordered]@{ pid=[int]$started.ProcessID; parentPid=[int]$started.ParentProcessID
                     observedAt=[DateTime]::FromFileTimeUtc([long]$started.TIME_CREATED).ToString('o')
@@ -200,7 +208,9 @@ public static class LegacyPreflightWitness {
         if ($null -eq $identity[0] -or $identity[0] -ine $Installer) { throw 'Installer process identity changed or became unavailable.' }
         $dialogs = @([LegacyPreflightWitness]::Dialogs([uint32]$receipt.installerPid))
         if ($null -eq $receipt.firstDialog -and $dialogs.Count -eq 1) {
-            $receipt.firstDialog = ReadDialog $dialogs[0]
+            $captured = ReadDialog $dialogs[0]
+            if ($null -eq $captured) { Start-Sleep -Milliseconds 100; continue }
+            $receipt.firstDialog = $captured
             $text = ($receipt.firstDialog.controls | ForEach-Object { $_.name }) -join "`n"
             $receipt.classification = if ($text.Contains('Creator Works MCP files are in use.')) { 'preflight-busy' }
                 elseif ($text.Contains('Setup could not verify access to Creator Works MCP files.')) { 'preflight-unavailable' }
@@ -217,6 +227,7 @@ public static class LegacyPreflightWitness {
             $receipt.cancelPosted = $true
         } elseif ($Mode -ceq 'first-dialog-cancel' -and $receipt.cancelPosted -and -not $receipt.confirmationPosted -and $dialogs.Count -eq 1) {
             $candidate = ReadDialog $dialogs[0]
+            if ($null -eq $candidate) { Start-Sleep -Milliseconds 100; continue }
             $confirmation = @('Are you sure you want to quit?', 'Are you sure you want to quit the setup?',
                 'Are you sure you want to quit Creator Works MCP Setup?', 'Are you sure you want to quit Creator Works MCP 2.7.7 Setup?')
             $lines = @($candidate.controls | ForEach-Object { $_.name.Trim() })

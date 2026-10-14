@@ -305,7 +305,8 @@ public static class LegacyPreflightWitness {
 $receipt = [ordered]@{installerPid=4000; powerShellChildren=@(); observerError=$null}
 $sourceIdentifier='fixture-start'; $stopIdentifier='fixture-stop'
 function ErrorIdentity($Record) { throw $Record }
-function Get-FileHash { [pscustomobject]@{Hash=('a' * 64)} }
+function Get-FileHash { throw 'Runner-observed unavailable cmdlet must not be used.' }
+function ReadImageHash { return ('a' * 64) }
 function Remove-Event { param($EventIdentifier) }
 function Get-Event {
   param($SourceIdentifier)
@@ -329,3 +330,14 @@ $receipt | ConvertTo-Json -Depth 8 -Compress
     assert.equal(result.powerShellChildren[0].exitStatus, 11);
     assert.equal(result.observerError, null);
   });
+
+test('runner-observed hashing dependency and null-title race are handled without changing installer or module policy', () => {
+  assert.doesNotMatch(native, /Get-FileHash|PSModulePath\s*=|Import-Module|Set-ExecutionPolicy/);
+  assert.match(native, /\$hash = ReadImageHash \$details\[0\]/);
+  assert.match(native, /\$binary\.Length -gt 16777216/);
+  assert.match(native, /\$algorithm\.ComputeHash\(\$binary\)/);
+  assert.match(native, /finally \{ \$binary\.Dispose\(\) \}/);
+  assert.ok(native.indexOf('if ($null -eq $title) { return $null }') < native.indexOf('$title.Length'));
+  assert.match(native, /if \(\$null -eq \$captured\) \{ Start-Sleep -Milliseconds 100; continue \}/);
+  assert.match(native, /if \(\$null -eq \$candidate\) \{ Start-Sleep -Milliseconds 100; continue \}/);
+});
