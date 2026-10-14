@@ -13,6 +13,19 @@ remain in scope, and their incomplete gates are not waived.
 
 ## Latest Acceptance Checkpoint, 2026-10-14
 
+- Linux component trial `38656402069` (`3505a33`, unchanged 4f product) verifies
+  Root terms, exact GTK Setup decline and clean Root exit/pipe EOF. It then
+  refuses readiness because the displayed decline paragraph has no captured AX
+  text. Setup approval/retry, managed routing and MCP operation were not reached;
+  the failure remains unaccepted, with compact AX/PNG evidence retained.
+- Helper transaction trial `38655921324` stops before installation at the strict
+  Cargo-output fingerprint. Test-only `6a7fcb5` copies that output without weakening
+  installed-image checks; no retry yet. Captured unrelated dpkg records also
+  expose the experimental helper's reject-any compatibility limit.
+- An unconnected Flatpak host/private path adapter passes 14 synthetic Windows
+  tests and strict Clippy. Explicit grants and unavailable/absent distinctions
+  are tested, not real filesystem access. Native grant verification, imports,
+  client wiring, network/Unity access and the update origin remain unfinished.
 - Native Linux updater-source tests and strict Clippy pass in `38654369500`
   (`76ed726`), alongside the sealed-input `pkexec`/`dpkg` fixture. New DEB source
   honors authorization cancellation without another password/sudo attempt; this
