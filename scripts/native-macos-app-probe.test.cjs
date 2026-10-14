@@ -894,6 +894,15 @@ async function compileSwift(file, binary) {
   assert.equal(result.code, 0, errors); assert.equal(result.signal, null);
 }
 
+test('actual SDK compiles LaunchServices control and poisoned local admission refuses before app launch', { skip: process.platform !== 'darwin' }, async () => {
+  const source = path.join(__dirname, 'native-macos-launchservices.swift'), binary = path.join(scratch, 'launchservices-guard');
+  await compileSwift(source, binary);
+  const result = spawnSync(binary, ['/must-not-launch.app', '/must-not-read.json'], {
+    env: { ...process.env, GITHUB_ACTIONS: 'false' }, encoding: 'utf8', timeout: 10000,
+  });
+  assert.equal(result.status, 2); assert.equal(JSON.parse(result.stdout).error, 'disposable-explicit-launch-control-required');
+});
+
 test('SDK link diagnostics and XML/binary package versions execute actual pure branches without live AX reads', { skip: process.platform !== 'darwin' }, async () => {
   const declarations = probe.surfaceSource.split('\ndo {\n')[0];
   const links = ('func remoteLinks(' + probe.surfaceSource.split('    func remoteLinks(')[1].split('    func visit(')[0])

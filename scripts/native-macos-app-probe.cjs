@@ -3,6 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { isDeepStrictEqual } = require('node:util');
+const rootDiagnostics = require('./native-macos-root-diagnostics.cjs');
 
 const bundle = 'com.creatorworks.hub';
 const acceptance = Object.freeze({ nativeGuiAccepted: false, mcpAccepted: false, migrationAccepted: false,
@@ -16,6 +17,12 @@ function admission(env, platform, arch) {
   requireThat(env.RUNNER_ARCH === (arch === 'arm64' ? 'ARM64' : 'X64'), 'runner-architecture-mismatch');
 }
 function options(args) {
+  let launchContext;
+  if (args.at(-2) === '--launch-context') {
+    launchContext = args.at(-1); args = args.slice(0, -2);
+    requireThat(rootDiagnostics.scopes.includes(launchContext), 'unknown-launch-control-context');
+    requireThat(args.length === 12, 'launch-control-requires-independent-fresh14-package-identity');
+  }
   requireThat([6, 12].includes(args.length) && args[0] === '--app' && args[2] === '--hub-sha256' && args[4] === '--output',
     'expected --app APP_PATH --hub-sha256 INDEPENDENT_SHA256 --output NEW_DIRECTORY [--expected-version VERSION --assembly-receipt FILE --assembly-receipt-sha256 INDEPENDENT_SHA256]');
   requireThat(/^[a-f0-9]{64}$/.test(args[3]), 'independent-hub-sha256-required');
@@ -25,6 +32,7 @@ function options(args) {
       && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(args[7]) && /^[a-f0-9]{64}$/.test(args[11]), 'independent-package-identity-required');
     Object.assign(result, { expectedVersion: args[7], assemblyReceipt: args[9], assemblyReceiptSha256: args[11] });
   }
+  if (launchContext) result.launchContext = launchContext;
   return result;
 }
 function inside(root, value) { return value.startsWith(root + path.sep); }
@@ -807,6 +815,7 @@ do {
 async function probe(args, env) {
   admission(env, process.platform, process.arch);
   const request = options(args), temporary = canonical(env.RUNNER_TEMP || '');
+  if (request.launchContext) rootDiagnostics.launchControl(request.launchContext, env, request.expectedVersion);
   canonical(request.app); requireThat(inside(temporary, request.app) && request.app.endsWith('.app'), 'root-app-outside-runner-temp');
   const executable = path.join(request.app, 'Contents/MacOS/creator-hub'), info = path.join(request.app, 'Contents/Info.plist');
   const executablePin = pin(executable), infoPin = pin(info, 65536);
@@ -835,7 +844,8 @@ async function probe(args, env) {
     childPid: null, ownedChildExit: null, tools: [],
     windowBitmap: { diagnosticOnly: true, attempted: false, completed: false, reason: 'owned-live-window-not-available', ...acceptance } };
   const write = (name, data) => fs.writeFileSync(path.join(output, name), typeof data === 'string' || Buffer.isBuffer(data) ? data : JSON.stringify(data, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
-  let child, owner, ownerImage, closeReceipt, ownedExit = null, toolUncertain = false, sequence = 0;
+  let child, rootPid, owner, ownerImage, closeReceipt, ownedExit = null, toolUncertain = false, sequence = 0;
+  report.launchContext = request.launchContext || 'direct-private';
   function retainForeign(receipt, label) {
     if (receipt?.foreignElement && !report.foreignElementReceipt) {
       report.foreignElementReceipt = path.join(output, 'foreign-element.json');
@@ -892,25 +902,57 @@ async function probe(args, env) {
     }
     requireThat(sameImage(pin(executable).image, executablePin.image) && sameImage(pin(info, 65536).image, infoPin.image), 'root-files-changed-before-launch');
     if (sourcePin) requireThat(sameImage(pin(request.assemblyReceipt, 16384).image, sourcePin.image), 'assembly-receipt-drift');
-    const rootEnv = privateProfile(output), logFD = fs.openSync(path.join(output, 'root.stdout'), 'wx', 0o600), errFD = fs.openSync(path.join(output, 'root.stderr'), 'wx', 0o600);
-    try { child = spawn(executable, [], { cwd: rootEnv.HOME, env: rootEnv, stdio: ['ignore', logFD, errFD] }); }
-    finally { fs.closeSync(logFD); fs.closeSync(errFD); }
-    child.once('exit', (code, signal) => { ownedExit = { pid: child.pid, code, signal }; });
-    child.once('error', error => { ownedExit = { pid: child.pid ?? null, code: null, signal: null, error: error.code }; });
-    requireThat(Number.isSafeInteger(child.pid) && child.pid > 0, 'owned-root-launch-unverified');
-    report.childPid = child.pid; write('launch.json', { pid: child.pid, executable, profile: rootEnv, ...acceptance });
-    const expected = { pid: child.pid, executable, app: request.app, image: executablePin.image, infoPlist: infoPin.image };
+    const rootEnv = report.launchContext === 'direct-private' ? privateProfile(output) : rootDiagnostics.ordinaryProfile(env);
+    const suppliedTmpdir = rootEnv.TMPDIR;
+    rootEnv.TMPDIR = fs.realpathSync(rootEnv.TMPDIR) + path.sep;
+    canonical(rootEnv.HOME); canonical(rootEnv.TMPDIR.replace(/\/$/, ''));
+    let launchStarted = Date.now();
+    if (report.launchContext === 'launchservices-ordinary') {
+      const launchSource = pin(path.join(__dirname, 'native-macos-launchservices.swift'), 65536, true);
+      write('native-macos-launchservices.swift', launchSource.bytes); write('launch-environment.json', rootEnv);
+      const launcher = path.join(output, 'native-macos-launchservices');
+      const compiled = await command('/usr/bin/swiftc', [path.join(output, 'native-macos-launchservices.swift'), '-o', launcher], 'compile-launchservices', 120000);
+      requireThat(compiled.exitCode === 0, 'launchservices-diagnostic-helper-compilation-failed');
+      const launcherImage = pin(launcher).image;
+      launchStarted = Date.now();
+      const launched = await command(launcher, [request.app, path.join(output, 'launch-environment.json')], 'launchservices-open', 15000, launcherImage);
+      const receipt = JSON.parse(launched.text);
+      requireThat(launched.exitCode === 0 && receipt.diagnosticOnly === true && receipt.method === 'native-launchservices-open-application'
+        && receipt.app === request.app && receipt.executable === executable && receipt.bundleIdentifier === bundle
+        && receipt.rootExitStatusKnown === false && receipt.nativeGuiAccepted === false && receipt.releaseReady === false,
+      'launchservices-result-not-kernel-ownership');
+      rootPid = receipt.pid; report.launchServicesReceipt = receipt;
+      report.launchServicesHelper = { sourceSha256: launchSource.image.sha256, image: launcherImage };
+      // No invented Node ChildProcess or owned Root exit code for LaunchServices.
+    } else {
+      const logFD = fs.openSync(path.join(output, 'root.stdout'), 'wx', 0o600), errFD = fs.openSync(path.join(output, 'root.stderr'), 'wx', 0o600);
+      try { child = spawn(executable, [], { cwd: rootEnv.HOME, env: rootEnv, stdio: ['ignore', logFD, errFD] }); }
+      finally { fs.closeSync(logFD); fs.closeSync(errFD); }
+      child.once('exit', (code, signal) => { ownedExit = { pid: child.pid, code, signal }; });
+      child.once('error', error => { ownedExit = { pid: child.pid ?? null, code: null, signal: null, error: error.code }; });
+      rootPid = child.pid; report.childPid = child.pid;
+    }
+    requireThat(Number.isSafeInteger(rootPid) && rootPid > 0, 'owned-root-launch-unverified');
+    report.rootPid = rootPid;
+    write('launch.json', { pid: rootPid, executable, profile: rootEnv, suppliedTmpdir, context: report.launchContext,
+      environmentReceipt: report.launchContext === 'launchservices-ordinary'
+        ? { kind: 'requested-LaunchServices-overrides', fullChildEnvironmentVerified: false }
+        : { kind: 'supplied-Node-spawn-environment', fullChildEnvironmentVerified: false }, ...acceptance });
+    const expected = { pid: rootPid, executable, app: request.app, image: executablePin.image, infoPlist: infoPin.image };
     const deadline = Date.now() + 20000;
     while (Date.now() < deadline) {
       requireThat(!ownedExit, 'owned-root-exited-before-identification');
-      const result = await command(helper, ['identify', String(child.pid), request.app, executable, request.hubSha256, bundle],
+      const result = await command(helper, ['identify', String(rootPid), request.app, executable, request.hubSha256, bundle],
         'identify', Math.min(15000, Math.max(1, deadline - Date.now())), helperImage);
       const receipt = JSON.parse(result.text);
       if (result.exitCode === 0) {
         requireThat(Array.isArray(receipt.windows) && receipt.windows.length <= 1, 'root-window-ambiguous');
         if (receipt.windows.length === 1) {
           const candidate = { process: receipt.process, window: receipt.windows[0] };
-          validateOwner(candidate, expected); owner = candidate; break;
+          validateOwner(candidate, expected);
+          requireThat(candidate.process.startSeconds * 1000 + candidate.process.startMicroseconds / 1000 >= launchStarted,
+            'preexisting-root-instance-not-a-launch-control');
+          owner = candidate; break;
         }
       } else requireThat(receipt.error === 'native-app-not-ready', 'root-native-identification-refused');
       await new Promise(resolve => setTimeout(resolve, 250));
@@ -954,8 +996,15 @@ async function probe(args, env) {
     report.captureCompleted = true;
   } catch (error) { report.error = error.message; }
   finally {
-    if (child && owner && !ownedExit && !toolUncertain) {
+    if (rootPid && owner && !ownedExit && !toolUncertain) {
       try {
+        if (request.launchContext) {
+          const captureAt = owner.process.startSeconds * 1000 + owner.process.startMicroseconds / 1000 + 20000;
+          const remaining = captureAt - Date.now();
+          if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
+          report.controlBitmapAgeMilliseconds = Date.now() - owner.process.startSeconds * 1000 - owner.process.startMicroseconds / 1000;
+          requireThat(report.controlBitmapAgeMilliseconds >= 20000, 'control-bitmap-age-unverified');
+        }
         const directory = path.join(output, 'window-bitmap');
         fs.mkdirSync(directory, { mode: 0o700 }); canonical(directory);
         const file = path.join(directory, 'root-window.png'), sampler = report.sampler;
@@ -976,7 +1025,25 @@ async function probe(args, env) {
         write('window-bitmap/receipt.json', report.windowBitmap);
       } catch (error) { report.windowBitmap = { diagnosticOnly: true, completed: false, reason: error.message, ...acceptance }; }
     }
-    if (child && owner && !ownedExit && !toolUncertain) {
+    if (rootPid && owner && !ownedExit && !toolUncertain) {
+      report.rootFailureDiagnostics = await rootDiagnostics.diagnostic(owner, {
+        now: () => Date.now(),
+        fence: async stage => {
+          requireThat(ownerImage && sameImage(pin(path.join(output, 'owner.json'), 8192).image, ownerImage), 'diagnostic-owner-file-drift');
+          const sampler = report.sampler;
+          const result = await command(sampler.path, ['bitmap-fence', path.join(output, 'owner.json'), String(process.pid)], `log-fence-${stage}`, 15000, sampler.image);
+          requireThat(result.exitCode === 0, 'diagnostic-native-root-fence-refused'); return JSON.parse(result.text);
+        },
+        run: plan => rootDiagnostics.runLog(plan, toolEnv),
+      });
+      if (report.rootFailureDiagnostics.toolLifetimeUncertain === true) toolUncertain = true;
+      write('root-failure-diagnostics.json', report.rootFailureDiagnostics);
+      try {
+        const signature = await command('/usr/bin/codesign', ['--display', '--verbose=4', '--entitlements', ':-', request.app], 'readonly-code-signature', 15000);
+        report.codeSignatureInspection = { exitCode: signature.exitCode, actionAttempted: false, diagnosticOnly: true };
+      } catch (error) { report.codeSignatureInspection = { error: error.message, actionAttempted: false, diagnosticOnly: true }; }
+    }
+    if (rootPid && owner && !ownedExit && !toolUncertain) {
       try {
         const helper = report.helper;
         requireThat(ownerImage && sameImage(pin(path.join(output, 'owner.json'), 8192).image, ownerImage), 'owner-file-drift-no-close-attempted');
@@ -990,7 +1057,7 @@ async function probe(args, env) {
     report.ownedChildExit = ownedExit;
     report.closeAssessment = closeAssessment(closeReceipt, ownedExit, owner);
     report.acceptedExit = acceptedExit(closeReceipt, ownedExit, owner) && !report.closeError;
-    report.cleanupUncertain = toolUncertain || !!child && !ownedExit;
+    report.cleanupUncertain = toolUncertain || !!rootPid && !ownedExit;
     report.passed = report.captureCompleted && report.acceptedExit && !report.error && !report.cleanupUncertain;
     write('report.json', report);
     if (child && !ownedExit) child.unref();

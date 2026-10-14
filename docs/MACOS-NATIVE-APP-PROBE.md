@@ -562,6 +562,46 @@ No native packaging, workflow run, commit or push was performed locally. The
 parent must review and push this workflow once; source checks do not establish
 actual current14 GUI capture or terms/navigation acceptance.
 
+### Actual Fresh ARM38613119845 And Bitmap Admission Correction
+
+Completed ARM job116021388745 at `85ecdb861475a69e1e21f22368722a299c06ea74`
+passed SDK tests, native app/DMG packaging and package binding. Its native receipt
+has both bundle version fields `0.1.14`, `packageIdentityValidated:true`, outer
+source85ecdb8 and private sourcea517375/run38599976833. Root image SHA256 is
+`16ef1b41718fb3381fc4a02a26eeaa5a573ec748438e97ea0c91cbe0cc1b37c1`.
+Normal native close/termination and original PID13870 exit0/noSignal passed;
+cleanup is not uncertain. All product acceptance flags remain false.
+
+The distinct probe failure is still `root-web-area-readiness-unverified` under
+the outer `root-surface-capture-unverified`. This time the content group's
+`root-window/0` AXChildren count is definitively **zero in the initial read**:
+AXError0, timeout-set error0, countVerified true, elapsed0.04354ms. Only seven
+Root window/chrome nodes were observed at revision0; no notification produced
+another observation before the 20-second deadline. This establishes neither
+permanent document absence nor blank rendering. Root before/after CF fences pass.
+
+The bitmap tool exited0 with a completed exact-window receipt (1052x692,
+234135 bytes, SHA256
+`a37b8869130b771971cc4e9efb40408da64344afb5f24bf82162148417e8224b`).
+Completed-job logs prove a separate workflow assertion bug: `sameImage(image,
+report.windowBitmap.image)` compares every receipt key, including `path`, while
+`bitmapImage()` returns pins/dimensions without a path. The real receipt reproduces
+this unconditional shape mismatch. The corrected diagnostic gate requires the
+reported path to equal the exact owned file, requires identical pin-field sets,
+then compares every pin. Missing/foreign paths, missing/extra pins, any changed
+pin or promoted acceptance flag still refuse. Generic `sameImage`, probe ownership,
+native roles/peer/CF/phase fences and all capture/action behavior are unchanged.
+
+Artifact11917619627 is independently API-size/hash checked (43758 bytes, ZIP
+SHA256 `1f2ee1fa0e80d688bf880dfa2ecdd5e4779dc589cce4861c007785c4e4fc44ed`);
+ten bounded reports are retained under `artifacts/mac-root-probe-38613119845/arm/`.
+The PNG was not uploaded because its admission step failed, so these retained
+receipts cannot establish visually nonblank fresh14 rendering. Correcting the
+gate cannot recover pixels from the completed runner. No rebuild/rerun, native
+authority change or Git operation was performed during this diagnosis. The
+workflow regression executes the exact gate against the observed receipt shape
+and negative path/pin/flag cases: locally 68 pass, zero fail, 122 SDK cases skipped.
+
 Concrete real GUI operation already implemented: one verified Root-native close
 button AXPress followed by the live/termination and original-child-exit proof.
 It must still be captured on this fresh app before any current14 claim. The next

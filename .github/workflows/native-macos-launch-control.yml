@@ -1,0 +1,166 @@
+name: Exact fresh14 Mac launch context control (diagnostic only, no rebuild)
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/mac-root-probe-014]
+    paths: ['.github/workflows/native-macos-launch-control.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  control:
+    strategy:
+      fail-fast: false
+      matrix:
+        context: [direct-private, direct-ordinary, launchservices-ordinary]
+        target: [macos-arm64, macos-intel]
+        include:
+          - target: macos-arm64
+            os: macos-latest
+            artifact: 11919728492
+            bytes: 107558637
+            zip: e3487449c031dac861cdcc92a012588dcfae58cbb88b1f575c30984ede869fbb
+            hub: 16ef1b41718fb3381fc4a02a26eeaa5a573ec748438e97ea0c91cbe0cc1b37c1
+            job: 116030795575
+          - target: macos-intel
+            os: macos-15-intel
+            artifact: 11919859477
+            bytes: 111199637
+            zip: 294615a337b1eb527df57c0fb3a9aba239aae204812d8a7b7b680d3698282767
+            hub: 85f7a1f9401d540e3fb8f6ddb5b83d3a3ff8681ad7b7f21c80cad085fcaffca5
+            job: 116030795486
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - run: npm ci --ignore-scripts
+      - name: Compile SDK guard fixtures without launching a product
+        run: node --test scripts/native-macos-root-diagnostics.test.cjs scripts/native-macos-app-probe.test.cjs scripts/native-macos-window.test.cjs
+      - name: Independently qualify original packaged artifact, not the failed GUI job as acceptance
+        uses: actions/github-script@v8
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+          ZIP_SHA256: ${{ matrix.zip }}
+          ZIP_BYTES: ${{ matrix.bytes }}
+          TARGET: ${{ matrix.target }}
+          PRIMARY_JOB: ${{ matrix.job }}
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+            const {data:run}=await github.rest.actions.getWorkflowRun({...context.repo,run_id:38615878801});
+            const {data:artifact}=await github.rest.actions.getArtifact({...context.repo,artifact_id:Number(process.env.ARTIFACT)});
+            const {data:job}=await github.rest.actions.getJobForWorkflowRun({...context.repo,job_id:Number(process.env.PRIMARY_JOB)});
+            assert.equal(run.id,38615878801);assert.equal(run.head_sha,'17b769ad2d8c4a005520459749170895d75ff05b');
+            assert.equal(run.path,'.github/workflows/unix-managed-assembly.yml');assert.equal(run.event,'push');
+            assert.equal(run.status,'completed');assert.equal(run.run_attempt,1);assert.equal(run.conclusion,'failure');
+            assert.equal(artifact.id,Number(process.env.ARTIFACT));assert.equal(artifact.expired,false);assert.equal(artifact.workflow_run.id,run.id);
+            assert.equal(artifact.workflow_run.repository_id,1364807512);assert.equal(artifact.workflow_run.head_repository_id,1364807512);
+            assert.equal(artifact.workflow_run.head_sha,run.head_sha);
+            assert.equal(artifact.name,`signed-unix-hub-${process.env.TARGET}-38615878801-1`);
+            assert.equal(artifact.digest,`sha256:${process.env.ZIP_SHA256}`);
+            assert.equal(artifact.size_in_bytes,Number(process.env.ZIP_BYTES));assert.equal(job.id,Number(process.env.PRIMARY_JOB));
+            assert.equal(job.run_id,run.id);assert.equal(job.run_attempt,1);
+            assert.ok(job.name.startsWith(`assembly (${process.env.TARGET},`));
+            for(const name of ['Verify trusted handoff and compile only the outer native Hub',
+              'Bind the actual packaged Mac app, native version and primary assembly receipt',
+              'Retain signed build evidence, not publication or migration acceptance']) {
+              const steps=job.steps.filter(step=>step.name===name);assert.equal(steps.length,1);assert.equal(steps[0].conclusion,'success');
+            }
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'primary-package-binding.json'),JSON.stringify({
+              diagnosticOnly:true,runId:run.id,assemblyCommit:run.head_sha,artifactId:artifact.id,
+              artifactName:artifact.name,zipSha256:process.env.ZIP_SHA256,zipBytes:artifact.size_in_bytes,
+              packageStepsVerified:true,originalGuiJobFailed:true,nativeGuiAccepted:false,releaseReady:false}),{flag:'wx',mode:0o600});
+      - name: Read only the exact archived package; no build, signing or product source substitution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT/zip" > "$RUNNER_TEMP/control-package.zip"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,stat,zipfile
+          root=pathlib.Path(os.environ['RUNNER_TEMP']); binding=json.loads((root/'primary-package-binding.json').read_text())
+          archive=root/'control-package.zip'; assert archive.stat().st_size==binding['zipBytes']
+          digest=hashlib.sha256()
+          with archive.open('rb') as stream:
+              for chunk in iter(lambda:stream.read(1048576),b''): digest.update(chunk)
+          assert digest.hexdigest()==binding['zipSha256']
+          output=root/'control-package-input'; output.mkdir(mode=0o700)
+          with zipfile.ZipFile(archive) as z:
+              entries=z.infolist(); names=[e.filename for e in entries]
+              assert len(names)<=1024 and len(names)==len(set(names))
+              dmg=[n for n in names if n.startswith('native-packages/') and n.endswith('.dmg') and n.count('/')==1]
+              assert len(dmg)==1
+              for name in ['builtin-manifest.json','unix-package-integrity.json','signed-unix-assembly.json']+dmg:
+                  e=z.getinfo(name); assert not e.is_dir() and not stat.S_ISLNK(e.external_attr>>16)
+                  assert '\\' not in name and all(p not in ('','..','.') for p in name.split('/'))
+                  assert 0<e.file_size<=(536870912 if name in dmg else 1048576)
+                  target=output/name; target.parent.mkdir(parents=True,exist_ok=True)
+                  with z.open(e) as source,target.open('xb') as dest:
+                      count=0
+                      for chunk in iter(lambda:source.read(1048576),b''):
+                          count+=len(chunk); assert count<=e.file_size; dest.write(chunk)
+                  assert count==e.file_size
+          PY
+      - name: Verify and extract the same DMG for every context, never modifying app bytes
+        uses: actions/github-script@v8
+        env:
+          HUB_SHA256: ${{ matrix.hub }}
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+            const {execFileSync}=require('node:child_process');
+            const probe=require('./scripts/native-macos-app-probe.cjs'),unix=require('./scripts/unix-package-payload.cjs');
+            const temp=fs.realpathSync(process.env.RUNNER_TEMP),input=path.join(temp,'control-package-input');
+            const arch=process.arch==='arm64'?'aarch64':process.arch==='x64'?'x86_64':null;assert.ok(arch);assert.equal(process.platform,'darwin');
+            const integrity=JSON.parse(probe.pin(path.join(input,'unix-package-integrity.json'),1048576,true).bytes);
+            assert.equal(integrity.integrityPassed,true);assert.equal(integrity.platform,'macos');assert.equal(integrity.arch,arch);
+            assert.equal(integrity.mcpMode,'writable');assert.equal(integrity.writableGuiAccepted,false);assert.equal(integrity.releaseReady,false);
+            assert.deepEqual(integrity.packages.map(p=>p.format),['app','dmg']);
+            const dmg=integrity.packages[1];assert.match(dmg.path,/^native-packages\/[^/\\]+\.dmg$/);
+            assert.equal(dmg.hubSha256,process.env.HUB_SHA256);assert.equal(integrity.packages[0].hubSha256,dmg.hubSha256);
+            const file=path.join(input,dmg.path);assert.equal(probe.pin(file,512*1024*1024).image.sha256,dmg.sha256);
+            const assembly=probe.pin(path.join(input,'signed-unix-assembly.json'),16384,true);
+            const source=probe.assemblyIdentity(assembly.bytes,arch,'0.1.14');
+            assert.equal(source.assemblyCommit,'17b769ad2d8c4a005520459749170895d75ff05b');
+            assert.equal(source.privateSource.sourceCommit,'a517375633f149aed719c8d5d84031f3303c0bcd');
+            assert.equal(source.privateSource.runId,38599976833);
+            const output=path.join(temp,'control-package');fs.mkdirSync(output,{mode:0o700});
+            unix.extract(file,'dmg',path.join(output,'extracted'),'Creator Hub');
+            const app=path.join(output,'extracted','Creator Hub.app');
+            const manifest=JSON.parse(probe.pin(path.join(input,'builtin-manifest.json'),1048576,true).bytes);
+            assert.deepEqual(unix.verifyResources(path.join(app,'Contents/Resources/modules'),manifest),dmg.files);
+            assert.equal(probe.pin(path.join(app,'Contents/MacOS/creator-hub')).image.sha256,dmg.hubSha256);
+            const info=JSON.parse(execFileSync('/usr/bin/plutil',['-convert','json','-o','-','--',path.join(app,'Contents/Info.plist')],{encoding:'utf8',timeout:15000,maxBuffer:65536}));
+            assert.equal(info.CFBundleShortVersionString,'0.1.14');assert.equal(info.CFBundleIdentifier,'com.creatorworks.hub');assert.equal(info.CFBundleExecutable,'creator-hub');
+            execFileSync('/usr/bin/codesign',['--verify','--deep','--strict',app],{timeout:30000,maxBuffer:65536});
+            core.exportVariable('APP_PATH',app);core.exportVariable('HUB_SHA256',dmg.hubSha256);
+            core.exportVariable('ASSEMBLY_RECEIPT',path.join(input,'signed-unix-assembly.json'));
+            core.exportVariable('ASSEMBLY_RECEIPT_SHA256',assembly.image.sha256);
+      - name: Capture the exact Root at measured20s with unchanged AX and action authority
+        env:
+          CREATOR_MACOS_APP_PROBE: '1'
+          CREATOR_MACOS_OWNED_GUI_TEST: '1'
+          CREATOR_MACOS_LAUNCH_CONTROL: '1'
+          LAUNCH_CONTEXT: ${{ matrix.context }}
+        run: |
+          node scripts/native-macos-app-probe.cjs --app "$APP_PATH" --hub-sha256 "$HUB_SHA256" --output "$RUNNER_TEMP/root-app-probe" --expected-version 0.1.14 --assembly-receipt "$ASSEMBLY_RECEIPT" --assembly-receipt-sha256 "$ASSEMBLY_RECEIPT_SHA256" --launch-context "$LAUNCH_CONTEXT"
+      - name: Retain only owned Root diagnostics and exact-window bitmap; no entire desktop or user log archive
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh14-control-${{ matrix.target }}-${{ matrix.context }}-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/primary-package-binding.json
+            ${{ runner.temp }}/root-app-probe/*.json
+            ${{ runner.temp }}/root-app-probe/*.stdout
+            ${{ runner.temp }}/root-app-probe/*.stderr
+            ${{ runner.temp }}/root-app-probe/window-bitmap/receipt.json
+            ${{ runner.temp }}/root-app-probe/window-bitmap/root-window.png
