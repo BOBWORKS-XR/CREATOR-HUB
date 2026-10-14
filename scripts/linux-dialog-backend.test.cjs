@@ -27,3 +27,9 @@ test('native Linux producer checks the actual locked feature graph before compil
   assert.match(source, /cargo tree --locked --manifest-path modules\/project-setup\/src-tauri\/Cargo.toml --target x86_64-unknown-linux-gnu -e features -i rfd/);
   assert.doesNotMatch(source.slice(0, source.indexOf('permissions:')), /paths:/);
 });
+
+test('post-build settings tests reuse the native release dependency profile', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-payload.yml'), 'utf8');
+  const step = source.split('name: Test native product settings after build-bound launcher resources exist')[1]?.split('\n      - ')[0];
+  assert.match(step || '', /cargo test --release --locked --manifest-path modules\/mcp\/launcher\/src-tauri\/Cargo.toml --features experimental-unix-hosting product_settings -- --quiet/);
+});
