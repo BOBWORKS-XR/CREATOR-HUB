@@ -271,6 +271,14 @@ changed. Twelve additional pure distinction fixtures pass locally; a fresh
 native result remains pending. Intel pre-action foreign-element refusal and
 missing Root WebArea remain separate gaps.
 
+Run 38575009554 at `b6042b1` accepts ARM's normal Root termination with the exact
+caller-owned exit zero and distinct native termination receipt. Live identity
+remains false, honestly. ARM still lacks the WebArea capture. Intel completes
+the Root surface capture but its unchanged whole-tree close selector refuses a
+foreign descendant before acting. These separate results do not constitute
+writable GUI, migration, update or release acceptance; those flags remain false.
+Reports are retained under `artifacts/mac-root-probe-38575009554/`.
+
 ```sh
 node --test scripts/native-macos-app-probe.test.cjs
 ```
