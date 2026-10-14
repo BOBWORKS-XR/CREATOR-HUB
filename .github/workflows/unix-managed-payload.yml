@@ -3,7 +3,6 @@ name: Prepared native Unix payload and previous-server tests (not acceptance)
 on:
   push:
     branches: [validation/unix-payload-014]
-    paths: ['.github/workflows/unix-managed-payload.yml']
   workflow_dispatch:
     inputs:
       platform:
@@ -55,7 +54,8 @@ jobs:
       - name: Check the source and split-producer controls before compiling
         run: |
           npm run check:sources
-          node --test scripts/build-unified.test.cjs scripts/unix-package-payload.test.cjs scripts/unix-managed-payload.test.cjs
+          node --test scripts/build-unified.test.cjs scripts/unix-package-payload.test.cjs scripts/unix-managed-payload.test.cjs scripts/linux-dialog-backend.test.cjs
+          cargo tree --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target x86_64-unknown-linux-gnu -e features -i rfd
       - name: Test and build the shared bounded transfer consumer
         run: |
           cargo fmt --manifest-path native/unix-transfer/Cargo.toml --check

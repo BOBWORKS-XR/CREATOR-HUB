@@ -38,7 +38,7 @@ libc = "0.2"
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
+tauri-plugin-dialog = { version = "2", default-features = false, features = ["gtk3"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tauri-plugin-dialog = "2"
