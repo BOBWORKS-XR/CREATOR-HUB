@@ -36,7 +36,7 @@ is now integrated as a negative check after reviewed connection migration.
 Project/profile/managed/plugin scopes and other launch contexts remain unresolved;
 ordinary files being absent or routed does not clear those checks. Diagnostics
 are shown without exposing config contents. Step 7 remains blocked pending
-complete dependency/retained-runtime handling, native adapter acceptance,
+complete dependency/retained-runtime handling, full native coordinator acceptance,
 platform-specific cleanup and full native-flow tests.
 The guide says cleanup is pending; it does not claim completion. A review record
 is not permission to uninstall, live-client acceptance or publisher verification.
@@ -64,7 +64,7 @@ Do not force-close AI clients, Unity or unrelated Node processes.
 - Full native first launch, signed update/restart, actual AI-client reconnect,
   macOS/Linux cleanup and end-to-end uninstall retention are still required.
 
-Current Windows source checks: 290 Root Rust tests pass with 12 explicitly
+Current Windows source checks: 291 Root Rust tests pass with 12 explicitly
 opt-in native tests ignored; strict Clippy passes. Dependency inspection is
 connected to production diagnostics, not removal authorization. The 15 browser
 convergence/startup tests pass, including screenshots at 390 and 1100 pixels.

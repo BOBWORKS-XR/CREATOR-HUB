@@ -235,3 +235,23 @@ are preserved under `artifacts/legacy-retention-38537875593/`. A read-only
 public-preflight diagnostic and exact child-exit/remaining-registration capture
 are being added before changing the adapter's behavior. No process guard is
 bypassed and no successful MCP adapter acceptance is claimed.
+
+## Accepted Production Adapter Scope
+
+[Run 38542947181](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38542947181)
+at `5daf07e` passes both exact production-adapter cases. Old registrations and
+installed payloads are absent; five MCP and three Setup stores retain exact
+bytes/metadata. Both native test processes exit zero. Local reports are under
+`artifacts/legacy-retention-38542947181/`.
+
+The diagnostic run `38541756108` measured the adapter's stripped environment at
+31086 ms for the public read-only MCP preflight, versus 517 ms with the earlier
+accepted sanitized system PATH/PSModulePath. The published uninstaller gives
+that guard 15 seconds and returned exit 10. Matching the accepted environment
+then passes the actual uninstaller without changing its deadline, process guard,
+payload pins or retention checks. Runtime/auth injection variables stay excluded.
+
+This accepts the adapter only for the two pinned Windows baselines. It does not
+authorize production guide cleanup, unknown dependency scopes, older/custom
+installs, live-client convergence, Unix cleanup or publication. Release flags
+remain false, and the user's PC applications remain unchanged.
