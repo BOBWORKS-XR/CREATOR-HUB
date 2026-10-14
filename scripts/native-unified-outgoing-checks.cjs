@@ -72,6 +72,17 @@ function cancelPreserved(before, after) {
   assert.equal(before.ticketExists, false); assert.equal(after.ticketExists, false, 'Cancel wrote a restore ticket');
   assert.deepEqual(after.rootExit, { code: null, signal: null }, 'Cancel terminated Root');
 }
+function restoreImagePath(value) {
+  assert.ok(typeof value === 'string' && value.length <= 4096, 'Bounded native image path required');
+  const image = value.startsWith('\\\\?\\') ? value.slice(4) : value;
+  assert.match(image, /^[A-Za-z]:\\/, 'Only absolute Windows drive image paths are comparable');
+  const parts = image.slice(3).split('\\');
+  assert.ok(parts.every(part => part.length > 0 && part !== '.' && part !== '..'
+    && !/[\x00-\x1f<>:"|?*/]/.test(part) && !/[. ]$/.test(part)
+    && !/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(part)),
+  'Noncanonical, device or stream image path refused');
+  return image.toLowerCase();
+}
 function restoreTicket(ticket, before) {
   assert.deepEqual(Object.keys(ticket).sort(), ['created', 'fromVersion', 'schemaVersion', 'toVersion', 'views']);
   assert.equal(ticket.schemaVersion, 1); assert.equal(ticket.fromVersion, BASELINE.version);
@@ -82,7 +93,7 @@ function restoreTicket(ticket, before) {
   for (const view of ticket.views) {
     assert.deepEqual(Object.keys(view).sort(), ['app', 'bundled', 'path']);
     assert.equal(view.bundled, true, 'Legacy hosted views are not outgoing built-in acceptance');
-    assert.equal(view.path.toLowerCase(), before.backends[view.app].image.toLowerCase(), 'Restore source path differs');
+    assert.equal(restoreImagePath(view.path), restoreImagePath(before.backends[view.app].image), 'Restore source path differs');
   }
 }
 function approvedUpdate(before, after, evidence) {

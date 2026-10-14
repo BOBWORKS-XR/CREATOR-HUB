@@ -249,6 +249,31 @@ test('activation must move from the exact14 descriptor to signed15; unchanged pr
   const after = clone(initial); after.activeRoute.generation = 'e'.repeat(64);
   assert.throws(() => checks.cancelPreserved(initial, after));
 });
+test('restore ticket compares only canonical drive paths with the observed optional extended prefix', () => {
+  const initial = before();
+  const extended = ticket(initial);
+  extended.views.forEach(view => { view.path = '\\\\?\\' + view.path.toUpperCase(); });
+  checks.restoreTicket(extended, initial);
+  const extendedKernel = clone(initial);
+  Object.values(extendedKernel.backends).forEach(backend => { backend.image = '\\\\?\\' + backend.image; });
+  checks.restoreTicket(ticket(initial), extendedKernel);
+  for (const image of [
+    'D:\\owned\\creator-project-setup.exe', 'C:\\foreign\\creator-project-setup.exe',
+    '\\\\server\\owned\\creator-project-setup.exe', '\\\\?\\UNC\\server\\owned\\creator-project-setup.exe',
+    '\\\\.\\C:\\owned\\creator-project-setup.exe', '\\??\\C:\\owned\\creator-project-setup.exe',
+    'C:owned\\creator-project-setup.exe', 'C:/owned/creator-project-setup.exe',
+    'C:\\owned\\.\\creator-project-setup.exe', 'C:\\owned\\..\\owned\\creator-project-setup.exe',
+    'C:\\owned\\\\creator-project-setup.exe', 'C:\\owned\\creator-project-setup.exe:stream',
+    '\\\\?\\C:\\owned\\creator-project-setup.exe.', 'C:\\owned \\creator-project-setup.exe',
+    'C:\\NUL\\creator-project-setup.exe', 'C:\\owned\\creator-project-setup.exe\u0000',
+  ]) {
+    const changed = ticket(initial); changed.views[0].path = image;
+    assert.throws(() => checks.restoreTicket(changed, initial), image);
+    const changedKernel = clone(initial); changedKernel.backends.setup.image = image;
+    assert.throws(() => checks.restoreTicket(ticket(initial), changedKernel), image);
+  }
+});
+
 test('observed native restore ticket cannot be empty, duplicate, foreign, legacy or wrong version', () => {
   const initial = before(); checks.restoreTicket(ticket(initial), initial);
   for (const mutate of [value => value.fromVersion = '0.1.12', value => value.toVersion = '0.1.14',
