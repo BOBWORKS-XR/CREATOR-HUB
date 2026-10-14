@@ -85,14 +85,35 @@ function privateProfile(output) {
 }
 function acceptedExit(close, exit, owner) {
   const before = close?.before, after = close?.after;
-  const bound = !!owner && isDeepStrictEqual(before?.process, owner.process) && isDeepStrictEqual(before?.window, owner.window)
-    && before.accessibilityTrusted === true && before.active === true && before.truncated === false
-    && isDeepStrictEqual(after?.process, owner.process) && after.accessibilityTrusted === true && after.truncated === false
-    && (isDeepStrictEqual(after.window, owner.window) || after.window === null && after.windowMissingVerified === true);
-  return close?.action === 'close-window' && close.axAction === 'AXPress' && close.actionAttempted === true
-    && close.postIdentityVerified === true && close.forceKillPerformed === false && close.permissionRequestsPerformed === false
-    && !close.error && !close.postProcessStatus && bound && exit?.pid === owner.process.pid
+  const beforeBound = !!owner && isDeepStrictEqual(before?.process, owner.process) && isDeepStrictEqual(before?.window, owner.window)
+    && before.accessibilityTrusted === true && before.active === true && before.truncated === false;
+  const common = close?.action === 'close-window' && close.axAction === 'AXPress' && close.actionAttempted === true
+    && close.forceKillPerformed === false && close.permissionRequestsPerformed === false
+    && !close.error && !close.postProcessStatus && beforeBound && exit?.pid === owner.process.pid
     && exit.code === 0 && exit.signal === null && !exit.error;
+  if (!common) return false;
+  if (close.closeOutcome === 'native-termination') {
+    const t = close.termination;
+    const fields = ['expectedProcess', 'expectedWindow', 'kernelMissingVerified', 'windowMissingVerified',
+      'imageBindingsVerified', 'firstKernelBytes', 'firstKernelErrno', 'lastKernelBytes', 'lastKernelErrno'];
+    const controls = Array.isArray(before.controls) ? before.controls.filter(control => control?.path === 'close-button') : null;
+    const control = controls?.length === 1 && controls[0];
+    return close.postIdentityVerified === false && close.postTerminationVerified === true && close.axResult === 0
+      && close.after === undefined && before.hasDialog === false && control?.role === 'AXButton'
+      && control.pid === owner.process.pid && control.windowID === owner.window.id && control.enabled === true
+      && control.hidden === false && control.showing === true && control.pressSupported === true
+      && !!t && Object.keys(t).length === fields.length && Object.keys(t).every(key => fields.includes(key))
+      && isDeepStrictEqual(t.expectedProcess, owner.process) && isDeepStrictEqual(t.expectedWindow, owner.window)
+      && t.kernelMissingVerified === true && t.windowMissingVerified === true && t.imageBindingsVerified === true
+      && t.firstKernelBytes === 0 && t.lastKernelBytes === 0 && t.firstKernelErrno === 3 && t.lastKernelErrno === 3
+      && [close.actionStartedUptime, close.actionReturnedUptime, close.postInspectionCompletedUptime].every(Number.isFinite)
+      && close.actionStartedUptime > 0 && close.actionReturnedUptime >= close.actionStartedUptime
+      && close.postInspectionCompletedUptime >= close.actionReturnedUptime;
+  }
+  return close.closeOutcome === undefined && close.postTerminationVerified !== true && close.termination === undefined
+    && close.postIdentityVerified === true && isDeepStrictEqual(after?.process, owner.process)
+    && after.accessibilityTrusted === true && after.truncated === false
+    && (isDeepStrictEqual(after.window, owner.window) || after.window === null && after.windowMissingVerified === true);
 }
 function closeAssessment(close, exit, owner) {
   const p = owner?.process, status = close?.postProcessStatus;
@@ -100,6 +121,7 @@ function closeAssessment(close, exit, owner) {
   const bound = !!p && status?.pid === p.pid && status.expectedStartSeconds === p.startSeconds
     && status.expectedStartMicroseconds === p.startMicroseconds;
   return { callerOwnedExit0, helperPostIdentityVerified: close?.postIdentityVerified === true,
+    helperPostTerminationVerified: close?.postTerminationVerified === true,
     postProcessState: bound && ['absent', 'same-kernel-process', 'different-process', 'unavailable'].includes(status.state) ? status.state : 'unknown',
     closeAccepted: callerOwnedExit0 && acceptedExit(close, exit, owner), diagnosticOnly: true };
 }

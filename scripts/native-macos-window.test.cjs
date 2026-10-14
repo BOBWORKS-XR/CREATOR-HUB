@@ -102,6 +102,78 @@ test('post-close process status is diagnostic only and cannot replace post-ident
   assert.match(source, /exit\(attempted \? 3 : 2\)/);
 });
 
+test('termination is a distinct successful Root-close postcondition, not a synthetic live identity', () => {
+  const entry = source.slice(source.indexOf('func nativeMain()'));
+  assert.match(entry, /if action == \.closeWindow, result == \.success, owner.process.bundleIdentifier == "com.creatorworks.hub"/);
+  assert.equal(entry.match(/AXUIElementPerformAction\(/g).length, 1);
+  const terminated = entry.split('case .terminated(let termination):')[1].split('case .live(let observed):')[0];
+  assert.match(terminated, /"closeOutcome": "native-termination"/);
+  assert.match(terminated, /"postIdentityVerified": false, "postTerminationVerified": true/);
+  assert.match(terminated, /"termination": try object\(termination\)/);
+  assert.match(terminated, /"axResult": result.rawValue/);
+  assert.doesNotMatch(terminated, /"after"|"process"|"postProcessStatus"|"windowGone"/);
+  assert.match(terminated, /"forceKillPerformed": false, "permissionRequestsPerformed": false/);
+  assert.match(terminated, /return/);
+  assert.match(entry.split('case .live(let observed):')[1], /"after": try object\(after.value\), "actionAttempted": true, "postIdentityVerified": true/);
+  const fixtureSection = source.split('#if NATIVE_MACOS_WINDOW_FIXTURES')[1].split('#elseif os(macOS)')[0];
+  assert.match(fixtureSection, /fixture.after == nil/);
+  assert.match(fixtureSection, /validateNativeTermination/);
+  assert.doesNotMatch(fixtureSection, /AXUIElement|proc_pidinfo|CGWindowList|NSRunningApplication/);
+});
+
+test('termination brackets independently checked Root paths, exact images and raw CG absence with two missing-kernel checks', () => {
+  const native = source.split('func nativeTermination(')[1].split('enum ClosePostcondition')[0];
+  const first = native.indexOf('expectedKernelPresent(firstKernel'), paths = native.indexOf('try allowedApp(');
+  const images = native.indexOf('try image(owner.process.executablePath)'), cg = native.indexOf('CGWindowListCopyWindowInfo(');
+  const last = native.indexOf('let lastKernel = kernelObservation(owner.process.pid)');
+  assert.ok(first >= 0 && paths > first && images > paths && cg > images && last > cg);
+  assert.match(native, /image\(owner.process.bundlePath \+ "\/Contents\/Info.plist", limit: 65536\) == owner.process.infoPlist/);
+  assert.match(native, /Bundle\(path: owner.process.bundlePath\)\?\.bundleIdentifier == owner.process.bundleIdentifier/);
+  assert.match(native, /CGWindowListCopyWindowInfo\(\[\.optionIncludingWindow\], owner.window.id\)/);
+  assert.match(native, /windows.count <= 2048/);
+  assert.match(native, /guard windows.isEmpty else/);
+  assert.match(native, /bytes: Int32\(MemoryLayout<proc_bsdinfo>.size\), missingErrno: ESRCH/);
+  assert.doesNotMatch(native, /excludeDesktopElements|optionOnScreenOnly|NSRunningApplication|observe\(|while |sleep|PerformAction|postIdentityVerified/);
+  const pure = source.split('func validateNativeTermination')[1].split('func emit')[0];
+  assert.match(pure, /expectedKernelPresent\(input.beforeKernel/);
+  assert.match(pure, /!expectedKernelPresent\(input.firstKernel/);
+  assert.match(pure, /!expectedKernelPresent\(input.lastKernel/);
+  assert.match(pure, /expectedProcess: owner.process, expectedWindow: owner.window/);
+  assert.match(pure, /firstKernelBytes: input.firstKernel.bytes, firstKernelErrno: input.firstKernel.error/);
+  assert.match(pure, /lastKernelBytes: input.lastKernel.bytes, lastKernelErrno: input.lastKernel.error/);
+});
+
+test('termination fallback is limited to captured process/AppKit disappearance and refuses identity, AX, CG or image faults', () => {
+  const transition = source.split('func closeTerminationTransition')[1].split('struct TerminationInputs')[0];
+  for (const error of ['expected-process-absent', 'native-app-not-ready', 'native-bundle-id-unverified',
+    'native-bundle-path-unverified', 'native-executable-path-unverified']) assert.ok(transition.includes(`"${error}"`));
+  assert.doesNotMatch(transition, /foreign-ax-element|process-start-drift|process-identity-drift|expected-kernel-identity-drift|image-|window-|ax-|accessibility-denied/);
+  const post = source.split('func observeSuccessfulClose')[1].split('func ownerFile')[0];
+  assert.match(post, /guard result == \.success else/);
+  assert.match(post, /catch let refusal as Refusal/);
+  assert.match(post, /guard closeTerminationTransition\(refusal.description\) else \{ throw refusal \}/);
+  assert.match(post, /let missing = kernelObservation\(owner.process.pid\)/);
+  assert.match(post, /guard try !expectedKernelPresent\(missing/);
+  assert.doesNotMatch(post, /catch \{|while |sleep|PerformAction/);
+});
+
+test('expected kernel identity is checked before live AppKit metadata and immediately before the sole close action', () => {
+  const process = source.split('func process(_ pid:')[1].split('func cgWindows')[0];
+  assert.ok(process.indexOf('expectedKernelPresent(sample, expected') < process.indexOf('NSRunningApplication(processIdentifier: pid)'));
+  assert.match(process, /expectedKernel: expected/);
+  assert.match(process, /rechecked.pbi_ruid == info.pbi_ruid/);
+  const kernel = source.split('func expectedKernelPresent')[1].split('func closeTerminationTransition')[0];
+  assert.match(kernel, /sample.bytes == 0 && sample.error == missingErrno/);
+  assert.match(kernel, /sample.bytes == bytes, sample.error == 0/);
+  for (const fact of ['pid', 'uid', 'realUID', 'startSeconds', 'startMicroseconds']) assert.ok(kernel.includes(`sample.${fact} ==`));
+  const entry = source.slice(source.indexOf('func nativeMain()'));
+  const capture = entry.indexOf('let sample = kernelObservation(owner.process.pid)'), action = entry.indexOf('AXUIElementPerformAction(');
+  assert.ok(capture >= 0 && capture < entry.indexOf('attempted = true') && capture < action);
+  assert.match(entry.slice(capture, action), /expectedKernelPresent\(sample, owner.process/);
+  assert.match(source, /func observe\(_ owner: Owner, controls: Bool = true, allowGone: Bool = false\) throws -> NativeObservation \{\s*let identity = try process\(owner.process\)/);
+  assert.match(source, /try visit\(axWindow, 0, "window", nil, false, nil\)\s*if let value = attribute\(axWindow, kAXCloseButtonAttribute\)/);
+});
+
 test('SDK compatibility uses the exact kernel path bound and public AX sheet hierarchy', () => {
   assert.match(source, /let processPathBufferBytes = 4096\b/);
   assert.match(source, /\[CChar\]\(repeating: 0, count: processPathBufferBytes\)/);
@@ -262,6 +334,93 @@ for (const [name, mutate, error] of cases) {
     assert.equal(receipt.nativeGuiAccepted, false);
     assert.equal(receipt.releaseReady, false);
     if (error) assert.equal(receipt.error, error); else assert.equal(receipt.fixtureAccepted, true);
+  });
+}
+
+function terminationFixture() {
+  const value = fixture('close-window');
+  for (const observation of [value.before, value.immediate]) {
+    observation.hasDialog = false;
+    observation.controls = [{ ...observation.controls[0], path: 'close-button', dialog: null, title: '' }];
+  }
+  delete value.after;
+  const p = value.owner.process;
+  const missing = { bytes: 0, error: 3, pid: 0, uid: 0, realUID: 0, startSeconds: 0, startMicroseconds: 0 };
+  value.termination = { actionAttempted: true, axResult: 0,
+    beforeKernel: { bytes: 136, error: 0, pid: p.pid, uid: p.image.uid, realUID: p.image.uid,
+      startSeconds: p.startSeconds, startMicroseconds: p.startMicroseconds },
+    firstKernel: structuredClone(missing), lastKernel: structuredClone(missing), liveInspectionFailure: null,
+    rootPathVerified: true, imageBindingsVerified: true, windowMissingVerified: true };
+  return value;
+}
+
+test('termination fixtures contain expected pre-action bindings but no fabricated after observation', () => {
+  const value = terminationFixture();
+  assert.equal('after' in value, false);
+  assert.equal(value.termination.beforeKernel.pid, value.owner.process.pid);
+  assert.equal(value.termination.firstKernel.bytes, 0); assert.equal(value.termination.lastKernel.bytes, 0);
+  value.termination.lastKernel.pid++;
+  assert.equal(value.termination.firstKernel.pid, 0);
+});
+
+const terminationCases = [
+  ['two definitive absences after successful Root close', () => {}, null],
+  ['captured ARM AppKit disappearance', f => { f.termination.liveInspectionFailure = 'native-bundle-id-unverified'; }, null],
+  ['captured process disappearance', f => { f.termination.liveInspectionFailure = 'expected-process-absent'; }, null],
+  ['death before action', f => { f.termination.beforeKernel = { ...f.termination.firstKernel }; }, 'termination-process-missing-before-action'],
+  ['action never attempted', f => { f.termination.actionAttempted = false; }, 'termination-successful-root-close-required'],
+  ['refused AXPress', f => { f.termination.axResult = -25204; }, 'termination-successful-root-close-required'],
+  ['consent action cannot use termination', f => {
+    const consent = fixture(); f.action = consent.action; f.before = consent.before; f.immediate = consent.immediate;
+  }, 'termination-successful-root-close-required'],
+  ['legacy app cannot use Root termination', f => {
+    for (const p of [f.owner.process, f.before.process, f.immediate.process]) p.bundleIdentifier = 'com.creatorworks.projectsetup';
+  }, 'termination-successful-root-close-required'],
+  ['pre-action PID reuse', f => { f.termination.beforeKernel.startSeconds++; }, 'expected-kernel-identity-drift'],
+  ['pre-action foreign PID', f => { f.termination.beforeKernel.pid++; }, 'expected-kernel-identity-drift'],
+  ['pre-action foreign uid', f => { f.termination.beforeKernel.uid++; }, 'expected-kernel-identity-drift'],
+  ['pre-action foreign real uid', f => { f.termination.beforeKernel.realUID++; }, 'expected-kernel-identity-drift'],
+  ['pre-action partial kernel structure', f => { f.termination.beforeKernel.bytes--; }, 'expected-kernel-unavailable'],
+  ['first PID reuse', f => {
+    f.termination.firstKernel = { ...f.termination.beforeKernel, startMicroseconds: f.owner.process.startMicroseconds + 1 };
+  }, 'expected-kernel-identity-drift'],
+  ['last PID reuse', f => {
+    f.termination.lastKernel = { ...f.termination.beforeKernel, startSeconds: f.owner.process.startSeconds + 1 };
+  }, 'expected-kernel-identity-drift'],
+  ['first process still present', f => { f.termination.firstKernel = { ...f.termination.beforeKernel }; }, 'termination-kernel-not-missing'],
+  ['last process still present', f => { f.termination.lastKernel = { ...f.termination.beforeKernel }; }, 'termination-kernel-not-missing'],
+  ['first missing errno unavailable', f => { f.termination.firstKernel.error = 0; }, 'expected-kernel-unavailable'],
+  ['last kernel permission failure', f => { f.termination.lastKernel.error = 1; }, 'expected-kernel-unavailable'],
+  ['partial kernel with ESRCH', f => { f.termination.firstKernel.bytes = 1; }, 'expected-kernel-unavailable'],
+  ['negative kernel bytes', f => { f.termination.lastKernel.bytes = -1; }, 'expected-kernel-unavailable'],
+  ['unverified Root path', f => { f.termination.rootPathVerified = false; }, 'termination-image-bindings-unverified'],
+  ['changed executable or InfoPlist', f => { f.termination.imageBindingsVerified = false; }, 'termination-image-bindings-unverified'],
+  ['CG unavailable or held window remains', f => { f.termination.windowMissingVerified = false; }, 'termination-window-not-missing'],
+  ['forged live after identity', f => { f.after = fixture().after; }, 'termination-must-not-forge-after'],
+  ['pre-action native dialog still blocks close', f => { f.immediate.hasDialog = true; }, 'normal-close-unverified-or-dialog-present'],
+  ['pre-action foreign close button', f => { f.immediate.controls[0].pid++; }, 'control-unready-or-foreign'],
+  ...['foreign-ax-element', 'accessibility-denied', 'process-identity-drift', 'expected-kernel-identity-drift',
+    'process-start-drift', 'image-open-failed', 'executable-hash-mismatch', 'window-identity-drift', 'cg-window-inventory-unavailable']
+    .map(reason => [`unrelated ${reason} is not termination`, f => { f.termination.liveInspectionFailure = reason; }, 'termination-transition-unverified']),
+];
+
+for (const [name, mutate, error] of terminationCases) {
+  test(`Swift termination fixture: ${name}`, { skip: !nativeMac }, () => {
+    const value = terminationFixture(); mutate(value);
+    const result = spawnSync(fixtureBinary, [], { input: JSON.stringify(value), encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+    assert.equal(result.status, error ? 1 : 0, result.stderr || result.stdout);
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(receipt.nativeActionsAvailable, false); assert.equal(receipt.nativeGuiAccepted, false); assert.equal(receipt.releaseReady, false);
+    assert.equal('after' in receipt, false); assert.equal('process' in receipt, false);
+    if (error) {
+      assert.equal(receipt.error, error); assert.notEqual(receipt.postTerminationVerified, true);
+    } else {
+      assert.equal(receipt.closeOutcome, 'native-termination'); assert.equal(receipt.postIdentityVerified, false);
+      assert.equal(receipt.postTerminationVerified, true);
+      assert.deepEqual(receipt.termination, { expectedProcess: value.owner.process, expectedWindow: value.owner.window,
+        kernelMissingVerified: true, windowMissingVerified: true, imageBindingsVerified: true,
+        firstKernelBytes: 0, firstKernelErrno: 3, lastKernelBytes: 0, lastKernelErrno: 3 });
+    }
   });
 }
 

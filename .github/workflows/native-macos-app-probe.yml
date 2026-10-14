@@ -1,4 +1,4 @@
-name: Owned Mac Root surface capture with precise AX refusals (not acceptance)
+name: Owned Mac Root capture and distinct normal termination (not acceptance)
 on:
   push:
     branches: [validation/mac-root-probe-014]

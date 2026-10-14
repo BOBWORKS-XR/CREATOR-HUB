@@ -155,6 +155,79 @@ func validateAction(_ owner: Owner, _ before: Observation, _ immediate: Observat
     return second
 }
 
+struct KernelObservation: Codable {
+    let bytes: Int32
+    let error: Int32
+    let pid: UInt32
+    let uid: UInt32
+    let realUID: UInt32
+    let startSeconds: UInt64
+    let startMicroseconds: UInt64
+}
+
+func expectedKernelPresent(_ sample: KernelObservation, _ expected: ProcessIdentity,
+                           bytes: Int32, missingErrno: Int32) throws -> Bool {
+    guard expected.pid > 0, expected.startSeconds > 0, expected.startMicroseconds < 1000000,
+          bytes > 0, missingErrno > 0 else { throw Refusal("expected-kernel-invalid") }
+    if sample.bytes == 0 && sample.error == missingErrno { return false }
+    guard sample.bytes == bytes, sample.error == 0 else { throw Refusal("expected-kernel-unavailable") }
+    guard sample.pid == UInt32(expected.pid), sample.uid == expected.image.uid,
+          sample.realUID == expected.image.uid, sample.startSeconds == expected.startSeconds,
+          sample.startMicroseconds == expected.startMicroseconds else { throw Refusal("expected-kernel-identity-drift") }
+    return true
+}
+
+func closeTerminationTransition(_ reason: String?) -> Bool {
+    guard let reason = reason else { return true }
+    return ["expected-process-absent", "native-app-not-ready", "native-bundle-id-unverified",
+            "native-bundle-path-unverified", "native-executable-path-unverified"].contains(reason)
+}
+
+struct TerminationInputs: Codable {
+    let actionAttempted: Bool
+    let axResult: Int32
+    let beforeKernel: KernelObservation
+    let firstKernel: KernelObservation
+    let lastKernel: KernelObservation
+    let liveInspectionFailure: String?
+    let rootPathVerified: Bool
+    let imageBindingsVerified: Bool
+    let windowMissingVerified: Bool
+}
+
+struct NativeTermination: Codable {
+    let expectedProcess: ProcessIdentity
+    let expectedWindow: WindowIdentity
+    let kernelMissingVerified: Bool
+    let windowMissingVerified: Bool
+    let imageBindingsVerified: Bool
+    let firstKernelBytes: Int32
+    let firstKernelErrno: Int32
+    let lastKernelBytes: Int32
+    let lastKernelErrno: Int32
+}
+
+func validateNativeTermination(_ owner: Owner, _ before: Observation, _ immediate: Observation,
+                               _ action: Action, _ input: TerminationInputs, bytes: Int32, missingErrno: Int32) throws -> NativeTermination {
+    guard action == .closeWindow, input.actionAttempted, input.axResult == 0,
+          owner.process.bundleIdentifier == "com.creatorworks.hub" else { throw Refusal("termination-successful-root-close-required") }
+    _ = try validateAction(owner, before, immediate, action)
+    guard try expectedKernelPresent(input.beforeKernel, owner.process, bytes: bytes, missingErrno: missingErrno) else {
+        throw Refusal("termination-process-missing-before-action")
+    }
+    guard closeTerminationTransition(input.liveInspectionFailure) else { throw Refusal("termination-transition-unverified") }
+    guard try !expectedKernelPresent(input.firstKernel, owner.process, bytes: bytes, missingErrno: missingErrno),
+          try !expectedKernelPresent(input.lastKernel, owner.process, bytes: bytes, missingErrno: missingErrno) else {
+        throw Refusal("termination-kernel-not-missing")
+    }
+    guard input.rootPathVerified, input.imageBindingsVerified else { throw Refusal("termination-image-bindings-unverified") }
+    guard input.windowMissingVerified else { throw Refusal("termination-window-not-missing") }
+    return NativeTermination(expectedProcess: owner.process, expectedWindow: owner.window, kernelMissingVerified: true,
+                             windowMissingVerified: true, imageBindingsVerified: true,
+                             firstKernelBytes: input.firstKernel.bytes, firstKernelErrno: input.firstKernel.error,
+                             lastKernelBytes: input.lastKernel.bytes, lastKernelErrno: input.lastKernel.error)
+}
+
 func emit(_ value: Any) {
     do {
         var receipt = value as? [String: Any] ?? ["error": "evidence-serialization-failed"]
@@ -175,16 +248,26 @@ struct Fixture: Decodable {
     let owner: Owner
     let before: Observation
     let immediate: Observation
-    let after: Observation
+    let after: Observation?
     let action: Action
+    let termination: TerminationInputs?
 }
 do {
     let data = try FileHandle.standardInput.read(upToCount: 65537) ?? Data()
     guard data.count <= 65536 else { throw Refusal("fixture-too-large") }
     let fixture = try JSONDecoder().decode(Fixture.self, from: data)
     _ = try validateAction(fixture.owner, fixture.before, fixture.immediate, fixture.action)
-    try validateIdentity(fixture.owner, fixture.after, allowGone: true)
-    emit(["fixtureAccepted": true, "nativeActionsAvailable": false])
+    if let input = fixture.termination {
+        guard fixture.after == nil else { throw Refusal("termination-must-not-forge-after") }
+        let termination = try validateNativeTermination(fixture.owner, fixture.before, fixture.immediate, fixture.action, input,
+                                                        bytes: 136, missingErrno: 3)
+        emit(["fixtureAccepted": true, "nativeActionsAvailable": false, "closeOutcome": "native-termination",
+              "postIdentityVerified": false, "postTerminationVerified": true, "termination": try object(termination)])
+    } else {
+        guard let after = fixture.after else { throw Refusal("fixture-after-required") }
+        try validateIdentity(fixture.owner, after, allowGone: true)
+        emit(["fixtureAccepted": true, "nativeActionsAvailable": false])
+    }
 } catch { emit(["error": String(describing: error), "nativeActionsAvailable": false]); exit(1) }
 #elseif os(macOS)
 import AppKit
@@ -269,13 +352,31 @@ func image(_ path: String, limit: UInt64 = maxImageBytes) throws -> ImageIdentit
                          modifiedNanoseconds: Int64(before.st_mtimespec.tv_nsec), uid: before.st_uid)
 }
 
-func process(_ pid: Int32, appPath: String, executable: String, expectedHash: String, bundle: String) throws -> ProcessIdentity {
+func kernelObservation(_ pid: Int32) -> KernelObservation {
+    var info = proc_bsdinfo()
+    errno = 0
+    let bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)), code = errno
+    return KernelObservation(bytes: bytes, error: code, pid: info.pbi_pid, uid: info.pbi_uid, realUID: info.pbi_ruid,
+                             startSeconds: info.pbi_start_tvsec, startMicroseconds: info.pbi_start_tvusec)
+}
+
+func process(_ pid: Int32, appPath: String, executable: String, expectedHash: String, bundle: String,
+             expectedKernel: ProcessIdentity? = nil) throws -> ProcessIdentity {
     try admission(); try trustedAX(); try allowedApp(appPath, executable, bundle)
     guard pid > 0, pid != getpid(), expectedHash.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
         throw Refusal("invalid-process-request")
     }
     var info = proc_bsdinfo()
-    guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) == Int32(MemoryLayout<proc_bsdinfo>.size),
+    errno = 0
+    let kernelBytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)), kernelErrno = errno
+    if let expected = expectedKernel {
+        let sample = KernelObservation(bytes: kernelBytes, error: kernelErrno, pid: info.pbi_pid, uid: info.pbi_uid,
+                                       realUID: info.pbi_ruid, startSeconds: info.pbi_start_tvsec, startMicroseconds: info.pbi_start_tvusec)
+        guard try expectedKernelPresent(sample, expected, bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH) else {
+            throw Refusal("expected-process-absent")
+        }
+    }
+    guard kernelBytes == Int32(MemoryLayout<proc_bsdinfo>.size),
           info.pbi_pid == UInt32(pid), info.pbi_uid == getuid(), info.pbi_ruid == getuid(),
           info.pbi_start_tvsec > 0, info.pbi_start_tvusec < 1000000 else {
         throw Refusal("process-absent-or-foreign")
@@ -296,6 +397,7 @@ func process(_ pid: Int32, appPath: String, executable: String, expectedHash: St
     var rechecked = proc_bsdinfo()
     guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &rechecked, Int32(MemoryLayout<proc_bsdinfo>.size)) == Int32(MemoryLayout<proc_bsdinfo>.size),
           rechecked.pbi_pid == info.pbi_pid, rechecked.pbi_uid == info.pbi_uid,
+          rechecked.pbi_ruid == info.pbi_ruid,
           rechecked.pbi_start_tvsec == info.pbi_start_tvsec,
           rechecked.pbi_start_tvusec == info.pbi_start_tvusec else { throw Refusal("process-start-drift") }
     return ProcessIdentity(pid: pid, startSeconds: info.pbi_start_tvsec, startMicroseconds: info.pbi_start_tvusec,
@@ -305,7 +407,7 @@ func process(_ pid: Int32, appPath: String, executable: String, expectedHash: St
 
 func process(_ expected: ProcessIdentity) throws -> ProcessIdentity {
     try process(expected.pid, appPath: expected.bundlePath, executable: expected.executablePath,
-                expectedHash: expected.image.sha256, bundle: expected.bundleIdentifier)
+                expectedHash: expected.image.sha256, bundle: expected.bundleIdentifier, expectedKernel: expected)
 }
 
 func cgWindows(_ pid: Int32, id: UInt32? = nil) throws -> [WindowIdentity] {
@@ -543,6 +645,60 @@ func observe(_ owner: Owner, controls: Bool = true, allowGone: Bool = false) thr
                                                accessibilityTrusted: true, active: active, truncated: false, hasDialog: hasDialog, controls: found), elements: native, axWindow: axWindow)
 }
 
+func nativeTermination(_ owner: Owner, _ before: Observation, _ immediate: Observation, _ beforeKernel: KernelObservation,
+                       _ firstKernel: KernelObservation, _ liveFailure: String?, _ result: AXError) throws -> NativeTermination {
+    try admission(); try trustedAX()
+    guard result == .success, owner.process.bundleIdentifier == "com.creatorworks.hub", closeTerminationTransition(liveFailure),
+          try !expectedKernelPresent(firstKernel, owner.process, bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH) else {
+        throw Refusal("termination-transition-unverified")
+    }
+    try allowedApp(owner.process.bundlePath, owner.process.executablePath, owner.process.bundleIdentifier)
+    guard try image(owner.process.executablePath) == owner.process.image,
+          try image(owner.process.bundlePath + "/Contents/Info.plist", limit: 65536) == owner.process.infoPlist,
+          Bundle(path: owner.process.bundlePath)?.bundleIdentifier == owner.process.bundleIdentifier else {
+        throw Refusal("termination-image-bindings-unverified")
+    }
+    // Query the exact ID without PID/visibility filters: a hidden, lingering or
+    // reused CG window must not be mistaken for absence.
+    guard let windows = CGWindowListCopyWindowInfo([.optionIncludingWindow], owner.window.id) as? [[String: Any]],
+          windows.count <= 2048 else { throw Refusal("termination-cg-inventory-unavailable") }
+    guard windows.isEmpty else { throw Refusal("termination-window-not-missing") }
+    let lastKernel = kernelObservation(owner.process.pid)
+    return try validateNativeTermination(owner, before, immediate, .closeWindow,
+        TerminationInputs(actionAttempted: true, axResult: result.rawValue, beforeKernel: beforeKernel, firstKernel: firstKernel,
+                          lastKernel: lastKernel, liveInspectionFailure: liveFailure, rootPathVerified: true,
+                          imageBindingsVerified: true, windowMissingVerified: true),
+        bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH)
+}
+
+enum ClosePostcondition {
+    case live(NativeObservation)
+    case terminated(NativeTermination)
+}
+
+func observeSuccessfulClose(_ owner: Owner, _ before: Observation, _ immediate: Observation,
+                            _ beforeKernel: KernelObservation, _ result: AXError) throws -> ClosePostcondition {
+    guard result == .success else { throw Refusal("ax-action-refused") }
+    let firstKernel = kernelObservation(owner.process.pid)
+    if try !expectedKernelPresent(firstKernel, owner.process, bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH) {
+        return .terminated(try nativeTermination(owner, before, immediate, beforeKernel, firstKernel, nil, result))
+    }
+    do {
+        let after = try observe(owner, controls: false, allowGone: true)
+        try validateIdentity(owner, after.value, allowGone: true)
+        return .live(after)
+    } catch let refusal as Refusal {
+        // Only live process/AppKit disappearance can enter this transition.
+        // Kernel drift, AX/CG failures, permissions and image errors stay refused.
+        guard closeTerminationTransition(refusal.description) else { throw refusal }
+        let missing = kernelObservation(owner.process.pid)
+        guard try !expectedKernelPresent(missing, owner.process, bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH) else {
+            throw refusal
+        }
+        return .terminated(try nativeTermination(owner, before, immediate, beforeKernel, missing, refusal.description, result))
+    }
+}
+
 func ownerFile(_ path: String) throws -> Owner {
     _ = try canonical(path)
     guard let temporary = ProcessInfo.processInfo.environment["RUNNER_TEMP"],
@@ -630,14 +786,41 @@ func nativeMain() {
             throw Refusal("control-state-drift")
         }
         try admission(); try trustedAX()
+        var closeKernel: KernelObservation?
+        if action == .closeWindow {
+            let sample = kernelObservation(owner.process.pid)
+            guard try expectedKernelPresent(sample, owner.process, bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH) else {
+                throw Refusal("termination-process-missing-before-action")
+            }
+            closeKernel = sample
+        }
         actionStarted = ProcessInfo.processInfo.systemUptime
         if action == .closeWindow { closeOwner = owner }
         attempted = true
         let result = AXUIElementPerformAction(target, kAXPressAction as CFString)
         axResult = result.rawValue
         actionReturned = ProcessInfo.processInfo.systemUptime
-        // Capture real identity immediately after the action even if AXPress refused.
-        let after = try observe(owner, controls: false, allowGone: true)
+        let after: NativeObservation
+        if action == .closeWindow, result == .success, owner.process.bundleIdentifier == "com.creatorworks.hub",
+           let beforeKernel = closeKernel {
+            let outcome = try observeSuccessfulClose(owner, before.value, immediate.value, beforeKernel, result)
+            switch outcome {
+            case .terminated(let termination):
+                emit(["action": action.rawValue, "axAction": "AXPress", "axResult": result.rawValue,
+                      "before": try object(immediate.value), "actionAttempted": true, "closeOutcome": "native-termination",
+                      "postIdentityVerified": false, "postTerminationVerified": true, "termination": try object(termination),
+                      "actionStartedUptime": actionStarted!, "actionReturnedUptime": actionReturned!,
+                      "postInspectionCompletedUptime": ProcessInfo.processInfo.systemUptime,
+                      "forceKillPerformed": false, "permissionRequestsPerformed": false,
+                      "syntheticTestOnly": true, "customerConsent": false])
+                return
+            case .live(let observed):
+                after = observed
+            }
+        } else {
+            // Preserve live inspection even when another action/AXPress refused.
+            after = try observe(owner, controls: false, allowGone: true)
+        }
         afterEvidence = try object(after.value)
         try validateIdentity(owner, after.value, allowGone: true)
         guard result == .success else { throw Refusal("ax-action-refused") }

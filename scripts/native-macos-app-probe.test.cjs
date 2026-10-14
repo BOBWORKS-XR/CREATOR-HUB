@@ -151,6 +151,46 @@ test('ARM refusal contract keeps close acceptance false while reporting only the
   }
 });
 
+test('native termination is distinct from live process identity and requires exact owned exit and all postconditions', () => {
+  const { owner } = ownership();
+  const before = { process: owner.process, window: owner.window, accessibilityTrusted: true, active: true,
+    truncated: false, hasDialog: false, controls: [{ path: 'close-button', role: 'AXButton', pid: owner.process.pid,
+      windowID: owner.window.id, enabled: true, hidden: false, showing: true, pressSupported: true }] };
+  const close = { action: 'close-window', axAction: 'AXPress', actionAttempted: true, axResult: 0,
+    closeOutcome: 'native-termination', postIdentityVerified: false, postTerminationVerified: true,
+    forceKillPerformed: false, permissionRequestsPerformed: false, before,
+    actionStartedUptime: 100, actionReturnedUptime: 101, postInspectionCompletedUptime: 102,
+    termination: { expectedProcess: owner.process, expectedWindow: owner.window, kernelMissingVerified: true,
+      windowMissingVerified: true, imageBindingsVerified: true, firstKernelBytes: 0, firstKernelErrno: 3,
+      lastKernelBytes: 0, lastKernelErrno: 3 } };
+  const exit = { pid: owner.process.pid, code: 0, signal: null };
+  assert.equal(probe.acceptedExit(close, exit, owner), true);
+  const changes = [
+    c => c.postIdentityVerified = true, c => c.postTerminationVerified = false, c => c.closeOutcome = 'unknown',
+    c => delete c.termination, c => c.before.controls = {},
+    c => c.after = before, c => c.axResult = -25204, c => c.actionAttempted = false,
+    c => c.forceKillPerformed = true, c => c.permissionRequestsPerformed = true,
+    c => c.error = 'native-bundle-id-unverified', c => c.postProcessStatus = { state: 'absent' },
+    c => c.before.hasDialog = true, c => c.before.controls[0].pid++, c => c.before.controls[0].enabled = false,
+    c => c.before.controls.push(structuredClone(c.before.controls[0])),
+    c => c.termination.expectedProcess.startSeconds++, c => c.termination.expectedWindow.id++,
+    c => c.termination.kernelMissingVerified = false, c => c.termination.windowMissingVerified = false,
+    c => c.termination.imageBindingsVerified = false, c => c.termination.firstKernelBytes = 136,
+    c => c.termination.firstKernelErrno = 0, c => c.termination.lastKernelBytes = 136,
+    c => c.termination.lastKernelErrno = 1, c => c.termination.extra = true,
+    c => c.postInspectionCompletedUptime = 99,
+  ];
+  for (const change of changes) {
+    const changed = structuredClone(close); change(changed);
+    assert.equal(probe.acceptedExit(changed, exit, owner), false);
+  }
+  for (const changed of [{ ...exit, pid: exit.pid + 1 }, { ...exit, code: 1 }, { ...exit, signal: 'SIGTERM' }, null]) {
+    assert.equal(probe.acceptedExit(close, changed, owner), false);
+  }
+  assert.equal(probe.closeAssessment(close, exit, owner).helperPostIdentityVerified, false);
+  assert.equal(probe.closeAssessment(close, exit, owner).helperPostTerminationVerified, true);
+});
+
 test('successful-shaped close output cannot accept a reused PID, unknown post-identity or a different Root', () => {
   const { owner } = ownership(), exit = { pid: owner.process.pid, code: 0, signal: null };
   const close = { action: 'close-window', axAction: 'AXPress', actionAttempted: true, postIdentityVerified: true,
@@ -355,10 +395,10 @@ test('remote metadata keeps actual PID, finite traversal/time/message limits and
   assert.doesNotMatch(probe.surfaceSource, /AXUIElementPerformAction|AXUIElementSetAttributeValue|AXUIElementCopyActionNames|kAXPressAction|kAXCloseButtonAttribute|kAXValueAttribute|CreateSystemWide|AXIsProcessTrustedWithOptions|CGRequestScreenCaptureAccess|NSRunningApplication/);
 });
 
-test('unchanged action helper still refuses foreign nodes and enforces target Root PID before its sole action', () => {
+test('reviewed close-termination helper still refuses foreign nodes before its sole action', () => {
   const helper = fs.readFileSync(path.join(__dirname, 'native-macos-window.swift'));
-  // Source hash retained in the actual Intel evidence; no action-helper edits.
-  assert.equal(crypto.createHash('sha256').update(helper).digest('hex'), 'f0adc5eaafee9577d6629391807ad875738fa15cceb869b10f575a16de3a1258');
+  // Reviewed post-close-only change; native traversal/consent authority is unchanged.
+  assert.equal(crypto.createHash('sha256').update(helper).digest('hex'), '3f60dc5295a02537b19d02589c0e173522ff534c66ae127a273b404411a66008');
   const swift = helper.toString('utf8');
   assert.match(swift, /AXUIElementGetPid\(item, &pid\) == \.success, pid == expected else \{ throw Refusal\("foreign-ax-element"\)/);
   assert.match(swift, /do \{ try axPID\(item, identity.pid\) \}[\s\S]*?catch \{ throw Refusal\("foreign-ax-element"/);

@@ -248,6 +248,18 @@ It keeps the original error, deadlines, action helper and false acceptance flags
 There is no fallback read, retry, permission change or action-authority relaxation.
 Local JS/guard fixtures pass; native compilation/runtime remains pending.
 
+The ARM close evidence in run 38563802054 records one Root-owned close AXPress,
+result zero, then caller-owned PID 1948 exiting zero without a signal. AppKit
+metadata inspection was rejected during termination; kernel absence afterward
+was recorded as diagnostic only. The helper now has a separate
+`native-termination` postcondition. It keeps `postIdentityVerified=false`, never
+fabricates a live `after.process`, and requires matching images/path, exact
+unfiltered CG-window absence and two definitive kernel absences. Caller acceptance
+also requires its original child to exit zero without a signal. Old arbitrary
+errors/PID disappearance still cannot pass. Whole-tree/consent action authority
+is unchanged; Intel remote-child close selection remains refused. Native runtime
+validation of this changed helper remains pending.
+
 ```sh
 node --test scripts/native-macos-app-probe.test.cjs
 ```
