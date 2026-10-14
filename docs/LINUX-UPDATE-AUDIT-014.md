@@ -36,9 +36,13 @@ The actual Root source is compiled independently through
 `native/linux-update-check`, avoiding a full GUI build for kernel/command tests.
 Portable tests and native-target strict Clippy pass, three integration/source
 regressions pass, and Windows Root tests pass (358, with 13 opt-in tests ignored).
-Real Linux execution of this Rust source, native authentication cancellation and
-the exact signed Hub install/restart remain pending; the Python mechanism does
-not substitute for those gates. No user-PC app or settings were changed.
+[Run 38654369500](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38654369500)
+at `76ed726` then executes all four tests of this actual Rust source on Linux,
+passes strict native Clippy and three source-integration regressions, and repeats
+the real Python `pkexec`/`dpkg` fixture successfully. Native authentication Cancel,
+the packaged Rust installation entry point and exact signed Hub install/restart
+remain pending; this composition does not substitute for those gates. No user-PC
+app or settings were changed.
 
 ## Original Dependency Audit
 
