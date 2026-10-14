@@ -13,7 +13,7 @@ jobs:
   retention:
     if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/legacy-retention-014'
     runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -28,13 +28,31 @@ jobs:
       - name: Pure guards, canonical filesystem and named registry record regressions only
         shell: pwsh
         run: node --test scripts/native-legacy-uninstall-retention.test.cjs
-      - name: Install exact published baseline, seed synthetic stores, uninstall and prove retention
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Compile exact Root production adapter and pure regressions, without packaging
+        id: adapter
+        shell: pwsh
+        run: |
+          $messages = & cargo test --manifest-path src-tauri/Cargo.toml --locked --no-run --message-format=json
+          if ($LASTEXITCODE -ne 0) { throw 'Root adapter compilation failed before any installation.' }
+          $bins = @($messages | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object {
+            $_.reason -ceq 'compiler-artifact' -and $_.target.name -ceq 'creator-hub' -and $_.profile.test -eq $true -and $_.executable
+          })
+          if ($bins.Count -ne 1) { throw 'Expected one exact freshly compiled Root test executable.' }
+          $bin = [string]$bins[0].executable
+          & $bin legacy_removal_windows::tests:: --skip native_windows_pinned_removal
+          if ($LASTEXITCODE -ne 0) { throw 'Root adapter pure regressions failed.' }
+          "executable=$bin" >> $env:GITHUB_OUTPUT
+      - name: Install exact published baseline, seed synthetic stores, use Root removal adapter and prove retention
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           CREATOR_LEGACY_RETENTION_EXPERIMENT: '1'
         run: |
-          & ./scripts/native-legacy-uninstall-retention.ps1 -Product '${{ matrix.product }}' -OutputDirectory (Join-Path $env:RUNNER_TEMP 'legacy-retention-${{ matrix.product }}')
+          & ./scripts/native-legacy-uninstall-retention.ps1 -Product '${{ matrix.product }}' -OutputDirectory (Join-Path $env:RUNNER_TEMP 'legacy-retention-${{ matrix.product }}') -AdapterTestExecutable '${{ steps.adapter.outputs.executable }}'
       - name: Preserve official bytes, generated uninstaller provenance, synthetic before-images and failures
         if: always()
         uses: actions/upload-artifact@v4

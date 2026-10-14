@@ -35,6 +35,110 @@ fn after() -> Vec<u8> {
 }
 
 #[test]
+fn reviewed_server_transition_changes_only_path_and_preserves_identical_stores() {
+    let fixture = Fixture::new();
+    let original = fixture.legacy();
+    fs::write(&fixture.paths.current, &original).unwrap();
+    let saved = inventory(&fixture.paths).unwrap();
+    let server = fixture.root.path().join("verified/server.mjs");
+    let writes = server_writes(&fixture.paths, &saved, &server, |path| {
+        Ok(path == Path::new("/old/server.mjs"))
+    })
+    .unwrap();
+    assert_eq!(writes.len(), 2);
+    let mut expected: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    expected["mcp_server_path"] = serde_json::json!(server);
+    for write in &writes {
+        assert_eq!(write.before, original);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&write.after).unwrap(),
+            expected
+        );
+    }
+    preserve(&fixture.paths, &saved).unwrap();
+    let transaction = recovery::Transaction::prepare(
+        &fixture.paths.journal,
+        writes
+            .iter()
+            .map(|write| {
+                recovery::ReviewedWrite::new(
+                    "MCP retained server path",
+                    &write.path,
+                    &write.before,
+                    &write.after,
+                )
+            })
+            .collect(),
+    )
+    .unwrap();
+    assert!(transaction.resume(|_| true).unwrap().completed);
+    assert_eq!(fixture.inspect().status, Status::Identical);
+    assert_eq!(fixture.inspect().recovery.len(), 1);
+    assert_eq!(
+        fs::read(backup_path(&fixture.paths.current, &original)).unwrap(),
+        original
+    );
+    assert_eq!(
+        fs::read(backup_path(&fixture.paths.legacy, &original)).unwrap(),
+        original
+    );
+    let saved = inventory(&fixture.paths).unwrap();
+    assert!(server_writes(&fixture.paths, &saved, &server, |_| Err(
+        "must not inspect old server".into()
+    ))
+    .unwrap()
+    .is_empty());
+}
+
+#[test]
+fn custom_conflicting_or_duplicate_server_settings_are_not_rewritten() {
+    let fixture = Fixture::new();
+    let original = fixture.legacy();
+    let saved = inventory(&fixture.paths).unwrap();
+    let server = fixture.root.path().join("verified/server.mjs");
+    assert!(server_writes(&fixture.paths, &saved, &server, |_| Ok(false)).is_err());
+    fs::write(&fixture.paths.current, after()).unwrap();
+    assert!(server_writes(
+        &fixture.paths,
+        &inventory(&fixture.paths).unwrap(),
+        &server,
+        |_| Ok(true)
+    )
+    .is_err());
+    fs::remove_file(&fixture.paths.current).unwrap();
+    fs::write(
+        &fixture.paths.legacy,
+        br#"{"channels":[],"auto_start":false,"mcp_server_path":"one","mcp_server_path":"two"}"#,
+    )
+    .unwrap();
+    assert!(inventory(&fixture.paths).is_err());
+    fs::write(&fixture.paths.legacy, &original).unwrap();
+    assert_eq!(fs::read(&fixture.paths.legacy).unwrap(), original);
+    assert!(!fixture.paths.journal.exists());
+}
+
+#[test]
+fn missing_server_field_can_be_reviewed_without_inventing_other_defaults() {
+    let fixture = Fixture::new();
+    fs::write(&fixture.paths.current, after()).unwrap();
+    let server = fixture.root.path().join("verified/server.mjs");
+    let writes = server_writes(
+        &fixture.paths,
+        &inventory(&fixture.paths).unwrap(),
+        &server,
+        |_| Err("unused".into()),
+    )
+    .unwrap();
+    assert_eq!(writes.len(), 1);
+    let mut expected: serde_json::Value = serde_json::from_slice(&after()).unwrap();
+    expected["mcp_server_path"] = serde_json::json!(server);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&writes[0].after).unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn existing_shared_paths_and_read_precedence_are_not_migrated() {
     let fixture = Fixture::new();
     assert_eq!(fixture.inspect().status, Status::None);

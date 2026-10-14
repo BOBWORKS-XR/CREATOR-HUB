@@ -128,10 +128,10 @@ fn transactions(paths: &Paths) -> Result<Vec<recovery::Transaction>, String> {
         if result.len() >= 32 {
             return Err("Too many product settings journals; inspect manually.".into());
         }
-        // A journal cannot select its own destination: the current store path is independently derived.
-        result.push(recovery::Transaction::open(
+        // A journal cannot select destinations: both established stores are independently derived.
+        result.push(recovery::Transaction::open_allowlisted(
             &path,
-            std::slice::from_ref(&paths.current),
+            &[paths.current.clone(), paths.legacy.clone()],
         )?);
     }
     Ok(result)
@@ -175,6 +175,178 @@ fn inspect_paths(paths: &Paths) -> Result<Report, String> {
 }
 pub(super) fn inspect(base: &Path) -> Result<Report, String> {
     inspect_paths(&Paths::new(base)?)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ServerTransition {
+    pub changed: bool,
+    pub server: PathBuf,
+}
+
+struct ServerWrite {
+    path: PathBuf,
+    before: Vec<u8>,
+    after: Vec<u8>,
+}
+
+fn server_writes(
+    paths: &Paths,
+    saved: &Snapshot,
+    server: &Path,
+    recognized: impl Fn(&Path) -> Result<bool, String>,
+) -> Result<Vec<ServerWrite>, String> {
+    if matches!((&saved.current, &saved.legacy), (Some(a), Some(b)) if a != b) {
+        return Err("MCP settings conflict; the server path and old apps were kept.".into());
+    }
+    let target = server
+        .to_str()
+        .ok_or("The verified server path cannot be represented.")?;
+    let mut writes = Vec::new();
+    for (path, bytes) in [
+        (&paths.current, &saved.current),
+        (&paths.legacy, &saved.legacy),
+    ] {
+        let Some(before) = bytes else { continue };
+        let mut value = crate::jsonc::parse_unambiguous(
+            std::str::from_utf8(before).map_err(|_| "Invalid MCP settings; original kept.")?,
+        )?;
+        let object = value
+            .as_object_mut()
+            .ok_or("Invalid MCP settings; original kept.")?;
+        let previous = match object.get("mcp_server_path") {
+            None => "",
+            Some(serde_json::Value::String(previous)) => previous.as_str(),
+            _ => return Err("Invalid saved MCP server path; original kept.".into()),
+        };
+        if previous == target {
+            continue;
+        }
+        if !previous.is_empty() && !recognized(Path::new(previous))? {
+            return Err(
+                "The saved MCP server is custom or unverified. Its path and old apps were kept."
+                    .into(),
+            );
+        }
+        object.insert(
+            "mcp_server_path".into(),
+            serde_json::Value::String(target.into()),
+        );
+        let after =
+            serde_json::to_vec_pretty(&value).map_err(|_| "Cannot stage the MCP server path.")?;
+        if after.len() > MAX_CONFIG {
+            return Err("MCP settings would exceed their size limit; original kept.".into());
+        }
+        writes.push(ServerWrite {
+            path: path.clone(),
+            before: before.clone(),
+            after,
+        });
+    }
+    Ok(writes)
+}
+
+fn official_previous_server(path: &Path) -> Result<bool, String> {
+    // This hash is the server from the byte-verified published 2.7.7 Windows
+    // installer. Other versions/platform payloads remain unverified, not guessed.
+    const SHA: &str = "8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149";
+    if !cfg!(windows) {
+        return Ok(false);
+    }
+    let expected = dirs::data_local_dir()
+        .ok_or("Local app data is unavailable.")?
+        .join("Creator Works MCP/server/creator-works-mcp.mjs");
+    storage::reject_links(path)?;
+    storage::reject_links(&expected)?;
+    if crate::normalized_existing_path(path.to_path_buf())
+        != crate::normalized_existing_path(expected)
+    {
+        return Ok(false);
+    }
+    let bytes = storage::read_bytes(path)?
+        .ok_or("The previous MCP server is missing; old apps were kept.")?;
+    Ok(bytes.len() == 1_221_209 && format!("{:x}", Sha256::digest(&bytes)) == SHA)
+}
+
+pub(super) fn native_review_server(app: &tauri::AppHandle) -> Result<ServerTransition, String> {
+    use tauri::Manager;
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    if !crate::settings_review_admission::enabled()
+        || app
+            .try_state::<crate::managed_client::ManagedClient>()
+            .is_none()
+    {
+        return Err(
+            "Server-path migration requires an admitted, signed managed MCP runtime.".into(),
+        );
+    }
+    let runtime = creator_hub_mcp_router::Store::installed()?.resolve()?;
+    if crate::normalized_existing_path(crate::default_mcp_server_path(app)?)
+        != crate::normalized_existing_path(runtime.server.clone())
+    {
+        return Err("The signed MCP runtime changed; no settings were written.".into());
+    }
+    let paths = Paths::new(&dirs::config_dir().ok_or("MCP config directory is unavailable.")?)?;
+    let report = inspect_paths(&paths)?;
+    if report
+        .recovery
+        .iter()
+        .any(|r| !r.completed && !r.historical_completed)
+    {
+        return Err(
+            "Review interrupted MCP settings changes before moving the server path.".into(),
+        );
+    }
+    let before = inventory(&paths)?;
+    let writes = server_writes(&paths, &before, &runtime.server, official_previous_server)?;
+    if writes.is_empty() {
+        return Ok(ServerTransition {
+            changed: false,
+            server: runtime.server,
+        });
+    }
+    let approved = app.dialog().message(format!(
+        "Move the saved MCP server path to Hub's verified retained runtime?\n\nNew server: {}\n\nOnly this path changes. Project selection, options and unknown settings are preserved. Exact local backups and recovery records are kept. Old apps and AI clients are not stopped or removed by this step.", runtime.server.display()
+    )).title("Keep MCP settings working in Hub").kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancelCustom("Move server path".into(), "Keep existing".into())).blocking_show();
+    if !approved {
+        return Err("Server-path migration was cancelled; settings and old apps were kept.".into());
+    }
+    if inventory(&paths)? != before {
+        return Err("MCP settings changed during review; nothing was overwritten.".into());
+    }
+    // Revalidate the exact old payload after the user has reviewed the change.
+    let _ = server_writes(&paths, &before, &runtime.server, official_previous_server)?;
+    preserve(&paths, &before)?;
+    let transaction = recovery::Transaction::prepare(
+        &paths.journal,
+        writes
+            .iter()
+            .map(|write| {
+                recovery::ReviewedWrite::new(
+                    "MCP retained server path",
+                    &write.path,
+                    &write.before,
+                    &write.after,
+                )
+            })
+            .collect(),
+    )?;
+    if !transaction.resume(|_| true)?.completed {
+        return Err("Server-path migration needs recovery review. Old apps were kept.".into());
+    }
+    for write in &writes {
+        if storage::read_bytes(&write.path)?.as_deref() != Some(write.after.as_slice()) {
+            return Err(
+                "MCP settings changed after publication; inspect the retained recovery records."
+                    .into(),
+            );
+        }
+    }
+    Ok(ServerTransition {
+        changed: true,
+        server: runtime.server,
+    })
 }
 
 // Only the owned form's load_config handler may renew this UI before-image.

@@ -1,6 +1,7 @@
 param(
     [ValidateSet('mcp', 'setup')][string]$Product = 'mcp',
-    [string]$OutputDirectory = ''
+    [string]$OutputDirectory = '',
+    [string]$AdapterTestExecutable = ''
 )
 
 function Require-Legacy($Condition, [string]$Message) {
@@ -252,6 +253,12 @@ function Invoke-LegacyRetention([string]$Id, [string]$Output) {
         $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.WindowStyle = 'Hidden'; $psi.WorkingDirectory = $Output
         $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.Environment.Clear()
         foreach ($entry in $nativeEnv.GetEnumerator()) { $psi.Environment[$entry.Key] = $entry.Value }
+        if ($Label -ceq 'run-root-pinned-removal-adapter') {
+            foreach ($name in @('GITHUB_ACTIONS', 'RUNNER_ENVIRONMENT', 'RUNNER_OS', 'RUNNER_ARCH', 'GITHUB_REPOSITORY', 'GITHUB_REF', 'CREATOR_LEGACY_RETENTION_EXPERIMENT')) {
+                $psi.Environment[$name] = [Environment]::GetEnvironmentVariable($name)
+            }
+            $psi.Environment['CREATOR_LEGACY_RETENTION_PRODUCT'] = $pin.id
+        }
         if ($GitHub) {
             $psi.Environment['GH_TOKEN'] = $env:GH_TOKEN; $psi.Environment['GH_CONFIG_DIR'] = $ghHome
             $psi.Environment['GH_HOST'] = 'github.com'; $psi.Environment['HOME'] = $ghHome
@@ -344,8 +351,19 @@ function Invoke-LegacyRetention([string]$Id, [string]$Output) {
         $report | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath (Join-Path $Output 'seeded-before-uninstall.json') -NoNewline
         Assert-LegacyRegistrations (Get-LegacyRegistrations $pin) $pin $installRoot
         Assert-LegacyResidual $rootIdentity (Get-LegacyRootIdentity $installRoot) $originalUninstaller (Get-LegacyFileProof $uninstaller 16777216)
-        # _?= must be last and unquoted, even with spaces; no shell/registry command execution.
-        $null = Tool $uninstaller @('/S', "_?=$installRoot") 'uninstall-exact-owned-baseline' 180000
+        if ($AdapterTestExecutable) {
+            $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
+            Assert-LegacyPath $AdapterTestExecutable $workspace
+            Require-Legacy ([IO.Path]::GetDirectoryName($AdapterTestExecutable) -ceq (Join-Path $workspace 'src-tauri\target\debug\deps') -and
+                [IO.Path]::GetFileName($AdapterTestExecutable) -cmatch '^creator_hub-[a-f0-9]{16}\.exe$') 'Exact freshly compiled Root unit-test executable required.'
+            $adapter = Get-LegacyFileProof $AdapterTestExecutable
+            $report.adapterTest = $adapter
+            $null = Tool $AdapterTestExecutable @('--exact', 'legacy_removal_windows::tests::native_windows_pinned_removal', '--ignored', '--nocapture') 'run-root-pinned-removal-adapter' 240000
+            Assert-LegacyRetained $adapter (Get-LegacyFileProof $AdapterTestExecutable)
+        } else {
+            # _?= must be last and unquoted, even with spaces; no shell/registry command execution.
+            $null = Tool $uninstaller @('/S', "_?=$installRoot") 'uninstall-exact-owned-baseline' 180000
+        }
         Require-Legacy (@(Get-LegacyRegistrations $pin).Count -eq 0) 'Legacy app registration survived uninstall.'
         Require-Legacy (-not (Test-Path -LiteralPath (Join-Path $installRoot $pin.executable))) 'Legacy executable survived uninstall.'
         foreach ($entry in $before | Where-Object { $_.type -ceq 'file' -and $_.name -cne 'uninstall.exe' }) {

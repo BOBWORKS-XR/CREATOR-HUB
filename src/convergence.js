@@ -56,6 +56,7 @@
             : 'Connection review is recorded. Cleanup verification is still pending.'
           : current?.message || 'Existing apps and settings are kept until native review succeeds.';
         const rows = [];
+        if (stage === 'connections-reviewed' && current?.message) rows.push(`Removal check: ${current.message}`);
         for (const item of current?.settings || []) rows.push(`Settings: ${item}`);
         for (const app of current?.legacyApps || []) rows.push(`Standalone app: ${app.name} - ${app.path}`);
         for (const item of current?.backups || []) rows.push(`Backup: ${item}`);

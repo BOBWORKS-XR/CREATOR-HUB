@@ -12,6 +12,7 @@ pub const COMMANDS: &[&str] = &[
     "save_config",
     "product_settings_status",
     "review_product_settings",
+    "review_convergence_server",
     "discover_unity_projects",
     "get_onboarding_status",
     "add_project",
@@ -68,6 +69,10 @@ fn encoded(value: impl serde::Serialize) -> Result<Value, String> {
 
 pub fn dispatch(app: &tauri::AppHandle, command: &str, value: Value) -> Result<Value, String> {
     match command {
+        "review_convergence_server" => {
+            args!(value, {});
+            encoded(product_settings::native_review_server(app)?)
+        }
         "product_settings_status" | "review_product_settings" => {
             args!(value, {});
             let base = dirs::config_dir().ok_or("Cannot locate MCP configuration directory.")?;
@@ -235,6 +240,7 @@ mod tests {
             "remove_codex_mcp_config",
             "set_project_feedback_settings",
             "review_product_settings",
+            "review_convergence_server",
         ] {
             assert!(needs_workflow(command), "{command}");
         }

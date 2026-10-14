@@ -40,6 +40,7 @@ const MCP_WRITABLE_COMMANDS: &[&str] = &[
     "save_config",
     "product_settings_status",
     "review_product_settings",
+    "review_convergence_server",
     "discover_unity_projects",
     "get_onboarding_status",
     "add_project",

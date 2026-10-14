@@ -244,7 +244,7 @@ test('unit fixture canonicalizes its parent with .NET without relaxing strict na
   `, { LEGACY_UNIT_PATH: alias });
 });
 
-test('PowerShell AST parses and native workflow stays scoped, build-free and failure-preserving', windowsOnly, () => {
+test('PowerShell AST parses and native workflow compiles only the exact test adapter, without packaging', windowsOnly, () => {
   assert.equal(powershell(String.raw`
     $tokens=$null;$errors=$null;[Management.Automation.Language.Parser]::ParseFile($env:LEGACY_UNIT_SCRIPT,[ref]$tokens,[ref]$errors) | Out-Null
     if($errors.Count) { throw ($errors | Out-String) };'parsed'
@@ -263,5 +263,8 @@ test('PowerShell AST parses and native workflow stays scoped, build-free and fai
   assert.match(workflow, /branches: \['validation\/legacy-retention-014'\]/);
   assert.match(workflow, /paths: \['\.github\/workflows\/native-legacy-uninstall-retention\.yml'\]/);
   assert.doesNotMatch(workflow, /pull_request/);
-  assert.doesNotMatch(workflow, /cargo|build:unified|assemble-unix|secrets\.|npm ci|permissions:\s+write/);
+  assert.match(workflow, /cargo test --manifest-path src-tauri\/Cargo\.toml --locked --no-run --message-format=json/);
+  assert.match(workflow, /legacy_removal_windows::tests:: --skip native_windows_pinned_removal/);
+  assert.match(source, /--exact', 'legacy_removal_windows::tests::native_windows_pinned_removal', '--ignored'/);
+  assert.doesNotMatch(workflow, /cargo (?:build|run)|--release|build:unified|assemble-unix|secrets\.|npm ci|permissions:\s+write/);
 });

@@ -31,6 +31,7 @@ tokio = { version = "1", features = ["macros", "time"] }
 tempfile = "3"
 flate2 = "=1.1.10"
 tar = "=0.4.46"
+toml_edit = "=0.20.2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
@@ -42,6 +43,3 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[dev-dependencies]
-toml_edit = "=0.20.2"

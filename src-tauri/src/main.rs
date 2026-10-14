@@ -5,6 +5,8 @@ mod catalog;
 mod community;
 mod community_project;
 mod convergence;
+#[allow(dead_code)]
+mod convergence_dependencies;
 #[cfg(all(target_os = "macos", test))]
 #[allow(dead_code)]
 #[path = "../../native/host_parent_macos.rs"]
@@ -16,9 +18,9 @@ mod hosted_restore;
 mod installation_identity;
 mod installer_preflight;
 mod launch;
-#[cfg(test)]
-#[path = "../../native/legacy-dependencies.rs"]
-mod legacy_dependencies;
+#[cfg(any(windows, test))]
+#[allow(dead_code)]
+mod legacy_removal_windows;
 #[cfg(any(target_os = "macos", test))]
 mod mac_update;
 mod manager;

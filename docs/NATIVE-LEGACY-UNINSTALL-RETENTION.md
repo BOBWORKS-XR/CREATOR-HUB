@@ -209,3 +209,19 @@ tested published Windows uninstallers' retention procedure. It does not prove
 Hub migration, live AI-client reconnection, safe removal of modified/custom
 installations, Mac/Linux cleanup or release readiness. Product/migration/release
 acceptance flags remain false. The user's installed applications were untouched.
+
+## Production Adapter Validation
+
+The next bounded workflow compiles Root's exact unit-test executable, without
+building or signing product packages, and uses its production Windows removal
+adapter against the same fresh public fixtures. It has a 25-minute disposable
+job limit. The ignored native case requires the exact GitHub-hosted Windows
+repository/branch/opt-in/product context before inspection. It is never an
+ordinary unit test or a local-user removal command.
+
+The adapter pins the complete observed installed file set, including the
+generated official uninstallers. It refuses modified/missing/extra files and
+custom registrations; it does not use an arbitrary registry command or force
+process exit. The outer harness independently compares all eight synthetic
+persistent stores and retains original errors. A successful adapter run would
+still be leaf retention acceptance, not full Hub migration or release readiness.
