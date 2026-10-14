@@ -1,4 +1,4 @@
-name: Owned Mac Root capture and exact final kernel classification (not acceptance)
+name: Owned Mac Root capture and finite native-dialog close scope (not acceptance)
 on:
   push:
     branches: [validation/mac-root-probe-014]
