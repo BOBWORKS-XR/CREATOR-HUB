@@ -110,7 +110,7 @@ test('retained pre-wrapper is the signed manifest and original preparation is se
 });
 test('changes to either shared backend source or the compiled router public key cannot evade source equality', () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unix-source-test-')));
-  const names = ['native/host_parent_macos.rs', 'native/plugins_retirement.rs', 'src-tauri/src/catalog-key.pub'];
+  const names = ['native/host_parent_macos.rs', 'native/plugins_retirement.rs', 'native/convergence-server-unix.rs', 'src-tauri/src/catalog-key.pub'];
   const execute = (command, args) => execFileSync(command, args, { cwd: root, encoding: 'utf8', windowsHide: true, stdio: 'pipe' });
   try {
     execute('git', ['init', '-q']);

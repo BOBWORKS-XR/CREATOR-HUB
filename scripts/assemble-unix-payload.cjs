@@ -14,7 +14,7 @@ const ROUTING = ['routing/router.json', 'routing/router.minisig', 'routing/runti
 const INPUTS = [...TRANSFER, ...ROUTING, 'handoff.json', 'handoff.minisig'];
 const META = 128 * 1024;
 const PRIVATE_SOURCE_PATHS = ['modules/mcp', 'modules/project-setup', 'native/mcp-router',
-  'native/host_parent_macos.rs', 'native/plugins_retirement.rs',
+  'native/host_parent_macos.rs', 'native/plugins_retirement.rs', 'native/convergence-server-unix.rs',
   'src-tauri/src/module_archive.rs', 'src-tauri/src/catalog-key.pub'];
 
 function keys(value, expected) {
