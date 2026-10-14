@@ -106,7 +106,18 @@ write-bit-removed modes), rejects unexpected grants, creates a real unsigned
 `.flatpak`, and installs only the exact test ref in the isolated user store.
 It probes `/usr/bin/ldd` inside the **Platform** sandbox with `flatpak run
 --sandbox --command=sh`; it does not use the SDK build shell as runtime proof.
-The shell snippets are static and inspect only the packaged file/owned fixture.
+The separate retention read uses **normal app-sandbox semantics**, not the extra
+`--sandbox` restriction that intentionally omits app-private bindings. Before
+and after that read, the runner rechecks the exact installed ref/commit/location,
+manifest identity and four grants, effective permissions including overrides,
+Platform commit, six deployed files and owned fixture bytes. Unknown bus/env/
+filesystem/network grants refuse. This is grounded in Flatpak 1.12.7's
+[effective-permission implementation](https://github.com/flatpak/flatpak/blob/1.12.7/app/flatpak-builtins-info.c#L380).
+Only the command is overridden: a static shell prints the mapped
+`XDG_CONFIG_HOME`, then `/usr/bin/sha256sum` reads the fixed fixture filename.
+Both output lines must match the independently derived owned app-private path
+and original hash. The existing 30-second/8,192-byte read bounds remain unchanged.
+No permission, recipe, payload or child-environment broadening is included.
 It never launches Hub, either GUI backend, Node or the router.
 
 With a second separately verified stage, it requires different Hub bytes and
@@ -122,7 +133,7 @@ failure tails. Artifact output and private stores remain for capture.
 Even `suitePassed:true` cannot change these fields: `nativeLinuxAccepted`,
 `flatpakGuiAccepted`, `hostIntegrationAccepted`, `mcpAccepted`,
 `migrationAccepted`, `signedUpdateAccepted`, `releaseReady` are always false.
-`signedRoutingVerifiedByThisLane` is false. Linker success is not WebKit rendering,
+`signedRoutingVerifiedByThisLane` and `updateReady` are false. Linker success is not WebKit rendering,
 resource lookup, backend ABI, portal consent or host MCP acceptance.
 
 ## Exact Disposable Invocation
@@ -197,10 +208,111 @@ repository, build dirs and resolved `/app/manifest.json` even when linkage fails
 in the [Flatpak command reference](https://docs.flatpak.org/en/latest/flatpak-command-reference.html).
 The test remote is unsigned and private, not a publication or update trust model.
 
+## Same-Version Replacement Input Plan
+
+`packaging/flatpak/replacement-014-inputs.json` proposes independently reviewed
+baseline/replacement pins for **older actual 0.1.14 -> current actual 0.1.14**.
+It is not a 0.1.15 fixture or signed in-app update. The JSON is planning data,
+not self-authenticating authorization: main must recheck primary run/source/job/
+artifact identity, ZIP bytes and exact receipt bodies before using either stage.
+
+The [older assembly run 38481240964](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38481240964)
+succeeded, attempt 1, Linux assembly job `115584153665`, source
+`216273ac80d1674ef5986f2d60b2650b33f48544`, tree
+`6a99de4973f05dbe767cbadf4cc20c15a16995e4`. Its source `package.json` and
+`src-tauri/tauri.conf.json` both say `0.1.14`; native build logs agree. Original
+artifact `11857940858`, `signed-unix-hub-linux-38481240964-1`, is 119,406,235
+bytes; downloaded ZIP SHA-256 matches primary API digest
+`8c433ed0501512ef90f027b500a71530c16043686b49501e8582e98ea7eca141`.
+The byte-bound 875-byte assembly receipt says `hubVersion=0.1.14`,
+`mcpMode=writable`, exact assembly commit, private producer run `38478429870`,
+and no native GUI/release acceptance. Receipt SHA-256 and all three payload
+byte/size pins are in the reviewed pair file. Nothing was rebuilt or relabeled.
+
+The [current assembly run 38607998719](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38607998719)
+and artifact `11916403015` were independently rechecked and downloaded again:
+119,481,169 bytes, SHA-256
+`e875b1cd071a42f9c264295b05425708df2e0d4574aa0d88e9136e919ce6f780`.
+Its exact source versions and receipt also say writable `0.1.14`. Actual Hub
+ELFs differ: old 21,038,512 bytes / `e20d2ef60514b6eb3db4e561846336f59223dcc365c80865eab010a4f5cb4bff`;
+current 21,352,568 bytes / `1ba7eabe233e9cce35b480b8651abb8b0496a519e55e13613b67720b406e54d9`.
+Both pass ELF64/x86_64 shape and exact embedded descriptor checks. Their known
+module/routing maps and outer archive bindings validate; archive member proof
+remains the disposable native decoder's job, not a staging claim.
+
+Two real source stages were prepared without executing either ELF:
+`artifacts/flatpak-replacement-38481240964/stage-baseline` and `stage-current`.
+Original ZIPs, three-file inputs and original assembly receipts remain alongside
+them. The pair's regression checks exact source/artifact/Hub identities, equal
+real version 14, writable mode, different payload hashes and false acceptance.
+It is source/template proof, not installed replacement or retention acceptance.
+
+After independently verifying both inputs, main can extract each `pins` object
+into its separately named reviewed pin file and stage in fresh runner directories:
+
+```sh
+node scripts/flatpak-package.cjs "$BASELINE_INPUT" "$BASELINE_PINS" "$BASELINE_STAGE"
+node scripts/flatpak-package.cjs "$CURRENT_INPUT" "$CURRENT_PINS" "$CURRENT_STAGE"
+CREATOR_FLATPAK_PACKAGE_TEST=1 node scripts/flatpak-disposable.cjs "$BASELINE_STAGE" "$DECODER" "$DECODER_SHA256" "$CURRENT_STAGE"
+```
+
+The intended evidence is a different deployed OSTree commit, exact current
+payload bytes and preservation of a synthetic app-private config fixture.
+[Flatpak's update contract](https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-update)
+addresses the exact ref/commit, not a fabricated Hub version increment.
+Run `38619251453` below proves that the former extra-restricted retention probe
+omitted app-private data. The reviewed continuation now uses the normal app
+sandbox only for that bounded read, after installed/effective permission checks;
+the linker remains extra-restricted. The captured failure stays immutable.
+Normal-context retention and old-package linkage remain **native-test pending**.
+No native Hub/backend launch, settings migration, host MCP broker, signed update
+or `updateReady` acceptance is supplied.
+
+## Implemented Two-Input Workflow
+
+`scripts/flatpak-replacement-source.cjs` and the Flatpak-only workflow now verify
+both reviewed assemblies before staging. Each must have the exact successful
+run/attempt, repository, workflow, source SHA/tree, unique successful Linux
+assembly job, artifact ID/name/size/digest and original ZIP bytes. Both original
+source `package.json` and `src-tauri/tauri.conf.json` are fetched at that exact
+commit and independently checked as Root `0.1.14`, before either ZIP download.
+The extractor reads only the three exact payload files and the original assembly
+receipt, with expected size/hash, duplicate-name, entry-count, type and encryption
+guards. The receipt is separately byte-pinned and checked against those source
+bindings, real version 14, Linux x86_64, writable mode and false acceptance.
+
+Both unchanged inputs are staged, not recompiled. The native runner requires
+the exact reviewed baseline/replacement provenance and original receipt bytes,
+then installs older 14 and replaces its exact ref with current 14. Different
+Hub bytes and deployment commits are required; before/after normal-context
+reads must preserve the same synthetic app-private config. Its report scope is
+`same-version-flatpak-package-replacement-only`. Partial failures remain failed,
+with owned stores/bundles preserved; no uninstall or global process operation.
+
+The workflow retains both original ZIPs, API/source bindings, reviewed pins,
+original assembly receipts (source and stage copies), reviewed pair document,
+both generated bundles, resolved metadata and the actual report. No signing key,
+app bytes, public release, runtime branch, recipe permission or timeout changed.
+The archive decoder alone is freshly compiled from the consumer source.
+
+Local source verification: 36 focused tests pass. The regression includes the
+captured 115-byte `--sandbox` failure and refuses even a matching hash read from
+the host XDG directory rather than the app-private directory. Mocked API tests
+refuse source/version/tree/job/artifact/receipt mismatches and cover Octokit
+Buffer/ArrayBuffer responses. Both actual retained 875-byte receipts and existing
+source stages also pass the new byte/source/version/mode checks locally. The
+workflow's exact extraction block passes Python syntax validation.
+
+No normal-context native run was performed here. Main must review/commit only
+the scoped Flatpak files, supply the exact new source SHA on
+`validation/flatpak-package-014`, and bind the resulting run's head SHA to that
+reviewed source before interpreting its report. Do not rerun the former source
+revision: its retained fixture probe is intentionally the original failure.
+
 ## Current Results And Stop Conditions
 
-- Windows source/temp-fixture tests: 24 passed, zero skipped, no native children.
-- Related archive/package source suites: combined 43 passed, one existing Unix
+- Windows source/temp-fixture tests: 36 passed, zero skipped, no native app children.
+- Related archive/package source suites: combined 55 passed, one existing Unix
   mode test skipped on Windows; no native Linux/Flatpak execution implied.
 - Local runner inventory: no `flatpak`, `flatpak-builder`, Docker or Podman. No
   accessible fresh Linux executor; existing workflow reruns cannot execute these
@@ -269,6 +381,30 @@ The test remote is unsigned and private, not a publication or update trust model
   ELF execution/relocations, GTK/WebKit rendering, resources, backend ABI and
   host/MCP/migration acceptance remain untested or false. This is static outer-Hub
   dependency resolution and package-install evidence only, not full runtime acceptance.
+- Actual [run 38619251453, job 116042177053](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38619251453/job/116042177053),
+  source `c9c394d39a2d6c115a128be9819d0c509e6ac42a`: build/bundle/install,
+  deployed-byte/permission checks and Platform linkage pass. The linker command
+  exits 0 in 131 ms, 11,429 stdout bytes, no stderr, 137 recognized rows and no
+  diagnostics. The next `private-fixture-0` exits 1 in 114 ms, no stdout, 115
+  stderr bytes: `sha256sum` cannot find the owned host `config/retention-fixture.json`.
+  **Confirmed broken harness expectation, not demonstrated product/ABI failure:**
+  the fixture was written under owned `HOME/.var/app/com.creatorworks.hub/config`,
+  but Flatpak 1.12.7 [run source](https://github.com/flatpak/flatpak/blob/1.12.7/common/flatpak-run.c#L3993)
+  deliberately leaves `app_id_dir` unset with `--sandbox`; the
+  [filesystem/environment contract](https://github.com/flatpak/flatpak/blob/1.12.7/common/flatpak-context.c#L2484)
+  only binds/re-writes app-private XDG locations when that directory is supplied.
+  A path-only patch cannot validate app-private retention in this context.
+  No guard, timeout, environment, runtime, recipe or payload change was made.
+  Do not remove `--sandbox`, grant filesystem access or mark the failed probe
+  passed to conceal this scope mismatch. A separately reviewed retention probe
+  contract is required; app-native GUI controls are a further separate gate.
+  Original report/tails remain at
+  `artifacts/flatpak-package-38619251453/flatpak-package-38619251453-1/creator-flatpak-qqmjjs/flatpak-report.json`.
+  Original artifact `11920967817` is 60,194,486 bytes; downloaded SHA-256
+  `40071a6a198192ce0dbfe85bb2f6dcd66888ef362da48436d30f9d92432b30e7`
+  matches the primary API. `suitePassed:false`, `runtimeLinkProbePassed:true`,
+  `appPrivateFixtureRetained:false`; replacement/GUI/host/MCP/migration remain
+  false. No rerun or app rebuild was performed here.
 - Existing inspected Linux package receipts label 0.1.12/0.1.13. They were not
   relabeled. Fresh current14 assembly acceptance is main's independently verified
   prerequisite, not replaced by fixture hashes.

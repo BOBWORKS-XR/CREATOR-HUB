@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "scope": "same-version-flatpak-package-replacement-only",
+  "ref": "app/com.creatorworks.hub/x86_64/flatpak-test",
+  "baseline": {
+    "artifactId": 11857940858,
+    "artifactName": "signed-unix-hub-linux-38481240964-1",
+    "artifactSize": 119406235,
+    "assemblyJobId": 115584153665,
+    "assemblyReceipt": {
+      "size": 875,
+      "sha256": "97e8fa0b6a69c3486fc67d4db1539cbc2a1f4cc4b81f5d44d54db63e9ebaa22c"
+    },
+    "pins": {
+      "schemaVersion": 1,
+      "version": "0.1.14",
+      "platform": "linux",
+      "arch": "x86_64",
+      "mcpMode": "writable",
+      "sourceCommit": "216273ac80d1674ef5986f2d60b2650b33f48544",
+      "sourceTree": "6a99de4973f05dbe767cbadf4cc20c15a16995e4",
+      "runId": 38481240964,
+      "runAttempt": 1,
+      "inputArtifactSha256": "8c433ed0501512ef90f027b500a71530c16043686b49501e8582e98ea7eca141",
+      "files": {
+        "creator-hub": {
+          "size": 21038512,
+          "sha256": "e20d2ef60514b6eb3db4e561846336f59223dcc365c80865eab010a4f5cb4bff"
+        },
+        "builtin-manifest.json": {
+          "size": 3663,
+          "sha256": "9622794666602c82dfd89de1452517f0e8ec062e043f3250da6165d787bf0a23"
+        },
+        "modules.tar.gz": {
+          "size": 56836247,
+          "sha256": "5620af51cf80433be48c6cb0d53a856382193f6857bb85e44c72ac9fc5ae0968"
+        }
+      }
+    }
+  },
+  "replacement": {
+    "artifactId": 11916403015,
+    "artifactName": "signed-unix-hub-linux-38607998719-1",
+    "artifactSize": 119481169,
+    "assemblyJobId": 116003838168,
+    "assemblyReceipt": {
+      "size": 875,
+      "sha256": "f0d6e5d5157f9e70760b06713b3179e6f98e7d0be290c6cb749395f5aae223fe"
+    },
+    "pins": {
+      "schemaVersion": 1,
+      "version": "0.1.14",
+      "platform": "linux",
+      "arch": "x86_64",
+      "mcpMode": "writable",
+      "sourceCommit": "7eb00ad8a61db307c71bb95459ac85b7a957088d",
+      "sourceTree": "c2a7f1e3e6e4af03b05634dba98654bb27325eae",
+      "runId": 38607998719,
+      "runAttempt": 1,
+      "inputArtifactSha256": "e875b1cd071a42f9c264295b05425708df2e0d4574aa0d88e9136e919ce6f780",
+      "files": {
+        "creator-hub": {
+          "size": 21352568,
+          "sha256": "1ba7eabe233e9cce35b480b8651abb8b0496a519e55e13613b67720b406e54d9"
+        },
+        "builtin-manifest.json": {
+          "size": 3663,
+          "sha256": "3f70bc4793084f4801b27a3c68df10af86e21d8449d86a694686821a8f6373f6"
+        },
+        "modules.tar.gz": {
+          "size": 56832461,
+          "sha256": "278bebafd78f6dcccfce1deca3248e34f591b5423a20e2c02572660f636a9ebd"
+        }
+      }
+    }
+  },
+  "acceptance": {
+    "nativeLinuxAccepted": false,
+    "flatpakGuiAccepted": false,
+    "hostIntegrationAccepted": false,
+    "mcpAccepted": false,
+    "migrationAccepted": false,
+    "signedUpdateAccepted": false,
+    "releaseReady": false,
+    "updateReady": false
+  }
+}

@@ -40,6 +40,34 @@ const env = () => ({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted'
   GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', CREATOR_FLATPAK_PACKAGE_TEST: '1',
   RUNNER_TEMP: path.resolve(os.tmpdir()) });
 
+test('reviewed replacement pair binds distinct actual writable Root 14 artifacts, not a future update', () => {
+  const plan = JSON.parse(pkg.read(path.join(pkg.RECIPE, 'replacement-014-inputs.json'), 65536));
+  assert.equal(plan.schemaVersion, 1);
+  assert.equal(plan.scope, 'same-version-flatpak-package-replacement-only');
+  assert.equal(plan.ref, pkg.REF);
+  assert.deepEqual(plan.acceptance, { ...pkg.acceptance(), updateReady: false });
+  for (const [name, id, size, runId, source, hubSha] of [
+    ['baseline', 11857940858, 119406235, 38481240964, '216273ac80d1674ef5986f2d60b2650b33f48544',
+      'e20d2ef60514b6eb3db4e561846336f59223dcc365c80865eab010a4f5cb4bff'],
+    ['replacement', 11916403015, 119481169, 38607998719, '7eb00ad8a61db307c71bb95459ac85b7a957088d',
+      '1ba7eabe233e9cce35b480b8651abb8b0496a519e55e13613b67720b406e54d9'],
+  ]) {
+    const input = plan[name]; pkg.validatePins(input.pins);
+    assert.equal(input.artifactId, id); assert.equal(input.artifactSize, size);
+    assert.equal(input.artifactName, `signed-unix-hub-linux-${runId}-1`);
+    assert.equal(input.pins.runId, runId); assert.equal(input.pins.runAttempt, 1);
+    assert.equal(input.pins.sourceCommit, source); assert.equal(input.pins.mcpMode, 'writable');
+    assert.equal(input.pins.files['creator-hub'].sha256, hubSha);
+    assert.equal(input.assemblyReceipt.size, 875); assert.match(input.assemblyReceipt.sha256, /^[a-f0-9]{64}$/);
+  }
+  assert.equal(plan.baseline.pins.version, plan.replacement.pins.version);
+  for (const name of pkg.INPUTS) assert.notEqual(plan.baseline.pins.files[name].sha256, plan.replacement.pins.files[name].sha256);
+  assert.notEqual(plan.baseline.pins.sourceCommit, plan.replacement.pins.sourceCommit);
+  const source = pkg.read(path.join(__dirname, 'flatpak-disposable.cjs'), 65536).toString();
+  assert.ok(source.includes('Identical Hub bytes cannot prove package replacement'));
+  assert.ok(source.includes('No replacement deployment'));
+});
+
 test('exact offline local-source recipe has no host, network, devel or bus grants', () => {
   pkg.validateRecipe(recipe());
   assert.deepEqual(recipe()['finish-args'], pkg.PERMISSIONS);
@@ -261,6 +289,7 @@ test('runner source confines install/update to owned exact ref and does not laun
   assert.ok(source.includes('archive.verify(')); assert.ok(source.includes('pkg.verifyStage(source, receipt)'));
   assert.ok(source.includes('report.packageInstalled = true;'));
   assert.ok(source.includes('report.builds.every(build => build.runtimeLinkProbePassed === true)'));
+  assert.ok(source.includes('report.builds.length === stages.length'), 'A partial two-input run cannot claim all linker probes passed');
   assert.ok(!/shell:\s*true|flatpak-spawn|--filesystem|--allow=devel|--force-clean|--delete-data|\['kill'|\['uninstall'|sudo/.test(source));
   assert.ok(!runner.ABI_SCRIPT.includes('creator-hub --')); assert.ok(runner.ABI_SCRIPT.includes('ldd /app/bin/creator-hub'));
 });
@@ -269,11 +298,13 @@ test('real package workflow installs locked Node dependencies before contract te
   const source = fs.readFileSync(path.join(__dirname, '../.github/workflows/flatpak-package-014.yml'), 'utf8');
   const dependencies = source.indexOf('run: npm ci --ignore-scripts');
   const preflight = source.indexOf('run: node --test scripts/flatpak-package.test.cjs');
-  const download = source.indexOf('downloadArtifact(');
+  const download = source.indexOf('downloadInputs(github,context)');
   assert.ok(dependencies >= 0 && dependencies < preflight && preflight < download);
-  assert.ok(source.includes("assert.equal(run.conclusion,'success')"));
-  assert.ok(source.includes("assert.equal(artifact.expired,false)"));
-  assert.ok(source.includes('11916403015'));
-  assert.ok(source.includes('e875b1cd071a42f9c264295b05425708df2e0d4574aa0d88e9136e919ce6f780'));
+  const verifier = pkg.read(path.join(__dirname, 'flatpak-replacement-source.cjs'), 65536).toString();
+  assert.ok(verifier.includes("assert.equal(run.conclusion, 'success')"));
+  assert.ok(verifier.includes("assert.equal(artifact.expired, false)"));
+  const pair = JSON.parse(pkg.read(path.join(pkg.RECIPE, 'replacement-014-inputs.json'), 65536));
+  assert.equal(pair.replacement.artifactId, 11916403015);
+  assert.equal(pair.replacement.pins.inputArtifactSha256, 'e875b1cd071a42f9c264295b05425708df2e0d4574aa0d88e9136e919ce6f780');
   assert.doesNotMatch(source, /contents: write|--filesystem|--allow=devel|flatpak-spawn|release (?:create|edit|upload)/);
 });
