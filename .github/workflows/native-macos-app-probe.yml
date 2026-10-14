@@ -1,4 +1,4 @@
-name: Owned Mac Root surface capture (not acceptance)
+name: Owned Mac Root-only inspection and surface capture (not acceptance)
 on:
   push:
     branches: [validation/mac-root-probe-014]

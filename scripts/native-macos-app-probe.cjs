@@ -151,6 +151,45 @@ function remoteReadPolicy(facts) {
   return Object.freeze({ diagnosticOnly: true, readOnly: true, actionAllowed: false, ...acceptance });
 }
 
+function validateRootInspection(receipt, owner) {
+  const fields = ['command', 'complete', 'readOnly', 'diagnosticOnly', 'rootWindowOnly', 'accessibilityTrusted',
+    'rootNativeCFReferencePreserved', 'rootReferenceScope', 'actionAttempted', 'permissionRequestsPerformed',
+    'process', 'window', ...Object.keys(acceptance)];
+  requireThat(receipt?.command === 'inspect-root' && receipt.complete === true && receipt.readOnly === true
+    && receipt.diagnosticOnly === true && receipt.rootWindowOnly === true && receipt.accessibilityTrusted === true
+    && receipt.rootNativeCFReferencePreserved === true && receipt.rootReferenceScope === 'native-invocation'
+    && receipt.actionAttempted === false && receipt.permissionRequestsPerformed === false
+    && Object.keys(receipt).every(key => fields.includes(key)) && owner?.process && owner.window
+    && Object.keys(acceptance).every(key => receipt[key] === false)
+    && isDeepStrictEqual(receipt.process, owner.process) && isDeepStrictEqual(receipt.window, owner.window),
+  'read-only-root-inspection-unverified');
+}
+
+async function rootSurfaceDiagnostic(owner, io) {
+  const result = { diagnosticOnly: true, completed: false, ...acceptance };
+  try {
+    result.before = await io.inspectRoot('before'); validateRootInspection(result.before, owner);
+    let sampleError, sampled;
+    try { sampled = await io.sample(); result.surface = sampled?.receipt; } catch (error) { sampleError = error; }
+    result.after = await io.inspectRoot('after'); validateRootInspection(result.after, owner);
+    if (sampleError) throw sampleError;
+    const surface = result.surface;
+    requireThat(sampled?.exitCode === 0 && sampled.signal === null && !sampled.timedOut && !sampled.error
+      && surface?.complete === true && surface.readOnly === true && surface.diagnosticOnly === true
+      && surface.actionAttempted === false && surface.permissionRequestsPerformed === false && !surface.error
+      && Object.keys(acceptance).every(key => surface[key] === false)
+      && surface.readiness?.rootWebAreaObserved === true && surface.readiness.rootNativeCFReferencePreserved === true,
+    'root-surface-capture-unverified');
+    requireThat(isDeepStrictEqual(surface.process, owner.process) && isDeepStrictEqual(surface.window, owner.window),
+      'post-capture-root-identity-drift');
+    requireThat(Array.isArray(surface.nodes) && surface.nodes.length > 0 && surface.nodes.length <= 512
+      && surface.nodes.every(node => typeof node?.role === 'string' && Buffer.byteLength(node.role, 'utf8') <= 128)
+      && surface.nodes.some(node => node.role === 'AXWebArea'), 'root-surface-node-count-or-readiness-unverified');
+    result.completed = true;
+  } catch (error) { result.reason = error.message; }
+  return result;
+}
+
 // A separate read-only sampler is needed because the unchanged action helper emits only fixed consent controls.
 const surfaceSource = String.raw`
 import Foundation
@@ -268,16 +307,16 @@ do {
     try admitted()
     let args = Array(CommandLine.arguments.dropFirst())
     if args == ["availability"] { emit(["accessibilityTrusted": AXIsProcessTrusted(), "readOnly": true]); exit(0) }
-    let bitmap = args.first == "bitmap-fence"
+    let bitmap = args.first == "bitmap-fence", rootOnly = args.first == "inspect-root"
     if bitmap {
         try check(args.count == 3, "bitmap-fence-owner-parent-required")
         if !CGPreflightScreenCaptureAccess() {
             emit(["command": "bitmap-fence", "screenCaptureAccess": false, "cgWindowFenceVerified": false,
                   "diagnosticOnly": true, "actionAttempted": false, "permissionRequestsPerformed": false]); exit(0)
         }
-    } else { try check(args.count == 2 && AXIsProcessTrusted(), "accessibility-or-owner-required") }
-    guard let parent = UInt32(args[bitmap ? 2 : 1]), parent > 0 else { throw Denied("owned-parent-required") }
-    let file = args[bitmap ? 1 : 0], env = ProcessInfo.processInfo.environment
+    } else { try check(args.count == (rootOnly ? 3 : 2) && AXIsProcessTrusted(), "accessibility-or-owner-required") }
+    guard let parent = UInt32(args[bitmap || rootOnly ? 2 : 1]), parent > 0 else { throw Denied("owned-parent-required") }
+    let file = args[bitmap || rootOnly ? 1 : 0], env = ProcessInfo.processInfo.environment
     try check(file.hasPrefix((env["RUNNER_TEMP"] ?? "invalid") + "/") && URL(fileURLWithPath: file).resolvingSymlinksInPath().path == file, "owner-path-refused")
     let fd = open(file, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
     try check(fd >= 0, "owner-open-refused"); let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
@@ -317,6 +356,26 @@ do {
     let window = matches[0], readinessDeadline = ProcessInfo.processInfo.systemUptime + 20
     nativeRootSnapshot = ["process": p, "window": w, "rootNativeCFReferencePinned": true]
     var deadline = ProcessInfo.processInfo.systemUptime + 4
+    func checkHeldRoot() throws {
+        try fence(p, parent); try checkCG()
+        try check(AXIsProcessTrusted() && ProcessInfo.processInfo.systemUptime < deadline, "root-fence-time-or-trust-unverified")
+        let current = try children(root, kAXWindowsAttribute).filter { item in
+            try pidMatches(item, pid)
+            try check(attr(item, kAXRoleAttribute) as? String == kAXWindowRole, "ax-window-role-unverified")
+            return try bounds(item) == expected
+        }
+        let unchanged = current.count == 1 && CFEqual(current[0], window)
+        readiness["rootNativeCFReferencePreserved"] = unchanged
+        try check(unchanged && ProcessInfo.processInfo.systemUptime < deadline, "root-native-cf-reference-drift")
+    }
+    if rootOnly {
+        // Native references are compared only inside this invocation. A JSON
+        // receipt is never a CF reference or authority to inspect/action controls.
+        try checkHeldRoot()
+        emit(["command": "inspect-root", "complete": true, "readOnly": true, "rootWindowOnly": true,
+            "accessibilityTrusted": true, "rootNativeCFReferencePreserved": true, "rootReferenceScope": "native-invocation",
+            "process": p, "window": w, "actionAttempted": false, "permissionRequestsPerformed": false]); exit(0)
+    }
     var seen = [AXUIElement]()
     var observer: AXObserver?
     let observerStatus = AXObserverCreate(pid, { _, _, _, _ in rootRevision += 1 }, &observer)
@@ -335,18 +394,6 @@ do {
     readiness = ["rootWebAreaObserved": false, "notificationsSupported": supported, "observerStatus": observerStatus.rawValue,
                  "changesOnly": true, "rootNativeCFReferencePreserved": true]
     let labelRoles = Set(["AXWindow", "AXWebArea", "AXGroup", "AXHeading", "AXStaticText", "AXButton", "AXCheckBox", "AXRadioButton", "AXLink", "AXTab", "AXTabGroup"])
-    func checkHeldRoot() throws {
-        try fence(p, parent); try checkCG()
-        try check(AXIsProcessTrusted() && ProcessInfo.processInfo.systemUptime < deadline, "root-fence-time-or-trust-unverified")
-        let current = try children(root, kAXWindowsAttribute).filter { item in
-            try pidMatches(item, pid)
-            try check(attr(item, kAXRoleAttribute) as? String == kAXWindowRole, "ax-window-role-unverified")
-            return try bounds(item) == expected
-        }
-        let unchanged = current.count == 1 && CFEqual(current[0], window)
-        readiness["rootNativeCFReferencePreserved"] = unchanged
-        try check(unchanged && ProcessInfo.processInfo.systemUptime < deadline, "root-native-cf-reference-drift")
-    }
     func remoteLinks(_ item: AXUIElement, _ traversalParent: AXUIElement?, _ depth: Int) throws {
         try check(depth <= 16 && seen.count < 512 && ProcessInfo.processInfo.systemUptime < deadline, "ax-surface-incomplete")
         var parentMatches = false, windowMatches = false
@@ -539,24 +586,29 @@ async function probe(args, env) {
     requireThat(owner, 'owned-root-window-readiness-expired'); write('owner.json', owner);
     const ownerPath = path.join(output, 'owner.json');
     ownerImage = pin(ownerPath, 8192).image;
-    const inspected = await command(helper, ['inspect', ownerPath], 'inspect-before', 15000, helperImage);
-    retainForeign(JSON.parse(inspected.text), 'inspect-before');
-    requireThat(inspected.exitCode === 0, 'owned-root-inspection-refused');
-    validateOwner({ process: JSON.parse(inspected.text).observation.process, window: JSON.parse(inspected.text).observation.window }, expected);
-    requireThat(sameImage(pin(ownerPath, 8192).image, ownerImage), 'owner-file-drift');
-    const sampled = await command(sampler, [ownerPath, String(process.pid)], 'surface', 30000, samplerImage);
-    const surface = JSON.parse(sampled.text); write('surface.json', { ...surface, ...acceptance });
-    requireThat(sampled.exitCode === 0 && surface.complete === true && surface.readOnly === true && surface.actionAttempted === false
-      && surface.readiness?.rootWebAreaObserved === true && surface.readiness.rootNativeCFReferencePreserved === true, 'root-surface-capture-unverified');
-    validateOwner({ process: surface.process, window: surface.window }, expected);
-    requireThat(Array.isArray(surface.nodes) && surface.nodes.length > 0 && surface.nodes.length <= 512, 'root-surface-node-count-unverified');
+    const captureOwnerFence = () => requireThat(!toolUncertain && !ownedExit && sameImage(pin(ownerPath, 8192).image, ownerImage),
+      'capture-owner-or-tool-state-unverified');
+    report.rootSurface = await rootSurfaceDiagnostic(owner, {
+      inspectRoot: async stage => {
+        captureOwnerFence();
+        const result = await command(sampler, ['inspect-root', ownerPath, String(process.pid)], `inspect-root-${stage}`, 15000, samplerImage);
+        requireThat(result.exitCode === 0, 'read-only-root-inspection-refused');
+        captureOwnerFence();
+        return JSON.parse(result.text);
+      },
+      sample: async () => {
+        captureOwnerFence();
+        const result = await command(sampler, [ownerPath, String(process.pid)], 'surface', 30000, samplerImage);
+        const receipt = JSON.parse(result.text); write('surface.json', { ...receipt, ...acceptance });
+        captureOwnerFence();
+        return { ...result, receipt };
+      },
+    });
+    write('root-surface-diagnostic.json', report.rootSurface);
+    requireThat(report.rootSurface.completed === true, report.rootSurface.reason || 'root-surface-capture-unverified');
+    const surface = report.rootSurface.surface;
     report.surfaceSummary = { nodeCount: surface.nodes.length, rootWebAreaObserved: surface.nodes.some(node => node.role === 'AXWebArea'),
       roleCounts: Object.fromEntries([...new Set(surface.nodes.map(node => node.role))].map(role => [role, surface.nodes.filter(node => node.role === role).length])) };
-    requireThat(sameImage(pin(ownerPath, 8192).image, ownerImage), 'owner-file-drift');
-    const after = await command(helper, ['inspect', ownerPath], 'inspect-after', 15000, helperImage);
-    requireThat(after.exitCode === 0, 'post-capture-inspection-refused');
-    const observation = JSON.parse(after.text).observation;
-    requireThat(isDeepStrictEqual(observation.process, owner.process) && isDeepStrictEqual(observation.window, owner.window), 'post-capture-root-identity-drift');
     report.captureCompleted = true;
   } catch (error) { report.error = error.message; }
   finally {
@@ -612,4 +664,4 @@ if (require.main === module) {
   }).catch(error => { console.log(JSON.stringify({ error: error.message, passed: false, ...acceptance })); process.exitCode = 2; });
 }
 module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, closeAssessment,
-  bitmapArguments, bitmapImage, windowBitmapDiagnostic, remoteReadPolicy, acceptance, surfaceSource };
+  bitmapArguments, bitmapImage, windowBitmapDiagnostic, remoteReadPolicy, validateRootInspection, rootSurfaceDiagnostic, acceptance, surfaceSource };

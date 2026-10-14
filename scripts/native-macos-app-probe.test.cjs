@@ -368,14 +368,139 @@ test('unchanged action helper still refuses foreign nodes and enforces target Ro
   assert.doesNotMatch(swift, /remoteReadPolicy|requireRemoteRead|native-parent-and-root-window/);
 });
 
-test('sampler diagnostics retain source hashes and all false acceptance flags without relaxing orchestrator/helper errors', () => {
+test('sampler diagnostics retain source hashes and all false acceptance flags without relaxing normal-close errors', () => {
   assert.match(source, /report.helper = \{ path: helper, image: helperImage, sourceSha256: source.image.sha256 \}/);
   assert.match(source, /report.sampler = \{ path: sampler, image: samplerImage, sourceSha256: crypto.createHash\('sha256'\).update\(surfaceSource, 'utf8'\).digest\('hex'\) \}/);
   assert.match(probe.surfaceSource, /value\["diagnosticOnly"\] = true/);
   assert.match(probe.surfaceSource, /for key in \["nativeGuiAccepted", "mcpAccepted", "migrationAccepted", "updateAccepted", "releaseReady"\] \{ value\[key\] = false \}/);
-  assert.match(source, /requireThat\(inspected.exitCode === 0, 'owned-root-inspection-refused'\)/);
-  assert.match(source, /requireThat\(after.exitCode === 0, 'post-capture-inspection-refused'\)/);
   assert.match(source, /requireThat\(close.exitCode === 0, 'normal-close-refused-or-post-identity-unverified'\)/);
+});
+
+function rootInspection(owner) {
+  return { command: 'inspect-root', complete: true, readOnly: true, diagnosticOnly: true, rootWindowOnly: true,
+    accessibilityTrusted: true, rootNativeCFReferencePreserved: true, rootReferenceScope: 'native-invocation',
+    actionAttempted: false, permissionRequestsPerformed: false, process: structuredClone(owner.process),
+    window: structuredClone(owner.window), ...probe.acceptance };
+}
+function rootSample(owner) {
+  return { exitCode: 0, signal: null, timedOut: false, receipt: {
+    complete: true, readOnly: true, diagnosticOnly: true, actionAttempted: false, permissionRequestsPerformed: false,
+    process: structuredClone(owner.process), window: structuredClone(owner.window),
+    readiness: { rootWebAreaObserved: true, rootNativeCFReferencePreserved: true },
+    nodes: [{ role: 'AXWebArea', pid: 51 }], ...probe.acceptance,
+  } };
+}
+
+test('root-only receipts refuse false/unknown fences, action/control metadata and changed Root identity', () => {
+  const { owner } = ownership();
+  assert.doesNotThrow(() => probe.validateRootInspection(rootInspection(owner), owner));
+  for (const key of ['complete', 'readOnly', 'diagnosticOnly', 'rootWindowOnly', 'accessibilityTrusted', 'rootNativeCFReferencePreserved']) {
+    for (const value of [false, undefined, 'true', 1]) {
+      assert.throws(() => probe.validateRootInspection({ ...rootInspection(owner), [key]: value }, owner));
+    }
+  }
+  for (const changed of [{ command: 'inspect' }, { rootReferenceScope: 'serialized-cf-reference' },
+    { actionAttempted: true }, { permissionRequestsPerformed: true }, { nativeGuiAccepted: true },
+    { controls: [] }, { nodes: [] }, { observation: {} }, { action: 'close-window' }, { error: 'foreign-ax-element' }]) {
+    assert.throws(() => probe.validateRootInspection({ ...rootInspection(owner), ...changed }, owner));
+  }
+  for (const mutate of [r => r.process.pid++, r => r.process.startSeconds++, r => r.process.image.sha256 = 'b'.repeat(64),
+    r => r.window.pid++, r => r.window.id++, r => r.window.bounds.width++]) {
+    const receipt = rootInspection(owner); mutate(receipt);
+    assert.throws(() => probe.validateRootInspection(receipt, owner));
+  }
+});
+
+test('root-only diagnostic samples independently of full-tree action ownership and cannot accept normal-close', async () => {
+  const { owner } = ownership(), calls = [];
+  const result = await probe.rootSurfaceDiagnostic(owner, {
+    inspectRoot: async stage => { calls.push(stage); return rootInspection(owner); },
+    sample: async () => { calls.push('sample'); return rootSample(owner); },
+    inspectControls: () => { throw Error('action helper must not gate diagnostic reads'); },
+  });
+  assert.deepEqual(calls, ['before', 'sample', 'after']);
+  assert.equal(result.completed, true); assert.equal(result.diagnosticOnly, true);
+  for (const key of Object.keys(probe.acceptance)) assert.equal(result[key], false);
+  assert.equal(probe.acceptedExit(result, { pid: owner.process.pid, code: 0, signal: null }, owner), false);
+  assert.equal(probe.acceptedExit(result.before, { pid: owner.process.pid, code: 0, signal: null }, owner), false);
+});
+
+test('unknown/foreign root-only pre-inspection prevents sampling without a full-tree fallback', async () => {
+  const { owner } = ownership(); let sampled = 0;
+  for (const receipt of [undefined, {}, { ...rootInspection(owner), accessibilityTrusted: false },
+    { ...rootInspection(owner), command: 'inspect', observation: { process: owner.process, window: owner.window } }]) {
+    const result = await probe.rootSurfaceDiagnostic(owner, {
+      inspectRoot: async () => receipt,
+      sample: async () => { sampled++; return rootSample(owner); },
+    });
+    assert.equal(result.completed, false); assert.equal(result.reason, 'read-only-root-inspection-unverified');
+  }
+  assert.equal(sampled, 0);
+});
+
+test('changed post-inspection Root rejects sampled metadata; new read-only authority never replaces an action fence', async () => {
+  const { owner } = ownership();
+  for (const mutate of [r => r.process.startMicroseconds++, r => r.window.id++, r => r.window.bounds.x++,
+    r => r.rootNativeCFReferencePreserved = false, r => r.permissionRequestsPerformed = true]) {
+    const result = await probe.rootSurfaceDiagnostic(owner, {
+      inspectRoot: async stage => { const receipt = rootInspection(owner); if (stage === 'after') mutate(receipt); return receipt; },
+      sample: async () => rootSample(owner),
+    });
+    assert.equal(result.completed, false); assert.equal(result.reason, 'read-only-root-inspection-unverified');
+    assert.equal(result.nativeGuiAccepted, false);
+  }
+});
+
+test('missing WebArea, failed native sample and throwing sampler retain post-root diagnostics without claiming capture', async () => {
+  const { owner } = ownership();
+  for (const mode of ['no-web-area', 'missing-web-area-node', 'exit-failed', 'process-drift', 'throw']) {
+    const calls = [];
+    const result = await probe.rootSurfaceDiagnostic(owner, {
+      inspectRoot: async stage => { calls.push(stage); return rootInspection(owner); },
+      sample: async () => {
+        calls.push('sample');
+        if (mode === 'throw') throw Error('native-sample-refused');
+        const sample = rootSample(owner);
+        if (mode === 'no-web-area') { sample.receipt.complete = false; sample.receipt.readiness.rootWebAreaObserved = false; }
+        if (mode === 'missing-web-area-node') sample.receipt.nodes = [{ role: 'AXGroup' }];
+        if (mode === 'exit-failed') sample.exitCode = 2;
+        if (mode === 'process-drift') sample.receipt.process.pid++;
+        return sample;
+      },
+    });
+    assert.deepEqual(calls, ['before', 'sample', 'after']); assert.equal(result.completed, false);
+    assert.equal(result.after.rootNativeCFReferencePreserved, true);
+    for (const key of Object.keys(probe.acceptance)) assert.equal(result[key], false);
+  }
+});
+
+test('root-only native branch exits before observer/control traversal and preserves Root CF/process/image fences', () => {
+  const branch = probe.surfaceSource.split('if rootOnly {')[1].split('var seen =')[0];
+  assert.match(branch, /try checkHeldRoot\(\)/);
+  assert.match(branch, /"command": "inspect-root", "complete": true, "readOnly": true, "rootWindowOnly": true/);
+  assert.match(branch, /"rootReferenceScope": "native-invocation"/);
+  assert.match(branch, /"actionAttempted": false, "permissionRequestsPerformed": false\]\); exit\(0\)/);
+  assert.doesNotMatch(branch, /AXObserver|kAXChildrenAttribute|visit\(|kAXTitleAttribute|kAXDescriptionAttribute|AXUIElementPerformAction/);
+  const fence = probe.surfaceSource.split('func checkHeldRoot')[1].split('if rootOnly {')[0];
+  assert.match(fence, /try fence\(p, parent\); try checkCG\(\)/);
+  assert.match(fence, /children\(root, kAXWindowsAttribute\)/);
+  assert.match(fence, /try pidMatches\(item, pid\)/);
+  assert.match(fence, /current.count == 1 && CFEqual\(current\[0\], window\)/);
+  assert.doesNotMatch(fence, /kAXChildrenAttribute|visit\(/);
+  assert.match(probe.surfaceSource, /args.count == \(rootOnly \? 3 : 2\) && AXIsProcessTrusted\(\)/);
+});
+
+test('orchestrator brackets sampler with root-only inspections, retains owner/image guards and leaves normal-close unchanged', () => {
+  const capture = source.split('report.rootSurface = await rootSurfaceDiagnostic')[1].split('report.captureCompleted = true')[0];
+  assert.match(capture, /command\(sampler, \['inspect-root', ownerPath, String\(process.pid\)\]/);
+  assert.match(capture, /command\(sampler, \[ownerPath, String\(process.pid\)\]/);
+  assert.match(capture, /captureOwnerFence\(\)/);
+  assert.doesNotMatch(source, /command\(helper, \['inspect',/);
+  assert.match(source, /!toolUncertain && !ownedExit && sameImage\(pin\(ownerPath, 8192\).image, ownerImage\)/);
+  assert.match(source, /owner-file-drift-no-close-attempted/);
+  assert.match(source, /command\(helper.path, \['close', path.join\(output, 'owner.json'\)\]/);
+  assert.match(source, /requireThat\(close.exitCode === 0, 'normal-close-refused-or-post-identity-unverified'\)/);
+  assert.match(source, /report.acceptedExit = acceptedExit\(closeReceipt, ownedExit, owner\) && !report.closeError/);
 });
 
 test('actual Mac SDK compiles the read-only sampler; local execution refuses before AX inspection', { skip: process.platform !== 'darwin' }, async t => {
@@ -392,10 +517,14 @@ test('actual Mac SDK compiles the read-only sampler; local execution refuses bef
     child.once('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
   });
   assert.equal(result.code, 0, errors); assert.equal(result.signal, null);
-  const refusal = spawnSync(binary, ['availability'], { env: {}, encoding: 'utf8' });
-  assert.equal(refusal.status, 2, refusal.stderr || refusal.stdout);
-  const receipt = JSON.parse(refusal.stdout);
-  assert.equal(receipt.error, 'hosted-ci-explicit-opt-in-required');
-  for (const key of Object.keys(probe.acceptance)) assert.equal(receipt[key], false);
+  for (const args of [['availability'], ['inspect-root', '/unread-owner.json', '1'], ['inspect-root'],
+    ['inspect-root', '/unread-owner.json', '1', '--controls']]) {
+    const refusal = spawnSync(binary, args, { env: {}, encoding: 'utf8' });
+    assert.equal(refusal.status, 2, refusal.stderr || refusal.stdout);
+    const receipt = JSON.parse(refusal.stdout);
+    assert.equal(receipt.error, 'hosted-ci-explicit-opt-in-required');
+    assert.equal(receipt.actionAttempted, false); assert.equal(receipt.permissionRequestsPerformed, false);
+    for (const key of Object.keys(probe.acceptance)) assert.equal(receipt[key], false);
+  }
   t.diagnostic(JSON.stringify({ samplerCompiled: true, rootAppLaunched: false, ...probe.acceptance }));
 });
