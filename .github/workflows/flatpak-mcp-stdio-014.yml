@@ -1,4 +1,5 @@
 name: Disposable seeded Flatpak SDK stdio replacement (not acceptance)
+# One reviewed rerun: portable empty-environment refusal regression; product pins unchanged.
 on:
   push:
     branches: [validation/flatpak-mcp-stdio-014]
