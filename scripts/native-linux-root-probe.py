@@ -16,6 +16,7 @@ https://github.com/WebKit/WebKit/blob/webkitgtk-2.50.4/Source/WebCore/accessibil
 https://github.com/WebKit/WebKit/blob/webkitgtk-2.50.4/Source/WebCore/accessibility/atspi/AccessibilityObjectActionAtspi.cpp
 """
 import ctypes as C
+import copy
 import hashlib
 import importlib.util
 import io
@@ -55,7 +56,34 @@ DEB_PIN = (62780196, "f0297e74c6ce918b54c248b222af7ac64c3c96c270d281a17a017fb90a
 INSTALLED_HUB_PIN = (21364752, "efca8d6ca5949e787f10c124e26b91202587b34803f65c7cc5c3e9ffb93fdbf9", 0o755)
 INTEGRITY_PIN = (6026, "fba483967ad294fbbfe36e448ded73ffa78dc9ca27507e20297605358d34ec05", 0o644)
 PRIVATE_SOURCE = "a3118106086516751b78a58b5dbd684cff4c63a7"
+PRIVATE_RUN, PRIVATE_ATTEMPT = 38621563945, 1
 HANDOFF_SHA = "77bf64dcf8c82d4e9ad5e4112445a59639425e6315d4723f910bd8058c9a1a62"
+COMPONENT_PINS = {
+    "setup": (20868880, "35bef3b90848f64748da5bc9a5a7a632bac75b9c4a4e65f6eb78c8ee1c07729b"),
+    "mcp": (17328424, "30da4a6adbbce992ebaad1d4589628016ca31d5e49cd62090bdd12537c00095f"),
+}
+# Original authority above stays independently selectable and byte-exact.
+ORIGINAL_CANDIDATE = "original-5bb05a2"
+GTK3_CANDIDATE = "setup-gtk3-77367ae"
+PIN_FIELDS = ("SOURCE", "TREE", "RUN", "ATTEMPT", "JOB", "ARTIFACT", "ARTIFACT_NAME", "ZIP_SIZE", "ZIP_SHA",
+              "PINS", "DEB_NAME", "DEB_PIN", "INSTALLED_HUB_PIN", "INTEGRITY_PIN", "PRIVATE_SOURCE", "PRIVATE_RUN",
+              "PRIVATE_ATTEMPT", "HANDOFF_SHA", "COMPONENT_PINS")
+ORIGINAL_REVIEWED_PINS = {key: copy.deepcopy(globals()[key]) for key in PIN_FIELDS}
+GTK3_PREPARATION = {
+    "source": "77367ae881413d6868e484f77e12a48c5aa58b00", "tree": "013e360eccb7474744f5e6cd0a6b719748d867e5",
+    "run": 38647206970, "attempt": 1, "artifact": 11933471423, "zipSize": 53940332,
+    "zipSha256": "31228e87a6516e85b8e84dc01107b8057c5b8b5f86c93da809f04be3a0b82250",
+    "handoffSha256": "75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae",
+    "components": {
+        "setup": (16554072, "c960edfdd2f86d1ef994ef639b0d3e1b35041acb78935bf5d61dd7f69f32978c"),
+        "mcp": COMPONENT_PINS["mcp"],
+    },
+}
+# Populate ONLY from the new successful outer assembly's API, original ZIP,
+# native DEB and original receipts. Preparation alone cannot authorize staging.
+GTK3_REVIEWED_PINS = None
+SELECTED_CANDIDATE = ORIGINAL_CANDIDATE
+_candidate_configured = False
 TITLE = "Creator Hub - Development Preview"
 TERMS = "Terms of use and risk acknowledgement"
 TERMS_CHECKBOX = "I have read and agree to these terms, including the risk assumption and liability limitations above."
@@ -77,6 +105,52 @@ HELPER = Path(__file__).with_name("native-unix-window.py")
 def require(value, message):
     if not value:
         raise RuntimeError(message)
+
+
+def validate_candidate_pins(pins):
+    require(type(pins) is dict and set(pins) == set(PIN_FIELDS), "Complete reviewed outer-assembly pin set required; no partial merge")
+    for key in ("SOURCE", "TREE", "PRIVATE_SOURCE"):
+        require(type(pins[key]) is str and re.fullmatch(r"[0-9a-f]{40}", pins[key]), "Invalid reviewed source/tree pin: " + key)
+    for key in ("ZIP_SHA", "HANDOFF_SHA"):
+        require(type(pins[key]) is str and re.fullmatch(r"[0-9a-f]{64}", pins[key]), "Invalid reviewed digest: " + key)
+    for key in ("RUN", "ATTEMPT", "JOB", "ARTIFACT", "ZIP_SIZE", "PRIVATE_RUN", "PRIVATE_ATTEMPT"):
+        require(type(pins[key]) is int and 0 < pins[key] <= 2**53 - 1, "Invalid canonical reviewed integer: " + key)
+    require(pins["ARTIFACT_NAME"] == f'signed-unix-hub-linux-{pins["RUN"]}-{pins["ATTEMPT"]}'
+            and pins["DEB_NAME"] == DEB_NAME, "Reviewed artifact/package name differs")
+    require(type(pins["PINS"]) is dict and set(pins["PINS"]) == set(ORIGINAL_REVIEWED_PINS["PINS"]),
+            "Complete fixed input inventory required")
+    def file_pin(value, mode):
+        require(type(value) is tuple and len(value) == 3 and type(value[0]) is int and 0 < value[0] <= 512 * 1024 * 1024
+                and type(value[1]) is str and re.fullmatch(r"[0-9a-f]{64}", value[1])
+                and type(value[2]) is int and value[2] == mode, "Invalid reviewed file hash/size/mode")
+    for name, pin in pins["PINS"].items():
+        file_pin(pin, 0o755 if name == "creator-hub" else 0o644)
+    for key, mode in (("DEB_PIN", 0o644), ("INSTALLED_HUB_PIN", 0o755), ("INTEGRITY_PIN", 0o644)):
+        file_pin(pins[key], mode)
+    require(pins["PRIVATE_SOURCE"] == GTK3_PREPARATION["source"]
+            and pins["PRIVATE_RUN"] == GTK3_PREPARATION["run"] and pins["PRIVATE_ATTEMPT"] == GTK3_PREPARATION["attempt"]
+            and pins["HANDOFF_SHA"] == GTK3_PREPARATION["handoffSha256"]
+            and pins["COMPONENT_PINS"] == GTK3_PREPARATION["components"], "GTK3 private preparation binding differs")
+    require(pins["SOURCE"] != ORIGINAL_REVIEWED_PINS["SOURCE"] and pins["RUN"] != ORIGINAL_REVIEWED_PINS["RUN"]
+            and pins["ARTIFACT"] != ORIGINAL_REVIEWED_PINS["ARTIFACT"] and pins["ZIP_SHA"] != ORIGINAL_REVIEWED_PINS["ZIP_SHA"],
+            "Original product cannot be relabeled as the GTK3 assembly")
+
+
+def configure_candidate(name):
+    global SELECTED_CANDIDATE, _candidate_configured
+    require(name in (ORIGINAL_CANDIDATE, GTK3_CANDIDATE), "Unknown reviewed candidate; paths/URLs/overrides are not accepted")
+    require(not _candidate_configured or SELECTED_CANDIDATE == name, "Candidate switching within one process refused")
+    if name == GTK3_CANDIDATE:
+        require(GTK3_REVIEWED_PINS is not None, "GTK3 outer assembly pins unavailable; signed preparation is not an assembled DEB")
+        validate_candidate_pins(GTK3_REVIEWED_PINS)
+        selected = GTK3_REVIEWED_PINS
+    else:
+        selected = ORIGINAL_REVIEWED_PINS
+    # Only fixed, fully reviewed source constants enter this isolated module.
+    # Never overlay a caller dictionary or partially reuse another artifact.
+    globals().update(copy.deepcopy(selected))
+    SELECTED_CANDIDATE, _candidate_configured = name, True
+    return {"candidate": name, **{key: copy.deepcopy(globals()[key]) for key in PIN_FIELDS}}
 
 
 def admission(env, system, machine):
@@ -300,15 +374,17 @@ def verify_inputs(root, full=False):
     require(receipt["assemblyCommit"] == SOURCE and receipt["hubVersion"] == "0.1.14"
             and receipt["schemaVersion"] == 1 and receipt["product"] == "com.creatorworks.hub.unix-signed-assembly"
             and receipt["platform"] == "linux" and receipt["arch"] == "x86_64" and receipt["mcpMode"] == "writable"
-            and receipt["privateSource"]["runId"] == 38621563945 and receipt["privateSource"]["runAttempt"] == 1
+            and receipt["privateSource"]["runId"] == PRIVATE_RUN and receipt["privateSource"]["runAttempt"] == PRIVATE_ATTEMPT
             and receipt["privateSource"]["sourceCommit"] == PRIVATE_SOURCE
             and receipt["privateSource"]["buildCommit"] == PRIVATE_SOURCE and receipt["handoffSha256"] == HANDOFF_SHA
             and receipt["privateModulesRecompiled"] is False and receipt["privateModulesResigned"] is False
             and receipt["nativeGuiAccepted"] is False and receipt["releaseReady"] is False, "Original assembly receipt differs")
+    if SELECTED_CANDIDATE == GTK3_CANDIDATE:
+        require(receipt["privateSource"]["sourceTree"] == GTK3_PREPARATION["tree"], "GTK3 preparation source tree differs")
     with input_path(root, "creator-hub").open("rb") as stream:
         elf = stream.read(20)
     require(elf[:7] == b"\x7fELF\x02\x01\x01" and elf[18:20] == b"\x3e\x00", "Exact native x86_64 ELF required")
-    result = {"sourceCommit": SOURCE, "sourceTree": TREE, "runId": RUN, "runAttempt": ATTEMPT,
+    result = {"candidate": SELECTED_CANDIDATE, "sourceCommit": SOURCE, "sourceTree": TREE, "runId": RUN, "runAttempt": ATTEMPT,
               "assemblyJobId": JOB, "artifactId": ARTIFACT, "artifactSha256": ZIP_SHA,
               "files": files, "originalAssembly": receipt, "layout": "/usr/bin + /usr/lib/Creator Hub",
               "debInstalled": False, "resourceLookupProof": "native package layout; not runtime module-load acceptance"}
@@ -384,7 +460,8 @@ def child_env(env, root):
                "GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH", "GITHUB_REPOSITORY",
                "GITHUB_REPOSITORY_ID", "RUNNER_TEMP", "CREATOR_LINUX_ROOT_PROBE", "CREATOR_UNIX_WINDOW_TEST")
     result = {k: env[k] for k in allowed if k in env}
-    result.update(PATH="/usr/bin:/bin", GDK_BACKEND="x11", NO_AT_BRIDGE="0", HOME=str(root / "home"),
+    result.update(CREATOR_LINUX_ROOT_CANDIDATE=SELECTED_CANDIDATE,
+                  PATH="/usr/bin:/bin", GDK_BACKEND="x11", NO_AT_BRIDGE="0", HOME=str(root / "home"),
                   XDG_CONFIG_HOME=str(root / "home/config"), XDG_DATA_HOME=str(root / "home/data"),
                   XDG_CACHE_HOME=str(root / "home/cache"), TMPDIR=str(root / "tmp"))
     return result
@@ -1293,6 +1370,7 @@ def probe(root, env):
 
 def main():
     admission(os.environ, sys.platform, platform.machine())
+    configure_candidate(os.environ.get("CREATOR_LINUX_ROOT_CANDIDATE", ORIGINAL_CANDIDATE))
     temp = ordinary(os.environ["RUNNER_TEMP"])
     args = sys.argv[1:]
     require(bool(args), "Use stage, install, probe, or internal worker")

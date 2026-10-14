@@ -1067,5 +1067,104 @@ class ParentTests(unittest.TestCase):
             self.assertFalse(report["readOnlyCaptureCompleted"])
 
 
+class CandidatePinTests(unittest.TestCase):
+    def subject(self):
+        spec = importlib.util.spec_from_file_location("root_candidate_pure_test", SCRIPT)
+        value = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = value
+        spec.loader.exec_module(value)
+        return value
+
+    def synthetic_pins(self, subject):
+        # Synthetic API-only fixture, never a product pin or native launch input.
+        pins = copy.deepcopy(subject.ORIGINAL_REVIEWED_PINS)
+        pins.update(SOURCE="7"*40, TREE="8"*40, RUN=1, JOB=2, ARTIFACT=3, ZIP_SHA="e"*64,
+                    ARTIFACT_NAME="signed-unix-hub-linux-1-1", PRIVATE_SOURCE=subject.GTK3_PREPARATION["source"],
+                    PRIVATE_RUN=subject.GTK3_PREPARATION["run"], PRIVATE_ATTEMPT=1,
+                    HANDOFF_SHA=subject.GTK3_PREPARATION["handoffSha256"],
+                    COMPONENT_PINS=copy.deepcopy(subject.GTK3_PREPARATION["components"]))
+        return pins
+
+    def test_original_authority_is_exact_and_still_refuses_every_original_source_mutation(self):
+        subject = self.subject()
+        original = copy.deepcopy(subject.ORIGINAL_REVIEWED_PINS)
+        result = subject.configure_candidate(subject.ORIGINAL_CANDIDATE)
+        self.assertEqual({k: result[k] for k in subject.PIN_FIELDS}, original)
+        subject.validate_source(source_fixture())
+        changed = source_fixture()
+        changed["run"]["head_sha"] = subject.GTK3_PREPARATION["source"]
+        with self.assertRaises(RuntimeError):
+            subject.validate_source(changed)
+        self.assertEqual(subject.SOURCE, p.SOURCE)
+
+    def test_missing_new_assembly_or_unrecognized_selector_cannot_overlay_or_fall_back(self):
+        for name in (p.GTK3_CANDIDATE, "/tmp/pins.json", "https://example.invalid/pins", "latest", ""):
+            subject = self.subject()
+            subject.GTK3_REVIEWED_PINS = None
+            before = copy.deepcopy(subject.ORIGINAL_REVIEWED_PINS)
+            self.assertIsNone(subject.GTK3_REVIEWED_PINS)
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                subject.configure_candidate(name)
+            self.assertEqual({k: getattr(subject, k) for k in subject.PIN_FIELDS}, before)
+            self.assertFalse(subject._candidate_configured)
+
+    def test_incomplete_boolean_invalid_mode_old_source_and_wrong_preparation_refuse_atomically(self):
+        subject = self.subject()
+        for change in ("partial", "extra", "bool", "mode", "private", "handoff", "component", "old-source"):
+            pins = self.synthetic_pins(subject)
+            if change == "partial":
+                del pins["DEB_PIN"]
+            elif change == "extra":
+                pins["path"] = "/tmp/unreviewed"
+            elif change == "bool":
+                pins["RUN"] = True
+            elif change == "mode":
+                pins["DEB_PIN"] = pins["DEB_PIN"][:2] + (0o777,)
+            elif change == "private":
+                pins["PRIVATE_SOURCE"] = p.PRIVATE_SOURCE
+            elif change == "handoff":
+                pins["HANDOFF_SHA"] = p.HANDOFF_SHA
+            elif change == "component":
+                pins["COMPONENT_PINS"] = copy.deepcopy(p.COMPONENT_PINS)
+            else:
+                pins["SOURCE"] = p.SOURCE
+            subject.GTK3_REVIEWED_PINS = pins
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                subject.configure_candidate(subject.GTK3_CANDIDATE)
+            self.assertEqual(subject.SOURCE, p.SOURCE)
+            self.assertFalse(subject._candidate_configured)
+
+    def test_complete_reviewed_namespace_is_independent_and_cannot_switch_back_or_accept_old_binding(self):
+        subject = self.subject()
+        original = copy.deepcopy(subject.ORIGINAL_REVIEWED_PINS)
+        subject.GTK3_REVIEWED_PINS = self.synthetic_pins(subject)
+        value = subject.configure_candidate(subject.GTK3_CANDIDATE)
+        self.assertEqual(subject.COMPONENT_PINS, subject.GTK3_PREPARATION["components"])
+        self.assertEqual(subject.PRIVATE_RUN, 38647206970)
+        self.assertEqual(subject.SOURCE, "7"*40)
+        self.assertEqual(subject.ORIGINAL_REVIEWED_PINS, original)
+        binding = source_fixture()
+        binding["run"].update(id=subject.RUN, head_sha=subject.SOURCE)
+        binding["artifact"].update(id=subject.ARTIFACT, name=subject.ARTIFACT_NAME, digest="sha256:" + subject.ZIP_SHA)
+        binding["artifact"]["workflow_run"].update(id=subject.RUN, head_sha=subject.SOURCE)
+        binding["job"].update(id=subject.JOB, run_id=subject.RUN)
+        binding["commit"] = {"sha": subject.SOURCE, "tree": {"sha": subject.TREE}}
+        subject.validate_source(binding)
+        child = subject.child_env({}, Path("/fixture"))
+        self.assertEqual(child["CREATOR_LINUX_ROOT_CANDIDATE"], subject.GTK3_CANDIDATE)
+        value["PINS"].clear()
+        self.assertTrue(subject.PINS)
+        with self.assertRaises(RuntimeError):
+            subject.validate_source(source_fixture())
+        with self.assertRaisesRegex(RuntimeError, "switching"):
+            subject.configure_candidate(subject.ORIGINAL_CANDIDATE)
+
+    def test_candidate_label_is_the_only_added_worker_environment_value(self):
+        env = p.child_env({"CREATOR_LINUX_ROOT_CANDIDATE": p.GTK3_CANDIDATE, "GITHUB_TOKEN": "secret",
+                           "NODE_OPTIONS": "inject", "LD_PRELOAD": "inject"}, Path("/fixture"))
+        self.assertEqual(env["CREATOR_LINUX_ROOT_CANDIDATE"], p.SELECTED_CANDIDATE)
+        self.assertFalse(set(env).intersection(("GITHUB_TOKEN", "NODE_OPTIONS", "LD_PRELOAD")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

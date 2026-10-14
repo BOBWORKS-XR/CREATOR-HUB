@@ -5,7 +5,7 @@ update, Unity project creation, AI connection, Flatpak host integration or relea
 acceptance. Those gates remain false even if every component action passes.
 Linux retirement/integration work is parent-owned. No Mac lane is included.
 
-## Immutable Product
+## Original Immutable Product
 
 - Product source `5bb05a21d73c0fc3b2839cbcbd4322832b24aead`, tree
   `f91c61a8e29da84e0dbdbfa642d201cd4c6a3279`, successful assembly
@@ -246,3 +246,62 @@ again merely to exercise uploads: doing so would dispatch the obsolete pinned
 DEB. Next diagnostics should download the compact capture only; original source
 bytes and both failed-run artifacts remain retained separately. No active
 commands remain at this checkpoint.
+
+## Pending GTK3 Assembly Pins
+
+The unpublished 48-line Zenity inventory draft was removed, and only that draft
+was removed. No Zenity code was executed, installed or granted native input
+authority. Original failure ZIPs/reports/PNG remain unchanged.
+
+The Root helper now preserves its original complete `5bb05a2` authority in
+`ORIGINAL_REVIEWED_PINS`. A separate fixed selector `setup-gtk3-77367ae` can only
+activate `GTK3_REVIEWED_PINS` after the complete outer-assembly record is present
+and valid. That record is deliberately `None` while assembly evidence is pending.
+Unknown selectors, paths/URLs, partial records, mixed private sources, original
+product relabeling and switching candidates within a process refuse. All
+existing archive, file mode/hash, receipt, actual package and kernel-image checks
+still run against the selected exact authority; none fall back to another one.
+
+The reviewed preparation block independently records source/build
+`77367ae881413d6868e484f77e12a48c5aa58b00`, source tree
+`013e360eccb7474744f5e6cd0a6b719748d867e5`, preparation `38647206970` attempt 1,
+and handoff SHA-256
+`75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae`.
+The actual `artifacts/unix-payload-38647206970/transfer/prepared-unix.json` was
+read: new Setup is 16554072 bytes, SHA-256
+`c960edfdd2f86d1ef994ef639b0d3e1b35041acb78935bf5d61dd7f69f32978c`,
+mode 0755; MCP's original 17328424-byte image/hash is unchanged. Parent reports
+the original preparation artifact and signed upload verified; these are not
+substitutes for outer assembly acceptance. The signed upload is private asset
+`641883669`, 53946597 bytes, SHA-256
+`28887d8d783468e04583d75905ca732237986f90110dea1d4929a103e37c6eb5`.
+
+Parent is producing outer assembly `38648562557` at source
+`4f3744d5707ed5cd26c2e5a1b10a7d45a5e8d10b`. Before activating the new selector,
+review its completed-success API/job/source-tree binding, original artifact
+ID/name/size/ZIP digest, raw Root/native DEB/installed Root hashes, and exact
+manifest/archive/assembly-receipt/package-integrity file sizes/hashes/modes.
+No such missing value is guessed or inherited from the original assembly.
+
+The component CLI holds the old candidate and refuses the new candidate before
+any temp-path, artifact, installer or native-process operation while its complete
+outer pins are absent. The workflow uses `candidate-pins` before its first API
+download; only that source-constant export supplies run/artifact/job/ZIP pins.
+The primary API checks remain exact, and the exported Root helper self-hash is
+checked again. After final reviewed constants are populated, recompute and
+propagate the helper hash to `ROOT_SHA` and rerun both focused suites plus YAML/
+JavaScript parsing before any authorized native dispatch. Worker candidate labels
+are derived from the selected authority, not copied from an untrusted override.
+
+The generic `native-unix-window.py` and sealed in-process GTK consent guard are
+unchanged. No child-dialog exception, arbitrary input, runtime injection variable,
+deadline change or sandbox broadening was added. Compact capture still uploads before separate
+original source evidence. No old-product or new-candidate native run was started.
+
+Pending-pin preflight: Root suite 80 passed / 1 skipped; component suite 25 passed /
+1 skipped on Windows. Existing single-process helper suite 36 passed / 2 skipped;
+native fixture source suite 8 passed. YAML, compact-first ordering and the
+embedded GitHub script parsed. Tests include unknown/missing/mixed candidate
+refusals, original source binding preservation, detached complete candidate
+selection, worker-label propagation, early old-component dispatch hold and
+helper self-hash consistency. No test fixture is a real new assembly pin.

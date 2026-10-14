@@ -79,18 +79,48 @@ class ContractTests(unittest.TestCase):
         self.assertIn('B.process_uids(actual["pid"]) == uid_before', source)
         self.assertEqual(set(p.CONTROLS), {"view-setup", "view-mcp", "retry", "requirements", "skip-migration", "save-guide"})
 
-    def test_workflow_reuses_exact_original_artifact_with_all_bindings(self):
+    def test_workflow_uses_complete_reviewed_candidate_without_changing_api_binding_guards(self):
         body = (HERE.parent / ".github/workflows/native-linux-components-014.yml").read_text()
-        for literal in (p.B.SOURCE, p.B.TREE, p.B.ZIP_SHA, str(p.B.RUN), str(p.B.JOB), str(p.B.ARTIFACT), str(p.B.ZIP_SIZE),
+        for literal in (p.B.GTK3_CANDIDATE, p.B.GTK3_PREPARATION["source"], p.B.GTK3_PREPARATION["handoffSha256"],
+                        "sha=pins.SOURCE,tree=pins.TREE", "runId=pins.RUN,artifactId=pins.ARTIFACT",
+                        "zipSize=pins.ZIP_SIZE,zipSha=pins.ZIP_SHA", "pins.ARTIFACT_NAME", "job.id,pins.JOB",
+                        "run.run_attempt,pins.ATTEMPT", "job.run_attempt,pins.ATTEMPT", "pins.helperSha256",
                         "Buffer.isBuffer(data)||data instanceof ArrayBuffer", "persist-credentials: false", "if: always()",
                         "ubuntu-22.04", "CREATOR_LINUX_COMPONENTS_PROBE", "validation/linux-components-014",
                         "native-linux-components-probe.py\" probe", "linux-root-probe/*.json", "linux-root-input.zip"):
             self.assertIn(literal, body)
         self.assertLess(body.index("native-linux-components-probe.test.py"), body.index("downloadArtifact("))
+        self.assertLess(body.index("candidate-pins >"), body.index("getWorkflowRun("))
         self.assertLess(body.index("assert.equal(commit.tree.sha,tree)"), body.index("downloadArtifact("))
         self.assertLess(body.index("native-linux-root-probe.py stage"), body.index("native-linux-root-probe.py install"))
         for forbidden in ("cargo build", "npm run build", "secrets."):
             self.assertNotIn(forbidden, body)
+
+    def test_removed_unpublished_zenity_draft_has_no_runtime_code_or_inputs(self):
+        source = (HERE / "native-linux-components-probe.py").read_text()
+        for removed in ("system_zenity", "inventory_zenity", "zenity_proof", "ZENITY", "import shutil"):
+            self.assertNotIn(removed, source)
+        self.assertIn("helper.Request.sealed(args, parsed)", source)
+        self.assertIn("helper.perform(req, atspi, helper.Proc(), x11, binding)", source)
+
+    def test_pending_assembly_blocks_component_cli_before_any_staging_or_native_read(self):
+        subject = load("components_pending_candidate", HERE / "native-linux-components-probe.py")
+        subject.B.GTK3_REVIEWED_PINS = None
+        with mock.patch.object(subject, "admission"), mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(subject.B, "ordinary") as paths, mock.patch.object(subject.subprocess, "Popen") as spawn, \
+                self.assertRaisesRegex(RuntimeError, "outer assembly pins unavailable"):
+            subject.main()
+        paths.assert_not_called()
+        spawn.assert_not_called()
+        self.assertEqual(subject.B.SELECTED_CANDIDATE, subject.B.ORIGINAL_CANDIDATE)
+
+    def test_explicit_old_candidate_is_held_not_used_as_component_cli_fallback(self):
+        subject = load("components_old_candidate_held", HERE / "native-linux-components-probe.py")
+        with mock.patch.object(subject, "admission"), \
+                mock.patch.dict(os.environ, {"CREATOR_LINUX_ROOT_CANDIDATE": subject.B.ORIGINAL_CANDIDATE}, clear=True), \
+                mock.patch.object(subject.B, "ordinary") as paths, self.assertRaisesRegex(RuntimeError, "dispatches are held"):
+            subject.main()
+        paths.assert_not_called()
 
     def test_compact_capture_upload_precedes_separate_original_zip_and_keeps_refusals(self):
         body = (HERE.parent / ".github/workflows/native-linux-components-014.yml").read_text()

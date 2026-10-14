@@ -16,6 +16,7 @@ jobs:
     timeout-minutes: 12
     env:
       CREATOR_LINUX_COMPONENTS_PROBE: '1'
+      CREATOR_LINUX_ROOT_CANDIDATE: setup-gtk3-77367ae
       CREATOR_LINUX_ROOT_PROBE: '1'
       CREATOR_UNIX_WINDOW_TEST: '1'
     steps:
@@ -23,9 +24,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Test probe contracts without launching an application
+        env:
+          CREATOR_LINUX_ROOT_CANDIDATE: original-5bb05a2
         run: |
           python3 -B scripts/native-linux-root-probe.test.py
           python3 -B scripts/native-linux-components-probe.test.py
+      - name: Refuse staging until complete reviewed GTK3 outer assembly pins are available
+        run: python3 -B scripts/native-linux-components-probe.py candidate-pins > "$RUNNER_TEMP/linux-components-reviewed-pins.json"
       - name: Verify exact successful native assembly and source before downloading original ZIP
         uses: actions/github-script@v8
         with:
@@ -34,23 +39,28 @@ jobs:
             assert.equal(`${context.repo.owner}/${context.repo.repo}`,'BOBWORKS-XR/CREATOR-HUB');
             assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
             assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted');assert.equal(process.env.RUNNER_OS,'Linux');assert.equal(process.env.RUNNER_ARCH,'X64');
-            const repo=context.repo,sha='5bb05a21d73c0fc3b2839cbcbd4322832b24aead',tree='f91c61a8e29da84e0dbdbfa642d201cd4c6a3279';
-            const runId=38630742955,artifactId=11927495507,zipSize=386824719;
-            const zipSha='42c5e1a95605158ab084c4cad1db1a6fb5b49f6fe225db9cea868148cccda725';
+            const temp=fs.realpathSync(process.env.RUNNER_TEMP);
+            const pinBytes=fs.readFileSync(path.join(temp,'linux-components-reviewed-pins.json'));assert.ok(pinBytes.length<=16384);
+            const pins=JSON.parse(pinBytes.toString('utf8'));
+            assert.equal(pins.candidate,'setup-gtk3-77367ae');assert.equal(pins.PRIVATE_SOURCE,'77367ae881413d6868e484f77e12a48c5aa58b00');
+            assert.equal(pins.PRIVATE_RUN,38647206970);assert.equal(pins.HANDOFF_SHA,'75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae');
+            assert.equal(crypto.createHash('sha256').update(fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE,'scripts/native-linux-root-probe.py'))).digest('hex'),pins.helperSha256);
+            const repo=context.repo,sha=pins.SOURCE,tree=pins.TREE;
+            const runId=pins.RUN,artifactId=pins.ARTIFACT,zipSize=pins.ZIP_SIZE,zipSha=pins.ZIP_SHA;
             const {data:run}=await github.rest.actions.getWorkflowRun({...repo,run_id:runId});
-            assert.equal(run.id,runId);assert.equal(run.run_attempt,1);assert.equal(run.head_sha,sha);
+            assert.equal(run.id,runId);assert.equal(run.run_attempt,pins.ATTEMPT);assert.equal(run.head_sha,sha);
             assert.equal(run.repository.id,1364807512);assert.equal(run.status,'completed');assert.equal(run.conclusion,'success');
             assert.equal(run.event,'push');assert.equal(run.head_branch,'validation/unix-assembly-014');
             assert.equal(run.path,'.github/workflows/unix-managed-assembly.yml');
             const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:artifactId});
-            assert.equal(artifact.id,artifactId);assert.equal(artifact.name,'signed-unix-hub-linux-38630742955-1');
+            assert.equal(artifact.id,artifactId);assert.equal(artifact.name,pins.ARTIFACT_NAME);
             assert.equal(artifact.expired,false);assert.equal(artifact.size_in_bytes,zipSize);assert.equal(artifact.digest,`sha256:${zipSha}`);
             assert.equal(artifact.workflow_run.id,runId);assert.equal(artifact.workflow_run.head_sha,sha);
             assert.equal(artifact.workflow_run.repository_id,1364807512);assert.equal(artifact.workflow_run.head_repository_id,1364807512);
-            const {data:page}=await github.rest.actions.listJobsForWorkflowRunAttempt({...repo,run_id:runId,attempt_number:1,per_page:100});
+            const {data:page}=await github.rest.actions.listJobsForWorkflowRunAttempt({...repo,run_id:runId,attempt_number:pins.ATTEMPT,per_page:100});
             assert.ok(page.jobs.length<=16&&page.total_count===page.jobs.length);
             const jobs=page.jobs.filter(j=>j.name.startsWith('assembly (linux,'));assert.equal(jobs.length,1);
-            const job=jobs[0];assert.equal(job.id,116081506373);assert.equal(job.run_id,runId);assert.equal(job.run_attempt,1);assert.equal(job.conclusion,'success');
+            const job=jobs[0];assert.equal(job.id,pins.JOB);assert.equal(job.run_id,runId);assert.equal(job.run_attempt,pins.ATTEMPT);assert.equal(job.conclusion,'success');
             const {data:commit}=await github.rest.git.getCommit({...repo,commit_sha:sha});
             assert.equal(commit.sha,sha);assert.equal(commit.tree.sha,tree);
             async function source(file) {
@@ -110,6 +120,7 @@ jobs:
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/linux-root-source-binding.json
+            ${{ runner.temp }}/linux-components-reviewed-pins.json
             ${{ runner.temp }}/linux-root-probe/*.json
             ${{ runner.temp }}/linux-root-probe/*.stdout
             ${{ runner.temp }}/linux-root-probe/*.stderr

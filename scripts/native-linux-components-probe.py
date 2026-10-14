@@ -17,7 +17,7 @@ import time
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
-ROOT_SHA = "81e30d24b9a5aa28fb525a8785b949f09f79cdf94d8365171f429f516faf1df7"
+ROOT_SHA = "90e2e94f1c0e291bd02b89e6f8240bcc2e4abb3ad3a103673f1508008353b660"
 SCOPE = "pinned-native-deb-embedded-components-only"
 FALSE_GATES = {key: False for key in ("releaseReady", "migrationAccepted", "retirementAccepted",
                                     "signedUpdateAccepted", "flatpakHostIntegrationAccepted",
@@ -57,6 +57,13 @@ def load_root():
 
 
 B = load_root()
+
+
+def configure_component_candidate(name):
+    selected = B.configure_candidate(name)
+    for app, (size, digest) in B.COMPONENT_PINS.items():
+        APPS[app] = {**APPS[app], "hash": digest, "size": size}
+    return {**selected, "helperSha256": ROOT_SHA}
 
 
 def admission(env, system, machine):
@@ -458,7 +465,7 @@ def wait_backend_gone(record, helper, capture):
 
 def probe(root, env):
     report = {"scope": SCOPE, **FALSE_GATES, "phase": "verify", "workers": [], "backends": [],
-              "productSource": B.SOURCE, "privateSource": B.PRIVATE_SOURCE,
+              "candidate": B.SELECTED_CANDIDATE, "productSource": B.SOURCE, "privateSource": B.PRIVATE_SOURCE,
               "testSource": env.get("GITHUB_SHA"), "testRunId": env.get("GITHUB_RUN_ID"),
               "componentsAccepted": False, "normalExitVerified": False, "backendExitCodesObserved": False}
     child, capture, start, xid, failure = None, None, None, None, None
@@ -571,9 +578,14 @@ def probe(root, env):
 
 def main():
     admission(os.environ, sys.platform, platform.machine())
-    root = B.ordinary(os.environ["RUNNER_TEMP"]) / "linux-root-probe"
+    selected = configure_component_candidate(os.environ.get("CREATOR_LINUX_ROOT_CANDIDATE", B.GTK3_CANDIDATE))
+    require(B.SELECTED_CANDIDATE == B.GTK3_CANDIDATE, "Old component native dispatches are held; reviewed GTK3 assembly required")
     args = sys.argv[1:]
-    require(args and (args == ["probe"] or args[0] == "worker"), "Use probe or fixed internal worker")
+    if args == ["candidate-pins"]:
+        print(json.dumps(selected, ensure_ascii=True))
+        return
+    root = B.ordinary(os.environ["RUNNER_TEMP"]) / "linux-root-probe"
+    require(args and (args == ["probe"] or args[0] == "worker"), "Use candidate-pins, probe or fixed internal worker")
     result = probe(root, os.environ) if args == ["probe"] else worker(root, args[1:])
     body = json.dumps(result, ensure_ascii=True)
     require(len(body.encode()) <= (B.MAX_JSON if args[0] == "worker" else 1048576), "Component output exceeds bounds")
