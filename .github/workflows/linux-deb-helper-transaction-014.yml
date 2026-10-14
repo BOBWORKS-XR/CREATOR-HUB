@@ -1,0 +1,56 @@
+name: Linux DEB helper actual transaction (disposable mechanism only)
+on:
+  push:
+    branches: [validation/linux-deb-helper-transaction-014]
+    paths: ['.github/workflows/linux-deb-helper-transaction-014.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  helper-transaction:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' && github.ref == 'refs/heads/validation/linux-deb-helper-transaction-014' && github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      CREATOR_LINUX_DEB_HELPER_TRANSACTION: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Pure syntax and regression preflight before downloads, build or privilege
+        run: |
+          python3 -B -c "import ast,pathlib; [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in ['scripts/linux-deb-helper-transaction-probe.py','scripts/linux-deb-helper-transaction.test.py']]"
+          node --check scripts/linux-deb-helper-transaction-sdk.cjs
+          node --check scripts/linux-deb-helper-transaction-sdk.test.cjs
+          python3 -B scripts/linux-deb-helper-transaction.test.py
+          node --test scripts/linux-deb-helper-transaction-sdk.test.cjs
+      - name: Reuse original public MCP DEB from the pinned earlier retention artifact
+        uses: actions/download-artifact@v5
+        with:
+          artifact-ids: '11929999662'
+          run-id: '38642404016'
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/linux-deb-helper-transaction-input
+      - name: Install existing lockfile-pinned SDK without lifecycle scripts or product build
+        run: npm ci --prefix modules/mcp --omit=dev --ignore-scripts --no-audit --no-fund
+      - name: Build only experimental helper, install exact baseline, retain live SDK and retire once
+        run: node scripts/linux-deb-helper-transaction-sdk.cjs
+      # Capture even an artifact/setup failure. Never clear diversions, markers or stages.
+      - name: Read-only final system diversions, package state and protected helper evidence
+        if: always()
+        run: python3 -B scripts/linux-deb-helper-transaction-probe.py diagnostics
+      - name: Retain original logs and false production gates, not product/package payloads
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb-helper-transaction-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/linux-deb-helper-transaction/*.json
+            ${{ runner.temp }}/linux-deb-helper-transaction/*.stdout
+            ${{ runner.temp }}/linux-deb-helper-transaction/*.stderr
