@@ -1,4 +1,4 @@
-name: Actual Windows convergence with environment-isolated diagnostic tests (not release)
+name: Actual Windows convergence and observed startup-idle closure (not release)
 on:
   push:
     branches: [validation/convergence-014]

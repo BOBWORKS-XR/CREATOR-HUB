@@ -217,11 +217,26 @@ async function main(candidate) {
     const completed = await page.evaluate(() => window.CreatorHubNative.invoke('convergence_status'));
     assert.equal(completed.required, false); assert.equal(completed.stage, 'complete');
     report.checks.push('Native cleanup cancellation then approval retires both exact GUI registrations, retains all nine runtime files, preserves old live stdio and reconnects via old and signed-router paths');
+    await page.waitForFunction(() => {
+      const check = document.querySelector('#check-updates');
+      const status = document.querySelector('#catalog-status');
+      return check && !check.disabled && status?.textContent === 'Update check complete. Installation always needs your approval.';
+    });
+    report.closeReadiness = await page.evaluate(() => ({
+      checkEnabled: !document.querySelector('#check-updates').disabled,
+      catalogueStatus: document.querySelector('#catalog-status').textContent,
+      hubStatus: document.querySelector('#hub-update-status').textContent,
+    }));
+    await page.evaluate(async () => {
+      window.convergenceCloseBlocked = [];
+      await window.__TAURI__.event.listen('close-blocked', event => window.convergenceCloseBlocked.push(String(event.payload).slice(0, 4096)));
+    });
     native(child.pid, hub, 'close');
     await retry(() => assert.notEqual(child.exitCode, null)); assert.equal(child.exitCode, 0);
     report.passed = true;
   } catch (error) {
     report.error = String(error); report.stack = error.stack;
+    if (page) report.closeBlocked = await page.evaluate(() => window.convergenceCloseBlocked || []).catch(() => null);
     if (page) await page.screenshot({ path: path.join(out, 'failure.png') }).catch(() => {});
     process.exitCode = 1;
   } finally {
