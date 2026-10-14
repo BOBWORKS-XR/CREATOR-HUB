@@ -1,4 +1,4 @@
-name: Accepted B03 14 to outer-only 15 outgoing lab (not release)
+name: Scoped B03 14 to outer-only 15 outgoing lab (not release)
 on:
   workflow_dispatch:
   push:

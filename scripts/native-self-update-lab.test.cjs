@@ -211,7 +211,9 @@ test('both literal scenarios still refuse local execution before files, processe
 
 test('dedicated outgoing workflow freezes one private ZIP and separates write-token staging from read-only execution', () => {
   assert.match(outgoingWorkflow, /workflow_dispatch:/);
-  assert.doesNotMatch(outgoingWorkflow, /inputs:|push:|workflow_call:|schedule:/);
+  assert.doesNotMatch(outgoingWorkflow, /inputs:|workflow_call:|schedule:/);
+  assert.match(outgoingWorkflow, /push:\r?\n    branches: \[validation\/unified-outgoing-014\]\r?\n    paths: \['\.github\/workflows\/native-unified-outgoing-lab\.yml'\]/);
+  assert.equal((outgoingWorkflow.match(/push:/g) || []).length, 1);
   const staging = outgoingWorkflow.slice(outgoingWorkflow.indexOf('  stage-input:'), outgoingWorkflow.indexOf('  outgoing-lab:'));
   const execution = outgoingWorkflow.slice(outgoingWorkflow.indexOf('  outgoing-lab:'));
   assert.match(staging, /permissions:\r?\n      contents: write/);
