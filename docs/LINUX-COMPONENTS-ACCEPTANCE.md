@@ -99,7 +99,7 @@ runs `native-linux-components-probe.py probe`. It preserves original input ZIP,
 source binding, receipts, all bounded worker stdout/stderr, owned snapshots,
 refusals and PNG even on failure. Original failed runs are never overwritten.
 
-Current classification: implementation prepared; native component result pending.
+Initial pre-dispatch classification: implementation prepared; native component result pending.
 Only an actual report with every required action/result/retention gate can change
 this component classification. Packaging and Root terms proof alone cannot.
 
@@ -187,7 +187,7 @@ Classification:
   label `Retry opening`. The paragraph Text gap means
   the planned recipe/status predicates are not yet experimentally verified.
 
-Smallest next step, **before another dispatch**: parent review of this exact
+Historical proposed next step (superseded by the GTK3 checkpoint below): parent review of this exact
 dialog/dependency contract; bounded read-only inventory of the runner's resolved
 Zenity binary/package/hash and backend launch outcome. Any native action would
 need an explicitly reviewed Root -> sealed Setup -> exact system Zenity chain,
@@ -207,3 +207,42 @@ retry correction: 22 focused tests passed, 1 Linux-only fixture skipped; unchang
 Root tests 75 passed, 1 skipped. Workflow YAML, upload ordering and embedded native
 GitHub-script syntax parsed. These changes are not a third native run or a suite
 acceptance claim.
+
+## Source Checkpoint: GTK3 Candidate Required
+
+Parent commit `77367ae881413d6868e484f77e12a48c5aa58b00` selects
+`tauri-plugin-dialog`'s `gtk3` feature for Linux Setup instead of `xdg-portal`,
+with a mechanical lockfile prune. The committed Linux-only selection was read
+directly and `node --test scripts/linux-dialog-backend.test.cjs` passed all three
+source/preflight guards locally. Hub and MCP keep their existing default GTK3
+selection. The producer preflight also checks the actual locked Linux `rfd`
+feature graph; that Linux graph command was not rerun on this Windows host.
+
+This source change requires a **fresh built and signed private Setup payload**;
+the old `5bb05a2` DEB still contains the original XDG/Zenity-backed Setup ELF.
+No old artifact, manifest hash, signature, report or helper pin is relabeled to
+represent the GTK3 candidate. Parent owns producer/build/signing and subsequent
+Root assembly. The separately verified `9894b1c` Root package still has the old
+private Setup payload and is not evidence for this new dialog backend.
+
+All old `5bb` native dispatches are stopped. No Zenity-child driver, native
+Zenity-chain input, dependency provision or counterfactual run was performed.
+The interrupted draft consists only of 48 uncommitted lines in
+`scripts/native-linux-components-probe.py`: read-only inventory helpers plus
+their import/constants. They remain preserved, unwired, unexecuted and untested;
+they are not a runtime authority or an accepted part of the flow.
+
+The existing strict in-process, manifest-sealed backend PID/start/UID/kernel
+image/XRes/GTK dialog scope is the intended driver for a new candidate. It must
+still pass actual decline, reaped backend, retry, approval and module operation
+tests after independent new source/artifact/receipt/hash/signature binding.
+No runtime fix, component-suite pass or release readiness is claimed here.
+Actual GTK FileChooserNative/portal behavior remains a separate Flatpak test
+gate; selecting GTK3 does not establish that gate by itself.
+
+Compact-first capture and separate original-source uploads are committed in
+`4459e615ab68a5cbfa8a17eae3e25f6b16489d51`. The validation branch is not pushed
+again merely to exercise uploads: doing so would dispatch the obsolete pinned
+DEB. Next diagnostics should download the compact capture only; original source
+bytes and both failed-run artifacts remain retained separately. No active
+commands remain at this checkpoint.
