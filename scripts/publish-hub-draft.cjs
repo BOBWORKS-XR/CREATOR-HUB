@@ -20,7 +20,7 @@ async function publishDraft(version, actions = {}, options = {}) {
   const inspectDraft = actions.checkDraft || checkDraft;
   const inspectLive = actions.checkLive || checkLive;
   const publish = actions.publish || (() => (actions.execute || execFileSync)('gh', ['api', '--method', 'PATCH',
-    `repos/BOBWORKS-XR/CREATOR-HUB/releases/${qualification.draft.id}`, '-F', 'draft=false', '-f', 'make_latest=false'],
+    `repos/BOBWORKS-XR/CREATOR-HUB/releases/${qualification.draft.id}`, '-f', `tag_name=v${version}`, '-F', 'draft=false', '-f', 'make_latest=false'],
   { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true }));
   const preflight = await inspectDraft(version);
   if (preflight.previousStable !== selectBaseline('0.1.14').version) throw Error('Public previous stable differs from the qualified native incoming baseline.');

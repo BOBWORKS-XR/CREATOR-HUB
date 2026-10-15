@@ -74,7 +74,7 @@ test('a newer public stable than the qualified incoming baseline refuses before 
   assert.equal(writes, 0);
 });
 
-test('the sole default write publishes the qualified draft ID, never assets or latest', async () => {
+test('the sole default write preserves the exact draft tag and ID, never assets or latest', async () => {
   const commands = [];
   await publishDraft('0.1.14', {
     checkReadiness: () => ({ draft: { id: 401 } }), verifyQualification: async () => {},
@@ -82,7 +82,7 @@ test('the sole default write publishes the qualified draft ID, never assets or l
     execute: (command, args) => { commands.push({ command, args }); return '{}'; },
   });
   assert.deepEqual(commands, [{ command: 'gh', args: ['api', '--method', 'PATCH',
-    'repos/BOBWORKS-XR/CREATOR-HUB/releases/401', '-F', 'draft=false', '-f', 'make_latest=false'] }]);
+    'repos/BOBWORKS-XR/CREATOR-HUB/releases/401', '-f', 'tag_name=v0.1.14', '-F', 'draft=false', '-f', 'make_latest=false'] }]);
 });
 
 test('invalid local qualification never reaches any GitHub verification or write', async t => {
