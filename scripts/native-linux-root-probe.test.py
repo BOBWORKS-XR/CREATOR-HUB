@@ -771,10 +771,13 @@ class OwnershipTests(unittest.TestCase):
         self.assertTrue(error.exception.action_may_have_run)
         self.checkbox.action.do_action.assert_called_once_with(0)
 
-    def test_close_only_exact_root_ewmh_after_full_renderer_traversal(self):
+    def test_close_only_exact_root_ewmh_without_document_authority(self):
         binding = self.fixture()
-        result = p.perform_owned("close", self.request, self.helper, self.atspi, binding)
+        with mock.patch.object(p, "owned_walk", side_effect=AssertionError("No document traversal for WM close")):
+            result = p.perform_owned("close", self.request, self.helper, self.atspi, binding)
         self.assertEqual(result["verb"], "WM_DELETE_WINDOW")
+        self.assertFalse(result["axTreeUsedForClose"])
+        self.assertFalse(result["normalExitVerified"])
         self.x11.close_window.assert_called_once_with(77, self.info)
         self.checkbox.action.do_action.assert_not_called()
 
@@ -786,38 +789,49 @@ class OwnershipTests(unittest.TestCase):
         self.x11.close_window.side_effect = close
         self.assertEqual(p.perform_owned("close", self.request, self.helper, self.atspi, binding)["actionCount"], 1)
 
-    def test_wm_close_accepts_observed_semantic_parent_only_inside_full_owned_subtree(self):
+    def test_document_parent_refusal_does_not_prevent_owned_native_frame_close(self):
         binding = self.fixture()
         section = AxNode(43, 109, parent=self.web)
         heading = AxNode(43, 94, parent=section)
         text = AxNode(43, 82, "fixture text", parent=section)
-        text.parent = heading
+        text.parent = AxNode(43, 94)
         with self.assertRaisesRegex(RuntimeError, "AX subtree escaped"):
             p.owned_walk(self.window, binding, self.atspi)
         result = p.perform_owned("close", self.request, self.helper, self.atspi, binding)
         self.assertEqual(result["actionCount"], 1)
-        self.assertEqual(result["ownership"]["wmCloseParentContainment"]["semanticEdges"], 1)
+        self.assertFalse(result["axTreeUsedForClose"])
         self.x11.close_window.assert_called_once_with(77, self.info)
+        self.checkbox.action.do_action.assert_not_called()
 
-    def test_wm_close_still_refuses_outside_same_pid_parent_and_foreign_windows(self):
-        for kind in ("outside-parent", "foreign-peer", "frame", "window", "application", "uid", "image", "pid-reuse"):
+    def test_wm_close_still_refuses_changed_native_ownership_or_protocol(self):
+        for kind in ("uid", "image", "pid-reuse", "title", "xres-client", "xres-pid", "unmapped", "protocol"):
             with self.subTest(kind=kind):
                 binding = self.fixture()
-                if kind == "outside-parent":
-                    self.heading.parent = AxNode(43, 94)
-                elif kind == "foreign-peer":
-                    AxNode(99, 20, parent=self.web)
-                elif kind in ("frame", "window", "application"):
-                    AxNode(43, {"frame": 23, "window": 69, "application": 75}[kind], parent=self.web)
-                elif kind == "uid":
-                    self.records[43]["uids"] = [0] * 4
+                if kind == "uid":
+                    self.records[42]["uids"] = [0] * 4
                 elif kind == "image":
-                    self.records[43]["kernelImageSha256"] = "f" * 64
+                    self.records[42]["kernelImageSha256"] = "f" * 64
+                elif kind == "pid-reuse":
+                    self.records[42]["startTime"] = "99"
+                elif kind == "protocol":
+                    self.x11.check_close.side_effect = RuntimeError("No normal delete protocol")
                 else:
-                    self.records[43]["startTime"] = "99"
+                    self.info[{"title": "title", "xres-client": "client", "xres-pid": "pid", "unmapped": "mapped"}[kind]] = "changed"
                 with self.assertRaises(RuntimeError):
                     p.perform_owned("close", self.request, self.helper, self.atspi, binding)
                 self.x11.close_window.assert_not_called()
+
+    def test_close_unknown_after_dispatch_never_retries_or_uses_other_input(self):
+        binding = self.fixture()
+        self.x11.close_window.side_effect = RuntimeError("Unknown native result")
+        with self.assertRaises(self.helper.ActionError) as caught:
+            p.perform_owned("close", self.request, self.helper, self.atspi, binding)
+        self.assertTrue(caught.exception.action_may_have_run)
+        self.x11.close_window.assert_called_once_with(77, self.info)
+        self.checkbox.action.do_action.assert_not_called()
+        foreign_request = copy.copy(self.request)
+        with self.assertRaisesRegex(RuntimeError, "native binding"):
+            p.perform_owned("close", foreign_request, self.helper, self.atspi, binding)
 
 
 class AcknowledgementTests(unittest.TestCase):

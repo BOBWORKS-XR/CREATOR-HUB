@@ -17,7 +17,7 @@ import time
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
-ROOT_SHA = "d2848cd8110015982b9becee81aa259e333e6e0a9878bb152e2ae015f1e282f6"
+ROOT_SHA = "1d5f7c4fca899b80905967ec515cfab273af12a13d5e88673cbd2db8f84ae384"
 SCOPE = "pinned-native-deb-embedded-components-only"
 FALSE_GATES = {key: False for key in ("releaseReady", "migrationAccepted", "retirementAccepted",
                                     "signedUpdateAccepted", "flatpakHostIntegrationAccepted",

@@ -1024,28 +1024,37 @@ def terms_control(nodes, action, helper, atspi):
 
 def perform_owned(action, request, helper, atspi, ownership):
     require(action in ("check-terms", "accept-terms", "close"), "Unreviewed native action refused")
-    window = helper.select_window(request, atspi)
-    nodes = owned_walk(window, ownership, atspi, wm_close=action == "close")
-    selected = terms_control(nodes, action, helper, atspi)[0] if action != "close" else None
     if action == "close":
+        # EWMH targets the native client XID, not any document/control. Semantic
+        # DOM Parent links must not authorize or prevent closing that owned frame.
+        # https://specifications.freedesktop.org/wm/latest/ar01s04.html
+        require(request is ownership.request, "Normal close request differs from its native binding")
+        ownership.recheck(full=True)
         ownership.x11.check_close(request.window)
+        ownership.recheck(full=True)
+        try:
+            ownership.x11.close_window(request.window, ownership.xres)
+            return {"action": action, "actionCount": 1, "verb": "WM_DELETE_WINDOW",
+                    "ownership": ownership.evidence(), "normalExitVerified": False,
+                    "termsVisibleBeforeAction": None, "axTreeUsedForClose": False}
+        except Exception as error:
+            raise helper.ActionError(str(error)) from error
+    window = helper.select_window(request, atspi)
+    nodes = owned_walk(window, ownership, atspi)
+    selected = terms_control(nodes, action, helper, atspi)[0]
     ownership.recheck(full=True)
     require(ownership.same_node(helper.select_window(request, atspi), window), "AX frame changed before native action")
-    current_nodes = owned_walk(window, ownership, atspi, wm_close=action == "close")
-    if selected is not None:
-        current, interface, verb = terms_control(current_nodes, action, helper, atspi)
-        require(ownership.renderer is not None and ownership.same_node(current, selected)
-                and current.get_process_id() == ownership.renderer["pid"],
-                "Terms control changed or is not in the bound WebKit child")
+    current_nodes = owned_walk(window, ownership, atspi)
+    current, interface, verb = terms_control(current_nodes, action, helper, atspi)
+    require(ownership.renderer is not None and ownership.same_node(current, selected)
+            and current.get_process_id() == ownership.renderer["pid"],
+            "Terms control changed or is not in the bound WebKit child")
     terms_visible = any(n.get_name() == TERMS and n.get_state_set().contains(atspi.StateType.SHOWING) for n in current_nodes)
     ownership.recheck(full=True)
     # One terminal input boundary. Failures after this line never authorize retry.
     try:
-        if selected is not None:
-            require(interface.do_action(0), "Native terms action refused; no retry")
-        else:
-            ownership.x11.close_window(request.window, ownership.xres)
-        return {"action": action, "actionCount": 1, "verb": verb if selected is not None else "WM_DELETE_WINDOW",
+        require(interface.do_action(0), "Native terms action refused; no retry")
+        return {"action": action, "actionCount": 1, "verb": verb,
                 "ownership": ownership.evidence(), "normalExitVerified": False,
                 "termsVisibleBeforeAction": terms_visible}
     except Exception as error:
