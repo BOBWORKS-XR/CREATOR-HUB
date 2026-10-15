@@ -679,3 +679,23 @@ action is added. Saving the capture cannot replace the original failure.
 Local component regressions pass 51 tests with one native-only skip. The next
 same-package run collects the missing topology evidence; it does not presume a
 cache defect or relax containment to reach green.
+
+## Client Cache Diagnostic
+
+Run `38714806792`, source `da6274f`, again passed decline/Retry/approval, then
+failed at Setup readiness with a stale AT-SPI object path. The containment
+failure-only capture did not trigger: this error occurred before that final
+check. Cleanup had the same stale-object refusal. Compact artifact `11962726216`
+was downloaded with `gh run download` (no separate local ZIP-digest check);
+its API-reported size is 110,145 bytes and digest is
+`3c370ebc798594ac52fed7b8782cf3c08b3168ebae37bd30eed633dc5aca508c`.
+
+Hypothesis, not a product fix: client caching may return a retired reference
+during the embedded-view transition. The next same-package diagnostic sets
+`ATSPI_NO_CACHE=1` only in the spawned collector workers, after Hub has already
+been launched with its unchanged environment. This is supported by the
+[at-spi2-core 2.44.1 initialization contract](https://github.com/GNOME/at-spi2-core/blob/AT_SPI2_CORE_2_44_1/atspi/atspi-misc.c#L871).
+There is no extra action/retry, longer timeout, changed readiness/ownership rule,
+product environment change, package rebuild or production acceptance. Local
+component preflight passes 52 tests with one native-only skip. A failure will
+disprove this as a sufficient correction; do not stack timing or selector changes.
