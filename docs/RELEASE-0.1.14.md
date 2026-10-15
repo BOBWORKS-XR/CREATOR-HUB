@@ -1,7 +1,7 @@
 # Creator Hub 0.1.14: Windows
 
-Publication candidate. Do not announce readiness until the public update run
-below has passed and the exact release has been promoted.
+Published October 15, 2026, and promoted to latest after the actual public update
+run passed. [Download Windows x64](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.14/Creator.Hub_0.1.14_x64-setup.exe).
 
 ## Package
 
@@ -23,11 +23,32 @@ below has passed and the exact release has been promoted.
 | Guarded public 0.1.12 installer upgrade | Passed in the same run: real `/UPDATE /S /NS`, exact installed image and retained settings/unmanaged bytes |
 | Signed 0.1.12 to 0.1.14 in-app update | Passed in [38659795657](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38659795657), attempt 1: native cancellation, approved installation, automatic restart, both built-ins and SDK reconnect. Controlled feed, not public discovery |
 | New updater with both built-in views open | Passed in [38660387465](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38660387465), attempt 1: native Cancel preserves drafts/processes; approval installs the exact signed target and restarts automatically; both views reopen, settings survive, the old SDK connection survives and the new router reconnects twice. The 0.1.15 target is an acceptance-only fixture, never a public release |
-| Previous stable discovers and installs the final public release | Pending publication and public self-update acceptance |
+| Original reports and exact uploaded draft assets | Passed in [38661596832](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38661596832): full archive/download hashes, source/job/artifact identity, signed target bindings and old-client feed budget; no rebuild or publication |
+| Previous stable discovers and installs the final public release | Passed in [38662269035](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38662269035): unmodified public 0.1.12, real GitHub discovery, enabled Update Hub button, native Cancel, approved signed install and automatic restart into the exact 0.1.14 hash; footer/registry version, preferences and unmanaged installation content preserved |
 
 The immutable qualification receipt binds original reports, successful jobs,
 source trees, artifact digests and the exact six release assets. Unit tests and
 silent installation alone are not treated as full update acceptance.
+
+The initial tag validator [38661217497](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38661217497)
+stopped on HTTP 415 while requesting an Actions artifact ZIP with a release-asset
+Accept header. The transport was corrected and covered by an argument regression;
+the complete qualification then passed in the run above. The product bytes and
+release tag were not changed. GitHub draft writes also now retain the explicit
+release tag, after a draft-source edit was observed resetting an omitted tag.
+
+Public report SHA-256:
+`9e7bbc32649f837d532d875bee6bf92b0088ff96a2fa85b2342718ab112293a0`.
+Original artifact: `11939337495`, 134,284 bytes, SHA-256
+`51d71fc8ffd8dd611192c743f509084310d416e42ba8ae8df35b8ec328830537`.
+The first anonymous feed read immediately after publication did not yet show the
+release; the next independent read and the real public app update both passed.
+Publication was not retried. Latest promotion followed native public acceptance.
+The publication tool now rechecks only this explicitly classified absent-release
+condition, with at most 30 reads and 29 two-second waits after its single write.
+Missing signatures, malformed/oversized feeds and other errors still stop it.
+The final public feed is 159,261 bytes, 102,883 below the legacy 256 KiB limit;
+the release has exactly six assets and historical published assets are unchanged.
 
 ## Migration And Limits
 

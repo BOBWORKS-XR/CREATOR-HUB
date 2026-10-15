@@ -1,4 +1,5 @@
-const { checkDraft, checkLive } = require('./check-release-feed.cjs');
+const { checkDraft, checkLive, RELEASE_NOT_VISIBLE } = require('./check-release-feed.cjs');
+const { setTimeout: wait } = require('node:timers/promises');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -27,7 +28,14 @@ async function publishDraft(version, actions = {}, options = {}) {
   await publish(`v${version}`);
   // Public feeds can expose this version immediately, even before marking it latest.
   // Do not claim readiness until real old-client update/restart acceptance passes.
-  const live = await inspectLive(version);
+  let live;
+  for (let attempt = 1; attempt <= 30; attempt++) {
+    try { live = await inspectLive(version); break; }
+    catch (error) {
+      if (error?.code !== RELEASE_NOT_VISIBLE || attempt === 30) throw error;
+      await (actions.wait || wait)(2000);
+    }
+  }
   return { preflight, live, ready: false, next: 'Run Public Hub self-update acceptance for this exact release before promoting latest or announcing readiness.' };
 }
 module.exports = { publishDraft };

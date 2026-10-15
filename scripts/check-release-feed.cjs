@@ -3,6 +3,7 @@ const semver = require('semver');
 // Existing Hub releases read this exact endpoint before fetching signed metadata.
 const LEGACY_LIMIT = 256 * 1024;
 const PUBLICATION_HEADROOM = 4 * 1024;
+const RELEASE_NOT_VISIBLE = 'RELEASE_NOT_VISIBLE';
 const DESCRIPTOR = 'creator-hub-windows-x86_64.json';
 const REPO = 'BOBWORKS-XR/CREATOR-HUB';
 function inspectFeed(bytes, expectedVersion) {
@@ -12,7 +13,8 @@ function inspectFeed(bytes, expectedVersion) {
   const releases = JSON.parse(bytes.toString('utf8'));
   if (!Array.isArray(releases)) throw Error('Release list is not an array.');
   const item = releases.find(r => r.tag_name === `v${expectedVersion}` && !r.draft);
-  if (!item || !Array.isArray(item.assets) || ![DESCRIPTOR, `${DESCRIPTOR}.minisig`].every(name => item.assets.some(a => a.name === name))) {
+  if (!item) throw Object.assign(Error('Expected public release is missing from the current feed.'), { code: RELEASE_NOT_VISIBLE });
+  if (!Array.isArray(item.assets) || ![DESCRIPTOR, `${DESCRIPTOR}.minisig`].every(name => item.assets.some(a => a.name === name))) {
     throw Error('Expected public release with both signed catalog files is missing.');
   }
   const previousStable = releases.filter(r => !r.draft && !r.prerelease)
@@ -59,6 +61,6 @@ async function checkDraft(expectedVersion) {
   const draft = gh(['api', `repos/${REPO}/releases/${record.databaseId}`]);
   return inspectDraft(await readLiveFeed(), draft, expectedVersion);
 }
-module.exports = { LEGACY_LIMIT, PUBLICATION_HEADROOM, inspectFeed, inspectDraft, checkLive, checkDraft };
+module.exports = { LEGACY_LIMIT, PUBLICATION_HEADROOM, RELEASE_NOT_VISIBLE, inspectFeed, inspectDraft, checkLive, checkDraft };
 if (require.main === module) (process.argv[3] === '--draft' ? checkDraft(process.argv[2]) : checkLive(process.argv[2]))
   .then(result => console.log(JSON.stringify(result)), error => { console.error(error.message); process.exitCode = 1; });
