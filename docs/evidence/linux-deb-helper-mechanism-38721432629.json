@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "scope": "disposable-experimental-retirement-mechanism-only",
+  "notForPublication": true,
+  "sourceRevision": "5fc08dd73267dd213de44d3cf9304c2e709fa3c2",
+  "run": {
+    "id": 38721432629,
+    "attempt": 1,
+    "url": "https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38721432629",
+    "workflow": ".github/workflows/linux-deb-helper-transaction-014.yml",
+    "branch": "validation/linux-deb-helper-transaction-014",
+    "conclusion": "success"
+  },
+  "artifact": {
+    "id": 11966111762,
+    "name": "linux-deb-helper-transaction-38721432629-1",
+    "bytes": 116267,
+    "apiSha256": "70491fbe1d2260443938f6fdfe6125366939685624fef34d908263114fa72e2d"
+  },
+  "environment": {
+    "containerImage": "ubuntu:22.04@sha256:08ea48a03a3e78ebc7cd526e6a275053223aadd88bfc09cc49b06d5281525fde",
+    "fixtureUid": 1001,
+    "authorization": "test-only-sudo-not-native-user-authentication"
+  },
+  "observed": {
+    "helperMechanismAccepted": true,
+    "helperExitCode": 0,
+    "originalPackageVersion": "2.7.7",
+    "compatibilityPackageVersion": "2.7.7-1+hub.retention014.1",
+    "packageTransactionStarted": true,
+    "livePid": 7300,
+    "liveStartTime": "83735",
+    "liveIdentityAndReferenceUnchanged": true,
+    "toolsBeforeAndAfter": 53,
+    "originalAliasesReconnected": ["node", "node.exe"],
+    "retainedFilesWithIdenticalContentModesAndOwnership": 9,
+    "omittedGuiFiles": 5,
+    "settingsAndSentinelFilesUnchanged": 8,
+    "originalMetadataBytes": 177,
+    "compatibilityMetadataBytes": 243,
+    "bothMetadataSuffixHex": "0a6e6f",
+    "protectedStages": 1,
+    "diagnosticsComplete": true,
+    "negativeRepeatExitCode": 2,
+    "markerAndPrivateListingUnchangedByRepeat": true
+  },
+  "productionGates": {
+    "productionIntegrated": false,
+    "privilegedHelperAccepted": false,
+    "nativeTransactionAccepted": false,
+    "nativeApprovalAccepted": false,
+    "actualUserAuthenticationAccepted": false,
+    "nativeCancellationAccepted": false,
+    "guiIdleCloseAccepted": false,
+    "runtimeRetentionAccepted": false,
+    "packageGuiRetirementAccepted": false,
+    "recoveryAccepted": false,
+    "migrationAccepted": false,
+    "setupTransitionAccepted": false,
+    "flatpakAccepted": false,
+    "signedUpdateAccepted": false,
+    "restartAccepted": false,
+    "releaseReady": false,
+    "nativeContentionAccepted": false
+  }
+}

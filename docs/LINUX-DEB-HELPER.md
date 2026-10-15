@@ -4,7 +4,8 @@
 Default Cargo features are empty: `INSTALL_REFUSAL` remains unconditional in
 the default build. A separate **nondefault `experimental-transaction` feature**
 implements the normal dpkg frontend-lock handoff. Unprivileged native fixtures
-are accepted below; an actual helper/dpkg transaction is not yet accepted.
+and one disposable-container helper/dpkg mechanism are accepted below. This is
+not production retirement, native approval/authentication or recovery acceptance.
 Preparation remains separate from that transaction. There is no policy
 installation, coordinator wiring, publication, user-app build or user-PC
 transaction. The parent ran the fixture workflow and attempted transaction
@@ -312,6 +313,36 @@ flags remain false. Local Python23/Node5, AST/shell syntax, actionlint and diff 
 passed. No container execution, package rebuild, commit, push or dispatch here.
 
 ## Experimental Transaction
+
+### Accepted Disposable Mechanism: 38721432629
+
+[Run 38721432629](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38721432629),
+source `5fc08dd73267dd213de44d3cf9304c2e709fa3c2`, passed in the pinned clean
+Ubuntu 22.04 container with fixture UID1001 and explicit test-only sudo.
+[Compact machine-readable evidence](evidence/linux-deb-helper-mechanism-38721432629.json)
+binds the exact source, artifact and scope. Parent independently compared the
+retained report's before/after identities, file metadata and eight settings hashes.
+
+- Original MCP 2.7.7 became `2.7.7-1+hub.retention014.1`, helper exit 0.
+- Live PID7300/start83735 and reference hash stayed identical; 53 tools before
+  and after. Both original `node` and `node.exe` paths reconnected successfully.
+- Nine runtime files retained identical bytes, hashes, modes and ownership;
+  five GUI assets disappeared. Eight settings/sentinel files stayed byte-identical.
+- Both exact installed-metadata captures end `0a6e6f` (newline plus `no`), with
+  177 original / 243 compatibility bytes, confirming the showformat correction.
+- One protected stage, complete diagnostics, no capture errors. Negative repeat
+  exited 2 for the prior-attempt marker and changed neither marker nor private
+  listing. It did not initiate another package transaction.
+
+The already-live Node mapping is reported `(deleted)` after dpkg replaced its
+inode; the mapped process continues and both new paths work. This is measured
+retention, not proof that the original inode stays linked.
+
+Only `helperMechanismAccepted` is true. All 17 production flags remain false:
+no Hub/polkit integration, native approval/authentication/Cancel, actual GUI idle
+close, contention/interruption/recovery, Setup retirement, full settings migration,
+signed Hub update/restart, Flatpak or release acceptance. The default helper
+still refuses installation. Do not publish the TEST ONLY compatibility package.
 
 Container run `38718417359` at `8647d7f` passed bootstrap, identity, Rust tests,
 Clippy and the real unprivileged metadata gate. The baseline/SDK phase reached
