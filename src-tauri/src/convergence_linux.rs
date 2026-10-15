@@ -86,6 +86,7 @@ fn native_deb() -> Result<(), String> {
 pub struct Plan {
     helper: linux_retirement::Plan,
     dependencies: convergence_dependencies::GuiRetirementSnapshot,
+    retained_only: bool,
 }
 
 impl Plan {
@@ -107,12 +108,36 @@ impl Plan {
         Ok(Self {
             helper,
             dependencies,
+            retained_only: false,
         })
+    }
+
+    pub fn inspect_retained(router: &Path) -> Result<Self, String> {
+        native_deb()?;
+        if !pending()? {
+            return Err("No pending Linux cleanup was found for outcome review.".into());
+        }
+        idle()?;
+        let helper = linux_retirement::Plan::inspect_retained()?;
+        let paths = GUI.map(PathBuf::from);
+        let dependencies = convergence_dependencies::gui_retirement_snapshot(&paths, router);
+        dependencies.recheck().map_err(|_| {
+            "Client configuration or former GUI paths need review. No transaction was replayed."
+        })?;
+        Ok(Self {
+            helper,
+            dependencies,
+            retained_only: true,
+        })
+    }
+
+    pub fn retained_only(&self) -> bool {
+        self.retained_only
     }
 
     pub fn recheck(&self) -> Result<(), String> {
         native_deb()?;
-        if pending()? {
+        if pending()? != self.retained_only {
             return Err(
                 "A Linux cleanup is already pending. Keep recovery records; no retry was started."
                     .into(),
@@ -122,11 +147,20 @@ impl Plan {
         self.dependencies.recheck().map_err(|_| {
             "Client configuration changed or depends on the old GUI. Check again before cleanup."
         })?;
-        self.helper.recheck_baseline()
+        if self.retained_only {
+            self.helper.verify_retained()
+        } else {
+            self.helper.recheck_baseline()
+        }
     }
 
     pub fn retire_after_native_review(&self) -> Result<linux_retirement::Outcome, String> {
         self.recheck()?;
+        if self.retained_only {
+            // Outcome review never replays dpkg from a saved journal.
+            self.helper.verify_retained()?;
+            return Ok(linux_retirement::Outcome::ExperimentalVerified);
+        }
         // Persist before elevation: parent death or an unknown helper result must
         // never make a missing launcher look like an accepted completed migration.
         save(State::ReviewRequired)?;

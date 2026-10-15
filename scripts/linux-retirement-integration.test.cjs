@@ -60,3 +60,13 @@ test('preflight has one Linux job, no app installation or publication, and tests
     assert.ok(!source.includes(forbidden), forbidden);
   }
 });
+
+test('recovered completion independently inspects retained state and never replays a transaction', () => {
+  const source = read('src-tauri/src/convergence_linux.rs');
+  const inspect = source.slice(source.indexOf('pub fn inspect_retained('), source.indexOf('pub fn recheck('));
+  assert.ok(inspect.includes('linux_retirement::Plan::inspect_retained()?'));
+  assert.ok(inspect.includes('retained_only: true'));
+  const retire = source.slice(source.indexOf('pub fn retire_after_native_review('));
+  assert.ok(retire.indexOf('if self.retained_only') < retire.indexOf('save(State::ReviewRequired)?'));
+  assert.ok(retire.indexOf('return Ok(linux_retirement::Outcome::ExperimentalVerified)') < retire.indexOf('self.helper.retire_after_native_review()?'));
+});

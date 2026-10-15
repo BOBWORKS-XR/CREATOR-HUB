@@ -331,17 +331,27 @@ mod native {
     }
 
     impl Plan {
-        pub fn inspect() -> Result<Self, String> {
-            let result = Self {
+        fn images() -> Result<Self, String> {
+            Ok(Self {
                 helper: image(Path::new(HELPER), true)?,
                 authorization: image(Path::new(PKEXEC), false)?,
-            };
+            })
+        }
+
+        pub fn inspect() -> Result<Self, String> {
+            let result = Self::images()?;
             let (code, output) = run(Action::Inspect)?;
             if code != Some(0) || output.exceeded {
                 return Err("The exact MCP DEB baseline could not be verified. No installation was changed.".into());
             }
             inspect_response(&output.bytes)?;
             result.recheck_image()?;
+            Ok(result)
+        }
+
+        pub fn inspect_retained() -> Result<Self, String> {
+            let result = Self::images()?;
+            result.verify_retained()?;
             Ok(result)
         }
 
