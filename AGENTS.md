@@ -2,6 +2,11 @@
 
 ## Unified Product Work
 
+- User decision 2026-10-15: release unified 0.1.14 for Windows first. Linux and
+  Flatpak remain unpublished development work, not blockers for a Windows-only
+  release. Do not ship their current experimental packages or claim their
+  migration/host-operation gates passed. Preserve their source and evidence.
+
 - User decision 2026-10-14: macOS support is suspended. Active release targets are
   Windows and Linux, with Flatpak still requiring its own host-operation gates.
   Do not run Mac jobs, publish new Mac artifacts or use Mac acceptance as a

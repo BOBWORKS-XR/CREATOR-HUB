@@ -5,6 +5,11 @@ PR21 and the source publication guard remain held.
 
 ## Active Platform Scope
 
+User decision, 2026-10-15: finish and publish Windows-only 0.1.14 first, after
+its exact candidate passes packaged migration and signed update/restart checks.
+Linux and Flatpak are deferred and stay unpublished; their incomplete acceptance
+does not block that explicitly scoped Windows release.
+
 User decision, 2026-10-14: macOS support is suspended. Stop Mac work and omit Mac
 packages from upcoming releases. Retain old downloads, source and evidence; do
 not alter installed Mac apps or their settings. The Mac results below are
