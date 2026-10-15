@@ -85,7 +85,10 @@ pub(super) fn retire() -> Result<serde_json::Value> {
     privileged_image()?;
     let mut held = locks()?;
     // Never reopen or accept a previous preparation; rebuild after exact baseline admission.
-    let candidate = prepare_locked(&held)?;
+    let Prepared {
+        candidate,
+        metadata,
+    } = prepare_locked(&held)?;
     verify_candidate(&candidate)?;
     let mut cmd = install_command(&candidate)?;
     let interrupts = Interrupts::register()?;
@@ -95,6 +98,8 @@ pub(super) fn retire() -> Result<serde_json::Value> {
     )?;
     // Persist refusal-on-retry before the only handoff. This is not a rollback journal.
     mark_attempt(&candidate).map_err(|e| manual(e, Some(false)))?;
+    // Both locks still held. Standalone Root database writers are not excluded.
+    metadata.unchanged().map_err(|e| manual(e, Some(false)))?;
     let mut started = false;
     let result = held.handoff(|| {
         require(!interrupts.requested(), "Interrupted before dpkg spawn")?;
@@ -119,6 +124,7 @@ pub(super) fn retire() -> Result<serde_json::Value> {
     result.map_err(|e| manual(e, Some(started)))?;
     // handoff has reacquired the database lock; frontend is still held.
     installed(true).map_err(|e| manual(e, Some(true)))?;
+    metadata.unchanged().map_err(|e| manual(e, Some(true)))?;
     require(
         !interrupts.requested(),
         "Helper interrupted during post-verification",

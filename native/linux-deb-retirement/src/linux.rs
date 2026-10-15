@@ -28,6 +28,7 @@ const INFO: &str = "/var/lib/dpkg/info";
 const LIMIT: u64 = 128 * 1024;
 const ATTEMPT: &str = "transaction-attempted";
 mod handoff;
+mod metadata;
 use handoff::PackageLocks;
 #[cfg(feature = "experimental-transaction")]
 mod transaction;
@@ -323,17 +324,7 @@ fn installed(compatibility: bool) -> Result<()> {
         fs::read_dir("/var/lib/dpkg/updates")?.next().is_none(),
         "Pending dpkg updates refused",
     )?;
-    // Diversions/overrides are deliberately narrower than necessary: any refuse.
-    for path in ["/var/lib/dpkg/diversions", "/var/lib/dpkg/statoverride"] {
-        match fs::symlink_metadata(path) {
-            Ok(_) => require(
-                read(path)?.is_empty(),
-                "Diversions/statoverrides not supported",
-            )?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
+    metadata::Snapshot::capture()?;
     for pin in &selected {
         owner(
             &capture(QUERY, &["--search", &format!("/{}", pin.path)])?,
@@ -501,11 +492,21 @@ fn new_stage_name() -> Result<String> {
 fn prepare() -> Result<PathBuf> {
     privileged_image()?;
     let held = locks()?;
-    prepare_locked(&held)
+    let Prepared {
+        candidate,
+        metadata: _metadata,
+    } = prepare_locked(&held)?;
+    Ok(candidate)
 }
 
-fn prepare_locked(_held: &PackageLocks) -> Result<PathBuf> {
+struct Prepared {
+    candidate: PathBuf,
+    metadata: metadata::Snapshot,
+}
+
+fn prepare_locked(_held: &PackageLocks) -> Result<Prepared> {
     refuse_prior_attempt()?;
+    let metadata = metadata::Snapshot::capture()?;
     baseline()?;
     let private = Path::new(pins::PRIVATE);
     match fs::symlink_metadata(private) {
@@ -574,7 +575,11 @@ fn prepare_locked(_held: &PackageLocks) -> Result<PathBuf> {
     parsed(cmd, |out| bounded(out, LIMIT))?;
     verify_candidate(&candidate)?;
     baseline()?;
-    Ok(candidate)
+    metadata.unchanged()?;
+    Ok(Prepared {
+        candidate,
+        metadata,
+    })
 }
 
 fn verify_candidate(candidate: &Path) -> Result<()> {

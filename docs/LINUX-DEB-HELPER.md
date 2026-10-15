@@ -3,10 +3,13 @@
 2026-10-15. Bounded MCP 2.7.7 amd64 prerequisite, **not production retirement**.
 Default Cargo features are empty: `INSTALL_REFUSAL` remains unconditional in
 the default build. A separate **nondefault `experimental-transaction` feature**
-implements the normal dpkg frontend-lock handoff. It is source/type-checked,
-not natively accepted. Preparation remains separate from that transaction.
-There is no policy installation, coordinator wiring, workflow dispatch,
-publication, user-app build or user-PC transaction in this task.
+implements the normal dpkg frontend-lock handoff. Unprivileged native fixtures
+are accepted below; an actual helper/dpkg transaction is not yet accepted.
+Preparation remains separate from that transaction. There is no policy
+installation, coordinator wiring, publication, user-app build or user-PC
+transaction. The parent ran the fixture workflow and attempted transaction
+harness run 38655921324, which failed before helper execution (details below).
+No native dispatch is performed by this continuation.
 Assembly 38648562557 belongs to the parent and is not touched here. Mac remains
 suspended; Setup, Flatpak, RPM, AppImage and other distro work are excluded.
 
@@ -83,12 +86,13 @@ the fixed system pkexec; this binary does not elevate itself or call pkexec.
    exact complete package file list and exclusive ownership for all 14 files.
    Only original `.list` and `.md5sums` package info members are admitted, and
    original md5sums bytes must match the compiled SHA-256.
-3. Refuse pending dpkg update files, nonempty diversions or statoverride files,
-   links/special files, multiply linked files, non-root ownership, writable or
-   redirected ancestors, changed modes/sizes/hashes and extra entries in the
-   product-owned `/usr/lib/Creator Works MCP` tree. The global diversion and
-   statoverride refusal is intentionally conservative: even unrelated entries
-   currently refuse. Shared `/usr` directories are not recursively inventoried.
+3. Refuse pending dpkg update files. The metadata WIP below replaces rejection
+   of every nonempty diversion/statoverride database with complete bounded
+   parsing and target-intersection checks; it never clears unrelated entries.
+   Retain refusal of links/special files, multiply linked files, non-root
+   ownership, writable or redirected ancestors, changed modes/sizes/hashes and
+   extra entries in the product-owned `/usr/lib/Creator Works MCP` tree.
+   Shared `/usr` directories are not recursively inventoried.
 4. Only after validation, create/use root:root 0700
    `/var/lib/creator-hub-deb-retirement`. Create a fresh root-private
    `mcp-2.7.7-preparation-<128-bit random hex>` directory. Old/expired preparations
@@ -124,6 +128,107 @@ not claimed identical to the prior xz fixture. Failure can leave private staging
 files; the preparation action never initiates a transaction. A restrictive umask or uncommon
 system layout may refuse rather than be repaired. Preparation is not yet natively
 accepted and must not be run on the user's PC.
+
+## Metadata WIP Review (2026-10-15)
+
+### Observed Failure, Not An Inferred Helper Run
+
+Retained [run 38655921324](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38655921324),
+attempt 1, used source `c4ac3683e4968c4023ca447f5171540146635cfe`.
+Its [phase-install.stderr](../artifacts/linux-deb-helper-transaction-38655921324/phase-install.stderr)
+fails at `fixture.fingerprint(binary)`: Cargo's build output did not satisfy
+the ordinary, unredirected, single-link file invariant. This is a **confirmed
+harness failure before helper execution**, not an observed metadata refusal or
+failed dpkg transaction. Parent commit `6a7fcb5` subsequently added a fresh,
+hash-verified helper-image copy; that source change is not native acceptance.
+
+The retained [report](../artifacts/linux-deb-helper-transaction-38655921324/report.json)
+has `helperMechanismAccepted:false` and all 17 production gates false.
+[Diagnostics](../artifacts/linux-deb-helper-transaction-38655921324/diagnostics.json)
+has `evidenceComplete:false`; package-state capture failed and no protected
+stage/attempt marker was found. Do not upgrade incomplete capture into a
+positive package-state or installation claim.
+
+Both new fixtures exactly match the captured raw databases, including hashes
+in [final-global-state.json](../artifacts/linux-deb-helper-transaction-38655921324/final-global-state.json):
+
+| Fixture | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `38655921324.diversions` | 850 | `4f52ad327289a43ebded110e1a504732d01a81f682bfc9bb287b6ac11334bbe1` |
+| `38655921324.statoverride` | 244 | `2d720ba50d80368e90fc51dcb42112dc893eb0d3e06997f74f7f3e13f6670e3d` |
+
+The 12 diversion triples and six overrides are lexically unrelated to MCP.
+**Likely next blocker, not observed in this run:** the old global reject-any
+guard would refuse those nonempty files. **Unknown / needs capture:** real NSS
+resolution, final symlink targets, protected parent walks and unchanged-snapshot
+checks on the disposable Ubuntu host. Portable fixture tests use explicit
+identity/path resolvers; they do not establish these native facts.
+
+### Security Scope
+
+The WIP parses entire databases, not `--list` output or a runner-entry allowlist.
+The supported subset follows the pinned dpkg 1.21.1
+[diversion reader](https://github.com/guillemj/dpkg/blob/1.21.1/lib/dpkg/db-fsys-divert.c)
+and [statoverride reader](https://github.com/guillemj/dpkg/blob/1.21.1/lib/dpkg/db-fsys-override.c),
+with deliberately stricter bounds/canonical names. Unsupported or malformed
+records refuse; names must resolve through NSS and numeric IDs are bounded.
+Both diversion endpoints, every override path, resolved aliases, all 14 MCP
+files, their ancestors and the entire product subtree are checked. Duplicate or
+aliased endpoints/override paths and MCP-owned diversions also refuse.
+
+Database descriptors are opened with the existing protected no-follow walk;
+complete bytes, inode/stamp, absence, resolved identities and protected
+parent/symlink observations are compared. Original database FDs remain held
+through child wait. Rechecks occur after preparation, immediately before
+database-lock handoff and after post-install verification. A late refusal after
+the attempt marker is a manual-review result, even if no child started.
+This detects changes; it does not exclude independent Root metadata writers.
+The cooperating-package-manager threat boundary above is unchanged.
+
+**Correct as-is:** empty default features, unconditional default retirement
+refusal, fixed helper identity/arguments, frontend lock retention, package/hash
+pins, retry marker, and all production acceptance flags remain unchanged. No
+metadata write/delete/repair, shell invocation, caller-selected package/root or
+fallback that skips a guard was added. Review found no proven runtime defect in
+the metadata WIP; this continuation adds regressions and a diagnostic, not a
+new production behavior change.
+
+### Local Verification Of This WIP
+
+- Windows x64, Rust 1.99.0: `cargo test --locked --offline` for this manifest,
+  default and `--features experimental-transaction`, each passed **18 unit +
+  2 baseline + 1 CLI = 21 tests** (same portable tests, not 42 unique tests).
+- New regressions bind both fixture hashes, reject late target/invalid records
+  after the captured valid prefix, and exercise database bounds/encoding.
+- Strict `clippy --locked --offline --all-targets -- -D warnings` passed both
+  feature configurations for Windows (Rust 1.99.0) and the already-installed
+  Linux target (`cargo +stable`, Rust 1.92.0). Linux checks include test code,
+  but are **not Linux linking/execution or pinned-1.99 Linux acceptance**.
+- `cargo fmt --check` and all five `scripts/linux-deb-helper.test.cjs` Node
+  tests passed, including the default CLI refusal and non-opted-in script guard.
+  No Linux diagnostic or install/transaction test was run in this continuation.
+
+### Smallest Next Native Test (Parent Review Required)
+
+First run only this explicitly ignored diagnostic, unprivileged on a disposable
+Ubuntu 22.04 x86_64 runner, with the reviewed source and exact toolchain recorded:
+
+```text
+cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --lib linux::metadata::tests::host_metadata_read_only_preflight -- --ignored --exact --nocapture
+```
+
+It reads the actual global databases twice, resolves NSS/aliases, checks protected
+parents and equality, and emits sizes/hashes plus explicit non-acceptance flags.
+It takes no package-manager locks, creates no stage, invokes no package command, and
+requires neither a baseline install nor a trusted-path helper image. It refuses
+UID/effective UID 0. Require exactly one executed/passed test and its JSON record;
+zero matching tests is not proof (the diagnostic is Linux-only).
+Compare its database hashes with the retained fixture hashes;
+different bytes mean a different host state, not proof about the captured state.
+If it refuses, retain the original error and state; do not clear databases,
+relax guards or proceed to an install. This diagnostic is type-checked here but
+**not executed on Linux**. Only after review and native metadata proof should
+the parent consider the separately gated contention/transaction plan below.
 
 ## Experimental Transaction
 
@@ -203,11 +308,40 @@ protocol. The default build still refuses every transaction. Retaining the
 database lock in a parent while starting child dpkg would block the child;
 releasing both locks would lose frontend exclusion. Neither is done. A malicious
 Root protocol bypass is outside the stated boundary, not a new release gate.
-No native acceptance is inferred from matching source or descriptor fixtures.
+No actual-dpkg transaction acceptance is inferred from matching source or
+descriptor fixtures.
 
-## Smallest Next Native Proof
+## Accepted Native Fixtures (2026-10-15)
 
-After parent review, first run only the prepared unprivileged disposable-native
+The parent verified **SUCCESS** for [run 38653151014, attempt 1](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38653151014).
+The downloaded [compact result](../artifacts/linux-deb-helper-fixtures-38653151014/result.json)
+and original [stdout](../artifacts/linux-deb-helper-fixtures-38653151014/native-fixtures.stdout)/[stderr](../artifacts/linux-deb-helper-fixtures-38653151014/native-fixtures.stderr)
+were also read for this checkpoint. Source is
+`54a980fe2e11a06a3bb5e64c47fdf21f0d8b2841`; Ubuntu 22.04.5 x86_64,
+dpkg 1.21.1 amd64, Rust/Cargo 1.99.0, unprivileged UID 1001.
+
+- Default: **19 unit + 2 baseline + 1 CLI = 22 Rust tests passed**.
+- Experimental: **20 unit + 2 baseline + 1 CLI = 23 Rust tests passed**.
+  Child fixture invocations are not additional distinct tests.
+- **5 Node tests and 4 Python preflight tests passed**. Format check, both
+  strict-Clippy configurations and the default helper build completed; the
+  `set -e` native fixture script exited 0.
+- Linux kernel/record-lock contention, CLOEXEC descriptors, continuous frontend
+  ownership across database handoff, child acquisition and parent reacquisition
+  after success/spawn failure/child failure, the feature-only signal flag, and
+  the tiny scriptless dpkg-deb roundtrip **actually executed on Linux**.
+  These used temporary fixture files, not system package locks or an install.
+
+Only `fixtureChecksPassed` is accepted. All **16 captured production gates remain
+false**, including privileged-helper, actual native transaction, approval,
+authentication, cancellation, recovery, migration and release acceptance. The
+default installation refusal is unchanged. This does not prove contention with
+actual system dpkg, privileged baseline preparation, an installed helper upgrade,
+live SDK retention through that helper, or interruption/recovery safety.
+
+### Historical Pre-Run Plan (2026-10-15)
+
+Earlier the same day, the plan was to first run the unprivileged disposable-native
 fixture script. Both feature configurations are covered. Separate-process tests
 on temporary files check frontend exclusion before/during/after database handoff,
 CLOEXEC descriptors, child database acquisition, and parent reacquisition after
@@ -215,7 +349,10 @@ success, spawn failure or child failure. A feature-only signal fixture checks
 the parent's interrupted flag. Another fixture builds/parses a tiny synthetic
 DEB with dpkg-deb. No package install, alternate
 system root, policy install or user app is involved. Capture exact OS/dpkg/helper
-versions, source SHA, exits and output. It is **not yet dispatched/run**.
+versions, source SHA, exits and output. It was **not yet dispatched/run at that
+checkpoint**; this historical status is superseded by the accepted run above.
+
+## Actual Transaction Plan (Unaccepted)
 
 Before integrating/enabling the feature in packaging, a separately reviewed disposable Ubuntu
 22.04 x64 probe must test the implementation with the actual system
@@ -223,8 +360,8 @@ dpkg: contention on each lock before preparation must refuse without a stage;
 a normal direct-dpkg competitor and a second compliant frontend must not cross
 the held frontend lock; helper/child termination must release locks without
 unlinking them. A deliberately malicious Root protocol bypass is excluded, not
-required. Only a new unprivileged fixture workflow is prepared; no workflow is
-dispatched by this task.
+required. The accepted unprivileged run does not establish this system-dpkg
+contention contract. No actual-transaction workflow is dispatched by this task.
 
 Only after that contract is accepted: one normal same-package upgrade through
 the reviewed helper route, with the existing live-SDK/both-original-path probes,
@@ -247,7 +384,11 @@ checks and a second-call refusal; do not clear the marker or retry an interrupte
 upgrade to obtain a passing test. The parent's native approval/policy/packaging
 integration remains separate and is not installed by this task.
 
-## Verification Checkpoint
+## Historical Local Verification (2026-10-15)
+
+This records local verification **before** run 38653151014. Its statements that
+Linux fixtures were unrun describe that earlier checkpoint only; current native
+fixture acceptance is recorded above, without actual-transaction acceptance.
 
 Local Windows commands, this crate only (no user-app build):
 
@@ -269,19 +410,24 @@ assumed historical version. Linux cross-checks used an already-installed stable
 Linux target (no toolchain/target installation). Cross-checking is not
 Linux linking or execution. Focused CLI tests execute only hard refusals here.
 No production/native acceptance gate is lifted by source, parser or CLI tests.
-The native script's fixture body is not executed; it is unprivileged/hosted/
+At this earlier checkpoint the native script's fixture body was not executed;
+it is unprivileged/hosted/
 opt-in guarded. Bash syntax and its early opt-out refusal are checked locally.
 A new fixture-only workflow is now prepared below, not dispatched here.
 
 Results: **15 Rust tests passed in each feature configuration** (same portable
 coverage, not 30 unique tests); helper-only default build and both Linux-target
 strict-Clippy/test compilation checks passed. Linux-only descriptor, signal and
-dpkg-deb fixtures are prepared/type-checked but **not executed**. Node's source
+dpkg-deb fixtures were prepared/type-checked but **not executed at that historical
+checkpoint**. Node's source
 assertion initially failed on rustfmt's multiline method chain; the assertion
 now allows whitespace; the initial four Node tests passed, including shell syntax
 and early opt-out refusal. No native acceptance or actual transaction is claimed.
 
-## Prepared Fixture Workflow
+## Historical Fixture Workflow Preparation (2026-10-15)
+
+The following describes preparation before the parent dispatched the accepted
+run above; it is not a current claim that the native fixtures remain unrun.
 
 New `.github/workflows/linux-deb-helper-fixtures-014.yml` has exactly one Ubuntu
 22.04 job. Its sole trigger is a push changing that workflow path on
@@ -308,11 +454,12 @@ source archive, credential or user content is uploaded.
 
 Local preparation verification: **four pure Python tests and five Node tests
 pass**, YAML parsed/one-job guards checked, Bash syntax checked. The native
-fixture body is still **not run**; no workflow dispatch, commit or push by this
-task. This new workflow/capture driver does not alter the parent's separate
+fixture body was **not run at that checkpoint**; no workflow dispatch, commit or
+push was performed by this task. The parent subsequently ran it as recorded
+above. This workflow/capture driver does not alter the parent's separate
 sealed-stdin probe or its workflow.
 
-## Exact Owned Files
+## Historical Owned Files
 
 ```text
 native/linux-deb-retirement/.gitattributes
@@ -342,3 +489,22 @@ docs/LINUX-DEB-HELPER.md
 
 Generated crate `target/` is locally ignored. Working files remain visible;
 no shared-index changes, commit, branch move, push or unrelated-dirt cleanup.
+
+## Current Continuation Scope
+
+Only these paths belong to the metadata continuation; other WIP belongs to the
+parent/components/Flatpak work and is preserved:
+
+```text
+native/linux-deb-retirement/src/lib.rs
+native/linux-deb-retirement/src/linux.rs
+native/linux-deb-retirement/src/metadata.rs
+native/linux-deb-retirement/src/linux/transaction.rs
+native/linux-deb-retirement/src/linux/metadata.rs
+native/linux-deb-retirement/tests/fixtures/38655921324.diversions
+native/linux-deb-retirement/tests/fixtures/38655921324.statoverride
+docs/LINUX-DEB-HELPER.md
+```
+
+No root install, package rebuild, native dispatch, commit or change to Windows
+0.1.14's immutable publication or suspended Mac work is authorized here.

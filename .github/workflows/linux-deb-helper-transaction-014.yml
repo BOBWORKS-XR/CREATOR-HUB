@@ -27,6 +27,12 @@ jobs:
           node --check scripts/linux-deb-helper-transaction-sdk.test.cjs
           python3 -B scripts/linux-deb-helper-transaction.test.py
           node --test scripts/linux-deb-helper-transaction-sdk.test.cjs
+      - name: Read-only native metadata and helper regression gate before packages or privilege
+        run: |
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --features experimental-transaction
+          cargo clippy --locked --manifest-path native/linux-deb-retirement/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --lib linux::metadata::tests::host_metadata_read_only_preflight -- --ignored --exact --nocapture
       - name: Reuse original public MCP DEB from the pinned earlier retention artifact
         uses: actions/download-artifact@v5
         with:

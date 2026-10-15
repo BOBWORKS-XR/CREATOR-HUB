@@ -8,6 +8,7 @@ use std::{
 pub mod archive;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod metadata;
 pub mod pins;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;

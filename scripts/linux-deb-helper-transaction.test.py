@@ -205,6 +205,11 @@ class TransactionTests(unittest.TestCase):
         self.assertIn("run-id: '38642404016'", workflow)
         self.assertLess(workflow.index("transaction.test.py"), workflow.index("actions/download-artifact"))
         self.assertLess(workflow.index("transaction-sdk.test.cjs"), workflow.index("npm ci"))
+        metadata_gate = workflow.index("host_metadata_read_only_preflight")
+        self.assertLess(metadata_gate, workflow.index("actions/download-artifact"))
+        self.assertLess(metadata_gate, workflow.index("npm ci"))
+        self.assertIn("-- --ignored --exact --nocapture", workflow)
+        self.assertIn("--all-targets --all-features -- -D warnings", workflow)
         self.assertIn("if: always()", workflow)
         self.assertIn("probe.py diagnostics", workflow)
         for forbidden in ("workflow_dispatch:", "matrix:", "macos-", "windows-", "secrets.", "contents: write", "npm run build", "cargo tauri"):
