@@ -5,6 +5,8 @@ mod catalog;
 mod community;
 mod community_project;
 mod convergence;
+#[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+mod convergence_linux;
 #[allow(dead_code)]
 mod convergence_dependencies;
 #[cfg(all(target_os = "macos", test))]
@@ -20,6 +22,8 @@ mod installer_preflight;
 mod launch;
 #[cfg(any(target_os = "linux", test))]
 mod linux_update;
+#[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+mod linux_retirement;
 #[cfg(any(windows, test))]
 #[allow(dead_code)]
 mod legacy_removal_windows;

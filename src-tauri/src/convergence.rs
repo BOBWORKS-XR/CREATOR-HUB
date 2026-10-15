@@ -40,6 +40,8 @@ struct Plan {
     retry_allowed: bool,
     #[cfg(windows)]
     retirement_dependencies: Option<crate::convergence_dependencies::GuiRetirementSnapshot>,
+    #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+    retirement_linux: Option<crate::convergence_linux::Plan>,
 }
 
 #[derive(Default)]
@@ -201,6 +203,8 @@ fn inspect() -> Result<Plan, String> {
         retry_allowed: true,
         #[cfg(windows)]
         retirement_dependencies: None,
+        #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+        retirement_linux: None,
         report: Report {
             enabled: true,
             required,
@@ -268,7 +272,11 @@ fn retirement_pending() -> Result<bool, String> {
         }
         Ok(pending)
     }
-    #[cfg(not(windows))]
+    #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+    {
+        crate::convergence_linux::pending()
+    }
+    #[cfg(not(any(windows, all(target_os = "linux", feature = "experimental-linux-migration"))))]
     Ok(false)
 }
 
@@ -835,6 +843,24 @@ fn retirement_diagnostics(plan: &mut Plan, manager: &manager::Manager) -> Result
     #[cfg(target_os = "linux")]
     {
         plan.report.retirement_available = false;
+        #[cfg(feature = "experimental-linux-migration")]
+        {
+            plan.retirement_linux = None;
+            let current = legacy_apps()?;
+            if !plan.report.legacy_apps.is_empty() || !current.is_empty() {
+                let store = creator_hub_mcp_router::Store::installed()?;
+                let _runtime = store.resolve()?;
+                let router = store.router()?;
+                let paths = current.iter().map(|app| app.path.clone()).collect::<Vec<_>>();
+                let native = crate::convergence_linux::Plan::inspect(&paths, &router.command)?;
+                plan.retirement_linux = Some(native);
+                plan.report.retirement_available = true;
+                return Ok("Development test only: the exact MCP DEB is ready for a separately confirmed system-authorized retirement. The TEST ONLY helper is not a release acceptance. All settings and old Node/server paths stay in place; custom old-GUI integrations need separate review.".into());
+            }
+            if crate::convergence_linux::pending()? {
+                return Err("An earlier Linux cleanup needs outcome review; do not retry or mark migration complete from a missing launcher alone.".into());
+            }
+        }
         require_no_retirement(plan, &legacy_apps()?)?;
         plan.report.retirement_available = true;
         Ok("Settings and connections are reviewed. No known standalone app was found; finish migration to continue. No installation will be removed.".into())
@@ -947,9 +973,64 @@ pub async fn retire_convergence_apps(handle: tauri::AppHandle) -> Result<Report,
             let store = creator_hub_mcp_router::Store::installed()?;
             let runtime = store.resolve()?;
             let router = store.router()?;
+            #[cfg(feature = "experimental-linux-migration")]
+            if let Some(native) = plan.retirement_linux.take() {
+                let preflight = || {
+                    can_retain(plan)?;
+                    let fresh_runtime = store.resolve()?;
+                    let fresh_router = store.router()?;
+                    if fresh_runtime.generation != runtime.generation || fresh_router.command != router.command {
+                        return Err("The signed MCP route changed; Linux cleanup was paused.".into());
+                    }
+                    Ok::<_, String>(())
+                };
+                preflight()?;
+                native.recheck()?;
+                let approved = handle.dialog().message(
+                    "Development migration test only.\n\nRetire the verified standalone MCP 2.7.7 DEB launcher? All nine original Node/server/license/bridge files remain at their existing paths. Settings, AI-client options, Unity projects and Hub backups are kept.\n\nCustom launchers that depend on the old GUI or its desktop registration need separate review. AI clients, Unity and Node processes will not be force-closed.\n\nLinux will request administrator authentication separately. Cancel keeps the installation. Unknown or interrupted outcomes require review; no transaction is automatically retried. This TEST ONLY compatibility package is not a published transition."
+                ).title("Test Linux Creator app retirement").kind(MessageDialogKind::Info)
+                    .buttons(MessageDialogButtons::OkCancelCustom("Continue to system authorization".into(), "Keep existing".into())).blocking_show();
+                if !approved {
+                    plan.retirement_linux = Some(native);
+                    return Err("Standalone retirement was cancelled. Apps and settings were kept.".into());
+                }
+                let result = (|| {
+                    preflight()?;
+                    match native.retire_after_native_review()? {
+                        crate::linux_retirement::Outcome::Cancelled => return Ok(false),
+                        crate::linux_retirement::Outcome::ExperimentalVerified => {}
+                    }
+                    preflight()?;
+                    if !legacy_apps()?.is_empty() {
+                        return Err("A standalone GUI remains after cleanup. Keep retained files and review package state.".into());
+                    }
+                    native.complete_review()?;
+                    Ok(true)
+                })();
+                plan.report.retirement_available = false;
+                plan.report.legacy_apps = legacy_apps().unwrap_or_else(|_| plan.report.legacy_apps.clone());
+                plan.report.message = match result {
+                    Ok(false) => {
+                        plan.retirement_linux = Some(native);
+                        plan.report.retirement_available = true;
+                        "System authorization was cancelled. The standalone installation, settings and connections were kept.".into()
+                    }
+                    Ok(true) => {
+                        plan.report.stage = "complete";
+                        plan.report.required = false;
+                        "Experimental Linux retirement verified. Original MCP runtime paths, reviewed settings and backups were kept. This development result is not release acceptance.".into()
+                    }
+                    Err(reason) => format!("Linux cleanup needs review: {reason} No automatic retry was started. Keep settings, backups and retained runtime files."),
+                };
+                return Ok(plan.report.clone());
+            }
             finish_without_retirement(plan, |plan| {
                 can_retain(plan)?;
                 require_no_retirement(plan, &legacy_apps()?)?;
+                #[cfg(feature = "experimental-linux-migration")]
+                if crate::convergence_linux::pending()? {
+                    return Err("The Linux cleanup outcome needs review before completion. No transaction was replayed.".into());
+                }
                 let fresh_runtime = store.resolve()?;
                 let fresh_router = store.router()?;
                 if fresh_runtime.generation != runtime.generation || fresh_router.command != router.command {
@@ -1006,6 +1087,8 @@ mod tests {
             retry_allowed: true,
             #[cfg(windows)]
             retirement_dependencies: None,
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            retirement_linux: None,
             report: Report {
                 enabled: true,
                 required: true,
