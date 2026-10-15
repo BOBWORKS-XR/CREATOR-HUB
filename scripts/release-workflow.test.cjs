@@ -126,3 +126,11 @@ test('release workflow validates the exact accepted receipt before draft-feed pr
   assert.doesNotMatch(workflow, /gh release (?:edit|create)[^\r\n]*--(?:draft=false|latest(?:=true)?)(?:\s|$)/,
     'Tag validation must not bypass the guarded publisher or promote latest');
 });
+
+test('manual qualification reruns use the package version, not a branch masquerading as a release tag', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'release.yml'), 'utf8');
+  assert.match(workflow, /github\.event_name == 'workflow_dispatch'/);
+  assert.match(workflow, /\$version = \(Get-Content package\.json -Raw \| ConvertFrom-Json\)\.version/);
+  assert.match(workflow, /GITHUB_REF_TYPE -ceq 'tag' -and \$env:GITHUB_REF_NAME -cne "v\$version"/);
+  assert.doesNotMatch(workflow, /GITHUB_REF_NAME\.Substring\(1\)/);
+});

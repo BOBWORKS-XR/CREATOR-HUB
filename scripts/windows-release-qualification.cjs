@@ -151,12 +151,18 @@ function inspectArchive(bytes) {
     return rows;
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 }
+function downloadArchive(endpoint, execute = execFileSync) {
+  assert.match(endpoint, /^(?:releases\/assets\/[1-9][0-9]*|actions\/artifacts\/[1-9][0-9]*\/zip)$/);
+  // Actions requires JSON negotiation before redirecting to its ZIP bytes.
+  const accept = endpoint.startsWith('actions/') ? 'application/json' : 'application/octet-stream';
+  return execute('gh', ['api', `repos/${REPO}/${endpoint}`, '-H', `Accept: ${accept}`],
+    { windowsHide: true, timeout: 180000, maxBuffer: 256 * 1024 * 1024 });
+}
 async function verifyRemote(value, services = {}) {
   validateQualification(value, { version: '0.1.14', platform: 'windows-x86_64' });
   const api = endpoint => execFileSync('gh', ['api', `repos/${REPO}/${endpoint}`], { windowsHide: true, timeout: 180000, maxBuffer: 256 * 1024 * 1024 });
   const request = services.request || (async endpoint => JSON.parse(api(endpoint)));
-  const download = endpoint => execFileSync('gh', ['api', `repos/${REPO}/${endpoint}`, '-H', 'Accept: application/octet-stream'],
-    { windowsHide: true, timeout: 180000, maxBuffer: 256 * 1024 * 1024 });
+  const download = endpoint => downloadArchive(endpoint);
   const readArchive = services.readArchive || (async (endpoint, pin) => { const bytes = download(endpoint); capture(bytes, pin); return inspectArchive(bytes); });
   const readAsset = services.readAsset || (async (name, pin) => { const bytes = download(`releases/assets/${pin.id}`); return { ...capture(bytes, pin), bytes: bytes.length <= 256 * 1024 ? bytes : undefined }; });
   const commit = async (source, tree) => { const c = await request(`git/commits/${source}`); assert.equal(c.sha, source); assert.equal(c.tree.sha, tree); };
@@ -207,4 +213,4 @@ async function verifyRemote(value, services = {}) {
   assert.equal(bodies['SHA256SUMS.txt'].toString('utf8'), sums, 'Checksums must cover exactly five qualified product assets');
   return { version: '0.1.14', platform: 'windows-x86_64', draftId: draft.id, assets: 6, ready: false };
 }
-module.exports = { REPO, REPO_ID, B05, ROLES, capture, inspectArchive, validateQualification, loadQualification, verifyRemote };
+module.exports = { REPO, REPO_ID, B05, ROLES, capture, inspectArchive, downloadArchive, validateQualification, loadQualification, verifyRemote };

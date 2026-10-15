@@ -196,6 +196,22 @@ test('current signed metadata must bind the B05 installer, Windows-only update U
   ]) { const f = fixture(); change(f); await assert.rejects(q.verifyRemote(f.value, services(f))); }
 });
 
+test('Actions ZIP transport negotiates JSON, while private release assets still request binary bytes', () => {
+  const calls = [], bytes = Buffer.from('synthetic ZIP');
+  const execute = (command, args, options) => { calls.push({ command, args, options }); return bytes; };
+  assert.equal(q.downloadArchive('actions/artifacts/11937746507/zip', execute), bytes);
+  assert.equal(q.downloadArchive('releases/assets/642095693', execute), bytes);
+  assert.deepEqual(calls.map(({ command, args }) => ({ command, args })), [
+    { command: 'gh', args: ['api', `repos/${q.REPO}/actions/artifacts/11937746507/zip`, '-H', 'Accept: application/json'] },
+    { command: 'gh', args: ['api', `repos/${q.REPO}/releases/assets/642095693`, '-H', 'Accept: application/octet-stream'] },
+  ]);
+  for (const call of calls) assert.equal(call.options.maxBuffer, 256 * 1024 * 1024);
+  for (const endpoint of ['releases/1', 'actions/artifacts/1/zip?override=1', 'https://foreign.test/']) {
+    assert.throws(() => q.downloadArchive(endpoint, execute));
+  }
+  assert.equal(calls.length, 2);
+});
+
 test('capture hashes actual bytes, rejects size/hash mismatch, and never returns a claimed digest', () => {
   const bytes = Buffer.from('synthetic archive');
   assert.deepEqual(q.capture(bytes, record(bytes)), record(bytes));
