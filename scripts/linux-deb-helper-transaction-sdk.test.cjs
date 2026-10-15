@@ -9,6 +9,10 @@ test('exact opted-in repository/id/branch/push and unprivileged Linux only', () 
   assert.throws(() => admission(EXPECTED, 'linux', 'x64', 0));
   for (const key of ['FLATPAK_ID', 'APPIMAGE', 'APPDIR', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'PYTHONPATH'])
     assert.throws(() => admission({ ...EXPECTED, [key]: 'injected' }, 'linux', 'x64', 1000));
+  const container = { ...EXPECTED, CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE: 'fixture', RUNNER_TEMP: '/__w/_temp' };
+  admission(container, 'linux', 'x64', 1001);
+  assert.throws(() => admission({ ...container, RUNNER_TEMP: '/home/runner/work/_temp' }, 'linux', 'x64', 1001));
+  assert.throws(() => admission(container, 'linux', 'x64', 1000));
 });
 
 function fixture(failure) {

@@ -415,11 +415,12 @@ class TransactionTests(unittest.TestCase):
                     self.assertFalse(any(after["productionGates"].values()))
 
     def test_container_admission_requires_exact_image_and_fixture_uid(self):
-        env = {"CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE": p.CONTAINER_IMAGE}
+        env = {"CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE": p.CONTAINER_IMAGE, "RUNNER_TEMP": "/__w/_temp"}
         p.container_admission(env, 1001, 1001, True)
         for configured, uid, euid, marker in ((env, 0, 0, True), (env, 1000, 1000, True),
                 (env, 1001, 0, True), (env, 1001, 1001, False), ({}, 1001, 1001, True),
-                ({**env, "CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE": "ubuntu:22.04"}, 1001, 1001, True)):
+                ({**env, "CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE": "ubuntu:22.04"}, 1001, 1001, True),
+                ({**env, "RUNNER_TEMP": "/home/runner/work/_temp"}, 1001, 1001, True)):
             with self.subTest(uid=uid, euid=euid, marker=marker), self.assertRaises(RuntimeError):
                 p.container_admission(configured, uid, euid, marker)
 
@@ -429,7 +430,8 @@ class TransactionTests(unittest.TestCase):
                     "cargo": b"cargo 1.99.0 (fixture)\n", "node": b"v24.17.0\n"}
         probe.command.side_effect = lambda label, argv, **kw: (0, versions[label.removeprefix("container-")], b"")
         probe.save = Mock(side_effect=lambda label, value: value)
-        with patch.dict(p.os.environ, {**p.EXPECTED, "CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE": p.CONTAINER_IMAGE}, clear=True), \
+        with patch.dict(p.os.environ, {**p.EXPECTED, "CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE": p.CONTAINER_IMAGE,
+                "RUNNER_TEMP": "/__w/_temp"}, clear=True), \
                 patch.multiple(p.os, getuid=Mock(return_value=1001), geteuid=Mock(return_value=1001), create=True), \
                 patch.object(p.Path, "is_file", return_value=True), \
                 patch.object(p.Path, "read_text", return_value='ID=ubuntu\nVERSION_ID="22.04"\n'):
@@ -437,6 +439,8 @@ class TransactionTests(unittest.TestCase):
             self.assertEqual(observed["configuredContainerImage"], p.CONTAINER_IMAGE)
             self.assertEqual(observed["imageSourceUrl"], p.CONTAINER_SOURCE)
             self.assertEqual(observed["observedTagIndexDigest"], p.CONTAINER_INDEX)
+            self.assertEqual(observed["runnerTemp"], "/__w/_temp")
+            self.assertEqual(observed["evidenceDirectory"], str(probe.root))
             self.assertEqual(observed["versions"]["dpkg"]["stdout"], versions["dpkg"].decode())
             self.assertEqual((observed["uid"], observed["euid"]), (1001, 1001))
             self.assertFalse(observed["nativeAcceptance"])
@@ -521,8 +525,8 @@ class TransactionTests(unittest.TestCase):
         self.assertLess(metadata_capture, metadata_gate)
         self.assertLess(metadata_capture, workflow.index("actions/download-artifact"))
         self.assertLess(metadata_capture, workflow.index("npm ci"))
-        self.assertIn("${{ runner.temp }}/linux-deb-helper-transaction/*.json", workflow)
-        self.assertIn("${{ runner.temp }}/linux-deb-helper-preflight/*.json", workflow)
+        self.assertIn("/__w/_temp/linux-deb-helper-transaction/*.json", workflow)
+        self.assertIn("/__w/_temp/linux-deb-helper-preflight/*.json", workflow)
         self.assertIn("if: always()", workflow)
         self.assertIn("probe.py diagnostics", workflow)
         for forbidden in ("workflow_dispatch:", "matrix:", "macos-", "windows-", "secrets.", "contents: write", "npm run build", "cargo tauri",
@@ -535,6 +539,17 @@ class TransactionTests(unittest.TestCase):
         self.assertIn('timeout=None', source)
         self.assertIn('"--features", "experimental-transaction"', source)
         self.assertIn('"--manifest-path", "native/linux-deb-retirement/Cargo.toml"', source)
+
+    def test_artifact_globs_use_container_paths_for_every_line_not_host_runner_context(self):
+        workflow = (p.REPO / ".github/workflows/linux-deb-helper-transaction-014.yml").read_text()
+        upload = workflow.split("uses: actions/upload-artifact@v4", 1)[1]
+        paths = [line.strip() for line in upload.split("path: |", 1)[1].splitlines() if line.strip()]
+        expected = [f"/__w/_temp/linux-deb-helper-{directory}/*.{extension}"
+            for directory in ("preflight", "transaction") for extension in ("json", "stdout", "stderr")]
+        self.assertEqual(paths, expected)
+        self.assertNotIn("${{ runner.temp }}", upload)
+        self.assertNotIn("/home/runner/work", upload)
+        self.assertIn("path: /__w/_temp/linux-deb-helper-transaction-input", workflow)
 
 
 if __name__ == "__main__":

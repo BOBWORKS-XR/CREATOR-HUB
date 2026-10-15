@@ -24,6 +24,10 @@ function admission(env, system, arch, uid) {
   assert.equal(system, 'linux'); assert.equal(arch, 'x64'); assert.ok(uid > 0);
   for (const [key, value] of Object.entries(EXPECTED)) assert.equal(env[key], value, key);
   for (const key of ['FLATPAK_ID', 'APPIMAGE', 'APPDIR', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'PYTHONPATH']) assert.ok(!env[key], key);
+  if (env.CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE) {
+    assert.equal(uid, 1001);
+    assert.equal(env.RUNNER_TEMP, '/__w/_temp');
+  }
 }
 
 async function connectAndIdentify(client, transport, identify) {
@@ -104,6 +108,7 @@ async function run() {
   const root = path.join(parent, 'linux-deb-helper-transaction');
   fs.mkdirSync(root, { mode: 0o700 });
   const report = { schemaVersion: 1, scope: 'one disposable sudo experimental helper transaction, not authorization',
+    runtimeContext: { runnerTemp: parent, evidenceDirectory: root, uid: process.getuid(), cwd: process.cwd() },
     sourceRevision: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
     helperMechanismAccepted: false, productionGates: { ...FALSE_GATES },
     limitations: ['No native approval/pkexec or production integration', 'No contention/interruption/recovery acceptance',

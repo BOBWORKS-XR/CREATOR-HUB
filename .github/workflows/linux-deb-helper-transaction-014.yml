@@ -95,7 +95,7 @@ jobs:
           run-id: '38642404016'
           github-token: ${{ github.token }}
           merge-multiple: true
-          path: ${{ runner.temp }}/linux-deb-helper-transaction-input
+          path: /__w/_temp/linux-deb-helper-transaction-input
       - name: Install existing lockfile-pinned SDK without lifecycle scripts or product build
         run: npm ci --prefix modules/mcp --omit=dev --ignore-scripts --no-audit --no-fund
       - name: Build only experimental helper, install exact baseline, retain live SDK and retire once
@@ -112,9 +112,9 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
           path: |
-            ${{ runner.temp }}/linux-deb-helper-preflight/*.json
-            ${{ runner.temp }}/linux-deb-helper-preflight/*.stdout
-            ${{ runner.temp }}/linux-deb-helper-preflight/*.stderr
-            ${{ runner.temp }}/linux-deb-helper-transaction/*.json
-            ${{ runner.temp }}/linux-deb-helper-transaction/*.stdout
-            ${{ runner.temp }}/linux-deb-helper-transaction/*.stderr
+            /__w/_temp/linux-deb-helper-preflight/*.json
+            /__w/_temp/linux-deb-helper-preflight/*.stdout
+            /__w/_temp/linux-deb-helper-preflight/*.stderr
+            /__w/_temp/linux-deb-helper-transaction/*.json
+            /__w/_temp/linux-deb-helper-transaction/*.stdout
+            /__w/_temp/linux-deb-helper-transaction/*.stderr

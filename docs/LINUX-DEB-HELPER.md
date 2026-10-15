@@ -313,6 +313,20 @@ passed. No container execution, package rebuild, commit, push or dispatch here.
 
 ## Experimental Transaction
 
+Container run `38718417359` at `8647d7f` passed bootstrap, identity, Rust tests,
+Clippy and the real unprivileged metadata gate. The baseline/SDK phase reached
+`retire`, which exited 1. The upload mixed host `/home/runner/work/_temp` with
+container `/__w/_temp` paths: only seven preflight JSON files were retained.
+Underlying retire stderr and package outcome were lost. Transaction-started state
+and marker absence are **unknown**, not false; mechanism acceptance remains false.
+The original log and 4,215-byte artifact `11963532359` remain the failed evidence.
+
+Capture correction uses the verified container path for every input/output glob,
+requires that same `RUNNER_TEMP` at container admission and records actual SDK
+runtime/evidence paths. No helper guard changes or retry within an unknown state.
+Any follow-up must use a fresh disposable baseline and cannot establish recovery
+of the destroyed earlier container or qualify production migration.
+
 Compile explicitly with `--features experimental-transaction`; no default,
 coordinator or packaging feature enables it. Only `retire-mcp-2.7.7` reaches it,
 and the same real/effective root:root and fixed root-owned 0755 image gate applies.

@@ -52,6 +52,7 @@ def admission(env, system, machine, uid):
 
 def container_admission(env, uid, euid, docker_marker):
     require(uid == euid == 1001 and docker_marker
+            and env.get("RUNNER_TEMP") == "/__w/_temp"
             and env.get("CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE") == CONTAINER_IMAGE,
             "Exact pinned container and real/effective fixture UID 1001 required")
 
@@ -162,6 +163,7 @@ class Probe:
             "configuredContainerImage": CONTAINER_IMAGE, "imageSourceUrl": CONTAINER_SOURCE,
             "observedTagIndexDigest": CONTAINER_INDEX, "osRelease": Path("/etc/os-release").read_text(),
             "uid": os.getuid(), "euid": os.geteuid(), "kernel": platform.release(),
+            "runnerTemp": os.environ["RUNNER_TEMP"], "evidenceDirectory": str(self.root),
             "sourceRevision": os.environ.get("GITHUB_SHA"), "runId": os.environ.get("GITHUB_RUN_ID"),
             "runAttempt": os.environ.get("GITHUB_RUN_ATTEMPT"), "environment": {key: os.environ.get(key) for key in EXPECTED},
             "versions": versions, "packageTransactionStarted": False, "nativeAcceptance": False,
