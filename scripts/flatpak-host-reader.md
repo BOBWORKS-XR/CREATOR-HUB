@@ -86,6 +86,17 @@ hostile same-user immutability. Metadata rechecks cannot establish publisher
 identity, detect every transient ABA change, or guarantee I/O deadlines on all
 filesystems/NSS backends. There is no host write/rollback path.
 
+Native diagnostic `38749794146` directly observed a six-byte fixture overwrite
+before its first data read with identical size, mtime and ctime on both sides:
+`1792073780.006846746`. The reader returned the new fixture bytes. The prior test
+incorrectly assumed a write necessarily advances the observable stamp. Its
+observable-change regression now explicitly changes mtime and asserts that the
+fixture changed before testing rejection; no production guard or timing delay
+was added. This does **not** prove detection of unchanged-stamp edits, atomic
+snapshots or safe writes. Future migration writers must retain and independently
+recheck full byte before-images under their own ownership/transaction contract;
+these metadata observations never grant write authority.
+
 ## Tests And Verification
 
 `src/linux/tests.rs` adds 15 owned-fixture tests for all five positive reads, empty

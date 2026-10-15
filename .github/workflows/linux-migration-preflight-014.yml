@@ -33,7 +33,7 @@ jobs:
           node --test scripts/linux-retirement-integration.test.cjs scripts/linux-update.test.cjs scripts/linux-deb-helper.test.cjs scripts/flatpak-host-reader.test.cjs
       - name: Execute native helper and host-reader fixtures without installing a Creator app
         run: |
-          cargo test --locked --manifest-path native/flatpak-host-reader/Cargo.toml same_length_in_place_change_during_read_is_not_returned -- --nocapture
+          cargo test --locked --manifest-path native/flatpak-host-reader/Cargo.toml observable_same_length_in_place_change_during_read_is_not_returned -- --exact linux::tests::observable_same_length_in_place_change_during_read_is_not_returned --nocapture
           cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml
           cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --features experimental-transaction --target-dir native/linux-deb-retirement/target/experimental
           cargo clippy --locked --manifest-path native/flatpak-host-reader/Cargo.toml --all-targets -- -D warnings

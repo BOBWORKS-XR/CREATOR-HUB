@@ -333,7 +333,7 @@ fn a_foreign_typed_mapping_or_wrong_limit_cannot_select_another_file() {
 }
 
 #[test]
-fn same_length_in_place_change_during_read_is_not_returned() {
+fn observable_same_length_in_place_change_during_read_is_not_returned() {
     let f = Fixture::new();
     f.put(Setting::CreatorMcp, b"before");
     let mut host = f.reader();
@@ -341,9 +341,22 @@ fn same_length_in_place_change_during_read_is_not_returned() {
     let mutation = std::sync::Arc::new(Mutex::new(None));
     let observation = mutation.clone();
     host.reader.before_read = Some(Box::new(move || {
-        let before = Stamp::from(&fs::metadata(&file).unwrap());
+        let metadata = fs::metadata(&file).unwrap();
+        let before = Stamp::from(&metadata);
         fs::write(&file, b"after!").unwrap();
+        // A write can share the previous coarse clock timestamp (38749794146).
+        // Exercise the observable-change contract without a sleep/timing guess.
+        File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(metadata.modified().unwrap() + std::time::Duration::from_secs(1))
+            .unwrap();
         let after = Stamp::from(&fs::metadata(&file).unwrap());
+        assert_ne!(
+            before, after,
+            "Fixture must actually change observed metadata"
+        );
         *observation.lock().unwrap() = Some((before, after));
     }));
     let result = host.inspect(Setting::CreatorMcp);
