@@ -93,6 +93,21 @@ pub fn compatibility_state(data: &[u8]) -> Result<()> {
     )
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn installed_metadata(data: &[u8], compatibility: bool) -> Result<()> {
+    // dpkg-query calls w_multiarch without fw_printheader, so the default is
+    // rendered as "no" even when the control file omits Multi-Arch (dpkg 1.21.1).
+    let expected = if compatibility {
+        b"242888\nCreator Hub Retention Validation <noreply@example.invalid>\noptional\nlibwebkit2gtk-4.1-0, libgtk-3-0\nTEST ONLY - original MCP 2.7.7 runtime compatibility payload\n No launcher or desktop entries; not a published Creator Hub transition.\nno".as_slice()
+    } else {
+        b"263030\nCreator Works\noptional\nlibwebkit2gtk-4.1-0, libgtk-3-0\nCreator Works MCP Launcher\n Configure and manage Creator Works MCP for Codex, Claude Code, and Unity integration\nno".as_slice()
+    };
+    require(
+        data == expected,
+        "Installed control/relationships/triggers changed",
+    )
+}
+
 pub fn paths(pins: &[pins::Pin], directories: bool) -> BTreeSet<String> {
     let mut result = BTreeSet::new();
     for pin in pins {
@@ -197,6 +212,32 @@ pub fn md5sums() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dpkg_showformat_requires_default_multiarch_no_not_an_empty_field() {
+        let baseline = "263030\nCreator Works\noptional\nlibwebkit2gtk-4.1-0, libgtk-3-0\nCreator Works MCP Launcher\n Configure and manage Creator Works MCP for Codex, Claude Code, and Unity integration\nno";
+        let compatibility = "242888\nCreator Hub Retention Validation <noreply@example.invalid>\noptional\nlibwebkit2gtk-4.1-0, libgtk-3-0\nTEST ONLY - original MCP 2.7.7 runtime compatibility payload\n No launcher or desktop entries; not a published Creator Hub transition.\nno";
+        for (value, is_compatibility) in [(baseline, false), (compatibility, true)] {
+            installed_metadata(value.as_bytes(), is_compatibility).unwrap();
+            assert!(
+                installed_metadata(value.trim_end_matches("no").as_bytes(), is_compatibility)
+                    .is_err()
+            );
+            for replacement in ["same", "allowed", "foreign", "noevil"] {
+                assert!(installed_metadata(
+                    format!("{}{replacement}", &value[..value.len() - 2]).as_bytes(),
+                    is_compatibility
+                )
+                .is_err());
+            }
+            assert!(installed_metadata(
+                format!("{value}extra-relationship").as_bytes(),
+                is_compatibility
+            )
+            .is_err());
+            assert!(installed_metadata(value.as_bytes(), !is_compatibility).is_err());
+        }
+    }
+
     #[test]
     fn finite_actions_never_accept_paths_or_additional_arguments() {
         assert_eq!(action(&[]).unwrap(), Action::Inspect);

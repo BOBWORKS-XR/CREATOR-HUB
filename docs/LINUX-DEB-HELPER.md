@@ -327,6 +327,32 @@ runtime/evidence paths. No helper guard changes or retry within an unknown state
 Any follow-up must use a fresh disposable baseline and cannot establish recovery
 of the destroyed earlier container or qualify production migration.
 
+### Showformat Protocol Correction
+
+Run `38719827788` at `1600b08` retained complete compact evidence. The helper
+refused `Installed control/relationships/triggers changed`, exit 2, before a
+package transaction. It reported both started flags false; final package state
+remained healthy original MCP 2.7.7, with no attempt marker or stage found.
+The original archive control still matches its pin.
+
+The old comparison incorrectly expected an omitted Multi-Arch field to render
+empty. Pinned dpkg 1.21.1 initializes it to `PKG_MULTIARCH_NO`
+([initialization](https://github.com/guillemj/dpkg/blob/1.21.1/lib/dpkg/pkg.c#L134),
+[name table](https://github.com/guillemj/dpkg/blob/1.21.1/lib/dpkg/pkg-namevalue.c#L31)).
+Its [query formatter](https://github.com/guillemj/dpkg/blob/1.21.1/lib/dpkg/pkg-format.c#L413)
+calls the [field writer](https://github.com/guillemj/dpkg/blob/1.21.1/lib/dpkg/dump.c#L178)
+without header flags, so it always emits `no`. This is a confirmed protocol
+mismatch; other causes of the captured comparison failure remain observable by
+the added exact pre-retire/final query capture.
+
+The shared comparison now requires explicit `no` for original and compatibility
+states; it does not trim, ignore the field or admit other modes/relationships.
+Its portable regression failed against the old expected bytes, then passed after
+the correction. Windows default/experimental each pass 22 tests; strict Windows
+and existing stable-1.92 Linux-target Clippy pass. These are not native execution.
+Default installation refusal and all production gates remain unchanged. The next
+single fresh-container mechanism test must verify actual query bytes and outcome.
+
 Compile explicitly with `--features experimental-transaction`; no default,
 coordinator or packaging feature enables it. Only `retire-mcp-2.7.7` reaches it,
 and the same real/effective root:root and fixed root-owned 0755 image gate applies.

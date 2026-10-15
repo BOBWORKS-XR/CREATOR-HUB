@@ -359,6 +359,7 @@ class Probe:
         for name, args in (("diversions-list", ["/usr/bin/dpkg-divert", "--list"]),
                 ("statoverride-list", ["/usr/bin/dpkg-statoverride", "--list"]),
                 ("package-state", ["/usr/bin/dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\t${Status}\n", fixture.PACKAGE]),
+                ("package-metadata", ["/usr/bin/dpkg-query", "--show", "--showformat=${Installed-Size}\n${Maintainer}\n${Priority}\n${Depends}\n${Description}\n${Conffiles}${Triggers-Pending}${Triggers-Awaited}${Multi-Arch}${Pre-Depends}${Breaks}${Conflicts}${Replaces}${Provides}", fixture.PACKAGE]),
                 ("audit", ["/usr/bin/dpkg", "--audit"])):
             try:
                 code, _, _ = self.command(prefix + "-" + name, args, allowed=(0, 1, 2))

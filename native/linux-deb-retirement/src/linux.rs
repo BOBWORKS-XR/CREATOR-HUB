@@ -1,7 +1,7 @@
 use crate::{
-    archive, compatibility_listing, compatibility_state, control, copy_pinned, listing, md5sums,
-    owner, paths, pins, require, retained, sha256, stage_name, state, Action, ManualRepair, Result,
-    INSTALL_REFUSAL,
+    archive, compatibility_listing, compatibility_state, control, copy_pinned, installed_metadata,
+    listing, md5sums, owner, paths, pins, require, retained, sha256, stage_name, state, Action,
+    ManualRepair, Result, INSTALL_REFUSAL,
 };
 use serde_json::json;
 use std::{
@@ -250,15 +250,7 @@ fn installed(compatibility: bool) -> Result<()> {
         state(&status)?;
     }
     let metadata = capture(QUERY, &["--show", "--showformat=${Installed-Size}\n${Maintainer}\n${Priority}\n${Depends}\n${Description}\n${Conffiles}${Triggers-Pending}${Triggers-Awaited}${Multi-Arch}${Pre-Depends}${Breaks}${Conflicts}${Replaces}${Provides}", pins::PACKAGE])?;
-    let expected = if compatibility {
-        b"242888\nCreator Hub Retention Validation <noreply@example.invalid>\noptional\nlibwebkit2gtk-4.1-0, libgtk-3-0\nTEST ONLY - original MCP 2.7.7 runtime compatibility payload\n No launcher or desktop entries; not a published Creator Hub transition.\n".as_slice()
-    } else {
-        b"263030\nCreator Works\noptional\nlibwebkit2gtk-4.1-0, libgtk-3-0\nCreator Works MCP Launcher\n Configure and manage Creator Works MCP for Codex, Claude Code, and Unity integration\n".as_slice()
-    };
-    require(
-        metadata == expected,
-        "Installed control/relationships/triggers changed",
-    )?;
+    installed_metadata(&metadata, compatibility)?;
     let check_list = if compatibility {
         compatibility_listing
     } else {

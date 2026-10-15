@@ -139,8 +139,36 @@ class TransactionTests(unittest.TestCase):
             self.assertTrue(observed["statoverride"]["unknownTypePreserved"])
             self.assertEqual((database / "diversions").read_bytes(), raw)
             self.assertTrue((database / "statoverride").is_dir())
-            self.assertEqual(probe.command.call_count, 5)
+            self.assertEqual(probe.command.call_count, 6)
             self.assertTrue(all(p.HELPER not in call.args[1] for call in probe.command.call_args_list))
+
+    def test_global_state_captures_exact_helper_metadata_query_bytes_and_exit(self):
+        showformat = "--showformat=${Installed-Size}\n${Maintainer}\n${Priority}\n${Depends}\n${Description}\n${Conffiles}${Triggers-Pending}${Triggers-Awaited}${Multi-Arch}${Pre-Depends}${Breaks}${Conflicts}${Replaces}${Provides}"
+        self.assertIn(json.dumps(showformat), (p.REPO / "native/linux-deb-retirement/src/linux.rs").read_text())
+        for code, stdout, stderr in ((0, b"description\n continuation\nno", b""), (2, b"partial\n", b"query diagnostic\n")):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                probe = p.Probe.__new__(p.Probe)
+                probe.root = root
+
+                def run(argv, **kwargs):
+                    if argv == ["/usr/bin/dpkg-query", "--show", showformat, p.fixture.PACKAGE]:
+                        kwargs["stdout"].write(stdout)
+                        kwargs["stderr"].write(stderr)
+                        return SimpleNamespace(returncode=code)
+                    return SimpleNamespace(returncode=0)
+
+                with patch.object(p, "Path", side_effect=lambda name: root / "absent-database" if name == "/var/lib/dpkg" else Path(name)), \
+                        patch.object(p.subprocess, "run", side_effect=run) as commands:
+                    observed = probe.global_state("pre-retire")
+                self.assertEqual(observed["package-metadata"], {"captureExitCode": code})
+                captured = root / "pre-retire-package-metadata"
+                self.assertEqual(captured.with_suffix(".stdout").read_bytes(), stdout)
+                self.assertEqual(captured.with_suffix(".stderr").read_bytes(), stderr)
+                self.assertEqual(json.loads((root / "pre-retire-package-metadata-command.json").read_text()),
+                    {"argv": ["/usr/bin/dpkg-query", "--show", showformat, p.fixture.PACKAGE], "exitCode": code})
+                self.assertTrue(all(call.args[0][0] in ("/usr/bin/dpkg-query", "/usr/bin/dpkg-divert",
+                    "/usr/bin/dpkg-statoverride", "/usr/bin/dpkg") for call in commands.call_args_list))
 
     def test_post_repeat_snapshot_uses_fresh_capture_names_for_all_nine_and_five(self):
         with tempfile.TemporaryDirectory() as temporary:
