@@ -77,6 +77,7 @@ jobs:
           node --check scripts/linux-deb-helper-transaction-sdk.cjs
           node --check scripts/linux-deb-helper-transaction-sdk.test.cjs
           python3 -B scripts/linux-deb-helper-transaction.test.py
+          python3 -B scripts/linux-setup-helper-transaction.test.py
           node --test scripts/linux-deb-helper-transaction-sdk.test.cjs
       - name: Record pinned container image and actual dpkg toolchain and environment identity
         run: python3 -B scripts/linux-deb-helper-transaction-probe.py container-identity
@@ -96,15 +97,25 @@ jobs:
           github-token: ${{ github.token }}
           merge-multiple: true
           path: /__w/_temp/linux-deb-helper-transaction-input
+      - name: Download exact published Setup 0.3.7 fixture without installing it
+        run: |
+          input=/__w/_temp/linux-deb-helper-transaction-input/Creator.Project.Setup_0.3.7_amd64.deb
+          test ! -e "$input" && test ! -L "$input"
+          curl --fail --silent --show-error --location https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.3.7/Creator.Project.Setup_0.3.7_amd64.deb -o "$input"
+          test "$(stat -c %s "$input")" = 5966970
+          printf 'be18f23450146e71a2960e2110474f6e0409a9521a3ced308b7fd6a6d584c63d  %s\n' "$input" | sha256sum --check --strict
       - name: Install existing lockfile-pinned SDK without lifecycle scripts or product build
         run: npm ci --prefix modules/mcp --omit=dev --ignore-scripts --no-audit --no-fund
-      - name: Build only experimental helper, install exact baseline, retain live SDK and retire once
+      - name: Build only experimental helper, install both baselines and preserve live SDK across both retirements
         # Verify dpkg's explicit default Multi-Arch=no and retain the exact queried bytes.
         run: node scripts/linux-deb-helper-transaction-sdk.cjs
       # Capture even an artifact/setup failure. Never clear diversions, markers or stages.
       - name: Read-only final system diversions, package state and protected helper evidence
         if: always()
         run: python3 -B scripts/linux-deb-helper-transaction-probe.py diagnostics
+      - name: Retain Setup package, protected candidate and dpkg evidence without retries
+        if: always()
+        run: python3 -B scripts/linux-setup-helper-transaction-probe.py diagnostics
       - name: Retain original logs and false production gates, not product/package payloads
         if: always()
         uses: actions/upload-artifact@v4
@@ -119,3 +130,6 @@ jobs:
             /__w/_temp/linux-deb-helper-transaction/*.json
             /__w/_temp/linux-deb-helper-transaction/*.stdout
             /__w/_temp/linux-deb-helper-transaction/*.stderr
+            /__w/_temp/linux-deb-helper-transaction/setup/*.json
+            /__w/_temp/linux-deb-helper-transaction/setup/*.stdout
+            /__w/_temp/linux-deb-helper-transaction/setup/*.stderr

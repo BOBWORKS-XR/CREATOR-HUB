@@ -48,11 +48,16 @@ function fixture(failure) {
       if (failure === 'repeat') throw Error('Wrong refusal');
       return { status: 'manual-repair-required' };
     },
+    setup: {
+      async snapshot(phase) { events.push(`setup-snapshot:${phase}`); if (failure === `setup-${phase}`) throw Error('Setup snapshot failed'); },
+      async retire() { events.push('setup-retire-once'); if (failure === 'setup-retire') throw Error('Setup refused'); },
+      async repeat() { events.push('setup-repeat'); if (failure === 'setup-repeat') throw Error('Setup repeat failed'); },
+    },
     verifySettings() { events.push('settings'); return { sentinel: 'same' }; },
   } };
 }
 
-test('live SDK and both original aliases surround one transaction, then marker-only repeat', async () => {
+test('live SDK and both aliases surround both fixed transactions, then marker-only repeats', async () => {
   const { deps, events } = fixture();
   const report = { helperMechanismAccepted: false, productionGates: { ...FALSE_GATES } };
   await exercise(deps, report);
@@ -65,21 +70,28 @@ test('live SDK and both original aliases surround one transaction, then marker-o
     assert.ok(events.indexOf(`connect:after-${alias}:${alias}`) > at);
   }
   assert.ok(events.indexOf('repeat-marker-negative-test') > events.indexOf('snapshot:after'));
+  assert.equal(events.filter(e => e === 'setup-retire-once').length, 1);
+  assert.ok(events.indexOf('setup-retire-once') > at);
+  assert.ok(events.indexOf('setup-retire-once') < events.indexOf('check:already-live:after'));
+  assert.ok(events.indexOf('setup-repeat') > events.indexOf('setup-snapshot:after'));
   assert.equal(events.at(-1), 'close:already-live');
   assert.equal(report.helperMechanismAccepted, true);
+  assert.equal(report.setupHelperMechanismAccepted, true);
   assert.deepEqual(report.productionGates, FALSE_GATES);
 });
 
 test('failures never retry, earn acceptance, or run marker test before all postchecks', async () => {
-  for (const failure of ['before-node.exe', 'retire', 'after-node', 'pid', 'hash', 'repeat', 'close']) {
+  for (const failure of ['before-node.exe', 'retire', 'after-node', 'pid', 'hash', 'repeat', 'close',
+    'setup-before', 'setup-retire', 'setup-after', 'setup-repeat']) {
     const { deps, events } = fixture(failure);
     const report = { helperMechanismAccepted: false, productionGates: { ...FALSE_GATES } };
     await assert.rejects(exercise(deps, report));
     assert.equal(report.helperMechanismAccepted, false);
+    assert.notEqual(report.setupHelperMechanismAccepted, true);
     assert.deepEqual(report.productionGates, FALSE_GATES);
     assert.equal(events.at(-1), 'close:already-live');
     assert.ok(events.filter(e => e === 'retire-once').length <= 1);
-    if (!['repeat', 'close'].includes(failure)) assert.ok(!events.includes('repeat-marker-negative-test'));
+    if (!['repeat', 'close', 'setup-repeat'].includes(failure)) assert.ok(!events.includes('repeat-marker-negative-test'));
     if (failure === 'before-node.exe') assert.ok(!events.includes('retire-once'));
   }
 });

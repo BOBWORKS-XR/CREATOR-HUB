@@ -44,11 +44,12 @@ async function connectAndIdentify(client, transport, identify) {
   }
 }
 
-async function exercise({ connect, snapshot, retire, repeat, verifySettings }, report) {
+async function exercise({ connect, snapshot, retire, repeat, setup, verifySettings }, report) {
   const live = await connect('node', 'already-live');
   try {
     report.liveBefore = await live.check();
     report.before = await snapshot('before');
+    report.setupBefore = await setup.snapshot('before');
     report.reconnectBefore = {};
     for (const alias of ALIASES) {
       const fresh = await connect(alias, `before-${alias}`);
@@ -57,6 +58,8 @@ async function exercise({ connect, snapshot, retire, repeat, verifySettings }, r
     }
     verifySettings();
     report.transaction = await retire();
+    verifySettings();
+    report.setupTransaction = await setup.retire();
     report.liveAfter = await live.check();
     for (const key of ['pid', 'startTime', 'referenceSha256']) assert.equal(report.liveAfter[key], report.liveBefore[key], key);
     report.reconnectAfter = {};
@@ -66,6 +69,7 @@ async function exercise({ connect, snapshot, retire, repeat, verifySettings }, r
       finally { await fresh.close(); }
     }
     report.after = await snapshot('after');
+    report.setupAfter = await setup.snapshot('after');
     assert.equal(Object.keys(report.after.files).length, 9);
     for (const [name, row] of Object.entries(report.after.files)) {
       for (const key of ['bytes', 'sha256', 'md5', 'mode', 'uid', 'gid', 'owner']) assert.equal(row[key], report.before.files[name][key], name);
@@ -73,17 +77,21 @@ async function exercise({ connect, snapshot, retire, repeat, verifySettings }, r
     verifySettings();
     // Negative repeat only after verified success; never retry a failed/interrupted call.
     report.repeatRefusal = await repeat();
+    report.setupRepeatRefusal = await setup.repeat();
     report.settingsAfter = verifySettings();
   } finally { await live.close(); }
   report.helperMechanismAccepted = true;
+  report.setupHelperMechanismAccepted = true;
 }
 
-function native(root, phase) {
+function native(root, phase, setup = false) {
   assert.ok(['prepare', 'install', 'before', 'retire', 'after', 'repeat'].includes(phase));
   return new Promise((resolve, reject) => {
-    const out = fs.openSync(path.join(root, `phase-${phase}.stdout`), 'wx', 0o600);
-    const err = fs.openSync(path.join(root, `phase-${phase}.stderr`), 'wx', 0o600);
-    const child = spawn('/usr/bin/python3', ['-B', path.join(__dirname, 'linux-deb-helper-transaction-probe.py'), phase],
+    const prefix = setup ? 'setup-phase' : 'phase';
+    const out = fs.openSync(path.join(root, `${prefix}-${phase}.stdout`), 'wx', 0o600);
+    const err = fs.openSync(path.join(root, `${prefix}-${phase}.stderr`), 'wx', 0o600);
+    const script = setup ? 'linux-setup-helper-transaction-probe.py' : 'linux-deb-helper-transaction-probe.py';
+    const child = spawn('/usr/bin/python3', ['-B', path.join(__dirname, script), phase],
       { cwd: path.resolve(__dirname, '..'), stdio: ['ignore', out, err] });
     fs.closeSync(out); fs.closeSync(err);
     // Deliberately no timeout, signal or automatic retry around a package transaction.
@@ -92,7 +100,7 @@ function native(root, phase) {
       try {
         assert.equal(signal, null, `Native phase ${phase} interrupted; manual review, no retry`);
         assert.equal(code, 0, `Native phase ${phase} failed; original output retained, no retry`);
-        const bytes = fs.readFileSync(path.join(root, `phase-${phase}.stdout`));
+        const bytes = fs.readFileSync(path.join(root, `${prefix}-${phase}.stdout`));
         assert.ok(bytes.length <= 262144);
         resolve(JSON.parse(bytes));
       } catch (error) { reject(error); }
@@ -107,10 +115,10 @@ async function run() {
   assert.ok(path.isAbsolute(parent)); assert.equal(fs.realpathSync(parent), parent);
   const root = path.join(parent, 'linux-deb-helper-transaction');
   fs.mkdirSync(root, { mode: 0o700 });
-  const report = { schemaVersion: 1, scope: 'one disposable sudo experimental helper transaction, not authorization',
+  const report = { schemaVersion: 1, scope: 'two fixed disposable sudo experimental helper transactions, not authorization',
     runtimeContext: { runnerTemp: parent, evidenceDirectory: root, uid: process.getuid(), cwd: process.cwd() },
     sourceRevision: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
-    helperMechanismAccepted: false, productionGates: { ...FALSE_GATES },
+    helperMechanismAccepted: false, setupHelperMechanismAccepted: false, productionGates: { ...FALSE_GATES },
     limitations: ['No native approval/pkexec or production integration', 'No contention/interruption/recovery acceptance',
       'Workflow cancellation may interrupt a transaction; never retry, repair or roll back automatically',
       'Global diversions/statoverrides remain untouched; the helper may intentionally refuse them'] };
@@ -123,6 +131,8 @@ async function run() {
     assert.equal(report.sdkVersion, '1.29.0');
     report.plan = await native(root, 'prepare');
     report.fixtureProvisioning = await native(root, 'install');
+    report.setupPlan = await native(root, 'prepare', true);
+    report.setupFixtureProvisioning = await native(root, 'install', true);
     const settings = seedSettings(root);
     report.settingsBefore = settings.baseline;
     async function connect(alias, label) {
@@ -156,11 +166,14 @@ async function run() {
       };
     }
     await exercise({ connect, snapshot: phase => native(root, phase), retire: () => native(root, 'retire'),
+      setup: { snapshot: phase => native(root, phase, true), retire: () => native(root, 'retire', true),
+        repeat: () => native(root, 'repeat', true) },
       repeat: () => native(root, 'repeat'), verifySettings: settings.verify }, report);
   } catch (error) { report.error = String(error.stack || error); process.exitCode = 1; }
   finally {
     fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify(report, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
-    console.log(JSON.stringify({ helperMechanismAccepted: report.helperMechanismAccepted, error: report.error,
+    console.log(JSON.stringify({ helperMechanismAccepted: report.helperMechanismAccepted,
+      setupHelperMechanismAccepted: report.setupHelperMechanismAccepted, error: report.error,
       productionGates: report.productionGates }));
   }
 }

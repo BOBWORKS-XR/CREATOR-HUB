@@ -123,7 +123,7 @@ cross-target Clippy passes for the library, executable and test targets with
 warnings denied. Portable Windows Rust tests pass 19/19: 14 shared model plus
 five CLI invocation/admission/JSON-redaction/bounds tests. Their inspectors are
 synthetic; no account settings reader is constructed. The 15 Linux syscall tests
-are typechecked, but **not yet executed on Linux**. An existing Windows compiler
+were initially typechecked only. An existing Windows compiler
 was used and its missing Linux standard-library target was downloaded/installed;
 the crate's libc lockfile/dependency resolve is offline.
 
@@ -132,15 +132,23 @@ Build/check artifacts are confined to
 No real settings reads, product installation, workflow changes, native dispatch,
 packaging, publication or commits occurred.
 
-The remaining source/owned-fixture-only Linux execution command is:
+Native Ubuntu 22.04 run
+[38750164868](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38750164868)
+at `0feae0c35e28d95208d301875ac5518ba15ae998` subsequently passed all 14 shared
+model, 15 Linux filesystem and five CLI tests, plus warnings-denied Clippy.
+Its [receipt](../docs/evidence/linux-migration-preflight-38750164868.json) keeps
+all Flatpak host-integration and release flags false. No installed user settings
+were selected. Earlier native diagnostic failures are retained, not rerun claims.
+
+The source/owned-fixture-only Linux execution command is:
 
 ```sh
 cargo test --locked --offline --all-targets --manifest-path native/flatpak-host-reader/Cargo.toml --target-dir "$RUNNER_TEMP/flatpak-host-reader-target"
 ```
 
 This includes 14 shared model, 15 Linux implementation and five CLI tests.
-Parent owns adding the reviewed fixture job; no new Root artifact is required.
-Passing it would prove only this bounded native reader, not Flatpak
+No new Root artifact was required for that fixture job.
+Passing it proves only this bounded native reader, not Flatpak
 caller identity, real settings migration, Unity, update origin or acceptance.
 
 ## Remaining Integration Dependency

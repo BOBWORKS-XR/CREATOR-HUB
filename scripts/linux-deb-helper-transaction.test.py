@@ -574,6 +574,8 @@ class TransactionTests(unittest.TestCase):
         paths = [line.strip() for line in upload.split("path: |", 1)[1].splitlines() if line.strip()]
         expected = [f"/__w/_temp/linux-deb-helper-{directory}/*.{extension}"
             for directory in ("preflight", "transaction") for extension in ("json", "stdout", "stderr")]
+        expected += [f"/__w/_temp/linux-deb-helper-transaction/setup/*.{extension}"
+                     for extension in ("json", "stdout", "stderr")]
         self.assertEqual(paths, expected)
         self.assertNotIn("${{ runner.temp }}", upload)
         self.assertNotIn("/home/runner/work", upload)
