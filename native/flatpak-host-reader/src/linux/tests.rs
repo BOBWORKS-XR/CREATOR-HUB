@@ -338,11 +338,27 @@ fn same_length_in_place_change_during_read_is_not_returned() {
     f.put(Setting::CreatorMcp, b"before");
     let mut host = f.reader();
     let file = f.file(Setting::CreatorMcp);
-    host.reader.before_read = Some(Box::new(move || fs::write(file, b"after!").unwrap()));
-    assert!(matches!(
-        host.inspect(Setting::CreatorMcp),
-        Presence::Unavailable(_)
-    ));
+    let mutation = std::sync::Arc::new(Mutex::new(None));
+    let observation = mutation.clone();
+    host.reader.before_read = Some(Box::new(move || {
+        let before = Stamp::from(&fs::metadata(&file).unwrap());
+        fs::write(&file, b"after!").unwrap();
+        let after = Stamp::from(&fs::metadata(&file).unwrap());
+        *observation.lock().unwrap() = Some((before, after));
+    }));
+    let result = host.inspect(Setting::CreatorMcp);
+    let observed = match &result {
+        Presence::Present(bytes) if bytes == b"after!" => "present-after",
+        Presence::Present(bytes) if bytes == b"before" => "present-before",
+        Presence::Present(_) => "present-other",
+        Presence::Absent => "absent",
+        Presence::Unavailable(_) => "unavailable",
+    };
+    assert!(
+        matches!(result, Presence::Unavailable(_)),
+        "owned fixture observation={observed}; stamps={:?}",
+        *mutation.lock().unwrap()
+    );
 }
 
 #[test]
