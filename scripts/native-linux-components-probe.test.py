@@ -265,6 +265,17 @@ class OwnershipTests(unittest.TestCase):
         self.assertNotIsInstance(caught.exception, p.TreeRefusal)
         f.button.action.do_action.assert_not_called()
 
+    def test_external_parent_role_is_not_queried_before_containment_refusal(self):
+        f, owner = self.fixture()
+        external = fixtures.AxNode(43, 20)
+        external.get_role = mock.Mock(side_effect=RuntimeError("stale external parent"))
+        f.button.parent = external
+        with self.assertRaises(p.TreeRefusal) as caught:
+            p.press("view-setup", owner, f.atspi)
+        self.assertEqual(caught.exception.observation["missingCount"], 1)
+        external.get_role.assert_not_called()
+        f.button.action.do_action.assert_not_called()
+
     def test_capture_save_failure_does_not_replace_original_tree_refusal(self):
         error = p.TreeRefusal({"authorization": False, "actionCount": 0})
         with mock.patch.object(p.B, "save_json", side_effect=OSError("private path detail")), \

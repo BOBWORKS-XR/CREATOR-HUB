@@ -152,8 +152,7 @@ def own_tree(window, owner, atspi):
             owner.node(parent)
             parents.append({"node": list(key), "parent": owner.references.identity(parent, owner),
                             "getChildrenParent": list(expected_parent), "depth": depth,
-                            "pid": node.get_process_id(), "role": int(node.get_role()),
-                            "parentPid": parent.get_process_id(), "parentRole": int(parent.get_role())})
+                            "pid": node.get_process_id(), "role": int(node.get_role())})
         nodes.append(node)
         budget = min(helper.MAX_CHILDREN, helper.MAX_NODES - len(nodes) - len(pending))
         pending.extend((child, key, depth + 1) for child in reversed(helper.children(node, budget)))
