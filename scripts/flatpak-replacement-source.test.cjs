@@ -1,11 +1,80 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const pkg = require('./flatpak-package.cjs');
+const runner = require('./flatpak-disposable.cjs');
 const source = require('./flatpak-replacement-source.cjs');
 const plan = JSON.parse(pkg.read(path.join(pkg.RECIPE, 'replacement-014-inputs.json'), 65536));
 const repo = { owner: 'BOBWORKS-XR', repo: 'CREATOR-HUB' };
 const encoded = value => ({ encoding: 'base64', content: Buffer.from(JSON.stringify(value)).toString('base64') });
+
+function supportedPlan() {
+  const [baseline, replacement] = require('./flatpak-mcp-stdio-run.cjs').plan();
+  return { schemaVersion: 1, scope: plan.scope, ref: plan.ref, baseline, replacement };
+}
+
+test('historical writable plan stays readable but preflight refuses its missing raw router pin', () => {
+  const before = JSON.stringify(plan);
+  for (const name of ['baseline', 'replacement']) {
+    pkg.validatePins(plan[name].pins);
+    assert.equal(Object.hasOwn(plan[name].pins.files, pkg.ROUTER_INPUT), false);
+  }
+  assert.throws(() => source.validatePlan(plan), { code: 'ERR_FLATPAK_RAW_ROUTER_PIN_REQUIRED', input: 'baseline' });
+  assert.equal(JSON.stringify(plan), before, 'Preflight must not repair historical pins');
+});
+
+test('preflight checks both inputs and preserves the existing four-input pair without authorizing it', () => {
+  const supported = supportedPlan(), before = JSON.stringify(supported);
+  assert.doesNotThrow(() => source.validatePlan(supported));
+  assert.equal(JSON.stringify(supported), before);
+  for (const name of ['baseline', 'replacement']) {
+    const historical = structuredClone(supported); historical[name] = structuredClone(plan[name]);
+    assert.throws(() => source.validatePlan(historical), { code: 'ERR_FLATPAK_RAW_ROUTER_PIN_REQUIRED', input: name });
+  }
+  for (const mutate of [p => { p.scope = 'foreign'; }, p => { p.ref = 'foreign'; },
+    p => { p.replacement.pins.files[pkg.ROUTER_INPUT].size = 0; }]) {
+    const changed = structuredClone(supported); mutate(changed);
+    assert.throws(() => source.validatePlan(changed));
+  }
+});
+
+test('download and staging preflight both inputs before API calls, runner-temp access or mutation', async t => {
+  for (const input of ['baseline', 'replacement']) for (const entrypoint of ['downloadInputs', 'stageInputs']) {
+    await t.test(`${entrypoint}: historical ${input}`, async t => {
+      const candidate = supportedPlan(); candidate[input] = structuredClone(plan[input]);
+      const bytes = Buffer.from(JSON.stringify(candidate)), calls = [], f = fixture();
+      const admission = runner.admission;
+      const env = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
+        GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512',
+        CREATOR_FLATPAK_PACKAGE_TEST: '1', RUNNER_TEMP: path.join(os.tmpdir(), 'unused-flatpak-preflight-fixture') };
+      t.mock.method(runner, 'admission', value => { admission(value, 'linux', 'x64'); calls.push('admission'); });
+      t.mock.method(pkg, 'read', (file, limit) => {
+        assert.equal(file, path.join(pkg.RECIPE, 'replacement-014-inputs.json')); assert.equal(limit, 65536);
+        calls.push('read-plan'); return bytes;
+      });
+      for (const method of ['realpathSync', 'writeFileSync', 'mkdirSync']) t.mock.method(fs, method, () => {
+        calls.push(method); throw Error(`Unexpected ${method}`);
+      });
+      t.mock.method(pkg, 'prepare', () => { calls.push('prepare'); throw Error('Unexpected staging'); });
+      const error = { code: 'ERR_FLATPAK_RAW_ROUTER_PIN_REQUIRED', input };
+      if (entrypoint === 'downloadInputs') await assert.rejects(source.downloadInputs(f.github, { repo }, env), error);
+      else assert.throws(() => source.stageInputs(env), error);
+      assert.deepEqual(calls, ['admission', 'read-plan']);
+      assert.deepEqual(f.calls, []);
+    });
+  }
+});
+
+test('read-only CLI preflight refuses the unchanged plan without native runner admission', () => {
+  const result = spawnSync(process.execPath, [path.join(__dirname, 'flatpak-replacement-source.cjs'), '--preflight'],
+    { env: {}, encoding: 'utf8', timeout: 10000, maxBuffer: 8192, windowsHide: true });
+  assert.equal(result.error, undefined); assert.equal(result.status, 1); assert.equal(result.signal, null);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /ERR_FLATPAK_RAW_ROUTER_PIN_REQUIRED: baseline/);
+});
 
 function fixture(name = 'baseline', arrayBuffer = false) {
   const expected = structuredClone(plan[name]);
@@ -102,4 +171,14 @@ test('workflow preserves both original ZIPs/receipts and uses older-to-current s
   const implementation = pkg.read(path.join(__dirname, 'flatpak-replacement-source.cjs'), 65536).toString();
   assert.ok(implementation.includes('runner.admission(env)')); assert.ok(implementation.includes("flag: 'wx'"));
   assert.doesNotMatch(implementation, /spawn|execFile|execSync|auth\.json|GITHUB_TOKEN/);
+});
+
+test('workflow refuses an unstaggable plan before dependency setup, downloads or native tools', () => {
+  const workflow = pkg.read(path.resolve(__dirname, '../.github/workflows/flatpak-package-014.yml'), 65536).toString();
+  const preflight = workflow.indexOf('run: node scripts/flatpak-replacement-source.cjs --preflight');
+  assert.ok(preflight > workflow.indexOf('uses: actions/checkout@'));
+  for (const later of ['uses: actions/setup-node@', 'uses: dtolnay/rust-toolchain@', 'run: npm ci',
+    'downloadInputs(github,context)', 'python3 -B - <<', 'cargo build', 'sudo apt-get', 'sudo flatpak']) {
+    assert.ok(workflow.indexOf(later) > preflight, `${later} must follow plan preflight`);
+  }
 });

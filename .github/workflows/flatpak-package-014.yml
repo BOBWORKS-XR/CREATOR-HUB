@@ -14,6 +14,8 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Refuse incompatible historical pins before downloads or tool setup
+        run: node scripts/flatpak-replacement-source.cjs --preflight
       - uses: actions/setup-node@v6
         with:
           node-version: 24.17.0

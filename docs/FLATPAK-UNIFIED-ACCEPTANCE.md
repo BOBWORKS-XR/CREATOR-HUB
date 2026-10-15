@@ -7,6 +7,24 @@ The initial audit was read-only. Subsequent disposable packaging and native
 Root GUI results are separately bound below; none ran on the user's PC or read
 real credentials/projects. All readiness and migration acceptance remain false.
 
+2026-10-15 packaging correction: the historical three-input writable replacement
+plan is no longer executable by the current seven-file packager. A read-only
+`node scripts/flatpak-replacement-source.cjs --preflight` now refuses it with
+`ERR_FLATPAK_RAW_ROUTER_PIN_REQUIRED`, before artifact API calls/downloads,
+runner-temp access or staging writes. The Flatpak package workflow runs this
+check immediately after checkout, using existing Node, before Node/Rust setup,
+`npm ci`, native helper compilation or Flatpak provisioning. Both inputs are
+checked before either is used; direct download/staging entrypoints recheck too.
+This is an early refusal, not repaired packaging or host acceptance. Original
+historical pins, assembly identities, receipts and results below are unchanged;
+no fourth raw-router pin is inferred or added to those old assemblies.
+Focused local verification: replacement-source regressions pass 14/14; the
+replacement-source, package, retention and seeded-run fixture files together
+pass 72 tests with one existing Linux-only mode test skipped on Windows.
+Node syntax, workflow YAML/order and its unchanged embedded Python parse pass.
+The actual local read-only CLI exits 1 with the expected refusal. No native
+build, product download, dispatch, signature, deployment or commit occurred.
+
 ## Findings And Classification
 
 | Classification | Current evidence | Consequence |
@@ -44,7 +62,7 @@ Network omission also excludes catalogue/download/update functionality; this
 is intentionally an offline package experiment, not a usable replacement for
 all native functionality. See [the permission contract](https://docs.flatpak.org/en/latest/sandbox-permissions.html).
 
-The exact six input destinations are:
+The six base payload destinations are:
 
 ```text
 /app/bin/creator-hub
@@ -54,6 +72,15 @@ The exact six input destinations are:
 /app/share/appdata/com.creatorworks.hub.appdata.xml
 /app/share/licenses/com.creatorworks.hub/LICENSE
 ```
+
+Current read-only packages have exactly these six files. Current writable
+managed-routing packages require a seventh, mode 0755:
+`/app/libexec/creator-hub-mcp-router`. It comes from the original assembly's
+`modules/routing/creator-hub-mcp-router`, with its own independently reviewed
+fourth raw-input size/hash pin bound to the managed routing/archive descriptor.
+The historical six-file writable packages below remain historical evidence;
+their three-input pins are readable, but cannot stage or recheck a current
+writable package. See [the seven-file contract](../scripts/flatpak-mcp-stdio.md#package-change).
 
 The sixth file retains Hub's MIT license. The icon is the existing 128px Hub PNG.
 Optional `appstream-compose` is false for this private offline experiment; the
@@ -77,10 +104,12 @@ a missing-library or renderer failure.
 
 `scripts/flatpak-package.cjs INPUT REVIEWED_PINS NEW_STAGE` reads exactly
 `creator-hub`, `modules.tar.gz`, `builtin-manifest.json` from a verified outer
-assembly. It checks external byte/size pins, ELF64/x86_64 identity, exact embedded
+assembly for read-only inputs; writable managed-routing inputs additionally
+require the separately pinned raw router at the fixed original path above.
+It checks external byte/size pins, ELF64/x86_64 identity, exact embedded
 descriptor bytes, known MCP 2.7.7/Setup 0.3.7 file maps, optional exact managed
 routing map, archive binding and before/after input snapshots. It publishes a
-new six-file stage; existing destinations, redirections, hard-linked inputs,
+new six-file read-only or seven-file writable stage; existing destinations, redirections, hard-linked inputs,
 changed bytes and extra staged files refuse. It neither extracts nor executes
 payloads. `archiveMembersVerified` stays false at this stage.
 
@@ -102,7 +131,7 @@ The system Platform/SDK are inspected read-only; they must already exist.
 
 The runner verifies members with the rechecked pinned shared native archive decoder,
 builds/export locally with `--sandbox --disable-download`, compares packaged
-and deployed bytes/executable modes (also allowing the corresponding
+and deployed bytes/executable modes for the six base files (also allowing the corresponding
 write-bit-removed modes), rejects unexpected grants, creates a real unsigned
 `.flatpak`, and installs only the exact test ref in the isolated user store.
 It probes `/usr/bin/ldd` inside the **Platform** sandbox with `flatpak run
@@ -120,6 +149,9 @@ Both output lines must match the independently derived owned app-private path
 and original hash. The existing 30-second/8,192-byte read bounds remain unchanged.
 No permission, recipe, payload or child-environment broadening is included.
 It never launches Hub, either GUI backend, Node or the router.
+Its `verifyFiles` does not check the seventh libexec router. The separate seeded
+stdio lane uses `verifySeven` for that additional deployed-byte/mode check;
+neither lane establishes native host routing or settings retention.
 
 With a second separately verified stage, it requires different Hub bytes and
 deployment commit, performs an exact-ref local repository update, rechecks bytes,
@@ -137,7 +169,14 @@ Even `suitePassed:true` cannot change these fields: `nativeLinuxAccepted`,
 `signedRoutingVerifiedByThisLane` and `updateReady` are false. Linker success is not WebKit rendering,
 resource lookup, backend ABI, portal consent or host MCP acceptance.
 
-## Exact Disposable Invocation
+## Historical Disposable Invocation (Currently Blocked)
+
+The three-input writable template and commands in this section are retained as
+historical planning context, not a runnable current writable recipe. Run the
+read-only `node scripts/flatpak-replacement-source.cjs --preflight` before any
+downloads or dependency provisioning; the unchanged historical plan must exit 1
+with `ERR_FLATPAK_RAW_ROUTER_PIN_REQUIRED: baseline`. Do not add a guessed fourth
+pin, relabel an old assembly, or bypass that refusal.
 
 Main owns the workflow, verified artifact staging and public dependency setup.
 Nothing below is to run on the user's PC. Use a native hosted Linux x64 runner
@@ -209,6 +248,9 @@ repository, build dirs and resolved `/app/manifest.json` even when linkage fails
 in the [Flatpak command reference](https://docs.flatpak.org/en/latest/flatpak-command-reference.html).
 The test remote is unsigned and private, not a publication or update trust model.
 
+`validatePins` and `verifyRemoteInput` retain historical schema/provenance reading;
+those lower-level checks are not execution eligibility or staging authority.
+
 ## Same-Version Replacement Input Plan
 
 `packaging/flatpak/replacement-014-inputs.json` proposes independently reviewed
@@ -265,14 +307,17 @@ Run `38619251453` below proves that the former extra-restricted retention probe
 omitted app-private data. The reviewed continuation now uses the normal app
 sandbox only for that bounded read, after installed/effective permission checks;
 the linker remains extra-restricted. The captured failure stays immutable.
-Normal-context retention and old-package linkage remain **native-test pending**.
+Normal-context private-fixture retention and both static linkage probes now pass
+in run `38624468436`, recorded below. This is not real product-settings retention
+or GUI/backend execution acceptance.
 No native Hub/backend launch, settings migration, host MCP broker, signed update
 or `updateReady` acceptance is supplied.
 
-## Implemented Two-Input Workflow
+## Historical Two-Input Workflow
 
-`scripts/flatpak-replacement-source.cjs` and the Flatpak-only workflow now verify
-both reviewed assemblies before staging. Each must have the exact successful
+At the original six-file checkpoint, `scripts/flatpak-replacement-source.cjs`
+and the Flatpak-only workflow verified both reviewed assemblies before staging.
+Each must have the exact successful
 run/attempt, repository, workflow, source SHA/tree, unique successful Linux
 assembly job, artifact ID/name/size/digest and original ZIP bytes. Both original
 source `package.json` and `src-tauri/tauri.conf.json` are fetched at that exact
@@ -304,20 +349,21 @@ Buffer/ArrayBuffer responses. Both actual retained 875-byte receipts and existin
 source stages also pass the new byte/source/version/mode checks locally. The
 workflow's exact extraction block passes Python syntax validation.
 
-No normal-context native run was performed here. Main must review/commit only
-the scoped Flatpak files, supply the exact new source SHA on
-`validation/flatpak-package-014`, and bind the resulting run's head SHA to that
-reviewed source before interpreting its report. Do not rerun the former source
-revision: its retained fixture probe is intentionally the original failure.
+The initial implementation checkpoint had no normal-context native result.
+Main subsequently reviewed and committed exactly the eight scoped Flatpak paths
+as `9d015402bbbcb9b6c584cedd88815a4867d7739a` on
+`validation/flatpak-package-014`. Run `38624468436` is independently bound to
+that exact source; its actual result is below. Former failed reports remain
+immutable, rather than being relabeled by this later pass.
 
 ## Current Results And Stop Conditions
 
 - Windows source/temp-fixture tests: 36 passed, zero skipped, no native app children.
 - Related archive/package source suites: combined 55 passed, one existing Unix
   mode test skipped on Windows; no native Linux/Flatpak execution implied.
-- Local runner inventory: no `flatpak`, `flatpak-builder`, Docker or Podman. No
-  accessible fresh Linux executor; existing workflow reruns cannot execute these
-  new uncommitted scripts. User WSL/SSH or user Flatpak provisioning is excluded.
+- Local Windows runner inventory: no `flatpak`, `flatpak-builder`, Docker or
+  Podman. Actual native execution below occurred only on the source-bound
+  disposable hosted runner. User WSL/SSH or user Flatpak provisioning is excluded.
 - Actual disposable run `38612495075` reached Flatpak 1.12.7/builder 1.2.2,
   resolved GNOME 50 Platform/SDK commits and verified the native archive. Its six
   install commands passed; cleanup then exited 1 in 1,425 ms because the SDK
@@ -406,15 +452,61 @@ revision: its retained fixture probe is intentionally the original failure.
   matches the primary API. `suitePassed:false`, `runtimeLinkProbePassed:true`,
   `appPrivateFixtureRetained:false`; replacement/GUI/host/MCP/migration remain
   false. No rerun or app rebuild was performed here.
+- Actual [run 38624468436/1, job 116059992516](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38624468436/job/116059992516)
+  completed **success** at source `9d015402bbbcb9b6c584cedd88815a4867d7739a`,
+  source tree `127a53c3b8854407e27c74a60d3303662e16df33`. Steps 6-12 pass:
+  contract tests, both independent assembly/source downloads, exact bounded
+  extraction, staging/decoder, dependency provisioning, actual replacement/
+  private-retention harness and evidence upload. All 47 recorded native commands
+  exit 0, with no signal/error code and no stderr. Build 0/1 take 5,288/5,227 ms;
+  isolated install/update take 362/365 ms. Both archive-member verifications pass.
+  Linkage probes take 135/137 ms, each with 137 recognized rows and zero diagnostics.
+  Normal app-private reads take 126/127 ms, each returning 267 stdout bytes and no
+  stderr. Both independently checked ref/commit/metadata/effective-permission/
+  payload/fixture before and after the read.
+  Deployed OSTree commit changes from
+  `6474ae07f803a688b86d83dc480d49205c5fad229830605bd8b79bfe8e714429` to
+  `32745d5e9f4d01e0c732272b3c02d5d9c11cb462677d5c52c2d0417192464d5c`.
+  The actual mapped `HOME/.var/app/com.creatorworks.hub/config` path and synthetic
+  fixture SHA-256 `8c51417574244aa107841e1001c85d7f92c1a68780055e370da27fdee1381910`
+  stay identical across deployment replacement. Both manifest/effective-permission
+  hashes match across states; resolved manifests retain all four exact grants
+  and the same recorded Platform/SDK commits. The two original 875-byte receipts
+  retain their reviewed hashes, source versions and writable-mode bindings;
+  source/stage copies are byte-identical.
+  Consumer artifact `11923252154` is 358,586,204 bytes, downloaded and independently
+  checked against primary API SHA-256
+  `d0826ea15fa19d3d4745aa75f8ae5ef781c082434a008b57e4a97929bac63e46`.
+  Both original ZIPs inside it retain their reviewed `8c433ed0...`/`e875b1cd...`
+  digests and exact sizes. Actual generated bundle 0: 60,115,384 bytes, SHA-256
+  `e5b0ce2c0dfa5b83d9db5943e0cab52d19c2c83279b690cce2522c9388ec3a10`;
+  bundle 1: 60,176,800 bytes, SHA-256
+  `09582f687b5bc0c84f370f122b949a7adf2112910bd64f23287c205ea66fb976`.
+  All four embedded input/bundle hashes were streamed and rechecked locally;
+  no package or ELF was executed on the user's PC.
+  Report/metadata/bindings/receipts are retained under
+  `artifacts/flatpak-package-38624468436/flatpak-package-38624468436-1/`;
+  the complete original ZIP retains both bundles and original assembly ZIPs.
+  `flatpak-report.json`: 47,303 bytes, SHA-256
+  `2b531e19f085377eb28eda25a1d881d2edf5a85566f9a42c6466b2f57344d79b`.
+  **Verified scope only:** same-version 0.1.14 package replacement, exact payload
+  deployment, static outer-Hub dependency resolution and synthetic app-private
+  fixture retention. `suitePassed`, `packageReplacementVerified`,
+  `appPrivateFixtureRetained` and `runtimeLinkProbePassed` are true. All GUI,
+  native-Linux product, host/MCP, migration, signed/future update and readiness
+  fields remain false. No recipe, app bytes, runtime, permissions, environment,
+  timeout or production code change followed this result. All original failures
+  remain preserved as their actual failed runs.
 - Existing inspected Linux package receipts label 0.1.12/0.1.13. They were not
   relabeled. Fresh current14 assembly acceptance is main's independently verified
   prerequisite, not replaced by fixture hashes.
 
 Stop on any pinned-input, decoder, tool, runtime, permission, byte-preservation,
 linkage or private-fixture mismatch; preserve the first failure report. No timing,
-library-copy, permission or sandbox workaround is included. The smallest next
-test is the single-input command above using main's freshly verified Linux outer
-assembly. Actual unified native install/update/migration remains a separate gap.
+library-copy, permission or sandbox workaround is included. The two-input package
+fixture now has actual bounded native evidence; repeating it unchanged does not
+close GUI, host-broker, native settings migration or future public update gaps.
+Actual unified native install/update/migration remains a separate gap.
 
 ## Host MCP Broker Boundary
 
@@ -483,6 +575,68 @@ version 5, but a returned path is not host write/execution consent. Prove grant
 identity, canonical project root, revocation and host/sandbox path equivalence;
 otherwise refuse. See the [Documents portal contract](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Documents.html).
 
+### Proposed Read-Only Filtered-Bus Capture
+
+Design only, not implemented or run. The question is which live process the
+filtered connection's bus credentials identify, and whether it can be correlated
+to the exact owned Flatpak instance. It does not create broker authority.
+The [proxy manual](https://raw.githubusercontent.com/flatpak/xdg-dbus-proxy/main/xdg-dbus-proxy.xml)
+explicitly says the proxy sends its own credentials during authentication.
+Therefore a bus PID is not automatically the UI PID. The
+[D-Bus specification](https://raw.githubusercontent.com/d-bus/dbus/master/doc/dbus-specification.xml)
+defines `GetConnectionCredentials`, `Hello` and a separate monitor connection;
+credentials can be omitted. The
+[instance API](https://docs.flatpak.org/en/latest/libflatpak-api-reference.html#flatpak-instance-get-pid)
+distinguishes the outer babysitter PID from the application PID and warns that
+process lifecycle tracking is racy. These primitives do not prove a secure caller map.
+
+1. Require a separately authorized disposable capture owner and its verified
+   Flatpak ref, app/Platform commits, deployment path, payload hashes and effective
+   four-grant metadata. That owner supplies the actual Root PID/start/UID/image
+   after launch and owns normal close. Use only its private session bus and synthetic
+   HOME/XDG. Do not launch/relaunch through a new driver, modify the app command,
+   or use the user's desktop bus. Missing expected inputs stop before observation;
+   missing live ownership records prevent successful attribution.
+2. Before that owner's one launch, open two host-only bus connections: an observer
+   and a credential reader. The observer uses `BecomeMonitor(rules, 0)` with only
+   these three rules, never an empty rule array or all-bus dump:
+
+   ```text
+   type='method_call',destination='org.freedesktop.DBus',path='/org/freedesktop/DBus',interface='org.freedesktop.DBus',member='Hello'
+   type='method_return',sender='org.freedesktop.DBus'
+   type='signal',sender='org.freedesktop.DBus',path='/org/freedesktop/DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged'
+   ```
+
+   Retain headers only, plus the unique-name string from a serial-correlated
+   `Hello` reply and lifecycle names for those selected connections. Ignore other
+   reply bodies. No app RPC, portal operation, service activation, `RequestName`,
+   broker method, consent prompt or sandbox-side helper is introduced.
+3. For each selected live unique name, the separate reader calls the bus daemon's
+   `GetConnectionCredentials(name)`, with 2-second deadlines and no interactive
+   authorization/auto-start. Keep only `UnixUserID`, `ProcessID`, and a hash of
+   `LinuxSecurityLabel` when supplied; missing fields remain explicitly missing.
+   Recheck the same unique name and credentials before the owner's normal close.
+4. Independently recheck the selected libflatpak instance's app/arch/branch/app
+   commit/runtime commit and both PIDs. For only the known Root and returned
+   credential PID, retain start time, UID tuple, executable hash, PID/mount/user
+   namespace identities and a bounded `/proc/PID/root/.flatpak-info` hash plus
+   allowlisted identity fields. Classify `credentialRole=app|proxy|unresolved`.
+   A shared UID, app ID, instance label, namespace or metadata match alone is
+   correlation, not proof of the individual originating UI process.
+5. Bound observation to 30 seconds, 32 unique names, 16 KiB per credential reply
+   and 64 KiB total report. Reject drift, foreign processes, ambiguous mapping,
+   overflow or denied inspection; preserve the original bounded failure. No
+   matching live connection is inconclusive, not a reason to retry, inject a call,
+   add grants, enable tracing privileges or relax the bus policy.
+6. Output only `busPeerObserved`, `credentialRole`, `instanceCorrelation` and
+   `mappingUnresolvedReason`, plus bound source/session/process/deployment records.
+   `uiCallerAuthenticated`, `hostIntegrationAccepted`, migration/update/readiness
+   remain false. If only the proxy can be established, the next review must define
+   a separately proven per-connection app-peer binding; this capture cannot admit
+   `GetStatus`, `InspectMigration` or any host writer. Settings, projects, routes,
+   permissions, services and product bytes are never changed; only owned capture
+   evidence may be written by a future authorized harness.
+
 ## Reusable Native Linux Route
 
 Use native Linux first; it cannot confer Flatpak acceptance.
@@ -527,7 +681,7 @@ immutable before-images and report failed cleanup separately from original failu
 | Gate | Smallest exact positive/negative evidence |
 | --- | --- |
 | Native current14 baseline | Bind source/tree/run/attempt, Hub hash, private input hashes/modes and signed descriptors. Exercise actual Hub terms, Convergence deferral, hosted decline/retry/status/recipe and parent-reaped normal closure. Component scope must report migration skipped, never full flow. |
-| Flatpak ABI/resources | Build/export six-file recipe; retain resolved manifest, app/Platform/SDK commits and arch. Check ELF interpreter/NEEDED/symbol versions, real nonblank WebKit rendering, resource lookup and archive bytes/modes. Repacking alone does not pass. |
+| Flatpak ABI/resources | Build/export the exact six-file read-only or seven-file writable recipe; retain resolved manifest, app/Platform/SDK commits and arch. Check all applicable deployed files/modes, ELF interpreter/NEEDED/symbol versions, real nonblank WebKit rendering, resource lookup and archive bytes/modes. Repacking alone does not pass. |
 | No broker / foreign peer | Missing broker, wrong version/app/deployment, proxy/PID ambiguity, reused PID, changed bus owner, oversized/unknown method/field, replay/expired nonce and arbitrary path/argv/env must refuse without host writes or process launch. |
 | No-consent retention | Preview, Later/Keep existing, cancel, read-only launch and failed admission leave exact host/sandbox settings, legacy registrations/desktop files, client entries, projects and active route unchanged, including absence. Run without broad home/host permissions. |
 | Reviewed migration | Known exact legacy client entries in JSON/JSONC/TOML convert only after native review; preserve unrelated bytes/options/unknown fields. Current-vs-legacy product conflicts and custom server selection stay explicit. Concurrent standalone owner or changed before-image refuses. |

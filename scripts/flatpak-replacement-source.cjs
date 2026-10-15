@@ -6,6 +6,25 @@ const pkg = require('./flatpak-package.cjs');
 const runner = require('./flatpak-disposable.cjs');
 const REPOSITORY_ID = 1364807512;
 
+function validatePlan(plan) {
+  assert.equal(plan.scope, 'same-version-flatpak-package-replacement-only'); assert.equal(plan.ref, pkg.REF);
+  for (const name of ['baseline', 'replacement']) {
+    const pins = plan[name].pins;
+    pkg.validatePins(pins);
+    if (pins.mcpMode === 'writable' && !Object.hasOwn(pins.files, pkg.ROUTER_INPUT)) {
+      throw Object.assign(Error(`${name} writable plan lacks an independently reviewed raw router pin; historical pins and results remain unchanged. No download or staging is allowed.`),
+        { code: 'ERR_FLATPAK_RAW_ROUTER_PIN_REQUIRED', input: name });
+    }
+  }
+}
+
+function preflight() {
+  const bytes = pkg.read(path.join(pkg.RECIPE, 'replacement-014-inputs.json'), 65536);
+  const plan = JSON.parse(bytes);
+  validatePlan(plan);
+  return { bytes, plan };
+}
+
 function validateRun(run, expected) {
   assert.equal(run.id, expected.pins.runId); assert.equal(run.run_attempt, expected.pins.runAttempt);
   assert.equal(run.status, 'completed'); assert.equal(run.conclusion, 'success');
@@ -79,9 +98,8 @@ async function verifyRemoteInput(github, repo, expected) {
 async function downloadInputs(github, context, env = process.env) {
   runner.admission(env);
   assert.equal(`${context.repo.owner}/${context.repo.repo}`, 'BOBWORKS-XR/CREATOR-HUB');
+  const { plan } = preflight();
   const root = fs.realpathSync(env.RUNNER_TEMP); assert.ok(pkg.ordinary(root).isDirectory());
-  const plan = JSON.parse(pkg.read(path.join(pkg.RECIPE, 'replacement-014-inputs.json'), 65536));
-  assert.equal(plan.scope, 'same-version-flatpak-package-replacement-only'); assert.equal(plan.ref, pkg.REF);
   for (const name of ['baseline', 'replacement']) {
     const { bytes, binding } = await verifyRemoteInput(github, context.repo, plan[name]);
     fs.writeFileSync(path.join(root, `flatpak-${name}-input.zip`), bytes, { flag: 'wx', mode: 0o600 });
@@ -91,9 +109,8 @@ async function downloadInputs(github, context, env = process.env) {
 
 function stageInputs(env = process.env) {
   runner.admission(env);
+  const { bytes: planBytes, plan } = preflight();
   const root = fs.realpathSync(env.RUNNER_TEMP); assert.ok(pkg.ordinary(root).isDirectory());
-  const planBytes = pkg.read(path.join(pkg.RECIPE, 'replacement-014-inputs.json'), 65536);
-  const plan = JSON.parse(planBytes);
   for (const name of ['baseline', 'replacement']) {
     const expected = plan[name], source = path.join(root, `flatpak-${name}-source`);
     const binding = JSON.parse(pkg.read(path.join(root, `flatpak-${name}-binding.json`), 65536));
@@ -111,8 +128,10 @@ function stageInputs(env = process.env) {
 }
 
 if (require.main === module) {
-  try { assert.equal(process.argv.length, 2); stageInputs(); }
-  catch (error) { console.error(String(error.message).slice(0, 1000)); process.exitCode = 1; }
+  try {
+    if (process.argv.length === 3 && process.argv[2] === '--preflight') preflight();
+    else { assert.equal(process.argv.length, 2); stageInputs(); }
+  } catch (error) { console.error(`${error.code ? `${error.code}: ` : ''}${String(error.message)}`.slice(0, 1000)); process.exitCode = 1; }
 }
 
-module.exports = { validateRun, validateArtifact, validateSource, validateReceipt, verifyRemoteInput, downloadInputs, stageInputs };
+module.exports = { validatePlan, preflight, validateRun, validateArtifact, validateSource, validateReceipt, verifyRemoteInput, downloadInputs, stageInputs };
