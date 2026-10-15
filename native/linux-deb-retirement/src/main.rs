@@ -5,7 +5,7 @@ use creator_hub_linux_deb_retirement::{Action, INSTALL_REFUSAL};
 fn run() -> Result<serde_json::Value> {
     let action = action(&std::env::args().skip(1).collect::<Vec<_>>())?;
     #[cfg(not(feature = "experimental-transaction"))]
-    if action == Action::Retire {
+    if matches!(action, Action::Retire | Action::RetireSetup) {
         return Err(INSTALL_REFUSAL.into());
     }
     #[cfg(target_os = "linux")]

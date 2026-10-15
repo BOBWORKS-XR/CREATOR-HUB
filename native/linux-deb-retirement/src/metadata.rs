@@ -1,12 +1,35 @@
 //! Strict supported subset of dpkg 1.21.1 db-fsys-divert/override formats.
 //! Validate complete databases, not translated --list output. Never rewrite them.
-use crate::{pins, require, Result};
+use crate::{pins, require, setup, Result};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Identity {
     User,
     Group,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Mcp,
+    Setup,
+}
+
+impl Target {
+    pub(crate) fn package(self) -> &'static str {
+        match self {
+            Self::Mcp => pins::PACKAGE,
+            Self::Setup => setup::PACKAGE,
+        }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn private(self) -> &'static str {
+        match self {
+            Self::Mcp => pins::PRIVATE,
+            Self::Setup => setup::PRIVATE,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -34,16 +57,23 @@ fn within(child: &str, parent: &str) -> bool {
 }
 
 pub fn disjoint(path: &str) -> Result<()> {
+    disjoint_for(Target::Mcp, path)
+}
+
+pub fn disjoint_for(target: Target, path: &str) -> Result<()> {
     canonical(path)?;
-    let product = "/usr/lib/Creator Works MCP";
+    let (product, files, additional) = match target {
+        Target::Mcp => ("/usr/lib/Creator Works MCP", pins::FILES, &[][..]),
+        Target::Setup => (setup::DOCUMENT_ROOT, setup::FILES, setup::TOMBSTONE),
+    };
     require(
         !within(path, product)
             && !within(product, path)
-            && pins::FILES.iter().all(|p| {
+            && files.iter().chain(additional).all(|p| {
                 let target = format!("/{}", p.path);
                 !within(path, &target) && !within(&target, path)
             }),
-        "Diversion/statoverride intersects MCP files or directories",
+        "Diversion/statoverride intersects target files or directories",
     )
 }
 
@@ -89,18 +119,29 @@ fn numeric_id(value: &str) -> Result<Option<u32>> {
 }
 
 fn check_path(
+    target: Target,
     value: &str,
     resolve: &mut impl FnMut(&str) -> Result<String>,
     paths: &mut Vec<(String, String)>,
 ) -> Result<String> {
-    disjoint(value)?;
+    disjoint_for(target, value)?;
     let resolved = resolve(value)?;
-    disjoint(&resolved)?;
+    disjoint_for(target, &resolved)?;
     paths.push((value.into(), resolved.clone()));
     Ok(resolved)
 }
 
 pub fn validate(
+    diversions: &[u8],
+    overrides: &[u8],
+    identity: impl FnMut(Identity, &str) -> Result<u32>,
+    resolve: impl FnMut(&str) -> Result<String>,
+) -> Result<Validated> {
+    validate_for(Target::Mcp, diversions, overrides, identity, resolve)
+}
+
+pub fn validate_for(
+    target: Target,
     diversions: &[u8],
     overrides: &[u8],
     mut identity: impl FnMut(Identity, &str) -> Result<u32>,
@@ -127,10 +168,13 @@ pub fn validate(
                     })),
             "Invalid diversion package label",
         )?;
-        require(package != pins::PACKAGE, "Unexpected MCP-owned diversion")?;
+        require(
+            package != target.package(),
+            "Unexpected target-owned diversion",
+        )?;
         for value in &triple[..2] {
             require(endpoints.insert(*value), "Conflicting diversion endpoints")?;
-            let resolved = check_path(value, &mut resolve, &mut result.paths)?;
+            let resolved = check_path(target, value, &mut resolve, &mut result.paths)?;
             require(
                 resolved_endpoints.insert(resolved),
                 "Aliased diversion endpoints conflict",
@@ -162,7 +206,7 @@ pub fn validate(
             "Invalid statoverride mode",
         )?;
         require(paths.insert(fields[3]), "Duplicate statoverride path")?;
-        let resolved = check_path(fields[3], &mut resolve, &mut result.paths)?;
+        let resolved = check_path(target, fields[3], &mut resolve, &mut result.paths)?;
         require(
             resolved_paths.insert(resolved),
             "Aliased statoverride paths conflict",
@@ -384,5 +428,71 @@ mod tests {
         )
         .unwrap();
         assert_ne!(first, changed);
+    }
+
+    #[test]
+    fn setup_targets_include_all_five_old_files_the_notice_and_resolved_aliases() {
+        assert_eq!(Target::Mcp.private(), pins::PRIVATE);
+        assert_eq!(Target::Setup.private(), setup::PRIVATE);
+        assert_ne!(Target::Mcp.private(), Target::Setup.private());
+        for pin in setup::FILES.iter().chain(setup::TOMBSTONE) {
+            let path = format!("/{}", pin.path);
+            assert!(disjoint_for(Target::Setup, &path).is_err());
+            assert!(disjoint_for(Target::Setup, path.rsplit_once('/').unwrap().0).is_err());
+            for diversion in [
+                format!("{path}\n/other/file\n:\n"),
+                format!("/other/file\n{path}\nother-package\n"),
+            ] {
+                assert!(validate_for(
+                    Target::Setup,
+                    diversion.as_bytes(),
+                    b"",
+                    |_, _| Ok(0),
+                    |p| Ok(p.into())
+                )
+                .is_err());
+            }
+            assert!(validate_for(
+                Target::Setup,
+                b"",
+                format!("root root 644 {path}\n").as_bytes(),
+                |_, _| Ok(0),
+                |p| Ok(p.into())
+            )
+            .is_err());
+            assert!(validate_for(
+                Target::Setup,
+                b"/alias/a\n/alias/b\n:\n",
+                b"",
+                |_, _| Ok(0),
+                |_| Ok(path.clone())
+            )
+            .is_err());
+        }
+        assert!(disjoint_for(
+            Target::Setup,
+            "/usr/share/doc/creator-project-setup/unknown/child"
+        )
+        .is_err());
+        assert!(validate_for(
+            Target::Setup,
+            b"/other/a\n/other/b\ncreator-project-setup\n",
+            b"",
+            |_, _| Ok(0),
+            |p| Ok(p.into())
+        )
+        .is_err());
+        validate_for(
+            Target::Setup,
+            DIVERSION_FIXTURE,
+            OVERRIDE_FIXTURE,
+            |_, _| Ok(0),
+            |p| Ok(p.into()),
+        )
+        .unwrap();
+        // The MCP default remains target-specific; no Setup pin is added to it.
+        disjoint("/usr/bin/creator-project-setup").unwrap();
+        assert!(disjoint("/usr/bin/creator-works-mcp-launcher").is_err());
+        disjoint_for(Target::Setup, "/usr/bin/creator-works-mcp-launcher").unwrap();
     }
 }

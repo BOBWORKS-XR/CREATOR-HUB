@@ -10,6 +10,7 @@ pub mod archive;
 pub mod linux;
 pub mod metadata;
 pub mod pins;
+pub mod setup;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub const INSTALL_REFUSAL: &str = "WIP: installation disabled; dpkg lock handoff, native GUI-close/approval and recovery contracts are not accepted";
@@ -54,8 +55,12 @@ pub fn require(ok: bool, reason: &str) -> Result<()> {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Action {
     Inspect,
+    InspectRetainedMcp,
+    InspectSetup,
+    InspectRetainedSetup,
     Prepare,
     Retire,
+    RetireSetup,
 }
 
 pub fn action(args: &[String]) -> Result<Action> {
@@ -66,12 +71,27 @@ pub fn action(args: &[String]) -> Result<Action> {
         .as_slice()
     {
         [] | ["inspect"] => Ok(Action::Inspect),
+        ["inspect-retained-mcp-2.7.7"] => Ok(Action::InspectRetainedMcp),
+        ["inspect-setup-0.3.7"] => Ok(Action::InspectSetup),
+        ["inspect-retained-setup-0.3.7"] => Ok(Action::InspectRetainedSetup),
         ["prepare-mcp-2.7.7"] => Ok(Action::Prepare),
         ["retire-mcp-2.7.7"] => Ok(Action::Retire),
+        ["retire-setup-0.3.7"] => Ok(Action::RetireSetup),
         _ => Err(
-            "Only inspect, prepare-mcp-2.7.7 or retire-mcp-2.7.7; no paths/options accepted".into(),
+            "Only fixed MCP 2.7.7 and Setup 0.3.7 inspection/retirement actions; no paths/options accepted".into(),
         ),
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn retained_inspection_report() -> serde_json::Value {
+    serde_json::json!({ "status": "inspected-retained-read-only", "product": "mcp",
+        "package": pins::PACKAGE, "packageState": "compatibility", "version": pins::NEW,
+        "readOnly": true, "baselineMatches": false, "compatibilityMatches": true,
+        "snapshotAuthoritative": false, "installationEnabled": false,
+        "experimentalTransactionCompiled": cfg!(feature = "experimental-transaction"),
+        "packageTransactionStarted": false, "nativeAcceptance": false,
+        "retainedFilesVerified": 9, "omittedFilesVerified": 5 })
 }
 
 pub fn state(data: &[u8]) -> Result<()> {
@@ -243,8 +263,12 @@ mod tests {
         assert_eq!(action(&[]).unwrap(), Action::Inspect);
         for (arg, expected) in [
             ("inspect", Action::Inspect),
+            ("inspect-retained-mcp-2.7.7", Action::InspectRetainedMcp),
+            ("inspect-setup-0.3.7", Action::InspectSetup),
+            ("inspect-retained-setup-0.3.7", Action::InspectRetainedSetup),
             ("prepare-mcp-2.7.7", Action::Prepare),
             ("retire-mcp-2.7.7", Action::Retire),
+            ("retire-setup-0.3.7", Action::RetireSetup),
         ] {
             assert_eq!(action(&[arg.into()]).unwrap(), expected);
             assert!(action(&[arg.into(), "/tmp/evil.deb".into()]).is_err());
@@ -253,10 +277,33 @@ mod tests {
             "--root=/tmp",
             "prepare-setup-0.3.7",
             "retire-mcp-2.7.8",
+            "inspect-retained-mcp-2.7.8",
+            "inspect-retained-setup-0.3.8",
             "/tmp/a.deb",
             "inspect\n",
         ] {
             assert!(action(&[arg.into()]).is_err());
+        }
+    }
+    #[test]
+    fn retained_inspection_protocol_never_claims_mutation_or_production_acceptance() {
+        let report = retained_inspection_report();
+        assert_eq!(report["status"], "inspected-retained-read-only");
+        assert_eq!(report["packageState"], "compatibility");
+        assert_eq!(report["package"], pins::PACKAGE);
+        assert_eq!(report["version"], pins::NEW);
+        assert_eq!(report["readOnly"], true);
+        assert_eq!(report["compatibilityMatches"], true);
+        assert_eq!(report["retainedFilesVerified"], 9);
+        assert_eq!(report["omittedFilesVerified"], 5);
+        for field in [
+            "baselineMatches",
+            "snapshotAuthoritative",
+            "installationEnabled",
+            "packageTransactionStarted",
+            "nativeAcceptance",
+        ] {
+            assert_eq!(report[field], false, "{field}");
         }
     }
     #[test]

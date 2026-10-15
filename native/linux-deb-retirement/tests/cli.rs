@@ -8,23 +8,22 @@ fn default_refuses_and_feature_build_still_requires_the_trusted_installed_image(
         std::path::Path::new(binary),
         std::path::Path::new(pins::HELPER)
     );
-    let output = Command::new(binary)
-        .arg("retire-mcp-2.7.7")
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["status"], "refused");
-    assert_eq!(report["packageTransactionStarted"], false);
-    assert_eq!(report["manualRepairRequired"], false);
-    assert_eq!(report["nativeAcceptance"], false);
-    assert_eq!(
-        report["experimentalTransactionCompiled"],
-        cfg!(feature = "experimental-transaction")
-    );
-    if cfg!(feature = "experimental-transaction") {
-        assert_ne!(report["reason"], INSTALL_REFUSAL);
-    } else {
-        assert_eq!(report["reason"], INSTALL_REFUSAL);
+    for action in ["retire-mcp-2.7.7", "retire-setup-0.3.7"] {
+        let output = Command::new(binary).arg(action).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "refused");
+        assert_eq!(report["packageTransactionStarted"], false);
+        assert_eq!(report["manualRepairRequired"], false);
+        assert_eq!(report["nativeAcceptance"], false);
+        assert_eq!(
+            report["experimentalTransactionCompiled"],
+            cfg!(feature = "experimental-transaction")
+        );
+        if cfg!(feature = "experimental-transaction") {
+            assert_ne!(report["reason"], INSTALL_REFUSAL);
+        } else {
+            assert_eq!(report["reason"], INSTALL_REFUSAL);
+        }
     }
 }

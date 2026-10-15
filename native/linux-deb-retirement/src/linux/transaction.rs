@@ -47,12 +47,20 @@ fn log(path: &Path) -> Result<File> {
         .open(path)?)
 }
 
-fn mark_attempt(candidate: &Path) -> Result<()> {
-    let path = Path::new(pins::PRIVATE).join(ATTEMPT);
+fn mark_attempt(candidate: &Path, target: Target) -> Result<()> {
+    let (package, old, new) = match target {
+        Target::Mcp => (pins::PACKAGE, pins::OLD, pins::NEW),
+        Target::Setup => (crate::setup::PACKAGE, crate::setup::OLD, crate::setup::NEW),
+    };
+    let path = Path::new(target.private()).join(ATTEMPT);
     let mut file = log(&path)?;
-    file.write_all(format!("Experimental {} {} -> {}\nStage: {}\nManual review required. No automatic retry or rollback.\n", pins::PACKAGE, pins::OLD, pins::NEW, candidate.display()).as_bytes())?;
+    file.write_all(format!("Experimental {package} {old} -> {new}\nStage: {}\nManual review required. No automatic retry or rollback.\n", candidate.display()).as_bytes())?;
     file.sync_all()?;
-    open(Path::new(pins::PRIVATE), libc::O_RDONLY | libc::O_DIRECTORY)?.sync_all()?;
+    open(
+        Path::new(target.private()),
+        libc::O_RDONLY | libc::O_DIRECTORY,
+    )?
+    .sync_all()?;
     Ok(())
 }
 
@@ -82,14 +90,28 @@ fn install_command(candidate: &Path) -> Result<Command> {
 }
 
 pub(super) fn retire() -> Result<serde_json::Value> {
+    retire_target(Target::Mcp)
+}
+
+pub(super) fn retire_setup() -> Result<serde_json::Value> {
+    retire_target(Target::Setup)
+}
+
+fn retire_target(target: Target) -> Result<serde_json::Value> {
     privileged_image()?;
     let mut held = locks()?;
     // Never reopen or accept a previous preparation; rebuild after exact baseline admission.
     let Prepared {
         candidate,
         metadata,
-    } = prepare_locked(&held)?;
-    verify_candidate(&candidate)?;
+    } = match target {
+        Target::Mcp => prepare_locked(&held)?,
+        Target::Setup => setup::prepare_locked(&held)?,
+    };
+    match target {
+        Target::Mcp => verify_candidate(&candidate)?,
+        Target::Setup => setup::verify_candidate(&candidate)?,
+    }
     let mut cmd = install_command(&candidate)?;
     let interrupts = Interrupts::register()?;
     require(
@@ -97,7 +119,7 @@ pub(super) fn retire() -> Result<serde_json::Value> {
         "Interrupted before transaction; no package transaction started",
     )?;
     // Persist refusal-on-retry before the only handoff. This is not a rollback journal.
-    mark_attempt(&candidate).map_err(|e| manual(e, Some(false)))?;
+    mark_attempt(&candidate, target).map_err(|e| manual(e, Some(false)))?;
     // Both locks still held. Standalone Root database writers are not excluded.
     metadata.unchanged().map_err(|e| manual(e, Some(false)))?;
     let mut started = false;
@@ -123,20 +145,29 @@ pub(super) fn retire() -> Result<serde_json::Value> {
     });
     result.map_err(|e| manual(e, Some(started)))?;
     // handoff has reacquired the database lock; frontend is still held.
-    installed(true).map_err(|e| manual(e, Some(true)))?;
+    match target {
+        Target::Mcp => installed(true),
+        Target::Setup => setup::installed(true),
+    }
+    .map_err(|e| manual(e, Some(true)))?;
     metadata.unchanged().map_err(|e| manual(e, Some(true)))?;
     require(
         !interrupts.requested(),
         "Helper interrupted during post-verification",
     )
     .map_err(|e| manual(e, Some(true)))?;
-    Ok(
-        json!({ "status": "experimental-transaction-verified", "experimentalTransactionCompiled": true,
+    let mut report = json!({ "status": "experimental-transaction-verified", "experimentalTransactionCompiled": true,
         "installationEnabled": false, "packageTransactionStarted": true, "manualRepairRequired": false,
-        "nativeAcceptance": false, "candidate": candidate, "version": pins::NEW,
-        "retainedFilesVerified": 9, "omittedFilesVerified": 5,
-        "retryPolicy": "attempt marker retained; no automatic retry" }),
-    )
+        "nativeAcceptance": false, "candidate": candidate,
+        "version": if target == Target::Mcp { pins::NEW } else { crate::setup::NEW },
+        "retainedFilesVerified": if target == Target::Mcp { 9 } else { 0 }, "omittedFilesVerified": 5,
+        "retryPolicy": "attempt marker retained; no automatic retry" });
+    if target == Target::Setup {
+        report["product"] = json!("setup");
+        report["package"] = json!(crate::setup::PACKAGE);
+        report["tombstoneFilesVerified"] = json!(1);
+    }
+    Ok(report)
 }
 
 #[cfg(test)]

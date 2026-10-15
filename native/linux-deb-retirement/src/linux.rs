@@ -27,8 +27,11 @@ const DEB: &str = "/usr/bin/dpkg-deb";
 const INFO: &str = "/var/lib/dpkg/info";
 const LIMIT: u64 = 128 * 1024;
 const ATTEMPT: &str = "transaction-attempted";
+const METADATA_FORMAT: &str = "--showformat=${Installed-Size}\n${Maintainer}\n${Priority}\n${Depends}\n${Description}\n${Conffiles}${Triggers-Pending}${Triggers-Awaited}${Multi-Arch}${Pre-Depends}${Breaks}${Conflicts}${Replaces}${Provides}";
 mod handoff;
 mod metadata;
+mod setup;
+use crate::metadata::Target;
 use handoff::PackageLocks;
 #[cfg(feature = "experimental-transaction")]
 mod transaction;
@@ -171,9 +174,21 @@ fn command(tool: &str, private_tmp: Option<&Path>) -> Result<Command> {
 }
 
 fn parsed<T: Send + 'static>(
-    mut cmd: Command,
+    cmd: Command,
     parse: impl FnOnce(std::process::ChildStdout) -> Result<T> + Send + 'static,
 ) -> Result<T> {
+    let (status, result, stderr) = parsed_outcome(cmd, parse)?;
+    require(
+        status.success() && stderr.is_empty(),
+        "System tool failed or emitted diagnostics",
+    )?;
+    Ok(result)
+}
+
+fn parsed_outcome<T: Send + 'static>(
+    mut cmd: Command,
+    parse: impl FnOnce(std::process::ChildStdout) -> Result<T> + Send + 'static,
+) -> Result<(std::process::ExitStatus, T, Vec<u8>)> {
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().ok_or("Missing stdout pipe")?;
     let stderr = child.stderr.take().ok_or("Missing stderr pipe")?;
@@ -196,11 +211,16 @@ fn parsed<T: Send + 'static>(
     };
     let result = reader.join().map_err(|_| "Parser thread failed")?;
     let stderr = errors.join().map_err(|_| "Stderr thread failed")??;
-    require(
-        status?.success() && stderr.is_empty(),
-        "System tool failed or emitted diagnostics",
-    )?;
-    result
+    Ok((status?, result?, stderr))
+}
+
+fn capture_outcome(
+    tool: &str,
+    args: &[&str],
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
+    let mut cmd = command(tool, None)?;
+    cmd.args(args);
+    parsed_outcome(cmd, |out| bounded(out, LIMIT))
 }
 
 fn capture(tool: &str, args: &[&str]) -> Result<Vec<u8>> {
@@ -249,7 +269,7 @@ fn installed(compatibility: bool) -> Result<()> {
     } else {
         state(&status)?;
     }
-    let metadata = capture(QUERY, &["--show", "--showformat=${Installed-Size}\n${Maintainer}\n${Priority}\n${Depends}\n${Description}\n${Conffiles}${Triggers-Pending}${Triggers-Awaited}${Multi-Arch}${Pre-Depends}${Breaks}${Conflicts}${Replaces}${Provides}", pins::PACKAGE])?;
+    let metadata = capture(QUERY, &["--show", METADATA_FORMAT, pins::PACKAGE])?;
     installed_metadata(&metadata, compatibility)?;
     let check_list = if compatibility {
         compatibility_listing
@@ -432,7 +452,11 @@ fn privileged_image() -> Result<()> {
 }
 
 fn refuse_prior_attempt() -> Result<()> {
-    let private = Path::new(pins::PRIVATE);
+    refuse_prior_attempt_for(Target::Mcp)
+}
+
+fn refuse_prior_attempt_for(target: Target) -> Result<()> {
+    let private = Path::new(target.private());
     match fs::symlink_metadata(private) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
@@ -452,6 +476,10 @@ fn refuse_prior_attempt() -> Result<()> {
 }
 
 fn new_stage_name() -> Result<String> {
+    new_stage_name_for(Target::Mcp)
+}
+
+fn new_stage_name_for(target: Target) -> Result<String> {
     let mut random = [0u8; 16];
     let mut filled = 0;
     while filled < random.len() {
@@ -472,8 +500,12 @@ fn new_stage_name() -> Result<String> {
         require(count > 0, "Cannot generate fresh stage identity")?;
         filled += count as usize;
     }
+    let prefix = match target {
+        Target::Mcp => "mcp-2.7.7-preparation-",
+        Target::Setup => "setup-0.3.7-preparation-",
+    };
     Ok(format!(
-        "mcp-2.7.7-preparation-{}",
+        "{prefix}{}",
         random
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -605,6 +637,24 @@ pub fn run(action: Action) -> Result<serde_json::Value> {
         "Native Linux x86_64 only",
     )?;
     match action {
+        Action::InspectSetup => setup::inspect(false),
+        Action::InspectRetainedSetup => setup::inspect(true),
+        Action::RetireSetup => {
+            #[cfg(feature = "experimental-transaction")]
+            {
+                transaction::retire_setup()
+            }
+            #[cfg(not(feature = "experimental-transaction"))]
+            {
+                Err(INSTALL_REFUSAL.into())
+            }
+        }
+        Action::InspectRetainedMcp => {
+            // Re-read the fixed installed state; a retained retry marker is not
+            // authority for success and must not block this read-only check.
+            installed(true)?;
+            Ok(crate::retained_inspection_report())
+        }
         Action::Inspect => {
             refuse_prior_attempt()?;
             baseline()?;

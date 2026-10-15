@@ -1,5 +1,5 @@
-//! Unconnected host/private settings mapping. Hints and declarations do not grant access.
-//! A future native caller must validate effective grants and supply protected, bounded reads.
+//! Host/private settings mapping. Path hints and declarations alone never grant access.
+//! `flatpak-host-reader` supplies native-process-only protected reads, not sandbox caller authority.
 use std::{
     io,
     path::{Component, Path, PathBuf},

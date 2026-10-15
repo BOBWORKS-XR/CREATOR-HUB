@@ -2,7 +2,7 @@
 //! dpkg-divert/statcmd themselves do not lock: this is not exclusion against
 //! independent Root writers. No global metadata is ever created or rewritten.
 use super::*;
-use crate::metadata::{self, Identity, Validated};
+use crate::metadata::{self, Identity, Target, Validated};
 use std::collections::VecDeque;
 
 type Stamp = (u64, u64, u64, u32, u32, u32, u64, i64, i64, i64, i64);
@@ -28,6 +28,7 @@ struct State {
 }
 
 pub(super) struct Snapshot {
+    target: Target,
     state: State,
     // Pin original database inodes across child wait, including atomic replacement.
     _files: [Option<File>; 2],
@@ -84,6 +85,10 @@ fn parts(path: &Path) -> VecDeque<std::ffi::OsString> {
 }
 
 fn resolve_parent(path: &str, parents: &mut Vec<Parent>) -> Result<String> {
+    resolve_parent_for(Target::Mcp, path, parents)
+}
+
+fn resolve_parent_for(target: Target, path: &str, parents: &mut Vec<Parent>) -> Result<String> {
     metadata::canonical(path)?;
     let path = Path::new(path);
     let mut pending = parts(path);
@@ -109,7 +114,10 @@ fn resolve_parent(path: &str, parents: &mut Vec<Parent>) -> Result<String> {
                 if last {
                     // Check the directory entry AND any final alias referent.
                     // An override on /bin must not bypass an /usr/bin ancestor.
-                    metadata::disjoint(next.to_str().ok_or("Non-UTF8 metadata entry")?)?;
+                    metadata::disjoint_for(
+                        target,
+                        next.to_str().ok_or("Non-UTF8 metadata entry")?,
+                    )?;
                 }
                 let info = match fs::symlink_metadata(&next) {
                     Err(e) if last && e.kind() == std::io::ErrorKind::NotFound => {
@@ -196,16 +204,25 @@ fn resolve_identity(kind: Identity, name: &str) -> Result<u32> {
 
 impl Snapshot {
     pub(super) fn capture() -> Result<Self> {
+        Self::capture_for(Target::Mcp)
+    }
+
+    pub(super) fn capture_for(target: Target) -> Result<Self> {
         let (diversions, div_file) = database(DATABASES[0])?;
         let (overrides, stat_file) = database(DATABASES[1])?;
         let mut parents = Vec::new();
-        let validation = metadata::validate(
+        let validation = metadata::validate_for(
+            target,
             diversions.as_ref().map_or(&[], |d| d.bytes.as_slice()),
             overrides.as_ref().map_or(&[], |d| d.bytes.as_slice()),
             resolve_identity,
-            |path| resolve_parent(path, &mut parents),
+            |path| match target {
+                Target::Mcp => resolve_parent(path, &mut parents),
+                Target::Setup => resolve_parent_for(target, path, &mut parents),
+            },
         )?;
         let snapshot = Self {
+            target,
             state: State {
                 databases: [diversions, overrides],
                 validation,
@@ -224,7 +241,7 @@ impl Snapshot {
 
     pub(super) fn unchanged(&self) -> Result<()> {
         require(
-            self.state == Self::capture()?.state,
+            self.state == Self::capture_for(self.target)?.state,
             "Global metadata/identities/parent aliases changed",
         )
     }

@@ -158,7 +158,6 @@ impl Plan {
         self.recheck()?;
         if self.retained_only {
             // Outcome review never replays dpkg from a saved journal.
-            self.helper.verify_retained()?;
             return Ok(linux_retirement::Outcome::ExperimentalVerified);
         }
         // Persist before elevation: parent death or an unknown helper result must
@@ -168,7 +167,6 @@ impl Plan {
         match result {
             linux_retirement::Outcome::Cancelled => save(State::Cancelled)?,
             linux_retirement::Outcome::ExperimentalVerified => {
-                self.helper.verify_retained()?;
                 self.dependencies.recheck().map_err(|_| "Client configuration changed during cleanup. Review retained files before completing migration.")?;
             }
         }

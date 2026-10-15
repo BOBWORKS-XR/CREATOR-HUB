@@ -4,6 +4,7 @@ const { test } = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const root = path.resolve(__dirname, '..');
 const crate = path.join(root, 'native/linux-deb-retirement');
 const source = name => fs.readFileSync(path.join(crate, 'src', name), 'utf8');
@@ -47,7 +48,7 @@ test('default stays closed and experimental installer has only the fixed handoff
   assert.match(transaction, /env\("DPKG_FRONTEND_LOCKED", "1"\)/);
   assert.match(transaction, /arg\("--install"\)\s*\.arg\(candidate\)/);
   assert.doesNotMatch(transaction, /\.kill\(|remove_file|remove_dir|"--force|sudo|pkexec/);
-  assert.ok(transaction.indexOf('mark_attempt(&candidate)') < transaction.indexOf('held.handoff('));
+  assert.ok(transaction.indexOf('mark_attempt(&candidate, target)') < transaction.indexOf('held.handoff('));
   assert.ok(transaction.indexOf('installed(true)') > transaction.indexOf('held.handoff('));
   assert.match(code, /private\.join\(new_stage_name\(\)\?\)/);
 });
@@ -55,7 +56,7 @@ test('default stays closed and experimental installer has only the fixed handoff
 test('built CLI refuses retirement and every arbitrary path/unsupported action', () => {
   const binary = path.join(crate, 'target/debug', `creator-hub-linux-deb-retirement${process.platform === 'win32' ? '.exe' : ''}`);
   assert.ok(fs.existsSync(binary), 'Run cargo build --locked for this crate first');
-  for (const args of [['retire-mcp-2.7.7'], ['prepare-mcp-2.7.7', '/tmp/user.deb'], ['--root=/tmp'], ['prepare-setup-0.3.7']]) {
+  for (const args of [['retire-mcp-2.7.7'], ['retire-setup-0.3.7'], ['prepare-mcp-2.7.7', '/tmp/user.deb'], ['--root=/tmp'], ['prepare-setup-0.3.7']]) {
     const result = spawnSync(binary, args, { encoding: 'utf8', timeout: 5000 });
     assert.ifError(result.error);
     assert.equal(result.status, 2);
@@ -66,12 +67,81 @@ test('built CLI refuses retirement and every arbitrary path/unsupported action',
     assert.equal(report.experimentalTransactionCompiled, false, 'Node harness must use the separate default build');
   }
   if (process.platform !== 'linux') {
-    for (const args of [[], ['inspect'], ['prepare-mcp-2.7.7']]) {
+    for (const args of [[], ['inspect'], ['inspect-retained-mcp-2.7.7'], ['inspect-setup-0.3.7'], ['inspect-retained-setup-0.3.7'], ['prepare-mcp-2.7.7']]) {
       const result = spawnSync(binary, args, { encoding: 'utf8', timeout: 5000 });
       assert.equal(result.status, 2);
       assert.match(JSON.parse(result.stdout).reason, /Native Linux only/);
     }
   }
+});
+
+test('retained MCP inspection independently validates the fixed package without retry-marker admission or writes', () => {
+  const branch = source('linux.rs').split('Action::InspectRetainedMcp => {')[1]?.split('Action::Inspect => {')[0];
+  assert.ok(branch);
+  assert.match(branch, /installed\(true\)\?;/);
+  assert.ok(branch.indexOf('installed(true)?') < branch.indexOf('retained_inspection_report()'));
+  assert.doesNotMatch(branch, /refuse_prior_attempt|prepare\(|transaction::|write_new|create_directory/);
+  const installed = source('linux.rs').split('fn installed(compatibility: bool)')[1].split('fn create_directory')[0];
+  for (const check of ['compatibility_state', 'installed_metadata', 'compatibility_listing', 'resource(pin', 'Retired path still present/unreadable', 'Retired path still has package ownership']) {
+    assert.ok(installed.includes(check), check);
+  }
+});
+
+test('Setup pins match the exact public DEB and admit only the finite experimental transaction', () => {
+  const evidence = JSON.parse(fs.readFileSync(path.join(root, 'docs/evidence/legacy-unix-public-package-pins-014.json')));
+  const published = evidence.packages.find(p => p.asset === 'Creator.Project.Setup_0.3.7_amd64.deb');
+  const setup = source('setup.rs');
+  assert.ok(setup.includes(published.packageSha256));
+  assert.ok(setup.includes(String(published.packageBytes)));
+  for (const pin of [...published.control, ...published.members]) {
+    assert.ok(setup.includes(pin.sha256), pin.member);
+  }
+  const notice = Buffer.from(JSON.parse(setup.match(/pub const NOTICE: &\[u8\] = b("(?:[^"\\]|\\.)*");/)[1]));
+  assert.equal(notice.length, 200);
+  assert.ok(setup.includes(crypto.createHash('sha256').update(notice).digest('hex')));
+  assert.ok(setup.includes(crypto.createHash('md5').update(notice).digest('hex')));
+  assert.doesNotMatch(source('lib.rs'), /\["prepare-setup-/);
+  assert.match(source('lib.rs'), /\["retire-setup-0\.3\.7"\] => Ok\(Action::RetireSetup\)/);
+  assert.match(source('main.rs'), /Action::Retire \| Action::RetireSetup[\s\S]*?INSTALL_REFUSAL/);
+  assert.doesNotMatch(setup, /Command::|sudo|pkexec|remove_file|remove_dir|"--(?:install|remove|purge)"/);
+});
+
+test('Setup verifier admits no scripts, foreign owner, pre-existing notice or user-data payload', () => {
+  const native = source('linux/setup.rs');
+  for (const check of ['contract::state', 'contract::installed_metadata', 'contract::listing',
+    'info_members(false)', 'contract::MD5_SHA256', 'Target::Setup', 'resource(pin',
+    'Foreign/shared Setup resource ownership', 'original_notice_absent()', 'Unknown Setup tombstone namespace member']) {
+    assert.ok(native.includes(check), check);
+  }
+  assert.ok(native.indexOf('refuse_prior_attempt_for(Target::Setup)?') < native.indexOf('let work = private.join('));
+  assert.match(native, /entries\.len\(\) == 1/);
+  assert.match(native, /count < 4/);
+  assert.match(native, /archive::verify_controls/);
+  assert.match(native, /archive::verify_data/);
+  assert.doesNotMatch(native, /sudo|pkexec|remove_file|remove_dir|"--(?:install|remove|purge)"|setuid\(/);
+  const transaction = source('linux/transaction.rs');
+  for (const call of ['setup::prepare_locked(&held)?', 'setup::verify_candidate(&candidate)?', 'setup::installed(true)']) {
+    assert.ok(transaction.includes(call), call);
+  }
+  assert.ok(transaction.indexOf('mark_attempt(&candidate, target)') < transaction.indexOf('held.handoff('));
+  assert.ok(transaction.indexOf('setup::installed(true)') > transaction.indexOf('held.handoff('));
+  assert.ok(transaction.includes('Path::new(target.private()).join(ATTEMPT)'));
+  assert.match(transaction, /manual\(e, Some\(started\)\)/);
+  assert.ok(transaction.indexOf('Interrupts::register()?') < transaction.indexOf('mark_attempt(&candidate, target)'));
+  assert.match(transaction, /held\.handoff\(\|\| \{\s*require\(!interrupts\.requested\(\), "Interrupted before dpkg spawn"\)\?;\s*let mut child = cmd\.spawn\(\)\?;\s*started = true;/);
+  assert.match(transaction, /e\.kind\(\) == std::io::ErrorKind::Interrupted => continue/);
+  assert.ok(transaction.includes('Helper interrupted while waiting; review package state and protected logs'));
+  assert.ok(transaction.includes('Helper interrupted during post-verification'));
+  assert.doesNotMatch(transaction, /\.kill\(|remove_file|remove_dir|"--force/);
+});
+
+test('Setup read-only inspection independently re-queries state and rejects false absence', () => {
+  const inspect = source('linux/setup.rs').split('pub(super) fn inspect(retained_only: bool)')[1].split('#[cfg(feature')[0];
+  for (const check of ['queried_state()?', 'installed(false)?', 'installed(true)?', 'info_members(true)?',
+    'unowned_absent', 'original_notice_absent()?', 'metadata.unchanged()?', 'queried_state()? == state']) {
+    assert.ok(inspect.includes(check), check);
+  }
+  assert.doesNotMatch(inspect, /refuse_prior_attempt|prepare_locked|write_new|create_directory|transaction::/);
 });
 
 test('prepared native script refuses this host before any build or native probe', () => {

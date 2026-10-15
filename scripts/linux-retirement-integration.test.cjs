@@ -56,7 +56,10 @@ test('preflight has one Linux job, no app installation or publication, and tests
   assert.ok(source.includes('runs-on: ubuntu-22.04'));
   assert.ok(source.includes('paths: [.github/workflows/linux-migration-preflight-014.yml]'));
   assert.ok(source.indexOf('scripts/linux-retirement-integration.test.cjs') < source.indexOf('sudo apt-get'));
-  for (const forbidden of ['windows-latest', 'macos-', 'dpkg --install', 'cargo build', 'gh release', 'secrets.']) {
+  assert.ok(source.indexOf('cargo build --locked --manifest-path native/linux-deb-retirement/Cargo.toml') < source.indexOf('node --test'));
+  assert.ok(source.indexOf('cargo test --locked --manifest-path native/flatpak-host-reader/Cargo.toml') < source.indexOf('sudo apt-get'));
+  assert.ok(source.includes('--features experimental-transaction --target-dir native/linux-deb-retirement/target/experimental'));
+  for (const forbidden of ['windows-latest', 'macos-', 'dpkg --install', 'cargo build --manifest-path src-tauri', 'gh release', 'secrets.']) {
     assert.ok(!source.includes(forbidden), forbidden);
   }
 });
