@@ -52,26 +52,35 @@ test('native lab driver retains exact old-app hashes, native cancel, signatures,
   assert.doesNotMatch(source, /danger_accept_invalid|rejectUnauthorized|NODE_TLS_REJECT_UNAUTHORIZED|--ignore-certificate/);
 });
 
-test('lab workflow uses pinned public signatures, keeps import privileges separate and stages baseline before trust', () => {
+test('B05 lab workflow uses pinned public signatures, keeps import privileges separate and stages baseline before trust', () => {
   const source = fs.readFileSync(path.join(__dirname, '../.github/workflows/signed-update-lab.yml'), 'utf8');
   const importing = source.slice(source.indexOf('  stage-input:'), source.indexOf('  update:'));
   const native = source.slice(source.indexOf('  update:'));
   assert.match(importing, /contents: write/);
-  assert.match(importing, /releases\/assets\/641560071/);
+  assert.match(source, /^name: B05 signed stable update lab \(not public discovery\)/);
+  assert.match(importing, /Where-Object id -EQ 642121466/);
+  assert.match(importing, /releases\/assets\/642121466/);
+  assert.match(importing, /\$matches\[0\]\.name -cne 'signed-windows-b05-db86273-20261015\.zip'/);
   assert.match(importing, /\$release\.draft -ne \$true/);
-  assert.match(importing, /\$matches\[0\]\.size -ne 36498841/);
+  assert.match(importing, /releases\/411494394/);
+  assert.match(importing, /\$matches\[0\]\.size -ne 36504560/);
   assert.match(importing, /\$matches\[0\]\.state -cne 'uploaded'/);
   assert.match(importing, /Invoke-WebRequest -Method Get/);
   assert.doesNotMatch(importing, /npm ci|actions\/checkout|native-self-update-lab.ps1/);
   assert.doesNotMatch(native, /contents: write|GH_TOKEN|signing_key|signer sign/);
   assert.match(source, /validation\/unified-update-lab-014/);
-  assert.match(source, /530bb816137ff078d63b0f78e9e1f88f8b8a961c391c21fc486dc11b7247436d/);
-  for (const pin of ['30005699f97457bd283c91d8dcdff2c8e518fc03e963ba5f612c0ae46e78d653',
-    '14d2ee14a2ad7728d7a666c37a60e167a217c548f1874176dc85cc7642cc68de',
-    '7007a87c2818fa809382742fb41fc80ddacf6391d678759112196dd962d0955e',
-    '5b13e590dc176ea9991cf4cbe228dc6a358dc914b08367bc7dc033e8523d6f32',
-    '2782921b6bebcf6e811d1240a27d3d47f9c139269aaf6544ff0c6dff85a454ad']) assert.ok(native.includes(pin));
+  const archive = 'ac2aec6db4a227406be989d46e728bc7322a283444a3a568b01c6273767fceb4';
+  assert.equal(source.split(archive).length - 1, 3, 'API digest, downloaded ZIP and native lane ZIP must use the reviewed B05 pin');
+  for (const [name, pin] of Object.entries({
+    descriptor: 'a72515762bea3ca766e01ecac958308edb9f6e73e4d59b48fa0e1025ea4abdf9',
+    descriptorSignature: 'd644e0b492cd94404b8e5adc11485bf15693ebd3fecf23fb8b72ee04084b8fe0',
+    installer: '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157',
+    manifest: '889e9afcfd3d43032e99edc35c08626ded570f1a63b7f7e1acc393d8f69a889a',
+    executable: 'cd5e3fd2829727d06444c0f3266b178798d1b55c63df651be12eb38ac4523a86',
+  })) assert.ok(native.includes(`${name}='${pin}'`), name);
   assert.match(source, /targetVersion='0\.1\.14'/);
+  assert.match(native, /releases\/download\/v0\.1\.12\/Creator\.Hub_0\.1\.12_x64-setup\.exe/);
+  assert.match(native, /0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18/);
   assert.ok(native.indexOf('Public baseline differs') < native.indexOf('./scripts/native-self-update-lab.ps1'));
   assert.match(native, /BaselineInstallerPath/);
   assert.match(native, /Get-ChildItem -LiteralPath artifacts -Directory/);
