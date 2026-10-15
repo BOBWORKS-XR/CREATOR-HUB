@@ -99,7 +99,11 @@ jobs:
           path: /__w/_temp/linux-deb-helper-transaction-input
       - name: Download exact published Setup 0.3.7 fixture without installing it
         run: |
-          input=/__w/_temp/linux-deb-helper-transaction-input/Creator.Project.Setup_0.3.7_amd64.deb
+          stat -c '%u %g %a %n' /__w/_temp/linux-deb-helper-transaction-input
+          directory=/__w/_temp/linux-setup-helper-transaction-input
+          mkdir --mode=0700 "$directory"
+          test "$(stat -c %u "$directory")" = 1001
+          input="$directory/Creator.Project.Setup_0.3.7_amd64.deb"
           test ! -e "$input" && test ! -L "$input"
           curl --fail --silent --show-error --location https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.3.7/Creator.Project.Setup_0.3.7_amd64.deb -o "$input"
           test "$(stat -c %s "$input")" = 5966970

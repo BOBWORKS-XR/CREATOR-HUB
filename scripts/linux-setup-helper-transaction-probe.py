@@ -80,7 +80,7 @@ class SetupProbe(base.Probe):
         require(stat.S_ISDIR(info.st_mode) and self.root.resolve() == self.root
                 and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700,
                 "Private owned Setup fixture directory required")
-        self.old = Path(os.environ["RUNNER_TEMP"]) / "linux-deb-helper-transaction-input" / ASSET
+        self.old = Path(os.environ["RUNNER_TEMP"]) / "linux-setup-helper-transaction-input" / ASSET
 
     def inspect(self, phase, retained=False):
         action = "inspect-retained-setup-0.3.7" if retained else "inspect-setup-0.3.7"
