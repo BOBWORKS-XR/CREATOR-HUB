@@ -170,7 +170,6 @@ fn command(tool: &str, private_tmp: Option<&Path>) -> Result<Command> {
         .stderr(Stdio::piped())
         .env("LC_ALL", "C")
         .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-        .env("HOME", "/root")
         .env("DPKG_COLORS", "never")
         .env("DPKG_PAGER", "/bin/cat");
     if let Some(tmp) = private_tmp {
@@ -706,6 +705,47 @@ mod tests {
         assert!(open(Path::new("/"), libc::O_RDONLY).is_err());
         assert!(open(Path::new("/"), libc::O_PATH).is_err());
         assert!(directory(Path::new("/./")).is_err());
+    }
+
+    #[test]
+    fn fixed_tool_environment_has_no_user_specific_configuration_home() {
+        // dpkg 1.21.1 options.c:194-199 loads HOME/.dpkg.cfg only if HOME is set.
+        let cmd = command(DPKG, None).unwrap();
+        let environment = cmd.get_envs().collect::<Vec<_>>();
+        assert_eq!(environment.len(), 4);
+        assert!(!environment.iter().any(|(key, _)| *key == "HOME"));
+    }
+
+    #[test]
+    #[ignore = "Opt-in exact disposable container audit; reads no user settings or app payload"]
+    fn disposable_read_only_audit_proves_root_home_warning_and_clean_fixed_environment() {
+        assert_eq!(unsafe { libc::getuid() }, 1001);
+        assert_eq!(unsafe { libc::geteuid() }, 1001);
+        for (key, value) in [
+            ("CREATOR_LINUX_DEB_HELPER_TRANSACTION", "1"),
+            ("GITHUB_REPOSITORY", "BOBWORKS-XR/CREATOR-HUB"),
+            (
+                "GITHUB_REF",
+                "refs/heads/validation/linux-deb-helper-transaction-014",
+            ),
+            ("GITHUB_ACTIONS", "true"),
+        ] {
+            assert_eq!(std::env::var(key).unwrap(), value);
+        }
+        assert!(Path::new("/.dockerenv").is_file());
+        let mut previous = command(DPKG, None).unwrap();
+        previous.env("HOME", "/root").arg("--audit");
+        let (status, stdout, stderr) = parsed_outcome(previous, |out| bounded(out, LIMIT)).unwrap();
+        eprintln!(
+            "original read-only audit: exit={:?}, stdout={}, stderr={}",
+            status.code(),
+            stdout.len(),
+            String::from_utf8_lossy(&stderr)
+        );
+        assert_eq!(status.code(), Some(0));
+        assert!(stdout.is_empty());
+        assert!(stderr.starts_with(b"dpkg: warning: failed to open configuration file '/root/.dpkg.cfg' for reading: Permission denied"));
+        assert!(capture(DPKG, &["--audit"]).unwrap().is_empty());
     }
     #[test]
     fn posix_locks_conflict_across_processes_without_touching_system_locks() {

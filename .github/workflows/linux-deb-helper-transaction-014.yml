@@ -90,6 +90,7 @@ jobs:
           cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --features experimental-transaction
           cargo clippy --locked --manifest-path native/linux-deb-retirement/Cargo.toml --all-targets --all-features -- -D warnings
           cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --lib linux::metadata::tests::host_metadata_read_only_preflight -- --ignored --exact --nocapture
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --lib linux::tests::disposable_read_only_audit_proves_root_home_warning_and_clean_fixed_environment -- --ignored --exact --nocapture
       - name: Reuse original public MCP DEB from the pinned earlier retention artifact
         uses: actions/download-artifact@v5
         with:
