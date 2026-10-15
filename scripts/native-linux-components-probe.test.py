@@ -29,6 +29,42 @@ fixtures = load("components_root_pure_fixtures", HERE / "native-linux-root-probe
 
 
 class ContractTests(unittest.TestCase):
+    def test_original_failure_location_excludes_locals_source_paths_and_remote_message(self):
+        secret = "private fixture local and remote message"
+        namespace = {}
+        exec(compile("def observed_getter(secret):\n    raise RuntimeError(secret)\n",
+                     str(HERE / "native-linux-components-probe.py"), "exec"), namespace)
+        try:
+            namespace["observed_getter"](secret)
+        except RuntimeError as error:
+            result = p.failure_site(error)
+        self.assertEqual(result["frames"], [{"file": "native-linux-components-probe.py",
+                                           "function": "observed_getter", "line": 2}])
+        self.assertEqual(result["errorType"], "RuntimeError")
+        self.assertFalse(result["authorization"])
+        self.assertEqual(result["actionCount"], 0)
+        self.assertFalse(result["truncated"])
+        self.assertNotIn(secret, json.dumps(result))
+        self.assertNotIn(str(HERE), json.dumps(result))
+
+    def test_failure_locations_are_bounded_and_capture_cannot_replace_original_error(self):
+        namespace = {}
+        exec(compile("def observed_getter(n):\n    if n: return observed_getter(n - 1)\n    raise ValueError('remote text')\n",
+                     str(HERE / "native-unix-window.py"), "exec"), namespace)
+        try:
+            namespace["observed_getter"](80)
+        except ValueError as error:
+            result = p.failure_site(error)
+            with mock.patch.object(p.B, "save_json", side_effect=OSError("private path")), \
+                    mock.patch("sys.stderr", new_callable=io.StringIO) as output:
+                p.retain_failure_site(Path("/fixture"), "mcp-ready", error)
+        self.assertEqual(len(result["frames"]), 12)
+        self.assertTrue(result["truncated"])
+        self.assertLess(len(json.dumps(result)), 4096)
+        self.assertEqual(json.loads(output.getvalue()), {"failureSiteCaptureRefusal": "OSError"})
+        source = (HERE / "native-linux-components-probe.py").read_text()
+        self.assertIn('retain_failure_site(root, action, error)\n        raise', source)
+
     def test_mcp_is_checked_first_without_omitting_setup_or_allowing_caller_order(self):
         self.assertEqual(p.COMPONENT_ORDER, ("mcp", "setup"))
         self.assertEqual(set(p.COMPONENT_ORDER), set(p.APPS))

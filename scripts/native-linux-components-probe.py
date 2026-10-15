@@ -95,6 +95,32 @@ def retain_tree_refusal(root, action, error):
         print(json.dumps({"treeCaptureRefusal": type(capture_error).__name__[:64]}), file=sys.stderr)
 
 
+def failure_site(error):
+    """Original Python call sites only; never locals, source lines or remote text."""
+    allowed = {str(HERE / name): name for name in (
+        "native-linux-components-probe.py", "native-linux-root-probe.py", "native-unix-window.py")}
+    frames, count, cursor = [], 0, error.__traceback__
+    while cursor is not None and count < 64:
+        code = cursor.tb_frame.f_code
+        if code.co_filename in allowed:
+            name = code.co_name
+            frames.append({"file": allowed[code.co_filename], "function": name[:80]
+                           if re.fullmatch(r"[A-Za-z0-9_<>]+", name) else "unknown",
+                           "line": cursor.tb_lineno})
+        count += 1
+        cursor = cursor.tb_next
+    return {"readOnly": True, "authorization": False, "actionCount": 0,
+            "timing": "original-exception-not-a-retry", "errorType": type(error).__name__[:64],
+            "frames": frames[-12:], "truncated": cursor is not None or len(frames) > 12}
+
+
+def retain_failure_site(root, action, error):
+    try:
+        B.save_json(root / (action + "-failure-site.json"), failure_site(error))
+    except Exception as capture_error:
+        print(json.dumps({"failureSiteCaptureRefusal": type(capture_error).__name__[:64]}), file=sys.stderr)
+
+
 def own_tree(window, owner, atspi):
     """Contained semantic parents, not strict reverse GetChildren equality.
 
@@ -662,8 +688,10 @@ def worker(root, args):
         require(last is not None, "No owned component tree")
         B.save_json(root / (action + "-unready.json"), last)
         raise RuntimeError("Native component UI readiness deadline: " + action + "; exact tree retained")
-    except TreeRefusal as error:
-        retain_tree_refusal(root, action, error)
+    except Exception as error:
+        if isinstance(error, TreeRefusal):
+            retain_tree_refusal(root, action, error)
+        retain_failure_site(root, action, error)
         raise
     finally:
         if bus is not None:
