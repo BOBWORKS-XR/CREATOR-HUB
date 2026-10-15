@@ -699,3 +699,13 @@ There is no extra action/retry, longer timeout, changed readiness/ownership rule
 product environment change, package rebuild or production acceptance. Local
 component preflight passes 52 tests with one native-only skip. A failure will
 disprove this as a sufficient correction; do not stack timing or selector changes.
+
+Result: run `38715650011` at `c4fc058` still failed at `setup-operation` with
+a stale AT-SPI object path, also preventing failure-tree capture and normal
+close. `rootExitCode` remained null and component acceptance false. Its compact
+capture is retained under `artifacts/native-linux-components-38715650011/`.
+The worker-only cache experiment was removed after this negative result; Hub's
+environment was never changed. Client-cache disabling is not a sufficient fix.
+No additional timing, selector, parent-containment or readiness change is made.
+Further work needs the exact failing getter/producer reference lifecycle, not
+another unchanged replay or a new product build.

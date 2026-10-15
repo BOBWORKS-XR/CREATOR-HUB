@@ -46,12 +46,6 @@ def require(value, message):
         raise RuntimeError(message)
 
 
-def collector_env(env):
-    # Test the client-cache hypothesis without changing the product environment.
-    # at-spi2-core 2.44.1 atspi_init reads this before any accessible queries.
-    return {**env, "ATSPI_NO_CACHE": "1"}
-
-
 def load_root():
     path = HERE / "native-linux-root-probe.py"
     require(hashlib.sha256(path.read_bytes()).hexdigest() == ROOT_SHA, "Reviewed Root helper bytes changed")
@@ -781,8 +775,6 @@ def probe(root, env, capture_only=False):
         report["phase"] = "launch"
         child = subprocess.Popen([str(executable)], cwd=root, env=env_child, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        env_child = collector_env(env_child)
-        report["collectorCachePolicy"] = "ATSPI_NO_CACHE=1 in workers only; cache hypothesis unproven"
         capture = B.Capture(child, root, "root")
         start = B.check_process(child, None, executable, helper)
         found = B.run_worker(root, env_child, "discover", child.pid, start, 1, capture, report["workers"])

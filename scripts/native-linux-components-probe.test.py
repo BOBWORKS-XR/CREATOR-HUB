@@ -29,17 +29,6 @@ fixtures = load("components_root_pure_fixtures", HERE / "native-linux-root-probe
 
 
 class ContractTests(unittest.TestCase):
-    def test_cache_diagnostic_changes_collectors_only_after_product_spawn(self):
-        original = {"DISPLAY": ":1", "CREATOR_LINUX_COMPONENTS_PROBE": "1"}
-        self.assertEqual(p.collector_env(original), {**original, "ATSPI_NO_CACHE": "1"})
-        self.assertNotIn("ATSPI_NO_CACHE", original)
-        source = (HERE / "native-linux-components-probe.py").read_text().split("def probe(")[1]
-        product_spawn = source.index("child = subprocess.Popen([str(executable)]")
-        policy = source.index("env_child = collector_env(env_child)")
-        self.assertLess(product_spawn, policy)
-        self.assertLess(source.index("env=env_child", product_spawn), policy)
-        self.assertLess(policy, source.index('B.run_worker(root, env_child, "discover"'))
-
     def test_exact_previous_product_and_root_helper_no_rebuild(self):
         self.assertEqual(p.B.SOURCE, "5bb05a21d73c0fc3b2839cbcbd4322832b24aead")
         self.assertEqual(p.B.RUN, 38630742955)
