@@ -152,6 +152,119 @@ def ui_snapshot(nodes, owner, atspi):
     return result
 
 
+def text_interface_observation(nodes, owner, atspi):
+    """Failure-only interface evidence; never an alternative readiness result."""
+    result = {"readOnly": True, "authorization": False, "actionCount": 0, "verified": False,
+              "timing": "post-failure-not-original-trace", "nodes": []}
+    deadline = time.monotonic() + 5
+    text_roles = {getattr(atspi.Role, key, -1) for key in ("PARAGRAPH", "TEXT", "STATIC", "LABEL")}
+    diagnostic_roles = text_roles | {getattr(atspi.Role, key, -1) for key in
+                                    ("SECTION", "HEADING", "PANEL", "STATUS_BAR")}
+
+    def budget():
+        require(time.monotonic() < deadline, "Read-only interface diagnostic budget exhausted")
+
+    try:
+        require(0 < len(nodes) <= 64, "Read-only interface node bound exceeded")
+        owner.recheck(full=True)
+        result["ownership"] = owner.evidence()
+        indices = {}
+        for index, node in enumerate(nodes):
+            budget()
+            owner.node(node)
+            reference = tuple(owner.references.identity(node, owner))
+            require(reference not in indices, "Duplicate diagnostic AX reference")
+            indices[reference] = index
+        for index, node in enumerate(nodes):
+            def read(getter):
+                budget()
+                owner.node(node)
+                return getter()
+
+            record = {"index": index, "reference": list(owner.references.identity(node, owner)),
+                      "pid": read(node.get_process_id), "role": int(read(node.get_role)),
+                      "name": (read(node.get_name) or "")[:512]}
+            record["states"] = {key.lower(): read(node.get_state_set).contains(getattr(atspi.StateType, key))
+                                for key in ("SHOWING", "ENABLED", "SENSITIVE", "BUSY", "DEFUNCT", "EDITABLE")
+                                if hasattr(atspi.StateType, key)}
+            record["readinessTextRole"] = record["role"] in text_roles
+            result["nodes"].append(record)
+            # Interface getters are read-only. Hyperlinks are counted, never
+            # followed: child references must already belong to own_tree.
+            # https://docs.gtk.org/atspi2/method.Accessible.get_interfaces.html
+            for kind in ("interfaces", "attributes", "text", "hypertext", "children"):
+                budget()
+                detail = record[kind] = {}
+                try:
+                    if kind == "interfaces":
+                        names = read(node.get_interfaces)
+                        require(isinstance(names, (list, tuple)) and len(names) <= 32
+                                and all(isinstance(n, str) and len(n.encode("utf8")) <= 64 for n in names),
+                                "Diagnostic interface list exceeds bound")
+                        detail["names"] = list(names)
+                    elif kind == "attributes":
+                        attributes = read(node.get_attributes)
+                        require(isinstance(attributes, dict) and len(attributes) <= 32
+                                and all(isinstance(k, str) and isinstance(v, str) and len(k.encode("utf8")) <= 128
+                                        and len(v.encode("utf8")) <= 2048 for k, v in attributes.items())
+                                and len(json.dumps(attributes).encode("utf8")) <= 4096,
+                                "Diagnostic attributes exceed bound")
+                        detail["values"] = attributes
+                    elif kind == "text":
+                        interface = read(node.get_text_iface)
+                        detail["available"] = interface is not None
+                        if interface is not None:
+                            count = read(interface.get_character_count)
+                            detail["characterCount"] = count
+                            require(type(count) is int and 0 <= count <= 2048, "Diagnostic text count exceeds bound")
+                            if record["role"] in diagnostic_roles and record["states"]["showing"] \
+                                    and not record["states"].get("editable", False):
+                                text = read(lambda: interface.get_text(0, count))
+                                require(isinstance(text, str) and len(text) <= count and len(text.encode("utf8")) <= 8192,
+                                        "Diagnostic text exceeds bound")
+                                detail["value"] = text
+                            detail["countAfter"] = read(interface.get_character_count)
+                            detail["stable"] = detail["countAfter"] == count
+                            require(detail["stable"], "Diagnostic text count changed")
+                    elif kind == "hypertext":
+                        interface = read(node.get_hypertext_iface)
+                        detail["available"] = interface is not None
+                        if interface is not None:
+                            count = read(interface.get_n_links)
+                            detail["linkCount"] = count
+                            require(type(count) is int and 0 <= count <= 128, "Diagnostic hyperlink count unknown/oversized")
+                    else:
+                        count = read(node.get_child_count)
+                        detail["count"] = count
+                        require(type(count) is int and 0 <= count <= 128, "Diagnostic child count exceeds bound")
+                        children = []
+                        for child_index in range(count):
+                            child = read(lambda: node.get_child_at_index(child_index))
+                            owner.node(child)
+                            reference = tuple(owner.references.identity(child, owner))
+                            require(reference in indices, "Diagnostic child escaped already-owned subtree")
+                            children.append(indices[reference])
+                        require(len(set(children)) == len(children) and read(node.get_child_count) == count,
+                                "Diagnostic child inventory changed/duplicated")
+                        detail["indices"] = children
+                except Exception as error:
+                    detail["errorType"] = type(error).__name__[:64]
+            if len(json.dumps(result).encode("utf8")) > 32768:
+                result["nodes"].pop()
+                raise RuntimeError("Read-only interface diagnostic output bound exceeded")
+        owner.recheck(full=True)
+        result["verified"] = all(not any("errorType" in record[key] for key in
+                                 ("interfaces", "attributes", "text", "hypertext", "children"))
+                                 for record in result["nodes"])
+    except Exception as error:
+        result["captureRefusal"] = {"errorType": type(error).__name__[:64]}
+    while len(json.dumps(result).encode("utf8")) > 32768:
+        result["verified"] = False
+        result["captureRefusal"] = {"errorType": "OutputBound"}
+        result["nodes"].pop()
+    return result
+
+
 def fixed_control(nodes, action, owner, atspi):
     require(action in CONTROLS, "Unreviewed component action")
     name, heading = CONTROLS[action]
@@ -489,6 +602,10 @@ def worker(root, args):
             nodes = own_tree(helper.select_window(request, Atspi), owner, Atspi)
             last = ui_snapshot(nodes, owner, Atspi)
             if action == "failure-snapshot":
+                B.save_json(root / "failure-ui-snapshot.json", last)
+                observation = text_interface_observation(nodes, owner, Atspi)
+                B.save_json(root / "failure-text-interfaces.json", observation)
+                last["textInterfaceObservation"] = observation
                 return last
             if action in ("setup-ready", "mcp-ready", "mcp-saved"):
                 alerts = [n["name"] for n in last["nodes"] if n["showing"] and n["name"]

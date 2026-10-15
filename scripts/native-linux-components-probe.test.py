@@ -603,6 +603,154 @@ class SetupGtkContractTests(unittest.TestCase):
         observation.assert_called_once()
 
 
+class TextObservationTests(unittest.TestCase):
+    def fixture(self):
+        role = types.SimpleNamespace(PARAGRAPH=72, TEXT=60, STATIC=116, LABEL=29, SECTION=84, HEADING=82)
+        state = types.SimpleNamespace(SHOWING=1, ENABLED=2, SENSITIVE=3, BUSY=4, DEFUNCT=5, EDITABLE=6)
+        atspi = types.SimpleNamespace(Role=role, StateType=state)
+
+        def node(key, text=None, children=(), node_role=72):
+            interface = None if text is None else types.SimpleNamespace(
+                get_character_count=mock.Mock(return_value=len(text)), get_text=mock.Mock(return_value=text))
+            value = types.SimpleNamespace(key=key, pid=43, children=list(children), text=interface,
+                get_role=lambda: node_role, get_role_name=lambda: "paragraph", get_name=lambda: "",
+                get_process_id=lambda: value.pid,
+                get_state_set=lambda: types.SimpleNamespace(contains=lambda s: s in (1, 2, 3)),
+                get_interfaces=mock.Mock(return_value=["Accessible"] + (["Text"] if text is not None else [])),
+                get_attributes=mock.Mock(return_value={"tag": "p"}), get_text_iface=mock.Mock(return_value=interface),
+                get_hypertext_iface=mock.Mock(return_value=None), get_child_count=mock.Mock(side_effect=lambda: len(value.children)),
+                get_child_at_index=mock.Mock(side_effect=lambda i: value.children[i]), get_action_iface=mock.Mock())
+            return value
+
+        def owned(value):
+            p.require(value.pid == 43, "Foreign fixture node")
+
+        owner = types.SimpleNamespace(node=mock.Mock(side_effect=owned), recheck=mock.Mock(),
+            evidence=lambda: {"fixture": True}, references=types.SimpleNamespace(
+                identity=lambda n, _owner: [":1.43", n.key]))
+        return atspi, owner, node
+
+    def test_unavailable_empty_and_nonempty_text_remain_distinct_not_authority(self):
+        atspi, owner, node = self.fixture()
+        nodes = [node("absent"), node("empty", ""), node("present", "Exact visible state")]
+        result = p.text_interface_observation(nodes, owner, atspi)
+        self.assertTrue(result["verified"])
+        self.assertFalse(result["authorization"])
+        self.assertEqual(result["actionCount"], 0)
+        self.assertEqual(result["nodes"][0]["text"], {"available": False})
+        self.assertEqual(result["nodes"][1]["text"]["characterCount"], 0)
+        self.assertEqual(result["nodes"][1]["text"]["value"], "")
+        self.assertEqual(result["nodes"][2]["text"]["value"], "Exact visible state")
+        self.assertTrue(result["nodes"][2]["text"]["stable"])
+        for value in nodes:
+            value.get_action_iface.assert_not_called()
+        owner.recheck.assert_any_call(full=True)
+
+    def test_child_text_on_section_is_recorded_but_never_used_as_decline_authority(self):
+        atspi, owner, node = self.fixture()
+        child = node("inline", "Opening Setup in Hub was declined.", node_role=84)
+        parent = node("paragraph", "", [child])
+        parent.get_hypertext_iface.return_value = types.SimpleNamespace(get_n_links=lambda: 1)
+        result = p.text_interface_observation([parent, child], owner, atspi)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["nodes"][0]["children"], {"count": 1, "indices": [1]})
+        self.assertEqual(result["nodes"][0]["hypertext"], {"available": True, "linkCount": 1})
+        self.assertEqual(result["nodes"][1]["text"]["value"], "Opening Setup in Hub was declined.")
+        self.assertFalse(result["nodes"][1]["readinessTextRole"])
+        snapshot = {"nodes": [{"name": "Retry opening", "text": "", "showing": True}],
+                    "textInterfaceObservation": result}
+        self.assertFalse(p.ready_snapshot(snapshot, "setup-declined"))
+        snapshot["nodes"].append({"name": "Could not open Project Setup", "showing": True})
+        self.assertFalse(p.ready_snapshot(snapshot, "setup-declined"))
+
+    def test_probe_error_is_explicit_not_empty_text_and_other_probes_survive(self):
+        atspi, owner, node = self.fixture()
+        value = node("error", "known")
+        value.get_text_iface.side_effect = RuntimeError("Do not echo arbitrary remote diagnostic content")
+        result = p.text_interface_observation([value], owner, atspi)
+        self.assertEqual(result["nodes"][0]["text"], {"errorType": "RuntimeError"})
+        self.assertEqual(result["nodes"][0]["attributes"]["values"], {"tag": "p"})
+        self.assertNotIn("Do not echo", json.dumps(result))
+
+    def test_foreign_or_out_of_tree_child_refused_before_child_content_read(self):
+        for foreign in (False, True):
+            atspi, owner, node = self.fixture()
+            child = node("escaped", "not owned")
+            if foreign:
+                child.pid = 999
+            parent = node("parent", "", [child])
+            result = p.text_interface_observation([parent], owner, atspi)
+            self.assertIn("errorType", result["nodes"][0]["children"])
+            child.get_text_iface.assert_not_called()
+            child.get_attributes.assert_not_called()
+            self.assertFalse(result["authorization"])
+
+    def test_counts_output_bounds_and_drift_are_recorded_without_unbounded_reads(self):
+        for kind in ("text", "attributes", "interfaces", "hypertext", "children", "text-drift"):
+            atspi, owner, node = self.fixture()
+            value = node("bounded", "small")
+            if kind == "text":
+                value.text.get_character_count.return_value = 2049
+            elif kind == "attributes":
+                value.get_attributes.return_value = {"oversized": "x" * 2049}
+            elif kind == "interfaces":
+                value.get_interfaces.return_value = ["Text"] * 33
+            elif kind == "hypertext":
+                value.get_hypertext_iface.return_value = types.SimpleNamespace(get_n_links=lambda: -1)
+            elif kind == "children":
+                value.get_child_count.return_value = 129
+                value.get_child_count.side_effect = None
+            else:
+                value.text.get_character_count.side_effect = [5, 4]
+            result = p.text_interface_observation([value], owner, atspi)
+            field = "text" if kind == "text-drift" else kind
+            self.assertIn("errorType", result["nodes"][0][field], kind)
+            if kind == "text":
+                value.text.get_text.assert_not_called()
+            self.assertFalse(result["authorization"])
+
+    def test_budget_identity_and_node_bounds_refuse_not_authorize(self):
+        atspi, owner, node = self.fixture()
+        value = node("owned", "small")
+        with mock.patch.object(p.time, "monotonic", side_effect=[0, 6]):
+            result = p.text_interface_observation([value], owner, atspi)
+        self.assertFalse(result["verified"])
+        value.get_interfaces.assert_not_called()
+        owner.recheck.side_effect = RuntimeError("changed")
+        self.assertFalse(p.text_interface_observation([value], owner, atspi)["verified"])
+        owner.recheck.side_effect = None
+        self.assertFalse(p.text_interface_observation([value] * 65, owner, atspi)["verified"])
+
+    def test_hidden_editable_and_unknown_roles_do_not_read_text_values(self):
+        for role, states in ((72, (2, 3)), (72, (1, 2, 3, 6)), (999, (1, 2, 3))):
+            atspi, owner, node = self.fixture()
+            value = node("not-static-visible", "not for collection", node_role=role)
+            value.get_state_set = lambda: types.SimpleNamespace(contains=lambda s: s in states)
+            result = p.text_interface_observation([value], owner, atspi)
+            self.assertTrue(result["verified"])
+            self.assertTrue(result["nodes"][0]["text"]["available"])
+            self.assertNotIn("value", result["nodes"][0]["text"])
+            value.text.get_text.assert_not_called()
+
+    def test_output_bound_retains_explicit_partial_diagnostic_not_success(self):
+        atspi, owner, node = self.fixture()
+        nodes = [node(str(i), "x" * 2048) for i in range(20)]
+        result = p.text_interface_observation(nodes, owner, atspi)
+        self.assertFalse(result["verified"])
+        self.assertIn("captureRefusal", result)
+        self.assertLess(len(result["nodes"]), len(nodes))
+        self.assertLessEqual(len(json.dumps(result).encode("utf8")), 32768)
+
+    def test_failure_only_capture_retains_original_snapshot_before_optional_diagnostics(self):
+        source = (HERE / "native-linux-components-probe.py").read_text()
+        branch = source.split('if action == "failure-snapshot":')[1].split('if action in ("setup-ready"')[0]
+        self.assertLess(branch.index('"failure-ui-snapshot.json"'), branch.index("text_interface_observation("))
+        self.assertIn('"failure-text-interfaces.json"', branch)
+        diagnostic = source.split("def text_interface_observation(")[1].split("def fixed_control(")[0]
+        for forbidden in ("get_action_iface", "do_action", "get_uri", "get_object", "EditableText", "ready_snapshot("):
+            self.assertNotIn(forbidden, diagnostic)
+
+
 class FixtureTests(unittest.TestCase):
     def test_empty_ax_name_uses_only_bounded_native_read_only_text(self):
         interface = types.SimpleNamespace(get_character_count=mock.Mock(return_value=len(p.RECIPE)),

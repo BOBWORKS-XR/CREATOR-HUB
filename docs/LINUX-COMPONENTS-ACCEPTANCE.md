@@ -540,3 +540,58 @@ Source/fixture-tested geometry is NOT native-accepted. Root/MCP role/name associ
 Read-only MCP, warning/unknown dialogs, altered host/hash/body, extra/nested/foreign windows, geometry or image drift refuse; no guessed input.
 Captured-tree failing-first regression now passes; focused preflight 173 passed / 4 skipped, plus Python/YAML/JS syntax checks.
 Six owned harness paths staged for parent review; prepared workflow is full `probe`, but no dispatch/push/product rebuild or full-flow acceptance.
+
+## Nameless Paragraph Diagnostic Checkpoint
+Run `38656402069`, test `3505a33`, unchanged 4f product: `open-setup` / `setup-declined` readiness refused.
+Root terms saved; exactly one sealed Setup `Not now` click; no approval/retry/MCP action. Root reaped exit 0, both EOFs verified.
+Retained `setup-declined-unready.json` has three showing Paragraph (72) nodes, all names/text empty; the owned PNG shows the exact decline reason.
+This does NOT prove every paragraph type inaccessible: the old capture conflates absent Text with a zero count and omits child/interface metadata.
+[Matching WebKit 2.50.4 source](https://github.com/WebKit/WebKit/blob/webkitgtk-2.50.4/Source/WebCore/accessibility/atspi/AccessibilityObjectAtspi.cpp) explicitly gives Paragraph Text support.
+[Text implementation](https://github.com/WebKit/WebKit/blob/webkitgtk-2.50.4/Source/WebCore/accessibility/atspi/AccessibilityObjectTextAtspi.cpp) reads stringValue or descendant text; source expectations are not captured runtime proof.
+Failure-only diagnostics now retain interface names, bounded attributes, Text availability/count/value/count recheck, Hypertext availability/link count, states and already-owned child indices.
+The original failure UI snapshot is saved first; extra diagnostics never feed `shown_names`, readiness or input authority, and never follow hyperlinks.
+Bounds: 64 nodes, 32 KiB diagnostic JSON, 2048 Text characters, 5-second diagnostic budget within the unchanged worker limit; partial/error results are explicitly unverified.
+Root/renderer/native-window identities and AX wire membership remain checked; foreign/out-of-tree children, drift and oversized results refuse, not authorize.
+Smallest pending capture: the existing post-failure snapshot plus `failure-text-interfaces.json` and owned PNG on the same immutable product; no extra consent action.
+Decision after capture: only exact decline text from a proven owned Text/child path can justify a collector correction; Retry/generic error is insufficient.
+No product a11y correction is established; if owned Text paths remain empty, assess the existing status/detail region's genuine accessible-name contract against native capture.
+[WAI-ARIA status naming](https://www.w3.org/TR/wai-aria-1.2/#status) supports author naming; no production markup change or demonstrated runtime fix is claimed.
+Focused component tests: 46 passed / 1 skipped, including nine diagnostic regressions. No native dispatch, rebuild, permission/timeout/selector change or readiness weakening.
+
+## Parent Review: One Diagnostic Follow-up
+
+Disk evidence rechecked: `38656402069` / `3505a33`, product `4f3744d`, private
+`77367ae`. Confirmed failure: `setup-declined` readiness timed out after one
+sealed `Not now` click. Owned PNG shows the exact decline message; three showing
+Paragraph nodes have empty names/text. Root normal close, exit 0 and both EOFs
+passed. No Retry, approval or MCP action occurred in that run.
+
+Classification: confirmed harness observation gap; collector defect versus
+product accessibility defect is **unknown / needs capture**, not proven broken
+product UI. Exact-message readiness and identity/permission guards are correct
+as-is. No speculative Root label or readiness correction is justified.
+
+Prepared workflow delta is only a diagnostic step label/comment, leaving the
+existing `probe` entry point, pins, environment and deadlines unchanged. Parent
+must approve and selectively commit these four owned paths before one push to
+`validation/linux-components-014`; no dispatch or push was performed here.
+The checked local workflow has a branch filter, not a `paths` filter; its explicit
+workflow-file delta also satisfies the parent's workflow-only change selection.
+
+New hypothesis: the original snapshot omitted Text availability/count and owned
+child/interface evidence that could distinguish unavailable Text, empty Text and
+text on another already-owned node. Inspect `failure-ui-snapshot.json`,
+`failure-text-interfaces.json`, `setup-declined-unready.json` and the owned PNG.
+Unavailable/empty/errored/partial diagnostics do not authorize input; only an
+exact decline message on a proven owned path can justify a later collector fix.
+No automatic rerun. This is the existing full probe with failure-only diagnostics,
+not a new capture-only stop: if readiness unexpectedly passes, the unchanged
+probe can proceed to Retry/approval/MCP. Parent approval must cover that scope.
+
+Fresh Windows preflight: components 46 passed / 1 skipped; Root 81 / 1;
+native-window contracts 43 / 2; fixture contracts 8 passed; dialog backend 4
+passed. Total **182 passed / 4 skipped**. Python AST, workflow YAML, embedded
+JavaScript and Bash syntax, actionlint (without shellcheck/pyflakes), and scoped
+`git diff --check` passed. Skipped native checks and this new Text/interface
+observation remain unverified on Linux. No commit, stage, push, dispatch, package
+rebuild/re-sign/repin or unrelated-file edit was performed.

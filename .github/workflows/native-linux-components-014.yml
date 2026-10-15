@@ -98,7 +98,9 @@ jobs:
             libx11-6 libxres1 dbus-x11 xvfb xauth openbox
       - name: Inspect control metadata and install only the exact fresh DEB on this disposable runner
         run: python3 -B scripts/native-linux-root-probe.py install
-      - name: Native Root terms, exact GTK consent decline and retry, component operation and normal close
+      # Diagnostic follow-up to 38656402069: retain failure-only Text/interface,
+      # character-count and owned-child evidence; same 4f package and input gates.
+      - name: Native components probe with failure-only Text diagnostics (immutable 4f package)
         env:
           GDK_BACKEND: x11
           NO_AT_BRIDGE: '0'
