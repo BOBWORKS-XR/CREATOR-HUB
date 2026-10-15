@@ -414,12 +414,93 @@ class TransactionTests(unittest.TestCase):
                     self.assertFalse(after["fixtureStateVerified"])
                     self.assertFalse(any(after["productionGates"].values()))
 
-    def test_workflow_is_one_push_only_job_preflight_first_and_helper_only(self):
+    def test_container_admission_requires_exact_image_and_fixture_uid(self):
+        env = {"CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE": p.CONTAINER_IMAGE}
+        p.container_admission(env, 1001, 1001, True)
+        for configured, uid, euid, marker in ((env, 0, 0, True), (env, 1000, 1000, True),
+                (env, 1001, 0, True), (env, 1001, 1001, False), ({}, 1001, 1001, True),
+                ({**env, "CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE": "ubuntu:22.04"}, 1001, 1001, True)):
+            with self.subTest(uid=uid, euid=euid, marker=marker), self.assertRaises(RuntimeError):
+                p.container_admission(configured, uid, euid, marker)
+
+    def test_container_identity_records_actual_versions_without_acceptance(self):
+        probe = self.metadata_probe(Path("unused"))
+        versions = {"dpkg": b"Debian dpkg 1.21.1 (amd64)\n", "rustc": b"rustc 1.99.0 (fixture)\n",
+                    "cargo": b"cargo 1.99.0 (fixture)\n", "node": b"v24.17.0\n"}
+        probe.command.side_effect = lambda label, argv, **kw: (0, versions[label.removeprefix("container-")], b"")
+        probe.save = Mock(side_effect=lambda label, value: value)
+        with patch.dict(p.os.environ, {**p.EXPECTED, "CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE": p.CONTAINER_IMAGE}, clear=True), \
+                patch.multiple(p.os, getuid=Mock(return_value=1001), geteuid=Mock(return_value=1001), create=True), \
+                patch.object(p.Path, "is_file", return_value=True), \
+                patch.object(p.Path, "read_text", return_value='ID=ubuntu\nVERSION_ID="22.04"\n'):
+            observed = probe.container_identity()
+            self.assertEqual(observed["configuredContainerImage"], p.CONTAINER_IMAGE)
+            self.assertEqual(observed["imageSourceUrl"], p.CONTAINER_SOURCE)
+            self.assertEqual(observed["observedTagIndexDigest"], p.CONTAINER_INDEX)
+            self.assertEqual(observed["versions"]["dpkg"]["stdout"], versions["dpkg"].decode())
+            self.assertEqual((observed["uid"], observed["euid"]), (1001, 1001))
+            self.assertFalse(observed["nativeAcceptance"])
+            self.assertFalse(any(observed["productionGates"].values()))
+            versions["node"] = b"v24.16.0\n"
+            with self.assertRaisesRegex(RuntimeError, "Exact container toolchain"):
+                probe.container_identity()
+        probe.save.assert_called_once()
+        probe.global_state.assert_not_called()
+
+    def test_preflight_cli_keeps_evidence_out_of_sdk_transaction_namespace(self):
+        for phase, method, preflight in (("container-identity", "container_identity", True),
+                ("metadata-diagnostic", "metadata_diagnostic", True),
+                ("provision-metadata-fixture", "provision_metadata_fixture", True),
+                ("prepare", "prepare", False), ("install", "install", False), ("diagnostics", "diagnostics", False)):
+            probe = Mock()
+            getattr(probe, method).return_value = {}
+            with self.subTest(phase=phase), patch.object(p, "Probe", return_value=probe) as constructor, \
+                    patch.object(p.sys, "argv", ["probe", phase]), patch("builtins.print"):
+                p.main()
+            constructor.assert_called_once_with(preflight=preflight)
+            getattr(probe, method).assert_called_once_with()
+
+    def test_preflight_constructor_does_not_occupy_sdk_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            real_stat, real_read = p.Path.stat, p.Path.read_text
+            def fixture_stat(path, *args, **kwargs):
+                actual = real_stat(path, *args, **kwargs)
+                return self.metadata_info(p.stat.S_IFDIR | 0o700, 1001) if path == root / "linux-deb-helper-preflight" else actual
+            def fixture_read(path, *args, **kwargs):
+                return 'ID=ubuntu\nVERSION_ID="22.04"\n' if path == Path("/etc/os-release") else real_read(path, *args, **kwargs)
+            with patch.dict(p.os.environ, {**p.EXPECTED, "RUNNER_TEMP": str(root)}, clear=True), \
+                    patch.object(p.platform, "system", return_value="Linux"), \
+                    patch.object(p.platform, "machine", return_value="x86_64"), \
+                    patch.object(p.os, "getuid", return_value=1001, create=True), \
+                    patch.object(p.Path, "stat", autospec=True, side_effect=fixture_stat), \
+                    patch.object(p.Path, "read_text", autospec=True, side_effect=fixture_read):
+                probe = p.Probe(preflight=True)
+            self.assertEqual(probe.root, root / "linux-deb-helper-preflight")
+            self.assertTrue(probe.root.is_dir())
+            sdk_root = root / "linux-deb-helper-transaction"
+            self.assertFalse(sdk_root.exists())
+            sdk_root.mkdir()  # The SDK's create-new directory operation must still succeed.
+
+    def test_workflow_is_one_pinned_container_push_job_preflight_first_and_helper_only(self):
         workflow = (p.REPO / ".github/workflows/linux-deb-helper-transaction-014.yml").read_text()
         self.assertIn("branches: [validation/linux-deb-helper-transaction-014]", workflow)
         self.assertIn("paths: ['.github/workflows/linux-deb-helper-transaction-014.yml']", workflow)
         self.assertEqual(workflow.count("runs-on:"), 1)
         self.assertIn("runs-on: ubuntu-22.04", workflow)
+        self.assertEqual(workflow.count(p.CONTAINER_IMAGE), 2)
+        self.assertIn("shell: sudo -H -u fixture -E env PATH=", workflow)
+        self.assertIn("CARGO_HOME: /opt/creator-cargo", workflow)
+        self.assertIn("RUSTUP_HOME: /opt/creator-rustup", workflow)
+        self.assertIn("      DEBIAN_FRONTEND: noninteractive", workflow)
+        self.assertLess(workflow.index("apt-get install -y --no-install-recommends"), workflow.index("actions/checkout"))
+        self.assertLess(workflow.index("actions/checkout"), workflow.index("'/usr/bin/chown'"))
+        self.assertIn("assert targets == expected", workflow)
+        self.assertIn("path.resolve(strict=True) == path", workflow)
+        self.assertIn("'-R', '-P', '--no-dereference'", workflow)
+        self.assertIn("--default-toolchain 1.99.0 --component clippy --component rustfmt", workflow)
+        self.assertIn("ab343a1b747c7cbf3630dfd7dbf818c5423fab2eb4f5ad1afc896f6bd121a917", workflow)
+        self.assertIn("--check --strict", workflow)
         self.assertIn("github.repository_id == '1364807512'", workflow)
         self.assertIn("github.event_name == 'push'", workflow)
         self.assertIn("persist-credentials: false", workflow)
@@ -433,19 +514,21 @@ class TransactionTests(unittest.TestCase):
         self.assertIn("-- --ignored --exact --nocapture", workflow)
         self.assertIn("--all-targets --all-features -- -D warnings", workflow)
         metadata_capture = workflow.index("probe.py metadata-diagnostic")
-        fixture_provision = workflow.index("probe.py provision-metadata-fixture")
-        self.assertLess(metadata_capture, fixture_provision)
-        self.assertLess(fixture_provision, workflow.index("cargo test --locked"))
+        self.assertNotIn("probe.py provision-metadata-fixture", workflow)
+        self.assertLess(workflow.index("probe.py container-identity"), metadata_capture)
         self.assertLess(workflow.index("transaction.test.py"), metadata_capture)
         self.assertLess(metadata_capture, workflow.index("cargo test --locked"))
         self.assertLess(metadata_capture, metadata_gate)
         self.assertLess(metadata_capture, workflow.index("actions/download-artifact"))
         self.assertLess(metadata_capture, workflow.index("npm ci"))
         self.assertIn("${{ runner.temp }}/linux-deb-helper-transaction/*.json", workflow)
+        self.assertIn("${{ runner.temp }}/linux-deb-helper-preflight/*.json", workflow)
         self.assertIn("if: always()", workflow)
         self.assertIn("probe.py diagnostics", workflow)
-        for forbidden in ("workflow_dispatch:", "matrix:", "macos-", "windows-", "secrets.", "contents: write", "npm run build", "cargo tauri"):
+        for forbidden in ("workflow_dispatch:", "matrix:", "macos-", "windows-", "secrets.", "contents: write", "npm run build", "cargo tauri",
+                          "--privileged", "--cap-add", "volumes:", "apt-get upgrade", "apt-get dist-upgrade", "chmod /usr", "chown /usr"):
             self.assertNotIn(forbidden, workflow)
+        self.assertNotRegex(workflow, r"(?:chmod|chown)[^\n]*/usr(?:/|\b)")
         source = Path(p.__file__).read_text()
         for forbidden in ("shell=True", "--force-", "--purge", "--remove", "kill(", "rmtree(", "unlink("):
             self.assertNotIn(forbidden, source)

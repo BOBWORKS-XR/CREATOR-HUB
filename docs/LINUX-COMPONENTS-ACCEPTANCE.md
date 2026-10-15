@@ -716,3 +716,13 @@ requires both paths plus normal close and retained settings. This gives MCP an
 independent first result instead of always stopping at Setup's earlier AX error.
 No cache override, extra input, missing-parent tolerance or alternative readiness
 signal is added. Local component preflight passes 52 tests with one skip.
+
+Result: `38717024669` at `f2350df` reached `mcp-operation` after native MCP
+decline, Retry, Root routing permission and MCP approval. Its owned bitmap shows
+the actual embedded MCP connection guide. The first readiness query then failed
+on a stale AT-SPI object path, as did cleanup. This confirms that opening works
+for MCP as well as Setup on this pinned older package, but not preference save,
+normal exit or complete component acceptance. Compact capture is retained under
+`artifacts/native-linux-components-38717024669/`; no source ZIP was downloaded.
+An exact failing-getter/producer-lifecycle capture is still needed. No new
+readiness shortcut or unchanged native replay follows this result.

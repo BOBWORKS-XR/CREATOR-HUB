@@ -33,6 +33,9 @@ EXPECTED = {"CREATOR_LINUX_DEB_HELPER_TRANSACTION": "1", "GITHUB_ACTIONS": "true
     "GITHUB_REF": "refs/heads/validation/linux-deb-helper-transaction-014", "GITHUB_EVENT_NAME": "push"}
 STAGE = re.compile(r"mcp-2\.7\.7-preparation-[0-9a-f]{32}")
 METADATA_PARENTS = ("/", "/usr", "/usr/share")
+CONTAINER_IMAGE = "ubuntu:22.04@sha256:08ea48a03a3e78ebc7cd526e6a275053223aadd88bfc09cc49b06d5281525fde"
+CONTAINER_SOURCE = "https://hub.docker.com/v2/repositories/library/ubuntu/tags/22.04"
+CONTAINER_INDEX = "sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401"
 GATES = ("productionIntegrated", "privilegedHelperAccepted", "nativeTransactionAccepted",
     "nativeApprovalAccepted", "actualUserAuthenticationAccepted", "nativeCancellationAccepted",
     "guiIdleCloseAccepted", "runtimeRetentionAccepted", "packageGuiRetirementAccepted",
@@ -45,6 +48,12 @@ def admission(env, system, machine, uid):
     require(all(env.get(k) == v for k, v in EXPECTED.items()), "Exact opted-in disposable repository/id/branch/push required")
     require(not any(env.get(k) for k in ("FLATPAK_ID", "APPIMAGE", "APPDIR", "LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH")),
             "Sandbox or injected loader refused")
+
+
+def container_admission(env, uid, euid, docker_marker):
+    require(uid == euid == 1001 and docker_marker
+            and env.get("CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE") == CONTAINER_IMAGE,
+            "Exact pinned container and real/effective fixture UID 1001 required")
 
 
 def helper_result(code, out, err, repeat=False):
@@ -96,14 +105,16 @@ def stage_built_helper(source, destination):
 
 
 class Probe:
-    def __init__(self):
+    def __init__(self, preflight=False):
         admission(os.environ, platform.system(), platform.machine(), os.getuid())
+        if os.environ.get("CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE"):
+            container_admission(os.environ, os.getuid(), os.geteuid(), Path("/.dockerenv").is_file())
         release = dict(line.split("=", 1) for line in Path("/etc/os-release").read_text().splitlines() if "=" in line)
         require(release.get("ID", "").strip('"') == "ubuntu" and release.get("VERSION_ID", "").strip('"') == "22.04",
                 "Pinned Ubuntu 22.04 required")
         parent = Path(os.environ["RUNNER_TEMP"])
         require(parent.is_absolute() and parent.resolve(strict=True) == parent, "Ordinary absolute runner temp required")
-        self.root = parent / "linux-deb-helper-transaction"
+        self.root = parent / ("linux-deb-helper-preflight" if preflight else "linux-deb-helper-transaction")
         self.root.mkdir(mode=0o700, exist_ok=True)
         require(self.root.resolve() == self.root and stat.S_ISDIR(self.root.lstat().st_mode)
                 and self.root.stat().st_uid == os.getuid() and stat.S_IMODE(self.root.stat().st_mode) == 0o700,
@@ -136,6 +147,25 @@ class Probe:
         row = fixture.fingerprint(self.old)
         require((row["bytes"], row["sha256"]) == (fixture.PACKAGE_BYTES, fixture.PACKAGE_SHA), "Exact original public DEB required")
         return json.loads((self.root / "plan.json").read_text())
+
+    def container_identity(self):
+        container_admission(os.environ, os.getuid(), os.geteuid(), Path("/.dockerenv").is_file())
+        versions = {}
+        for name, argv in (("dpkg", ["/usr/bin/dpkg", "--version"]), ("rustc", ["rustc", "--version", "--verbose"]),
+                ("cargo", ["cargo", "--version", "--verbose"]), ("node", ["node", "--version"])):
+            code, out, err = self.command("container-" + name, argv, timeout=30)
+            require(len(out) + len(err) <= 16 * 1024, "Container version capture exceeded bound")
+            versions[name] = {"exitCode": code, "stdout": out.decode("utf-8"), "stderr": err.decode("utf-8")}
+        require(versions["node"]["stdout"] == "v24.17.0\n" and versions["rustc"]["stdout"].startswith("rustc 1.99.0 ")
+                and versions["cargo"]["stdout"].startswith("cargo 1.99.0 "), "Exact container toolchain required")
+        return self.save("container-identity", {"schemaVersion": 1, "scope": "disposable-container-mechanism-only",
+            "configuredContainerImage": CONTAINER_IMAGE, "imageSourceUrl": CONTAINER_SOURCE,
+            "observedTagIndexDigest": CONTAINER_INDEX, "osRelease": Path("/etc/os-release").read_text(),
+            "uid": os.getuid(), "euid": os.geteuid(), "kernel": platform.release(),
+            "sourceRevision": os.environ.get("GITHUB_SHA"), "runId": os.environ.get("GITHUB_RUN_ID"),
+            "runAttempt": os.environ.get("GITHUB_RUN_ATTEMPT"), "environment": {key: os.environ.get(key) for key in EXPECTED},
+            "versions": versions, "packageTransactionStarted": False, "nativeAcceptance": False,
+            "productionGates": dict.fromkeys(GATES, False)})
 
     def metadata_diagnostic(self):
         uid, euid = os.getuid(), os.geteuid()
@@ -405,10 +435,12 @@ class Probe:
 
 
 def main():
-    require(len(sys.argv) == 2 and sys.argv[1] in ("prepare", "install", "before", "retire", "after", "repeat", "diagnostics", "metadata-diagnostic", "provision-metadata-fixture"), "One fixed fixture phase required")
-    probe = Probe()
+    require(len(sys.argv) == 2 and sys.argv[1] in ("prepare", "install", "before", "retire", "after", "repeat", "diagnostics", "metadata-diagnostic", "provision-metadata-fixture", "container-identity"), "One fixed fixture phase required")
     phase = sys.argv[1]
-    if phase == "metadata-diagnostic":
+    probe = Probe(preflight=phase in ("container-identity", "metadata-diagnostic", "provision-metadata-fixture"))
+    if phase == "container-identity":
+        result = probe.container_identity()
+    elif phase == "metadata-diagnostic":
         result = probe.metadata_diagnostic()
     elif phase == "provision-metadata-fixture":
         result = probe.provision_metadata_fixture()

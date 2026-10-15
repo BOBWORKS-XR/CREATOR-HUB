@@ -276,14 +276,40 @@ The unchanged helper correctly refuses that host state. No package was downloade
 or installed. Compact evidence is retained under
 `artifacts/linux-deb-helper-metadata-38714809976/`.
 
-The disposable fixture now admits only that exact ordinary root-owned 0777
+The earlier disposable VM fixture admitted only that exact ordinary root-owned 0777
 directory, or an already-protected 0755 no-op. A fixed nonrecursive
 `sudo -n /usr/bin/chmod -- 0755 /usr/share` tightens only this test VM. Before/after
 records verify unchanged device/inode/owner/group/entries and protected ancestors;
 unexpected state/drift refuses without further repair. This is explicit fixture
 provisioning, not a helper fix, user-PC action, metadata-database cleanup or
 relaxed production guard. The real unprivileged metadata gate still follows it,
-before any baseline package installation. Python19/Node5 preflight passes.
+before any baseline package installation. Python19/Node5 preflight passed.
+Run `38716201545` at `bf29d77` verified that bounded change, then refused the next
+parent, `/usr/share/dict`, with exit 101; its stat fields were not captured.
+That observed run/evidence is preserved. No further host permission fixes follow.
+
+### Prepared Clean Ubuntu Container (Not Run)
+
+The same exact-branch, one-job Ubuntu 22.04 VM workflow now uses official image
+`ubuntu:22.04@sha256:08ea48a03a3e78ebc7cd526e6a275053223aadd88bfc09cc49b06d5281525fde`.
+The [official tag API](https://hub.docker.com/v2/repositories/library/ubuntu/tags/22.04)
+returned that Linux/amd64 image and index digest
+`sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401`.
+Root bootstrap installs only explicit build prerequisites, checksum-verified Node
+24.17.0 and Rust 1.99.0; no whole-image upgrade, privileged container, extra host
+mount or manual `/usr` permission change. Recursive ownership is confined to four
+exact, resolved ephemeral checkout/temp/Cargo/Rustup paths with no symlink traversal.
+The permission-tightening workflow step is removed; its historical code/evidence remains.
+
+Preflight, metadata gate and existing SDK transaction execute as fixture UID 1001
+with disposable-container sudo, accessible `/opt` toolchains and job-wide
+`DEBIAN_FRONTEND=noninteractive`. Original DEB identity and dependency installation
+remain unchanged. Pre-gate evidence uses `linux-deb-helper-preflight`, leaving the
+SDK's create-new transaction directory absent. Compact `container-identity.json`
+records configured image/source URL, actual dpkg/tool versions and environment;
+configured image is not an independent runtime image attestation. All production
+flags remain false. Local Python23/Node5, AST/shell syntax, actionlint and diff checks
+passed. No container execution, package rebuild, commit, push or dispatch here.
 
 ## Experimental Transaction
 
