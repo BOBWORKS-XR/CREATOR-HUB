@@ -176,6 +176,45 @@ class Probe:
         require(observations["captureComplete"], "Read-only metadata capture incomplete; see metadata-diagnostic.json")
         return observations
 
+    def provision_metadata_fixture(self):
+        admission(os.environ, platform.system(), platform.machine(), os.getuid())
+        require(os.geteuid() > 0, "Fixture provisioning requires an unprivileged caller")
+        captured = json.loads((self.root / "metadata-diagnostic.json").read_text())
+        require(captured.get("captureComplete") is True and all(captured.get(key) == os.environ.get(env)
+            for key, env in (("sourceRevision", "GITHUB_SHA"), ("runId", "GITHUB_RUN_ID"), ("runAttempt", "GITHUB_RUN_ATTEMPT"))), "Same-run read-only capture required")
+        fields = ("mode", "uid", "gid", "dev", "ino", "nlink", "size", "mtimeNs", "ctimeNs")
+        attrs = ("st_mode", "st_uid", "st_gid", "st_dev", "st_ino", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        def observe():
+            return {name: dict(zip(fields, (getattr(info, attr) for attr in attrs)))
+                for name in METADATA_PARENTS for info in [Path(name).lstat()]}
+        def entries():
+            names = sorted(os.listdir("/usr/share"))
+            require(len(names) <= 8192, "Fixture entry inventory exceeded bound")
+            return {"count": len(names), "sha256": hashlib.sha256(json.dumps(names).encode()).hexdigest()}
+        before = observe()
+        require(before == {name: {key: captured["paths"][name][key] for key in fields} for name in METADATA_PARENTS}, "Parent metadata drift since capture")
+        require(all(stat.S_ISDIR(row["mode"]) and row["uid"] == 0 for row in before.values())
+            and all(before[name]["mode"] & 0o7022 == 0 for name in ("/", "/usr")), "Unprotected fixture parent")
+        mode = stat.S_IMODE(before["/usr/share"]["mode"])
+        require(mode in (0o777, 0o755), "Only exact fixture 0777 or 0755 admitted")
+        names = entries()
+        common = {"scope": "disposable-hosted-fixture-only", "nativeAcceptance": False,
+            "packageTransactionStarted": False, "productionGates": dict.fromkeys(GATES, False)}
+        self.save("metadata-fixture-before", {**common, "paths": before, "entries": names})
+        require(observe() == before and entries() == names, "Fixture drift before chmod")
+        try:
+            if mode == 0o777:
+                self.command("metadata-fixture-chmod", ["/usr/bin/sudo", "-n", "/usr/bin/chmod", "--", "0755", "/usr/share"], timeout=10)
+        finally:
+            after, after_names = observe(), entries()
+            expected = {**before["/usr/share"], "mode": stat.S_IFDIR | 0o755,
+                "ctimeNs": after["/usr/share"]["ctimeNs"] if mode == 0o777 else before["/usr/share"]["ctimeNs"]}
+            valid = all(after[name] == before[name] for name in ("/", "/usr")) and after["/usr/share"] == expected and after_names == names
+            result = {**common, "paths": after, "entries": after_names, "chmodRequested": mode == 0o777, "fixtureStateVerified": valid}
+            self.save("metadata-fixture-after", result)
+        require(valid, "Fixture post-state drift; no retry or other-path repair")
+        return result
+
     def prepare(self):
         source = self.command("source", ["git", "rev-parse", "HEAD"])[1].decode().strip()
         require(re.fullmatch(r"[0-9a-f]{40}", source) and source == os.environ.get("GITHUB_SHA"), "Checkout/source mismatch")
@@ -366,11 +405,13 @@ class Probe:
 
 
 def main():
-    require(len(sys.argv) == 2 and sys.argv[1] in ("prepare", "install", "before", "retire", "after", "repeat", "diagnostics", "metadata-diagnostic"), "One fixed fixture phase required")
+    require(len(sys.argv) == 2 and sys.argv[1] in ("prepare", "install", "before", "retire", "after", "repeat", "diagnostics", "metadata-diagnostic", "provision-metadata-fixture"), "One fixed fixture phase required")
     probe = Probe()
     phase = sys.argv[1]
     if phase == "metadata-diagnostic":
         result = probe.metadata_diagnostic()
+    elif phase == "provision-metadata-fixture":
+        result = probe.provision_metadata_fixture()
     else:
         result = probe.snapshot(phase) if phase in ("before", "after") else getattr(probe, phase)()
     print(json.dumps(result))

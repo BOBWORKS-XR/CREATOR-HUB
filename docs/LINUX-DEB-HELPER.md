@@ -270,6 +270,21 @@ actionlint 1.7.12 (`-shellcheck= -pyflakes=`), and `git diff --check` passed.
 No dispatch, commit, permission change or helper runtime edit. The new capture
 has not run on Linux; await actual stat fields before any further diagnosis.
 
+Actual capture `38714809976` at `da6274f` shows `/` and `/usr` root-owned 0755,
+but `/usr/share` root-owned **0777**, with unsafe group/other-write bits 0022.
+The unchanged helper correctly refuses that host state. No package was downloaded
+or installed. Compact evidence is retained under
+`artifacts/linux-deb-helper-metadata-38714809976/`.
+
+The disposable fixture now admits only that exact ordinary root-owned 0777
+directory, or an already-protected 0755 no-op. A fixed nonrecursive
+`sudo -n /usr/bin/chmod -- 0755 /usr/share` tightens only this test VM. Before/after
+records verify unchanged device/inode/owner/group/entries and protected ancestors;
+unexpected state/drift refuses without further repair. This is explicit fixture
+provisioning, not a helper fix, user-PC action, metadata-database cleanup or
+relaxed production guard. The real unprivileged metadata gate still follows it,
+before any baseline package installation. Python19/Node5 preflight passes.
+
 ## Experimental Transaction
 
 Compile explicitly with `--features experimental-transaction`; no default,

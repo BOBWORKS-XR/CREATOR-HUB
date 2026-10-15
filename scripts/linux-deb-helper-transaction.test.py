@@ -311,6 +311,109 @@ class TransactionTests(unittest.TestCase):
                 p.main()
             constructor.assert_not_called()
 
+    def provision_fixture(self, root, mode=None, uid=0):
+        probe = self.metadata_probe(root)
+        rows = {name: self.metadata_info() for name in ("/", "/usr", "/usr/share")}
+        rows["/usr/share"] = self.metadata_info(p.stat.S_IFDIR | 0o777 if mode is None else mode, uid)
+        keys = ("mode", "uid", "gid", "dev", "ino", "nlink", "size", "mtimeNs", "ctimeNs")
+        attrs = ("st_mode", "st_uid", "st_gid", "st_dev", "st_ino", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        env = {**p.EXPECTED, "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "9", "GITHUB_RUN_ATTEMPT": "1"}
+        captured = {"captureComplete": True, "sourceRevision": env["GITHUB_SHA"], "runId": "9", "runAttempt": "1",
+            "paths": {name: dict(zip(keys, (getattr(info, attr) for attr in attrs))) for name, info in rows.items()}}
+        (root / "metadata-diagnostic.json").write_text(json.dumps(captured))
+        return probe, rows, env
+
+    def test_fixture_exact_0777_tightens_only_fixed_parent_and_preserves_entries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            probe, rows, env = self.provision_fixture(Path(temporary))
+            def chmod(label, argv, **kwargs):
+                self.assertEqual(argv, ["/usr/bin/sudo", "-n", "/usr/bin/chmod", "--", "0755", "/usr/share"])
+                rows["/usr/share"].st_mode = p.stat.S_IFDIR | 0o755
+                rows["/usr/share"].st_ctime_ns += 1
+                return 0, b"", b""
+            probe.command.side_effect = chmod
+            with patch.dict(p.os.environ, env, clear=True), patch.object(p.platform, "system", return_value="Linux"), \
+                    patch.object(p.platform, "machine", return_value="x86_64"), \
+                    patch.multiple(p.os, getuid=Mock(return_value=1001), geteuid=Mock(return_value=1001), create=True), \
+                    patch.object(p.Path, "lstat", autospec=True, side_effect=lambda path: rows[path.as_posix()]), \
+                    patch.object(p.os, "listdir", return_value=["b", "a"]) as listing:
+                result = probe.provision_metadata_fixture()
+            probe.command.assert_called_once_with("metadata-fixture-chmod",
+                ["/usr/bin/sudo", "-n", "/usr/bin/chmod", "--", "0755", "/usr/share"], timeout=10)
+            self.assertTrue(all(call.args == ("/usr/share",) for call in listing.call_args_list))
+            before = json.loads((probe.root / "metadata-fixture-before.json").read_text())
+            after = json.loads((probe.root / "metadata-fixture-after.json").read_text())
+            self.assertEqual(before["entries"], after["entries"])
+            for name in ("/", "/usr"):
+                self.assertEqual(before["paths"][name], after["paths"][name])
+            self.assertTrue(result["fixtureStateVerified"])
+            self.assertFalse(result["nativeAcceptance"])
+            self.assertFalse(any(result["productionGates"].values()))
+
+    def test_fixture_already_0755_is_a_complete_noop(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            probe, rows, env = self.provision_fixture(Path(temporary), p.stat.S_IFDIR | 0o755)
+            with patch.dict(p.os.environ, env, clear=True), patch.object(p.platform, "system", return_value="Linux"), \
+                    patch.object(p.platform, "machine", return_value="x86_64"), \
+                    patch.multiple(p.os, getuid=Mock(return_value=1001), geteuid=Mock(return_value=1001), create=True), \
+                    patch.object(p.Path, "lstat", autospec=True, side_effect=lambda path: rows[path.as_posix()]), \
+                    patch.object(p.os, "listdir", return_value=["a"]):
+                with patch.object(p, "Probe", return_value=probe), \
+                        patch.object(p.sys, "argv", ["probe", "provision-metadata-fixture"]), patch("builtins.print"):
+                    p.main()
+            probe.command.assert_not_called()
+            before = json.loads((probe.root / "metadata-fixture-before.json").read_text())
+            after = json.loads((probe.root / "metadata-fixture-after.json").read_text())
+            self.assertEqual(before["paths"], after["paths"])
+            self.assertEqual(before["entries"], after["entries"])
+            self.assertFalse(after["chmodRequested"])
+            self.assertTrue(after["fixtureStateVerified"])
+
+    def test_fixture_unexpected_state_or_drift_refuses_without_other_path_repair(self):
+        cases = ("mode", "special-mode", "symlink", "uid", "capture-drift", "pre-drift", "post-inode",
+                 "post-entries", "post-root", "user-pc", "wrong-branch", "effective-root")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                mode = {"mode": p.stat.S_IFDIR | 0o775, "special-mode": p.stat.S_IFDIR | 0o2777,
+                    "symlink": p.stat.S_IFLNK | 0o777}.get(case)
+                probe, rows, env = self.provision_fixture(Path(temporary), mode, 1001 if case == "uid" else 0)
+                names, reads = ["a"], []
+                if case == "capture-drift":
+                    rows["/usr/share"].st_ino += 1
+                if case == "wrong-branch":
+                    env["GITHUB_REF"] = "refs/heads/main"
+                def lstat(path):
+                    name = path.as_posix()
+                    if name == "/usr/share":
+                        reads.append(name)
+                        if case == "pre-drift" and len(reads) == 2:
+                            rows[name].st_ino += 1
+                    return rows[name]
+                def chmod(*args, **kwargs):
+                    rows["/usr/share"].st_mode = p.stat.S_IFDIR | 0o755
+                    if case == "post-inode":
+                        rows["/usr/share"].st_ino += 1
+                    if case == "post-entries":
+                        names.append("unexpected")
+                    if case == "post-root":
+                        rows["/"].st_ctime_ns += 1
+                    return 0, b"", b""
+                probe.command.side_effect = chmod
+                with patch.dict(p.os.environ, env, clear=True), \
+                        patch.object(p.platform, "system", return_value="Windows" if case == "user-pc" else "Linux"), \
+                        patch.object(p.platform, "machine", return_value="x86_64"), \
+                        patch.multiple(p.os, getuid=Mock(return_value=1001), geteuid=Mock(return_value=0 if case == "effective-root" else 1001), create=True), \
+                        patch.object(p.Path, "lstat", autospec=True, side_effect=lstat) as observed, \
+                        patch.object(p.os, "listdir", side_effect=lambda path: names[:]), self.assertRaises(RuntimeError):
+                    probe.provision_metadata_fixture()
+                self.assertEqual(probe.command.call_count, 1 if case.startswith("post-") else 0)
+                if case in ("user-pc", "wrong-branch", "effective-root"):
+                    observed.assert_not_called()
+                if case.startswith("post-"):
+                    after = json.loads((probe.root / "metadata-fixture-after.json").read_text())
+                    self.assertFalse(after["fixtureStateVerified"])
+                    self.assertFalse(any(after["productionGates"].values()))
+
     def test_workflow_is_one_push_only_job_preflight_first_and_helper_only(self):
         workflow = (p.REPO / ".github/workflows/linux-deb-helper-transaction-014.yml").read_text()
         self.assertIn("branches: [validation/linux-deb-helper-transaction-014]", workflow)
@@ -330,6 +433,9 @@ class TransactionTests(unittest.TestCase):
         self.assertIn("-- --ignored --exact --nocapture", workflow)
         self.assertIn("--all-targets --all-features -- -D warnings", workflow)
         metadata_capture = workflow.index("probe.py metadata-diagnostic")
+        fixture_provision = workflow.index("probe.py provision-metadata-fixture")
+        self.assertLess(metadata_capture, fixture_provision)
+        self.assertLess(fixture_provision, workflow.index("cargo test --locked"))
         self.assertLess(workflow.index("transaction.test.py"), metadata_capture)
         self.assertLess(metadata_capture, workflow.index("cargo test --locked"))
         self.assertLess(metadata_capture, metadata_gate)
