@@ -276,7 +276,10 @@ fn retirement_pending() -> Result<bool, String> {
     {
         crate::convergence_linux::pending()
     }
-    #[cfg(not(any(windows, all(target_os = "linux", feature = "experimental-linux-migration"))))]
+    #[cfg(not(any(
+        windows,
+        all(target_os = "linux", feature = "experimental-linux-migration")
+    )))]
     Ok(false)
 }
 
@@ -851,19 +854,24 @@ fn retirement_diagnostics(plan: &mut Plan, manager: &manager::Manager) -> Result
                 let store = creator_hub_mcp_router::Store::installed()?;
                 let _runtime = store.resolve()?;
                 let router = store.router()?;
-                let paths = current.iter().map(|app| app.path.clone()).collect::<Vec<_>>();
+                let paths = current
+                    .iter()
+                    .map(|app| app.path.clone())
+                    .collect::<Vec<_>>();
                 let native = crate::convergence_linux::Plan::inspect(&paths, &router.command)?;
                 plan.retirement_linux = Some(native);
                 plan.report.retirement_available = true;
-                return Ok("Development test only: the exact MCP DEB is ready for a separately confirmed system-authorized retirement. The TEST ONLY helper is not a release acceptance. All settings and old Node/server paths stay in place; custom old-GUI integrations need separate review.".into());
+                return Ok("Development test only: the verified standalone DEB apps shown in this review are ready for separately confirmed system-authorized retirement. Only exact MCP 2.7.7 and Project Setup 0.3.7 packages are eligible. The TEST ONLY helper is not release acceptance. All settings and old MCP Node/server paths stay in place; custom old-GUI integrations need separate review.".into());
             }
             if crate::convergence_linux::pending()? {
                 let store = creator_hub_mcp_router::Store::installed()?;
                 let _runtime = store.resolve()?;
                 let router = store.router()?;
-                plan.retirement_linux = Some(crate::convergence_linux::Plan::inspect_retained(&router.command)?);
+                plan.retirement_linux = Some(crate::convergence_linux::Plan::inspect_retained(
+                    &router.command,
+                )?);
                 plan.report.retirement_available = true;
-                return Ok("The retained MCP package was independently checked after an earlier cleanup. Review completion to finish the guide; this will not repeat the package transaction.".into());
+                return Ok("Retained package state for pending MCP and/or Project Setup cleanup was independently checked. Review completion to finish the guide; this will not repeat any package transaction.".into());
             }
         }
         require_no_retirement(plan, &legacy_apps()?)?;
@@ -992,16 +1000,16 @@ pub async fn retire_convergence_apps(handle: tauri::AppHandle) -> Result<Report,
                 preflight()?;
                 native.recheck()?;
                 let message = if native.retained_only() {
-                    "Review completion of the earlier development cleanup?\n\nThe system helper independently verified the retained MCP package and missing old GUI files. Your settings, backed-up files and current connection route have been reviewed again.\n\nThis step only records completion. No package transaction, administrator prompt, client rewrite or process closure will be repeated. Cancel keeps the outcome review pending. This remains a TEST ONLY development result, not release acceptance."
+                    "Review completion of the earlier development cleanup?\n\nThe system helper independently verified retained package state and missing old GUI files for pending MCP and/or Project Setup cleanup. Your settings, backed-up files and current connection route have been reviewed again.\n\nThis step only records completion. No package transaction, administrator prompt, client rewrite or process closure will be repeated. Cancel keeps the outcome review pending. This remains a TEST ONLY development result, not release acceptance."
                 } else {
-                    "Development migration test only.\n\nRetire the verified standalone MCP 2.7.7 DEB launcher? All nine original Node/server/license/bridge files remain at their existing paths. Settings, AI-client options, Unity projects and Hub backups are kept.\n\nCustom launchers that depend on the old GUI or its desktop registration need separate review. AI clients, Unity and Node processes will not be force-closed.\n\nLinux will request administrator authentication separately. Cancel keeps the installation. Unknown or interrupted outcomes require review; no transaction is automatically retried. This TEST ONLY compatibility package is not a published transition."
+                    "Development migration test only.\n\nRetire the verified standalone DEB apps shown in this review? Only exact MCP 2.7.7 and Project Setup 0.3.7 packages are eligible. MCP retirement keeps all nine original Node/server/license/bridge files at their existing paths. Project Setup retirement keeps no runtime files and adds one fixed non-executable retirement notice. Settings, AI-client options, Unity projects and Hub backups are kept.\n\nCustom launchers that depend on either old GUI or its desktop registration need separate review. AI clients, Unity and Node processes will not be force-closed.\n\nLinux requests administrator authentication separately for each unretired app. Cancel here starts no new transaction and keeps earlier outcome reviews pending. Cancelling a later system prompt does not undo earlier cleanup. Unknown or interrupted outcomes require manual review; no transaction is automatically retried. These TEST ONLY packages are not a published transition."
                 };
                 let confirm = if native.retained_only() { "Complete outcome review" } else { "Continue to system authorization" };
                 let approved = handle.dialog().message(message).title("Test Linux Creator app retirement").kind(MessageDialogKind::Info)
                     .buttons(MessageDialogButtons::OkCancelCustom(confirm.into(), "Keep existing".into())).blocking_show();
                 if !approved {
                     plan.retirement_linux = Some(native);
-                    return Err("Standalone retirement was cancelled. Apps and settings were kept.".into());
+                    return Err("Standalone retirement was cancelled. No new package transaction was started; settings and any pending outcome review were kept.".into());
                 }
                 let result: Result<bool, String> = (|| {
                     preflight()?;
@@ -1027,7 +1035,7 @@ pub async fn retire_convergence_apps(handle: tauri::AppHandle) -> Result<Report,
                     Ok(true) => {
                         plan.report.stage = "complete";
                         plan.report.required = false;
-                        "Experimental Linux retirement verified. Original MCP runtime paths, reviewed settings and backups were kept. This development result is not release acceptance.".into()
+                        "Experimental Linux retirement verified for the reviewed app entries. Any original MCP runtime paths, reviewed settings and backups were kept. This development result is not release acceptance.".into()
                     }
                     Err(reason) => format!("Linux cleanup needs review: {reason} No automatic retry was started. Keep settings, backups and retained runtime files."),
                 };

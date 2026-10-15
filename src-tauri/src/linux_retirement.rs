@@ -7,6 +7,13 @@ const HELPER: &str = "/usr/libexec/creator-hub-deb-retirement-helper";
 const PKEXEC: &str = "/usr/bin/pkexec";
 const LIMIT: usize = 64 * 1024;
 
+/// Native-only finite targets. No command, version or path is supplied by a caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Mcp,
+    Setup,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
     Inspect,
@@ -14,18 +21,22 @@ enum Action {
     Retire,
 }
 
-fn command(action: Action) -> Command {
+fn command(target: Target, action: Action) -> Command {
+    let argument = match (target, action) {
+        (Target::Mcp, Action::Inspect) => "inspect",
+        (Target::Mcp, Action::InspectRetained) => "inspect-retained-mcp-2.7.7",
+        (Target::Mcp, Action::Retire) => "retire-mcp-2.7.7",
+        (Target::Setup, Action::Inspect) => "inspect-setup-0.3.7",
+        (Target::Setup, Action::InspectRetained) => "inspect-retained-setup-0.3.7",
+        (Target::Setup, Action::Retire) => "retire-setup-0.3.7",
+    };
     let mut cmd = if action == Action::Retire {
         let mut cmd = Command::new(PKEXEC);
-        cmd.args(["--disable-internal-agent", HELPER, "retire-mcp-2.7.7"]);
+        cmd.args(["--disable-internal-agent", HELPER, argument]);
         cmd
     } else {
         let mut cmd = Command::new(HELPER);
-        cmd.arg(if action == Action::InspectRetained {
-            "inspect-retained-mcp-2.7.7"
-        } else {
-            "inspect"
-        });
+        cmd.arg(argument);
         cmd
     };
     cmd.env_clear()
@@ -76,7 +87,10 @@ struct Inspection {
     blocker: String,
 }
 
-fn inspect_response(bytes: &[u8]) -> Result<(), String> {
+fn inspect_response(target: Target, bytes: &[u8]) -> Result<(), String> {
+    if target == Target::Setup {
+        return setup_inspection_response(bytes, false);
+    }
     let value: Inspection = serde_json::from_slice(bytes)
         .map_err(|_| "The Linux migration helper returned an unknown inspection protocol.")?;
     if value.status != "inspected-read-only"
@@ -116,7 +130,10 @@ struct RetainedInspection {
     omitted_files_verified: u32,
 }
 
-fn retained_response(bytes: &[u8]) -> Result<(), String> {
+fn retained_response(target: Target, bytes: &[u8]) -> Result<(), String> {
+    if target == Target::Setup {
+        return setup_inspection_response(bytes, true);
+    }
     let value: RetainedInspection = serde_json::from_slice(bytes).map_err(|_| {
         "Cannot verify the retained MCP package after cleanup. Keep recovery records."
     })?;
@@ -157,21 +174,131 @@ struct Completion {
     retry_policy: String,
 }
 
+// Setup has a distinct wire contract: zero retained runtime files and exactly
+// one fixed non-executable notice. Do not default missing fields or accept the
+// MCP protocol as a Setup result (or vice versa).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetupInspection {
+    status: String,
+    product: String,
+    package: String,
+    package_state: String,
+    version: String,
+    read_only: bool,
+    baseline_matches: bool,
+    compatibility_matches: bool,
+    snapshot_authoritative: bool,
+    installation_enabled: bool,
+    experimental_transaction_compiled: bool,
+    package_transaction_started: bool,
+    native_acceptance: bool,
+    tombstone_files_verified: u32,
+    omitted_files_verified: u32,
+}
+
+fn setup_inspection_response(bytes: &[u8], retained: bool) -> Result<(), String> {
+    let value: SetupInspection = serde_json::from_slice(bytes)
+        .map_err(|_| "The Linux helper returned an unknown Setup inspection protocol.")?;
+    if value.status
+        != if retained {
+            "inspected-retained-read-only"
+        } else {
+            "inspected-read-only"
+        }
+        || value.product != "setup"
+        || value.package != "creator-project-setup"
+        || value.package_state
+            != if retained {
+                "compatibility"
+            } else {
+                "original"
+            }
+        || value.version
+            != if retained {
+                "0.3.7-1+hub.retention014.1"
+            } else {
+                "0.3.7"
+            }
+        || !value.read_only
+        || value.baseline_matches != !retained
+        || value.compatibility_matches != retained
+        || value.snapshot_authoritative
+        || value.installation_enabled
+        || !value.experimental_transaction_compiled
+        || value.package_transaction_started
+        || value.native_acceptance
+        || value.tombstone_files_verified != u32::from(retained)
+        || value.omitted_files_verified != if retained { 5 } else { 0 }
+    {
+        return Err("The exact Setup 0.3.7 package or notice did not match its independent inspection. Keep recovery records; no automatic retry is allowed.".into());
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetupCompletion {
+    status: String,
+    product: String,
+    package: String,
+    experimental_transaction_compiled: bool,
+    installation_enabled: bool,
+    package_transaction_started: bool,
+    manual_repair_required: bool,
+    native_acceptance: bool,
+    candidate: String,
+    version: String,
+    retained_files_verified: u32,
+    tombstone_files_verified: u32,
+    omitted_files_verified: u32,
+    retry_policy: String,
+}
+
+fn setup_completion_response(bytes: &[u8]) -> Result<Outcome, String> {
+    let value: SetupCompletion = serde_json::from_slice(bytes).map_err(|_| {
+        "The Setup cleanup result is unknown. Keep recovery records; do not retry automatically."
+    })?;
+    if value.status != "experimental-transaction-verified"
+        || value.product != "setup"
+        || value.package != "creator-project-setup"
+        || !value.experimental_transaction_compiled
+        || value.installation_enabled
+        || !value.package_transaction_started
+        || value.manual_repair_required
+        || value.native_acceptance
+        || value.version != "0.3.7-1+hub.retention014.1"
+        || value.retained_files_verified != 0
+        || value.tombstone_files_verified != 1
+        || value.omitted_files_verified != 5
+        || !value
+            .candidate
+            .starts_with("/var/lib/creator-hub-deb-retirement-setup/")
+        || value.retry_policy != "attempt marker retained; no automatic retry"
+    {
+        return Err("The helper did not verify the exact Setup retirement notice and omitted GUI files. Keep recovery records; do not retry automatically.".into());
+    }
+    Ok(Outcome::ExperimentalVerified)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     Cancelled,
     ExperimentalVerified,
 }
 
-fn retire_response(code: Option<i32>, output: &Capture) -> Result<Outcome, String> {
+fn retire_response(target: Target, code: Option<i32>, output: &Capture) -> Result<Outcome, String> {
     if code == Some(126) {
         return Ok(Outcome::Cancelled);
     }
     if code == Some(127) {
-        return Err("System authorization was unavailable or refused. No fallback password prompt or automatic retry was opened; check the system package manager before trying again.".into());
+        return Err("System authorization was unavailable or refused. The cleanup record remains pending for manual package-state review even if the original package is still installed. No fallback password prompt or automatic retry was opened; no saved transaction may be replayed.".into());
     }
     if code != Some(0) || output.exceeded {
         return Err("Standalone cleanup did not report a verified completion. A transaction may have started. Keep all settings, backups and retained runtimes; review the system package manager before retrying.".into());
+    }
+    if target == Target::Setup {
+        return setup_completion_response(&output.bytes);
     }
     let value: Completion = serde_json::from_slice(&output.bytes)
         .map_err(|_| "The cleanup result is unknown. Keep retained files and review package state; do not automatically retry.")?;
@@ -297,8 +424,8 @@ mod native {
         })
     }
 
-    fn run(action: Action) -> Result<(Option<i32>, Capture), String> {
-        let mut cmd = command(action);
+    fn run(target: Target, action: Action) -> Result<(Option<i32>, Capture), String> {
+        let mut cmd = command(target, action);
         let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn().map_err(|_| "The migration helper could not start. No fallback or automatic retry was attempted.")?;
         let stdout = child.stdout.take().expect("configured stdout pipe");
@@ -326,31 +453,33 @@ mod native {
 
     /// Opaque image binding from native inspection, never renderer input.
     pub struct Plan {
+        target: Target,
         helper: Image,
         authorization: Image,
     }
 
     impl Plan {
-        fn images() -> Result<Self, String> {
+        fn images(target: Target) -> Result<Self, String> {
             Ok(Self {
+                target,
                 helper: image(Path::new(HELPER), true)?,
                 authorization: image(Path::new(PKEXEC), false)?,
             })
         }
 
-        pub fn inspect() -> Result<Self, String> {
-            let result = Self::images()?;
-            let (code, output) = run(Action::Inspect)?;
+        pub fn inspect(target: Target) -> Result<Self, String> {
+            let result = Self::images(target)?;
+            let (code, output) = run(target, Action::Inspect)?;
             if code != Some(0) || output.exceeded {
-                return Err("The exact MCP DEB baseline could not be verified. No installation was changed.".into());
+                return Err("The exact standalone DEB baseline could not be verified. No installation was changed.".into());
             }
-            inspect_response(&output.bytes)?;
+            inspect_response(target, &output.bytes)?;
             result.recheck_image()?;
             Ok(result)
         }
 
-        pub fn inspect_retained() -> Result<Self, String> {
-            let result = Self::images()?;
+        pub fn inspect_retained(target: Target) -> Result<Self, String> {
+            let result = Self::images(target)?;
             result.verify_retained()?;
             Ok(result)
         }
@@ -366,14 +495,14 @@ mod native {
 
         pub fn recheck_baseline(&self) -> Result<(), String> {
             self.recheck_image()?;
-            let (code, output) = run(Action::Inspect)?;
+            let (code, output) = run(self.target, Action::Inspect)?;
             if code != Some(0) || output.exceeded {
                 return Err(
                     "The reviewed standalone installation changed. Check again before retirement."
                         .into(),
                 );
             }
-            inspect_response(&output.bytes)?;
+            inspect_response(self.target, &output.bytes)?;
             self.recheck_image()
         }
 
@@ -381,8 +510,8 @@ mod native {
         /// closed GUI state and native approval. This makes one polkit attempt only.
         pub fn retire_after_native_review(&self) -> Result<Outcome, String> {
             self.recheck_baseline()?;
-            let (code, output) = run(Action::Retire)?;
-            let outcome = retire_response(code, &output)?;
+            let (code, output) = run(self.target, Action::Retire)?;
+            let outcome = retire_response(self.target, code, &output)?;
             self.recheck_image().map_err(|_| "Helper image changed during cleanup. Completion is unknown; inspect package state before retrying.")?;
             if outcome == Outcome::ExperimentalVerified {
                 self.verify_retained()?;
@@ -392,11 +521,11 @@ mod native {
 
         pub fn verify_retained(&self) -> Result<(), String> {
             self.recheck_image()?;
-            let (code, output) = run(Action::InspectRetained)?;
+            let (code, output) = run(self.target, Action::InspectRetained)?;
             if code != Some(0) || output.exceeded {
                 return Err("The helper could not independently verify the retained package after cleanup. Keep recovery records and inspect package state; no automatic retry was attempted.".into());
             }
-            retained_response(&output.bytes)?;
+            retained_response(self.target, &output.bytes)?;
             self.recheck_image()
         }
     }
@@ -433,7 +562,7 @@ mod tests {
     #[test]
     fn commands_are_finite_with_no_shell_path_password_or_environment_input() {
         for action in [Action::Inspect, Action::InspectRetained, Action::Retire] {
-            let cmd = command(action);
+            let cmd = command(Target::Mcp, action);
             assert_eq!(cmd.get_current_dir(), Some(std::path::Path::new("/")));
             assert_eq!(cmd.get_envs().count(), 3);
             if action != Action::Retire {
@@ -472,8 +601,8 @@ mod tests {
             "compatibilityMatches":true, "snapshotAuthoritative":false, "installationEnabled":false,
             "experimentalTransactionCompiled":true, "packageTransactionStarted":false,
             "nativeAcceptance":false, "retainedFilesVerified":9, "omittedFilesVerified":5});
-        retained_response(&serde_json::to_vec(&data).unwrap()).unwrap();
-        assert!(retained_response(&completion().bytes).is_err());
+        retained_response(Target::Mcp, &serde_json::to_vec(&data).unwrap()).unwrap();
+        assert!(retained_response(Target::Mcp, &completion().bytes).is_err());
         for (field, value) in [
             ("packageTransactionStarted", serde_json::json!(true)),
             ("readOnly", serde_json::json!(false)),
@@ -483,13 +612,13 @@ mod tests {
         ] {
             let mut bad = data.clone();
             bad[field] = value;
-            assert!(retained_response(&serde_json::to_vec(&bad).unwrap()).is_err());
+            assert!(retained_response(Target::Mcp, &serde_json::to_vec(&bad).unwrap()).is_err());
         }
     }
 
     #[test]
     fn only_exact_read_only_experimental_baseline_is_usable() {
-        inspect_response(&serde_json::to_vec(&inspection()).unwrap()).unwrap();
+        inspect_response(Target::Mcp, &serde_json::to_vec(&inspection()).unwrap()).unwrap();
         for (field, value) in [
             ("installationEnabled", true),
             ("snapshotAuthoritative", true),
@@ -500,34 +629,37 @@ mod tests {
         ] {
             let mut data = inspection();
             data[field] = value.into();
-            assert!(inspect_response(&serde_json::to_vec(&data).unwrap()).is_err());
+            assert!(inspect_response(Target::Mcp, &serde_json::to_vec(&data).unwrap()).is_err());
         }
         let mut data = inspection();
         data["unexpected"] = true.into();
-        assert!(inspect_response(&serde_json::to_vec(&data).unwrap()).is_err());
-        assert!(inspect_response(b"{\"status\":\"inspected-read-only\"}").is_err());
-        assert!(inspect_response(b"{\"status\":\"x\",\"status\":\"x\"}").is_err());
+        assert!(inspect_response(Target::Mcp, &serde_json::to_vec(&data).unwrap()).is_err());
+        assert!(inspect_response(Target::Mcp, b"{\"status\":\"inspected-read-only\"}").is_err());
+        assert!(inspect_response(Target::Mcp, b"{\"status\":\"x\",\"status\":\"x\"}").is_err());
     }
 
     #[test]
     fn cancellation_authorization_and_unknown_transaction_are_not_conflated() {
         let mut output = completion();
         assert_eq!(
-            retire_response(Some(0), &output).unwrap(),
+            retire_response(Target::Mcp, Some(0), &output).unwrap(),
             Outcome::ExperimentalVerified
         );
         assert_eq!(
-            retire_response(Some(126), &output).unwrap(),
+            retire_response(Target::Mcp, Some(126), &output).unwrap(),
             Outcome::Cancelled
         );
-        assert!(retire_response(Some(127), &output)
-            .unwrap_err()
-            .contains("authorization"));
+        for target in [Target::Mcp, Target::Setup] {
+            let error = retire_response(target, Some(127), &output).unwrap_err();
+            assert!(error.contains("authorization"));
+            assert!(error.contains("pending for manual package-state review"));
+            assert!(error.contains("even if the original package is still installed"));
+        }
         for code in [None, Some(1), Some(2), Some(-1)] {
-            assert!(retire_response(code, &output).is_err());
+            assert!(retire_response(Target::Mcp, code, &output).is_err());
         }
         output.exceeded = true;
-        assert!(retire_response(Some(0), &output).is_err());
+        assert!(retire_response(Target::Mcp, Some(0), &output).is_err());
     }
 
     #[test]
@@ -547,7 +679,179 @@ mod tests {
             let mut data: serde_json::Value = serde_json::from_slice(&output.bytes).unwrap();
             data[field] = value;
             output.bytes = serde_json::to_vec(&data).unwrap();
-            assert!(retire_response(Some(0), &output).is_err(), "{field}");
+            assert!(
+                retire_response(Target::Mcp, Some(0), &output).is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    fn setup_inspection(retained: bool) -> serde_json::Value {
+        serde_json::json!({"status": if retained { "inspected-retained-read-only" } else { "inspected-read-only" },
+            "product":"setup", "package":"creator-project-setup",
+            "packageState": if retained { "compatibility" } else { "original" },
+            "version": if retained { "0.3.7-1+hub.retention014.1" } else { "0.3.7" },
+            "readOnly":true, "baselineMatches":!retained, "compatibilityMatches":retained,
+            "snapshotAuthoritative":false, "installationEnabled":false,
+            "experimentalTransactionCompiled":true, "packageTransactionStarted":false,
+            "nativeAcceptance":false, "tombstoneFilesVerified":u32::from(retained),
+            "omittedFilesVerified":if retained { 5 } else { 0 }})
+    }
+
+    fn setup_completion() -> Capture {
+        let mut value: serde_json::Value = serde_json::from_slice(&completion().bytes).unwrap();
+        value["product"] = serde_json::json!("setup");
+        value["package"] = serde_json::json!("creator-project-setup");
+        value["version"] = serde_json::json!("0.3.7-1+hub.retention014.1");
+        value["retainedFilesVerified"] = serde_json::json!(0);
+        value["tombstoneFilesVerified"] = serde_json::json!(1);
+        value["candidate"] = serde_json::json!(
+            "/var/lib/creator-hub-deb-retirement-setup/fixture/gui-tombstone.deb"
+        );
+        Capture {
+            bytes: serde_json::to_vec(&value).unwrap(),
+            exceeded: false,
+        }
+    }
+
+    #[test]
+    fn setup_dispatch_uses_only_its_three_fixed_commands() {
+        for (action, argument) in [
+            (Action::Inspect, "inspect-setup-0.3.7"),
+            (Action::InspectRetained, "inspect-retained-setup-0.3.7"),
+            (Action::Retire, "retire-setup-0.3.7"),
+        ] {
+            let cmd = command(Target::Setup, action);
+            assert_eq!(cmd.get_current_dir(), Some(std::path::Path::new("/")));
+            assert_eq!(cmd.get_envs().count(), 3);
+            if action == Action::Retire {
+                assert_eq!(cmd.get_program(), PKEXEC);
+                assert_eq!(
+                    cmd.get_args().collect::<Vec<_>>(),
+                    ["--disable-internal-agent", HELPER, argument]
+                );
+            } else {
+                assert_eq!(cmd.get_program(), HELPER);
+                assert_eq!(cmd.get_args().collect::<Vec<_>>(), [argument]);
+            }
+        }
+    }
+
+    #[test]
+    fn setup_inspection_requires_exact_identity_version_notice_counts_and_phase() {
+        for retained in [false, true] {
+            let data = setup_inspection(retained);
+            setup_inspection_response(&serde_json::to_vec(&data).unwrap(), retained).unwrap();
+            assert!(
+                setup_inspection_response(&serde_json::to_vec(&data).unwrap(), !retained).is_err()
+            );
+            for (field, value) in [
+                ("product", serde_json::json!("mcp")),
+                ("package", serde_json::json!("creator-works-mcp")),
+                ("packageState", serde_json::json!("absent")),
+                ("version", serde_json::json!("0.3.8")),
+                ("readOnly", serde_json::json!(false)),
+                ("baselineMatches", serde_json::json!(retained)),
+                ("compatibilityMatches", serde_json::json!(!retained)),
+                ("snapshotAuthoritative", serde_json::json!(true)),
+                ("installationEnabled", serde_json::json!(true)),
+                ("experimentalTransactionCompiled", serde_json::json!(false)),
+                ("packageTransactionStarted", serde_json::json!(true)),
+                ("nativeAcceptance", serde_json::json!(true)),
+                ("tombstoneFilesVerified", serde_json::json!(2)),
+                ("omittedFilesVerified", serde_json::json!(4)),
+                ("retainedFilesVerified", serde_json::json!(0)),
+                ("unexpected", serde_json::json!(true)),
+            ] {
+                let mut bad = data.clone();
+                bad[field] = value;
+                assert!(
+                    setup_inspection_response(&serde_json::to_vec(&bad).unwrap(), retained)
+                        .is_err(),
+                    "{field}"
+                );
+            }
+            for field in data.as_object().unwrap().keys() {
+                let mut bad = data.clone();
+                bad.as_object_mut().unwrap().remove(field);
+                assert!(
+                    setup_inspection_response(&serde_json::to_vec(&bad).unwrap(), retained)
+                        .is_err(),
+                    "missing {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn product_and_phase_protocols_cannot_be_substituted() {
+        let setup = serde_json::to_vec(&setup_inspection(false)).unwrap();
+        inspect_response(Target::Setup, &setup).unwrap();
+        assert!(inspect_response(Target::Mcp, &setup).is_err());
+        assert!(
+            inspect_response(Target::Setup, &serde_json::to_vec(&inspection()).unwrap()).is_err()
+        );
+        let retained = serde_json::to_vec(&setup_inspection(true)).unwrap();
+        retained_response(Target::Setup, &retained).unwrap();
+        assert!(retained_response(Target::Mcp, &retained).is_err());
+        assert!(retained_response(Target::Setup, &setup_completion().bytes).is_err());
+        assert!(retire_response(Target::Setup, Some(0), &completion()).is_err());
+        assert!(retire_response(Target::Mcp, Some(0), &setup_completion()).is_err());
+    }
+
+    #[test]
+    fn setup_completion_requires_zero_runtime_one_notice_and_five_omissions() {
+        let output = setup_completion();
+        assert_eq!(
+            retire_response(Target::Setup, Some(0), &output).unwrap(),
+            Outcome::ExperimentalVerified
+        );
+        assert_eq!(
+            retire_response(Target::Setup, Some(126), &output).unwrap(),
+            Outcome::Cancelled
+        );
+        for code in [None, Some(1), Some(127)] {
+            assert!(retire_response(Target::Setup, code, &output).is_err());
+        }
+        let data: serde_json::Value = serde_json::from_slice(&output.bytes).unwrap();
+        for (field, value) in [
+            ("status", serde_json::json!("refused")),
+            ("product", serde_json::json!("mcp")),
+            ("package", serde_json::json!("creator-works-mcp")),
+            ("version", serde_json::json!("0.3.7")),
+            ("retainedFilesVerified", serde_json::json!(9)),
+            ("tombstoneFilesVerified", serde_json::json!(0)),
+            ("omittedFilesVerified", serde_json::json!(4)),
+            (
+                "candidate",
+                serde_json::json!("/var/lib/creator-hub-deb-retirement/fixture/runtime-only.deb"),
+            ),
+            ("experimentalTransactionCompiled", serde_json::json!(false)),
+            ("manualRepairRequired", serde_json::json!(true)),
+            ("installationEnabled", serde_json::json!(true)),
+            ("nativeAcceptance", serde_json::json!(true)),
+            ("packageTransactionStarted", serde_json::json!(false)),
+            ("retryPolicy", serde_json::json!("retry")),
+            ("unexpected", serde_json::json!(true)),
+        ] {
+            let mut bad = data.clone();
+            bad[field] = value;
+            let bad = Capture {
+                bytes: serde_json::to_vec(&bad).unwrap(),
+                exceeded: false,
+            };
+            assert!(
+                retire_response(Target::Setup, Some(0), &bad).is_err(),
+                "{field}"
+            );
+        }
+        for field in data.as_object().unwrap().keys() {
+            let mut bad = data.clone();
+            bad.as_object_mut().unwrap().remove(field);
+            assert!(
+                setup_completion_response(&serde_json::to_vec(&bad).unwrap()).is_err(),
+                "missing {field}"
+            );
         }
     }
 }
