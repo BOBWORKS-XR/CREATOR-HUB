@@ -153,6 +153,24 @@ caller identity, real settings migration, Unity, update origin or acceptance.
 
 ## Remaining Integration Dependency
 
+Read-only source review of Flatpak 1.18.4 established a possible next bounded
+transport experiment: a native foreground launcher can pass private inherited
+file descriptors through `flatpak run`, selecting exact installed app/runtime
+commits and an explicit installation. There is no `flatpak run --forward-fd`
+option; that belongs to `flatpak-spawn`. See upstream's
+[FD passthrough test](https://github.com/flatpak/flatpak/blob/a02d0ba48abe9aacc377de15699e5d8c024b5669/tests/test-run.sh#L98)
+and [launch implementation](https://github.com/flatpak/flatpak/blob/a02d0ba48abe9aacc377de15699e5d8c024b5669/common/flatpak-run.c#L4055).
+
+That is not caller authentication. A socketpair's initial `SO_PEERCRED` identifies
+its creator, not a later sandbox writer. A synthetic-only next proof should bind
+per-message kernel credentials, the owned launch tree, live process identity,
+deployment/runtime and effective permissions before any settings observation is
+exposed. The instance ID arrives before app execution and is not readiness.
+Read-only `/app` and a commit label also do not attest immutable bytes against
+host-side tampering. Actual Hub inherited-FD handling and single-instance
+redirection remain untested. No bootstrap, transport, permissions or reader
+exposure was added by this review.
+
 Parent review must choose an authenticated native bootstrap/transport and
 independently bind the actual live sandbox caller before settings data or even
 this diagnostic inventory is exposed to Flatpak. The filtered-bus proxy PID,

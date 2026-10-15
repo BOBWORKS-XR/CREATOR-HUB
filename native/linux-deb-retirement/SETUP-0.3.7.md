@@ -38,14 +38,21 @@ Native diagnostic 38754932346 verified dpkg's unchanged minimized-Ubuntu
 after an otherwise healthy transaction. Required transition state now lives at
 `/usr/share/creator-project-setup/retired-by-creator-hub.txt`, not in optional
 documentation. Its bytes, hash and mode are unchanged. No distro policy is
-rewritten or overridden. This change still needs a new native transaction pass;
-the earlier failed transaction remains retained with its attempt marker.
+rewritten or overridden. Native run 38755581264 subsequently passed both MCP and
+Setup transactions with the new destination, the same live SDK connection,
+byte-identical settings sentinels and complete protected diagnostics. See
+[the scoped receipt](../../docs/evidence/linux-deb-helper-mechanism-38755581264.json).
+This is sudo mechanism proof, not Hub approval, polkit, GUI close or complete
+migration acceptance. The earlier failed transaction remains retained with its
+attempt marker; no failed transaction was repaired or replayed.
 
 Next measured gate, after review: disposable positive MCP plus Setup with the
 original public DEBs, both post-inspects and complete protected logs; negatives
 for changed files/foreign ownership, pre-existing notice/user-data sentinel,
 repeat and interruption. Capture settings/project/cache hashes before/after.
-No native run, package installation or acceptance was performed for this change.
+No native run or package installation was performed at the initial source-only
+checkpoint. The later, explicitly scoped native result above supersedes that
+checkpoint without qualifying the remaining negative/full-flow gates.
 
 `inspect-retained-mcp-2.7.7` is a separate read-only postcheck: it independently
 validates the existing fixed MCP compatibility state and paths, without using
