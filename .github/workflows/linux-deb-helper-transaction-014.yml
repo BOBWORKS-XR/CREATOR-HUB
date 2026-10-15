@@ -84,6 +84,7 @@ jobs:
       - name: Capture fixed parent lstat and installed dpkg version without privilege before Cargo
         run: python3 -B scripts/linux-deb-helper-transaction-probe.py metadata-diagnostic
       - name: Read-only native metadata and helper regression gate before package installation
+        # Includes exact root-directory admission used by Setup absence checks.
         run: |
           cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml
           cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --features experimental-transaction

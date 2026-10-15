@@ -64,6 +64,12 @@ fn open(path: &Path, flags: i32) -> Result<File> {
     let mut dir = unsafe { File::from_raw_fd(fd) };
     protected(&dir.metadata()?, true)?;
     let parts = path.components().skip(1).collect::<Vec<_>>();
+    if parts.is_empty()
+        && path.as_os_str().as_bytes() == b"/"
+        && flags == (libc::O_PATH | libc::O_DIRECTORY)
+    {
+        return Ok(dir);
+    }
     require(!parts.is_empty(), "File path required")?;
     for (index, component) in parts.iter().enumerate() {
         let Component::Normal(part) = component else {
@@ -689,6 +695,18 @@ pub fn run(action: Action) -> Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_root_directory_is_admitted_but_root_file_or_noncanonical_path_is_not() {
+        let file = directory(Path::new("/")).unwrap();
+        let opened = file.metadata().unwrap();
+        let named = fs::symlink_metadata("/").unwrap();
+        assert_eq!((opened.dev(), opened.ino()), (named.dev(), named.ino()));
+        protected(&opened, true).unwrap();
+        assert!(open(Path::new("/"), libc::O_RDONLY).is_err());
+        assert!(open(Path::new("/"), libc::O_PATH).is_err());
+        assert!(directory(Path::new("/./")).is_err());
+    }
     #[test]
     fn posix_locks_conflict_across_processes_without_touching_system_locks() {
         let temp = tempfile::NamedTempFile::new().unwrap();
