@@ -14,19 +14,20 @@ const { applications, updaterManifest } = require('./release-descriptor.cjs');
 const ROOT = path.resolve(__dirname, '..');
 const FROM = '0.1.14', TO = '0.1.15', META = 128 * 1024, MAX = 512 * 1024 * 1024;
 const VERSION_SOURCE_LIMIT = 1024 * 1024;
+const BUILD_LOG_TAIL = 64 * 1024;
 const VERSIONS = ['package.json', 'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock'];
 const BASELINE = Object.freeze({
-  directory: 'artifacts/unified/unified-014-repeat-20261014-03',
-  commit: 'a914bb96abaca8837f586c25c341d24fe58fe73d', tree: '041a2dc95abbd99dc4619df8c033132275789fd7',
+  directory: 'artifacts/unified/windows-014-release-b05-20261015',
+  commit: 'db862739d01088ba9be335d0522f8f129222a48b', tree: '2c2e16053bdd2c9b6fa9301992324c44465757f8',
   hashes: {
-    'builtin-manifest.json': '2dff1bf72723703afb8e0fd66e17b4af3b6510675c042bc9a4fb08f75f6c9464',
-    'creator-hub.exe': 'a7ca6d37711eeb937d8c018e7971ccf10708c64f5c69436b40ace4ad3c920dff',
-    'installer.exe': 'edc47ecca5e80ce950d5b8ecf6bb32c46fa531e163b9d6ab7722b143a02a4e7a',
-    'installer-extracted/creator-hub.exe': 'dd74917a67e360a479158d81149a385ad813da9213661959928543a8f366dfca',
-    'installer-checksum.json': '6711ec4b70df554bb79f3f47de5f2290dfde5605b8aa7a33e16f01602a87ca94',
-    'mcp-runtime.json': '68e32d4c1afe42e66756dbbecd9306c41442584780bf3e1f41355d8b6f1b0d19',
-    'modules/routing/router.json.sig': 'fe26177fba3a4168972e6da65238b178a19935a2c6617a70d2fe033969d58b84',
-    'modules/routing/runtime.json.sig': '846ca909afbdc85f30785c1ec5f1ccb8688504edfddcc2b2bf23dda1ec321e83',
+    'builtin-manifest.json': '6be984c3358ce956154ecf6aa38532320e0be2765d54285a12183319121bb4cb',
+    'creator-hub.exe': 'cb09ca8249869315fc250bce2bb00933b93f7516054dbef3f85da94b37096e3f',
+    'installer.exe': '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157',
+    'installer-extracted/creator-hub.exe': 'cd5e3fd2829727d06444c0f3266b178798d1b55c63df651be12eb38ac4523a86',
+    'installer-checksum.json': '9ee05a11973b86facc2e789f60d24325d6525a77bc8504778329bd35abbf6906',
+    'mcp-runtime.json': '1b78bb735b41df55ea90ff59e72b41c410ff04115edcd88fcdc9d63878503e04',
+    'modules/routing/router.json.sig': 'bfeb49d84c8e200ca5625726d6c0649754cde414278fd44d2fb4b931a40f5fd5',
+    'modules/routing/runtime.json.sig': 'cf0229af40d8bedbb4d0ce6736b4cd8b0e2403525379ee166c178e5723a5628f',
   },
 });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -105,6 +106,36 @@ function compileEnvironment(env, descriptor, target) {
   return { ...clean, CREATOR_BUILTIN_MANIFEST: descriptor, CARGO_TARGET_DIR: target,
     CREATOR_MCP_HOST_WRITABLE: '1', CREATOR_MCP_HOST_READONLY_EVENTS: '1' };
 }
+function fixtureCache(root) {
+  const target = path.join(root, 'src-tauri/target'), bundle = path.join(target, 'release/bundle/nsis');
+  absolute(target); assert.ok(fs.lstatSync(target).isDirectory(), 'Existing canonical Root cache required');
+  absolute(bundle);
+  try {
+    assert.ok(!fs.readdirSync(bundle).some(name => name.toLowerCase().endsWith(`_${TO}_x64-setup.exe`)),
+      'Existing outer-only 15 NSIS output refused; preserve it and review before another build');
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  return target;
+}
+function compileOuterHub(root, source, overlay, env, output, execute = execFileSync) {
+  try {
+    execute(process.execPath, [path.join(root, 'node_modules/@tauri-apps/cli/tauri.js'), 'build', '--bundles', 'nsis', '--config', overlay, '--', '--locked'],
+      { cwd: source, env, encoding: 'utf8', windowsHide: true, timeout: 1800000, maxBuffer: 4 * 1024 * 1024 });
+  } catch (error) {
+    // Only this build child's streams are evidence. Never serialize a general/signing error.
+    const tail = value => {
+      const data = Buffer.isBuffer(value) ? value : typeof value === 'string' ? Buffer.from(value) : Buffer.alloc(0);
+      return { capturedBytes: data.length, tailTruncated: data.length > BUILD_LOG_TAIL,
+        tail: data.subarray(Math.max(0, data.length - BUILD_LOG_TAIL)).toString('utf8') };
+    };
+    const file = path.join(output, 'outer-hub-build-failure.json'); absolute(file);
+    fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, phase: 'outer-hub-build',
+      status: Number.isSafeInteger(error?.status) ? error.status : null,
+      signal: ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGBREAK', 'SIGSEGV'].includes(error?.signal) ? error.signal : null,
+      captureLimitExceeded: error?.code === 'ENOBUFS', stdout: tail(error?.stdout), stderr: tail(error?.stderr) }, null, 2),
+    { flag: 'wx', mode: 0o600 });
+    throw Error('Outer Hub build failed; bounded build-only diagnostics retained.');
+  }
+}
 function buildFixture(label, services = {}) {
   const root = services.root || ROOT, env = services.env || process.env;
   const execute = services.execute || execFileSync, approved = services.signer || routing;
@@ -116,6 +147,7 @@ function buildFixture(label, services = {}) {
   absolute(root);
   const input = path.join(root, baseline.directory), output = path.join(root, 'artifacts/outer-update-fixture', label);
   absolute(input); absolute(output); assert.equal(fs.existsSync(output), false, 'Fixture output is immutable');
+  const cache = fixtureCache(root);
   const canonicalVersions = Object.fromEntries(VERSIONS.map(name => [name, capture(path.join(root, name), VERSION_SOURCE_LIMIT)]));
   const original = Object.fromEntries(Object.entries(baseline.hashes).map(([name, sha256]) => {
     const record = capture(path.join(input, name), name.endsWith('.exe') ? MAX : META);
@@ -151,6 +183,7 @@ function buildFixture(label, services = {}) {
     return [name, { file, record: capture(file, 256 * 1024 * 1024, true) }];
   }));
   function recheck() {
+    absolute(cache);
     for (const [name, record] of Object.entries(original)) unchanged(path.join(input, name), record);
     for (const [name, record] of Object.entries(boundFiles)) unchanged(path.join(input, 'modules', name), record);
     for (const [name, record] of Object.entries(canonicalVersions)) unchanged(path.join(root, name), record);
@@ -199,6 +232,7 @@ function buildFixture(label, services = {}) {
     const signedDir = path.join(output, 'signed'); fs.mkdirSync(signedDir);
     let sequence = 0;
     phase = 'routing-sign'; recheck(); checkSource(source, entries, changes);
+    assert.equal(fixtureCache(root), cache);
     const key = approved.signingKey(root);
     function sign(file) {
       assert.ok(authorized.has(file), 'Only exact fixture bodies may be signed'); recheck();
@@ -219,10 +253,11 @@ function buildFixture(label, services = {}) {
     const overlay = path.join(output, 'tauri-outer-fixture.json');
     fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources: Object.fromEntries(Object.keys(allFiles(finalManifest))
       .map(n => [path.join(payload, 'modules', n), `modules/${n}`])) } }), { flag: 'wx' });
-    const buildEnv = compileEnvironment(env, descriptor, path.join(output, 'hub-target'));
+    const buildEnv = compileEnvironment(env, descriptor, cache);
     phase = 'outer-hub-build';
-    run(process.execPath, [path.join(root, 'node_modules/@tauri-apps/cli/tauri.js'), 'build', '--bundles', 'nsis', '--config', overlay, '--', '--locked'],
-      { cwd: source, env: buildEnv, timeout: 1800000, maxBuffer: 4 * 1024 * 1024 });
+    recheck();
+    compileOuterHub(root, source, overlay, buildEnv, output, execute);
+    recheck();
     checkSource(source, entries, changes); unchanged(descriptor, descriptorRecord);
     verifyStage(path.join(payload, 'modules'), finalManifest); inventory(path.join(payload, 'modules'), Object.keys(allFiles(finalManifest)));
     for (const [name, record] of Object.entries(privateFiles)) unchanged(path.join(payload, 'modules', name), record);
@@ -274,7 +309,8 @@ function buildFixture(label, services = {}) {
     return { output, signedDirectory: signedDir, ...receipt };
   } catch { throw Error(`Acceptance fixture failed at ${phase}. Partial owned evidence retained; no update/restoration acceptance established.`); }
 }
-module.exports = { BASELINE, VERSIONS, FROM, TO, bumpRootVersion, sourceEntries, compileEnvironment, buildFixture };
+module.exports = { BASELINE, VERSIONS, FROM, TO, BUILD_LOG_TAIL, bumpRootVersion, sourceEntries, compileEnvironment,
+  fixtureCache, compileOuterHub, buildFixture };
 if (require.main === module) {
   try {
     assert.equal(process.argv.length, 4, 'Use LABEL --acceptance-only with CREATOR_OUTER_UPDATE_FIXTURE=1');
