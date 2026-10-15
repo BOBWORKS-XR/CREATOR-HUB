@@ -244,21 +244,21 @@ test('baseline assertion cannot accept fixture installer/executable bytes or cha
   assert.deepEqual(lab.baselineFor('0.1.13'), before);
 });
 
-test('fixed outgoing factory uses actual accepted B03 14 while the public factory remains pinned to 12', () => {
+test('fixed outgoing factory uses actual accepted B05 14 while the public factory remains pinned to 12', () => {
   const contract = lab.createUnifiedOutgoingContract(outgoingInput());
   assert.equal(contract.targetVersion, '0.1.15');
   assert.deepEqual(contract.baseline, { version: '0.1.14',
-    installer: 'edc47ecca5e80ce950d5b8ecf6bb32c46fa531e163b9d6ab7722b143a02a4e7a',
-    exe: 'dd74917a67e360a479158d81149a385ad813da9213661959928543a8f366dfca' });
+    installer: '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157',
+    exe: 'cd5e3fd2829727d06444c0f3266b178798d1b55c63df651be12eb38ac4523a86' });
   assert.ok(Object.isFrozen(contract.baseline) && Object.isFrozen(contract.actualScope));
   assert.equal(lab.createContract(input(fixture('0.1.15'))).baseline.version, '0.1.12');
   assert.equal(lab.baselineFor('0.1.15').version, '0.1.12');
   assert.throws(() => lab.createContract(outgoingInput()), /intermediate Hub/);
   assert.throws(() => lab.assertUnifiedOutgoingBaselineBytes(Buffer.from('B02'), Buffer.from('version-masquerade')),
-    /Exact accepted B03/);
+    /Exact accepted B05/);
   const report = lab.labReport(contract, lab.newState());
   assert.equal(report.actualScope.kind, 'unified-outgoing-14-15');
-  assert.equal(report.actualScope.baseline, 'accepted-unmodified-unified-0.1.14-B03');
+  assert.equal(report.actualScope.baseline, 'accepted-unmodified-unified-0.1.14-B05');
   for (const field of ['publicDiscovery', 'liveAiAcceptance', 'productAcceptance', 'releaseReady']) {
     assert.equal(report.actualScope[field], false);
   }

@@ -3,7 +3,7 @@
 // descriptorSignature,installer,manifest,executable}}. Paths are absolute;
 // pins must come from external review of already-signed, immutable inputs.
 // The VM caller owns temporary Windows trust/proxy setup and its recovery.
-// Native callers separately bind public12 or accepted B03 with the matching
+// Native callers separately bind public12 or accepted B05 with the matching
 // baseline assertion. Neither contract factory accepts a baseline override.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -20,10 +20,10 @@ const LIMITS = Object.freeze({ feed: 256 * 1024, metadata: 32 * 1024, signature:
   installer: 512 * 1024 * 1024, headers: 8192, connections: 16, requests: 128,
   idleMs: 30000, durationMs: 600000, servedBytes: 1025 * 1024 * 1024 });
 const UNIFIED_OUTGOING_BASELINE = Object.freeze({ version: '0.1.14',
-  installer: 'edc47ecca5e80ce950d5b8ecf6bb32c46fa531e163b9d6ab7722b143a02a4e7a',
-  exe: 'dd74917a67e360a479158d81149a385ad813da9213661959928543a8f366dfca' });
+  installer: '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157',
+  exe: 'cd5e3fd2829727d06444c0f3266b178798d1b55c63df651be12eb38ac4523a86' });
 const UNIFIED_OUTGOING_SCOPE = Object.freeze({ kind: 'unified-outgoing-14-15',
-  baseline: 'accepted-unmodified-unified-0.1.14-B03', target: 'outer-only-0.1.15-acceptance-fixture',
+  baseline: 'accepted-unmodified-unified-0.1.14-B05', target: 'outer-only-0.1.15-acceptance-fixture',
   labDiscovery: true, publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false, releaseReady: false });
 const contracts = new WeakMap();
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -189,9 +189,9 @@ function assertBaselineBytes(targetVersion, installer, executable) {
 
 function assertUnifiedOutgoingBaselineBytes(installer, executable) {
   assert.equal(hash(bounded(installer, LIMITS.installer, 'Baseline installer')), UNIFIED_OUTGOING_BASELINE.installer,
-    'Exact accepted B03 0.1.14 baseline installer required');
+    'Exact accepted B05 0.1.14 baseline installer required');
   assert.equal(hash(bounded(executable, LIMITS.installer, 'Baseline executable')), UNIFIED_OUTGOING_BASELINE.exe,
-    'Exact installed B03 0.1.14 baseline executable required; no version masquerade');
+    'Exact installed B05 0.1.14 baseline executable required; no version masquerade');
   return UNIFIED_OUTGOING_BASELINE;
 }
 

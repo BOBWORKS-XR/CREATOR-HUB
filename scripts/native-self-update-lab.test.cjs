@@ -196,7 +196,7 @@ test('scenario allowlist preserves public-stable default and uses only the fixed
   assert.ok(check < source.indexOf('$rootStore.Add($publicRoot)'));
   assert.doesNotMatch(source.slice(0, source.indexOf('$ErrorActionPreference')), /\$(?:DriverPath|FeedPath|ChildExecutable|ChildArgument)/);
   assert.match(source, /actualScope=\$actualScope; liveAiAcceptance=\$false; productAcceptance=\$false/);
-  assert.match(source, /accepted-unmodified-B03-0\.1\.14-to-outer-only-0\.1\.15-fixture-lab-only/);
+  assert.match(source, /accepted-unmodified-B05-0\.1\.14-to-outer-only-0\.1\.15-fixture-lab-only/);
 });
 
 test('both literal scenarios still refuse local execution before files, processes or trust', { skip: !hasPwsh }, () => {
@@ -218,12 +218,17 @@ test('dedicated outgoing workflow freezes one private ZIP and separates write-to
   const execution = outgoingWorkflow.slice(outgoingWorkflow.indexOf('  outgoing-lab:'));
   assert.match(staging, /permissions:\r?\n      contents: write/);
   assert.match(staging, /releases\/411494394/);
-  assert.match(staging, /id -ne 641402829/);
-  assert.match(staging, /outgoing-lab-reviewed-a914bb9-20261014\.zip/);
-  assert.match(staging, /size -ne 76991135/);
-  assert.match(staging, /digest -cne 'sha256:aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a'/);
-  assert.match(staging, /releases\/assets\/641402829/);
-  assert.match(staging, /Get-FileHash.*aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a/);
+  assert.match(staging, /id -ne 642125160/);
+  assert.match(staging, /outgoing-windows-b05-db86273-20261015\.zip/);
+  assert.match(staging, /size -ne 73019589/);
+  assert.match(staging, /digest -cne 'sha256:a905a8f168fc9f3fe74cacf36dbbf7c6a90eccc69addf3abf08ebec6ad24e677'/);
+  assert.match(staging, /releases\/assets\/642125160/);
+  assert.match(staging, /Get-FileHash.*a905a8f168fc9f3fe74cacf36dbbf7c6a90eccc69addf3abf08ebec6ad24e677/);
+  assert.equal((outgoingWorkflow.match(/642125160/g) || []).length, 2);
+  assert.equal((outgoingWorkflow.match(/73019589/g) || []).length, 3);
+  assert.equal((outgoingWorkflow.match(/a905a8f168fc9f3fe74cacf36dbbf7c6a90eccc69addf3abf08ebec6ad24e677/g) || []).length, 5);
+  assert.doesNotMatch(outgoingWorkflow, /B03|a914bb9|641402829|76991135|aafe6f60/);
+  assert.match(outgoingWorkflow, /unified-outgoing-B05-14-15-/);
   assert.doesNotMatch(staging, /checkout|setup-node|node |npm |cargo |Expand-Archive|ExtractToFile|Process\]::Start|Get-Content|\.ps1|release.*(?:edit|upload)|secrets\./);
   assert.match(execution, /permissions:\r?\n      contents: read/);
   assert.match(execution, /persist-credentials: false/);
@@ -290,17 +295,17 @@ test('pure seven-entry archive guard refuses extras, aliases, duplicate, link, d
   assert.equal(result, 'exact-bounded-regular-seven-only');
 });
 
-test('mock outgoing baseline accepts B03 only, never public12/B02/masquerade or malformed files', { skip: !hasPwsh }, () => {
+test('mock outgoing baseline accepts B05 only, never public12/B02/B03/masquerade or malformed files', { skip: !hasPwsh }, () => {
   const pin = require('./self-update-lab-feed.cjs').UNIFIED_OUTGOING_BASELINE.installer;
   assert.ok(source.includes(`$pin = '${pin}'`));
   const output = isolatedFunctions(['Resolve-UnifiedOutgoingLabBaseline'], `
     $script:pin='${pin}'; $script:bytes=1234; $script:hashCalls=0;
-    function Resolve-LabFile($Path) { if ($Path -cne 'C:\\reviewed\\B03-installer.exe') { throw 'Invalid input' }; return $Path }
+    function Resolve-LabFile($Path) { if ($Path -cne 'C:\\reviewed\\B05-installer.exe') { throw 'Invalid input' }; return $Path }
     function Get-Item { param($LiteralPath); return @{Length=$script:bytes} }
     function Get-FileHash { param($LiteralPath,$Algorithm); if ($Algorithm -cne 'SHA256') { throw 'Wrong algorithm' }; $script:hashCalls++; return @{Hash=$script:pin.ToUpperInvariant()} }
-    $path='C:\\reviewed\\B03-installer.exe';
-    if ((Resolve-UnifiedOutgoingLabBaseline $path) -cne $path -or $script:hashCalls -ne 1) { throw 'B03 not checked' }
-    foreach ($badPin in @('0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18','b3a42b8d67ef94edefa9cefa9e3791a196febb9d88a2163d38dcfed49c09c13d','a' * 64)) {
+    $path='C:\\reviewed\\B05-installer.exe';
+    if ((Resolve-UnifiedOutgoingLabBaseline $path) -cne $path -or $script:hashCalls -ne 1) { throw 'B05 not checked' }
+    foreach ($badPin in @('0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18','b3a42b8d67ef94edefa9cefa9e3791a196febb9d88a2163d38dcfed49c09c13d','edc47ecca5e80ce950d5b8ecf6bb32c46fa531e163b9d6ab7722b143a02a4e7a','a' * 64)) {
       $script:pin=$badPin; $refused=$false; try { [void](Resolve-UnifiedOutgoingLabBaseline $path) } catch { $refused=$true };
       if (-not $refused) { throw 'Foreign baseline accepted' }
     }
@@ -308,8 +313,8 @@ test('mock outgoing baseline accepts B03 only, never public12/B02/masquerade or 
       $script:bytes=$length; $before=$script:hashCalls; $refused=$false; try { [void](Resolve-UnifiedOutgoingLabBaseline $path) } catch { $refused=$true };
       if (-not $refused -or $script:hashCalls -ne $before) { throw 'Invalid size not refused first' }
     }
-    'exact-B03-only'`);
-  assert.equal(output, 'exact-B03-only');
+    'exact-B05-only'`);
+  assert.equal(output, 'exact-B05-only');
 });
 
 test('isolated child environment strips credentials/bypass, scopes loopback and preserves parent values', { skip: !hasPwsh }, () => {

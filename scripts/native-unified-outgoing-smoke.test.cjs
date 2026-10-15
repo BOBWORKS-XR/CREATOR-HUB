@@ -129,7 +129,7 @@ test('fresh connection waits for asynchronously opened terms; restoration only v
   await exercise(true, false);
 });
 
-test('fixed sequence operates B03-style hidden checkbox through its visible label and real change events',
+test('fixed sequence operates B05 hidden checkbox through its visible label and real change events',
   { timeout: 15000 }, async t => {
     const { chromium } = require('playwright');
     if (!fs.existsSync(chromium.executablePath())) return t.skip('Chromium unavailable; required by the native workflow before tests');

@@ -1,4 +1,4 @@
-// Fixed, acceptance-only B03 -> outer-only 15. Never a public12 baseline override.
+// Fixed, acceptance-only B05 -> outer-only 15. Never a public12 baseline override.
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -6,21 +6,21 @@ const feed = require('./self-update-lab-feed.cjs');
 
 const KIND = 'unified-outgoing-14-15';
 const BASELINE = Object.freeze({ version: '0.1.14',
-  sourceCommit: 'a914bb96abaca8837f586c25c341d24fe58fe73d',
-  installer: 'edc47ecca5e80ce950d5b8ecf6bb32c46fa531e163b9d6ab7722b143a02a4e7a',
-  exe: 'dd74917a67e360a479158d81149a385ad813da9213661959928543a8f366dfca',
-  runtimeDescriptor: '68e32d4c1afe42e66756dbbecd9306c41442584780bf3e1f41355d8b6f1b0d19',
-  builtinManifest: '2dff1bf72723703afb8e0fd66e17b4af3b6510675c042bc9a4fb08f75f6c9464' });
+  sourceCommit: 'db862739d01088ba9be335d0522f8f129222a48b',
+  installer: '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157',
+  exe: 'cd5e3fd2829727d06444c0f3266b178798d1b55c63df651be12eb38ac4523a86',
+  runtimeDescriptor: '1b78bb735b41df55ea90ff59e72b41c410ff04115edcd88fcdc9d63878503e04',
+  builtinManifest: '6be984c3358ce956154ecf6aa38532320e0be2765d54285a12183319121bb4cb' });
 const TARGET = Object.freeze({ version: '0.1.15',
-  runtimeDescriptor: '712c74d83ebdacc9a8beb45f19c962be2862db01bb2b95f604e3947886351183',
-  runtimeSignature: '7c627fecbf4936b799170415e152453e885516b5095d43237976f4c59877c85c',
+  runtimeDescriptor: 'ce1c3dff78465797f3b076459f272be4231b15f163416a15598a6b154afacdb7',
+  runtimeSignature: 'eaf29525c977087cffcf1d31a6889053378b30420da5065720fa33c5a1fd1842',
   asset: 'Creator_Hub_0.1.15_x64-acceptance-only-setup.exe',
   pins: Object.freeze({
-    descriptor: '9342f77a3e235fc427422b24d54a701af0646d678dc43e67da1bf9971213fa94',
-    descriptorSignature: '8ad9a7082f1fe5b8535ae6235e13b2335af10d508396696ed8c01f67e2f00fd4',
-    installer: 'aef9b9fa3045dbd8f4e0770ef51d037a2f9add3240a7f738b5a2d5b32505eb61',
-    executable: '13690d6ca45f9b45bd7c05892ab2d1999962c84588f893d29609624abdaf21df',
-    manifest: '42f7ec53952721ac76e638da595c0faeee93ab31a0d120aeaf0a5f2ae0843566',
+    descriptor: '71c1b171c50057d017cb5537ddca3e5969a603fa0f80c558b06841e80f56c9e2',
+    descriptorSignature: '2e13732502c46f97db1df79e29b16098af1e3946dda6a215e917465aa07d57c8',
+    installer: 'af98b72c460b741e4c09afa0c2314c8d1976a7888943608aabfe2caade17149a',
+    executable: '7d62790ecd9fd0576ae97f72665f25febfbe62549ca6699b43dd4603182ffc06',
+    manifest: '45bd238e757e07dadf5114e0355fff3e0ee2d2bca36cd350f5ef26272ada7366',
   }) });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 function keys(value, expected, label) {
@@ -31,7 +31,7 @@ function validateConfig(config) {
   keys(config, ['schemaVersion', 'kind', 'baselineVersion', 'targetVersion', 'directory', 'builtinManifestPath', 'pins'], 'Outgoing config fields');
   assert.equal(config.schemaVersion, 1);
   assert.equal(config.kind, KIND);
-  assert.equal(config.baselineVersion, BASELINE.version, 'Only genuine B03 14 is admitted');
+  assert.equal(config.baselineVersion, BASELINE.version, 'Only genuine B05 14 is admitted');
   assert.equal(config.targetVersion, TARGET.version, 'Only reviewed outer-only 15 is admitted');
   assert.deepEqual(config.pins, TARGET.pins, 'Reviewed outgoing pins changed');
   assert.ok(typeof config.directory === 'string' && path.isAbsolute(config.directory), 'Absolute signed input directory required');
@@ -40,7 +40,7 @@ function validateConfig(config) {
 }
 function readBuiltinManifest(file) {
   const bytes = feed.readBounded(file, feed.LIMITS.metadata);
-  assert.equal(hash(bytes), BASELINE.builtinManifest, 'Reviewed B03 private manifest differs');
+  assert.equal(hash(bytes), BASELINE.builtinManifest, 'Reviewed B05 private manifest differs');
   const manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   assert.equal(manifest.schemaVersion, 1); assert.equal(manifest.platform, 'windows'); assert.equal(manifest.arch, 'x86_64');
   assert.equal(manifest.modules.mcp.version, '2.7.7'); assert.equal(manifest.modules.setup.version, '0.3.7');
@@ -83,8 +83,8 @@ function loadContract(config) {
 function assertBaselineBytes(installer, executable) {
   assert.ok(Buffer.isBuffer(installer) && installer.length > 0 && installer.length <= feed.LIMITS.installer);
   assert.ok(Buffer.isBuffer(executable) && executable.length > 0 && executable.length <= feed.LIMITS.installer);
-  assert.equal(hash(installer), BASELINE.installer, 'Exact B03 NSIS installer required');
-  assert.equal(hash(executable), BASELINE.exe, 'Installed B03 executable required, not the pre-NSIS build');
+  assert.equal(hash(installer), BASELINE.installer, 'Exact B05 NSIS installer required');
+  assert.equal(hash(executable), BASELINE.exe, 'Installed B05 executable required, not the pre-NSIS build');
 }
 function assertProxy(env) {
   feed.assertRunner(env);

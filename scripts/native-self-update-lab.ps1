@@ -35,8 +35,8 @@ function Resolve-UnifiedOutgoingLabBaseline([string]$Path) {
     $full = Resolve-LabFile $Path
     $item = Get-Item -LiteralPath $full
     if ($item.Length -lt 1 -or $item.Length -gt 512MB) { throw 'Baseline installer size refused.' }
-    $pin = 'edc47ecca5e80ce950d5b8ecf6bb32c46fa531e163b9d6ab7722b143a02a4e7a'
-    if ((Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() -cne $pin) { throw 'Exact accepted B03 0.1.14 baseline installer required; no B02 or version masquerade.' }
+    $pin = '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157'
+    if ((Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() -cne $pin) { throw 'Exact accepted B05 0.1.14 baseline installer required; no B02/B03 or version masquerade.' }
     return $full
 }
 
@@ -335,7 +335,7 @@ $driverExitCode = $null; $feedResult = $null; $rootThumbprint = $null; $leafThum
 $phase = 'timeout'; $failureDetails = $null
 $script:processIdentityFailure = $null
 $actualScope = if ($Scenario -ceq 'public-stable') { 'unmodified-public-0.1.12-lab-only' }
-    else { 'accepted-unmodified-B03-0.1.14-to-outer-only-0.1.15-fixture-lab-only' }
+    else { 'accepted-unmodified-B05-0.1.14-to-outer-only-0.1.15-fixture-lab-only' }
 try {
     Set-LabPhase 'timeout'
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 480) { throw 'Driver timeout must be 1..480 seconds.' }

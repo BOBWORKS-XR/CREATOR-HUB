@@ -10,7 +10,7 @@ function assertAdmission(env = process.env, platform = process.platform) {
   target.assertProxy(env);
   assert.equal(platform, 'win32', 'Native outgoing test requires Windows');
   assert.ok(path.isAbsolute(env.CREATOR_SELF_UPDATE_LAB_CONFIG || ''), 'Absolute outgoing config required');
-  assert.ok(path.isAbsolute(env.CREATOR_SELF_UPDATE_LAB_BASELINE || ''), 'Stage the reviewed B03 installer first');
+  assert.ok(path.isAbsolute(env.CREATOR_SELF_UPDATE_LAB_BASELINE || ''), 'Stage the reviewed B05 installer first');
 }
 async function retry(read, seconds = 30) {
   const deadline = Date.now() + seconds * 1000;

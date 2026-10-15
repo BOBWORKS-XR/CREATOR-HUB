@@ -98,7 +98,7 @@ function restoreTicket(ticket, before) {
 }
 function approvedUpdate(before, after, evidence) {
   snapshotShape(before); snapshotShape(after);
-  assert.equal(before.executableSha256, BASELINE.exe, 'Outgoing Root must be genuine installed B03');
+  assert.equal(before.executableSha256, BASELINE.exe, 'Outgoing Root must be genuine installed B05');
   assert.equal(before.ticketExists, false);
   assert.deepEqual(before.rootExit, { code: null, signal: null });
   assert.deepEqual(evidence.originalExit, { code: 0, signal: null }, 'Original Root did not exit normally');

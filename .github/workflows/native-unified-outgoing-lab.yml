@@ -1,4 +1,4 @@
-name: Observed-path B03 14 to outer-only 15 outgoing lab (not release)
+name: Observed-path B05 14 to outer-only 15 outgoing lab (not release)
 on:
   workflow_dispatch:
   push:
@@ -23,11 +23,11 @@ jobs:
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2026-03-10' }
           $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/411494394' -Headers $headers
           if ($release.id -ne 411494394 -or $release.draft -ne $true -or $release.tag_name -cne 'v0.1.13-validation') { throw 'Unexpected private validation release.' }
-          $assets = @($release.assets | Where-Object name -CEQ 'outgoing-lab-reviewed-a914bb9-20261014.zip')
-          if ($assets.Count -ne 1 -or $assets[0].id -ne 641402829 -or $assets[0].state -cne 'uploaded' -or $assets[0].size -ne 76991135 -or $assets[0].digest -cne 'sha256:aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a') { throw 'Exact outgoing input is unavailable.' }
+          $assets = @($release.assets | Where-Object name -CEQ 'outgoing-windows-b05-db86273-20261015.zip')
+          if ($assets.Count -ne 1 -or $assets[0].id -ne 642125160 -or $assets[0].state -cne 'uploaded' -or $assets[0].size -ne 73019589 -or $assets[0].digest -cne 'sha256:a905a8f168fc9f3fe74cacf36dbbf7c6a90eccc69addf3abf08ebec6ad24e677') { throw 'Exact outgoing input is unavailable.' }
           $headers.Accept = 'application/octet-stream'
-          Invoke-WebRequest -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/641402829' -Headers $headers -OutFile outgoing-input/fixture.zip -MaximumRedirection 5 -TimeoutSec 300
-          if ((Get-Item -LiteralPath outgoing-input/fixture.zip).Length -ne 76991135 -or (Get-FileHash -LiteralPath outgoing-input/fixture.zip -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a') { throw 'Outgoing archive differs.' }
+          Invoke-WebRequest -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/642125160' -Headers $headers -OutFile outgoing-input/fixture.zip -MaximumRedirection 5 -TimeoutSec 300
+          if ((Get-Item -LiteralPath outgoing-input/fixture.zip).Length -ne 73019589 -or (Get-FileHash -LiteralPath outgoing-input/fixture.zip -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'a905a8f168fc9f3fe74cacf36dbbf7c6a90eccc69addf3abf08ebec6ad24e677') { throw 'Outgoing archive differs.' }
       - uses: actions/upload-artifact@v4
         with:
           name: outgoing-lab-signed-input
@@ -73,7 +73,7 @@ jobs:
             }
           }
           $zip = 'artifacts/outgoing-lab-input/fixture.zip'
-          if ((Get-Item -LiteralPath $zip).Length -ne 76991135 -or (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a') { throw 'Outgoing archive differs.' }
+          if ((Get-Item -LiteralPath $zip).Length -ne 73019589 -or (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'a905a8f168fc9f3fe74cacf36dbbf7c6a90eccc69addf3abf08ebec6ad24e677') { throw 'Outgoing archive differs.' }
           $root = 'artifacts/outgoing-lab-input/staged'
           $archive = [IO.Compression.ZipFile]::OpenRead((Join-Path (Get-Location) $zip))
           try {
@@ -81,7 +81,7 @@ jobs:
             New-Item -ItemType Directory -Path $root | Out-Null
             foreach ($entry in $archive.Entries) { [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path (Join-Path (Get-Location) $root) $entry.FullName)) }
           } finally { $archive.Dispose() }
-          if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a') { throw 'Outgoing archive changed during extraction.' }
+          if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'a905a8f168fc9f3fe74cacf36dbbf7c6a90eccc69addf3abf08ebec6ad24e677') { throw 'Outgoing archive changed during extraction.' }
       - name: Test public and outgoing guards without starting the native lab
         run: node --test scripts/self-update-lab-feed.test.cjs scripts/native-self-update-lab.test.cjs scripts/self-update-baselines.test.cjs scripts/native-unified-outgoing-target.test.cjs scripts/native-unified-outgoing-lab.test.cjs scripts/native-unified-outgoing-smoke.test.cjs
       - name: Validate fixed source contract and write only local lab configuration
@@ -111,14 +111,14 @@ jobs:
           fs.writeFileSync('artifacts/outgoing-lab-input/input-binding.json', JSON.stringify({
             kind: 'unified-outgoing-14-15-input-binding', harnessSourceRevision: process.env.GITHUB_SHA,
             baselineSourceRevision: target.BASELINE.sourceCommit, baseline: contract.baseline, targetVersion: contract.targetVersion,
-            archiveSha256: 'aafe6f60c5c46ad1e49af1c18f0a74a3e97582c397264076164556e30944822a',
+            archiveSha256: 'a905a8f168fc9f3fe74cacf36dbbf7c6a90eccc69addf3abf08ebec6ad24e677',
             routeCount: contract.routes.length, actualScope: contract.actualScope, signaturesVerifiedHere: false,
             nativeAcceptanceTested: false, publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false,
             releaseReady: false }), { flag: 'wx' });
           '@
           node -e $prepare
           if ($LASTEXITCODE -ne 0) { throw 'Outgoing source contract refused before trust setup.' }
-      - name: Exercise only the fixed B03 to outer-only 15 outgoing scenario
+      - name: Exercise only the fixed B05 to outer-only 15 outgoing scenario
         shell: pwsh
         run: |
           $contract = Join-Path (Get-Location) 'artifacts/outgoing-lab-input/lab-config.json'
@@ -130,7 +130,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: unified-outgoing-B03-14-15-${{ github.run_id }}-${{ github.sha }}
+          name: unified-outgoing-B05-14-15-${{ github.run_id }}-${{ github.sha }}
           path: |
             artifacts/outgoing-lab-input/input-binding.json
             artifacts/outgoing-lab-lifecycle.jsonl
