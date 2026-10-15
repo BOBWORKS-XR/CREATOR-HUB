@@ -19,6 +19,8 @@ of defect-free releases. Source tests do not replace the installed checks below.
 | Equivalent signed runtime metadata is rejected after re-signing | `native/mcp-router` activation signature tests (`b154e36`) | Final packaged candidate repeats install/activation with retained routing metadata; valid signatures may differ, invalid signatures still refuse; no silent repair |
 | Linux Setup consent depends on undeclared Zenity | `scripts/linux-dialog-backend.test.cjs`; Linux-only GTK feature selection | Actual package's native decline/retry/approve, embedded requirements and saved controls; dependency/source checks alone are not acceptance |
 | A native test misses a backend spawned by a worker thread | `scripts/native-linux-components-probe.test.py` (`fefc528`) | Actual same-package retry with exact kernel image/parent/UID/start/seals and XRes/AX ownership; inventory alone never authorizes input |
+| Linux WebKit paragraph roles differ from the AT-SPI client enum, hiding available text from tests | Independent producer/client enum fixtures in `scripts/native-linux-components-probe.test.py` (`f8b6e7f`) | Same-package exact decline text, Retry/approval, real Setup operation and MCP preference save; counts or screenshots alone do not authorize further input |
+| A stale Flatpak writable plan fails only after expensive setup/downloads | `scripts/flatpak-replacement-source.test.cjs` (`2bc364d`) | Both input plans pass capability/provenance checks before setup; historical three-input pins remain unchanged and refuse the current writable packager |
 | Native harness errors trigger repeated expensive rebuilds | Focused changed-harness tests, Python/script/YAML preflight | Bind test source separately from product source; reuse immutable original installers for test-only corrections; retain first failure and compact captures |
 
 Native preflight also checks these captured boundaries:
@@ -30,8 +32,10 @@ Native preflight also checks these captured boundaries:
 - Read the workflow's actual event/branch before pushing a validation ref, then
   verify the resulting run's source. A push alone is not a dispatched test.
 - Preserve unrelated dpkg diversions/statoverrides. The experimental helper's
-  reject-any policy still needs a reviewed target-scoped contract before it can
-  support normal hosts; do not clear global system records to make tests pass.
+  target-scoped parser and protected-parent snapshot are implemented but not
+  natively accepted. Run the unprivileged metadata gate before packages or
+  privilege. Capture failed parent type/UID/mode before diagnosing; do not clear
+  system records or relax permissions checks to make a runner pass.
 
 ## Still Open
 
