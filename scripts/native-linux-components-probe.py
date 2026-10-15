@@ -81,6 +81,19 @@ def manifest_pins(root):
     return manifest
 
 
+class TreeRefusal(RuntimeError):
+    def __init__(self, observation):
+        super().__init__("Component AX parent escaped bound subtree")
+        self.observation = observation
+
+
+def retain_tree_refusal(root, action, error):
+    try:
+        B.save_json(root / (action + "-tree-refusal.json"), error.observation)
+    except Exception as capture_error:
+        print(json.dumps({"treeCaptureRefusal": type(capture_error).__name__[:64]}), file=sys.stderr)
+
+
 def own_tree(window, owner, atspi):
     """Contained semantic parents, not strict reverse GetChildren equality.
 
@@ -93,10 +106,10 @@ def own_tree(window, owner, atspi):
             and window.get_name() == req.title, "Foreign component AX frame refused")
     reference = owner.references.identity(window, owner)
     require(reference == owner.references.window, "Component AX frame wire identity changed")
-    nodes, seen, parents, pending = [], set(), [], [(window, 0)]
+    nodes, seen, parents, pending = [], set(), [], [(window, None, 0)]
     owner.recheck(full=True)
     while pending:
-        node, depth = pending.pop()
+        node, expected_parent, depth = pending.pop()
         require(node is not None and len(nodes) < helper.MAX_NODES and depth < helper.MAX_DEPTH,
                 "Component AX subtree exceeds reviewed bounds")
         owner.node(node)
@@ -110,11 +123,23 @@ def own_tree(window, owner, atspi):
             parent = node.get_parent()
             require(parent is not None, "Component AX parent absent")
             owner.node(parent)
-            parents.append(tuple(owner.references.identity(parent, owner)))
+            parents.append({"node": list(key), "parent": owner.references.identity(parent, owner),
+                            "getChildrenParent": list(expected_parent), "depth": depth,
+                            "pid": node.get_process_id(), "role": int(node.get_role()),
+                            "parentPid": parent.get_process_id(), "parentRole": int(parent.get_role())})
         nodes.append(node)
         budget = min(helper.MAX_CHILDREN, helper.MAX_NODES - len(nodes) - len(pending))
-        pending.extend((child, depth + 1) for child in reversed(helper.children(node, budget)))
-    require(all(parent in seen for parent in parents), "Component AX parent escaped bound subtree")
+        pending.extend((child, key, depth + 1) for child in reversed(helper.children(node, budget)))
+    missing = [record for record in parents if tuple(record["parent"]) not in seen]
+    if missing:
+        owner.recheck(full=True)
+        observation = {"readOnly": True, "authorization": False, "actionCount": 0,
+                       "timing": "original-refusing-walk-not-a-retry", "collectedCount": len(nodes),
+                       "checkedParents": len(parents), "missingCount": len(missing),
+                       "missing": missing[:8], "collectedReferences": [list(ref) for ref in sorted(seen)[:32]],
+                       "referencesTruncated": len(seen) > 32, "missingTruncated": len(missing) > 8}
+        require(len(json.dumps(observation).encode("utf8")) <= 32768, "Tree refusal capture exceeds bound")
+        raise TreeRefusal(observation)
     owner.recheck(full=True)
     require(owner.same_node(helper.select_window(req, atspi), window), "Component Root frame changed")
     return nodes
@@ -636,6 +661,9 @@ def worker(root, args):
         require(last is not None, "No owned component tree")
         B.save_json(root / (action + "-unready.json"), last)
         raise RuntimeError("Native component UI readiness deadline: " + action + "; exact tree retained")
+    except TreeRefusal as error:
+        retain_tree_refusal(root, action, error)
+        raise
     finally:
         if bus is not None:
             bus.close_sync(None)

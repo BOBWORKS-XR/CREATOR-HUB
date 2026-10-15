@@ -32,6 +32,7 @@ EXPECTED = {"CREATOR_LINUX_DEB_HELPER_TRANSACTION": "1", "GITHUB_ACTIONS": "true
     "GITHUB_REPOSITORY": "BOBWORKS-XR/CREATOR-HUB", "GITHUB_REPOSITORY_ID": "1364807512",
     "GITHUB_REF": "refs/heads/validation/linux-deb-helper-transaction-014", "GITHUB_EVENT_NAME": "push"}
 STAGE = re.compile(r"mcp-2\.7\.7-preparation-[0-9a-f]{32}")
+METADATA_PARENTS = ("/", "/usr", "/usr/share")
 GATES = ("productionIntegrated", "privilegedHelperAccepted", "nativeTransactionAccepted",
     "nativeApprovalAccepted", "actualUserAuthenticationAccepted", "nativeCancellationAccepted",
     "guiIdleCloseAccepted", "runtimeRetentionAccepted", "packageGuiRetirementAccepted",
@@ -135,6 +136,45 @@ class Probe:
         row = fixture.fingerprint(self.old)
         require((row["bytes"], row["sha256"]) == (fixture.PACKAGE_BYTES, fixture.PACKAGE_SHA), "Exact original public DEB required")
         return json.loads((self.root / "plan.json").read_text())
+
+    def metadata_diagnostic(self):
+        uid, euid = os.getuid(), os.geteuid()
+        require(uid > 0 and euid > 0, "Unprivileged metadata diagnostic required")
+        observations = {"schemaVersion": 1, "scope": "read-only-parent-metadata-before-native-gate",
+            "sourceRevision": os.environ.get("GITHUB_SHA"), "runId": os.environ.get("GITHUB_RUN_ID"),
+            "runAttempt": os.environ.get("GITHUB_RUN_ATTEMPT"), "uid": uid, "euid": euid,
+            "paths": {}, "captureErrors": [], "packageTransactionStarted": False,
+            "nativeAcceptance": False, "productionGates": dict.fromkeys(GATES, False)}
+        for name in METADATA_PARENTS:
+            try:
+                info = Path(name).lstat()
+                kind = "directory" if stat.S_ISDIR(info.st_mode) else "symlink" if stat.S_ISLNK(info.st_mode) else "regular-file" if stat.S_ISREG(info.st_mode) else "other"
+                observations["paths"][name] = {"type": kind, "mode": info.st_mode,
+                    "permissionsOctal": format(stat.S_IMODE(info.st_mode), "04o"),
+                    "uid": info.st_uid, "gid": info.st_gid, "dev": info.st_dev, "ino": info.st_ino,
+                    "nlink": info.st_nlink, "size": info.st_size,
+                    "mtimeNs": info.st_mtime_ns, "ctimeNs": info.st_ctime_ns,
+                    "helperParentChecks": {"directory": stat.S_ISDIR(info.st_mode), "rootOwned": info.st_uid == 0,
+                        "modeMaskClear": info.st_mode & 0o7022 == 0},
+                    "disallowedModeBitsOctal": format(info.st_mode & 0o7022, "04o")}
+            except OSError as error:
+                observations["paths"][name] = {"captureError": str(error), "errno": error.errno}
+                observations["captureErrors"].append("lstat unavailable: " + name)
+        try:
+            code, out, err = self.command("metadata-diagnostic-dpkg-version", ["/usr/bin/dpkg", "--version"],
+                allowed=(0, 1, 2), timeout=10)
+            truncated = len(out) + len(err) > 16 * 1024
+            observations["dpkgVersion"] = {"exitCode": code, "stdout": out[:16 * 1024].decode("utf-8", errors="replace"),
+                "stderr": err[:16 * 1024].decode("utf-8", errors="replace"), "truncated": truncated}
+            if code != 0 or truncated:
+                observations["captureErrors"].append("dpkg version unavailable or oversized; exit " + str(code))
+        except Exception as error:
+            observations["dpkgVersion"] = {"captureError": str(error)}
+            observations["captureErrors"].append("dpkg version capture failed")
+        observations["captureComplete"] = not observations["captureErrors"]
+        self.save("metadata-diagnostic", observations)
+        require(observations["captureComplete"], "Read-only metadata capture incomplete; see metadata-diagnostic.json")
+        return observations
 
     def prepare(self):
         source = self.command("source", ["git", "rev-parse", "HEAD"])[1].decode().strip()
@@ -326,10 +366,13 @@ class Probe:
 
 
 def main():
-    require(len(sys.argv) == 2 and sys.argv[1] in ("prepare", "install", "before", "retire", "after", "repeat", "diagnostics"), "One fixed fixture phase required")
+    require(len(sys.argv) == 2 and sys.argv[1] in ("prepare", "install", "before", "retire", "after", "repeat", "diagnostics", "metadata-diagnostic"), "One fixed fixture phase required")
     probe = Probe()
     phase = sys.argv[1]
-    result = probe.snapshot(phase) if phase in ("before", "after") else getattr(probe, phase)()
+    if phase == "metadata-diagnostic":
+        result = probe.metadata_diagnostic()
+    else:
+        result = probe.snapshot(phase) if phase in ("before", "after") else getattr(probe, phase)()
     print(json.dumps(result))
 
 

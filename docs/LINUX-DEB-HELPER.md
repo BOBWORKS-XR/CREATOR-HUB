@@ -208,9 +208,9 @@ new production behavior change.
   tests passed, including the default CLI refusal and non-opted-in script guard.
   No Linux diagnostic or install/transaction test was run in this continuation.
 
-### Smallest Next Native Test (Parent Review Required)
+### Historical Next Native Test (Run Below Supersedes Plan)
 
-First run only this explicitly ignored diagnostic, unprivileged on a disposable
+The initial plan was to run only this explicitly ignored diagnostic, unprivileged on a disposable
 Ubuntu 22.04 x86_64 runner, with the reviewed source and exact toolchain recorded:
 
 ```text
@@ -226,9 +226,49 @@ zero matching tests is not proof (the diagnostic is Linux-only).
 Compare its database hashes with the retained fixture hashes;
 different bytes mean a different host state, not proof about the captured state.
 If it refuses, retain the original error and state; do not clear databases,
-relax guards or proceed to an install. This diagnostic is type-checked here but
-**not executed on Linux**. Only after review and native metadata proof should
-the parent consider the separately gated contention/transaction plan below.
+relax guards or proceed to an install. At that checkpoint it was type-checked
+but not executed on Linux. The parent subsequently ran it as recorded below;
+native metadata and transaction acceptance remain false.
+
+### Native Failure And Prepared Capture Checkpoint (2026-10-15)
+
+[Run 38712905211](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38712905211),
+attempt 1, source `e21b68c2b62ee9f3d0b1258397880010b36b0d11`: Python 11 / Node 5,
+native Rust 1.99 default 31 / experimental 32 tests, and strict all-feature
+Clippy passed. The explicit host test then failed at `src/linux/metadata.rs:242:44`:
+
+```text
+Host metadata admission failed: "Unprotected/ambiguous metadata parent: /usr/share"
+```
+
+One test failed, Cargo exit **101**. The predicate is
+`is_dir && uid == 0 && mode & 0o7022 == 0`; which type/UID/mode condition failed
+was not captured. This is a protected-parent admission refusal, not a proven
+source defect or helper transaction failure. Artifact download, SDK/baseline
+installation and the mechanism were skipped. Final diagnostics exited 0 but
+reported `evidenceComplete:false`; all 17 production gates remained false.
+Evidence artifact: `linux-deb-helper-transaction-38712905211-1`.
+
+Prepared fixed phase `python3 -B scripts/linux-deb-helper-transaction-probe.py
+metadata-diagnostic` now runs after pure preflight and **before Cargo** in the
+existing workflow. It retains hosted-lane admission and requires real/effective
+non-root UID. Only `/`, `/usr`, `/usr/share` are inspected with direct `lstat`;
+only fixed `/usr/bin/dpkg --version` runs, unprivileged, with a 10-second timeout.
+No privileged global collector, recursive walk, package operation or guard change.
+
+`metadata-diagnostic.json` records type, raw mode/octal permissions, UID/GID,
+device/inode/link count/size, nanosecond mtime/ctime, exact predicate observations,
+source/run identity, dpkg exit/version text and false acceptance flags. Version
+JSON is capped at 16 KiB per stream; over 16 KiB combined fails capture. The
+existing always-run upload also retains `metadata-diagnostic-dpkg-version` raw
+stdout/stderr and command JSON. An unsafe parent can be captured successfully;
+only the unchanged Rust gate decides admission. Missing/failed/oversized evidence
+is saved before the capture step fails. Only runner-private evidence is written.
+
+Local preflight: **16 Python / five Node SDK tests**, Python AST, Node syntax,
+actionlint 1.7.12 (`-shellcheck= -pyflakes=`), and `git diff --check` passed.
+No dispatch, commit, permission change or helper runtime edit. The new capture
+has not run on Linux; await actual stat fields before any further diagnosis.
 
 ## Experimental Transaction
 
@@ -490,7 +530,7 @@ docs/LINUX-DEB-HELPER.md
 Generated crate `target/` is locally ignored. Working files remain visible;
 no shared-index changes, commit, branch move, push or unrelated-dirt cleanup.
 
-## Current Continuation Scope
+## Metadata Source Continuation Scope
 
 Only these paths belong to the metadata continuation; other WIP belongs to the
 parent/components/Flatpak work and is preserved:
@@ -508,3 +548,15 @@ docs/LINUX-DEB-HELPER.md
 
 No root install, package rebuild, native dispatch, commit or change to Windows
 0.1.14's immutable publication or suspended Mac work is authorized here.
+
+## Current Collector Continuation Scope
+
+Only the following paths are changed by the pre-Cargo diagnostic task. Parent
+UI/components and other work are preserved; helper runtime guards are untouched.
+
+```text
+scripts/linux-deb-helper-transaction-probe.py
+scripts/linux-deb-helper-transaction.test.py
+.github/workflows/linux-deb-helper-transaction-014.yml
+docs/LINUX-DEB-HELPER.md
+```

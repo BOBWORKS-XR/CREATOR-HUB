@@ -654,3 +654,28 @@ The full local component suite passes 48 tests with one native-only skip. These
 are collector regressions, not native component or release acceptance. A single
 follow-up may reuse the unchanged signed assembly and original readiness/input
 checks to verify actual returned text, Setup operations and MCP preference save.
+
+## Native Follow-Up: 38713353372
+
+Source `f8b6e7f8438f1adc66b8238394ebb6eb5dad7064`, same original signed GTK
+assembly. The compact 110,167-byte artifact was hash-verified and retained under
+`artifacts/native-linux-components-38713353372/`. Exact Setup decline text,
+Retry and native approval passed. The owned bitmap shows embedded Setup with
+the Linux platform label and actual requirements. This verifies the paragraph
+collector correction against the real producer, not just a mock.
+
+The run still failed at `setup-operation`, worker `component-11-setup-ready`:
+`Component AX parent escaped bound subtree`. Cleanup also refused a stale AX
+object path. Normal exit, Setup operation, MCP operation and component acceptance
+are not established. The bitmap is rendering evidence, not action authority.
+
+Failure-only capture now retains the original refusing walk's bounded node,
+semantic-parent and GetChildren-parent canonical references, PID/role metadata
+and truncated collected-reference inventory. It records at most eight missing
+edges, 32 collected references and 32 KiB. Existing native ownership checks run
+before collection; unknown/foreign parents still refuse without this capture.
+No external-parent traversal, text collection, cache change, repair, retry or
+action is added. Saving the capture cannot replace the original failure.
+Local component regressions pass 51 tests with one native-only skip. The next
+same-package run collects the missing topology evidence; it does not presume a
+cache defect or relax containment to reach green.

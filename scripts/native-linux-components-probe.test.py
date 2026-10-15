@@ -181,6 +181,56 @@ class OwnershipTests(unittest.TestCase):
             p.press("view-setup", owner, f.atspi)
         f.button.action.do_action.assert_not_called()
 
+    def test_parent_refusal_captures_original_owned_edges_without_text_or_action(self):
+        f, owner = self.fixture()
+        external = fixtures.AxNode(43, 20)
+        f.button.parent = external
+        with self.assertRaises(p.TreeRefusal) as caught:
+            p.press("view-setup", owner, f.atspi)
+        observation = caught.exception.observation
+        self.assertFalse(observation["authorization"])
+        self.assertEqual(observation["actionCount"], 0)
+        self.assertEqual(observation["missingCount"], 1)
+        row = observation["missing"][0]
+        self.assertEqual(row["node"], owner.references.identity(f.button, owner))
+        self.assertEqual(row["parent"], owner.references.identity(external, owner))
+        self.assertEqual(row["getChildrenParent"], owner.references.identity(f.web, owner))
+        self.assertNotIn(row["parent"], observation["collectedReferences"])
+        self.assertNotIn("name", row)
+        self.assertNotIn("text", row)
+        f.button.action.do_action.assert_not_called()
+
+    def test_parent_capture_is_bounded_and_foreign_parent_still_refuses_without_capture(self):
+        f, owner = self.fixture()
+        external = fixtures.AxNode(43, 20)
+        for _ in range(40):
+            node = fixtures.AxNode(43, 29, parent=f.web)
+            node.parent = external
+        with self.assertRaises(p.TreeRefusal) as caught:
+            p.own_tree(f.window, owner, f.atspi)
+        observation = caught.exception.observation
+        self.assertEqual(observation["missingCount"], 40)
+        self.assertEqual(len(observation["missing"]), 8)
+        self.assertEqual(len(observation["collectedReferences"]), 32)
+        self.assertTrue(observation["missingTruncated"])
+        self.assertTrue(observation["referencesTruncated"])
+        self.assertLessEqual(len(json.dumps(observation).encode("utf8")), 32768)
+        f, owner = self.fixture()
+        f.button.parent = fixtures.AxNode(99, 20)
+        with self.assertRaises((RuntimeError, KeyError)) as caught:
+            p.press("view-setup", owner, f.atspi)
+        self.assertNotIsInstance(caught.exception, p.TreeRefusal)
+        f.button.action.do_action.assert_not_called()
+
+    def test_capture_save_failure_does_not_replace_original_tree_refusal(self):
+        error = p.TreeRefusal({"authorization": False, "actionCount": 0})
+        with mock.patch.object(p.B, "save_json", side_effect=OSError("private path detail")), \
+                mock.patch.object(p.sys, "stderr") as stderr:
+            p.retain_tree_refusal(Path("/fixture"), "setup-ready", error)
+        self.assertEqual(str(error), "Component AX parent escaped bound subtree")
+        self.assertIn("OSError", str(stderr.write.call_args_list))
+        self.assertNotIn("private path detail", str(stderr.write.call_args_list))
+
     def test_foreign_pid_nested_window_duplicate_ref_and_extra_renderer_refused(self):
         for change in ("pid", "window", "duplicate"):
             f, owner = self.fixture()
