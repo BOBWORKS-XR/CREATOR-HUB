@@ -595,3 +595,62 @@ JavaScript and Bash syntax, actionlint (without shellcheck/pyflakes), and scoped
 `git diff --check` passed. Skipped native checks and this new Text/interface
 observation remain unverified on Linux. No commit, stage, push, dispatch, package
 rebuild/re-sign/repin or unrelated-file edit was performed.
+
+## Diagnostic Result: 38711448824
+
+Parent push `57ef78a623f7fed5317c9de773eb68041925b9b6`, attempt 1, completed
+failure at `open-setup` / `setup-declined`. Product/private sources remain exact
+`4f3744d` / `77367ae`; assembly run `38648562557` and original ZIP hash
+`ce7d02ecd5e72cbce9a0343003726601ab82a103e8e25348cac771d78f0ac881` matched.
+Only compact artifact `11961400532` was downloaded: 84298 bytes, SHA-256
+`413e4e87f06b18808f5880d01dfd00bf619185ff01d35e61a461f572db22133b` verified.
+Evidence: `artifacts/native-linux-components-38711448824/linux-root-probe/`.
+
+Confirmed: one sealed Setup `Not now` input, no Retry/approval/MCP, owned PNG
+shows the exact decline message. Root normal close, exit 0 and both EOFs passed.
+Failure-only observation completed with `verified=true`, `authorization=false`
+and zero actions across 26 owned nodes. `builtin-status` and `builtin-detail`
+both expose Text, stable counts 28 and 65 respectively, zero children/links,
+empty names and `readinessTextRole=false`. Text values were **not read**, not
+proven empty. The original unready snapshot still records empty text.
+
+Confirmed role-contract incompatibility explains the collector short-circuit:
+[pinned WebKit enum](https://github.com/WebKit/WebKit/blob/webkitgtk-2.50.4/Source/WebCore/accessibility/atspi/AccessibilityAtspiEnums.h)
+assigns Paragraph 72, Heading 82, Section 84;
+[AT-SPI client enum](https://docs.gtk.org/atspi2/enum.Role.html) defines Paragraph
+73, Heading 83, Section 85. Captured computed-role/id attributes independently
+identify the affected nodes. Existing fixtures incorrectly supplied Paragraph
+72 on both producer and client sides. A no-file-change local reproduction with
+client Paragraph 73 and captured node role 72 returned empty `node_text`, zero
+`get_text` calls, and the same diagnostic false role/nonzero count combination.
+
+Classification: collector incompatibility and fixture coverage gap confirmed;
+unavailable Text interfaces or zero character counts are ruled out for these
+nodes. Actual returned Text values and a corrected collector's native behavior
+remain unknown. No Root markup/labels, role/input authority, readiness rule,
+product bytes or pins were changed. Next review should cover a failing fixture
+using independent producer/client enums and source-bound read-only collection;
+do not authorize Retry from counts, computed-role alone, or the PNG.
+
+GitHub also showed earlier branch-advance run `38711395251` (`f7e9845`) executing
+its native step, contrary to the initial no-native-job assumption. It was not
+dispatched, rerun, cancelled, or downloaded here. No additional native run or
+commit was made; this checkpoint changes documentation only.
+
+## Paragraph Collector Regression
+
+The parent reproduced the captured mismatch with independent enum values: client
+Paragraph 73, producer role 72. The new exact-decline test failed before the
+collector change. It now passes with the existing character/byte/drift bounds.
+Only role 72 on the already package/image-bound WebKit 2.50.4 may use the
+compatibility path, and only with `tag=p`, `computed-role=paragraph`,
+`toolkit=WebKitGTK` and a noneditable state. The same attributes on an unknown
+role, a numeric role alone, a foreign toolkit, hidden or editable content do not
+enable a read. Standard client roles are unchanged. No enum translation is
+applied to buttons, windows, actions or consent authority.
+
+Fixtures now use the AT-SPI client values independently of producer observations.
+The full local component suite passes 48 tests with one native-only skip. These
+are collector regressions, not native component or release acceptance. A single
+follow-up may reuse the unchanged signed assembly and original readiness/input
+checks to verify actual returned text, Setup operations and MCP preference save.

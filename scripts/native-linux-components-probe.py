@@ -124,11 +124,28 @@ def visible(nodes, atspi):
     return [node for node in nodes if node.get_state_set().contains(atspi.StateType.SHOWING)]
 
 
+def readable_text_role(node, atspi):
+    role = node.get_role()
+    roles = {getattr(atspi.Role, key, -1) for key in ("PARAGRAPH", "TEXT", "STATIC", "LABEL")}
+    if role in roles:
+        return True
+    # The already image/package-bound WebKit 2.50.4 omits Footer in its enum,
+    # sending Paragraph=72 where libatspi calls 72 Footer and 73 Paragraph.
+    # https://github.com/WebKit/WebKit/blob/webkitgtk-2.50.4/Source/WebCore/accessibility/atspi/AccessibilityAtspiEnums.h
+    if role != 72 or B.WEBKIT_VERSION != "2.50.4-0ubuntu0.22.04.1":
+        return False
+    editable = getattr(atspi.StateType, "EDITABLE", None)
+    if editable is None or node.get_state_set().contains(editable):
+        return False
+    attributes = node.get_attributes()
+    return isinstance(attributes, dict) and attributes.get("tag") == "p" \
+        and attributes.get("computed-role") == "paragraph" and attributes.get("toolkit") == "WebKitGTK"
+
+
 def node_text(node, atspi):
     # Paragraph names are empty in the captured WebKit tree. This is a read,
     # never EditableText. https://docs.gtk.org/atspi2/method.Text.get_text.html
-    roles = {getattr(atspi.Role, key, -1) for key in ("PARAGRAPH", "TEXT", "STATIC", "LABEL")}
-    if node.get_role() not in roles or not node.get_state_set().contains(atspi.StateType.SHOWING):
+    if not node.get_state_set().contains(atspi.StateType.SHOWING) or not readable_text_role(node, atspi):
         return ""
     interface = node.get_text_iface()
     if interface is None:
@@ -187,7 +204,7 @@ def text_interface_observation(nodes, owner, atspi):
             record["states"] = {key.lower(): read(node.get_state_set).contains(getattr(atspi.StateType, key))
                                 for key in ("SHOWING", "ENABLED", "SENSITIVE", "BUSY", "DEFUNCT", "EDITABLE")
                                 if hasattr(atspi.StateType, key)}
-            record["readinessTextRole"] = record["role"] in text_roles
+            record["readinessTextRole"] = read(lambda: readable_text_role(node, atspi))
             result["nodes"].append(record)
             # Interface getters are read-only. Hyperlinks are counted, never
             # followed: child references must already belong to own_tree.
@@ -217,7 +234,7 @@ def text_interface_observation(nodes, owner, atspi):
                             count = read(interface.get_character_count)
                             detail["characterCount"] = count
                             require(type(count) is int and 0 <= count <= 2048, "Diagnostic text count exceeds bound")
-                            if record["role"] in diagnostic_roles and record["states"]["showing"] \
+                            if (record["readinessTextRole"] or record["role"] in diagnostic_roles) and record["states"]["showing"] \
                                     and not record["states"].get("editable", False):
                                 text = read(lambda: interface.get_text(0, count))
                                 require(isinstance(text, str) and len(text) <= count and len(text.encode("utf8")) <= 8192,

@@ -605,11 +605,11 @@ class SetupGtkContractTests(unittest.TestCase):
 
 class TextObservationTests(unittest.TestCase):
     def fixture(self):
-        role = types.SimpleNamespace(PARAGRAPH=72, TEXT=60, STATIC=116, LABEL=29, SECTION=84, HEADING=82)
+        role = types.SimpleNamespace(PARAGRAPH=73, TEXT=61, STATIC=117, LABEL=29, SECTION=85, HEADING=83)
         state = types.SimpleNamespace(SHOWING=1, ENABLED=2, SENSITIVE=3, BUSY=4, DEFUNCT=5, EDITABLE=6)
         atspi = types.SimpleNamespace(Role=role, StateType=state)
 
-        def node(key, text=None, children=(), node_role=72):
+        def node(key, text=None, children=(), node_role=73):
             interface = None if text is None else types.SimpleNamespace(
                 get_character_count=mock.Mock(return_value=len(text)), get_text=mock.Mock(return_value=text))
             value = types.SimpleNamespace(key=key, pid=43, children=list(children), text=interface,
@@ -648,7 +648,7 @@ class TextObservationTests(unittest.TestCase):
 
     def test_child_text_on_section_is_recorded_but_never_used_as_decline_authority(self):
         atspi, owner, node = self.fixture()
-        child = node("inline", "Opening Setup in Hub was declined.", node_role=84)
+        child = node("inline", "Opening Setup in Hub was declined.", node_role=85)
         parent = node("paragraph", "", [child])
         parent.get_hypertext_iface.return_value = types.SimpleNamespace(get_n_links=lambda: 1)
         result = p.text_interface_observation([parent, child], owner, atspi)
@@ -722,7 +722,7 @@ class TextObservationTests(unittest.TestCase):
         self.assertFalse(p.text_interface_observation([value] * 65, owner, atspi)["verified"])
 
     def test_hidden_editable_and_unknown_roles_do_not_read_text_values(self):
-        for role, states in ((72, (2, 3)), (72, (1, 2, 3, 6)), (999, (1, 2, 3))):
+        for role, states in ((73, (2, 3)), (73, (1, 2, 3, 6)), (999, (1, 2, 3))):
             atspi, owner, node = self.fixture()
             value = node("not-static-visible", "not for collection", node_role=role)
             value.get_state_set = lambda: types.SimpleNamespace(contains=lambda s: s in states)
@@ -752,12 +752,46 @@ class TextObservationTests(unittest.TestCase):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_captured_webkit_paragraph_differs_from_client_enum_but_reads_exact_decline(self):
+        atspi, owner, make_node = TextObservationTests().fixture()
+        node = make_node("builtin-detail", "Opening Setup in Hub was declined.", node_role=72)
+        node.get_attributes.return_value = {"tag": "p", "computed-role": "paragraph", "toolkit": "WebKitGTK"}
+        self.assertNotEqual(node.get_role(), atspi.Role.PARAGRAPH)
+        text = p.node_text(node, atspi)
+        self.assertEqual(text, "Opening Setup in Hub was declined.")
+        node.text.get_text.assert_called_once_with(0, len(text))
+        snapshot = {"nodes": [{"name": "", "text": text, "showing": True}]}
+        self.assertTrue(p.ready_snapshot(snapshot, "setup-declined"))
+        self.assertFalse(p.ready_snapshot(snapshot, "mcp-declined"))
+        observation = p.text_interface_observation([node], owner, atspi)
+        self.assertTrue(observation["verified"])
+        self.assertTrue(observation["nodes"][0]["readinessTextRole"])
+        self.assertEqual(observation["nodes"][0]["text"]["value"], text)
+        self.assertFalse(observation["authorization"])
+        node.get_action_iface.assert_not_called()
+
+    def test_numeric_role_or_claimed_attributes_alone_never_enable_compatibility(self):
+        for role, attributes, states in (
+            (72, {"tag": "p"}, (1, 2, 3)),
+            (72, {"tag": "p", "computed-role": "paragraph", "toolkit": "Other"}, (1, 2, 3)),
+            (72, {"tag": "footer", "computed-role": "paragraph", "toolkit": "WebKitGTK"}, (1, 2, 3)),
+            (999, {"tag": "p", "computed-role": "paragraph", "toolkit": "WebKitGTK"}, (1, 2, 3)),
+            (72, {"tag": "p", "computed-role": "paragraph", "toolkit": "WebKitGTK"}, (2, 3)),
+            (72, {"tag": "p", "computed-role": "paragraph", "toolkit": "WebKitGTK"}, (1, 2, 3, 6)),
+        ):
+            atspi, _, make_node = TextObservationTests().fixture()
+            node = make_node("refused", "Opening Setup in Hub was declined.", node_role=role)
+            node.get_attributes.return_value = attributes
+            node.get_state_set = lambda: types.SimpleNamespace(contains=lambda state: state in states)
+            self.assertEqual(p.node_text(node, atspi), "")
+            node.text.get_text.assert_not_called()
+
     def test_empty_ax_name_uses_only_bounded_native_read_only_text(self):
         interface = types.SimpleNamespace(get_character_count=mock.Mock(return_value=len(p.RECIPE)),
                                           get_text=mock.Mock(return_value=p.RECIPE))
-        node = types.SimpleNamespace(get_role=lambda: 72, get_state_set=lambda: types.SimpleNamespace(contains=lambda _: True),
+        node = types.SimpleNamespace(get_role=lambda: 73, get_state_set=lambda: types.SimpleNamespace(contains=lambda _: True),
                                      get_text_iface=lambda: interface)
-        atspi = types.SimpleNamespace(Role=types.SimpleNamespace(PARAGRAPH=72), StateType=types.SimpleNamespace(SHOWING=1))
+        atspi = types.SimpleNamespace(Role=types.SimpleNamespace(PARAGRAPH=73), StateType=types.SimpleNamespace(SHOWING=1))
         self.assertEqual(p.node_text(node, atspi), p.RECIPE)
         interface.get_text.assert_called_once_with(0, len(p.RECIPE))
         snap = {"nodes": [{"name": "", "text": p.RECIPE, "showing": True}]}
