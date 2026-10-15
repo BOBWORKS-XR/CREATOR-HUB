@@ -1,28 +1,35 @@
 # Creator Hub
 
 **Unity tools in one window.** Open Creator SDK / Altspace and Banter projects,
-manage Creator Works MCP and Creator Project Setup, and browse community plugins.
+use Creator Works MCP and create or inspect projects with Project Setup.
 
-**Platform scope:** macOS support is suspended. The upcoming unified release
-targets Windows and Linux; Flatpak host integration is still under development.
-Existing Mac downloads remain historical builds, not supported unified updates.
+**Platform scope:** unified 0.1.14 targets Windows x64. Linux/Flatpak remain
+unpublished development work; macOS support is suspended. Existing Mac/Linux
+downloads remain historical builds, not supported unified updates.
 
-## Next: One Creator Hub Product
+## Creator Hub 0.1.14
 
-Future development is being consolidated into this repository. Project Setup,
-MCP, Projects and Plugins will become built-in sections of Creator Hub, with one
-installer and update stream. Their source histories are retained under
-`modules/project-setup` and `modules/mcp`.
+Project Setup and MCP are included in Hub, with one installer and update stream.
+Their source histories are retained under `modules/project-setup` and
+`modules/mcp`. Future development lives in this repository.
 
-This is source consolidation, **not a released unified installer**. Current
-stable versions are [Hub 0.1.12](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.12),
-[MCP 2.7.7](https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/tag/v2.7.7)
-and [Project Setup 0.3.7](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/tag/v0.3.7).
-Historical downloads and repositories remain available while a tested migration
-preserves standalone users' settings, project lists and AI-client connections.
+[Windows installer and release](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.14)
+and [exact package checks and publication status](docs/RELEASE-0.1.14.md).
+Existing Hub users can check for updates. Standalone users install Hub and follow
+the first-launch migration review. Recognized MCP 2.7.7 / Setup 0.3.7 installations
+get verified backups, reviewed AI-client routing and separately approved removal
+of the old app interfaces. Settings and retained MCP runtimes stay available;
+Unity projects are not moved. Unknown/custom/conflicting copies are not silently
+overwritten or removed.
+
+The standalone repositories, historical downloads and old signed updater files
+remain available. Their update feeds are not silently redirected to Hub.
+Creator Plugins is retiring on October 20, 2026. The app shows a temporary notice,
+not an active catalogue; until that date visit [creatorplugins.store](https://creatorplugins.store/).
 
 See [the unified product and migration requirements](docs/UNIFIED-CREATOR-HUB.md).
-The following 0.1.7 section is retained release history, not the latest download.
+The following sections are retained release history, not current unified-product
+instructions or the latest download.
 
 ## Windows 0.1.7
 

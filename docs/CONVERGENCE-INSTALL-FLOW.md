@@ -1,8 +1,10 @@
 # Unified Installation Flow
 
-Work in progress for Hub 0.1.14. The Windows coordinator now invokes the tested
-GUI-retirement leaf, but full packaged coordinator acceptance is still pending.
-This is not release evidence.
+Windows 0.1.14 packaged first-launch migration and restart pass in run
+[38658790977](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/38658790977).
+See [the exact package and update evidence](RELEASE-0.1.14.md) for current
+publication status and limits. The dated checkpoints below retain the development
+history. Linux/Flatpak are deferred; macOS support is suspended.
 
 2026-10-14 continuation: active targets are Windows and Linux/Flatpak; macOS is
 suspended. Linux source now distinguishes completion with no known standalone
