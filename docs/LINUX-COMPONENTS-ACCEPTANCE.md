@@ -709,3 +709,10 @@ environment was never changed. Client-cache disabling is not a sufficient fix.
 No additional timing, selector, parent-containment or readiness change is made.
 Further work needs the exact failing getter/producer reference lifecycle, not
 another unchanged replay or a new product build.
+
+The next diagnostic changes only the fixed order to MCP then Setup, recording
+that order explicitly. Setup is not omitted and component acceptance still
+requires both paths plus normal close and retained settings. This gives MCP an
+independent first result instead of always stopping at Setup's earlier AX error.
+No cache override, extra input, missing-parent tolerance or alternative readiness
+signal is added. Local component preflight passes 52 tests with one skip.

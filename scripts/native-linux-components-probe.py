@@ -31,6 +31,7 @@ APPS = {
             "view": "View Creator Works MCP", "version": "MCP 2.7.7"},
 }
 RECIPE = "Approved recipe: Unity 6000.3.21f1 \u00b7 Creator SDK 4.0.14 \u00b7 URP 17.3.0 \u00b7 Input 1.20.0"
+COMPONENT_ORDER = ("mcp", "setup")
 CONTROLS = {
     "skip-migration": ("Continue for now", "Move to unified Creator Hub"),
     "view-setup": (APPS["setup"]["view"], None),
@@ -752,6 +753,7 @@ def wait_backend_gone(record, helper, capture):
 
 def probe(root, env, capture_only=False):
     report = {"scope": SCOPE, **FALSE_GATES, "phase": "verify", "workers": [], "backends": [],
+              "componentOrder": list(COMPONENT_ORDER),
               "candidate": B.SELECTED_CANDIDATE, "productSource": B.SOURCE, "privateSource": B.PRIVATE_SOURCE,
               "productScope": "4f3744d GTK3 baseline; excludes router fix b154e36; not final release acceptance",
               "testSource": env.get("GITHUB_SHA"), "testRunId": env.get("GITHUB_RUN_ID"),
@@ -798,7 +800,7 @@ def probe(root, env, capture_only=False):
             call(root, env_child, "view-setup", child, start, xid, capture, report)
             call(root, env_child, "setup-capture", child, start, xid, capture, report)
             raise RuntimeError("Capture-only worker unexpectedly returned; further input refused")
-        for app in ("setup", "mcp"):
+        for app in COMPONENT_ORDER:
             report["phase"] = "open-" + app
             call(root, env_child, "view-" + app, child, start, xid, capture, report)
             declined = call(root, env_child, app + "-decline", child, start, xid, capture, report)

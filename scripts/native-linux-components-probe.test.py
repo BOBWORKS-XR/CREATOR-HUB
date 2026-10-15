@@ -29,6 +29,13 @@ fixtures = load("components_root_pure_fixtures", HERE / "native-linux-root-probe
 
 
 class ContractTests(unittest.TestCase):
+    def test_mcp_is_checked_first_without_omitting_setup_or_allowing_caller_order(self):
+        self.assertEqual(p.COMPONENT_ORDER, ("mcp", "setup"))
+        self.assertEqual(set(p.COMPONENT_ORDER), set(p.APPS))
+        source = (HERE / "native-linux-components-probe.py").read_text()
+        self.assertIn("for app in COMPONENT_ORDER:", source)
+        self.assertNotIn('getenv("COMPONENT_ORDER"', source)
+
     def test_exact_previous_product_and_root_helper_no_rebuild(self):
         self.assertEqual(p.B.SOURCE, "5bb05a21d73c0fc3b2839cbcbd4322832b24aead")
         self.assertEqual(p.B.RUN, 38630742955)
@@ -465,7 +472,7 @@ class NativeReceiptTests(unittest.TestCase):
             subject.main()
         self.assertTrue(probe.call_args.kwargs["capture_only"])
         source = (HERE / "native-linux-components-probe.py").read_text().split("def probe(", 1)[1].split("def main(", 1)[0]
-        capture = source.split("if capture_only:", 1)[1].split('for app in ("setup", "mcp"):', 1)[0]
+        capture = source.split("if capture_only:", 1)[1].split('for app in COMPONENT_ORDER:', 1)[0]
         self.assertIn('"setup-capture"', capture)
         self.assertIn("raise RuntimeError", capture)
 
