@@ -6,8 +6,9 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { requireDisposable, baselines } = require('./native-installed-baseline.cjs');
 const { selectBaseline } = require('./self-update-baselines.cjs');
-const INSTALLER = '7007a87c2818fa809382742fb41fc80ddacf6391d678759112196dd962d0955e';
-const EXECUTABLE = '2782921b6bebcf6e811d1240a27d3d47f9c139269aaf6544ff0c6dff85a454ad';
+const CANDIDATE_SOURCE = 'db862739d01088ba9be335d0522f8f129222a48b';
+const INSTALLER = '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157';
+const EXECUTABLE = 'cd5e3fd2829727d06444c0f3266b178798d1b55c63df651be12eb38ac4523a86';
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const hash = file => digest(fs.readFileSync(file));
 function admission(env = process.env, platform = process.platform) {
@@ -17,8 +18,8 @@ function admission(env = process.env, platform = process.platform) {
     GITHUB_REF: 'refs/heads/validation/convergence-014', CREATOR_HUB_ONLY_UPGRADE_TEST: '1' })) assert.equal(env[name], value);
 }
 function artifact(installer, executable) {
-  assert.equal(installer, INSTALLER, 'Exact B04 installer required');
-  assert.equal(executable, EXECUTABLE, 'Exact installed B04 image required');
+  assert.equal(installer, INSTALLER, 'Exact B05 installer required');
+  assert.equal(executable, EXECUTABLE, 'Exact installed B05 image required');
 }
 function registry() {
   return JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-Command',
@@ -30,8 +31,8 @@ function main(candidate) {
   candidate = path.resolve(candidate);
   const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
   fs.mkdirSync(out, { recursive: true });
-  const report = { scope: 'actual-public12-to-B04-guarded-nsis-hub-only-contract', checks: [], passed: false,
-    sourceRevision: process.env.GITHUB_SHA, candidateSourceRevision: '7ab0a529b105cf9174f6b89b2f7073fae751633c',
+  const report = { scope: 'actual-public12-to-B05-guarded-nsis-hub-only-contract', checks: [], passed: false,
+    sourceRevision: process.env.GITHUB_SHA, candidateSourceRevision: CANDIDATE_SOURCE,
     installerScope: 'guarded-nsis-update-default-location-no-msi',
     legacyInstallationsTested: false, migrationAccepted: false, signedInAppUpdateAccepted: false,
     nativeGuiAccepted: false, liveAiAppAccepted: false, releaseReady: false };
@@ -76,5 +77,5 @@ function main(candidate) {
   console.log(JSON.stringify({ scope: report.scope, passed: report.passed, checks: report.checks.length,
     error: report.error, report: path.join(out, 'report.json'), migrationAccepted: false, signedInAppUpdateAccepted: false, releaseReady: false }));
 }
-module.exports = { admission, artifact, INSTALLER, EXECUTABLE };
+module.exports = { admission, artifact, CANDIDATE_SOURCE, INSTALLER, EXECUTABLE };
 if (require.main === module) { try { main(process.argv[2]); } catch (error) { console.error(error.message); process.exitCode = 1; } }
