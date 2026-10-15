@@ -3,6 +3,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const semver = require('semver');
+const { parseArgs } = require('node:util');
+const qualification = require('./windows-release-qualification.cjs');
 
 const root = path.resolve(__dirname, '..');
 const modulePaths = { mcp: 'modules/mcp', setup: 'modules/project-setup' };
@@ -28,9 +30,18 @@ function validateManifest(manifest) {
   return manifest;
 }
 
-function assertReleaseReady(manifest) {
+function assertReleaseReady(manifest, intent = {}) {
   validateManifest(manifest);
-  throw Error('Source consolidation is not a unified release. Built-in packaging and legacy migration acceptance are still required.');
+  if (!intent.receiptPath) throw Error('Source consolidation is not a unified release. Built-in packaging and legacy migration acceptance are still required.');
+  const directory = intent.root || root;
+  const reviewed = qualification.loadQualification(path.resolve(directory, intent.receiptPath), intent);
+  for (const file of ['package.json', 'src-tauri/tauri.conf.json']) {
+    if (JSON.parse(fs.readFileSync(path.join(directory, file), 'utf8')).version !== intent.version) throw Error('Publication version differs from the current source identity.');
+  }
+  // B05's reviewed Windows key bytes use CRLF; Git's LF checkout is the same key.
+  const key = fs.readFileSync(path.join(directory, 'src-tauri/src/catalog-key.pub'), 'utf8').replace(/\r?\n/g, '\r\n');
+  if (crypto.createHash('sha256').update(key).digest('hex') !== reviewed.productionKeySha256) throw Error('Production descriptor key differs from the qualification.');
+  return reviewed;
 }
 
 function checkSources(directory, manifest) {
@@ -70,13 +81,18 @@ function verifyImports(directory, manifest) {
 
 module.exports = { validateManifest, assertReleaseReady, checkSources, verifyImports };
 if (require.main === module) {
-  try {
-    const flags = process.argv.slice(2);
-    if (flags.some(flag => !['--verify-imports', '--release'].includes(flag))) throw Error('Unknown source check option.');
+  (async () => {
+    const { values: flags } = parseArgs({ options: { 'verify-imports': { type: 'boolean' }, release: { type: 'boolean' },
+      receipt: { type: 'string' }, version: { type: 'string' }, platform: { type: 'string' }, 'verify-draft': { type: 'boolean' } } });
+    if (!flags.release && ['receipt', 'version', 'platform', 'verify-draft'].some(key => flags[key] !== undefined)) throw Error('Qualification options require --release.');
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'modules/suite.json'), 'utf8'));
     const result = checkSources(root, manifest);
-    if (flags.includes('--verify-imports')) verifyImports(root, manifest);
-    if (flags.includes('--release')) assertReleaseReady(manifest);
+    if (flags['verify-imports']) verifyImports(root, manifest);
+    if (flags.release) {
+      const reviewed = assertReleaseReady(manifest, { receiptPath: flags.receipt, version: flags.version, platform: flags.platform });
+      result.publication = flags['verify-draft'] ? await qualification.verifyRemote(reviewed)
+        : { version: reviewed.version, platform: reviewed.platform, scope: 'local-qualification-only', ready: false };
+    }
     console.log(JSON.stringify(result));
-  } catch (error) { console.error(error.message); process.exitCode = 1; }
+  })().catch(error => { console.error(error.message); process.exitCode = 1; });
 }

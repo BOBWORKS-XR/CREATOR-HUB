@@ -12,12 +12,24 @@ function disabled(name, job) {
   'Mac job must refuse scheduling: ' + name + ':' + job);
 }
 
-test('active release and router CI target only Windows and Linux', () => {
+test('release promotion is Windows-only, not Linux or Flatpak publication', () => {
   const release = workflow('release.yml');
-  assert.match(release, /- os: windows-latest/);
-  assert.match(release, /- os: ubuntu-22\.04/);
+  assert.match(release, /\bwindows-x86_64\b/, 'Use the exact Windows release target, not a generic ready flag');
+  assert.doesNotMatch(release, /label: (?:Linux|macOS)|--bundles\s+(?:appimage|deb|rpm|dmg)|tauri-apps\/tauri-action|flatpak(?:-builder|\s+build-export)/i);
   assert.doesNotMatch(release, /- os: macos-/);
-  assert.match(workflow('ci.yml'), /os: \[windows-latest, ubuntu-22\.04\]/);
+});
+
+test('Windows-only publication preserves active Linux development CI', () => {
+  const ci = workflow('ci.yml');
+  assert.match(ci, /os: \[windows-latest, ubuntu-22\.04\]/);
+  const linux = ci.match(/^  hub-linux:\r?\n([\s\S]*?)(?=^  [\w-]+:|(?![\s\S]))/m);
+  assert.ok(linux, 'Retain the Linux development job');
+  assert.match(linux[1], /runs-on: ubuntu-22\.04/);
+  assert.doesNotMatch(linux[1], /if: \$\{\{ false \}\}/);
+  assert.match(linux[1], /cargo clippy --release --locked --manifest-path src-tauri\/Cargo\.toml --all-targets -- -D warnings/);
+  assert.match(linux[1], /npm run build -- --bundles appimage,deb,rpm/);
+  assert.match(linux[1], /Retain development packages \(not a release\)/);
+  assert.doesNotMatch(ci, /contents: write|gh release (?:create|upload|edit)|tauri-apps\/tauri-action/);
   disabled('ci.yml', 'hub-macos');
 });
 
