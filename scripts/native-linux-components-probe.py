@@ -88,6 +88,75 @@ class TreeRefusal(RuntimeError):
         self.observation = observation
 
 
+TREE_METADATA_VALUES = {
+    "tag": frozenset("a abbr address article aside b blockquote body br button caption code col colgroup "
+                     "dd details dialog div dl dt em fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 "
+                     "head header hgroup hr html i iframe img input label legend li main menu nav ol optgroup "
+                     "option p pre progress section select small span strong summary table tbody td textarea "
+                     "tfoot th thead time tr ul video".split()),
+    "computed-role": frozenset("alert alertdialog application article banner blockquote button caption cell "
+                               "checkbox code columnheader combobox complementary contentinfo definition "
+                               "deletion dialog directory document emphasis feed figure form generic grid "
+                               "gridcell group heading img insertion link list listbox listitem log main "
+                               "marquee math menu menubar menuitem menuitemcheckbox menuitemradio meter "
+                               "navigation none note option paragraph presentation progressbar radio "
+                               "radiogroup region row rowgroup rowheader scrollbar search searchbox "
+                               "section separator slider spinbutton status strong subscript superscript "
+                               "switch tab table tablist tabpanel term textbox time timer toolbar tooltip "
+                               "tree treegrid treeitem".split()),
+    "toolkit": frozenset(("WebKitGTK", "gtk", "Gtk", "GTK")),
+}
+
+
+def tree_refusal_metadata(missing, collected):
+    """Only GetChildren endpoints already collected by the original refusing walk."""
+    records, selected = [], set()
+    for edge in missing[:8]:
+        for endpoint in ("node", "getChildrenParent"):
+            reference = tuple(edge[endpoint])
+            if reference not in collected or reference in selected:
+                continue
+            selected.add(reference)
+            node = collected[reference]
+            record = {"reference": list(reference)}
+            for field, getter in (("role", "get_role"), ("childCount", "get_child_count"),
+                                  ("attributes", "get_attributes")):
+                try:
+                    value = getattr(node, getter)()
+                    if field == "role":
+                        if not isinstance(value, int) or isinstance(value, bool):
+                            raise TypeError()
+                        if not 0 <= value <= 0xffffffff:
+                            raise ValueError()
+                        value = int(value)
+                    elif field == "childCount":
+                        if type(value) is not int:
+                            raise TypeError()
+                        if not 0 <= value <= 128:
+                            raise ValueError()
+                    else:
+                        if type(value) is not dict:
+                            raise TypeError()
+                        if len(value) > 32:
+                            raise ValueError()
+                        allowed = {}
+                        for key, vocabulary in TREE_METADATA_VALUES.items():
+                            if key not in value:
+                                continue
+                            item = value[key]
+                            if type(item) is not str:
+                                raise TypeError()
+                            if len(item) > 64 or len(item.encode("utf8")) > 64 or item not in vocabulary:
+                                raise ValueError()
+                            allowed[key] = item
+                        value = allowed
+                    record[field] = value
+                except Exception as error:
+                    record.setdefault("errors", {})[field] = {"errorType": type(error).__name__[:64]}
+            records.append(record)
+    return records
+
+
 def retain_tree_refusal(root, action, error):
     try:
         B.save_json(root / (action + "-tree-refusal.json"), error.observation)
@@ -125,7 +194,8 @@ def own_tree(window, owner, atspi):
     """Contained semantic parents, not strict reverse GetChildren equality.
 
     WebKit's live semantic Parent may skip a GetChildren container (measured in
-    38639092559). Every Parent must still occur inside this same bound frame.
+    38639092559). Same-frame Parent membership is a harness invariant, not an
+    established upstream guarantee; a mismatch still refuses without input.
     Fixed controls below require two full walks and the same canonical wire ID.
     """
     helper, req = owner.helper, owner.request
@@ -134,6 +204,7 @@ def own_tree(window, owner, atspi):
     reference = owner.references.identity(window, owner)
     require(reference == owner.references.window, "Component AX frame wire identity changed")
     nodes, seen, parents, pending = [], set(), [], [(window, None, 0)]
+    collected = {}
     owner.recheck(full=True)
     while pending:
         node, expected_parent, depth = pending.pop()
@@ -154,6 +225,7 @@ def own_tree(window, owner, atspi):
                             "getChildrenParent": list(expected_parent), "depth": depth,
                             "pid": node.get_process_id(), "role": int(node.get_role())})
         nodes.append(node)
+        collected[key] = node
         budget = min(helper.MAX_CHILDREN, helper.MAX_NODES - len(nodes) - len(pending))
         pending.extend((child, key, depth + 1) for child in reversed(helper.children(node, budget)))
     missing = [record for record in parents if tuple(record["parent"]) not in seen]
@@ -164,8 +236,23 @@ def own_tree(window, owner, atspi):
                        "checkedParents": len(parents), "missingCount": len(missing),
                        "missing": missing[:8], "collectedReferences": [list(ref) for ref in sorted(seen)[:32]],
                        "referencesTruncated": len(seen) > 32, "missingTruncated": len(missing) > 8}
-        require(len(json.dumps(observation).encode("utf8")) <= 32768, "Tree refusal capture exceeds bound")
-        raise TreeRefusal(observation)
+        error = TreeRefusal(observation)
+        try:
+            enriched = {**observation, "knownObjects": tree_refusal_metadata(missing[:8], collected),
+                        "knownObjectsTruncated": False}
+            # Match save_json's on-disk encoding, not just compact JSON size.
+            while len((json.dumps(enriched, ensure_ascii=True, indent=2) + "\n").encode("utf8")) > 32768:
+                enriched["knownObjectsTruncated"] = True
+                if enriched["knownObjects"]:
+                    enriched["knownObjects"].pop()
+                else:
+                    enriched["collectedReferences"] = enriched["collectedReferences"][:-1]
+                    enriched["referencesTruncated"] = True
+                    require(enriched["collectedReferences"], "Tree refusal capture exceeds bound")
+            error.observation = enriched
+        except Exception as capture_error:
+            observation["metadataRefusal"] = {"errorType": type(capture_error).__name__[:64]}
+        raise error
     owner.recheck(full=True)
     require(owner.same_node(helper.select_window(req, atspi), window), "Component Root frame changed")
     return nodes

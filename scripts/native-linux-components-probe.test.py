@@ -333,6 +333,287 @@ class OwnershipTests(unittest.TestCase):
         f.button.action.do_action.assert_not_called()
 
 
+class TreeRefusalMetadataTests(unittest.TestCase):
+    def fixture(self):
+        f, owner = OwnershipTests().fixture()
+        external = fixtures.AxNode(43, 20)
+        f.button.parent = external
+        for node in (f.window, f.container, f.web, f.button, external):
+            node.get_child_count = mock.Mock(side_effect=lambda node=node: len(node.children))
+            node.get_attributes = mock.Mock(return_value={"tag": "div", "computed-role": "group",
+                                                         "toolkit": "WebKitGTK"})
+        return f, owner, external
+
+    def metadata(self, node):
+        reference = (":1.43", "/org/a11y/atspi/accessible/known")
+        missing = [{"node": list(reference), "getChildrenParent": list(reference),
+                    "parent": [":1.43", "/org/a11y/atspi/accessible/uncollected"]}]
+        return p.tree_refusal_metadata(missing, {reference: node})[0]
+
+    def test_original_three_missing_edges_capture_only_five_collected_endpoints(self):
+        f, owner, external = self.fixture()
+        container = fixtures.AxNode(43, 20, parent=f.web)
+        leaves = [fixtures.AxNode(43, 33, parent=container) for _ in range(2)]
+        for node in leaves:
+            node.parent = external
+        known = [f.button, f.web, leaves[0], container, leaves[1]]
+        secret = "private name text /home/user/file https://private.invalid"
+        for node in known:
+            node.get_name = mock.Mock(side_effect=AssertionError(secret))
+            node.get_text_iface = mock.Mock(side_effect=AssertionError(secret))
+            node.get_child_at_index = mock.Mock(side_effect=AssertionError("No additional traversal"))
+            node.get_child_count = mock.Mock(side_effect=lambda node=node: len(node.children))
+            node.get_attributes = mock.Mock(return_value={"tag": "div", "computed-role": "group",
+                "toolkit": "WebKitGTK", "name": secret, "text": secret, "path": secret, "url": secret})
+            node.get_parent = mock.Mock(wraps=node.get_parent)
+            node.clear_cache = mock.Mock(wraps=node.clear_cache)
+        with mock.patch.object(p, "tree_refusal_metadata", wraps=p.tree_refusal_metadata) as metadata, \
+                self.assertRaises(p.TreeRefusal) as caught:
+            p.press("view-setup", owner, f.atspi)
+        self.assertEqual(metadata.call_count, 1)
+        observation = caught.exception.observation
+        self.assertEqual(observation["missingCount"], 3)
+        self.assertEqual(observation["timing"], "original-refusing-walk-not-a-retry")
+        self.assertFalse(observation["authorization"])
+        self.assertEqual(observation["actionCount"], 0)
+        self.assertFalse(observation["knownObjectsTruncated"])
+        rows = observation["knownObjects"]
+        self.assertEqual([row["reference"] for row in rows],
+                         [owner.references.identity(node, owner) for node in known])
+        for row, node in zip(rows, known):
+            self.assertEqual(row, {"reference": owner.references.identity(node, owner), "role": node.role,
+                "childCount": len(node.children),
+                "attributes": {"tag": "div", "computed-role": "group", "toolkit": "WebKitGTK"}})
+            node.get_attributes.assert_called_once_with()
+            node.get_child_count.assert_called_once_with()
+            node.get_name.assert_not_called()
+            node.get_text_iface.assert_not_called()
+            node.get_child_at_index.assert_not_called()
+            node.get_parent.assert_called_once_with()
+            node.clear_cache.assert_called_once_with()
+        f.window.get_attributes.assert_not_called()
+        f.container.get_attributes.assert_not_called()
+        external.get_attributes.assert_not_called()
+        external.get_child_count.assert_not_called()
+        self.assertNotIn(secret, json.dumps(observation))
+        f.button.action.do_action.assert_not_called()
+
+    def test_absent_getters_are_type_only_and_do_not_prevent_other_records(self):
+        row = self.metadata(object())
+        self.assertEqual(row["errors"], {key: {"errorType": "AttributeError"}
+                                          for key in ("role", "childCount", "attributes")})
+        f, owner, _ = self.fixture()
+        del f.button.get_child_count
+        with self.assertRaises(p.TreeRefusal) as caught:
+            p.press("view-setup", owner, f.atspi)
+        row, parent = caught.exception.observation["knownObjects"]
+        self.assertEqual(row["errors"], {"childCount": {"errorType": "AttributeError"}})
+        self.assertEqual(parent["childCount"], 1)
+        f.button.action.do_action.assert_not_called()
+
+    def test_successful_walk_never_reads_diagnostic_metadata(self):
+        f, owner, _ = self.fixture()
+        f.button.parent = f.web
+        with mock.patch.object(p, "tree_refusal_metadata") as metadata:
+            self.assertIn(f.button, p.own_tree(f.window, owner, f.atspi))
+        metadata.assert_not_called()
+        for node in (f.window, f.container, f.web, f.button):
+            node.get_attributes.assert_not_called()
+            node.get_child_count.assert_not_called()
+
+    def test_none_wrong_types_oversize_and_non_allowlisted_values_are_never_serialized(self):
+        cases = {
+            "role": ((None, "TypeError"), (True, "TypeError"), ("33", "TypeError"),
+                     ([], "TypeError"), (-1, "ValueError"), (1 << 32, "ValueError")),
+            "childCount": ((None, "TypeError"), (False, "TypeError"), (1.5, "TypeError"),
+                           ("1", "TypeError"), (-1, "ValueError"), (129, "ValueError")),
+            "attributes": ((None, "TypeError"), ([], "TypeError"), ("private text", "TypeError"),
+                           ({str(i): "private text" for i in range(33)}, "ValueError"),
+                           ({"tag": None}, "TypeError"), ({"computed-role": 33}, "TypeError"),
+                           ({"toolkit": ["WebKitGTK"]}, "TypeError"),
+                           ({"tag": "x" * 65}, "ValueError"),
+                           ({"computed-role": "x" * 100000}, "ValueError"),
+                           ({"toolkit": "x" * 65}, "ValueError"),
+                           ({"tag": "/home/user/private"}, "ValueError"),
+                           ({"toolkit": "https://private.invalid"}, "ValueError"),
+                           ({"computed-role": "private text"}, "ValueError")),
+        }
+        getters = {"role": "get_role", "childCount": "get_child_count", "attributes": "get_attributes"}
+        for field, values in cases.items():
+            for value, error_type in values:
+                with self.subTest(field=field, value_type=type(value).__name__, error_type=error_type):
+                    node = types.SimpleNamespace(get_role=lambda: 33, get_child_count=lambda: 0,
+                                                 get_attributes=lambda: {})
+                    setattr(node, getters[field], mock.Mock(return_value=value))
+                    row = self.metadata(node)
+                    self.assertNotIn(field, row)
+                    self.assertEqual(row["errors"], {field: {"errorType": error_type}})
+                    self.assertNotIn("private", json.dumps(row))
+                    self.assertLess(len(json.dumps(row)), 512)
+                    getattr(node, getters[field]).assert_called_once_with()
+
+    def test_numeric_enum_role_and_absent_attribute_keys(self):
+        class NumericRole(int):
+            pass
+        row = self.metadata(types.SimpleNamespace(get_role=lambda: NumericRole(49),
+            get_child_count=lambda: 0, get_attributes=lambda: {"ignored-name": "private text"}))
+        self.assertEqual(row["role"], 49)
+        self.assertIs(type(row["role"]), int)
+        self.assertEqual(row["attributes"], {})
+        self.assertNotIn("errors", row)
+
+    def test_inaccessible_getter_and_remote_exception_record_only_type(self):
+        secret = "private remote message /home/user/file https://private.invalid"
+        class Inaccessible:
+            def get_role(self):
+                return 33
+
+            def get_child_count(self):
+                raise OSError(secret)
+
+            @property
+            def get_attributes(self):
+                raise PermissionError(secret)
+        row = self.metadata(Inaccessible())
+        self.assertEqual(row["errors"], {"childCount": {"errorType": "OSError"},
+                                         "attributes": {"errorType": "PermissionError"}})
+        self.assertEqual(row["role"], 33)
+        self.assertNotIn(secret, json.dumps(row))
+
+    def test_uncollected_semantic_parent_gets_no_extra_getters(self):
+        f, owner, external = self.fixture()
+        for getter in ("get_role", "get_child_count", "get_attributes", "get_name", "get_text_iface",
+                       "get_child_at_index", "get_parent", "clear_cache"):
+            setattr(external, getter, mock.Mock(side_effect=AssertionError("Uncollected reference queried")))
+        with self.assertRaises(p.TreeRefusal) as caught:
+            p.press("view-setup", owner, f.atspi)
+        for getter in ("get_role", "get_child_count", "get_attributes", "get_name", "get_text_iface",
+                       "get_child_at_index", "get_parent", "clear_cache"):
+            getattr(external, getter).assert_not_called()
+        self.assertNotIn(owner.references.identity(external, owner),
+                         [row["reference"] for row in caught.exception.observation["knownObjects"]])
+        f.button.action.do_action.assert_not_called()
+
+    def test_uncollected_endpoints_and_foreign_parent_never_enter_metadata(self):
+        node = types.SimpleNamespace(get_role=mock.Mock(), get_child_count=mock.Mock(), get_attributes=mock.Mock())
+        edge = {key: [":1.99", "/org/a11y/atspi/accessible/foreign"]
+                for key in ("node", "getChildrenParent", "parent")}
+        self.assertEqual(p.tree_refusal_metadata([edge], {(":1.43", "/org/a11y/atspi/accessible/known"): node}), [])
+        node.get_role.assert_not_called()
+        node.get_child_count.assert_not_called()
+        node.get_attributes.assert_not_called()
+        f, owner, external = self.fixture()
+        external.pid = 99
+        with mock.patch.object(p, "tree_refusal_metadata") as metadata, self.assertRaises(RuntimeError):
+            p.press("view-setup", owner, f.atspi)
+        metadata.assert_not_called()
+        external.get_attributes.assert_not_called()
+        f.button.action.do_action.assert_not_called()
+
+    def test_max_eight_missing_sixteen_known_objects_and_no_remaining_getters(self):
+        f, owner, external = self.fixture()
+        f.web.children.clear()
+        endpoints = []
+        for _ in range(40):
+            container = fixtures.AxNode(43, 20, parent=f.web)
+            node = fixtures.AxNode(43, 33, parent=container)
+            node.parent = external
+            for endpoint in (node, container):
+                endpoint.get_child_count = mock.Mock(return_value=len(endpoint.children))
+                endpoint.get_attributes = mock.Mock(return_value={"tag": "div"})
+                endpoints.append(endpoint)
+        with self.assertRaises(p.TreeRefusal) as caught:
+            p.own_tree(f.window, owner, f.atspi)
+        observation = caught.exception.observation
+        self.assertEqual(observation["missingCount"], 40)
+        self.assertEqual(len(observation["missing"]), 8)
+        self.assertTrue(observation["missingTruncated"])
+        self.assertEqual(len(observation["knownObjects"]), 16)
+        for endpoint in endpoints[:16]:
+            endpoint.get_attributes.assert_called_once_with()
+            endpoint.get_child_count.assert_called_once_with()
+        for endpoint in endpoints[16:]:
+            endpoint.get_attributes.assert_not_called()
+            endpoint.get_child_count.assert_not_called()
+        self.assertLessEqual(len((json.dumps(observation, ensure_ascii=True, indent=2) + "\n").encode()), 32768)
+
+    def test_metadata_capture_failure_preserves_exact_original_exception_and_edges(self):
+        f, owner, _ = self.fixture()
+        original_type, created = p.TreeRefusal, []
+        def refusing(observation):
+            error = original_type(observation)
+            created.append(error)
+            return error
+        secret = "private capture failure /home/user/file"
+        with mock.patch.object(p, "TreeRefusal", side_effect=refusing), \
+                mock.patch.object(p, "tree_refusal_metadata", side_effect=OSError(secret)), \
+                self.assertRaises(original_type) as caught:
+            p.press("view-setup", owner, f.atspi)
+        self.assertIs(caught.exception, created[0])
+        self.assertEqual(str(caught.exception), "Component AX parent escaped bound subtree")
+        observation = caught.exception.observation
+        self.assertEqual(observation["missingCount"], 1)
+        self.assertEqual(observation["missing"][0]["node"], owner.references.identity(f.button, owner))
+        self.assertEqual(observation["metadataRefusal"], {"errorType": "OSError"})
+        self.assertNotIn(secret, json.dumps(observation))
+        self.assertFalse(observation["authorization"])
+        self.assertEqual(observation["actionCount"], 0)
+        f.button.action.do_action.assert_not_called()
+
+    def test_metadata_serialization_failure_cannot_replace_original_refusal(self):
+        f, owner, _ = self.fixture()
+        with mock.patch.object(p, "tree_refusal_metadata", return_value=[object()]), \
+                self.assertRaises(p.TreeRefusal) as caught:
+            p.press("view-setup", owner, f.atspi)
+        observation = caught.exception.observation
+        self.assertEqual(observation["metadataRefusal"], {"errorType": "TypeError"})
+        self.assertEqual(observation["missingCount"], 1)
+        self.assertEqual(observation["missing"][0]["node"], owner.references.identity(f.button, owner))
+        self.assertFalse(observation["authorization"])
+        self.assertEqual(observation["actionCount"], 0)
+        self.assertNotIn("knownObjects", observation)
+        f.button.action.do_action.assert_not_called()
+
+    def test_overall_saved_json_bound_with_long_wire_ids_and_capture_failure(self):
+        for fail_metadata in (False, True):
+            with self.subTest(fail_metadata=fail_metadata):
+                f, owner, external = self.fixture()
+                wire_owner = ":1." + "9" * 252
+                f.bus_records[":1.43"]["owner"] = wire_owner
+                owner.references.aliases[":1.43"]["owner"] = wire_owner
+                f.web.children.clear()
+                for index in range(40):
+                    container = fixtures.AxNode(43, 20, parent=f.web)
+                    node = fixtures.AxNode(43, 33, parent=container)
+                    node.parent = external
+                    for number, endpoint in enumerate((node, container)):
+                        path = f"/org/a11y/atspi/accessible/n{index}_{number}_"
+                        endpoint.path = path + "x" * (256 - len(path))
+                        endpoint.get_child_count = mock.Mock(return_value=len(endpoint.children))
+                        endpoint.get_attributes = mock.Mock(return_value={"tag": "div"})
+                with mock.patch.object(p, "tree_refusal_metadata", wraps=p.tree_refusal_metadata,
+                                       side_effect=OSError("private") if fail_metadata else None), \
+                        self.assertRaises(p.TreeRefusal) as caught:
+                    p.own_tree(f.window, owner, f.atspi)
+                observation = caught.exception.observation
+                self.assertEqual(observation["missingCount"], 40)
+                self.assertEqual(len(observation["missing"]), 8)
+                self.assertTrue(observation["missingTruncated"])
+                self.assertLessEqual(len(observation.get("knownObjects", [])), 16)
+                if fail_metadata:
+                    self.assertEqual(observation["metadataRefusal"], {"errorType": "OSError"})
+                else:
+                    self.assertTrue(observation["knownObjectsTruncated"])
+                self.assertFalse(observation["authorization"])
+                self.assertEqual(observation["actionCount"], 0)
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    p.retain_tree_refusal(root, "mcp-ready", caught.exception)
+                    output = root / "mcp-ready-tree-refusal.json"
+                    self.assertLessEqual(output.stat().st_size, 32768)
+                    self.assertEqual(json.loads(output.read_bytes()), observation)
+
+
 class NativeReceiptTests(unittest.TestCase):
     def task_listing(self, *tids):
         listing = mock.MagicMock()
