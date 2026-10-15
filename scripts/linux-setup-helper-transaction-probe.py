@@ -214,6 +214,11 @@ class SetupProbe(base.Probe):
                 return b""
         capture("final-package-state", ["/usr/bin/dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\t${Status}\n", PACKAGE])
         capture("final-audit", ["/usr/bin/dpkg", "--audit"])
+        capture("final-verify", ["/usr/bin/dpkg", "--verify", PACKAGE])
+        capture("final-package-list", ["/usr/bin/dpkg-query", "-L", PACKAGE])
+        capture("final-md5sums", ["/usr/bin/cat", "/var/lib/dpkg/info/creator-project-setup.md5sums"])
+        capture("final-notice-stat", ["/usr/bin/stat", "--", "/" + NOTICE])
+        capture("system-path-exclusions", ["/usr/bin/cat", "/etc/dpkg/dpkg.cfg.d/excludes"])
         capture("attempt-marker", ["/usr/bin/sudo", "-n", "/usr/bin/cat", "--", PRIVATE + "/transaction-attempted"])
         listing = capture("private-stages", ["/usr/bin/sudo", "-n", "/usr/bin/find", PRIVATE, "-mindepth", "1", "-maxdepth", "1", "-type", "d", "-printf", "%f\n"])
         for index, name in enumerate(listing.decode().splitlines()):

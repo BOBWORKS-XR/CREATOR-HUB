@@ -120,6 +120,7 @@ jobs:
         if: always()
         run: python3 -B scripts/linux-deb-helper-transaction-probe.py diagnostics
       - name: Retain Setup package, protected candidate and dpkg evidence without retries
+        # Capture missing files and unchanged distro path exclusions on failure.
         if: always()
         run: python3 -B scripts/linux-setup-helper-transaction-probe.py diagnostics
       - name: Retain original logs and false production gates, not product/package payloads
