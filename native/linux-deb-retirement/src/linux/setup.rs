@@ -53,7 +53,7 @@ fn unowned_absent(path: &str) -> Result<()> {
 }
 
 fn original_notice_absent() -> Result<()> {
-    unowned_absent(contract::DOCUMENT_ROOT)?;
+    unowned_absent(contract::NOTICE_ROOT)?;
     unowned_absent(&format!("/{}", contract::TOMBSTONE[0].path))
 }
 
@@ -170,8 +170,8 @@ pub(super) fn installed(compatibility: bool) -> Result<()> {
         for pin in contract::FILES {
             unowned_absent(&format!("/{}", pin.path))?;
         }
-        directory(Path::new(contract::DOCUMENT_ROOT))?;
-        let entries = fs::read_dir(contract::DOCUMENT_ROOT)?
+        directory(Path::new(contract::NOTICE_ROOT))?;
+        let entries = fs::read_dir(contract::NOTICE_ROOT)?
             .map(|entry| entry.map(|e| e.file_name()))
             .collect::<std::io::Result<Vec<_>>>()?;
         require(
@@ -329,7 +329,7 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let tree = temporary.path().join("tree");
         fs::create_dir_all(tree.join("DEBIAN")).unwrap();
-        fs::create_dir_all(tree.join("usr/share/doc/creator-project-setup")).unwrap();
+        fs::create_dir_all(tree.join("usr/share/creator-project-setup")).unwrap();
         fs::write(tree.join("DEBIAN/control"), contract::control()).unwrap();
         fs::write(tree.join("DEBIAN/md5sums"), contract::md5sums()).unwrap();
         fs::write(tree.join(contract::TOMBSTONE[0].path), contract::NOTICE).unwrap();
@@ -338,8 +338,7 @@ mod tests {
             "DEBIAN",
             "usr",
             "usr/share",
-            "usr/share/doc",
-            "usr/share/doc/creator-project-setup",
+            "usr/share/creator-project-setup",
         ] {
             fs::set_permissions(tree.join(name), fs::Permissions::from_mode(0o755)).unwrap();
         }

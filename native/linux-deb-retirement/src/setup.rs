@@ -6,7 +6,7 @@ pub const PACKAGE: &str = "creator-project-setup";
 pub const OLD: &str = "0.3.7";
 pub const NEW: &str = "0.3.7-1+hub.retention014.1";
 pub const PRIVATE: &str = "/var/lib/creator-hub-deb-retirement-setup";
-pub const DOCUMENT_ROOT: &str = "/usr/share/doc/creator-project-setup";
+pub const NOTICE_ROOT: &str = "/usr/share/creator-project-setup";
 pub const PACKAGE_BYTES: u64 = 5966970;
 pub const PACKAGE_SHA256: &str = "be18f23450146e71a2960e2110474f6e0409a9521a3ced308b7fd6a6d584c63d";
 pub const CONTROL_SHA256: &str = "e0d549d19d4f8820b4e07cb05bca5c8f165bfc82a9ad255c5dc9d7233e9606e9";
@@ -60,7 +60,7 @@ pub const FILES: &[Pin] = &[
 // The only new payload is a fixed non-executable notice, never user data.
 pub const NOTICE: &[u8] = b"TEST ONLY - Creator Project Setup 0.3.7 GUI retired by a disposable Creator Hub validation.\nUser settings, Unity projects, caches and client configuration are not package payload and are not removed.\n";
 pub const TOMBSTONE: &[Pin] = &[Pin {
-    path: "usr/share/doc/creator-project-setup/retired-by-creator-hub.txt",
+    path: "usr/share/creator-project-setup/retired-by-creator-hub.txt",
     bytes: NOTICE.len() as u64,
     mode: 0o644,
     sha256: "a78a28ee51d81f81ae96c18c47fef7e66034262a59c9d189497c6e39043f5307",
@@ -187,6 +187,13 @@ mod tests {
         assert_eq!(crate::sha256(NOTICE), TOMBSTONE[0].sha256);
         assert_eq!(NOTICE.len(), 200);
         assert_eq!(TOMBSTONE[0].mode, 0o644);
+        // Required package state cannot live in optional documentation, which
+        // minimized Ubuntu legitimately excludes while unpacking packages.
+        assert_eq!(NOTICE_ROOT, "/usr/share/creator-project-setup");
+        assert_eq!(
+            TOMBSTONE[0].path,
+            "usr/share/creator-project-setup/retired-by-creator-hub.txt"
+        );
         assert_eq!(md5sums().lines().count(), 1);
         assert!(control().contains(&format!("Package: {PACKAGE}\nVersion: {NEW}\n")));
         assert!(control().contains("TEST ONLY"));
@@ -362,7 +369,7 @@ mod tests {
             FILES[0].path,
             "home/fixture/project/Assets/user.asset",
             "home/fixture/.config/creator-project-setup/preferences.json",
-            "usr/share/doc/creator-project-setup/unknown.txt",
+            "usr/share/creator-project-setup/unknown.txt",
         ] {
             assert!(crate::archive::verify_data(
                 archive(&[good, (path, b"preserve")]).as_slice(),

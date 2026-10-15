@@ -113,7 +113,7 @@ jobs:
       - name: Install existing lockfile-pinned SDK without lifecycle scripts or product build
         run: npm ci --prefix modules/mcp --omit=dev --ignore-scripts --no-audit --no-fund
       - name: Build only experimental helper, install both baselines and preserve live SDK across both retirements
-        # Verify dpkg's explicit default Multi-Arch=no and retain the exact queried bytes.
+        # Keep distro documentation exclusions unchanged; the required notice is package data.
         run: node scripts/linux-deb-helper-transaction-sdk.cjs
       # Capture even an artifact/setup failure. Never clear diversions, markers or stages.
       - name: Read-only final system diversions, package state and protected helper evidence

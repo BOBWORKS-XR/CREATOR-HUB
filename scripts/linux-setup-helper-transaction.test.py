@@ -46,8 +46,9 @@ class SetupFixtureTests(unittest.TestCase):
         original = probe.package_paths(probe.FILES, False)
         retained = probe.package_paths({probe.NOTICE: None}, True)
         self.assertNotIn("/.", original)
-        self.assertEqual(retained, {"/.", "/usr", "/usr/share", "/usr/share/doc",
-                                   "/usr/share/doc/creator-project-setup", "/" + probe.NOTICE})
+        self.assertEqual(retained, {"/.", "/usr", "/usr/share",
+                                   "/usr/share/creator-project-setup", "/" + probe.NOTICE})
+        self.assertFalse(probe.NOTICE.startswith("usr/share/doc/"))
         self.assertNotIn("/", original | retained)
         self.assertEqual(len(probe.FILES), 5)
         self.assertTrue(all("/" + name in original and not name.startswith("home/") for name in probe.FILES))

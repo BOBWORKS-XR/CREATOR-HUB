@@ -64,7 +64,7 @@ pub fn disjoint_for(target: Target, path: &str) -> Result<()> {
     canonical(path)?;
     let (product, files, additional) = match target {
         Target::Mcp => ("/usr/lib/Creator Works MCP", pins::FILES, &[][..]),
-        Target::Setup => (setup::DOCUMENT_ROOT, setup::FILES, setup::TOMBSTONE),
+        Target::Setup => (setup::NOTICE_ROOT, setup::FILES, setup::TOMBSTONE),
     };
     require(
         !within(path, product)
@@ -471,7 +471,7 @@ mod tests {
         }
         assert!(disjoint_for(
             Target::Setup,
-            "/usr/share/doc/creator-project-setup/unknown/child"
+            "/usr/share/creator-project-setup/unknown/child"
         )
         .is_err());
         assert!(validate_for(

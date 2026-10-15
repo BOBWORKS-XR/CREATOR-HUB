@@ -33,6 +33,14 @@ Success uses `experimental-transaction-verified`, fixed package/version,
 schema, including unknown transaction state for an earlier attempt marker.
 The exact five omissions and fixed notice are independently verified afterward.
 
+Native diagnostic 38754932346 verified dpkg's unchanged minimized-Ubuntu
+`path-exclude=/usr/share/doc/*` policy omitted the original notice destination
+after an otherwise healthy transaction. Required transition state now lives at
+`/usr/share/creator-project-setup/retired-by-creator-hub.txt`, not in optional
+documentation. Its bytes, hash and mode are unchanged. No distro policy is
+rewritten or overridden. This change still needs a new native transaction pass;
+the earlier failed transaction remains retained with its attempt marker.
+
 Next measured gate, after review: disposable positive MCP plus Setup with the
 original public DEBs, both post-inspects and complete protected logs; negatives
 for changed files/foreign ownership, pre-existing notice/user-data sentinel,
