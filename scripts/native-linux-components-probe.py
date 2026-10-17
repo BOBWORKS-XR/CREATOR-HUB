@@ -190,6 +190,205 @@ def retain_failure_site(root, action, error):
         print(json.dumps({"failureSiteCaptureRefusal": type(capture_error).__name__[:64]}), file=sys.stderr)
 
 
+def fixed_control_hit_test(window, collected, owner, atspi):
+    """Read-only save-guide evidence from the original GetChildren inventory.
+
+    No semantic Parent, new tree walk, action interface or readiness fallback.
+    https://docs.gtk.org/atspi2/method.Component.get_accessible_at_point.html
+    https://docs.gtk.org/atspi2/method.Component.get_extents.html
+    """
+    result = {"readOnly": True, "authorization": False, "actionCount": 0,
+              "nativeAcceptance": False, "verified": False, "control": "save-guide",
+              "timing": "original-refusing-walk-not-a-retry", "hitPath": []}
+    stage = "binding"
+    try:
+        helper, req = owner.helper, owner.request
+        owner.recheck(full=True)
+        require(type(collected) is dict and 0 < len(collected) <= min(512, helper.MAX_NODES),
+                "Hit-test inventory exceeds bound")
+        frame_ref = tuple(owner.references.identity(window, owner))
+        require(list(frame_ref) == owner.references.window and collected.get(frame_ref) is window
+                and window.get_process_id() == req.pid and window.get_role() == atspi.Role.FRAME,
+                "Hit-test frame differs from bound Root")
+        roles = {}
+        for reference, node in collected.items():
+            owner.node(node)
+            require(tuple(owner.references.identity(node, owner)) == reference, "Collected wire ID changed")
+            role = node.get_role()
+            require(isinstance(role, int) and not isinstance(role, bool) and 0 <= role <= 0xffffffff,
+                    "Collected numeric role unavailable/oversized")
+            require(reference == frame_ref or role not in
+                    (atspi.Role.FRAME, atspi.Role.WINDOW, atspi.Role.APPLICATION), "Nested AX window refused")
+            roles[reference] = role
+        require(owner.renderer is not None, "Bound renderer absent")
+        result.update(collectedCount=len(collected), frameReference=list(frame_ref),
+                      rootPid=req.pid, rendererPid=owner.renderer["pid"], xid=req.window)
+
+        def shown(node):
+            states = node.get_state_set()
+            require(all(states.contains(getattr(atspi.StateType, state)) for state in ("VISIBLE", "SHOWING"))
+                    and not states.contains(atspi.StateType.DEFUNCT), "Component not visible and showing")
+
+        def fixed_name(node):
+            value = node.get_name()
+            require(type(value) is str and len(value) <= 128, "Fixed-control name unavailable/oversized")
+            return value
+
+        stage = "fixed-controls"
+        name, heading = CONTROLS["save-guide"]
+        candidates, headings = [], []
+        # Only the source button/heading roles are inspected; no returned names
+        # or arbitrary UI text are retained in this diagnostic.
+        for reference, node in collected.items():
+            if roles[reference] == atspi.Role.PUSH_BUTTON and fixed_name(node) == name:
+                candidates.append(reference)
+            elif roles[reference] == atspi.Role.HEADING and fixed_name(node) == heading:
+                headings.append(reference)
+        result.update(candidateCount=len(candidates), headingCount=len(headings))
+        require(len(candidates) == len(headings) == 1, "Exact unique source button/heading required")
+        target_ref, heading_ref = candidates[0], headings[0]
+        target, source_heading = collected[target_ref], collected[heading_ref]
+        require(target.get_process_id() == source_heading.get_process_id() == owner.renderer["pid"],
+                "Source controls are not in the bound renderer")
+        shown(source_heading)
+        result["targetReference"] = list(target_ref)
+
+        stage = "geometry"
+        native_rect = B.visible_rectangle(req, helper, owner.x11)
+        require(type(native_rect) is tuple and len(native_rect) == 4
+                and all(type(v) is int and 0 <= v <= 0x7fffffff for v in native_rect)
+                and 0 < native_rect[2] <= 1920 and 0 < native_rect[3] <= 1080,
+                "Native rectangle unavailable/oversized")
+        result["nativeRectangle"] = list(native_rect)
+
+        def inside(inner, outer):
+            return (outer[0] <= inner[0] and outer[1] <= inner[1]
+                    and inner[0] + inner[2] <= outer[0] + outer[2]
+                    and inner[1] + inner[3] <= outer[1] + outer[3])
+
+        def geometry(node, field):
+            shown(node)
+            component = node.get_component_iface()
+            require(component is not None, "Component interface absent")
+            extents = component.get_extents(atspi.CoordType.SCREEN)
+            rect = (extents.x, extents.y, extents.width, extents.height)
+            require(all(type(v) is int and -0x80000000 <= v <= 0x7fffffff for v in rect),
+                    "Component rectangle type/range exceeds bound")
+            result[field] = list(rect)
+            require(0 < rect[2] <= 1920 and 0 < rect[3] <= 1080 and inside(rect, native_rect),
+                    "Component rectangle escapes native window")
+            return component, rect
+
+        frame_component, frame_rect = geometry(window, "frameRectangle")
+        _target_component, target_rect = geometry(target, "controlRectangle")
+        require(inside(target_rect, frame_rect), "Control rectangle escapes AX frame")
+        point = (target_rect[0] + target_rect[2] // 2, target_rect[1] + target_rect[3] // 2)
+        result["point"] = list(point)
+
+        stage = "hit-test"
+        current_ref, component = frame_ref, frame_component
+        visited = {frame_ref}
+        result["hitPath"].append(list(frame_ref))
+        while current_ref != target_ref:
+            if len(visited) >= 32:
+                result["hitRefusal"] = "ObjectBound"
+                raise RuntimeError()
+            hit = component.get_accessible_at_point(*point, atspi.CoordType.SCREEN)
+            if hit is None:
+                result["hitRefusal"] = "NoChild"
+                raise RuntimeError()
+            # Read reference fields only. Do not query PID/role/component on an
+            # unknown hit, resolve new aliases, or follow its children/parents.
+            bus_name, path = hit.app.bus_name, hit.path
+            require(type(bus_name) is str and len(bus_name) <= 255 and type(path) is str and len(path) <= 256,
+                    "Hit reference exceeds wire bound")
+            require(re.fullmatch(r"/org/a11y/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+", path), "Invalid AX hit path")
+            peer = owner.references.aliases.get(bus_name)
+            if peer is None:
+                result["hitRefusal"] = "UncollectedAlias"
+                raise RuntimeError()
+            next_ref = (peer["owner"], path)
+            if next_ref not in collected or next_ref in visited:
+                result["refusedHitReference"] = list(next_ref)
+                result["hitRefusal"] = "UncollectedReference" if next_ref not in collected else "Cycle"
+                raise RuntimeError()
+            visited.add(next_ref)
+            result["hitPath"].append(list(next_ref))
+            current_ref = next_ref
+            current = collected[current_ref]
+            owner.node(current)
+            require(tuple(owner.references.identity(current, owner)) == current_ref, "Hit wire ID changed")
+            shown(current)
+            if current_ref != target_ref:
+                component = current.get_component_iface()
+                require(component is not None, "Hit Component interface absent")
+
+        stage = "recheck"
+        owner.recheck(full=True)
+        require(B.visible_rectangle(req, helper, owner.x11) == native_rect, "Native rectangle changed")
+        require(geometry(window, "frameRectangleAfter")[1] == frame_rect
+                and geometry(target, "controlRectangleAfter")[1] == target_rect,
+                "Frame/control rectangle changed")
+        final_candidates, final_headings = [], []
+        for reference, node in collected.items():
+            owner.node(node)
+            require(tuple(owner.references.identity(node, owner)) == reference and node.get_role() == roles[reference],
+                    "Collected wire ID/role changed")
+            if reference in visited:
+                shown(node)
+            if roles[reference] == atspi.Role.PUSH_BUTTON and fixed_name(node) == name:
+                final_candidates.append(reference)
+            elif roles[reference] == atspi.Role.HEADING and fixed_name(node) == heading:
+                final_headings.append(reference)
+        shown(source_heading)
+        require(final_candidates == candidates and final_headings == headings
+                and owner.references.window == list(frame_ref), "Source control/frame changed")
+        owner.recheck(full=True)
+        result["verified"] = True
+    except Exception as error:
+        result["refusal"] = {"stage": stage, "errorType": type(error).__name__[:64]}
+    if len((json.dumps(result, ensure_ascii=True, indent=2) + "\n").encode("utf8")) > 24576:
+        result = {"readOnly": True, "authorization": False, "actionCount": 0, "nativeAcceptance": False,
+                  "verified": False, "control": "save-guide", "refusal": {"stage": "output", "errorType": "OutputBound"}}
+    return result
+
+
+def capture_refusal_hit_test(error, window, collected, owner, atspi):
+    """Optional evidence cannot replace the original refusal or authorize input."""
+    try:
+        observation = {**error.observation, "fixedControlHitTest": fixed_control_hit_test(window, collected, owner, atspi)}
+        if "knownObjects" in observation:
+            observation["knownObjects"] = list(observation["knownObjects"])
+        observation["collectedReferences"] = list(observation["collectedReferences"])
+        while len((json.dumps(observation, ensure_ascii=True, indent=2) + "\n").encode("utf8")) > 32768:
+            if observation.get("knownObjects"):
+                observation["knownObjects"].pop()
+                observation["knownObjectsTruncated"] = True
+            elif observation["collectedReferences"]:
+                observation["collectedReferences"].pop()
+                observation["referencesTruncated"] = True
+            else:
+                observation["fixedControlHitTest"] = {"readOnly": True, "authorization": False, "actionCount": 0,
+                    "nativeAcceptance": False, "verified": False, "control": "save-guide",
+                    "refusal": {"stage": "output", "errorType": "OutputBound"}}
+                require(len((json.dumps(observation, indent=2) + "\n").encode("utf8")) <= 32768,
+                        "Refusal diagnostic exceeds output bound")
+        error.observation = observation
+    except Exception as capture_error:
+        error.observation["hitTestCaptureRefusal"] = {"errorType": type(capture_error).__name__[:64]}
+        try:
+            while len((json.dumps(error.observation, indent=2) + "\n").encode("utf8")) > 32768:
+                if error.observation.get("knownObjects"):
+                    error.observation["knownObjects"].pop()
+                    error.observation["knownObjectsTruncated"] = True
+                else:
+                    require(error.observation["collectedReferences"], "Refusal capture exceeds bound")
+                    error.observation["collectedReferences"].pop()
+                    error.observation["referencesTruncated"] = True
+        except Exception:
+            pass  # A local serialization failure must never replace TreeRefusal.
+
+
 def own_tree(window, owner, atspi):
     """Contained semantic parents, not strict reverse GetChildren equality.
 
@@ -252,6 +451,7 @@ def own_tree(window, owner, atspi):
             error.observation = enriched
         except Exception as capture_error:
             observation["metadataRefusal"] = {"errorType": type(capture_error).__name__[:64]}
+        capture_refusal_hit_test(error, window, collected, owner, atspi)
         raise error
     owner.recheck(full=True)
     require(owner.same_node(helper.select_window(req, atspi), window), "Component Root frame changed")

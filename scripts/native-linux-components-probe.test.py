@@ -614,6 +614,302 @@ class TreeRefusalMetadataTests(unittest.TestCase):
                     self.assertEqual(json.loads(output.read_bytes()), observation)
 
 
+class FixedControlHitTestTests(unittest.TestCase):
+    def fixture(self, trap_traversal=True):
+        f, owner = OwnershipTests().fixture()
+        f.atspi.Role.HEADING = 78
+        f.atspi.StateType.VISIBLE = 8
+        f.atspi.CoordType = types.SimpleNamespace(SCREEN=0)
+        f.button.name = p.CONTROLS["save-guide"][0]
+        f.heading = fixtures.AxNode(43, 78, p.CONTROLS["save-guide"][1], parent=f.web)
+        f.native_rect = (10, 20, 800, 600)
+        nodes = [f.window, f.container, f.web, f.button, f.heading]
+        for node in nodes:
+            node.states.add(8)
+            rect = (100, 100, 200, 40) if node is f.button else f.native_rect
+            node.component = types.SimpleNamespace(
+                get_extents=mock.Mock(return_value=types.SimpleNamespace(x=rect[0], y=rect[1], width=rect[2], height=rect[3])),
+                get_accessible_at_point=mock.Mock(return_value=None))
+            node.get_component_iface = mock.Mock(return_value=node.component)
+            if trap_traversal:
+                for getter in ("get_parent", "clear_cache", "get_child_at_index", "get_text_iface", "get_action_iface"):
+                    setattr(node, getter, mock.Mock(side_effect=AssertionError("No traversal or input interface")))
+                if node not in (f.button, f.heading):
+                    node.get_name = mock.Mock(side_effect=AssertionError("Not a source control"))
+        f.window.component.get_accessible_at_point.return_value = f.container
+        f.container.component.get_accessible_at_point.return_value = f.web
+        f.web.component.get_accessible_at_point.return_value = f.button
+        collected = {tuple(owner.references.identity(node, owner)): node for node in nodes}
+        return f, owner, collected
+
+    def observe(self, f, owner, collected, rectangles=None):
+        with mock.patch.object(p.B, "visible_rectangle", return_value=f.native_rect, side_effect=rectangles):
+            result = p.fixed_control_hit_test(f.window, collected, owner, f.atspi)
+        self.assertTrue(result["readOnly"])
+        self.assertFalse(result["authorization"])
+        self.assertFalse(result["nativeAcceptance"])
+        self.assertEqual(result["actionCount"], 0)
+        self.assertLessEqual(len(result.get("hitPath", [])), 32)
+        self.assertLessEqual(len((json.dumps(result, indent=2) + "\n").encode()), 24576)
+        f.button.action.do_action.assert_not_called()
+        return result
+
+    def test_bound_frame_reaches_exact_wire_target_without_parent_child_text_cache_or_action_queries(self):
+        f, owner, collected = self.fixture()
+        result = self.observe(f, owner, collected)
+        self.assertTrue(result["verified"])
+        self.assertNotIn("refusal", result)
+        self.assertEqual(result["control"], "save-guide")
+        self.assertEqual(result["candidateCount"], 1)
+        self.assertEqual(result["headingCount"], 1)
+        self.assertEqual(result["point"], [200, 120])
+        self.assertEqual(result["hitPath"], [owner.references.identity(node, owner)
+                         for node in (f.window, f.container, f.web, f.button)])
+        for node in collected.values():
+            for getter in ("get_parent", "clear_cache", "get_child_at_index", "get_text_iface", "get_action_iface"):
+                getattr(node, getter).assert_not_called()
+        for node in (f.window, f.container, f.web):
+            node.component.get_accessible_at_point.assert_called_once_with(200, 120, f.atspi.CoordType.SCREEN)
+        f.button.component.get_accessible_at_point.assert_not_called()
+        for node in (f.window, f.button):
+            self.assertEqual(node.component.get_extents.call_args_list, [mock.call(0), mock.call(0)])
+        self.assertNotIn(p.CONTROLS["save-guide"][0], json.dumps(result))
+        self.assertNotIn(p.CONTROLS["save-guide"][1], json.dumps(result))
+
+    def test_original_tree_refusal_captures_hit_proof_but_still_refuses_save_guide_action(self):
+        f, owner, _ = self.fixture(trap_traversal=False)
+        external = fixtures.AxNode(43, 20)
+        f.button.parent = external
+        external.get_role = mock.Mock(side_effect=AssertionError("Uncollected semantic parent"))
+        with mock.patch.object(p.B, "visible_rectangle", return_value=f.native_rect), \
+                mock.patch.object(f.helper, "children", wraps=f.helper.children) as children, \
+                self.assertRaises(p.TreeRefusal) as caught:
+            p.press("save-guide", owner, f.atspi)
+        observation = caught.exception.observation
+        self.assertEqual(observation["missingCount"], 1)
+        self.assertTrue(observation["fixedControlHitTest"]["verified"])
+        self.assertFalse(observation["authorization"])
+        self.assertEqual(observation["actionCount"], 0)
+        self.assertEqual(children.call_count, 5)  # Original forward walk only.
+        external.get_role.assert_not_called()
+        f.button.action.do_action.assert_not_called()
+
+    def test_shared_renderer_forged_forward_edge_is_not_proven_by_root_hitting_other_frame(self):
+        for hit_kind in ("other-frame", "other-page", "none"):
+            with self.subTest(hit_kind=hit_kind):
+                f, owner, collected = self.fixture()
+                hit = fixtures.AxNode(42 if hit_kind == "other-frame" else 43, 23 if hit_kind == "other-frame" else 20)
+                # The forged candidate is in the inventory, shares renderer PID
+                # and coordinates, but the actual Root Component doesn't hit it.
+                for getter in ("get_process_id", "get_role", "get_component_iface", "get_parent", "get_child_at_index"):
+                    setattr(hit, getter, mock.Mock(side_effect=AssertionError("Unknown hit queried")))
+                f.window.component.get_accessible_at_point.return_value = None if hit_kind == "none" else hit
+                result = self.observe(f, owner, collected)
+                self.assertFalse(result["verified"])
+                self.assertEqual(result["refusal"]["stage"], "hit-test")
+                self.assertEqual(result["hitRefusal"], "NoChild" if hit_kind == "none" else "UncollectedReference")
+                if hit_kind != "none":
+                    self.assertEqual(result["refusedHitReference"], [f":1.{hit.pid}", hit.path])
+                for getter in ("get_process_id", "get_role", "get_component_iface", "get_parent", "get_child_at_index"):
+                    getattr(hit, getter).assert_not_called()
+                f.web.component.get_accessible_at_point.assert_not_called()
+
+    def test_known_proxy_alias_is_matched_only_to_collected_canonical_reference(self):
+        f, owner, collected = self.fixture()
+        alias = "org.example.already_bound_renderer"
+        f.bus_records[alias] = dict(f.bus_records[":1.43"])
+        owner.references.aliases[alias] = dict(f.bus_records[alias])
+        proxy = types.SimpleNamespace(app=types.SimpleNamespace(bus_name=alias), path=f.button.path,
+            get_process_id=mock.Mock(side_effect=AssertionError("Do not query returned proxy")))
+        f.web.component.get_accessible_at_point.return_value = proxy
+        self.assertTrue(self.observe(f, owner, collected)["verified"])
+        proxy.get_process_id.assert_not_called()
+        proxy.app.bus_name = "org.example.unknown_alias"
+        result = self.observe(f, owner, collected)
+        self.assertFalse(result["verified"])
+        self.assertEqual(result["refusal"]["stage"], "hit-test")
+        self.assertEqual(result["hitRefusal"], "UncollectedAlias")
+
+    def test_duplicates_cycles_oversize_and_wrong_frame_inventory_refuse(self):
+        for kind in ("duplicate-wire", "oversize", "oversize-role", "wrong-role-type", "nested-frame", "wrong-frame", "cycle"):
+            with self.subTest(kind=kind):
+                f, owner, collected = self.fixture()
+                if kind == "duplicate-wire":
+                    collected[(":1.43", "/org/a11y/atspi/accessible/duplicate")] = f.button
+                elif kind == "oversize":
+                    collected.update({(":1.43", f"/org/a11y/atspi/accessible/n{i}"): f.button for i in range(513)})
+                elif kind == "oversize-role":
+                    f.web.role = 1 << 32
+                elif kind == "wrong-role-type":
+                    f.web.role = "private role"
+                elif kind == "nested-frame":
+                    f.web.role = f.atspi.Role.FRAME
+                elif kind == "wrong-frame":
+                    owner.references.window = [":1.42", "/org/a11y/atspi/accessible/other_frame"]
+                else:
+                    f.web.component.get_accessible_at_point.return_value = f.container
+                self.assertFalse(self.observe(f, owner, collected)["verified"])
+
+    def test_duplicate_getchildren_edge_still_refuses_before_diagnostic_or_input(self):
+        f, owner, _ = self.fixture(trap_traversal=False)
+        f.web.children.append(f.button)
+        with mock.patch.object(p, "fixed_control_hit_test") as diagnostic, self.assertRaises(RuntimeError):
+            p.press("save-guide", owner, f.atspi)
+        diagnostic.assert_not_called()
+        f.button.action.do_action.assert_not_called()
+
+    def test_missing_duplicate_wrong_source_control_and_oversized_name_refuse(self):
+        for kind in ("missing-button", "missing-heading", "duplicate-button", "duplicate-heading", "wrong-role",
+                     "wrong-pid", "oversize-name", "wrong-name-type"):
+            with self.subTest(kind=kind):
+                f, owner, collected = self.fixture()
+                if kind == "missing-button":
+                    f.button.name = "private unrelated button"
+                elif kind == "missing-heading":
+                    f.heading.name = "private unrelated heading"
+                elif kind.startswith("duplicate"):
+                    source = f.button if kind.endswith("button") else f.heading
+                    extra = fixtures.AxNode(43, source.role, source.name)
+                    collected[tuple(owner.references.identity(extra, owner))] = extra
+                elif kind == "wrong-role":
+                    f.button.role = f.atspi.Role.LINK
+                elif kind == "wrong-pid":
+                    f.button.pid = 42
+                    f.button.app.bus_name = ":1.42"
+                    collected = {tuple(owner.references.identity(n, owner)): n for n in collected.values()}
+                elif kind == "oversize-name":
+                    f.button.name = "private" * 20000
+                else:
+                    f.button.name = None
+                result = self.observe(f, owner, collected)
+                self.assertFalse(result["verified"])
+                self.assertNotIn("private", json.dumps(result))
+
+    def test_extents_not_queried_without_both_visible_and_showing(self):
+        for target in ("window", "button"):
+            for missing in (1, 8):
+                with self.subTest(target=target, missing=missing):
+                    f, owner, collected = self.fixture()
+                    node = getattr(f, target)
+                    node.states.remove(missing)
+                    result = self.observe(f, owner, collected)
+                    self.assertFalse(result["verified"])
+                    node.component.get_extents.assert_not_called()
+                    f.window.component.get_accessible_at_point.assert_not_called()
+
+    def test_absent_wrong_type_oversized_inaccessible_and_out_of_frame_extents_refuse(self):
+        for change in ("none-interface", "none-extents", "bool", "float", "zero", "oversize", "outside-native",
+                       "outside-frame", "inaccessible-interface", "inaccessible-extents", "obscured-native"):
+            with self.subTest(change=change):
+                f, owner, collected = self.fixture()
+                rect = f.button.component.get_extents.return_value
+                if change == "none-interface":
+                    f.button.get_component_iface.return_value = None
+                elif change == "none-extents":
+                    f.button.component.get_extents.return_value = None
+                elif change in ("bool", "float", "zero", "oversize"):
+                    rect.width = {"bool": True, "float": 20.0, "zero": 0, "oversize": 1921}[change]
+                elif change == "outside-native":
+                    rect.x = 900
+                elif change == "outside-frame":
+                    f.window.component.get_extents.return_value.width = 100
+                elif change == "inaccessible-interface":
+                    f.button.get_component_iface.side_effect = PermissionError("private getter message")
+                elif change == "inaccessible-extents":
+                    f.button.component.get_extents.side_effect = OSError("private getter message")
+                rectangles = mock.Mock(side_effect=RuntimeError("private obscured window")) if change == "obscured-native" else None
+                result = self.observe(f, owner, collected, rectangles)
+                self.assertFalse(result["verified"])
+                self.assertEqual(result["refusal"]["stage"], "geometry")
+                self.assertNotIn("private", json.dumps(result))
+                if change == "outside-native":
+                    self.assertEqual(result["nativeRectangle"], list(f.native_rect))
+                    self.assertEqual(result["controlRectangle"], [900, 100, 200, 40])
+                elif change == "outside-frame":
+                    self.assertEqual(result["frameRectangle"], [10, 20, 100, 600])
+                    self.assertEqual(result["controlRectangle"], [100, 100, 200, 40])
+                f.window.component.get_accessible_at_point.assert_not_called()
+
+    def test_hit_chain_is_bounded_to_thirty_two_already_collected_objects(self):
+        for extras, verified in ((28, True), (29, False)):
+            with self.subTest(extras=extras):
+                f, owner, collected = self.fixture()
+                previous = f.web
+                for _ in range(extras):
+                    node = fixtures.AxNode(43, 20, states=(1, 2, 3, 8))
+                    node.component = types.SimpleNamespace(get_accessible_at_point=mock.Mock(return_value=f.button))
+                    node.get_component_iface = mock.Mock(return_value=node.component)
+                    collected[tuple(owner.references.identity(node, owner))] = node
+                    previous.component.get_accessible_at_point.return_value = node
+                    previous = node
+                result = self.observe(f, owner, collected)
+                self.assertEqual(result["verified"], verified)
+                self.assertEqual(len(result["hitPath"]), 32)
+                self.assertEqual(sum(n.component.get_accessible_at_point.call_count for n in collected.values()), 31)
+                if not verified:
+                    self.assertEqual(result["hitRefusal"], "ObjectBound")
+
+    def test_wire_role_geometry_name_native_binding_and_renderer_changes_refuse(self):
+        for change in ("wire", "role", "geometry", "heading", "button", "duplicate", "hidden-path", "native", "image", "xres"):
+            with self.subTest(change=change):
+                f, owner, collected = self.fixture()
+                extra = fixtures.AxNode(43, 43, "unrelated source button")
+                collected[tuple(owner.references.identity(extra, owner))] = extra
+                def change_after_hit(*_):
+                    if change == "wire":
+                        f.window.path += "changed"
+                    elif change == "role":
+                        f.button.role = f.atspi.Role.LINK
+                    elif change == "geometry":
+                        f.button.component.get_extents.return_value.width += 1
+                    elif change == "heading":
+                        f.heading.name = "private changed heading"
+                    elif change == "button":
+                        f.button.name = "private changed button"
+                    elif change == "duplicate":
+                        extra.name = f.button.name
+                    elif change == "hidden-path":
+                        f.container.states.remove(8)
+                    elif change == "image":
+                        f.records[43]["kernelImageSha256"] = "f" * 64
+                    elif change == "xres":
+                        f.info["client"] = 99
+                    return f.button
+                f.web.component.get_accessible_at_point.side_effect = change_after_hit
+                rectangles = [f.native_rect, (11, 20, 800, 600)] if change == "native" else None
+                result = self.observe(f, owner, collected, rectangles)
+                self.assertFalse(result["verified"])
+                self.assertNotIn("private", json.dumps(result))
+                if change == "geometry":
+                    self.assertEqual(result["controlRectangle"], [100, 100, 200, 40])
+                    self.assertEqual(result["controlRectangleAfter"], [100, 100, 201, 40])
+
+    def test_hit_getter_failure_is_type_only_and_capture_failure_preserves_original_refusal(self):
+        f, owner, collected = self.fixture()
+        f.web.component.get_accessible_at_point.side_effect = OSError("private native exception")
+        result = self.observe(f, owner, collected)
+        self.assertEqual(result["refusal"], {"stage": "hit-test", "errorType": "OSError"})
+        self.assertNotIn("private", json.dumps(result))
+        for failure in ("getter", "serialization"):
+            f, owner, _ = self.fixture(trap_traversal=False)
+            f.button.parent = fixtures.AxNode(43, 20)
+            original_type, created = p.TreeRefusal, []
+            def refusal(observation):
+                original = original_type(observation)
+                created.append(original)
+                return original
+            with mock.patch.object(p, "TreeRefusal", side_effect=refusal), \
+                    mock.patch.object(p, "fixed_control_hit_test", return_value={"invalid": object()},
+                                      side_effect=OSError("private capture") if failure == "getter" else None), \
+                    self.assertRaises(original_type) as caught:
+                p.press("save-guide", owner, f.atspi)
+            self.assertIs(caught.exception, created[0])
+            self.assertEqual(caught.exception.observation["missingCount"], 1)
+            self.assertIn("hitTestCaptureRefusal", caught.exception.observation)
+            self.assertNotIn("private", json.dumps(caught.exception.observation))
+            f.button.action.do_action.assert_not_called()
+
+
 class NativeReceiptTests(unittest.TestCase):
     def task_listing(self, *tids):
         listing = mock.MagicMock()
