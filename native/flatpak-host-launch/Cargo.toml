@@ -1,0 +1,19 @@
+[package]
+name = "creator-hub-flatpak-host-launch"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "creator-hub-flatpak-host-launch"
+path = "src/main.rs"
+
+[[bin]]
+name = "creator-hub-flatpak-launch-echo"
+path = "src/echo.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "=0.2.190"
+sha2 = "=0.10.9"
+
+[workspace]
