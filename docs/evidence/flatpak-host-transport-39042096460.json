@@ -1,0 +1,12 @@
+{
+  "sourceCommit": "5e01d5531b712f00349c46ed145ae416c4c0dd58",
+  "runId": "39042096460",
+  "kernel": "6.8.0-1064-azure",
+  "nativeKernelTestsPassed": true,
+  "actualEchoChildTestPassed": true,
+  "flatpakDeploymentTested": false,
+  "hostIntegrationAccepted": false,
+  "migrationAccepted": false,
+  "signedUpdateAccepted": false,
+  "releaseReady": false
+}

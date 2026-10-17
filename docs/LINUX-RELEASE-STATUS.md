@@ -1,6 +1,6 @@
 # Linux Release Status
 
-2026-10-15. Linux and Flatpak remain **unpublished development work**. The
+2026-10-17. Linux and Flatpak remain **unpublished development work**. The
 published Windows 0.1.14 artifacts and local Windows installations are unchanged.
 Mac support remains suspended. No TEST ONLY package is a release candidate.
 
@@ -37,10 +37,30 @@ Mac support remains suspended. No TEST ONLY package is a release candidate.
   installer. Source/kernel mechanism tests are not authentication/update/restart
   acceptance. RPM and AppImage automatic installation still refuse; Flatpak must
   use its own authenticated update origin, not native dpkg inside its sandbox.
+- Current private Linux source `f66d37f` passed producer
+  [39041386789](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39041386789).
+  Its original ZIP, API provenance and native payload were verified, then a new
+  signed handoff was created without including a key. The helper-bearing DEB
+  assembly is [39042071452](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39042071452),
+  dispatched at `6fc73d1` with explicit acceptance-only packaging. At this
+  checkpoint it is still running; no completed package or install is claimed.
+- Linux-only test packaging now adds the fixed retirement helper and one
+  fixed-path polkit action requiring uncached `auth_admin` in all contexts.
+  It does not use `argv1`, which polkit 0.105 does not enforce. The helper still
+  admits only finite commands. The default production refusal remains closed;
+  Windows and Mac default build paths are unchanged. See the
+  [acceptance recipe](../packaging/linux/RETIREMENT-ACCEPTANCE.md).
+- Native [39042096460](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39042096460)
+  passed Flatpak transport Clippy, real kernel credentials/pidfds and the actual
+  inherited-FD echo-child lifecycle. This did not launch an installed Flatpak,
+  expose the host reader or implement Hub/Unity/project operations. Its scoped
+  [result](evidence/flatpak-host-transport-39042096460.json) keeps integration,
+  migration, signed update and release gates false.
 
 ## Remaining Release Gates
 
-1. Install/package the reviewed production helper and test actual GUI-close/reopen
+1. Finish native acceptance-only helper packaging, then qualify the production
+   helper and test actual GUI-close/reopen
    races, system lock contention,
    cancellation, interruption and recovery. A pre-authentication idle check is
    not proof against a GUI reopened while authentication is pending.
@@ -98,3 +118,14 @@ edges: a role-49 scroll pane enumerated by an `iframe` group, plus two role-33
 menu objects. It queried only already-collected endpoints and issued no input
 after refusal. This is not Page-ownership or operation acceptance. No further
 unchanged action retry is justified by that capture alone.
+
+Native 38767944392 verified normal Root EWMH close and parent-observed exit 0
+without using a DOM walk for closing the exact owned native frame. Component
+operation still refused the same semantic Parent mismatch. Read-only run
+39041753996 found the exact fixed button but no matching HEADING-role context,
+so its independent frame-hit diagnostic stopped before geometry or input.
+The retained screenshot visibly contains the expected heading. This is a harness
+provenance/context issue still needing evidence, not a passed component operation
+or a reason to weaken the existing action ownership rules. See the separate
+[full updater prerequisites](LINUX-NATIVE-UPDATER-PLAN.md); a verifier and source
+tests are not an implemented full-flow updater test.

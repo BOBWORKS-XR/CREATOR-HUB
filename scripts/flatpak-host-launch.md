@@ -139,6 +139,16 @@ Rustfmt parsing/formatting passes. Rust compilation, Clippy, all Linux syscall
 tests and the installed-Flatpak checkpoint remain NOT RUN pending parent
 coordination. No native mechanism pass or release acceptance is claimed.
 
+Subsequent native [run 39042096460](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39042096460)
+at source `5e01d5531b712f00349c46ed145ae416c4c0dd58` passed warnings-denied Clippy,
+default tests, the four real kernel tests and the actual inherited-FD echo-child
+test on Linux `6.8.0-1064-azure`. This proves only the native synthetic transport,
+credential/pidfd refusals and owned echo lifecycle, not an installed Flatpak or
+Hub caller. `flatpakDeploymentTested`, `hostIntegrationAccepted`,
+`migrationAccepted`, `signedUpdateAccepted` and `releaseReady` remain false;
+the host reader remains unexposed. The installed-Flatpak fixture is the separate,
+parent-owned next checkpoint. Earlier failed run 39041939248 remains a failure.
+
 Primary contracts: [Flatpak foreground FD preservation](https://github.com/flatpak/flatpak/blob/a02d0ba48abe9aacc377de15699e5d8c024b5669/common/flatpak-run.c#L4055),
 [upstream passthrough test](https://github.com/flatpak/flatpak/blob/a02d0ba48abe9aacc377de15699e5d8c024b5669/tests/test-run.sh#L98),
 [per-message Linux credentials/pidfds](https://github.com/torvalds/linux/blob/v6.6/include/net/scm.h#L124),
