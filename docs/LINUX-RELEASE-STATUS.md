@@ -42,8 +42,14 @@ Mac support remains suspended. No TEST ONLY package is a release candidate.
   Its original ZIP, API provenance and native payload were verified, then a new
   signed handoff was created without including a key. The helper-bearing DEB
   assembly is [39042071452](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39042071452),
-  dispatched at `6fc73d1` with explicit acceptance-only packaging. At this
-  checkpoint it is still running; no completed package or install is claimed.
+  dispatched at `6fc73d1` with explicit acceptance-only packaging. Its Root and
+  helper tests passed, but nine-file ZIP staging refused the Windows wrapper's
+  raw backslash names before package compilation. Signed payload bytes were not
+  changed. The canonical packer now tests raw names on Windows too, and staging
+  runs before dependency installation. Corrected assembly
+  [39042746816](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39042746816)
+  at `534465a` passed that early staging check and is still running at this
+  checkpoint. No completed package or install is claimed.
 - Linux-only test packaging now adds the fixed retirement helper and one
   fixed-path polkit action requiring uncached `auth_admin` in all contexts.
   It does not use `argv1`, which polkit 0.105 does not enforce. The helper still
@@ -129,3 +135,8 @@ provenance/context issue still needing evidence, not a passed component operatio
 or a reason to weaken the existing action ownership rules. See the separate
 [full updater prerequisites](LINUX-NATIVE-UPDATER-PLAN.md); a verifier and source
 tests are not an implemented full-flow updater test.
+
+Read-only run 39042527460 subsequently found the exact source heading ID/name on
+an h2 object with numeric role 82, and the fixed button ID on role 43; all 31
+known-object metadata reads completed without errors. That distinguishes a role
+contract mismatch from missing UI. No control action or frame-hit proof followed.
