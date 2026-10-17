@@ -187,10 +187,15 @@ function one(directory, extension) {
   return file;
 }
 
-function validatePackages({ output, bundleDirectory, manifest, productName, rawHub, archiveDecoder, execute = execFileSync, mcpMode = 'read-only' }) {
+function validatePackages({ output, bundleDirectory, manifest, productName, rawHub, archiveDecoder, execute = execFileSync,
+  mcpMode = 'read-only', linuxRetirementCandidate = false }) {
   if (!['linux', 'macos'].includes(manifest.platform)) throw Error('Unix package validation requires a Unix manifest.');
   if (!['read-only', 'writable'].includes(mcpMode) || (mcpMode === 'writable' && !manifest.managedRouting)) {
     throw Error('Package evidence requires a known mode and signed managed routing for writable experiments.');
+  }
+  if (typeof linuxRetirementCandidate !== 'boolean' || (linuxRetirementCandidate
+    && (manifest.platform !== 'linux' || manifest.arch !== 'x86_64' || mcpMode !== 'writable' || !manifest.managedRouting))) {
+    throw Error('The retirement acceptance package is only a signed writable Linux x86_64 DEB.');
   }
   verifyProductName(productName);
   const destination = path.join(output, 'native-packages');
@@ -200,7 +205,7 @@ function validatePackages({ output, bundleDirectory, manifest, productName, rawH
   const reportFile = path.join(output, 'unix-package-integrity.json');
   let appHub;
   try {
-    const formats = manifest.platform === 'macos' ? ['app', 'dmg'] : ['deb', 'rpm', 'appimage'];
+    const formats = linuxRetirementCandidate ? ['deb'] : manifest.platform === 'macos' ? ['app', 'dmg'] : ['deb', 'rpm', 'appimage'];
     for (const format of formats) {
       let retained;
       let extracted;

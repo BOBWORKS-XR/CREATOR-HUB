@@ -8,6 +8,11 @@ on:
         description: Exact platform, runner, private validation asset ID, ZIP size/hash and handoff hash pins
         type: string
         required: true
+      linux_retirement_test_candidate:
+        description: Build only the acceptance-only native DEB with the fixed helper and auth_admin policy; never publish
+        type: boolean
+        default: false
+        required: false
 permissions:
   contents: read
 jobs:
@@ -63,6 +68,7 @@ jobs:
     timeout-minutes: 65
     env:
       CREATOR_UNIX_HANDOFF_SHA256: ${{ matrix.handoffSha256 }}
+      CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: ${{ inputs.linux_retirement_test_candidate && '1' || '0' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -90,8 +96,9 @@ jobs:
       - run: npm ci
       - name: Check the handoff and bounded native extraction contracts
         run: |
-          node --test scripts/assemble-unix-payload.test.cjs scripts/sign-unix-payload.test.cjs scripts/unix-managed-payload.test.cjs
+          node --test scripts/assemble-unix-payload.test.cjs scripts/sign-unix-payload.test.cjs scripts/unix-managed-payload.test.cjs scripts/linux-retirement-package.test.cjs
           python3 -B scripts/stage-signed-unix-handoff.test.py
+          python3 -B scripts/linux-retirement-package-verify.test.py
       - name: Test Linux migration completion and real owned GUI process detection before packaging
         run: >-
           cargo test --release --locked --manifest-path src-tauri/Cargo.toml
@@ -101,6 +108,12 @@ jobs:
         env:
           CREATOR_MACOS_OWNED_GUI_TEST: '1'
         run: node --test scripts/native-macos-app-probe.test.cjs scripts/native-macos-window.test.cjs
+      - name: Test nondefault native retirement route before building the acceptance-only DEB
+        if: runner.os == 'Linux' && inputs.linux_retirement_test_candidate
+        run: |
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target-dir artifacts/unix-verifier-target --features experimental-linux-migration convergence
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target-dir artifacts/unix-verifier-target --features experimental-linux-migration linux_retirement
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --features experimental-transaction
       - uses: actions/download-artifact@v4
         with:
           name: signed-unix-input-${{ matrix.target }}
@@ -119,7 +132,9 @@ jobs:
         run: |
           set -euo pipefail
           temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
-          npm run build:unified -- ci-signed-unix-hub --installer --managed --experimental-unix --experimental-unix-writable --signed-unix-input "$temp/signed-unix-input"
+          extra=()
+          if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 ]]; then extra+=(--linux-retirement-test-candidate); fi
+          npm run build:unified -- ci-signed-unix-hub --installer --managed --experimental-unix --experimental-unix-writable --signed-unix-input "$temp/signed-unix-input" "${extra[@]}"
       - name: Bind the actual packaged Mac app, native version and primary assembly receipt
         if: runner.os == 'macOS'
         uses: actions/github-script@v8
@@ -239,6 +254,17 @@ jobs:
             artifacts/unified/ci-signed-unix-hub/creator-hub
             artifacts/unified/ci-signed-unix-hub/modules.tar.gz
             artifacts/unified/ci-signed-unix-hub/modules/
+      - name: Retain separate acceptance-only helper and authorization package receipts
+        if: always() && runner.os == 'Linux' && inputs.linux_retirement_test_candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-retirement-development-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/unified/ci-signed-unix-hub/linux-retirement-candidate.json
+            artifacts/unified/ci-signed-unix-hub/linux-retirement-package-integrity.json
+            artifacts/unified/ci-signed-unix-hub/tauri-linux-retirement-acceptance.json
       - name: Retain only owned fresh14 package metadata and Root diagnostic reports, including refusals
         if: always() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4

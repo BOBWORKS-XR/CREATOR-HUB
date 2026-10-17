@@ -53,16 +53,18 @@ function verifyStage(directory, manifest) {
   }
 }
 function build(label, { installer = false, managed = false, experimentalUnix = false, experimentalWritable = false,
-  prepareManagedUnix = false, signedUnixInput = null } = {}, context = {}) {
+  prepareManagedUnix = false, signedUnixInput = null, linuxRetirementCandidate = false } = {}, context = {}) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(label || '')) throw Error('Provide a unique, simple build name.');
   const root = context.root || repositoryRoot;
   const execute = context.execute || execFileSync;
   const environment = context.env || process.env;
   const platform = context.platform || { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
   const arch = context.arch || { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
+  require('./linux-retirement-package.cjs').checkOptions({ enabled: linuxRetirementCandidate, platform, arch,
+    installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput });
   const payload = require('./unix-managed-payload.cjs');
   payload.checkSplitOptions({ platform, installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput });
-  if (signedUnixInput) return buildSignedUnix(label, { installer, signedUnixInput }, context);
+  if (signedUnixInput) return buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCandidate }, context);
   const unix = require('./unix-package-payload.cjs');
   const plan = unix.nativePlan(platform, arch, { installer, experimentalUnix, experimentalWritable, managed });
   const nativeTargetArgs = plan.rustTarget ? ['--target', plan.rustTarget] : [];
@@ -200,7 +202,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   console.log(`Local unified candidate: ${output}. Not a release or migration acceptance.`);
   return output;
 }
-function buildSignedUnix(label, { installer, signedUnixInput }, context = {}) {
+function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCandidate = false }, context = {}) {
   const root = context.root || repositoryRoot;
   const execute = context.execute || execFileSync;
   const environment = context.env || process.env;
@@ -236,18 +238,24 @@ function buildSignedUnix(label, { installer, signedUnixInput }, context = {}) {
     resources[file] = archive.FILE;
   }
   writeAssemblyManifests(output, preWrapper, manifest);
-  const overlay = path.join(output, 'tauri-unified.json');
-  fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources } }, null, 2), { flag: 'wx' });
+  const retirement = linuxRetirementCandidate
+    ? require('./linux-retirement-package.cjs').stage(root, output, resources, env, execute) : null;
+  const overlay = retirement ? retirement.overlay : path.join(output, 'tauri-unified.json');
+  if (!retirement) fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources } }, null, 2), { flag: 'wx' });
+  const bundles = retirement ? ['deb'] : plan.bundles;
   const cli = path.join(root, 'node_modules/@tauri-apps/cli/tauri.js');
   execute(process.execPath, [cli, 'build', '--target', plan.rustTarget,
-    ...(installer ? ['--bundles', plan.bundles.join(',')] : ['--no-bundle']), '--config', overlay, '--', '--locked'],
+    ...(installer ? ['--bundles', bundles.join(',')] : ['--no-bundle']), '--config', overlay, '--', '--locked'],
     { cwd: root, env, stdio: 'inherit', windowsHide: true });
   const release = path.join(env.CARGO_TARGET_DIR, plan.rustTarget, 'release');
   fs.copyFileSync(path.join(release, 'creator-hub'), path.join(output, 'creator-hub'), fs.constants.COPYFILE_EXCL);
   verifyStage(path.join(output, 'modules'), manifest);
-  if (installer) unix.validatePackages({ output, bundleDirectory: path.join(release, 'bundle'), manifest,
-    productName: JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'))).productName,
-    rawHub: path.join(output, 'creator-hub'), archiveDecoder, mcpMode: 'writable' });
+  if (installer) {
+    const integrity = unix.validatePackages({ output, bundleDirectory: path.join(release, 'bundle'), manifest,
+      productName: JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'))).productName,
+      rawHub: path.join(output, 'creator-hub'), archiveDecoder, mcpMode: 'writable', linuxRetirementCandidate });
+    if (retirement) require('./linux-retirement-package.cjs').verifyDeb(root, output, integrity, retirement, execute);
+  }
   fs.writeFileSync(path.join(output, 'signed-unix-assembly.json'), JSON.stringify({ schemaVersion: 1,
     product: 'com.creatorworks.hub.unix-signed-assembly', platform, arch, hubVersion: '0.1.14',
     assemblyCommit: environment.GITHUB_SHA, privateSource: result.source, handoffSha256: result.handoffSha256,
@@ -266,7 +274,8 @@ function parseBuildOptions(args) {
   const options = {};
   const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix.';
   const flags = { '--installer': 'installer', '--managed': 'managed', '--experimental-unix': 'experimentalUnix',
-    '--experimental-unix-writable': 'experimentalWritable', '--prepare-managed-unix': 'prepareManagedUnix' };
+    '--experimental-unix-writable': 'experimentalWritable', '--prepare-managed-unix': 'prepareManagedUnix',
+    '--linux-retirement-test-candidate': 'linuxRetirementCandidate' };
   const seen = new Set();
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
