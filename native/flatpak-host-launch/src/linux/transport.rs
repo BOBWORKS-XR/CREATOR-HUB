@@ -178,7 +178,7 @@ pub(crate) fn receive(fd: &OwnedFd, deadline: Instant) -> Result<Message> {
                 credentials = Some(unsafe { std::ptr::read_unaligned(data.cast::<libc::ucred>()) });
             }
             (libc::SOL_SOCKET, SCM_PIDFD | libc::SCM_RIGHTS) => {
-                if len % mem::size_of::<libc::c_int>() != 0 {
+                if !len.is_multiple_of(mem::size_of::<libc::c_int>()) {
                     bad = true;
                 }
                 for offset in (0..len / mem::size_of::<libc::c_int>())

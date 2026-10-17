@@ -65,6 +65,13 @@ test('actual seqpacket recvmsg validates per-message credentials and pidfds', ()
   assert.match(identity, /unexpected-sandbox-grant/);
 });
 
+test('native run 39041939248 Clippy regressions stay corrected without lint exemptions', () => {
+  assert.doesNotMatch(identity, /fd::\{[^}]*\bOwnedFd\b/);
+  assert.match(transport, /!len\.is_multiple_of\(mem::size_of::<libc::c_int>\(\)\)/);
+  assert.doesNotMatch(transport, /len\s*%\s*mem::size_of::<libc::c_int>\(\)/);
+  assert.doesNotMatch(identity + transport, /allow\((?:unused_imports|clippy::manual_is_multiple_of)\)/);
+});
+
 test('fixed protocol and finite owned cleanup cannot expose reader or claim release acceptance', () => {
   assert.match(read('src/protocol.rs'), /SIZE: usize = 48/);
   assert.match(read('src/protocol.rs'), /Release = 5/);

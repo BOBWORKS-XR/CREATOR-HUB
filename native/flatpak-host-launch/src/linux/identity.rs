@@ -6,7 +6,7 @@ use std::{
     fs::{File, Metadata},
     io::Read,
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
+        fd::{AsRawFd, FromRawFd},
         unix::fs::MetadataExt,
     },
     path::{Component, Path},
