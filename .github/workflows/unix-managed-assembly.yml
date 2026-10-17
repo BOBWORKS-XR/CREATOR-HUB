@@ -74,6 +74,22 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Check the portable handoff wrapper before dependency installation
+        run: |
+          python3 -B scripts/pack-signed-unix-handoff.test.py
+          python3 -B scripts/stage-signed-unix-handoff.test.py
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-unix-input-${{ matrix.target }}
+          path: ${{ runner.temp }}/assembly-signed-input
+      - name: Stage exactly nine bounded files without executing any candidate payload
+        env:
+          ZIP_BYTES: ${{ matrix.zipBytes }}
+          ZIP_SHA256: ${{ matrix.zipSha256 }}
+        run: |
+          set -euo pipefail
+          temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          python3 -B scripts/stage-signed-unix-handoff.py "$temp/assembly-signed-input/signed-unix-handoff.zip" "$ZIP_SHA256" "$ZIP_BYTES" "$temp/signed-unix-input"
       - uses: actions/setup-node@v6
         with:
           node-version: 24.17.0
@@ -114,18 +130,6 @@ jobs:
           cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target-dir artifacts/unix-verifier-target --features experimental-linux-migration convergence
           cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target-dir artifacts/unix-verifier-target --features experimental-linux-migration linux_retirement
           cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --features experimental-transaction
-      - uses: actions/download-artifact@v4
-        with:
-          name: signed-unix-input-${{ matrix.target }}
-          path: ${{ runner.temp }}/assembly-signed-input
-      - name: Stage exactly nine bounded files without executing any candidate payload
-        env:
-          ZIP_BYTES: ${{ matrix.zipBytes }}
-          ZIP_SHA256: ${{ matrix.zipSha256 }}
-        run: |
-          set -euo pipefail
-          temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
-          python3 -B scripts/stage-signed-unix-handoff.py "$temp/assembly-signed-input/signed-unix-handoff.zip" "$ZIP_SHA256" "$ZIP_BYTES" "$temp/signed-unix-input"
       - name: Verify trusted handoff and compile only the outer native Hub
         id: package
         shell: bash
