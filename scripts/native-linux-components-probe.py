@@ -190,6 +190,98 @@ def retain_failure_site(root, action, error):
         print(json.dumps({"failureSiteCaptureRefusal": type(capture_error).__name__[:64]}), file=sys.stderr)
 
 
+def source_heading_observation(collected, roles, owner, atspi):
+    """Missing-heading evidence only; never a context/role fallback.
+
+    WebKitGTK 2.50.4 AccessibilityObjectAtspi::attributes exposes the HTML id
+    as "id". Compare the fixed source id; never retain arbitrary ids or text.
+    """
+    require(type(collected) is dict and 0 < len(collected) <= 512 and roles.keys() == collected.keys(),
+            "Source-heading inventory exceeds original bounds")
+    result = {"readOnly": True, "authorization": False, "actionCount": 0, "nativeAcceptance": False,
+              "expectedId": "connection-guide-title", "expectedButtonId": "connection-guide-skip",
+              "inspectedCount": 0, "attributesReadCount": 0, "namesReadCount": 0,
+              "idMatchCount": 0, "buttonIdMatchCount": 0, "nameMatchCount": 0,
+              "candidateCount": 0, "candidates": [], "candidatesTruncated": False,
+              "errorCount": 0, "errors": [], "errorsTruncated": False}
+    for reference, node in collected.items():
+        record = {"reference": list(reference), "role": int(roles[reference]),
+                  "roleEqualsHeading": roles[reference] == atspi.Role.HEADING}
+
+        def failed(field, error):
+            error_type = type(error).__name__[:64]
+            record.setdefault("errors", {})[field] = {"errorType": error_type}
+            result["errorCount"] += 1
+            if len(result["errors"]) < 8:
+                result["errors"].append({"reference": list(reference), "field": field, "errorType": error_type})
+            else:
+                result["errorsTruncated"] = True
+
+        try:
+            owner.node(node)
+            require(tuple(owner.references.identity(node, owner)) == reference and node.get_role() == roles[reference],
+                    "Heading observation wire ID/role changed")
+            result["inspectedCount"] += 1
+        except Exception as error:
+            failed("binding", error)
+            continue
+        try:
+            name = node.get_name()
+            if type(name) is not str:
+                raise TypeError()
+            if len(name) > 128 or len(name.encode("utf8")) > 512:
+                raise ValueError()
+            record["nameEqualsSourceHeading"] = name == CONTROLS["save-guide"][1]
+            record["nameEqualsFixedButton"] = name == CONTROLS["save-guide"][0]
+            result["nameMatchCount"] += int(record["nameEqualsSourceHeading"])
+            result["namesReadCount"] += 1
+        except Exception as error:
+            failed("name", error)
+        try:
+            attributes = node.get_attributes()
+            if type(attributes) is not dict:
+                raise TypeError()
+            if len(attributes) > 32:
+                raise ValueError()
+            html_id = attributes.get("id", "")
+            if type(html_id) is not str:
+                raise TypeError()
+            if len(html_id) > 128 or len(html_id.encode("utf8")) > 128:
+                raise ValueError()
+            record["idEqualsSourceHeading"] = html_id == result["expectedId"]
+            record["idEqualsFixedButton"] = html_id == result["expectedButtonId"]
+            result["idMatchCount"] += int(record["idEqualsSourceHeading"])
+            result["buttonIdMatchCount"] += int(record["idEqualsFixedButton"])
+            allowed = {}
+            for key, vocabulary in TREE_METADATA_VALUES.items():
+                if key not in attributes:
+                    continue
+                value = attributes[key]
+                if type(value) is not str:
+                    raise TypeError()
+                if len(value) > 64 or len(value.encode("utf8")) > 64 or value not in vocabulary:
+                    raise ValueError()
+                allowed[key] = value
+            record["attributes"] = allowed
+            result["attributesReadCount"] += 1
+        except Exception as error:
+            failed("attributes", error)
+        allowed = record.get("attributes", {})
+        # These are evidence rows only. In particular, an exact name/id under
+        # another numeric role does not satisfy the HEADING gate below.
+        if (record.get("idEqualsSourceHeading") or record.get("idEqualsFixedButton")
+                or record.get("nameEqualsSourceHeading") or record.get("nameEqualsFixedButton")
+                or record["roleEqualsHeading"] or allowed.get("tag") == "h2"
+                or allowed.get("computed-role") == "heading"):
+            result["candidateCount"] += 1
+            if len(result["candidates"]) < 8:
+                result["candidates"].append(record)
+            else:
+                result["candidatesTruncated"] = True
+    result["complete"] = result["errorCount"] == 0
+    return result
+
+
 def fixed_control_hit_test(window, collected, owner, atspi):
     """Read-only save-guide evidence from the original GetChildren inventory.
 
@@ -245,6 +337,11 @@ def fixed_control_hit_test(window, collected, owner, atspi):
             elif roles[reference] == atspi.Role.HEADING and fixed_name(node) == heading:
                 headings.append(reference)
         result.update(candidateCount=len(candidates), headingCount=len(headings))
+        if not headings:
+            try:
+                result["sourceHeadingObservation"] = source_heading_observation(collected, roles, owner, atspi)
+            except Exception as error:
+                result["sourceHeadingCaptureRefusal"] = {"errorType": type(error).__name__[:64]}
         require(len(candidates) == len(headings) == 1, "Exact unique source button/heading required")
         target_ref, heading_ref = candidates[0], headings[0]
         target, source_heading = collected[target_ref], collected[heading_ref]

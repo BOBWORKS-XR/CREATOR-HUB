@@ -910,6 +910,178 @@ class FixedControlHitTestTests(unittest.TestCase):
             f.button.action.do_action.assert_not_called()
 
 
+class SourceHeadingObservationTests(unittest.TestCase):
+    def fixture(self, trap_traversal=True):
+        f, owner, collected = FixedControlHitTestTests().fixture(trap_traversal)
+        for node in collected.values():
+            node.get_name = mock.Mock(side_effect=lambda node=node: node.name)
+            node.get_attributes = mock.Mock(return_value={"tag": "div", "computed-role": "generic", "toolkit": "WebKitGTK"})
+        f.heading.name = ""
+        f.heading.get_attributes.return_value = {"id": "connection-guide-title", "tag": "h2",
+                                                "computed-role": "heading", "toolkit": "WebKitGTK"}
+        f.button.get_attributes.return_value = {"id": "connection-guide-skip", "tag": "button",
+                                               "computed-role": "button", "toolkit": "WebKitGTK"}
+        return f, owner, collected
+
+    def observe(self, f, owner, collected):
+        result = FixedControlHitTestTests().observe(f, owner, collected)
+        self.assertEqual(result["candidateCount"], 1)
+        self.assertEqual(result["headingCount"], 0)
+        self.assertFalse(result["verified"])
+        self.assertEqual(result["refusal"]["stage"], "fixed-controls")
+        self.assertEqual(result["hitPath"], [])
+        f.window.component.get_accessible_at_point.assert_not_called()
+        f.window.component.get_extents.assert_not_called()
+        observation = result["sourceHeadingObservation"]
+        self.assertFalse(observation["authorization"])
+        self.assertFalse(observation["nativeAcceptance"])
+        self.assertEqual(observation["actionCount"], 0)
+        self.assertLessEqual(len(observation["candidates"]), 8)
+        self.assertLessEqual(len(observation["errors"]), 8)
+        self.assertNotIn(p.CONTROLS["save-guide"][1], json.dumps(result))
+        self.assertNotIn(p.CONTROLS["save-guide"][0], json.dumps(result))
+        return observation
+
+    def test_source_markup_open_and_fixed_control_context_are_exact_not_renamed(self):
+        module = HERE.parent / "modules/mcp/launcher/src"
+        self.assertIn('<h2 id="connection-guide-title">' + p.CONTROLS["save-guide"][1] + '</h2>',
+                      (module / "index.html").read_text(encoding="utf8"))
+        self.assertIn("document.querySelector('#connection-guide-title').textContent = '" + p.CONTROLS["save-guide"][1] + "';",
+                      (module / "connection-guide.js").read_text(encoding="utf8"))
+
+    def test_captured_39041753996_counters_with_heading_absent_still_refuse_without_hit(self):
+        f, owner, collected = self.fixture()
+        del collected[tuple(owner.references.identity(f.heading, owner))]
+        f.web.children.remove(f.heading)
+        for _ in range(27):
+            node = fixtures.AxNode(43, 20, "private unrelated context", states=(1, 2, 3, 8))
+            node.get_attributes = mock.Mock(return_value={"id": "private-other-id", "tag": "div", "toolkit": "WebKitGTK"})
+            collected[tuple(owner.references.identity(node, owner))] = node
+        observation = self.observe(f, owner, collected)
+        self.assertEqual(len(collected), 31)
+        self.assertEqual(observation["inspectedCount"], 31)
+        self.assertEqual(observation["attributesReadCount"], 31)
+        self.assertEqual(observation["namesReadCount"], 31)
+        self.assertEqual(observation["idMatchCount"], 0)
+        self.assertEqual(observation["nameMatchCount"], 0)
+        self.assertEqual(observation["buttonIdMatchCount"], 1)
+        self.assertEqual(observation["candidateCount"], 1)
+        self.assertTrue(observation["complete"])
+        self.assertTrue(observation["candidates"][0]["idEqualsFixedButton"])
+        self.assertNotIn("private", json.dumps(observation))
+
+    def test_matching_html_id_and_name_under_other_numeric_role_are_evidence_not_fallback(self):
+        f, owner, collected = self.fixture()
+        f.heading.role = f.atspi.Role.LINK
+        f.heading.name = p.CONTROLS["save-guide"][1]
+        observation = self.observe(f, owner, collected)
+        row = next(row for row in observation["candidates"] if row.get("idEqualsSourceHeading"))
+        self.assertEqual(row["reference"], owner.references.identity(f.heading, owner))
+        self.assertEqual(row["role"], f.atspi.Role.LINK)
+        self.assertFalse(row["roleEqualsHeading"])
+        self.assertTrue(row["nameEqualsSourceHeading"])
+        self.assertEqual(row["attributes"], {"tag": "h2", "computed-role": "heading", "toolkit": "WebKitGTK"})
+        self.assertEqual(observation["idMatchCount"], 1)
+        self.assertEqual(observation["nameMatchCount"], 1)
+        for node in collected.values():
+            for getter in ("get_parent", "clear_cache", "get_child_at_index", "get_text_iface", "get_action_iface"):
+                getattr(node, getter).assert_not_called()
+
+    def test_exact_context_name_on_any_collected_role_is_retained_without_its_text_or_id(self):
+        f, owner, collected = self.fixture()
+        f.container.name = p.CONTROLS["save-guide"][1]
+        f.container.get_attributes.return_value = {"id": "private-other-id", "tag": "div", "computed-role": "generic",
+                                                  "toolkit": "WebKitGTK", "placeholder-text": "private text"}
+        observation = self.observe(f, owner, collected)
+        row = next(row for row in observation["candidates"] if row.get("nameEqualsSourceHeading"))
+        self.assertEqual(row["role"], 20)
+        self.assertFalse(row["idEqualsSourceHeading"])
+        self.assertFalse(row["roleEqualsHeading"])
+        self.assertNotIn("private", json.dumps(observation))
+
+    def test_heading_html_id_with_empty_accessible_name_does_not_read_text_interface(self):
+        f, owner, collected = self.fixture()
+        observation = self.observe(f, owner, collected)
+        row = next(row for row in observation["candidates"] if row.get("idEqualsSourceHeading"))
+        self.assertTrue(row["roleEqualsHeading"])
+        self.assertFalse(row["nameEqualsSourceHeading"])
+        self.assertEqual(observation["nameMatchCount"], 0)
+        f.heading.get_text_iface.assert_not_called()
+
+    def test_absent_wrong_type_oversize_and_inaccessible_getters_are_type_only(self):
+        cases = ("absent-attributes", "wrong-attributes", "large-map", "wrong-id", "large-id", "large-value",
+                 "inaccessible-attributes", "inaccessible-name", "wrong-name", "large-name")
+        for change in cases:
+            with self.subTest(change=change):
+                f, owner, collected = self.fixture()
+                f.heading.role = f.atspi.Role.LINK
+                attrs = f.heading.get_attributes.return_value
+                if change == "absent-attributes":
+                    del f.heading.get_attributes
+                elif change == "wrong-attributes":
+                    f.heading.get_attributes.return_value = []
+                elif change == "large-map":
+                    attrs.update({str(i): "private" for i in range(33)})
+                elif change == "wrong-id":
+                    attrs["id"] = None
+                elif change == "large-id":
+                    attrs["id"] = "private" * 100
+                elif change == "large-value":
+                    attrs["tag"] = "private" * 100
+                elif change == "inaccessible-attributes":
+                    f.heading.get_attributes.side_effect = PermissionError("private attribute detail")
+                elif change == "inaccessible-name":
+                    f.heading.get_name.side_effect = OSError("private name detail")
+                elif change == "wrong-name":
+                    f.heading.get_name.side_effect = None
+                    f.heading.get_name.return_value = None
+                else:
+                    f.heading.name = "private" * 100
+                observation = self.observe(f, owner, collected)
+                self.assertFalse(observation["complete"])
+                self.assertEqual(observation["errorCount"], 1)
+                self.assertIn(observation["errors"][0]["errorType"],
+                              ("AttributeError", "TypeError", "ValueError", "PermissionError", "OSError"))
+                self.assertNotIn("private", json.dumps(observation))
+
+    def test_candidate_and_error_rows_are_bounded_without_losing_inspection_counts(self):
+        for error in (False, True):
+            f, owner, collected = self.fixture()
+            for _ in range(40):
+                node = fixtures.AxNode(43, 20, "private unrelated name")
+                node.get_attributes = mock.Mock(return_value={"tag": "h2", "computed-role": "heading"},
+                    side_effect=OSError("private") if error else None)
+                collected[tuple(owner.references.identity(node, owner))] = node
+            observation = self.observe(f, owner, collected)
+            self.assertEqual(observation["inspectedCount"], 45)
+            if error:
+                self.assertEqual(observation["errorCount"], 40)
+                self.assertEqual(len(observation["errors"]), 8)
+                self.assertTrue(observation["errorsTruncated"])
+            else:
+                self.assertEqual(observation["candidateCount"], 42)
+                self.assertEqual(len(observation["candidates"]), 8)
+                self.assertTrue(observation["candidatesTruncated"])
+            self.assertNotIn("private", json.dumps(observation))
+
+    def test_capture_failure_keeps_strict_original_refusal_and_never_queries_uncollected_parent(self):
+        f, owner, _ = self.fixture(trap_traversal=False)
+        external = fixtures.AxNode(43, 20)
+        external.get_attributes = mock.Mock(side_effect=AssertionError("Unknown semantic parent"))
+        f.button.parent = external
+        with mock.patch.object(p, "source_heading_observation", side_effect=OSError("private capture detail")), \
+                mock.patch.object(p.B, "visible_rectangle") as geometry, self.assertRaises(p.TreeRefusal) as caught:
+            p.press("save-guide", owner, f.atspi)
+        result = caught.exception.observation["fixedControlHitTest"]
+        self.assertEqual(result["headingCount"], 0)
+        self.assertEqual(result["sourceHeadingCaptureRefusal"], {"errorType": "OSError"})
+        self.assertEqual(result["refusal"]["stage"], "fixed-controls")
+        self.assertNotIn("private", json.dumps(caught.exception.observation))
+        geometry.assert_not_called()
+        external.get_attributes.assert_not_called()
+        f.button.action.do_action.assert_not_called()
+
+
 class NativeReceiptTests(unittest.TestCase):
     def task_listing(self, *tids):
         listing = mock.MagicMock()
