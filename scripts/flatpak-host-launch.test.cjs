@@ -10,6 +10,7 @@ const read = file => fs.readFileSync(path.join(crate, file), 'utf8');
 const api = read('src/lib.rs');
 const launch = read('src/linux/launch.rs');
 const identity = read('src/linux/identity.rs');
+const identitySections = identity.split('\n#[cfg(test)]\nmod tests {\n');
 const transport = read('src/linux/transport.rs');
 const kernel = read('src/linux/transport/tests.rs');
 
@@ -33,9 +34,19 @@ test('bootstrap has one fixed installed ref and executable, not a host command i
   for (const option of ['--user', '--commit=', '--runtime-commit=', '--instance-id-fd=4', '--die-with-parent']) {
     assert.ok(launch.includes(option), option);
   }
-  assert.doesNotMatch(api + launch + identity + transport, /flatpak-spawn|--forward-fd|--filesystem|--talk-name|--devel|RequestConsent|GetStatus|InspectMigration|NativeHostSettings|launcher-config|\.claude|\.codex|Unity/);
+  // Denied flags in cfg(test) fixtures are not production command arguments.
+  assert.equal(identitySections.length, 2, 'One exact compiler-gated test boundary required');
+  assert.doesNotMatch(api + launch + identitySections[0] + transport, /flatpak-spawn|--forward-fd|--filesystem|--talk-name|--devel|RequestConsent|GetStatus|InspectMigration|NativeHostSettings|launcher-config|\.claude|\.codex|Unity/);
   assert.match(read('src/main.rs'), /args\.len\(\) != 2 \|\| args\[1\] != "prove-installed"/);
   assert.match(read('src/echo.rs'), /args\.len\(\) != 2 \|\| args\[1\] != "echo-v1"/);
+});
+test('empty USB metadata regression keeps broad permission examples inside the cfg(test) module only', () => {
+  assert.equal(identitySections.length, 2);
+  assert.match(identitySections[0], /"extra-args" => value != "--usb-list=;--usb-list=;"/);
+  assert.match(identitySections[1], /metadata_refusal_empty_usb_serialization_is_not_a_deployment_override/);
+  assert.match(identitySections[1], /--filesystem=home/);
+  assert.match(identitySections[1], /--share=network/);
+  assert.match(identitySections[1], /assert!\(replacement_metadata\("extra-args", value\)/);
 });
 
 test('only build-time review pins and isolated native runner state select inputs', () => {
