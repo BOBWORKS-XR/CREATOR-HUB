@@ -108,6 +108,21 @@ test('Tauri dependency resources reuse exact signed bytes and the established na
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('the real MCP Tauri resource map cannot acquire an unstaged generated input unnoticed', () => {
+  const config = JSON.parse(fs.readFileSync(path.join(__dirname, '../modules/mcp/launcher/src-tauri/tauri.conf.json')));
+  const generated = Object.entries(config.bundle.resources).filter(([source]) => source.startsWith('../../release/'));
+  assert.deepEqual(generated.sort(), [
+    ['../../release/creator-works-mcp.mjs', 'server/creator-works-mcp.mjs'],
+    ['../../release/runtime/LICENSE', 'server/runtime/LICENSE'],
+    ['../../release/runtime/VERSION', 'server/runtime/VERSION'],
+    ['../../release/runtime/node', 'server/runtime/node'],
+    ['../../release/runtime/node.exe', 'server/runtime/node.exe'],
+  ].sort());
+  for (const source of Object.keys(config.bundle.resources).filter(source => !source.startsWith('../../release/'))) {
+    assert.ok(fs.statSync(path.resolve(__dirname, '../modules/mcp/launcher/src-tauri', source)).isFile(), source);
+  }
+});
+
 test('Linux staged data and executables get canonical archive modes without changing other platform policy', () => {
   const writes = [];
   const chmod = (file, mode) => writes.push({ file, mode });
