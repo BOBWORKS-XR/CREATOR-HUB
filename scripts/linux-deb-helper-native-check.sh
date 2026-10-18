@@ -21,6 +21,7 @@ cargo clippy --locked --all-targets --manifest-path "$crate" -- -D warnings
 # Separate output: the default executable used by Node must remain default-off.
 cargo test --locked --features experimental-transaction --target-dir native/linux-deb-retirement/target/experimental --manifest-path "$crate"
 cargo clippy --locked --features experimental-transaction --all-targets --manifest-path "$crate" -- -D warnings
+python3 -B native/linux-deb-retirement/tests/gui-writer-kernel.py --receipt "$RUNNER_TEMP/linux-deb-helper-fixtures/gui-writer-kernel.json"
 cargo build --locked --manifest-path "$crate"
 node --test scripts/linux-deb-helper.test.cjs
 printf '%s\n' 'Unprivileged fixtures only; actual dpkg transaction and native approval remain unaccepted.'

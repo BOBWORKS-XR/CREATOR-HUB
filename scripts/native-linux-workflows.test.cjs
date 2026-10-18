@@ -53,3 +53,19 @@ test('39106292475 runner-only polkit hardening is fixed, guarded and never relax
   const root = fs.readFileSync(path.join(__dirname, 'native-linux-root-probe.py'), 'utf8');
   assert.match(root, /info.st_uid == info.st_gid == 0 and not info.st_mode & 0o7022/);
 });
+test('Linux helper fixture source changes trigger focused native checks before packaging', () => {
+  const workflow = yaml.parse(fs.readFileSync(path.join(__dirname,
+    '../.github/workflows/linux-deb-helper-fixtures-014.yml'), 'utf8'), { uniqueKeys: true });
+  assert.deepEqual(workflow.on.push.branches, ['validation/linux-deb-helper-fixtures-014']);
+  for (const file of ['native/linux-deb-retirement/**', 'scripts/linux-deb-helper-fixtures-probe.py',
+    'scripts/linux-deb-helper-fixtures.test.py', 'scripts/linux-deb-helper-native-check.sh', 'scripts/linux-deb-helper.test.cjs']) {
+    assert.ok(workflow.on.push.paths.includes(file), file);
+  }
+  const job = workflow.jobs['helper-fixtures'];
+  assert.equal(job['runs-on'], 'ubuntu-22.04');
+  const body = job.steps.find(step => step.run).run;
+  const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : '/usr/bin/bash';
+  const parsed = spawnSync(bash, ['-n'], { input: body, encoding: 'utf8', timeout: 5000, windowsHide: true });
+  assert.equal(parsed.status, 0, parsed.stderr || parsed.error?.message);
+  assert.match(body, /python3 -B scripts\/linux-deb-helper-fixtures-probe\.py/);
+});

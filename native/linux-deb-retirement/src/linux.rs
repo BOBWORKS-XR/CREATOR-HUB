@@ -28,6 +28,8 @@ const INFO: &str = "/var/lib/dpkg/info";
 const LIMIT: u64 = 128 * 1024;
 const ATTEMPT: &str = "transaction-attempted";
 const METADATA_FORMAT: &str = "--showformat=${Installed-Size}\n${Maintainer}\n${Priority}\n${Depends}\n${Description}\n${Conffiles}${Triggers-Pending}${Triggers-Awaited}${Multi-Arch}${Pre-Depends}${Breaks}${Conflicts}${Replaces}${Provides}";
+#[cfg(feature = "experimental-transaction")]
+mod gui;
 mod handoff;
 mod metadata;
 mod setup;

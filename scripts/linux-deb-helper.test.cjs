@@ -144,6 +144,37 @@ test('Setup read-only inspection independently re-queries state and rejects fals
   assert.doesNotMatch(inspect, /refuse_prior_attempt|prepare_locked|write_new|create_directory|transaction::/);
 });
 
+test('post-auth fixed GUI writer guard is retained across the entire transaction', () => {
+  const transaction = source('linux/transaction.rs');
+  const acquire = 'let _gui_guard = gui::acquire(target)?;';
+  assert.ok(transaction.indexOf(acquire) > transaction.indexOf('privileged_image()?'));
+  assert.ok(transaction.indexOf(acquire) < transaction.indexOf('mark_attempt(&candidate, target)'));
+  assert.ok(transaction.indexOf(acquire) < transaction.indexOf('held.handoff('));
+  assert.doesNotMatch(transaction, /drop\(_gui_guard\)|let _ = gui::/);
+  const gui = source('linux/gui.rs').split('#[cfg(test)]')[0];
+  for (const required of ['usr/bin/creator-works-mcp-launcher', 'usr/bin/creator-project-setup',
+    'copy_pinned(&image', 'open(&path, libc::O_RDONLY)', 'open(&path, libc::O_WRONLY)',
+    '_image: File', '_writer: File', 'stamp(&writer.metadata()?)', 'stamp(&image.metadata()?)']) {
+    assert.ok(gui.includes(required), required);
+  }
+  assert.ok(gui.indexOf('copy_pinned(&image') < gui.indexOf('open(&path, libc::O_WRONLY)'));
+  assert.doesNotMatch(gui, /Command::|\.kill\(|libc::kill|\/proc|PKEXEC_UID|O_CREAT|O_TRUNC|write_all|\.write\(/);
+  assert.match(source('linux.rs'), /access \| libc::O_NOFOLLOW \| libc::O_CLOEXEC \| libc::O_NONBLOCK/);
+});
+
+test('writer kernel fixtures cover busy, held, renamed/deleted, close and binding failures', () => {
+  const gui = source('linux/gui.rs');
+  for (const scenario of ['busy_image_refuses_guard_and_preserves_bytes_modes',
+    'held_guard_blocks_exec_but_allows_rename_and_unlink_without_byte_changes',
+    'changed_stamp_or_replacement_inode_refuses_binding', 'libc::ETXTBSY',
+    'libc::FD_CLOEXEC', 'drop(child)', 'drop(guard)', 'exec_ok(&deleted)']) {
+    assert.ok(gui.includes(scenario), scenario);
+  }
+  assert.doesNotMatch(gui.split('#[cfg(test)]')[0], /ManualRepair|transaction-attempted/);
+  assert.doesNotMatch(gui, /\.kill\(|libc::kill|pidfd_send_signal/);
+  assert.match(source('lib.rs'), /"packageTransactionStarted": manual\.map/);
+});
+
 test('prepared native script refuses this host before any build or native probe', () => {
   const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : '/bin/bash';
   if (!fs.existsSync(bash)) return;
@@ -164,7 +195,11 @@ test('prepared native script refuses this host before any build or native probe'
 test('new fixture workflow is one guarded push-only job without privilege or product builds', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/linux-deb-helper-fixtures-014.yml'), 'utf8');
   assert.match(workflow, /branches: \[validation\/linux-deb-helper-fixtures-014\]/);
-  assert.match(workflow, /paths: \['\.github\/workflows\/linux-deb-helper-fixtures-014.yml'\]/);
+  for (const file of ['.github/workflows/linux-deb-helper-fixtures-014.yml', 'native/linux-deb-retirement/**',
+    'scripts/linux-deb-helper-fixtures-probe.py', 'scripts/linux-deb-helper-fixtures.test.py',
+    'scripts/linux-deb-helper-native-check.sh', 'scripts/linux-deb-helper.test.cjs']) {
+    assert.ok(workflow.includes(`      - ${file}\n`), file);
+  }
   assert.match(workflow, /github\.repository_id == '1364807512'/);
   assert.match(workflow, /github\.repository == 'BOBWORKS-XR\/CREATOR-HUB'/);
   assert.match(workflow, /github\.ref == 'refs\/heads\/validation\/linux-deb-helper-fixtures-014'/);

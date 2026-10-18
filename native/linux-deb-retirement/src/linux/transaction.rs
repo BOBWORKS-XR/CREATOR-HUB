@@ -118,6 +118,9 @@ fn retire_target(target: Target) -> Result<serde_json::Value> {
         !interrupts.requested(),
         "Interrupted before transaction; no package transaction started",
     )?;
+    // Keep the pinned GUI's writer descriptor in this parent through dpkg and
+    // post-verification. CLOEXEC closes only the child's inherited copy.
+    let _gui_guard = gui::acquire(target)?;
     // Persist refusal-on-retry before the only handoff. This is not a rollback journal.
     mark_attempt(&candidate, target).map_err(|e| manual(e, Some(false)))?;
     // Both locks still held. Standalone Root database writers are not excluded.

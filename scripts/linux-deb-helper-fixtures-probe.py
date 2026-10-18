@@ -60,6 +60,8 @@ def run(root, report):
     # Parse only before running tests, version tools, Rust or native fixtures.
     for name in ("linux-deb-helper-fixtures-probe.py", "linux-deb-helper-fixtures.test.py"):
         ast.parse((REPO / "scripts" / name).read_text(encoding="utf-8"), filename=name)
+    kernel = REPO / "native/linux-deb-retirement/tests/gui-writer-kernel.py"
+    ast.parse(kernel.read_text(encoding="utf-8"), filename=str(kernel))
     capture(root, report, "syntax-shell", ["/bin/bash", "-n", "scripts/linux-deb-helper-native-check.sh"])
     capture(root, report, "syntax-node", ["node", "--check", "scripts/linux-deb-helper.test.cjs"])
     capture(root, report, "pure-preflight", [sys.executable, "-B", "scripts/linux-deb-helper-fixtures.test.py"])
