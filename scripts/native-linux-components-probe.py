@@ -1141,17 +1141,44 @@ def setup_pinned_requirements_state(nodes, values, paths, section, heading, owne
         result["paragraphs"].append({"text": text, "reference": list(ref)})
 
 
+def source_file_record(path, expected):
+    require(0 < len(expected) <= 32768, "Finite source artifact exceeds bound")
+    digest = hashlib.sha256(expected).hexdigest()
+    actual = B.bounded_read(path, 32768)
+    require(actual == expected and hashlib.sha256(actual).hexdigest() == digest,
+            "Finite source artifact readback/hash differs")
+    return {"path": path.name, "byteLength": len(expected), "sha256": digest}
+
+
+def finite_source_report(root, action, report, setup_text=None):
+    # Keep complete pre-input observations off the finite worker's result wire.
+    evidence = {**report, "timing": "before-finite-source-input"}
+    if setup_text is not None:
+        evidence["setupTextEvidence"] = setup_text
+    body = (json.dumps(evidence, ensure_ascii=True, separators=(",", ":")) + "\n").encode()
+    require(len(body) <= 32768, "Finite source evidence exceeds bound")
+    path = root / (action + "-source-sequence-evidence.json")
+    B.write_new(path, body)
+    record = source_file_record(path, body)
+    result = {key: value for key, value in report.items() if key not in ("walks", "runtime")}
+    result["walks"] = [{key: walk[key] for key in ("nodeCount", "graphSha256", "sourceCounts") if key in walk}
+                       for walk in report["walks"]]
+    result["sourceEvidence"] = record
+    # Reserve the largest success/uncertain-action flags before any input.
+    largest = {**result, "actionCount": 1, "readOnly": False, "actionMayHaveRun": True}
+    require(len((json.dumps(largest, ensure_ascii=True, indent=2) + "\n").encode()) <= 32768,
+            "Finite source report exceeds bound")
+    return result
+
+
 def retain_setup_text(root, action, walks):
     result = {"readOnly": True, "authorization": False, "actionCount": 0,
               "timing": "before-finite-Setup-input", "walks": walks}
-    while len((json.dumps(result, indent=2) + "\n").encode()) > 32768:
-        populated = [walk for walk in walks if walk["nodes"]]
-        require(populated, "Setup diagnostic metadata exceeds bound")
-        walk = max(populated, key=lambda value: len(value["nodes"]))
-        walk["complete"] = False
-        walk["captureRefusal"] = {"errorType": "OutputBound"}
-        walk["nodes"].pop()
-    B.save_json(root / (action + "-setup-text-interfaces.json"), result)
+    body = (json.dumps(result, ensure_ascii=True, indent=2) + "\n").encode()
+    require(len(body) <= 32768, "Setup diagnostic metadata exceeds bound")
+    path = root / (action + "-setup-text-interfaces.json")
+    B.save_json(path, result)
+    return source_file_record(path, body)
 
 
 def source_button(nodes, paths, context, name, owner, atspi):
@@ -1244,6 +1271,8 @@ def source_sequence(root, action, owner, atspi):
               "nativeAcceptance": False, "walks": []}
     setup_diagnostics = []
     setup_diagnostic_saved = False
+    setup_text = result = None
+    evidence_attempted = False
     try:
         report["runtime"] = guide_runtime_provenance(root, action, owner)
         deadline = time.monotonic() + 15
@@ -1273,31 +1302,35 @@ def source_sequence(root, action, owner, atspi):
         require(source_rectangles(owner, atspi, final_nodes, final_refs) == geometry, "Finite source geometry changed")
         require(guide_runtime_state(owner) == report["runtime"]["mappedFiles"], "Finite source runtime changed")
         report.update(freshWalksMatched=True, geometry=geometry)
-        require(len((json.dumps(report, indent=2) + "\n").encode()) <= 32768, "Finite source report exceeds bound")
+        if setup_diagnostics:
+            setup_diagnostic_saved = True
+            setup_text = retain_setup_text(root, action, setup_diagnostics)
+            require(all(walk["complete"] for walk in setup_diagnostics), "Bound Setup diagnostic truncated; no input")
+        evidence_attempted = True
+        result = finite_source_report(root, action, report, setup_text)
         if interface is not None:
-            if setup_diagnostics:
-                retain_setup_text(root, action, setup_diagnostics)
-                setup_diagnostic_saved = True
-                require(all(walk["complete"] for walk in setup_diagnostics), "Bound Setup diagnostic truncated; no input")
             owner.helper.ready(final_nodes[final_target], atspi)
             owner.recheck(full=True)
             try:
                 require(interface.do_action(0), "Finite source press refused; never retry")
                 owner.recheck(full=True)
             except Exception as error:
-                report["actionMayHaveRun"] = True
+                result["actionMayHaveRun"] = True
                 raise owner.helper.ActionError("Finite source action uncertain; no retry") from error
-            report.update(actionCount=1, readOnly=False)
-        return report
+            result.update(actionCount=1, readOnly=False)
+        return result
     finally:
         if setup_diagnostics and not setup_diagnostic_saved:
             try:
-                retain_setup_text(root, action, setup_diagnostics)
+                setup_text = retain_setup_text(root, action, setup_diagnostics)
             except Exception as error:
                 print(json.dumps({"setupTextCaptureRefusal": type(error).__name__[:64]}), file=sys.stderr)
         try:
-            require(len((json.dumps(report, indent=2) + "\n").encode()) <= 32768, "Finite source capture exceeds bound")
-            B.save_json(root / (action + "-source-sequence.json"), report)
+            if not evidence_attempted:
+                result = finite_source_report(root, action, report, setup_text)
+            if result is not None:
+                require(len((json.dumps(result, indent=2) + "\n").encode()) <= 32768, "Finite source capture exceeds bound")
+                B.save_json(root / (action + "-source-sequence.json"), result)
         except Exception as error:
             print(json.dumps({"sourceSequenceCaptureRefusal": type(error).__name__[:64]}), file=sys.stderr)
 

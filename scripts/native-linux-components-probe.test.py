@@ -1910,6 +1910,94 @@ class SourceGuidePathTests(unittest.TestCase):
                 versions["libgtk-3-0"] = "3.24.33-1ubuntu2.2"
 
 
+class FiniteSourceReportTests(unittest.TestCase):
+    @staticmethod
+    def native_shaped_report():
+        # Actual 39118240825 UUIDs; synthetic repeated/deep serialization stress,
+        # not a reconstruction or measurement of its discarded full report.
+        uuids = ("1db11fa0_457c_4c89_b078_e106667551e8", "47135c6c_3360_4871_9c42_335e99da1dec",
+                 "a3232d98_dffe_40bd_8e64_37daf6680644", "575e3d81_61ed_44a3_a251_58a93e1b75ee",
+                 "f24f2f6b_3abd_44d5_9a6f_0c8ea595fa59", "2064f986_7ec2_4166_8edd_ac7951b0c004",
+                 "021ceb25_7fda_4ddd_b21c_1a8c88a4f73c", "3f6d40ee_9c80_4e6a_8aab_dd28fc1f3f55",
+                 "07dc867c_70d7_471f_9f3b_52190efe35b5", "53bf0ac2_8714_4097_9215_d24f07617ecd",
+                 "68544fb6_4126_49c6_a708_7e79abb30b6e", "55412377_fa1b_496c_9433_9f7161fd6497",
+                 "f7fa1243_aba1_41b9_bfb9_69b9f4897894", "077cd551_cb42_4619_a274_cde51859fbe2")
+        refs = [[":1.2", "/org/a11y/atspi/accessible/" + value] for value in uuids]
+        ids = (*p.SETUP_SEQUENCE_IDS, "component-document", "requirements-section")
+        walk = {"freshness": "clear-cache-before-each-child-count-and-index", "nodeCount": 52,
+                "graphSha256": "a" * 64, "sourceCounts": {key: 1 for key in p.SETUP_SEQUENCE_IDS},
+                "sourcePaths": {key: copy.deepcopy(refs) for key in ids},
+                "sourceObservations": [{"reference": refs[index], "id": key, "role": 84,
+                    "roleMatches": True, "tagMatches": True, "computedRoleMatches": True,
+                    "toolkitMatches": True, "nameMatches": True,
+                    "states": {key: key not in ("DEFUNCT", "BUSY") for key in
+                               ("VISIBLE", "SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY")}}
+                    for index, key in enumerate(p.SETUP_SEQUENCE_IDS)],
+                "parentMismatches": [{"node": refs[index], "parentCollected": True,
+                    "forwardParent": refs[index + 1], "collectedParent": refs[index + 2]} for index in range(4)],
+                "setupTextDiagnostic": {"readOnly": True, "actionCount": 0, "complete": True},
+                "requirementsAcceptance": {"scope": "pinned-fresh-runner-source-paragraph-state",
+                    "independentlyCountedRpc": False, "paragraphs": [
+                        {"reference": refs[6], "text": "Will install: Android tools, Windows support and the URP template."},
+                        {"reference": refs[7], "text": "Unity Hub or Unity CLI is required to manage the Editor and license."},
+                        {"reference": refs[8], "text": "Unity Editor 6000.3.21f1 is not installed."}]}}
+        return {"action": "setup-ready", "readOnly": True, "authorization": False, "actionCount": 0,
+                "nativeAcceptance": False, "freshWalksMatched": True, "walks": [walk, copy.deepcopy(walk)],
+                "runtime": {"packages": {"libgtk-3-0": "3.24.33-1ubuntu2.2"},
+                    "mappedFiles": {"libgtk-3-0": {"path": "/usr/lib/x86_64-linux-gnu/libgtk-3.so.0.2404.29",
+                        "file": {"size": 8533424, "sha256": "b" * 64, "device": "2049", "inode": "30121"},
+                        "pid": 3457, "maps": [["7f000000-7f100000", "r-xp", "00001000", "08:01", "30121"]]}}},
+                "geometry": {"client": [171, 130, 940, 580], "frame": [170, 110, 942, 605],
+                             "source": [[200, 240, 300, 30]] * 5}}
+
+    def test_native_uuid_deep_repeated_paths_split_without_losing_any_observation(self):
+        report = self.native_shaped_report()
+        original = copy.deepcopy(report)
+        text = {"path": "setup-ready-setup-text-interfaces.json", "byteLength": 19867, "sha256": "c" * 64}
+        self.assertGreater(len((json.dumps(report, indent=2) + "\n").encode()), 32768)
+        with tempfile.TemporaryDirectory() as folder:
+            result = p.finite_source_report(Path(folder), "setup-ready", report, text)
+            body = (Path(folder) / result["sourceEvidence"]["path"]).read_bytes()
+        self.assertEqual(report, original)
+        self.assertEqual(json.loads(body), {**original, "timing": "before-finite-source-input", "setupTextEvidence": text})
+        self.assertEqual(result["sourceEvidence"]["byteLength"], len(body))
+        self.assertEqual(result["sourceEvidence"]["sha256"], hashlib.sha256(body).hexdigest())
+        self.assertLessEqual(len(body), 32768)
+        self.assertLessEqual(len((json.dumps(result, indent=2) + "\n").encode()), 32768)
+        self.assertNotIn("runtime", result)
+        for walk in result["walks"]:
+            self.assertEqual(set(walk), {"nodeCount", "graphSha256", "sourceCounts"})
+
+    def test_exact_evidence_boundary_and_exclusive_write_refuse_overflow_without_truncation(self):
+        for length in (32768, 32769):
+            with self.subTest(length=length), tempfile.TemporaryDirectory() as folder:
+                report = self.native_shaped_report()
+                report["runtime"]["padding"] = ""
+                body = lambda: (json.dumps({**report, "timing": "before-finite-source-input"}, separators=(",", ":")) + "\n").encode()
+                report["runtime"]["padding"] = "x" * (length - len(body()))
+                self.assertEqual(len(body()), length)
+                original = copy.deepcopy(report)
+                if length > 32768:
+                    with mock.patch.object(p.B, "write_new") as write, self.assertRaisesRegex(RuntimeError, "evidence exceeds bound"):
+                        p.finite_source_report(Path(folder), "setup-ready", report)
+                    write.assert_not_called()
+                else:
+                    result = p.finite_source_report(Path(folder), "setup-ready", report)
+                    file = Path(folder) / result["sourceEvidence"]["path"]
+                    self.assertEqual(file.read_bytes(), body())
+                    with self.assertRaises(FileExistsError):
+                        p.finite_source_report(Path(folder), "setup-ready", report)
+                    self.assertEqual(file.read_bytes(), body())
+                self.assertEqual(report, original)
+
+    def test_readback_hash_must_match_expected_even_when_read_bytes_equal(self):
+        with mock.patch.object(p.B, "bounded_read", return_value=b"same"), \
+                mock.patch.object(p.hashlib, "sha256", side_effect=[
+                    types.SimpleNamespace(hexdigest=lambda: "a" * 64), types.SimpleNamespace(hexdigest=lambda: "b" * 64)]), \
+                self.assertRaisesRegex(RuntimeError, "readback/hash differs"):
+            p.source_file_record(Path("/fixture/evidence.json"), b"same")
+
+
 class FiniteSourceSequenceTests(unittest.TestCase):
     @contextlib.contextmanager
     def fixture(self, phase):
@@ -1994,7 +2082,18 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                     get_text=mock.Mock(side_effect=lambda _start, _end: f.version.name))
                 f.status.get_text_iface = mock.Mock(return_value=f.version_text)
             with mock.patch.object(p, "own_tree", side_effect=AssertionError("No generic own_tree exemption")), \
-                    mock.patch.object(p, "press", side_effect=AssertionError("No name-only generic action")):
+                    mock.patch.object(p, "press", side_effect=AssertionError("No name-only generic action")), \
+                    mock.patch.object(p.B, "write_new") as write, mock.patch.object(p.B, "bounded_read") as read:
+                f.files = {}
+                def exclusive(file, body):
+                    if file in f.files:
+                        raise FileExistsError(file.name)
+                    f.files[file] = body
+                write.side_effect = exclusive
+                read.side_effect = lambda file, _limit: f.files[file]
+                f.save.side_effect = lambda file, value: p.B.write_new(file, (json.dumps(value, ensure_ascii=True, indent=2) + "\n").encode())
+                f.write, f.read = write, read
+                f.evidence = lambda result: json.loads(f.files[Path("/fixture") / result["sourceEvidence"]["path"]])
                 yield f
 
     def test_all_finite_reads_and_actions_use_two_matching_source_walks_and_only_expected_input(self):
@@ -2009,6 +2108,92 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                 self.assertEqual(f.target.action.do_action.call_count, int(writing))
                 self.assertFalse(result["nativeAcceptance"])
                 self.assertEqual(len(result["walks"]), 2)
+
+    def test_every_finite_press_has_exclusive_verified_full_preinput_evidence_and_small_actual_result(self):
+        for phase in ("close-mcp", "return-apps", "view-setup", "requirements"):
+            with self.subTest(phase=phase), self.fixture(phase) as f:
+                before = {}
+                def press(_):
+                    file = Path("/fixture") / (phase + "-source-sequence-evidence.json")
+                    self.assertIn(mock.call(file, 32768), f.read.call_args_list)
+                    before["body"] = f.files[file]
+                    detail = json.loads(before["body"])
+                    self.assertEqual(detail["timing"], "before-finite-source-input")
+                    self.assertTrue(detail["readOnly"])
+                    self.assertEqual(detail["actionCount"], 0)
+                    self.assertFalse(detail["authorization"])
+                    self.assertEqual(len(detail["walks"]), 2)
+                    self.assertEqual(detail["runtime"], f.provenance)
+                    self.assertTrue(all(walk["sourcePaths"] for walk in detail["walks"]))
+                    if phase == "requirements":
+                        text = detail["setupTextEvidence"]
+                        raw = f.files[Path("/fixture") / text["path"]]
+                        self.assertIn(mock.call(Path("/fixture") / text["path"], 32768), f.read.call_args_list)
+                        self.assertEqual(text["byteLength"], len(raw))
+                        self.assertEqual(text["sha256"], hashlib.sha256(raw).hexdigest())
+                        self.assertTrue(all(walk["complete"] for walk in json.loads(raw)["walks"]))
+                    return True
+                f.target.action.do_action.side_effect = press
+                result = p.source_sequence(Path("/fixture"), phase, f.owner, f.atspi)
+                self.assertEqual(result["actionCount"], 1)
+                self.assertFalse(result["readOnly"])
+                self.assertEqual(result["sourceEvidence"]["sha256"], hashlib.sha256(before["body"]).hexdigest())
+                self.assertEqual(f.files[Path("/fixture") / result["sourceEvidence"]["path"]], before["body"])
+                self.assertEqual(set(result), {"action", "readOnly", "authorization", "actionCount", "nativeAcceptance",
+                                               "walks", "freshWalksMatched", "geometry", "sourceEvidence"})
+                self.assertEqual(json.loads(f.files[Path("/fixture") / (phase + "-source-sequence.json")]), result)
+                f.target.action.do_action.assert_called_once_with(0)
+
+    def test_write_read_exact_byte_and_hash_failure_block_every_finite_press_without_retry(self):
+        for phase in ("close-mcp", "return-apps", "view-setup", "requirements"):
+            for failure in ("write", "existing", "read", "different-bytes", "hash"):
+                with self.subTest(phase=phase, failure=failure), self.fixture(phase) as f, \
+                        mock.patch("sys.stderr", new_callable=io.StringIO):
+                    if failure == "write": f.write.side_effect = OSError("write refused")
+                    elif failure == "existing": f.write.side_effect = FileExistsError("existing evidence")
+                    elif failure == "read": f.read.side_effect = OSError("read refused")
+                    elif failure == "different-bytes": f.read.side_effect = lambda file, _limit: b"!" + f.files[file][1:]
+                    with contextlib.ExitStack() as stack:
+                        if failure == "hash":
+                            stack.enter_context(mock.patch.object(p, "source_file_record", side_effect=RuntimeError("readback/hash differs")))
+                        with self.assertRaises((RuntimeError, OSError)):
+                            p.source_sequence(Path("/fixture"), phase, f.owner, f.atspi)
+                    self.assertEqual(sum(call.args[0].name.endswith("-source-sequence-evidence.json") for call in f.write.call_args_list),
+                                     1)
+                    if phase == "requirements":
+                        self.assertEqual(sum(call.args[0].name.endswith("-setup-text-interfaces.json") for call in f.write.call_args_list), 1)
+                    f.target.action.do_action.assert_not_called()
+
+    def test_preinput_result_bound_blocks_every_press_even_when_compact_evidence_fits(self):
+        geometry = {"source": [[0, 0, 0, 0]] * 700}
+        self.assertGreater(len((json.dumps(geometry, indent=2) + "\n").encode()), 32768)
+        for phase in ("close-mcp", "return-apps", "view-setup", "requirements"):
+            with self.subTest(phase=phase), self.fixture(phase) as f, \
+                    mock.patch.object(p, "source_rectangles", return_value=geometry), \
+                    self.assertRaisesRegex(RuntimeError, "Finite source report exceeds bound"):
+                p.source_sequence(Path("/fixture"), phase, f.owner, f.atspi)
+            f.target.action.do_action.assert_not_called()
+            self.assertLessEqual(len(f.files[Path("/fixture") / (phase + "-source-sequence-evidence.json")]), 32768)
+
+    def test_setup_text_aggregate_overflow_never_truncates_or_writes(self):
+        walks = [{"complete": True, "nodes": [{"text": {"value": "x" * 32768}}]}]
+        original = copy.deepcopy(walks)
+        with mock.patch.object(p.B, "save_json") as save, self.assertRaisesRegex(RuntimeError, "metadata exceeds bound"):
+            p.retain_setup_text(Path("/fixture"), "requirements", walks)
+        save.assert_not_called()
+        self.assertEqual(walks, original)
+
+    def test_uncertain_action_flags_are_result_only_and_do_not_rewrite_preinput_evidence(self):
+        with self.fixture("return-apps") as f:
+            f.target.action.do_action.side_effect = OSError("uncertain")
+            with self.assertRaises(f.owner.helper.ActionError):
+                p.source_sequence(Path("/fixture"), "return-apps", f.owner, f.atspi)
+            result = json.loads(f.files[Path("/fixture/return-apps-source-sequence.json")])
+            self.assertTrue(result["actionMayHaveRun"])
+            self.assertEqual(result["actionCount"], 0)
+            self.assertNotIn("actionMayHaveRun", f.evidence(result))
+            self.assertEqual(f.evidence(result)["actionCount"], 0)
+            f.target.action.do_action.assert_called_once_with(0)
 
     def test_native_39114019943_status_text_needs_no_accessible_name_or_text_child(self):
         with self.fixture("mcp-saved") as f:
@@ -2042,8 +2227,8 @@ class FiniteSourceSequenceTests(unittest.TestCase):
             self.assertEqual(result["actionCount"], 1)
             self.assertEqual(result["walks"][0]["sourceCounts"]["entry-setup"], 0)
             self.assertEqual(len(result["walks"]), 2)
-            self.assertIn("root-top-document", result["walks"][0]["sourcePaths"])
-            self.assertIn("setup-button", result["walks"][0]["sourcePaths"])
+            self.assertIn("root-top-document", f.evidence(result)["walks"][0]["sourcePaths"])
+            self.assertIn("setup-button", f.evidence(result)["walks"][0]["sourcePaths"])
             f.target.action.do_action.assert_called_once_with(0)
 
     def test_setup_navigation_missing_duplicate_foreign_hidden_or_nested_contexts_never_press(self):
@@ -2107,7 +2292,7 @@ class FiniteSourceSequenceTests(unittest.TestCase):
             result = p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
             self.assertEqual(result["actionCount"], 1)
             self.assertEqual(f.editor_label.role, 117)
-            for walk in result["walks"]:
+            for walk in f.evidence(result)["walks"]:
                 self.assertEqual(walk["sourceCounts"]["requirements-heading"], 1)
                 accepted = walk["requirementsAcceptance"]
                 self.assertEqual(accepted["scope"], "pinned-fresh-runner-source-paragraph-state")
@@ -2185,9 +2370,10 @@ class FiniteSourceSequenceTests(unittest.TestCase):
             f.requirement_label.parent = parent
             result = p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
             self.assertEqual(result["actionCount"], 1)
-            self.assertFalse(result["walks"][0]["rowLabelTextDiagnostic"]["required"])
-            self.assertEqual(result["walks"][0]["rowLabelTextDiagnostic"]["exactTextMatches"]["Unity Hub or Unity CLI"], 2)
-            self.assertEqual(len(result["walks"][0]["requirementsAcceptance"]["paragraphs"]), 3)
+            walk = f.evidence(result)["walks"][0]
+            self.assertFalse(walk["rowLabelTextDiagnostic"]["required"])
+            self.assertEqual(walk["rowLabelTextDiagnostic"]["exactTextMatches"]["Unity Hub or Unity CLI"], 2)
+            self.assertEqual(len(walk["requirementsAcceptance"]["paragraphs"]), 3)
 
     def test_native_39117179349_missing_row_labels_still_accepts_only_exact_paragraph_state(self):
         for phase in ("setup-ready", "requirements", "setup-checked"):
@@ -2197,7 +2383,7 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                 result = p.source_sequence(Path("/fixture"), phase, f.owner, f.atspi)
                 self.assertEqual(result["actionCount"], int(phase == "requirements"))
                 self.assertEqual(len(result["walks"]), 2)
-                for walk in result["walks"]:
+                for walk in f.evidence(result)["walks"]:
                     self.assertEqual(walk["rowLabelTextDiagnostic"], {"required": False,
                         "exactTextMatches": {"Unity Hub or Unity CLI": 0, "Unity 6000.3.21f1": 0}})
                     self.assertEqual(len(walk["requirementsAcceptance"]["paragraphs"]), 3)
@@ -2388,7 +2574,7 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                         self.assertEqual(result["readinessObservations"], 1)
                         self.assertEqual(len(result["walks"]), 2)
                         self.assertEqual(result["actionCount"], 0)
-                        self.assertTrue(all(walk["setupTextDiagnostic"]["complete"] for walk in result["walks"]))
+                        self.assertTrue(all(walk["setupTextDiagnostic"]["complete"] for walk in f.evidence(result)["walks"]))
                 f.target.action.do_action.assert_not_called()
 
     def test_post_save_and_navigation_contexts_refuse_visible_guide_or_iframe_and_wrong_ids(self):
