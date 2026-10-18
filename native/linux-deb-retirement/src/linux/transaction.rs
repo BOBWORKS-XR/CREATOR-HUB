@@ -100,6 +100,10 @@ pub(super) fn retire_setup() -> Result<serde_json::Value> {
 fn retire_target(target: Target) -> Result<serde_json::Value> {
     privileged_image()?;
     let mut held = locks()?;
+    // Refuse a running GUI before creating a preparation stage. Keep its writer
+    // descriptor in this parent through dpkg and post-verification; CLOEXEC
+    // closes only the child's inherited copy.
+    let _gui_guard = gui::acquire(target)?;
     // Never reopen or accept a previous preparation; rebuild after exact baseline admission.
     let Prepared {
         candidate,
@@ -118,9 +122,6 @@ fn retire_target(target: Target) -> Result<serde_json::Value> {
         !interrupts.requested(),
         "Interrupted before transaction; no package transaction started",
     )?;
-    // Keep the pinned GUI's writer descriptor in this parent through dpkg and
-    // post-verification. CLOEXEC closes only the child's inherited copy.
-    let _gui_guard = gui::acquire(target)?;
     // Persist refusal-on-retry before the only handoff. This is not a rollback journal.
     mark_attempt(&candidate, target).map_err(|e| manual(e, Some(false)))?;
     // Both locks still held. Standalone Root database writers are not excluded.

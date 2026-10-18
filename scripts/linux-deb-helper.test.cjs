@@ -148,6 +148,8 @@ test('post-auth fixed GUI writer guard is retained across the entire transaction
   const transaction = source('linux/transaction.rs');
   const acquire = 'let _gui_guard = gui::acquire(target)?;';
   assert.ok(transaction.indexOf(acquire) > transaction.indexOf('privileged_image()?'));
+  assert.ok(transaction.indexOf(acquire) < transaction.indexOf('prepare_locked(&held)?'));
+  assert.ok(transaction.indexOf(acquire) < transaction.indexOf('setup::prepare_locked(&held)?'));
   assert.ok(transaction.indexOf(acquire) < transaction.indexOf('mark_attempt(&candidate, target)'));
   assert.ok(transaction.indexOf(acquire) < transaction.indexOf('held.handoff('));
   assert.doesNotMatch(transaction, /drop\(_gui_guard\)|let _ = gui::/);
