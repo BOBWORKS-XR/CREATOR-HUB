@@ -1,0 +1,202 @@
+name: Integrated Linux signed update lab (capture only)
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/linux-integrated-update]
+    paths:
+      - .github/workflows/native-linux-integrated-update.yml
+      - scripts/native-linux-integrated-update.py
+      - scripts/native-linux-integrated-update.test.py
+      - scripts/linux-update-lab-feed.cjs
+      - scripts/linux-update-lab-feed.test.cjs
+permissions:
+  contents: read
+  actions: read
+env:
+  CREATOR_LINUX_INTEGRATED_UPDATE: '1'
+jobs:
+  preflight:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-integrated-update'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          python3 -m pip install --disable-pip-version-check PyYAML==6.0.3
+          node --test scripts/linux-update-lab-feed.test.cjs
+          python3 -B scripts/native-linux-integrated-update.test.py
+  input:
+    needs: preflight
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    # GitHub requires this capability to GET a draft asset. No write API,
+    # product execution or native session occurs in this job.
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            assert.equal(`${context.repo.owner}/${context.repo.repo}`,'BOBWORKS-XR/CREATOR-HUB');
+            assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
+            assert.equal(process.env.GITHUB_REF,'refs/heads/validation/linux-integrated-update');
+            assert.equal(process.env.GITHUB_EVENT_NAME,'workflow_dispatch');
+            const source='5065fb1112b9e96978e40e64503fa979f559baae',repo=context.repo;
+            const destination=path.join(fs.realpathSync(process.env.RUNNER_TEMP),'integrated-update-input');fs.mkdirSync(destination,{mode:0o700});
+            const rows=[];
+            const write=(name,data,size,sha)=>{const bytes=Buffer.from(data);assert.equal(bytes.length,size);
+              assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),sha);
+              fs.writeFileSync(path.join(destination,name),bytes,{flag:'wx',mode:0o600});};
+            for(const p of [
+              {run:39134487363,id:12139109123,size:182723403,sha:'71a2a4e42a1b1e2fe5e1e64f363f7d3c06444b03b5d2177b2e4565ad8a710c4c',name:'signed-unix-hub-linux-39134487363-1',file:'baseline.zip',event:'workflow_dispatch',branch:'validation/linux-integrated-candidate-014',workflow:'.github/workflows/unix-managed-assembly.yml'},
+              {run:39134454264,id:12139297945,size:71852017,sha:'37762440d9a72c83d48205b743d6e45a3e3e56526c02d117a9a5ce6c7328ac0b',name:'linux-integrated-update-target15-39134454264-1',file:'target.zip',event:'push',branch:'validation/linux-integrated-update-fixture',workflow:'.github/workflows/linux-integrated-update-fixture.yml'},
+            ]) {
+              const {data:run}=await github.rest.actions.getWorkflowRun({...repo,run_id:p.run});
+              assert.equal(run.head_sha,source);assert.equal(run.run_attempt,1);assert.equal(run.status,'completed');assert.equal(run.conclusion,'success');
+              assert.equal(run.event,p.event);assert.equal(run.head_branch,p.branch);assert.equal(run.path,p.workflow);assert.equal(run.repository.id,1364807512);
+              const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:p.id});
+              assert.equal(artifact.expired,false);assert.equal(artifact.name,p.name);assert.equal(artifact.size_in_bytes,p.size);assert.equal(artifact.digest,`sha256:${p.sha}`);
+              assert.equal(artifact.workflow_run.id,p.run);assert.equal(artifact.workflow_run.head_sha,source);
+              for(const k of ['repository_id','head_repository_id'])assert.equal(artifact.workflow_run[k],1364807512);
+              const {data}=await github.rest.actions.downloadArtifact({...repo,artifact_id:p.id,archive_format:'zip'});
+              assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer);write(p.file,data,p.size,p.sha);rows.push(p);
+            }
+            const {data:release}=await github.rest.repos.getRelease({...repo,release_id:411494394});
+            assert.equal(release.id,411494394);assert.equal(release.tag_name,'v0.1.13-validation');assert.equal(release.draft,true);
+            const id=653651716,name='linux-integrated-update15-inputs-39134454264.zip',size=63839087,sha='ac07b5053a808672b064de36c3f7d3362fc106b38b33c1330397b1d927931fb9';
+            assert.equal(release.assets.filter(a=>a.id===id).length,1);
+            const {data:asset}=await github.rest.repos.getReleaseAsset({...repo,asset_id:id});
+            assert.equal(asset.id,id);assert.equal(asset.name,name);assert.equal(asset.size,size);assert.equal(asset.state,'uploaded');assert.equal(asset.digest,`sha256:${sha}`);
+            const {data}=await github.rest.repos.getReleaseAsset({...repo,asset_id:id,headers:{accept:'application/octet-stream'}});
+            assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer);write('signed.zip',data,size,sha);
+            const {data:after}=await github.rest.repos.getRelease({...repo,release_id:411494394});
+            assert.equal(after.id,release.id);assert.equal(after.tag_name,release.tag_name);assert.equal(after.draft,true);
+            fs.writeFileSync(path.join(destination,'producers.json'),JSON.stringify({source,rows,signedAsset:{id,name,size,sha},releaseReady:false}),{flag:'wx',mode:0o600});
+      - uses: actions/upload-artifact@v4
+        with:
+          name: integrated-update-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/integrated-update-input/*
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+  native:
+    needs: input
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: actions/download-artifact@v5
+        with:
+          name: integrated-update-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/integrated-update-input
+      - name: Recheck raw hashes and safely stage only exact native inputs
+        run: python3 -B scripts/native-linux-integrated-update.py stage
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Provision stock native test dependencies only on this disposable runner
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libxdo3 libxres1 librsvg2-2 \
+            python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core dbus-x11 xvfb xauth openbox webkit2gtk-driver \
+            openssl ca-certificates libpam-systemd policykit-1-gnome=0.105-7ubuntu3 pkexec=0.105-33ubuntu0.2 \
+            polkitd=0.105-33ubuntu0.2 coreutils=8.32-4.1ubuntu1.4 passwd=1:4.8.1-2ubuntu2.2 fonts-dejavu-core
+          sudo systemctl start systemd-logind.service polkit.service
+      - name: Verify integrated package helper/policy/service and protect only known policy ancestry
+        run: |
+          python3 -B scripts/linux-retirement-package-verify.py "$RUNNER_TEMP/integrated-update-stage/native14.deb" \
+            8b9e937f3b0c2e9336732b0c92f6a6bf33b8f25f693f52c9a27a34f1585d232c \
+            5eb715286ff8d8cda8e612f8dc9d28d396068b2cdd470a5f3d92d7355e3e37c9 0.1.14 --profile integrated-candidate
+          python3 -B - <<'PY'
+          import os,stat,subprocess,importlib.util
+          from pathlib import Path
+          for path in map(Path,('/','/usr')):
+              value=path.lstat()
+              assert path.resolve()==path and stat.S_ISDIR(value.st_mode) and value.st_uid==value.st_gid==0 and not value.st_mode&0o7022
+          for path in map(Path,('/usr/share','/usr/share/polkit-1','/usr/share/polkit-1/actions')):
+              before=path.lstat()
+              assert path.resolve()==path and stat.S_ISDIR(before.st_mode) and before.st_uid==before.st_gid==0 and stat.S_IMODE(before.st_mode) in (0o755,0o777)
+              if stat.S_IMODE(before.st_mode)==0o777:
+                  subprocess.run(['/usr/bin/sudo','-n','/usr/bin/chmod','0755',str(path)],check=True)
+              after=path.lstat()
+              assert (after.st_dev,after.st_ino,after.st_uid,after.st_gid)==(before.st_dev,before.st_ino,0,0) and stat.S_IMODE(after.st_mode)==0o755
+          spec=importlib.util.spec_from_file_location('stock_policy',Path('scripts/native-linux-polkit-probe.py'))
+          module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+          module.secure_stock_policy(Path(os.environ['RUNNER_TEMP'])/'integrated-update-stage')
+          PY
+      - name: Install exact baseline14 and build only the test driver
+        run: |
+          sudo dpkg --install "$RUNNER_TEMP/integrated-update-stage/native14.deb"
+          cargo install tauri-driver --version 2.1.0 --locked --root "$RUNNER_TEMP/integrated-update-driver"
+      - name: Prepare protected fixed source and locked synthetic account (no password provisioned)
+        run: |
+          set -euo pipefail
+          node_image=$(node -p 'process.execPath')
+          sudo -n /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REPOSITORY_ID="$GITHUB_REPOSITORY_ID" \
+            GITHUB_REF="$GITHUB_REF" GITHUB_SHA="$GITHUB_SHA" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            RUNNER_TEMP="$RUNNER_TEMP" CREATOR_LINUX_INTEGRATED_UPDATE=1 CREATOR_LAB_NODE="$node_image" \
+            /usr/bin/python3 -B "$GITHUB_WORKSPACE/scripts/native-linux-integrated-update.py" prepare
+      - name: One original native updater/authentication capture, never credential input
+        run: |
+          sudo -n /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REPOSITORY_ID="$GITHUB_REPOSITORY_ID" \
+            GITHUB_REF="$GITHUB_REF" GITHUB_SHA="$GITHUB_SHA" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            CREATOR_LINUX_INTEGRATED_UPDATE=1 \
+            /usr/bin/python3 -B /opt/creator-integrated-update/scripts/native-linux-integrated-update.py broker </dev/null
+      - name: Export only fixed bounded receipts, never TLS keys or account files
+        if: always()
+        run: |
+          sudo -n /usr/bin/env -i PATH=/usr/bin:/bin RUNNER_TEMP="$RUNNER_TEMP" RUNNER_UID="$(id -u)" RUNNER_GID="$(id -g)" /usr/bin/python3 -B - <<'PY'
+          import os,stat
+          from pathlib import Path
+          base=Path('/opt/creator-integrated-update'); output=Path(os.environ['RUNNER_TEMP'])/'integrated-update-evidence'
+          output.mkdir(mode=0o700);uid,gid=int(os.environ['RUNNER_UID']),int(os.environ['RUNNER_GID']);os.chown(output,uid,gid)
+          names=['binding.json','broker-report.json','pending-dpkg.json','result/report.json','result/root-process.json',
+              'result/root-confirmation.json','result/root-confirmation-action.json','result/root-confirmation-refusal.json','result/authentication-original.json',
+              'result/driver.stdout','result/driver.stderr','result/session.stdout','result/session.stderr',
+              'result/agent.stdout','result/agent.stderr',
+              'result/system-files-observation.json','result/creator-linux-update-lab/transport-report.json',
+              'result/physical-capture/root-window.png','result/physical-root-confirmation/root-window.png','result/physical-authentication/root-window.png']
+          for name in names:
+              source=base/name
+              if not source.exists(): continue
+              info=source.lstat()
+              assert source.resolve()==source and stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_uid in (0,21314) and info.st_size<=16*1024*1024
+              data=source.read_bytes();assert len(data)==info.st_size
+              target=output/name.replace('/','__')
+              with target.open('xb') as stream: stream.write(data)
+              os.chmod(target,0o600);os.chown(target,uid,gid)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-linux-integrated-update-capture-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/integrated-update-input/producers.json
+            ${{ runner.temp }}/integrated-update-evidence/*

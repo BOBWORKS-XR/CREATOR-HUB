@@ -22,6 +22,13 @@ const ASSET = 'Creator_Hub_0.1.15_amd64-acceptance-only.deb';
 const REVIEWED_TARGET = Object.freeze({ bytes: 62212268,
   installer: '98aa9750cecf387a960f994d24726e5ca09100a5ce3723607939eeaa08d80796',
   executable: '7629379fbd3d0b7db0a996d727aa166750e08165478d622fe0d7c5047f2d50fe' });
+const INTEGRATED_BRANCH = 'refs/heads/validation/linux-integrated-update';
+const INTEGRATED_TARGET = Object.freeze({ bytes: 63874030,
+  descriptor: 'bbc44a1443f861bda3e927727834f14fb5af487f5290a03616335228335f8290',
+  descriptorSignature: '3199977b6ccd8911ded3691145f9c3a939105c8b4f0aa805679b10e04c64ed9b',
+  installer: '4cbd1488e0568e79ad8a9bc47d445cbbb344abc2c72045cde2dd3cd5e72fb36d',
+  manifest: 'f260bcd30e8ce5d3f20189ddbb1b2ba2c33186be71b83e3937af68f1dcc1ca5c',
+  executable: 'fc18fd79ab9fd1f9456b1f124acaba2390ea3501e1617e3f91dea082d9ce7a56' });
 const FEED_PATH = '/repos/BOBWORKS-XR/CREATOR-HUB/releases?per_page=10';
 const PREFIX = `/BOBWORKS-XR/CREATOR-HUB/releases/download/v${TO}/`;
 const LIMITS = Object.freeze({ metadata: 32768, signature: 4096, installer: 512 * 1024 * 1024,
@@ -131,9 +138,11 @@ function loadContract(config) {
     installer: readBounded(path.join(config.directory, ASSET), LIMITS.installer),
     manifest: readBounded(path.join(config.directory, 'latest.json'), LIMITS.metadata) });
 }
-function reviewedTargetPins(pins, byteLength) {
-  assert.equal(byteLength, REVIEWED_TARGET.bytes, 'Exact reviewed Linux15 DEB size required');
-  for (const key of ['installer', 'executable']) assert.equal(pins[key], REVIEWED_TARGET[key], `Exact reviewed Linux15 ${key} pin required`);
+function reviewedTargetPins(pins, byteLength, profile = 'legacy') {
+  assert.ok(['legacy', 'integrated-39134454264'].includes(profile), 'Unknown reviewed Linux target profile');
+  const expected = profile === 'legacy' ? REVIEWED_TARGET : INTEGRATED_TARGET;
+  assert.equal(byteLength, expected.bytes, 'Exact reviewed Linux15 DEB size required');
+  for (const key of profile === 'legacy' ? ['installer', 'executable'] : PIN_NAMES) assert.equal(pins[key], expected[key], `Exact reviewed Linux15 ${key} pin required`);
 }
 
 function assertRunner(env = process.env, platform = process.platform, arch = process.arch,
@@ -142,7 +151,12 @@ function assertRunner(env = process.env, platform = process.platform, arch = pro
   assert.ok(Number.isInteger(uid) && uid > 0 && euid === uid, 'Non-root native user required');
   for (const [key, value] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
     RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64', GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB',
-    GITHUB_REPOSITORY_ID: '1364807512', GITHUB_REF: BRANCH, CREATOR_LINUX_UPDATE_LAB_FEED: '1' })) assert.equal(env[key], value, key);
+    GITHUB_REPOSITORY_ID: '1364807512', CREATOR_LINUX_UPDATE_LAB_FEED: '1' })) assert.equal(env[key], value, key);
+  assert.ok([BRANCH, INTEGRATED_BRANCH].includes(env.GITHUB_REF), 'Exact reviewed lab branch required');
+  if (env.GITHUB_REF === INTEGRATED_BRANCH) {
+    assert.equal(env.CREATOR_LINUX_INTEGRATED_UPDATE, '1');
+    assert.equal(env.GITHUB_EVENT_NAME, 'workflow_dispatch', 'Integrated native lab is manual capture only');
+  }
   assert.ok(['push', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME), 'Unsupported test event');
   assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/); assert.match(env.GITHUB_RUN_ID || '', /^[1-9][0-9]*$/);
   assert.equal(env.FLATPAK_ID, undefined, 'Native, not Flatpak context required');
@@ -328,7 +342,8 @@ async function startLabProxy(contract, options, env = process.env) {
   assertRunner(env);
   assert.ok(!fs.existsSync('/.flatpak-info'), 'Native context required');
   assert.ok(contracts.has(contract), 'Validated Linux contract required');
-  reviewedTargetPins(contract.pins, contracts.get(contract)[3].bytes.length);
+  reviewedTargetPins(contract.pins, contracts.get(contract)[3].bytes.length,
+    env.GITHUB_REF === INTEGRATED_BRANCH ? 'integrated-39134454264' : 'legacy');
   return startLoopbackTransport(contract, options);
 }
 function inside(root, file) {
@@ -366,7 +381,7 @@ async function main() {
   fs.writeFileSync(reportFile, `${JSON.stringify(proxy.report(), null, 2)}\n`, { flag: 'wx', mode: 0o600 });
 }
 
-module.exports = { FROM, TO, BRANCH, DESCRIPTOR, PLATFORM, ASSET, REVIEWED_TARGET, FEED_PATH, LIMITS, createContract, loadContract, reviewedTargetPins,
+module.exports = { FROM, TO, BRANCH, INTEGRATED_BRANCH, INTEGRATED_TARGET, DESCRIPTOR, PLATFORM, ASSET, REVIEWED_TARGET, FEED_PATH, LIMITS, createContract, loadContract, reviewedTargetPins,
   readBounded, assertRunner, connectHost, headersAllowed, newState, resolveRequest, labReport, startLabProxy,
   testing: Object.freeze({ startLoopbackTransport }) };
 if (require.main === module) main().catch(() => {

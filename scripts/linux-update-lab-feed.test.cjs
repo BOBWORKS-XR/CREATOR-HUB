@@ -77,6 +77,31 @@ test('all lab/native/public/signature/migration/update/restart gates remain expl
   assert.deepEqual(report.requests, []);
 });
 
+test('integrated39134454264 profile binds all five exact pins without changing the old profile', () => {
+  const profile = 'integrated-39134454264', target = lab.INTEGRATED_TARGET;
+  assert.ok(Object.isFrozen(target));
+  assert.equal(target.bytes, 63874030);
+  assert.equal(target.installer, '4cbd1488e0568e79ad8a9bc47d445cbbb344abc2c72045cde2dd3cd5e72fb36d');
+  assert.equal(target.executable, 'fc18fd79ab9fd1f9456b1f124acaba2390ea3501e1617e3f91dea082d9ce7a56');
+  lab.reviewedTargetPins(target, target.bytes, profile);
+  for (const name of ['descriptor', 'descriptorSignature', 'installer', 'manifest', 'executable'])
+    assert.throws(() => lab.reviewedTargetPins({ ...target, [name]: 'c'.repeat(64) }, target.bytes, profile), undefined, name);
+  assert.throws(() => lab.reviewedTargetPins(target, target.bytes + 1, profile));
+  assert.throws(() => lab.reviewedTargetPins(lab.REVIEWED_TARGET, lab.REVIEWED_TARGET.bytes, profile));
+  assert.throws(() => lab.reviewedTargetPins(target, target.bytes));
+  assert.throws(() => lab.reviewedTargetPins(target, target.bytes, 'arbitrary-profile'));
+});
+
+test('new native branch requires explicit integrated opt-in and manual event; no synthetic entry bypass', () => {
+  const env = { ...runner(), GITHUB_REF: lab.INTEGRATED_BRANCH, CREATOR_LINUX_INTEGRATED_UPDATE: '1' };
+  assert.equal(lab.INTEGRATED_BRANCH, 'refs/heads/validation/linux-integrated-update');
+  lab.assertRunner(env, 'linux', 'x64', 21314, 21314);
+  for (const changed of [{ CREATOR_LINUX_INTEGRATED_UPDATE: undefined }, { GITHUB_EVENT_NAME: 'push' },
+    { GITHUB_REF: lab.INTEGRATED_BRANCH + '-other' }, { SSL_CERT_FILE: '/fake' }])
+    assert.throws(() => lab.assertRunner({ ...env, ...changed }, 'linux', 'x64', 21314, 21314));
+  assert.ok(source.includes("env.GITHUB_REF === INTEGRATED_BRANCH ? 'integrated-39134454264' : 'legacy'"));
+});
+
 test('external pins and immutable copied bytes are required for every served candidate input', () => {
   for (const field of ['descriptor', 'descriptorSignature', 'installer', 'manifest']) {
     const data = input(); data[field][0] ^= 1;
