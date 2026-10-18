@@ -391,24 +391,16 @@ def run(binding, root, report):
                 preserved(root / "home", binding["fixtures"], binding["config"], "read")
             else:
                 require(d.read(prefix + ' [data-field="platform"]') == "linux", "Wrong Setup platform")
-            encoded = d.call("GET", "/screenshot", limit=8 * 1024 * 1024)
-            png = base64.b64decode(encoded, validate=True)
-            width, height = png_dimensions(png)
-            import gi
-            gi.require_version("GdkPixbuf", "2.0")
-            from gi.repository import GdkPixbuf
-            loader = GdkPixbuf.PixbufLoader.new_with_type("png"); loader.write(png); loader.close()
-            image = loader.get_pixbuf()
-            metrics = native.pixel_metrics(image.get_pixels(), width, height, image.get_rowstride(), image.get_n_channels())
-            with (root / (feature + ".png")).open("xb") as stream:
-                stream.write(png)
+            # WebKit's screenshot command can stall after a successful page switch.
+            # Capture the already kernel-bound native window, not a second renderer.
+            report["phase"] = "capture-" + feature
             physical = root / ("physical-" + feature)
             physical.mkdir(mode=0o700)
             d.guard()
             surface = native.bitmap(request, physical, helper, x11)
             d.guard()
-            report[feature] = {"status": "Ready", "screenshot": metrics, "sha256": hashlib.sha256(png).hexdigest(),
-                               "nativeSurface": surface}
+            require(surface.get("nonblank") is True, "Native feature surface is blank")
+            report[feature] = {"status": "Ready", "nativeSurface": surface}
         preserved(root / "home", binding["fixtures"], binding["config"], "read")
         pinned(HUB, hub, 0, 0o755)
         report["pagesObserved"] = True

@@ -229,7 +229,9 @@ class PagesTests(unittest.TestCase):
         self.assertIn('rootExitCode": None', source)
         self.assertLess(source.index('x11.close_window('), source.index('d.call("DELETE", "")'))
         self.assertIn('if report["normalCloseObserved"] and d.session:', source)
-        self.assertIn('native.pixel_metrics(', source)
+        self.assertIn('native.bitmap(request, physical, helper, x11)', source)
+        self.assertIn('surface.get("nonblank") is True', source)
+        self.assertNotIn('d.call("GET", "/screenshot"', source)
         self.assertTrue(all(v is False for v in M.FALSE_GATES.values()))
 
 
