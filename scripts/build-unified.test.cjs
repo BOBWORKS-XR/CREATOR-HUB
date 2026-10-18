@@ -79,6 +79,35 @@ test('internal MCP compile snapshots use the already verified staged payload, ne
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('Tauri dependency resources reuse exact signed bytes and the established native-node alias without overwriting', () => {
+  const { stageIntegratedMcpResources } = require('./build-unified.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-integrated-tauri-'));
+  try {
+    const output = path.join(dir, 'staged');
+    const names = ['creator-works-mcp.mjs', 'runtime/node', 'runtime/LICENSE', 'runtime/VERSION'];
+    const manifest = { platform: 'linux', arch: 'x86_64', modules: { mcp: { files: {} } } };
+    for (const name of names) {
+      const source = path.join(output, 'modules', 'mcp', 'server', name);
+      fs.mkdirSync(path.dirname(source), { recursive: true }); fs.writeFileSync(source, name);
+      manifest.modules.mcp.files[`mcp/server/${name}`] = crypto.createHash('sha256').update(name).digest('hex');
+    }
+    const before = JSON.stringify(manifest);
+    stageIntegratedMcpResources(dir, output, manifest);
+    stageIntegratedMcpResources(dir, output, manifest);
+    assert.equal(JSON.stringify(manifest), before);
+    for (const name of names) assert.equal(fs.readFileSync(path.join(dir, 'modules/mcp/release', name), 'utf8'), name);
+    assert.equal(fs.readFileSync(path.join(dir, 'modules/mcp/release/runtime/node.exe'), 'utf8'), 'runtime/node');
+    assert.equal(manifest.modules.mcp.files['mcp/server/runtime/node.exe'], undefined);
+    const destination = path.join(dir, 'modules/mcp/release/runtime/VERSION');
+    fs.writeFileSync(destination, 'unrelated');
+    assert.throws(() => stageIntegratedMcpResources(dir, output, manifest), /nothing was overwritten/);
+    assert.equal(fs.readFileSync(destination, 'utf8'), 'unrelated');
+    fs.writeFileSync(path.join(output, 'modules/mcp/server/runtime/node'), 'changed');
+    assert.throws(() => stageIntegratedMcpResources(dir, output, manifest), /input changed/);
+    assert.throws(() => stageIntegratedMcpResources(dir, output, { ...manifest, platform: 'windows' }), /Linux x86_64/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('Linux staged data and executables get canonical archive modes without changing other platform policy', () => {
   const writes = [];
   const chmod = (file, mode) => writes.push({ file, mode });

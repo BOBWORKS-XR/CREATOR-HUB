@@ -34,6 +34,33 @@ function integrationEnvironment(environment, output, enabled) {
   }
   return { ...environment, [variable]: payload };
 }
+function stageIntegratedMcpResources(root, output, manifest) {
+  if (manifest.platform !== 'linux' || manifest.arch !== 'x86_64') throw Error('Integrated resource staging requires the verified Linux x86_64 payload.');
+  const release = path.join(root, 'modules', 'mcp', 'release');
+  for (const directory of [release, path.join(release, 'runtime')]) {
+    let stat;
+    try { stat = fs.lstatSync(directory); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (stat && (stat.isSymbolicLink() || !stat.isDirectory() || fs.realpathSync(directory) !== directory)) throw Error('Redirected generated MCP resources refused.');
+  }
+  fs.mkdirSync(path.join(release, 'runtime'), { recursive: true });
+  const files = ['creator-works-mcp.mjs', 'runtime/node', 'runtime/LICENSE', 'runtime/VERSION'];
+  for (const name of files) {
+    const source = path.join(output, 'modules', 'mcp', 'server', name);
+    const expected = manifest.modules.mcp.files[`mcp/server/${name}`];
+    if (!/^[a-f0-9]{64}$/.test(expected) || !fs.lstatSync(source).isFile()
+      || fs.lstatSync(source).isSymbolicLink() || sha256(source) !== expected) throw Error('Verified MCP resource input changed.');
+    // The existing standalone Tauri config references both names. Its native
+    // staging script also creates this alias; neither enters Hub's archive map.
+    for (const target of [name, ...(name === 'runtime/node' ? ['runtime/node.exe'] : [])]) {
+      const destination = path.join(release, target);
+      if (!fs.existsSync(destination)) fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+      const stat = fs.lstatSync(destination);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || sha256(destination) !== expected) throw Error('Existing generated MCP resource differs; nothing was overwritten.');
+      stageFileMode(destination, 'linux', name === 'runtime/node');
+    }
+    if (sha256(source) !== expected) throw Error('Verified MCP resource changed during staging.');
+  }
+}
 function stageIntegrationService(output, overlay) {
   const activation = require('./flatpak-native-activation.cjs');
   const config = JSON.parse(fs.readFileSync(overlay, 'utf8'));
@@ -267,6 +294,7 @@ function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCan
     { root, env: environment, execute });
   const manifest = result.manifest;
   const preWrapper = structuredClone(manifest);
+  if (integratedFeatures) stageIntegratedMcpResources(root, output, manifest);
   const unix = require('./unix-package-payload.cjs');
   const plan = unix.nativePlan(platform, arch, { installer, managed: true, experimentalUnix: true, experimentalWritable: true });
   const env = { ...integrationEnvironment(unix.packageEnvironment(environment, platform, 'writable'), output, integratedFeatures),
@@ -346,7 +374,7 @@ function parseBuildOptions(args) {
   }
   return options;
 }
-module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, integrationArguments, integrationEnvironment, candidateProfile, stageIntegrationService, build, parseBuildOptions, writeAssemblyManifests };
+module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, integrationArguments, integrationEnvironment, stageIntegratedMcpResources, candidateProfile, stageIntegrationService, build, parseBuildOptions, writeAssemblyManifests };
 if (require.main === module) {
   try {
     if (!process.argv[2]) throw Error('Provide one build name.');
