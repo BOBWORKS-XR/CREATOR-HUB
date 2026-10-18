@@ -135,7 +135,7 @@ mod tests {
     }
     #[test]
     fn async_mutations_move_the_guard_into_the_worker() {
-        let source = include_str!("main.rs");
+        let source = include_str!("lib.rs");
         for command in [
             "create_project",
             "restart_hub",

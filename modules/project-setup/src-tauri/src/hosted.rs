@@ -41,6 +41,10 @@ impl Output {
 }
 
 pub fn emit(app: &tauri::AppHandle, name: &str, payload: impl serde::Serialize + Clone) {
+    if app.try_state::<crate::service::DirectEvents>().is_some() {
+        crate::service::emit(app, name, payload);
+        return;
+    }
     if let Some(output) = app.try_state::<Output>() {
         let _ = output.send(json!({ "type": "event", "name": name, "payload": payload }));
     } else {
@@ -124,7 +128,11 @@ fn value(result: impl serde::Serialize) -> Result<Value, String> {
     serde_json::to_value(result).map_err(|e| e.to_string())
 }
 
-fn dispatch(app: &tauri::AppHandle, command: &str, args: Value) -> Result<Value, String> {
+pub(crate) fn dispatch(
+    app: &tauri::AppHandle,
+    command: &str,
+    args: Value,
+) -> Result<Value, String> {
     // Reuse the exact standalone command functions, including their validation and guards.
     match command {
         "get_recipe" => {
