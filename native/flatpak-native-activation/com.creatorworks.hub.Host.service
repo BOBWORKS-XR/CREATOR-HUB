@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=com.creatorworks.hub.Host
+Exec=/usr/bin/creator-hub --flatpak-activate

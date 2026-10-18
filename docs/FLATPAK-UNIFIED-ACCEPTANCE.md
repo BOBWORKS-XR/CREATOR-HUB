@@ -1,5 +1,16 @@
 # Unified Linux And Flatpak Acceptance
 
+## Current Native-Window Direction
+
+The later 18 October decision supersedes the sandboxed-GUI/native-Core direction
+below. Flatpak is to activate the integrated native Hub outside the sandbox, with
+explicit disclosure and one visible Hub window. The isolated implementation and
+parent-owned Root/native-DEB requirements are recorded in
+[Native Hub Activation](FLATPAK-NATIVE-ACTIVATION.md). Its initial profile is DEB
+x86_64 only, not generic SteamOS/RPM/AppImage support. It is not installed or
+release-accepted. Historical transport/RPC/echo evidence below remains scoped
+evidence; no further GUI relay is required for this direction.
+
 ## 18 October Host Helper Decision
 
 The user approved a one-time native host-helper installation, with one visible
