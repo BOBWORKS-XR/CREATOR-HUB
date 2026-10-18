@@ -172,6 +172,14 @@ test('source order freezes and installs echo before compiling ONLY host with ind
   assert.match(source, /copyFileSync\(originalEcho\.path, frozen, fs\.constants\.COPYFILE_EXCL\)/);
 });
 
+test('39105426143 inventory uses flatpak-list active, not remote-list commit', () => {
+  // Flatpak 1.18.4: list --columns=ref,commit,origin exits 1, Unknown column: commit.
+  // https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-list
+  assert.match(source, /\['list', '--system', '--runtime', '--columns=ref,active,origin'\]/);
+  assert.doesNotMatch(source, /--columns=ref,commit,origin/);
+  assert.match(source, /commit\(info\(true, '--show-commit', RUNTIME\)\)/);
+});
+
 test('no product build, host reader, settings operations, deletion, override or publishing path exists', () => {
   assert.doesNotMatch(source, /flatpak-spawn|flatpak-host-reader|--filesystem|--talk-name|--socket=x11|--share=network|--device=all/);
   assert.doesNotMatch(source, /rmSync|unlinkSync|rmdirSync|killall|pkill|\.kill\(|shell: true|--all-targets|--bins|npm run|tauri build|publish-hub/);

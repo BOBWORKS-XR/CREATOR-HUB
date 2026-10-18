@@ -233,7 +233,7 @@ function run() {
     const runtimeFiles = ordinary(`${runtimeLocation}/files`, uid, { directory: true, system: true });
     save('runtime-provenance.json', { ref: RUNTIME, commit: runtimeCommit, location: runtimeLocation,
       origin: 'flathub', signatureAcceptance: false, metadata: info(true, '--show-metadata', RUNTIME),
-      installedRuntimeAndExtensionInventory: fp(['list', '--system', '--runtime', '--columns=ref,commit,origin']),
+      installedRuntimeAndExtensionInventory: fp(['list', '--system', '--runtime', '--columns=ref,active,origin']),
       files: { dev: runtimeFiles.dev, ino: runtimeFiles.ino, uid: runtimeFiles.uid, mode: runtimeFiles.mode & 0o777 } });
 
     const cargo = env.CREATOR_FLATPAK_FIXTURE_CARGO;
