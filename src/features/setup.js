@@ -1,5 +1,11 @@
 import { controller, node, lines, text } from './common.js';
 
+const licenceUrls = {
+  unity: 'https://unity.com/legal/editor-terms-of-service/software',
+  android: 'https://developer.android.com/studio/terms',
+  openjdk: 'https://openjdk.org/legal/gplv2+ce.html',
+};
+
 export function mount(root, api) {
   root.innerHTML = `
     <div class="feature-heading"><h2>Project Setup</h2><span data-field="status" role="status">Checking availability</span></div>
@@ -17,6 +23,7 @@ export function mount(root, api) {
             <div class="feature-input-row"><label>Project folder<input data-field="parent" type="text" autocomplete="off" spellcheck="false"></label><button data-field="browse" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span> Browse</button></div>
             <p data-field="recipe" class="feature-note">Requirements not checked</p>
             <p class="feature-note">Installation needs your approval. Unity sign-in, licensing and administrator prompts still need you.</p>
+            <div class="feature-actions" aria-label="Installation licence terms"><span class="feature-note">Licence terms:</span><button data-field="licence-unity" class="text-button" type="button">Unity <span class="icon icon-external" aria-hidden="true"></span></button><button data-field="licence-android" class="text-button" type="button">Android SDK/NDK <span class="icon icon-external" aria-hidden="true"></span></button><button data-field="licence-openjdk" class="text-button" type="button">OpenJDK <span class="icon icon-external" aria-hidden="true"></span></button></div>
             <div class="feature-actions"><button data-field="create" class="primary-button" type="button" disabled>Set up and create project</button><button data-field="open" class="text-button" type="button" hidden>Open project in Unity</button><button data-field="another" class="text-button" type="button" hidden>Create another project</button></div>
             <div data-field="created" class="feature-output" role="status"></div>
             <p data-field="hub-result" class="feature-note"></p>
@@ -107,6 +114,7 @@ export function mount(root, api) {
   page.on($('refresh'), 'click', () => run(async () => { renderEnvironment(await page.call('probe_environment')); }, 'Checking requirements'));
   page.on($('retry'), 'click', () => { if (!page.busy()) void api.retry('setup'); });
   page.on($('hub'), 'click', () => run(() => page.call('launch_hub'), 'Opening Unity Hub'));
+  for (const [name, url] of Object.entries(licenceUrls)) page.on($(`licence-${name}`), 'click', () => run(() => page.call('open_official_url', { url }), 'Opening licence terms'));
   page.on($('create'), 'click', () => run(async () => {
     if (created || !environment || !$('name').value.trim() || !$('parent').value.trim()) throw new Error('Enter a project name and folder.');
     operation = 'create'; stage = 0; $('activity').hidden = false; $('created').replaceChildren();

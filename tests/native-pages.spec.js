@@ -59,6 +59,13 @@ async function open(page, options = {}) {
           case 'probe_environment': return { platform: options.linux ? 'linux' : 'windows', ready: true, hubInstalled: true, hubVersion: '3.21.1', hubAutoRegistration: true,
             recipe, editors: [{ exactRecipe: true, androidPlayer: true, androidSdk: true, androidNdk: true, openJdk: true, windowsStandalone: true, urpTemplate: 'urp.tgz' }], blockers: [], suggestedProjectParent: '/projects' };
           case 'pick_parent_folder': return '/projects/chosen';
+          case 'open_official_url':
+            if (feature !== 'setup' || Object.keys(fields).join() !== 'url' || ![
+              'https://unity.com/legal/editor-terms-of-service/software',
+              'https://developer.android.com/studio/terms',
+              'https://openjdk.org/legal/gplv2+ce.html',
+            ].includes(fields.url)) throw new Error('Unexpected Setup licence URL request');
+            return null;
           case 'create_project': return { success: true, projectPath: '/projects/Space', message: 'Validated project', hub: { registered: true, refreshPending: true, message: 'Registered in Unity Hub' } };
           case 'inspect_project': return { projectPath: fields.path, fingerprint: 'reviewed-fingerprint', canRepair: true, canValidate: true,
             findings: [{ title: 'Visual Scripting', detail: options.hostile ? '<img src=x onerror=alert(1)>' : 'Initialization needs repair', status: 'repair' }], proposedChanges: ['Initialize node database'] };
@@ -298,6 +305,59 @@ test('Setup creates once with exact DTO, consumes only scoped progress and compl
   await expect(field(page, 'setup', 'created')).toContainText('Validated project');
   await expect(field(page, 'setup', 'open')).toBeVisible();
   await expect(field(page, 'setup', 'restart')).toBeVisible();
+});
+
+test('Setup licence buttons use only exact pinned service URLs and preserve form/settings state', async ({ page }) => {
+  await open(page); await show(page, 'setup');
+  await field(page, 'setup', 'name').fill('Retain project name'); await field(page, 'setup', 'parent').fill('/keep/folder');
+  const licences = [
+    ['unity', 'https://unity.com/legal/editor-terms-of-service/software'],
+    ['android', 'https://developer.android.com/studio/terms'],
+    ['openjdk', 'https://openjdk.org/legal/gplv2+ce.html'],
+  ];
+  for (const [key] of licences) {
+    await field(page, 'setup', `licence-${key}`).evaluate(button => { button.dataset.url = 'https://untrusted.invalid/'; });
+    await field(page, 'setup', `licence-${key}`).click();
+    await expect(page.locator('#feature-setup')).toHaveAttribute('aria-busy', 'false');
+  }
+  expect((await commands(page, 'open_official_url')).map(call => call.args)).toEqual(licences.map(([, url]) => ({ feature: 'setup', command: 'open_official_url', args: { url } })));
+  expect(await page.evaluate(() => calls.filter(call => ['open_resource', 'plugin:shell|open', 'hosted_app_call', 'start_hosted_app'].includes(call.command)))).toEqual([]);
+  expect(await commands(page, 'create_project')).toEqual([]);
+  expect(await commands(page, 'save_config')).toEqual([]);
+  await expect(field(page, 'setup', 'name')).toHaveValue('Retain project name');
+  await expect(field(page, 'setup', 'parent')).toHaveValue('/keep/folder');
+  await expect(field(page, 'setup', 'error')).toBeHidden();
+});
+
+test('Setup licence opener failure is visible and retries only when clicked again', async ({ page }) => {
+  await open(page, { fail: 'open_official_url' }); await show(page, 'setup');
+  await field(page, 'setup', 'licence-android').click();
+  await expect(field(page, 'setup', 'error')).toContainText('open_official_url');
+  await expect(field(page, 'setup', 'create')).toBeEnabled();
+  expect((await commands(page, 'open_official_url')).length).toBe(1);
+  await show(page, 'mcp'); await show(page, 'setup');
+  expect((await commands(page, 'open_official_url')).length).toBe(1);
+  await field(page, 'setup', 'licence-android').click();
+  await expect(field(page, 'setup', 'error')).toBeHidden();
+  expect((await commands(page, 'open_official_url')).map(call => call.args.args)).toEqual(Array(2).fill({ url: 'https://developer.android.com/studio/terms' }));
+  expect(await commands(page, 'create_project')).toEqual([]);
+});
+
+test('Setup licence opening never bypasses startup gating or replays a second busy click', async ({ page }) => {
+  await open(page); await show(page, 'setup', false);
+  await expect(field(page, 'setup', 'licence-unity')).toBeDisabled();
+  await field(page, 'setup', 'licence-unity').dispatchEvent('click');
+  expect(await commands(page, 'open_official_url')).toEqual([]);
+  await show(page, 'setup');
+  await page.evaluate(() => { window.hold = 'open_official_url'; });
+  await field(page, 'setup', 'licence-unity').click(); await page.waitForFunction(() => pending.open_official_url);
+  await expect(field(page, 'setup', 'licence-openjdk')).toBeDisabled();
+  await field(page, 'setup', 'licence-unity').dispatchEvent('click');
+  await field(page, 'setup', 'licence-openjdk').dispatchEvent('click');
+  expect((await commands(page, 'open_official_url')).length).toBe(1);
+  await page.evaluate(() => { window.hold = null; pending.open_official_url(); });
+  await expect(field(page, 'setup', 'licence-openjdk')).toBeEnabled();
+  expect((await commands(page, 'open_official_url')).length).toBe(1);
 });
 
 test('inspection is read-only; repairs require approval and reuse exact reviewed fingerprint; changed path invalidates', async ({ page }) => {
