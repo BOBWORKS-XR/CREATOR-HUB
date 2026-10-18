@@ -1,4 +1,5 @@
 """Pure/temp contracts only. No application, installer, desktop or user data."""
+import ast
 import contextlib
 import copy
 import hashlib
@@ -1608,6 +1609,503 @@ class NativeReceiptTests(unittest.TestCase):
         helper.parse_start = lambda *_args, **_kwargs: "999"
         with self.assertRaisesRegex(RuntimeError, "reused"):
             p.backend_gone({"pid": 42, "startTime": "100"}, helper)
+
+
+class SourceGuidePathTests(unittest.TestCase):
+    @staticmethod
+    def fresh_node(node):
+        fresh = {"cleared": False}
+        def clear():
+            fresh["cleared"] = True
+        def consume():
+            if not fresh["cleared"]:
+                raise AssertionError("Child getter used without an immediately preceding cache clear")
+            fresh["cleared"] = False
+        def count():
+            consume()
+            return len(node.children)
+        def child(index):
+            consume()
+            return node.children[index]
+        node.clear_cache = mock.Mock(side_effect=clear)
+        node.get_child_count = mock.Mock(side_effect=count)
+        node.get_child_at_index = mock.Mock(side_effect=child)
+
+    @contextlib.contextmanager
+    def fixture(self):
+        f, owner, _ = FixedControlHitTestTests().fixture(trap_traversal=False)
+        FixedControlHitTestTests.decorate(f)
+        f.atspi.StateType.MODAL = 9
+        f.web.children.clear()
+        f.iframe = fixtures.AxNode(43, 39, "Creator Works MCP", parent=f.web, states=(1, 2, 3, 8))
+        f.scroll = fixtures.AxNode(43, 49, parent=f.iframe)
+        f.document = fixtures.AxNode(43, 94, parent=f.scroll)
+        f.dialog = fixtures.AxNode(43, 16, "Connect your AI to Unity", parent=f.document, states=(1, 2, 3, 8, 9))
+        f.block = fixtures.AxNode(43, 85, parent=f.dialog)
+        f.heading.parent, f.heading.role = f.dialog, 82
+        f.button.parent = f.dialog
+        f.dialog.children.extend([f.heading, f.button])
+        f.menu = fixtures.AxNode(43, 33, parent=f.document)
+        f.nodes = [f.window, f.container, f.web, f.iframe, f.scroll, f.document, f.dialog, f.block, f.heading, f.button, f.menu]
+        f.attributes = {}
+        for node in f.nodes:
+            f.attributes[id(node)] = {}
+            node.get_attributes = mock.Mock(side_effect=lambda node=node: dict(f.attributes[id(node)]))
+            self.fresh_node(node)
+        f.attributes[id(f.document)] = {"toolkit": "WebKitGTK"}
+        for name, source_id in (("iframe", "mcp-host-frame"), ("dialog", "connection-guide-dialog"),
+                                ("heading", "connection-guide-title"), ("button", "connection-guide-skip")):
+            node = getattr(f, name)
+            _role, tag, computed, _name = p.GUIDE_IDS[source_id]
+            f.attributes[id(node)] = {"id": source_id, "tag": tag, "computed-role": computed, "toolkit": "WebKitGTK"}
+        for node, rect in ((f.iframe, f.native_rect), (f.dialog, (190, 300, 700, 300)),
+                           (f.heading, (206, 330, 373, 19)), (f.button, (206, 550, 157, 37))):
+            node.component = types.SimpleNamespace(get_extents=mock.Mock(return_value=types.SimpleNamespace(
+                x=rect[0], y=rect[1], width=rect[2], height=rect[3])))
+            node.get_component_iface = mock.Mock(return_value=node.component)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(p.B, "SELECTED_CANDIDATE", p.B.CURRENT_CANDIDATE))
+            f.provenance = {"mappedFiles": {"fixture": "pure-contract-not-native-runtime-proof"}, "packages": {}}
+            f.runtime = stack.enter_context(mock.patch.object(p, "guide_runtime_provenance", return_value=f.provenance))
+            f.runtime_state = stack.enter_context(mock.patch.object(p, "guide_runtime_state", return_value=f.provenance["mappedFiles"]))
+            f.save = stack.enter_context(mock.patch.object(p.B, "save_json"))
+            stack.enter_context(mock.patch.object(p.B, "visible_rectangle", side_effect=lambda *_: f.native_rect))
+            f.owner = owner
+            yield f
+
+    def run_guide(self, f, action="save-guide"):
+        return p.source_guide(Path("/fixture"), action, f.owner, f.atspi)
+
+    def test_two_fresh_complete_walks_bind_exact_iframe_modal_and_fixed_one_press(self):
+        for action in ("mcp-ready", "save-guide"):
+            with self.subTest(action=action), self.fixture() as f:
+                result = self.run_guide(f, action)
+                self.assertTrue(result["freshWalksMatched"])
+                self.assertEqual(len(result["walks"]), 2)
+                self.assertEqual(result["walks"][0]["graphSha256"], result["walks"][1]["graphSha256"])
+                self.assertEqual(result["walks"][0]["sourceCounts"], {key: 1 for key in p.GUIDE_IDS})
+                self.assertEqual(result["actionCount"], int(action == "save-guide"))
+                self.assertEqual(f.button.action.do_action.call_count, int(action == "save-guide"))
+                self.assertFalse(result["nativeAcceptance"])
+                self.assertFalse(result["authorization"])
+                self.assertEqual(result["readOnly"], action == "mcp-ready")
+                self.assertLessEqual(len(json.dumps(result, indent=2).encode()), 32768)
+                self.assertEqual(f.save.call_args.args[0].name, action + "-source-guide.json")
+                for node in f.nodes:
+                    self.assertEqual(node.get_child_count.call_count, 4)
+                    self.assertEqual(node.get_child_at_index.call_count, len(node.children) * 2)
+                    self.assertGreaterEqual(node.clear_cache.call_count, 4)
+
+    def test_uncollected_semantic_parent_is_evidence_only_and_never_followed(self):
+        with self.fixture() as f:
+            foreign = fixtures.AxNode(99, 23, "private other window")
+            for getter in ("get_process_id", "get_role", "get_name", "get_parent", "get_child_count"):
+                setattr(foreign, getter, mock.Mock(side_effect=AssertionError("Uncollected Parent followed")))
+            f.scroll.parent = f.menu.parent = foreign
+            result = self.run_guide(f)
+            self.assertEqual(result["actionCount"], 1)
+            self.assertEqual(len(result["walks"][0]["parentMismatches"]), 2)
+            self.assertNotIn("private", json.dumps(result))
+            for getter in ("get_process_id", "get_role", "get_name", "get_parent", "get_child_count"):
+                getattr(foreign, getter).assert_not_called()
+            f.button.action.do_action.reset_mock()
+            foreign.get_process_id.side_effect = None
+            foreign.get_process_id.return_value = 99
+            with self.assertRaises(RuntimeError):
+                p.press("save-guide", f.owner, f.atspi)
+            f.button.action.do_action.assert_not_called()
+
+    def test_two_roots_shared_renderer_wrong_root_or_wrong_iframe_never_authorizes(self):
+        for change in ("nested-root", "renderer-application", "renderer-window", "wrong-root", "other-iframe",
+                       "foreign-forward-peer", "source-root-peer", "outside-modal"):
+            with self.subTest(change=change), self.fixture() as f:
+                if change == "nested-root":
+                    fixtures.AxNode(42, 23, p.B.TITLE, parent=f.web)
+                elif change in ("renderer-application", "renderer-window"):
+                    fixtures.AxNode(43, 74 if change == "renderer-application" else 69, parent=f.web)
+                elif change == "wrong-root":
+                    f.owner.references.window = [":1.42", "/org/a11y/atspi/accessible/other_root"]
+                elif change == "other-iframe":
+                    f.attributes[id(f.iframe)]["id"] = "setup-host-frame"
+                elif change == "foreign-forward-peer":
+                    foreign = fixtures.AxNode(99, 43, parent=f.dialog)
+                    foreign.get_attributes = mock.Mock(side_effect=AssertionError("Foreign node queried"))
+                elif change == "source-root-peer":
+                    f.button.pid, f.button.app.bus_name = 42, ":1.42"
+                else:
+                    f.dialog.children.remove(f.button)
+                    f.web.children.append(f.button)
+                with self.assertRaises(RuntimeError):
+                    self.run_guide(f)
+                f.button.action.do_action.assert_not_called()
+                if change == "foreign-forward-peer":
+                    foreign.get_attributes.assert_not_called()
+
+    def test_second_root_selection_with_shared_renderer_and_same_title_refuses(self):
+        with self.fixture() as f:
+            other = fixtures.AxNode(42, 23, p.B.TITLE)
+            other.children.append(f.web)
+            self.fresh_node(other)
+            other.get_attributes = mock.Mock(return_value={})
+            f.owner.helper.select_window = mock.Mock(side_effect=[f.window, other])
+            with self.assertRaisesRegex(RuntimeError, "Source guide frame differs"):
+                self.run_guide(f)
+            other.get_child_count.assert_not_called()
+            f.button.action.do_action.assert_not_called()
+
+    def test_collected_semantic_parent_difference_is_recorded_without_changing_forward_authority(self):
+        with self.fixture() as f:
+            f.scroll.parent = f.web
+            result = self.run_guide(f, "mcp-ready")
+            for walk in result["walks"]:
+                self.assertEqual(walk["parentMismatches"], [{
+                    "node": f.owner.references.identity(f.scroll, f.owner), "parentCollected": True,
+                    "forwardParent": f.owner.references.identity(f.iframe, f.owner),
+                    "collectedParent": f.owner.references.identity(f.web, f.owner)}])
+            f.button.action.do_action.assert_not_called()
+
+    def test_swapped_duplicate_missing_source_ids_roles_names_and_not_modal_refuse(self):
+        for change in ("swapped", "duplicate", "missing", "tag", "role", "computed-role", "toolkit", "name", "modal", "hidden", "disabled"):
+            with self.subTest(change=change), self.fixture() as f:
+                attrs = f.attributes[id(f.button)]
+                if change == "swapped":
+                    attrs["id"], f.attributes[id(f.heading)]["id"] = f.attributes[id(f.heading)]["id"], attrs["id"]
+                elif change == "duplicate":
+                    f.attributes[id(f.block)] = dict(attrs)
+                elif change == "missing":
+                    del attrs["id"]
+                elif change == "role":
+                    f.button.role = 16
+                elif change == "name":
+                    f.button.name = "private wrong name"
+                elif change == "modal":
+                    f.dialog.states.remove(9)
+                elif change == "hidden":
+                    f.heading.states.remove(8)
+                elif change == "disabled":
+                    f.button.states.remove(2)
+                else:
+                    attrs[change] = "private wrong source attribute"
+                with self.assertRaises(RuntimeError):
+                    self.run_guide(f)
+                f.button.action.do_action.assert_not_called()
+                self.assertNotIn("private", json.dumps(f.save.call_args.args[1]))
+
+    def test_stale_edges_or_action_interface_mutation_refuse_even_with_same_button_wire_id(self):
+        for change in ("edges", "id-during-interface", "image", "bus-owner", "geometry", "runtime"):
+            with self.subTest(change=change), self.fixture() as f:
+                original = p.fresh_guide_walk
+                calls = []
+                def walk(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    calls.append(result)
+                    if len(calls) == 1:
+                        if change == "edges":
+                            f.dialog.children.remove(f.button)
+                            f.block.children.append(f.button)
+                        elif change == "image":
+                            f.records[43]["kernelImageSha256"] = "f" * 64
+                        elif change == "bus-owner":
+                            f.bus_records[":1.43"]["owner"] = ":1.99"
+                        elif change == "runtime":
+                            f.runtime_state.return_value = {"fixture": "changed"}
+                    return result
+                if change == "id-during-interface":
+                    def verb(_):
+                        f.attributes[id(f.button)]["id"] = "other-button"
+                        return "press"
+                    f.button.action.get_action_name = verb
+                elif change == "geometry":
+                    def moved(_):
+                        f.button.component.get_extents.return_value.x += 1
+                        return "press"
+                    f.button.action.get_action_name = moved
+                with mock.patch.object(p, "fresh_guide_walk", side_effect=walk), self.assertRaises(RuntimeError):
+                    self.run_guide(f)
+                f.button.action.do_action.assert_not_called()
+
+    def test_cycle_child_count_drift_and_runtime_refusal_never_press(self):
+        for change in ("cycle", "count", "runtime"):
+            with self.subTest(change=change), self.fixture() as f:
+                if change == "cycle":
+                    f.block.children.append(f.iframe)
+                elif change == "count":
+                    f.block.get_child_count.side_effect = [0, 1]
+                else:
+                    f.runtime.side_effect = RuntimeError("private runtime provenance refused")
+                with self.assertRaises(RuntimeError):
+                    self.run_guide(f)
+                f.button.action.do_action.assert_not_called()
+                if change == "runtime":
+                    f.window.get_child_count.assert_not_called()
+
+    def test_uncertain_single_press_error_preserved_without_retry_or_retention_masking(self):
+        with self.fixture() as f, mock.patch("sys.stderr", new_callable=io.StringIO):
+            f.button.action.do_action.side_effect = OSError("private post-effect error")
+            f.save.side_effect = OSError("private retention error")
+            with self.assertRaises(f.owner.helper.ActionError):
+                self.run_guide(f)
+            f.button.action.do_action.assert_called_once_with(0)
+
+    def test_other_actions_and_candidates_cannot_enter_source_guide_path(self):
+        with self.fixture() as f:
+            for action in ("requirements", "view-mcp", "retry"):
+                with self.assertRaises(RuntimeError):
+                    self.run_guide(f, action)
+            with mock.patch.object(p.B, "SELECTED_CANDIDATE", p.B.GTK3_CANDIDATE), self.assertRaises(RuntimeError):
+                self.run_guide(f)
+            f.runtime.assert_not_called()
+            f.button.action.do_action.assert_not_called()
+
+    def test_runtime_map_binding_checks_exact_inode_device_and_executable_permissions(self):
+        name = "/usr/lib/x86_64-linux-gnu/libgtk-3.so.0.2400.33"
+        good = "1000-2000 r-xp 00001000 08:01 123 " + name + "\n"
+        self.assertEqual(len(p.guide_mapped_file(good, name, (8, 1), 123)), 1)
+        for bad in (good.replace("08:01", "08:02"), good.replace("123 ", "124 "),
+                    good.replace("r-xp", "rwxp"), good.replace("r-xp", "r-xs"),
+                    good.replace(name, name + " (deleted)"), "private" * 200000):
+            with self.assertRaises(RuntimeError):
+                p.guide_mapped_file(bad, name, (8, 1), 123)
+
+    def test_runtime_package_versions_and_owners_are_observed_not_guessed_or_overridden(self):
+        owner = object()
+        snapshot = {package: {"path": link + ".actual", "file": {"sha256": "a" * 64}}
+                    for package, link, _process in p.GUIDE_LIBRARIES}
+        versions = {"libgtk-3-0": "3.24.33-1ubuntu2.2", "libatk-bridge2.0-0": "2.38.0-3", "libatspi2.0-0": "2.44.0-3"}
+        def tool(_root, _label, command, **_kwargs):
+            if command[1] == "-W":
+                package = command[-1].removesuffix(":amd64")
+                return 0, (package + "\t" + versions[package] + "\tamd64\tinstalled\n").encode()
+            package = next(pkg for pkg in snapshot if snapshot[pkg]["path"] == command[-1])
+            return 0, (package + ":amd64: " + command[-1] + "\n").encode()
+        with mock.patch.object(p, "guide_runtime_state", return_value=snapshot), mock.patch.object(p.B, "run_tool", side_effect=tool):
+            result = p.guide_runtime_provenance(Path("/fixture"), "mcp-ready", owner)
+        self.assertEqual(result["packages"], versions)
+        for change in ("version", "owner", "mapped-file"):
+            with self.subTest(change=change):
+                if change == "version":
+                    versions["libgtk-3-0"] = "3.24.34-unknown"
+                def bad_tool(*args, **kwargs):
+                    status, output = tool(*args, **kwargs)
+                    return status, output.replace(b":amd64: ", b"-foreign:amd64: ") if change == "owner" else output
+                states = [snapshot, {"changed": True}] if change == "mapped-file" else None
+                with mock.patch.object(p, "guide_runtime_state", return_value=snapshot, side_effect=states), \
+                        mock.patch.object(p.B, "run_tool", side_effect=bad_tool), self.assertRaises(RuntimeError):
+                    p.guide_runtime_provenance(Path("/fixture"), "save-guide", owner)
+                versions["libgtk-3-0"] = "3.24.33-1ubuntu2.2"
+
+
+class FiniteSourceSequenceTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def fixture(self, phase):
+        with SourceGuidePathTests().fixture() as f:
+            def add(role, name, parent, source_id=None, rect=(200, 240, 300, 30), contract=None):
+                node = fixtures.AxNode(43, role, name, parent=parent, states=(1, 2, 3, 8), verb="press" if role == 43 else None)
+                SourceGuidePathTests.fresh_node(node)
+                attributes = {"toolkit": "WebKitGTK"}
+                if source_id is not None:
+                    _r, tag, computed, _n = contract or {**p.GUIDE_IDS, **p.MCP_SAVED_IDS, **p.ROOT_SEQUENCE_IDS, **p.SETUP_SEQUENCE_IDS}[source_id]
+                    attributes.update(id=source_id, tag=tag, **{"computed-role": computed})
+                elif role == 43:
+                    attributes.update(tag="button", **{"computed-role": "button"})
+                f.attributes[id(node)] = attributes
+                node.get_attributes = lambda node=node: dict(f.attributes[id(node)])
+                node.get_component_iface = mock.Mock(return_value=types.SimpleNamespace(get_extents=mock.Mock(return_value=types.SimpleNamespace(
+                    x=rect[0], y=rect[1], width=rect[2], height=rect[3]))))
+                return node
+            f.add = add
+            if phase in ("mcp-saved", "close-mcp"):
+                f.document.children.remove(f.dialog)
+                f.marker = add(43, "Connection guide", f.document, "connectionGuideBtn")
+                f.status = add(54, "", f.web, "hosted-status")
+                f.version = add(117, p.APPS["mcp"]["version"], f.status)
+                f.web.children.remove(f.iframe)
+                f.hosted = add(109, "Hosted Creator app", f.web, "view-hosted")
+                f.hosted.children.append(f.iframe)
+                f.iframe.parent = f.hosted
+                f.target = add(43, "Close MCP", f.hosted, "hosted-stop")
+            elif phase in ("mcp-closed", "return-apps", "view-setup"):
+                f.web.children.clear()
+                if phase in ("mcp-closed", "return-apps"):
+                    f.context = add(109, "Creator Works MCP", f.web, "view-builtin")
+                    f.title = add(82, "Creator Works MCP", f.context, "builtin-title")
+                    f.target = add(43, "All apps", f.context)
+                else:
+                    f.context = add(109, "Apps", f.web, "view-hub")
+                    f.entry = add(85, "", f.context, "entry-setup")
+                    f.target = add(43, p.APPS["setup"]["view"], f.entry)
+            else:
+                f.web.children.clear()
+                f.status = add(54, "", f.web, "hosted-status")
+                f.version = add(117, p.APPS["setup"]["version"], f.status)
+                f.setup_frame = add(39, "Creator Project Setup", f.web, "setup-host-frame", f.native_rect)
+                f.setup_doc = add(94, "Creator Project Setup", f.setup_frame)
+                f.recipe = add(85, "", f.setup_doc, "recipe-line")
+                f.recipe_text = add(117, p.RECIPE, f.recipe)
+                f.target = add(43, "Check requirements again", f.setup_doc, "refresh-button")
+                f.requirements = add(85, "", f.setup_doc, "requirements")
+                add(117, "Unity Hub or Unity CLI", f.requirements)
+            with mock.patch.object(p, "own_tree", side_effect=AssertionError("No generic own_tree exemption")), \
+                    mock.patch.object(p, "press", side_effect=AssertionError("No name-only generic action")):
+                yield f
+
+    def test_all_finite_reads_and_actions_use_two_matching_source_walks_and_only_expected_input(self):
+        for phase in ("mcp-saved", "close-mcp", "mcp-closed", "return-apps", "view-setup", "setup-ready", "requirements", "setup-checked"):
+            with self.subTest(phase=phase), self.fixture(phase) as f:
+                writing = phase in ("close-mcp", "return-apps", "view-setup", "requirements")
+                if not writing:
+                    f.target.get_action_iface = mock.Mock(side_effect=AssertionError("Read requested an Action interface"))
+                result = (p.source_guide if phase == "mcp-saved" else p.source_sequence)(Path("/fixture"), phase, f.owner, f.atspi)
+                self.assertTrue(result["freshWalksMatched"])
+                self.assertEqual(result["actionCount"], int(writing))
+                self.assertEqual(f.target.action.do_action.call_count, int(writing))
+                self.assertFalse(result["nativeAcceptance"])
+                self.assertEqual(len(result["walks"]), 2)
+
+    def test_post_save_and_navigation_contexts_refuse_visible_guide_or_iframe_and_wrong_ids(self):
+        for phase, change in (("mcp-saved", "visible-guide"), ("mcp-saved", "version"), ("close-mcp", "outside"),
+                              ("return-apps", "iframe"), ("return-apps", "heading"), ("view-setup", "hidden"),
+                              ("view-setup", "missing-id"), ("view-setup", "duplicate-button"),
+                              ("setup-ready", "recipe"), ("setup-ready", "version"), ("requirements", "outside")):
+            with self.subTest(phase=phase, change=change), self.fixture(phase) as f:
+                if change == "visible-guide": f.document.children.append(f.dialog)
+                elif change == "version": f.version.name = "Wrong product version"
+                elif change == "heading": f.title.name = "Wrong product"
+                elif change == "hidden": f.entry.states.remove(1)
+                elif change == "missing-id": f.attributes[id(f.entry)]["id"] = "entry-mcp"
+                elif change == "duplicate-button": f.add(43, p.APPS["setup"]["view"], f.entry)
+                elif change == "iframe": f.context.children.append(f.iframe)
+                elif change == "recipe": f.recipe_text.name = "Unpinned recipe"
+                else:
+                    parent = f.hosted if phase == "close-mcp" else f.setup_doc
+                    parent.children.remove(f.target)
+                    f.web.children.append(f.target)
+                with self.assertRaises(RuntimeError):
+                    (p.source_guide if phase == "mcp-saved" else p.source_sequence)(Path("/fixture"), phase, f.owner, f.atspi)
+                f.target.action.do_action.assert_not_called()
+
+    def test_finite_action_graph_drift_and_effect_uncertainty_never_retry(self):
+        with self.fixture("requirements") as f:
+            def changed(_):
+                f.attributes[id(f.target)]["id"] = "other-refresh"
+                return "press"
+            f.target.action.get_action_name = changed
+            with self.assertRaises(RuntimeError):
+                p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+            f.target.action.do_action.assert_not_called()
+        with self.fixture("return-apps") as f, mock.patch("sys.stderr", new_callable=io.StringIO):
+            f.target.action.do_action.side_effect = OSError("uncertain")
+            f.save.side_effect = OSError("retention")
+            with self.assertRaises(f.owner.helper.ActionError):
+                p.source_sequence(Path("/fixture"), "return-apps", f.owner, f.atspi)
+            f.target.action.do_action.assert_called_once_with(0)
+
+    def test_native_close_controller_snapshots_then_clicks_and_separates_dismissal_from_backend_exit(self):
+        with self.fixture("close-mcp") as f:
+            helper = f.owner.helper
+            native = {"window": 99, "pid": 42, "client": 9, "title": p.CLOSE_TITLE, "mapped": True}
+            frame = (300, 200, 600, 240)
+            class Requests:
+                def __new__(cls, *args, **kwargs):
+                    return types.SimpleNamespace(action=args[0])
+                @staticmethod
+                def parse(args, **kwargs):
+                    self.assertEqual(kwargs, {"gtk_message_info_frame": frame})
+                    self.assertEqual(args[-3:] if args[0] == "click" else args[-2:],
+                                     [p.CLOSE_TITLE, "ALERT", "Close view"] if args[0] == "click" else [p.CLOSE_TITLE, "ALERT"])
+                    return types.SimpleNamespace(action=args[0])
+            helper.Request, helper.Proc = Requests, mock.Mock(return_value=object())
+            helper.perform = mock.Mock(side_effect=[{"actionCount": 0}, {"actionCount": 1}])
+            f.owner.x11.frame_rectangle.return_value = frame
+            with mock.patch.object(p, "owned_windows", side_effect=[[native], [native], []]):
+                result = p.confirm_mcp_close(Path("/fixture"), f.owner, f.atspi)
+            self.assertTrue(result["dialogDismissed"])
+            self.assertFalse(result["backendExitVerified"])
+            self.assertEqual([call.args[0].action for call in helper.perform.call_args_list], ["snapshot", "click"])
+            self.assertTrue(all(call.kwargs.get("root_close_owner") is f.owner for call in helper.perform.call_args_list))
+
+    def test_actual_probe_loop_closes_mcp_returns_apps_and_preserves_saved_preference_before_setup(self):
+        source = ast.parse((HERE / "native-linux-components-probe.py").read_text())
+        probe = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "probe")
+        loop = next(node for node in ast.walk(probe) if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id == "app")
+        events, state = [], {"view": "apps", "saved": False}
+        def call(_root, _env, action, *_args):
+            events.append(action)
+            if action.startswith("view-"):
+                self.assertEqual(state["view"], "apps")
+                state["view"] = action[5:]
+            elif action == "save-guide": state["saved"] = True
+            elif action == "confirm-close-mcp": state["view"] = "builtin"
+            elif action == "return-apps": state["view"] = "apps"
+            if action.endswith(("-approve", "-decline")):
+                return {"native": {"pid": (100 if action.startswith("mcp") else 200) + int(action.endswith("-approve"))}}
+            return {}
+        def check(_root, _before, saved=False):
+            self.assertEqual(saved, state["saved"])
+            return {}
+        scope = dict(COMPONENT_ORDER=p.COMPONENT_ORDER, report={"backends": []}, root=Path("/fixture"), env_child={},
+                     child=object(), start="100", xid=77, capture=object(), before={}, helper=object(), B=p.B,
+                     call=call, fixture_check=check, require=p.require, wait_backend_gone=lambda native, *_: events.append("gone-" + str(native["pid"])))
+        with mock.patch.object(p.B, "SELECTED_CANDIDATE", p.B.CURRENT_CANDIDATE):
+            exec(compile(ast.Module(body=[loop], type_ignores=[]), "actual-probe-loop", "exec"), scope)
+        expected = ["save-guide", "mcp-saved", "close-mcp", "confirm-close-mcp", "mcp-closed", "gone-101", "return-apps", "view-setup"]
+        self.assertEqual(events[events.index("save-guide"):events.index("view-setup") + 1], expected)
+        self.assertEqual(events[-2:], ["requirements", "setup-checked"])
+
+    def test_native_confirmation_drift_refusal_and_uncertain_click_never_retry(self):
+        for change in ("snapshot", "changed-window", "uncertain-click", "not-dismissed", "absent"):
+            with self.subTest(change=change), self.fixture("close-mcp") as f:
+                helper = f.owner.helper
+                native = {"window": 99, "pid": 42, "client": 9, "title": p.CLOSE_TITLE, "mapped": True}
+                class Requests:
+                    def __new__(cls, *args, **kwargs):
+                        return types.SimpleNamespace(action=args[0])
+                    @staticmethod
+                    def parse(args, **kwargs):
+                        return types.SimpleNamespace(action=args[0])
+                helper.Request, helper.Proc = Requests, lambda: object()
+                snapshot = RuntimeError("refused snapshot") if change == "snapshot" else {"actionCount": 0}
+                click = helper.ActionError("uncertain click") if change == "uncertain-click" else {"actionCount": 1}
+                helper.perform = mock.Mock(side_effect=[snapshot, click])
+                windows = [[], []] if change == "absent" else [[native], [{**native, "client": 10}]] if change == "changed-window" else None
+                with mock.patch.object(p, "owned_windows", side_effect=windows, return_value=[native]), \
+                        mock.patch.object(p, "backend_ax_observation", return_value={"readOnly": True, "verified": False}), \
+                        mock.patch.object(p.time, "monotonic", side_effect=[0, 11, 22, 33, 44]), self.assertRaises(RuntimeError):
+                    p.confirm_mcp_close(Path("/fixture"), f.owner, f.atspi)
+                actions = [call.args[0].action for call in helper.perform.call_args_list]
+                self.assertEqual(actions.count("click"), int(change in ("uncertain-click", "not-dismissed")))
+                self.assertLessEqual(len(actions), 2)
+
+    def test_only_bound_setup_readiness_can_wait_before_two_ready_walks_without_any_input(self):
+        for pending in ("opening", "recipe", "checking"):
+            with self.subTest(pending=pending), self.fixture("setup-checked") as f:
+                if pending == "opening": f.version.name = "Opening app"
+                elif pending == "recipe": f.recipe_text.name = "Loading approved recipe\u2026"
+                else: f.target.states.remove(2)
+                original, calls = p.fresh_source_inventory, []
+                def inventory(*args, **kwargs):
+                    calls.append(True)
+                    if len(calls) == 2:
+                        f.version.name, f.recipe_text.name = p.APPS["setup"]["version"], p.RECIPE
+                        f.target.states.add(2)
+                    return original(*args, **kwargs)
+                f.target.get_action_iface = mock.Mock(side_effect=AssertionError("Readiness cannot request an Action interface"))
+                with mock.patch.object(p, "fresh_source_inventory", side_effect=inventory), mock.patch.object(p.time, "sleep"):
+                    result = p.source_sequence(Path("/fixture"), "setup-checked", f.owner, f.atspi)
+                self.assertEqual(result["readinessObservations"], 1)
+                self.assertEqual(len(result["walks"]), 2)
+                self.assertEqual(result["actionCount"], 0)
+        with self.fixture("setup-checked") as f:
+            f.target.states.remove(2)
+            with mock.patch.object(p.time, "monotonic", side_effect=[0, 16]), self.assertRaisesRegex(RuntimeError, "read-only readiness deadline"):
+                p.source_sequence(Path("/fixture"), "setup-checked", f.owner, f.atspi)
+            f.target.action.do_action.assert_not_called()
+        with self.fixture("requirements") as f, mock.patch.object(p.time, "sleep") as sleep:
+            f.target.states.remove(2)
+            with self.assertRaises(RuntimeError):
+                p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+            sleep.assert_not_called()
+            f.target.action.do_action.assert_not_called()
 
 
 class DeclinePostClickTests(unittest.TestCase):

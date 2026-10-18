@@ -12,22 +12,29 @@ from dataclasses import dataclass
 
 MAX_NODES, MAX_CHILDREN, MAX_DEPTH = 512, 128, 32
 REQUIRED_SEALS = 0x0f
+ROOT_CLOSE_TITLE = "Close hosted app?"
+ROOT_CLOSE_BODY = ("Close this hosted app view? Unsaved form entries in this view will be discarded. "
+                   "Project files and the standalone app are unchanged.")
 BUTTONS = {
     "Open MCP in Creator Hub?": {"Not now", "Enable MCP controls", "Open read-only preview"},
     "Open Setup in Creator Hub?": {"Not now", "Open in Hub"},
     "Enable managed MCP routing": {"Not now", "Enable managed routing"},
+    ROOT_CLOSE_TITLE: {"Close view", "Keep open"},
 }
 GTK_INFO_BUTTONS = {
     "Open Setup in Creator Hub?": {"Not now", "Open in Hub"},
     "Open MCP in Creator Hub?": {"Not now", "Enable MCP controls"},
     "Enable managed MCP routing": {"Not now", "Enable managed routing"},
+    ROOT_CLOSE_TITLE: {"Close view", "Keep open"},
 }
 
 
 def validate_gtk_frame(title, role, frame, sealed):
+    if title == ROOT_CLOSE_TITLE:
+        require(not sealed and frame is not None, "Root close requires pathname ownership and an explicit native GTK frame")
     if frame is None:
         return
-    allowed = {"Open Setup in Creator Hub?", "Open MCP in Creator Hub?"} if sealed else {"Enable managed MCP routing"}
+    allowed = {"Open Setup in Creator Hub?", "Open MCP in Creator Hub?"} if sealed else {"Enable managed MCP routing", ROOT_CLOSE_TITLE}
     require(title in allowed and role == "ALERT" and type(frame) is tuple and len(frame) == 4
             and all(type(v) is int for v in frame) and all(0 <= v <= 8192 for v in frame[:2])
             and all(0 < v <= 8192 for v in frame[2:]), "Exact pinned GTK message/geometry contract required")
@@ -363,11 +370,30 @@ def children(node, limit=MAX_CHILDREN):
     return [node.get_child_at_index(i) for i in range(count)]
 
 
+def fresh_close_children(node, limit):
+    node.clear_cache()
+    count = node.get_child_count()
+    require(type(count) is int and 0 <= count <= limit, "Root close child count exceeds bound")
+    result = []
+    for index in range(count):
+        node.clear_cache()
+        child = node.get_child_at_index(index)
+        require(child is not None, "Root close child disappeared")
+        result.append(child)
+    node.clear_cache()
+    require(node.get_child_count() == count, "Root close children changed during fresh read")
+    return result
+
+
 def select_window(request, atspi):
     # Inspect only application PID metadata until the sole owned root is selected.
-    roots = [app for app in children(atspi.get_desktop(0), 128) if app.get_process_id() == request.pid]
+    get_children = fresh_close_children if request.title == ROOT_CLOSE_TITLE else children
+    roots = [app for app in get_children(atspi.get_desktop(0), 128) if app.get_process_id() == request.pid]
     require(len(roots) == 1, "Owned accessibility application is missing or ambiguous")
-    windows = children(roots[0], 32)
+    windows = get_children(roots[0], 32)
+    if request.title == ROOT_CLOSE_TITLE:
+        for node in windows:
+            node.clear_cache()
     require(request.gtk_message_info_frame is None or request.receipt is None or len(windows) == 1,
             "Expected one sealed backend AX top-level")
     require(request.gtk_message_info_frame is None or all(n.get_process_id() == request.pid for n in windows),
@@ -400,6 +426,44 @@ def walk(window, request):
     return nodes
 
 
+def root_close_tree(window, request, atspi, owner):
+    """Exact native GTK profile only; no remote WebKit/semantic-parent exemption."""
+    def wire(node):
+        owner.node(node)
+        canonical = owner.references.identity(node, owner)
+        name, path = node.app.bus_name, node.path
+        require(type(name) is str and 0 < len(name) <= 255 and type(path) is str and 0 < len(path) <= 256,
+                "Bounded Root close AX wire identity required")
+        require(type(canonical) is list and len(canonical) == 2, "Canonical Root close bus/object binding required")
+        return tuple(canonical)
+    owner.recheck(full=True)
+    root_wire = wire(window)
+    nodes, graph, seen, pending = [], [], set(), [(window, None, 0)]
+    while pending:
+        node, parent, depth = pending.pop()
+        require(node is not None and len(nodes) < 64 and depth < 16, "Root close GTK tree exceeds bound")
+        node.clear_cache()
+        require(node.get_process_id() == request.pid, "Foreign Root close GTK node")
+        reference, role, name = wire(node), node.get_role(), node.get_name()
+        require(reference[0] == root_wire[0] and reference not in seen, "Foreign/duplicate/cyclic Root close AX wire")
+        require(type(name) is str and len(name) <= 512, "Root close GTK name exceeds bound")
+        if parent is not None:
+            require(role not in {getattr(atspi.Role, key, -1) for key in ("FRAME", "WINDOW", "DIALOG", "ALERT", "APPLICATION")},
+                    "Nested Root close GTK window")
+            node.clear_cache()
+            actual_parent = node.get_parent()
+            known = None if actual_parent is None else owner.references.aliases.get(actual_parent.app.bus_name)
+            require(known is not None and (known["owner"], actual_parent.path) == parent,
+                    "Root close GTK Parent differs from forward edge")
+        seen.add(reference)
+        nodes.append(node)
+        graph.append((reference, parent, int(role), name))
+        kids = fresh_close_children(node, min(32, 64 - len(nodes) - len(pending)))
+        pending.extend((child, reference, depth + 1) for child in reversed(kids))
+    owner.recheck(full=True)
+    return nodes, graph
+
+
 def gtk_message_context(request, nodes, atspi):
     if request.gtk_message_info_frame is None:
         return
@@ -414,6 +478,9 @@ def gtk_message_context(request, nodes, atspi):
                 + "\n\nThis permits launcher settings, selected AI-client configuration and Unity bridge changes when you use their controls. Only approve the Hub you intentionally opened. "
                 + "The direct parent and private pipes are checked. This fingerprint is a file snapshot, not a publisher signature or an immutable executable lock. "
                 + "This does not install updates, adopt shortcuts, or stop any client.")
+    elif request.title == ROOT_CLOSE_TITLE:
+        require(request.receipt is None, "Root close cannot use sealed child ownership")
+        body = ROOT_CLOSE_BODY
     else:
         require(request.title == "Enable managed MCP routing" and request.receipt is None, "Unknown GTK message context")
         body = ("Enable Creator Hub's managed MCP connection?\n\nA signed retained router will keep AI-client command paths stable across compatible Hub updates. "
@@ -450,13 +517,21 @@ def bound_window(request, x11):
     return info
 
 
-def perform(request, atspi, proc, x11, binding=None):
+def perform(request, atspi, proc, x11, binding=None, *, root_close_owner=None):
     """Adapters exist for pure unit fixtures; main constructs only native implementations."""
     validate_gtk_frame(request.title, request.role, request.gtk_message_info_frame, sealed=request.receipt is not None)
+    root_close = request.title == ROOT_CLOSE_TITLE
+    if root_close:
+        require(binding is None and root_close_owner is not None and request.action in ("snapshot", "click")
+                and (not request.button if request.action == "snapshot" else request.button in GTK_INFO_BUTTONS[ROOT_CLOSE_TITLE]),
+                "Exact pathname-owned Root close request required")
+        require(all(getattr(root_close_owner.request, key) == getattr(request, key)
+                    for key in ("pid", "start", "executable", "sha256")), "Root close owner identity differs")
+        root_close_owner.recheck(full=True)
     identity(request, proc, binding)
     owned = bound_window(request, x11)
     window = select_window(request, atspi)
-    nodes = walk(window, request)
+    nodes, graph = root_close_tree(window, request, atspi, root_close_owner) if root_close else (walk(window, request), None)
     gtk_message_context(request, nodes, atspi)
     result = {"pid": request.pid, "startTime": request.start, "executable": request.executable,
               "executableSha256": request.sha256, "window": str(request.window), "title": request.title,
@@ -476,6 +551,8 @@ def perform(request, atspi, proc, x11, binding=None):
                                for s in ("SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY")}} for n in nodes]
         identity(request, proc, binding)
         require(bound_window(request, x11) == owned and select_window(request, atspi) == window, "Owned window drifted during snapshot")
+        if root_close:
+            root_close_owner.recheck(full=True)
     else:
         selected = button(request, nodes, atspi)[0] if request.action == "click" else None
         if request.action == "close":
@@ -485,7 +562,9 @@ def perform(request, atspi, proc, x11, binding=None):
         require(bound_window(request, x11) == owned, "Owned X window changed before action")
         require(select_window(request, atspi) == window, "Owned accessibility window changed before action")
         if selected is not None:
-            current, interface = button(request, walk(window, request), atspi)
+            current_nodes, current_graph = root_close_tree(window, request, atspi, root_close_owner) if root_close else (walk(window, request), None)
+            require(not root_close or graph == current_graph, "Fresh Root close GTK graph changed")
+            current, interface = button(request, current_nodes, atspi)
             require(current == selected, "Owned permission button changed before action")
         if binding is not None:
             # Repeat the kernel/launcher proof at the final input boundary, not only at discovery.
@@ -496,12 +575,16 @@ def perform(request, atspi, proc, x11, binding=None):
                 current, interface = button(request, walk(window, request), atspi)
                 require(current == selected, "Owned permission button changed immediately before action")
         try:
+            if root_close:
+                root_close_owner.recheck(full=True)
             if selected is not None:
                 require(interface.do_action(0), "Native click was refused; do not retry")
                 result["button"] = request.button
             else:
                 x11.close_window(request.window, owned)
             result["actionCount"] = 1
+            if root_close:
+                root_close_owner.recheck(full=True)
             # Terminal actions may destroy the process. Only its parent can reap exit status.
             try:
                 if binding is not None:

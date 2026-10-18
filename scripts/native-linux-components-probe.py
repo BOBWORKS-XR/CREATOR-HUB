@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -605,6 +606,545 @@ def visible(nodes, atspi):
     return [node for node in nodes if node.get_state_set().contains(atspi.StateType.SHOWING)]
 
 
+GUIDE_IDS = {
+    "mcp-host-frame": (39, "iframe", "group", "Creator Works MCP"),
+    "connection-guide-dialog": (16, "dialog", "dialog", "Connect your AI to Unity"),
+    "connection-guide-title": (82, "h2", "heading", "Connect your AI to Unity"),
+    "connection-guide-skip": (43, "button", "button", "Use existing controls"),
+}
+MCP_SAVED_IDS = {
+    "connectionGuideBtn": (43, "button", "button", "Connection guide"),
+    "hosted-status": (54, "span", "status", None),
+}
+ROOT_SEQUENCE_IDS = {
+    "mcp-host-frame": GUIDE_IDS["mcp-host-frame"],
+    "setup-host-frame": (39, "iframe", "group", "Creator Project Setup"),
+    "view-hosted": (109, "section", "region", "Hosted Creator app"),
+    "hosted-stop": (43, "button", "button", "Close MCP"),
+    "view-builtin": (109, "section", "region", None),
+    "builtin-title": (82, "h2", "heading", "Creator Works MCP"),
+    "view-hub": (109, "section", "region", "Apps"),
+    "entry-setup": (85, "div", "generic", None),
+}
+SETUP_SEQUENCE_IDS = {
+    "setup-host-frame": (39, "iframe", "group", "Creator Project Setup"),
+    "recipe-line": (85, "div", "generic", None),
+    "refresh-button": (43, "button", "button", "Check requirements again"),
+    "hosted-status": MCP_SAVED_IDS["hosted-status"],
+    "requirements": (85, "div", "generic", None),
+}
+SOURCE_SEQUENCE = ("mcp-ready", "save-guide", "mcp-saved", "close-mcp", "mcp-closed", "return-apps",
+                   "view-setup", "setup-ready", "requirements", "setup-checked")
+CLOSE_TITLE = "Close hosted app?"
+CLOSE_BODY = ("Close this hosted app view? Unsaved form entries in this view will be discarded. "
+              "Project files and the standalone app are unchanged.")
+# Exact producer values, not a libatspi offset or a generic role conversion.
+# WebKit/webkitgtk-2.50.4/Source/WebCore/accessibility/atspi/AccessibilityAtspiEnums.h
+GUIDE_WEBKIT_ROOT_ROLES = (23, 69, 74)  # Frame, Window, Application.
+GUIDE_LIBRARIES = (
+    ("libgtk-3-0", "/usr/lib/x86_64-linux-gnu/libgtk-3.so.0", "root"),
+    ("libatk-bridge2.0-0", "/usr/lib/x86_64-linux-gnu/libatk-bridge-2.0.so.0", "root"),
+    ("libatspi2.0-0", "/usr/lib/x86_64-linux-gnu/libatspi.so.0", "worker"),
+)
+
+
+def guide_mapped_file(body, pathname, device, inode):
+    """Only the selected protected library's executable maps, not other paths."""
+    require(type(body) is str and 0 < len(body) <= 1048576, "Bounded native maps required")
+    matches = []
+    for line in body.splitlines():
+        fields = line.split(None, 5)
+        if len(fields) != 6 or fields[5] != pathname:
+            continue
+        require(re.fullmatch(r"[0-9a-f]+-[0-9a-f]+", fields[0])
+                and re.fullmatch(r"[r-][w-][x-][ps]", fields[1])
+                and re.fullmatch(r"[0-9a-f]+", fields[2])
+                and re.fullmatch(r"[0-9a-f]+:[0-9a-f]+", fields[3]) and fields[4].isdigit(),
+                "Invalid selected library mapping")
+        require(tuple(int(v, 16) for v in fields[3].split(":")) == device and int(fields[4]) == inode,
+                "Mapped library differs from protected file")
+        if "x" in fields[1]:
+            require(fields[1] == "r-xp" and len(matches) < 8, "Writable/shared/excess library code maps refused")
+            matches.append(fields[:5])
+    require(matches, "Selected runtime library is not executable-mapped")
+    return matches
+
+
+def guide_runtime_state(owner):
+    owner.recheck(full=True)
+    result = {}
+    for package, link, process in GUIDE_LIBRARIES:
+        selected = Path(link).resolve(strict=True)
+        require(str(selected).startswith("/usr/lib/x86_64-linux-gnu/"), "Runtime library escaped system directory")
+        for entry in (Path(link), selected, *selected.parents):
+            info = entry.lstat()
+            require(info.st_uid == info.st_gid == 0 and (stat.S_ISLNK(info.st_mode) or not info.st_mode & 0o022),
+                    "Runtime library ancestry is not protected root-owned content")
+        before = selected.stat()
+        require(stat.S_ISREG(before.st_mode), "Runtime library is not regular")
+        record = B.file_record(selected, 64 * 1024 * 1024)
+        require(record["device"] == str(before.st_dev) and record["inode"] == str(before.st_ino),
+                "Runtime file identity changed before maps attribution")
+        pid = owner.request.pid if process == "root" else os.getpid()
+        with open(f"/proc/{pid}/maps", encoding="utf8") as stream:
+            body = stream.read(1048577)
+        mappings = guide_mapped_file(body, str(selected), (os.major(before.st_dev), os.minor(before.st_dev)), before.st_ino)
+        require(B.file_record(selected, 64 * 1024 * 1024) == record, "Mapped runtime library changed")
+        result[package] = {"path": str(selected), "file": record, "pid": pid, "maps": mappings}
+    owner.recheck(full=True)
+    return result
+
+
+def guide_runtime_provenance(root, action, owner):
+    before = guide_runtime_state(owner)
+    packages = {}
+    for index, (package, _link, _process) in enumerate(GUIDE_LIBRARIES):
+        prefix = action + "-guide-runtime-" + str(index)
+        _status, version = B.run_tool(root, prefix + "-package", ["/usr/bin/dpkg-query", "-W", "-f=" + B.STATE_FORMAT, package + ":amd64"], timeout=5)
+        require(len(version) <= 512, "Runtime package metadata exceeds bound")
+        fields = version.decode("ascii").rstrip("\n").split("\t")
+        require(len(fields) == 4 and fields[0] == package and fields[2:] == ["amd64", "installed"]
+                and re.fullmatch(r"[0-9][0-9A-Za-z:.+~_-]{0,127}", fields[1]), "Invalid installed runtime package state")
+        if package == "libgtk-3-0":
+            require(re.fullmatch(r"3\.24\.33-[0-9A-Za-z.+~_-]+", fields[1]), "GTK source version differs from audited 3.24.33")
+        _status, attribution = B.run_tool(root, prefix + "-owner", ["/usr/bin/dpkg-query", "-S", before[package]["path"]], timeout=5)
+        require(attribution == (package + ":amd64: " + before[package]["path"] + "\n").encode(),
+                "Mapped runtime library package attribution differs")
+        packages[package] = fields[1]
+    require(guide_runtime_state(owner) == before, "Runtime libraries changed during package attribution")
+    return {"packages": packages, "mappedFiles": before, "scope": "observed-native-runtime-binding-not-publisher-authentication"}
+
+
+def fresh_source_inventory(window, owner, atspi, observation, phase):
+    """Finite disposable sequence only; this read does not authorize an action.
+
+    Clear libatspi's cache before EACH count/index read, including the frame.
+    See atspi_accessible_get_child_at_index's ATSPI_CACHE_CHILDREN branch and
+    WebKitGTK 2.50.4 AXObjectCacheAtspi's separate deferred Parent updates.
+    """
+    require(phase in SOURCE_SEQUENCE, "Unknown finite source inventory")
+    contracts = (GUIDE_IDS if phase in ("mcp-ready", "save-guide") else
+                 {**GUIDE_IDS, **MCP_SAVED_IDS, **ROOT_SEQUENCE_IDS} if phase in ("mcp-saved", "close-mcp") else
+                 SETUP_SEQUENCE_IDS if phase in ("setup-ready", "requirements", "setup-checked") else ROOT_SEQUENCE_IDS)
+    owner.recheck(full=True)
+    frame = tuple(owner.references.identity(window, owner))
+    require(list(frame) == owner.references.window and window.get_role() == atspi.Role.FRAME
+            and window.get_process_id() == owner.request.pid and window.get_name() == owner.request.title,
+            "Source guide frame differs from bound native Root")
+    nodes, rows, pending, ids, paths = {}, [], [(window, None, ())], {}, {}
+    observation.update(freshness="clear-cache-before-each-child-count-and-index", sourceObservations=[])
+    while pending:
+        node, parent, ancestors = pending.pop()
+        require(len(nodes) < min(512, owner.helper.MAX_NODES) and len(ancestors) < owner.helper.MAX_DEPTH,
+                "Source guide forward tree exceeds bound")
+        owner.node(node)
+        reference = tuple(owner.references.identity(node, owner))
+        require(reference not in nodes, "Duplicate/cyclic source guide wire reference")
+        node.clear_cache()
+        owner.node(node)
+        role = node.get_role()
+        require(isinstance(role, int) and not isinstance(role, bool) and 0 <= role <= 0xffffffff,
+                "Invalid source guide numeric role")
+        root_roles = ((atspi.Role.FRAME, atspi.Role.WINDOW, atspi.Role.APPLICATION)
+                      if node.get_process_id() == owner.request.pid else GUIDE_WEBKIT_ROOT_ROLES)
+        require(reference == frame or role not in root_roles,
+                "Nested/foreign source guide Root refused")
+        attributes = node.get_attributes()
+        require(type(attributes) is dict and len(attributes) <= 32, "Source guide attribute map exceeds bound")
+        source_id = attributes.get("id")
+        source_id = source_id if type(source_id) is str and source_id in contracts else None
+        row = {"reference": list(reference), "parent": list(parent) if parent else None, "role": int(role)}
+        if source_id is not None:
+            require(owner.renderer is not None and node.get_process_id() == owner.renderer["pid"],
+                    "Source guide DOM is not in the bound renderer")
+            expected_role, tag, computed, name = contracts[source_id]
+            source = {"id": source_id, "roleMatches": role == expected_role,
+                      "tagMatches": attributes.get("tag") == tag,
+                      "computedRoleMatches": attributes.get("computed-role") == computed,
+                      "toolkitMatches": attributes.get("toolkit") == "WebKitGTK",
+                      "nameMatches": name is None or node.get_name() == name}
+            row["source"] = source
+            states = node.get_state_set()
+            row["states"] = {state: states.contains(getattr(atspi.StateType, state)) for state in
+                             ("VISIBLE", "SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY")}
+            if source_id == "connection-guide-dialog" and phase in ("mcp-ready", "save-guide"):
+                source["modalMatches"] = states.contains(atspi.StateType.MODAL)
+            if len(observation["sourceObservations"]) < 8:
+                observation["sourceObservations"].append({"reference": list(reference), "role": int(role),
+                                                          **source, "states": dict(row["states"])})
+            ids.setdefault(source_id, []).append((reference, ancestors))
+        nodes[reference] = node
+        paths[reference] = ancestors
+        rows.append(row)
+        node.clear_cache()
+        count = node.get_child_count()
+        require(type(count) is int and 0 <= count <= owner.helper.MAX_CHILDREN
+                and count <= owner.helper.MAX_NODES - len(nodes) - len(pending), "Source guide child count exceeds bound")
+        children = []
+        for index in range(count):
+            node.clear_cache()
+            child = node.get_child_at_index(index)
+            require(child is not None, "Source guide forward child disappeared")
+            children.append(child)
+        node.clear_cache()
+        require(node.get_child_count() == count, "Source guide child count changed during fresh reads")
+        pending.extend((child, reference, (*ancestors, reference)) for child in reversed(children))
+    observation.update(nodeCount=len(rows), graphSha256=hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest(),
+                       sourceCounts={key: len(ids.get(key, [])) for key in contracts}, sourcePaths={}, parentMismatches=[])
+    for source_id, matches in ids.items():
+        if len(matches) == 1:
+            ref, ancestors = matches[0]
+            observation["sourcePaths"][source_id] = [list(item) for item in (*ancestors, ref)]
+    # Never resolve, inspect PID/role, or traverse an uncollected semantic parent.
+    forward_parents = {tuple(row["reference"]): row["parent"] for row in rows}
+    for reference, node in nodes.items():
+        try:
+            parent = node.get_parent()
+            canonical = None
+            if parent is not None:
+                alias = owner.references.aliases.get(parent.app.bus_name)
+                if alias is not None and type(parent.path) is str and len(parent.path) <= 256:
+                    canonical = (alias["owner"], parent.path)
+            if reference != frame and (list(canonical) if canonical else None) != forward_parents[reference] \
+                    and len(observation["parentMismatches"]) < 8:
+                observation["parentMismatches"].append({"node": list(reference), "parentCollected": canonical in nodes,
+                    "forwardParent": forward_parents[reference], "collectedParent": list(canonical) if canonical in nodes else None})
+        except Exception as error:
+            if len(observation["parentMismatches"]) < 8:
+                observation["parentMismatches"].append({"node": list(reference), "errorType": type(error).__name__[:64]})
+    require(all(len(matches) == 1 for matches in ids.values()), "Duplicate source context ID")
+    owner.recheck(full=True)
+    return rows, nodes, paths, ids
+
+
+class SourceNotReady(RuntimeError):
+    pass
+
+
+def source_context(rows, ids, required, setup_read=False):
+    require(all(len(ids.get(key, [])) == 1 for key in required), "Exact unique source guide IDs required")
+    for row in rows:
+        if row.get("source", {}).get("id") in required:
+            require(all(value is True for key, value in row["source"].items() if key != "id"),
+                    "Source guide DOM/role/name contract differs")
+            states = row["states"]
+            require(states["VISIBLE"] and states["SHOWING"] and not states["DEFUNCT"] and not states["BUSY"],
+                    "Source guide context is not visible/ready")
+            if row["source"]["id"] in ("connection-guide-skip", "connectionGuideBtn", "hosted-stop", "refresh-button"):
+                if setup_read and row["source"]["id"] == "refresh-button":
+                    continue
+                require(states["ENABLED"] and states["SENSITIVE"], "Source guide control is disabled")
+    return [ids[key][0][0] for key in required]
+
+
+def source_document(rows, nodes, paths, iframe, owner, observation):
+    documents = [tuple(row["reference"]) for row in rows if row["role"] == 94 and iframe in paths[tuple(row["reference"])]]
+    require(len(documents) == 1, "Exact one forward component document required")
+    document = documents[0]
+    require(nodes[document].get_process_id() == owner.renderer["pid"]
+            and nodes[document].get_attributes().get("toolkit") == "WebKitGTK", "Component document producer differs")
+    observation["sourcePaths"]["component-document"] = [list(item) for item in (*paths[document], document)]
+    return document
+
+
+def source_version(nodes, paths, status, expected, atspi, observation, setup_read=False):
+    version_nodes = [node for ref, node in nodes.items() if ref == status or status in paths[ref]]
+    require(0 < len(version_nodes) <= 8, "Hosted version source subtree exceeds bound")
+    matches = any(node.get_state_set().contains(atspi.StateType.SHOWING) and node.get_name() == expected for node in version_nodes)
+    observation["hostedVersionMatches"] = matches
+    if not matches and setup_read and any(node.get_state_set().contains(atspi.StateType.SHOWING)
+                                         and node.get_name() == "Opening app" for node in version_nodes):
+        raise SourceNotReady("Bound Setup initial workflow is still opening")
+    require(matches, "Exact source hosted component version is not ready")
+
+
+def fresh_guide_walk(window, owner, atspi, observation, saved=False):
+    require(type(saved) is bool, "Fixed MCP phase required")
+    rows, nodes, paths, ids = fresh_source_inventory(window, owner, atspi, observation, "mcp-saved" if saved else "mcp-ready")
+    required = ("mcp-host-frame", *MCP_SAVED_IDS) if saved else tuple(GUIDE_IDS)
+    references = source_context(rows, ids, required)
+    frame, iframe = tuple(owner.references.window), references[0]
+    document = source_document(rows, nodes, paths, iframe, owner, observation)
+    require(all(document in ancestors for key, matches in ids.items() if key not in ("mcp-host-frame", "hosted-status")
+                and key in (*GUIDE_IDS, *MCP_SAVED_IDS)
+                for _ref, ancestors in matches), "MCP source context escaped exact iframe document")
+    if saved:
+        target, status = references[1:]
+        require(iframe not in paths[status], "Hosted status escaped the Root document")
+        source_version(nodes, paths, status, APPS["mcp"]["version"], atspi, observation)
+        require(not any(row.get("source", {}).get("id") in tuple(GUIDE_IDS)[1:] and row["states"]["SHOWING"] for row in rows),
+                "Post-save guide remains visible; no action will be retried")
+        require(not any(row["role"] == 2 and nodes[tuple(row["reference"])].get_state_set().contains(atspi.StateType.SHOWING)
+                        for row in rows), "Visible source MCP/Root alert after save")
+        owner.recheck(full=True)
+        return rows, nodes, (frame, iframe, target, status)
+    dialog, heading, target = references[1:]
+    require(iframe in ids["connection-guide-dialog"][0][1]
+            and dialog in ids["connection-guide-title"][0][1]
+            and dialog in ids["connection-guide-skip"][0][1], "Source guide modal/control ancestry differs")
+    owner.recheck(full=True)
+    return rows, nodes, (frame, iframe, dialog, heading, target)
+
+
+def source_rectangles(owner, atspi, nodes, references):
+    require(2 <= len(references) <= 5, "Bounded source geometry required")
+    client = B.visible_rectangle(owner.request, owner.helper, owner.x11)
+    frame = owner.x11.frame_rectangle(owner.request.window)
+    def inside(inner, outer):
+        return (outer[0] <= inner[0] and outer[1] <= inner[1]
+                and inner[0] + inner[2] <= outer[0] + outer[2] and inner[1] + inner[3] <= outer[1] + outer[3])
+    require(all(type(rect) is tuple and len(rect) == 4 and all(type(v) is int and 0 <= v <= 0x7fffffff for v in rect)
+                and 0 < rect[2] <= 1920 and 0 < rect[3] <= 1080 for rect in (client, frame))
+            and inside(client, frame), "Source guide native geometry differs")
+    result = {"client": list(client), "frame": list(frame), "source": []}
+    for index, reference in enumerate(references):
+        node = nodes[reference]
+        owner.node(node)
+        component = node.get_component_iface()
+        require(component is not None, "Source guide Component interface absent")
+        extent = component.get_extents(atspi.CoordType.SCREEN)
+        rect = (extent.x, extent.y, extent.width, extent.height)
+        require(all(type(v) is int and -0x80000000 <= v <= 0x7fffffff for v in rect)
+                and 0 < rect[2] <= 1920 and 0 < rect[3] <= 1080
+                and (rect == frame if index == 0 else inside(rect, client)), "Source guide AX geometry escaped native binding")
+        result["source"].append(list(rect))
+    owner.recheck(full=True)
+    return result
+
+
+def source_guide_geometry(owner, atspi, nodes, references, saved=False):
+    require(type(saved) is bool and len(references) == (4 if saved else 5), "Fixed source MCP geometry only")
+    result = source_rectangles(owner, atspi, nodes, references)
+    if not saved:
+        def inside(inner, outer):
+            return (outer[0] <= inner[0] and outer[1] <= inner[1]
+                    and inner[0] + inner[2] <= outer[0] + outer[2] and inner[1] + inner[3] <= outer[1] + outer[3])
+        require(inside(tuple(result["source"][3]), tuple(result["source"][2]))
+                and inside(tuple(result["source"][4]), tuple(result["source"][2])), "Guide controls escaped their modal")
+    owner.recheck(full=True)
+    return result
+
+
+def source_guide(root, action, owner, atspi):
+    require(action in ("mcp-ready", "save-guide", "mcp-saved") and B.SELECTED_CANDIDATE == B.CURRENT_CANDIDATE,
+            "Source guide path is only for fixed current disposable candidate")
+    saved = action == "mcp-saved"
+    report = {"readOnly": True, "authorization": False, "actionCount": 0, "nativeAcceptance": False,
+              "action": action, "scope": "disposable-current-fixed-MCP-guide-only", "walks": []}
+    try:
+        report["runtime"] = guide_runtime_provenance(root, action, owner)
+        first = {}
+        report["walks"].append(first)
+        rows, nodes, references = fresh_guide_walk(owner.helper.select_window(owner.request, atspi), owner, atspi, first, saved=saved)
+        geometry = source_guide_geometry(owner, atspi, nodes, references, saved=saved)
+        interface = None
+        if action == "save-guide":
+            target = nodes[references[-1]]
+            owner.helper.ready(target, atspi)
+            interface = target.get_action_iface()
+            require(interface and interface.get_n_actions() == 1 and interface.get_action_name(0) == "press",
+                    "Exact single source guide press required")
+        second = {}
+        report["walks"].append(second)
+        final_rows, final_nodes, final_refs = fresh_guide_walk(owner.helper.select_window(owner.request, atspi), owner, atspi, second, saved=saved)
+        require(rows == final_rows and references == final_refs, "Fresh complete source guide graph/ancestry changed")
+        require(source_guide_geometry(owner, atspi, final_nodes, final_refs, saved=saved) == geometry, "Source guide geometry changed")
+        require(guide_runtime_state(owner) == report["runtime"]["mappedFiles"], "Source guide runtime libraries changed")
+        report.update(geometry=geometry, freshWalksMatched=True)
+        if saved:
+            report.update(guideDismissed=True, hostedVersion=APPS["mcp"]["version"], preferenceVerified=False)
+        require(len((json.dumps(report, indent=2) + "\n").encode()) <= 32768, "Source guide report exceeds bound")
+        if action == "save-guide":
+            target = final_nodes[final_refs[-1]]
+            owner.helper.ready(target, atspi)
+            owner.recheck(full=True)
+            try:
+                require(interface.do_action(0), "Source guide press refused; never retry")
+                owner.recheck(full=True)
+            except Exception as error:
+                report["actionMayHaveRun"] = True
+                raise owner.helper.ActionError(str(error)) from error
+            report.update(readOnly=False, actionCount=1)
+        return report
+    except Exception as error:
+        report["refusal"] = {"errorType": type(error).__name__[:64]}
+        raise
+    finally:
+        try:
+            require(len((json.dumps(report, indent=2) + "\n").encode()) <= 32768, "Source guide retention exceeds bound")
+            B.save_json(root / (action + "-source-guide.json"), report)
+        except Exception as error:
+            print(json.dumps({"sourceGuideCaptureRefusal": type(error).__name__[:64]}), file=sys.stderr)
+
+
+def fixed_subtree_values(nodes, paths, reference, atspi):
+    values = []
+    selected = [node for ref, node in nodes.items() if ref == reference or reference in paths[ref]]
+    require(0 < len(selected) <= 64, "Fixed source text subtree exceeds bound")
+    for node in selected:
+        if not node.get_state_set().contains(atspi.StateType.SHOWING):
+            continue
+        name = node.get_name()
+        require(type(name) is str and len(name) <= 2048, "Source text name exceeds bound")
+        values.extend(value for value in (name, node_text(node, atspi)) if value)
+    require(sum(len(value.encode()) for value in values) <= 16384, "Fixed source text aggregate exceeds bound")
+    return values
+
+
+def source_button(nodes, paths, context, name, owner, atspi):
+    matches = [ref for ref, node in nodes.items() if context in paths[ref]
+               and node.get_role() == 43 and node.get_name() == name]
+    require(len(matches) == 1, "Exact unique button in fixed source context required")
+    ref, = matches
+    node = nodes[ref]
+    attrs = node.get_attributes()
+    require(node.get_process_id() == owner.renderer["pid"] and type(attrs) is dict
+            and all(attrs.get(k) == v for k, v in {"tag": "button", "computed-role": "button", "toolkit": "WebKitGTK"}.items()),
+            "Fixed source button producer/tag/role differs")
+    owner.helper.ready(node, atspi)
+    return ref
+
+
+def source_sequence_walk(owner, atspi, action, observation):
+    window = owner.helper.select_window(owner.request, atspi)
+    if action == "close-mcp":
+        rows, nodes, refs = fresh_guide_walk(window, owner, atspi, observation, saved=True)
+        ids = {row["source"]["id"]: [(tuple(row["reference"]), tuple(tuple(v) for v in observation["sourcePaths"][row["source"]["id"]][:-1]))]
+               for row in rows if "source" in row}
+        hosted, stop = source_context(rows, ids, ("view-hosted", "hosted-stop"))
+        require(hosted in ids["hosted-stop"][0][1] and hosted in ids["mcp-host-frame"][0][1],
+                "MCP close escaped exact hosted Root context")
+        return rows, nodes, (refs[0], refs[1], refs[-1], stop), stop
+    rows, nodes, paths, ids = fresh_source_inventory(window, owner, atspi, observation, action)
+    frame = tuple(owner.references.window)
+    if action in ("mcp-closed", "return-apps", "view-setup"):
+        require(not any(key in ids for key in ("mcp-host-frame", "setup-host-frame")), "An embedded document remains in Root navigation")
+        if action in ("mcp-closed", "return-apps"):
+            context, heading = source_context(rows, ids, ("view-builtin", "builtin-title"))
+            require(context in paths[heading], "Closed MCP heading escaped built-in context")
+            target = source_button(nodes, paths, context, "All apps", owner, atspi)
+            return rows, nodes, (frame, heading, target), target
+        hub, entry = source_context(rows, ids, ("view-hub", "entry-setup"))
+        require(hub in paths[entry], "Setup app entry escaped Apps context")
+        target = source_button(nodes, paths, entry, APPS["setup"]["view"], owner, atspi)
+        return rows, nodes, (frame, target), target
+    require(action in ("setup-ready", "requirements", "setup-checked"), "Unknown finite source operation")
+    setup_read = action in ("setup-ready", "setup-checked")
+    iframe, recipe, refresh, status, requirements = source_context(rows, ids, tuple(SETUP_SEQUENCE_IDS), setup_read=setup_read)
+    document = source_document(rows, nodes, paths, iframe, owner, observation)
+    require(all(document in paths[ref] for ref in (recipe, refresh, requirements)) and iframe not in paths[status],
+            "Setup source controls escaped exact document")
+    source_version(nodes, paths, status, APPS["setup"]["version"], atspi, observation, setup_read=setup_read)
+    recipe_values = fixed_subtree_values(nodes, paths, recipe, atspi)
+    if setup_read and "Loading approved recipe\u2026" in recipe_values:
+        raise SourceNotReady("Bound Setup recipe is still loading")
+    require(RECIPE in recipe_values, "Exact pinned Setup recipe is not ready")
+    require("Unity Hub or Unity CLI" in fixed_subtree_values(nodes, paths, requirements, atspi), "Actual Setup requirements missing")
+    require(not any(row["role"] == 2 and nodes[tuple(row["reference"])].get_state_set().contains(atspi.StateType.SHOWING)
+                    for row in rows), "Visible Setup/Root source alert")
+    if setup_read:
+        states = nodes[refresh].get_state_set()
+        if not (states.contains(atspi.StateType.ENABLED) and states.contains(atspi.StateType.SENSITIVE)):
+            raise SourceNotReady("Bound Setup refresh is still checking")
+    return rows, nodes, (frame, iframe, recipe, refresh), refresh
+
+
+def source_sequence(root, action, owner, atspi):
+    require(action in SOURCE_SEQUENCE and action not in ("mcp-ready", "save-guide", "mcp-saved")
+            and B.SELECTED_CANDIDATE == B.CURRENT_CANDIDATE, "Fixed current source sequence only")
+    report = {"action": action, "readOnly": True, "authorization": False, "actionCount": 0,
+              "nativeAcceptance": False, "walks": []}
+    try:
+        report["runtime"] = guide_runtime_provenance(root, action, owner)
+        deadline = time.monotonic() + 15
+        while True:
+            before = {}
+            report["walks"] = [before]
+            try:
+                rows, nodes, refs, target = source_sequence_walk(owner, atspi, action, before)
+                break
+            except SourceNotReady:
+                require(action in ("setup-ready", "setup-checked") and time.monotonic() < deadline,
+                        "Bound Setup read-only readiness deadline; no input retried")
+                report["readinessObservations"] = report.get("readinessObservations", 0) + 1
+                time.sleep(0.05)
+        geometry = source_rectangles(owner, atspi, nodes, refs)
+        interface = None
+        if action in ("close-mcp", "return-apps", "view-setup", "requirements"):
+            owner.helper.ready(nodes[target], atspi)
+            interface = nodes[target].get_action_iface()
+            require(interface and interface.get_n_actions() == 1 and interface.get_action_name(0) == "press",
+                    "Exact single source press required")
+        after = {}
+        report["walks"].append(after)
+        current, final_nodes, final_refs, final_target = source_sequence_walk(owner, atspi, action, after)
+        require(rows == current and refs == final_refs and target == final_target, "Fresh finite source graph/control changed")
+        require(source_rectangles(owner, atspi, final_nodes, final_refs) == geometry, "Finite source geometry changed")
+        require(guide_runtime_state(owner) == report["runtime"]["mappedFiles"], "Finite source runtime changed")
+        report.update(freshWalksMatched=True, geometry=geometry)
+        require(len((json.dumps(report, indent=2) + "\n").encode()) <= 32768, "Finite source report exceeds bound")
+        if interface is not None:
+            owner.helper.ready(final_nodes[final_target], atspi)
+            owner.recheck(full=True)
+            try:
+                require(interface.do_action(0), "Finite source press refused; never retry")
+                owner.recheck(full=True)
+            except Exception as error:
+                report["actionMayHaveRun"] = True
+                raise owner.helper.ActionError("Finite source action uncertain; no retry") from error
+            report.update(actionCount=1, readOnly=False)
+        return report
+    finally:
+        try:
+            require(len((json.dumps(report, indent=2) + "\n").encode()) <= 32768, "Finite source capture exceeds bound")
+            B.save_json(root / (action + "-source-sequence.json"), report)
+        except Exception as error:
+            print(json.dumps({"sourceSequenceCaptureRefusal": type(error).__name__[:64]}), file=sys.stderr)
+
+
+def confirm_mcp_close(root, owner, atspi):
+    """Consume the shared exact native profile, never another GTK controller."""
+    require(B.SELECTED_CANDIDATE == B.CURRENT_CANDIDATE, "Current disposable close sequence only")
+    helper, request, x11 = owner.helper, owner.request, owner.x11
+    guide_runtime_provenance(root, "confirm-close-mcp", owner)
+    deadline = time.monotonic() + 10
+    while True:
+        owner.recheck(full=True)
+        windows = [w for w in owned_windows(request.pid, x11) if w["mapped"] and w["window"] != request.window]
+        require(len(windows) <= 1 and all(w["title"] == CLOSE_TITLE for w in windows), "Unexpected owned native close dialog")
+        if windows:
+            break
+        require(time.monotonic() < deadline, "Native hosted-close dialog absent; no input retried")
+        time.sleep(0.05)
+    native, = windows
+    frame = x11.frame_rectangle(native["window"])
+    args = [str(request.pid), request.start, request.executable, request.sha256, str(native["window"]), CLOSE_TITLE, "ALERT"]
+    snapshot = helper.Request("snapshot", request.pid, request.start, request.executable, request.sha256,
+                              native["window"], CLOSE_TITLE, "ALERT")
+    try:
+        snapshot = helper.Request.parse(["snapshot", *args], gtk_message_info_frame=frame)
+        before = helper.perform(snapshot, atspi, helper.Proc(), x11, root_close_owner=owner)
+    except Exception:
+        B.save_json(root / "close-mcp-native-refusal.json", {"readOnly": True, "actionCount": 0, "native": native,
+                    "nativeFrame": frame, "ax": backend_ax_observation(snapshot, helper, x11, atspi, None, owner.root, owner.root)})
+        raise
+    B.save_json(root / "close-mcp-native-snapshot.json", before)
+    owner.recheck(full=True)
+    require([w for w in owned_windows(request.pid, x11) if w["mapped"] and w["window"] != request.window] == [native],
+            "Native close window changed after snapshot")
+    result = helper.perform(helper.Request.parse(["click", *args, "Close view"], gtk_message_info_frame=frame),
+                            atspi, helper.Proc(), x11, root_close_owner=owner)
+    deadline = time.monotonic() + 10
+    while True:
+        owner.recheck(full=True)
+        remaining = [w for w in owned_windows(request.pid, x11) if w["mapped"] and w["window"] != request.window]
+        require(all(w == native for w in remaining), "Another native window replaced hosted close")
+        if not remaining:
+            return {"actionCount": 1, "dialogDismissed": True, "backendExitVerified": False, "input": result}
+        require(time.monotonic() < deadline, "Hosted close dismissal deadline; no retry")
+        time.sleep(0.05)
+
+
 def readable_text_role(node, atspi):
     role = node.get_role()
     roles = {getattr(atspi.Role, key, -1) for key in ("PARAGRAPH", "TEXT", "STATIC", "LABEL")}
@@ -1181,7 +1721,7 @@ def consent(root, action, request, helper, x11, atspi, root_record):
 def worker(root, args):
     require(len(args) == 4, "Expected fixed worker action and owned Root PID/start/XID")
     action, pid, start, xid = args
-    require(action in CONTROLS or action in ("navigation", "setup-declined", "mcp-declined", "setup-ready",
+    require(action in CONTROLS or action in SOURCE_SEQUENCE or action in ("confirm-close-mcp", "navigation", "setup-declined", "mcp-declined", "setup-ready",
             "mcp-ready", "mcp-saved", "setup-decline", "setup-approve", "setup-capture", "mcp-decline", "mcp-approve", "failure-snapshot"),
             "Unknown bounded component worker")
     B.verify_stage(root)
@@ -1208,6 +1748,13 @@ def worker(root, args):
         references, bus = B.native_ax_references(refs)
         owner = B.RootOwnership(request, helper, x11, saved["root"], saved["xres"],
                                 saved["systemWebKit"]["file"], renderer, references=references)
+        if action in ("mcp-ready", "save-guide", "mcp-saved") and B.SELECTED_CANDIDATE == B.CURRENT_CANDIDATE:
+            return source_guide(root, action, owner, Atspi)
+        if B.SELECTED_CANDIDATE == B.CURRENT_CANDIDATE:
+            if action == "confirm-close-mcp":
+                return confirm_mcp_close(root, owner, Atspi)
+            if action in SOURCE_SEQUENCE:
+                return source_sequence(root, action, owner, Atspi)
         if action in CONTROLS:
             return press(action, owner, Atspi)
         deadline, last = time.monotonic() + 20, None
@@ -1381,7 +1928,7 @@ def probe(root, env, capture_only=False):
             report["backends"].append(declined["native"])
             call(root, env_child, app + "-declined", child, start, xid, capture, report)
             wait_backend_gone(declined["native"], helper, capture)
-            fixture_check(root, before)
+            fixture_check(root, before, saved=report.get("mcpNativePreferenceVerified", False))
             report["phase"] = "retry-" + app
             call(root, env_child, "retry", child, start, xid, capture, report)
             approved = call(root, env_child, app + "-approve", child, start, xid, capture, report)
@@ -1389,16 +1936,25 @@ def probe(root, env, capture_only=False):
             report["backends"].append(approved["native"])
             report["phase"] = app + "-operation"
             call(root, env_child, app + "-ready", child, start, xid, capture, report)
-            fixture_check(root, before)
+            fixture_check(root, before, saved=report.get("mcpNativePreferenceVerified", False))
             if app == "setup":
                 call(root, env_child, "requirements", child, start, xid, capture, report)
-                call(root, env_child, "setup-ready", child, start, xid, capture, report)
+                call(root, env_child, "setup-checked" if B.SELECTED_CANDIDATE == B.CURRENT_CANDIDATE else "setup-ready", child, start, xid, capture, report)
                 report["setupNativeRequirementsVerified"] = True
             else:
                 call(root, env_child, "save-guide", child, start, xid, capture, report)
                 call(root, env_child, "mcp-saved", child, start, xid, capture, report)
                 report["preferenceAfterSave"] = fixture_check(root, before, saved=True)
                 report["mcpNativePreferenceVerified"] = True
+                if B.SELECTED_CANDIDATE == B.CURRENT_CANDIDATE:
+                    report["phase"] = "close-mcp-view"
+                    call(root, env_child, "close-mcp", child, start, xid, capture, report)
+                    call(root, env_child, "confirm-close-mcp", child, start, xid, capture, report)
+                    call(root, env_child, "mcp-closed", child, start, xid, capture, report)
+                    wait_backend_gone(approved["native"], helper, capture)
+                    report["mcpBackendAbsentAfterViewClose"] = True
+                    fixture_check(root, before, saved=True)
+                    call(root, env_child, "return-apps", child, start, xid, capture, report)
         report["bitmap"] = B.run_worker(root, env_child, "bitmap", child.pid, start, xid, capture, report["workers"])
         report["phase"] = "normal-close"
         B.normal_close(root, env_child, child, start, xid, capture, report, helper)

@@ -153,7 +153,9 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(h.Request.parse(base).window, 456)
         for title, buttons in h.BUTTONS.items():
             for name in buttons:
-                self.assertEqual(h.Request.parse(["click", *base[1:6], title, "DIALOG", name]).button, name)
+                args = ["click", *base[1:6], title, "ALERT" if title == h.ROOT_CLOSE_TITLE else "DIALOG", name]
+                options = {"gtk_message_info_frame": (10, 20, 600, 240)} if title == h.ROOT_CLOSE_TITLE else {}
+                self.assertEqual(h.Request.parse(args, **options).button, name)
         for index, value in ((0, "kill"), (1, "1"), (1, "123x"), (2, "0"), (3, "relative"), (4, "bad"),
                              (5, "0"), (5, "4294967296"), (6, ""), (6, "bad\nname"), (7, "UNKNOWN")):
             args = list(base)
@@ -437,6 +439,106 @@ class XResTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "close request refused"):
             x.close_window(456, expected)
         self.assertEqual(len(sends), 1)
+
+
+class RootCloseProfileTests(unittest.TestCase):
+    def close_fixture(self):
+        f = GtkMessageContractTests().setup_fixture("Enable managed MCP routing")
+        f.x11.info["title"] = f.heading.name = h.ROOT_CLOSE_TITLE
+        f.body.name = h.ROOT_CLOSE_BODY
+        f.control.name, f.approval.name = "Keep open", "Close view"
+        f.req = h.Request.parse(["click", "123", "9876", EXE, DIGEST, "456", h.ROOT_CLOSE_TITLE, "ALERT", "Close view"],
+                                gtk_message_info_frame=f.frame)
+        nodes = [f.desktop, f.app, f.window, *f.window.children, *f.app.children[1:]]
+        for index, node in enumerate(nodes):
+            node.app, node.path = types.SimpleNamespace(bus_name=":1.123"), "/org/a11y/atspi/accessible/" + str(index)
+            node.parent = next((parent for parent in nodes if node in parent.children), None)
+            node.get_parent = lambda node=node: node.parent
+            fresh = {"cleared": False}
+            def clear(fresh=fresh):
+                fresh["cleared"] = True
+            def consume(fresh=fresh):
+                self.assertTrue(fresh["cleared"], "Close profile child getter lacked explicit cache clear")
+                fresh["cleared"] = False
+            def count(node=node, consume=consume):
+                consume()
+                return len(node.children)
+            def child(index, node=node, consume=consume):
+                consume()
+                return node.children[index]
+            node.clear_cache, node.get_child_count, node.get_child_at_index = clear, count, child
+        f.owner = types.SimpleNamespace(request=f.req, recheck=lambda **_: None,
+            node=lambda node: h.require(node.get_process_id() == 123, "foreign Root"),
+            references=types.SimpleNamespace(identity=lambda node, _: [node.app.bus_name, node.path], aliases={":1.123": {"owner": ":1.123"}}))
+        f.perform = lambda req=None: h.perform(req or f.req, f.api, f.proc, f.x11, root_close_owner=f.owner)
+        return f
+
+    def test_snapshot_then_fresh_single_click_with_exact_context_and_frame(self):
+        f = self.close_fixture()
+        args = ["snapshot", "123", "9876", EXE, DIGEST, "456", h.ROOT_CLOSE_TITLE, "ALERT"]
+        snapshot = f.perform(h.Request.parse(args, gtk_message_info_frame=f.frame))
+        self.assertEqual(snapshot["actionCount"], 0)
+        self.assertEqual(f.approval.calls, 0)
+        result = f.perform()
+        self.assertEqual(result["actionCount"], 1)
+        self.assertEqual(result["axName"], "Information")
+        self.assertEqual(f.approval.calls, 1)
+        self.assertEqual(f.control.calls, 0)
+
+    def test_native_frame_is_mandatory_even_for_direct_requests_and_sealed_is_refused(self):
+        f = self.close_fixture()
+        for action in ("snapshot", "click"):
+            args = [action, "123", "9876", EXE, DIGEST, "456", h.ROOT_CLOSE_TITLE, "ALERT"]
+            if action == "click":
+                args.append("Close view")
+            with self.assertRaises(RuntimeError):
+                h.Request.parse(args)
+            direct = h.Request(action, 123, "9876", EXE, DIGEST, 456, h.ROOT_CLOSE_TITLE, "ALERT", "Close view" if action == "click" else "")
+            with self.assertRaises(RuntimeError):
+                f.perform(direct)
+        value, pins = receipt_fixture()
+        with self.assertRaises(RuntimeError):
+            h.Request.sealed(["snapshot", "456", h.ROOT_CLOSE_TITLE, "ALERT"], h.Receipt.parse(value, pins), gtk_message_info_frame=f.frame)
+        with self.assertRaises(RuntimeError):
+            h.perform(f.req, f.api, f.proc, f.x11)
+        f.owner.request = types.SimpleNamespace(pid=999, start=f.req.start, executable=EXE, sha256=DIGEST)
+        with self.assertRaises(RuntimeError):
+            f.perform()
+        self.assertEqual(f.approval.calls, 0)
+
+    def test_context_geometry_identity_foreign_cycle_duplicate_and_parent_fail_closed(self):
+        for change in ("title", "body", "buttons", "ax-name", "role", "native-frame", "ax-frame", "foreign", "bus", "parent", "cycle", "duplicate", "image", "second-window"):
+            with self.subTest(change=change):
+                f = self.close_fixture()
+                if change == "title": f.heading.name = "Other title"
+                elif change == "body": f.body.name += " changed"
+                elif change == "buttons": f.control.name = "Not now"
+                elif change == "ax-name": f.window.name = h.ROOT_CLOSE_TITLE
+                elif change == "role": f.window.role = ROLE.DIALOG
+                elif change == "native-frame": f.x11.frame_rectangle = lambda _: (11, 20, 600, 240)
+                elif change == "ax-frame": f.window.get_component_iface = lambda: types.SimpleNamespace(get_extents=lambda _: types.SimpleNamespace(x=11, y=20, width=600, height=240))
+                elif change == "foreign": f.body.pid = 999
+                elif change == "bus": f.body.app.bus_name = ":1.999"
+                elif change == "parent": f.body.parent = f.approval
+                elif change == "cycle": f.approval.children.append(f.window)
+                elif change == "duplicate": f.body.path = f.heading.path
+                elif change == "image": f.proc.hash = "f" * 64
+                else: f.app.children.append(f.window)
+                with self.assertRaises(RuntimeError):
+                    f.perform()
+                self.assertEqual(f.approval.calls, 0)
+
+    def test_complete_fresh_graph_change_and_uncertain_effect_never_retry(self):
+        f = self.close_fixture()
+        f.proc.hook = lambda: setattr(f.body, "path", f.body.path + "changed")
+        with self.assertRaisesRegex(RuntimeError, "graph changed"):
+            f.perform()
+        self.assertEqual(f.approval.calls, 0)
+        f = self.close_fixture()
+        f.approval.accept = False
+        with self.assertRaises(h.ActionError):
+            f.perform()
+        self.assertEqual(f.approval.calls, 1)
 
 
 class GtkMessageContractTests(unittest.TestCase):
