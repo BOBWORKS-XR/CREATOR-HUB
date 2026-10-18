@@ -19,10 +19,16 @@ async function open(page, options = {}) {
       connection_guide_version: options.guide ? 0 : 1, unrelatedSetting: 'preserve' };
     window.savedConfig = config;
     window.pendingRestore = options.restore ? [options.restore] : [];
-    const productStatus = options.productStatus || 'current';
+    window.productStatus = options.productStatus || 'current';
     window.productRecovery = options.productRecovery || options.productRecoveryCompleted ? [{ journal: '/retained/recovery', historical_completed: options.productRecoveryCompleted === true, completed: options.productRecoveryCompleted === true, files: [] }] : [];
-    const productReport = () => ({ status: productStatus, currentPath: '/settings/current.json', legacyPath: '/settings/legacy.json',
+    const productReport = () => ({ status: window.productStatus, currentPath: '/settings/current.json', legacyPath: '/settings/legacy.json',
       evidencePath: '/retained/evidence.json', backups: options.productStatus ? ['/retained/exact-backup'] : [], recovery: structuredClone(window.productRecovery) });
+    window.feedbackDocuments = structuredClone(options.feedbackDocuments || {});
+    const feedback = project => {
+      const document = window.feedbackDocuments[project] || {};
+      return { enabled: document.feedbackEnabled === true, usageCheckIns: document.feedbackEnabled === true && document.usageCheckInsEnabled === true,
+        file: `${project}/.bantworks-mcp/feedback/MCP_FEEDBACK.md` };
+    };
     const clients = ['codex', 'claude', 'claudeDesktop', 'antigravity', 'opencode'].map(id => ({ id,
       detected: ['codex', 'claudeDesktop'].includes(id), configured: true,
       supported: id !== 'claudeDesktop' || !options.linux }));
@@ -63,15 +69,16 @@ async function open(page, options = {}) {
           case 'finish_ui_operation': return null;
           case 'product_settings_status': return productReport();
           case 'review_product_settings': {
+            const pendingRecovery = window.productRecovery.some(item => !item.historical_completed);
             if (window.approveProduct === true) window.productRecovery = window.productRecovery.map(item => ({ ...item, historical_completed: true, completed: true }));
-            window.lastProductReview = { ...productReport(), approved: window.approveProduct === true };
+            window.lastProductReview = { ...productReport(), approved: window.approveProduct === true && (window.productStatus !== 'none' || pendingRecovery) };
             return structuredClone(window.lastProductReview);
           }
           case 'load_config': return structuredClone(config);
           case 'save_config': Object.assign(config, structuredClone(fields.config)); return null;
           case 'discover_unity_projects': return [{ name: 'Creator project', path: '/projects/Creator' }];
           case 'get_onboarding_status': return { managedRouting: true, runtime: { ready: true, bundled: true },
-            project: { valid: true, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: profile }, clients,
+            project: { valid: Boolean(fields.unityProjectPath?.trim()) && !options.invalidProject, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: profile }, clients,
             unityCli: { available: true, canEnable: true, enabled: config.unity_cli_enabled === true, message: 'Unity CLI detected; optional and experimental.' } };
           case 'pick_project_folder': return '/projects/picked';
           case 'add_project': return { ...channel, id: 'new', scene_path: null, unity_project_path: options.canonicalPath || fields.projectPath };
@@ -93,6 +100,16 @@ async function open(page, options = {}) {
           }
           case 'update_configured_unity_extensions': return { checked: 1 + (options.bridgeFailures?.length || 0), updated: 1, current: 0, failed: options.bridgeFailures || [] };
           case 'pending_client_recovery': return [];
+          case 'get_project_feedback_settings':
+            if (Object.keys(fields).join() !== 'unityProjectPath' || typeof fields.unityProjectPath !== 'string') throw new Error('Invalid feedback read DTO');
+            return options.invalidFeedback ? { enabled: 'unknown' } : feedback(fields.unityProjectPath);
+          case 'set_project_feedback_settings':
+            if (Object.keys(fields).sort().join() !== 'enabled,unityProjectPath,usageCheckIns' || typeof fields.unityProjectPath !== 'string'
+              || typeof fields.enabled !== 'boolean' || typeof fields.usageCheckIns !== 'boolean') throw new Error('Invalid feedback write DTO');
+            window.feedbackDocuments[fields.unityProjectPath] = { ...window.feedbackDocuments[fields.unityProjectPath],
+              feedbackEnabled: fields.enabled, usageCheckInsEnabled: fields.enabled && fields.usageCheckIns };
+            if (options.feedbackFailureAfterSave) throw new Error('<img src=x onerror=alert(1)> Feedback save outcome unknown');
+            return feedback(fields.unityProjectPath);
           case 'review_existing_client_connections': return { status: 'migrated', count: fields.clients.length };
           case 'recover_client_connection': return { completed: true };
           case 'update_codex_mcp_config': case 'update_claude_mcp_config': case 'update_claude_desktop_mcp_config':
@@ -477,16 +494,54 @@ for (const settings of [{ productStatus: 'current' }, { productStatus: 'none' },
   await page.getByText('Advanced settings', { exact: true }).click();
   await expect(field(page, 'mcp', 'product-review-advanced')).toBeEnabled();
   await field(page, 'mcp', 'product-review-advanced').click();
-  await expect(field(page, 'mcp', 'product-panel')).toBeVisible();
-  await expect(field(page, 'mcp', 'setup')).toBeDisabled();
-  await expect(field(page, 'mcp', 'product-review')).toBeEnabled();
-  await expect(field(page, 'mcp', 'product-status')).toContainText('without explicit approval');
-  expect((await commands(page, 'load_config')).length).toBe(1);
-  await page.evaluate(() => { window.approveProduct = true; }); await field(page, 'mcp', 'product-review').click();
   await expect(field(page, 'mcp', 'setup')).toBeEnabled();
   await expect(field(page, 'mcp', 'product-panel')).toBeHidden();
-  expect((await commands(page, 'load_config')).length).toBe(2);
+  expect(await page.evaluate(() => lastProductReview.approved)).toBe(false);
+  expect((await commands(page, 'load_config')).length).toBe(1);
+  await show(page, 'setup'); await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  await page.evaluate(() => { window.approveProduct = true; }); await field(page, 'mcp', 'product-review-advanced').click();
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  await expect(field(page, 'mcp', 'product-panel')).toBeHidden();
+  expect(await page.evaluate(() => lastProductReview.approved)).toBe(settings.productStatus !== 'none');
+  expect((await commands(page, 'load_config')).length).toBe(settings.productStatus === 'none' ? 1 : 2);
   expect((await commands(page, 'save_config')).length).toBe(0);
+});
+
+for (const issue of ['conflict', 'legacy-only', 'recovery']) test(`a cancelled review cannot preserve Ready after new native ${issue}`, async ({ page }) => {
+  await open(page); await show(page, 'mcp');
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await page.evaluate(issue => {
+    if (issue === 'recovery') window.productRecovery = [{ journal: '/new/recovery', historical_completed: false, files: [] }];
+    else window.productStatus = issue;
+  }, issue);
+  await field(page, 'mcp', 'product-review-advanced').click();
+  await expect(field(page, 'mcp', 'setup')).toBeDisabled();
+  await expect(field(page, 'mcp', 'product-panel')).toBeVisible();
+  await expect(field(page, 'mcp', 'product-status')).toContainText('without explicit approval');
+  expect((await commands(page, 'load_config')).length).toBe(1);
+  expect((await commands(page, 'save_config')).length).toBe(0);
+});
+
+test('a healthy cancelled review never unlocks an uncertain workflow release', async ({ page }) => {
+  await open(page, { productStatus: 'none' }); await show(page, 'mcp');
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await page.evaluate(() => { window.failNext = 'finish_ui_operation'; });
+  await field(page, 'mcp', 'product-review-advanced').click();
+  await expect(field(page, 'mcp', 'error')).toContainText('Operation state is unknown');
+  await expect(field(page, 'mcp', 'setup')).toBeDisabled();
+  await expect(field(page, 'mcp', 'product-panel')).toBeVisible();
+  expect((await commands(page, 'load_config')).length).toBe(1);
+});
+
+test('empty settings review cannot unlock an initially failed load', async ({ page }) => {
+  await open(page, { productStatus: 'none', fail: 'load_config' }); await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'setup')).toBeDisabled();
+  await page.evaluate(() => { window.approveProduct = true; });
+  await field(page, 'mcp', 'product-review').click();
+  expect(await page.evaluate(() => lastProductReview.approved)).toBe(false);
+  await expect(field(page, 'mcp', 'setup')).toBeDisabled();
+  expect((await commands(page, 'load_config')).length).toBe(1);
 });
 
 test('ordinary MCP errors keep the existing Check control without startup Retry or settings panel', async ({ page }) => {
@@ -569,6 +624,161 @@ test('protected load refusal leaves settings review reachable and does not repla
   expect((await commands(page, 'load_config')).length).toBe(2);
   await expect(field(page, 'mcp', 'retry')).toBeHidden();
   expect((await commands(page, 'save_config')).length).toBe(0);
+});
+
+test('project feedback initializes read-only and saves exact scoped DTOs without launcher changes', async ({ page }) => {
+  await open(page, { feedbackDocuments: { '/projects/Creator': { feedbackEnabled: false, usageCheckInsEnabled: false, unrelated: 'keep' },
+    '/projects/Other': { feedbackEnabled: true, usageCheckInsEnabled: true, unrelated: 'other' } } });
+  await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'feedback-enabled')).toBeEnabled();
+  await expect(field(page, 'mcp', 'feedback-enabled')).not.toBeChecked();
+  await expect(field(page, 'mcp', 'feedback-usage')).toBeDisabled();
+  expect((await commands(page, 'get_project_feedback_settings')).map(call => call.args.args)).toEqual([{ unityProjectPath: '/projects/Creator' }]);
+  expect(await commands(page, 'set_project_feedback_settings')).toEqual([]);
+  await field(page, 'mcp', 'feedback-enabled').check(); await field(page, 'mcp', 'feedback-usage').check();
+  expect(await commands(page, 'set_project_feedback_settings')).toEqual([]);
+  await field(page, 'mcp', 'feedback-save').click();
+  await expect(field(page, 'mcp', 'feedback-status')).toContainText('Preferences saved and checked');
+  expect((await commands(page, 'set_project_feedback_settings'))[0].args.args).toEqual({ unityProjectPath: '/projects/Creator', enabled: true, usageCheckIns: true });
+  expect((await commands(page, 'get_project_feedback_settings')).length).toBe(2);
+  await field(page, 'mcp', 'feedback-enabled').uncheck();
+  await expect(field(page, 'mcp', 'feedback-usage')).not.toBeChecked();
+  await expect(field(page, 'mcp', 'feedback-usage')).toBeDisabled();
+  await field(page, 'mcp', 'feedback-save').click();
+  await expect(field(page, 'mcp', 'feedback-status')).toContainText('Preferences saved and checked');
+  expect((await commands(page, 'set_project_feedback_settings'))[1].args.args).toEqual({ unityProjectPath: '/projects/Creator', enabled: false, usageCheckIns: false });
+  expect(await page.evaluate(() => feedbackDocuments)).toEqual({ '/projects/Creator': { feedbackEnabled: false, usageCheckInsEnabled: false, unrelated: 'keep' },
+    '/projects/Other': { feedbackEnabled: true, usageCheckInsEnabled: true, unrelated: 'other' } });
+  expect(await commands(page, 'save_config')).toEqual([]);
+  expect(await page.evaluate(() => savedConfig.unrelatedSetting)).toBe('preserve');
+});
+
+test('feedback follows the checked draft project, retains navigation state and refuses unchecked or invalid paths', async ({ page }) => {
+  await open(page, { feedbackDocuments: { '/projects/Other': { feedbackEnabled: true, usageCheckInsEnabled: true } } }); await show(page, 'mcp');
+  await field(page, 'mcp', 'project').fill('/projects/Other');
+  await expect(field(page, 'mcp', 'feedback-save')).toBeDisabled();
+  await field(page, 'mcp', 'feedback-save').dispatchEvent('click');
+  expect(await commands(page, 'set_project_feedback_settings')).toEqual([]);
+  await field(page, 'mcp', 'check').click();
+  await expect(field(page, 'mcp', 'feedback-enabled')).toBeChecked();
+  await expect(field(page, 'mcp', 'feedback-usage')).toBeChecked();
+  await expect(field(page, 'mcp', 'feedback-status')).toContainText('/projects/Other/.bantworks-mcp/feedback/MCP_FEEDBACK.md');
+  await show(page, 'setup'); await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'feedback-usage')).toBeChecked();
+  expect((await commands(page, 'get_project_feedback_settings')).length).toBe(2);
+  await field(page, 'mcp', 'feedback-usage').uncheck(); await field(page, 'mcp', 'feedback-save').click();
+  await expect(field(page, 'mcp', 'feedback-status')).toContainText('Preferences saved and checked');
+  expect((await commands(page, 'set_project_feedback_settings'))[0].args.args).toEqual({ unityProjectPath: '/projects/Other', enabled: true, usageCheckIns: false });
+  await field(page, 'mcp', 'project').fill(''); await field(page, 'mcp', 'check').click();
+  await expect(field(page, 'mcp', 'feedback-enabled')).toBeDisabled();
+  await expect(field(page, 'mcp', 'feedback-status')).toContainText('valid Unity project');
+  expect((await commands(page, 'get_project_feedback_settings')).length).toBe(3);
+});
+
+for (const fixture of [{ invalidProject: true }, { invalidFeedback: true }]) test(`feedback rejects invalid project/response: ${JSON.stringify(fixture)}`, async ({ page }) => {
+  await open(page, fixture); await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'feedback-enabled')).toBeDisabled();
+  await expect(field(page, 'mcp', 'feedback-save')).toBeDisabled();
+  if (fixture.invalidProject) expect(await commands(page, 'get_project_feedback_settings')).toEqual([]);
+  else await expect(field(page, 'mcp', 'feedback-error')).toContainText('response is incomplete');
+  await field(page, 'mcp', 'feedback-save').dispatchEvent('click');
+  expect(await commands(page, 'set_project_feedback_settings')).toEqual([]);
+});
+
+test('feedback read failure stays local and explicitly retries without rewriting any settings', async ({ page }) => {
+  await open(page, { fail: 'get_project_feedback_settings' }); await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  await expect(field(page, 'mcp', 'feedback-error')).toContainText('get_project_feedback_settings');
+  await expect(field(page, 'mcp', 'feedback-save')).toBeDisabled();
+  await field(page, 'mcp', 'feedback-check').click();
+  await expect(field(page, 'mcp', 'feedback-enabled')).toBeEnabled();
+  await expect(field(page, 'mcp', 'feedback-error')).toBeHidden();
+  expect((await commands(page, 'get_project_feedback_settings')).length).toBe(2);
+  expect(await commands(page, 'set_project_feedback_settings')).toEqual([]);
+  expect(await commands(page, 'save_config')).toEqual([]);
+});
+
+test('late feedback reads cannot populate a different project or authorize its save', async ({ page }) => {
+  await open(page, { feedbackDocuments: { '/projects/Creator': { feedbackEnabled: true, usageCheckInsEnabled: true } } }); await show(page, 'mcp');
+  await page.evaluate(() => { window.hold = 'get_project_feedback_settings'; });
+  await field(page, 'mcp', 'feedback-check').click();
+  await page.waitForFunction(() => pending.get_project_feedback_settings);
+  await field(page, 'mcp', 'project').evaluate(input => { input.value = '/projects/Other'; input.dispatchEvent(new Event('input')); });
+  await page.evaluate(() => { window.hold = null; pending.get_project_feedback_settings(); });
+  await expect(page.locator('#feature-mcp')).toHaveAttribute('aria-busy', 'false');
+  await expect(field(page, 'mcp', 'feedback-enabled')).not.toBeChecked();
+  await expect(field(page, 'mcp', 'feedback-save')).toBeDisabled();
+  await field(page, 'mcp', 'feedback-save').dispatchEvent('click');
+  expect(await commands(page, 'set_project_feedback_settings')).toEqual([]);
+  await field(page, 'mcp', 'check').click();
+  await expect(field(page, 'mcp', 'feedback-enabled')).toBeEnabled();
+  await expect(field(page, 'mcp', 'feedback-enabled')).not.toBeChecked();
+  expect((await commands(page, 'get_project_feedback_settings')).at(-1).args.args).toEqual({ unityProjectPath: '/projects/Other' });
+});
+
+test('feedback save rechecks its project after acquiring the native workflow', async ({ page }) => {
+  await open(page); await show(page, 'mcp');
+  await field(page, 'mcp', 'feedback-enabled').check();
+  await page.evaluate(() => { window.hold = 'begin_ui_operation'; });
+  await field(page, 'mcp', 'feedback-save').click(); await page.waitForFunction(() => pending.begin_ui_operation);
+  await field(page, 'mcp', 'project').evaluate(input => { input.value = '/projects/Other'; input.dispatchEvent(new Event('input')); });
+  await page.evaluate(() => { window.hold = null; pending.begin_ui_operation(); });
+  await expect(field(page, 'mcp', 'error')).toContainText('Project changed before feedback could be saved');
+  expect(await commands(page, 'set_project_feedback_settings')).toEqual([]);
+  await expect(field(page, 'mcp', 'feedback-save')).toBeDisabled();
+});
+
+test('feedback duplicate saves are blocked and an unknown partial write requires a read-only check', async ({ page }) => {
+  await open(page, { feedbackFailureAfterSave: true }); await show(page, 'mcp');
+  await field(page, 'mcp', 'feedback-enabled').check(); await field(page, 'mcp', 'feedback-usage').check();
+  await page.evaluate(() => { window.hold = 'set_project_feedback_settings'; });
+  await field(page, 'mcp', 'feedback-save').click(); await page.waitForFunction(() => pending.set_project_feedback_settings);
+  await field(page, 'mcp', 'feedback-save').dispatchEvent('click');
+  expect((await commands(page, 'set_project_feedback_settings')).length).toBe(1);
+  await page.evaluate(() => { window.hold = null; pending.set_project_feedback_settings(); });
+  await expect(field(page, 'mcp', 'feedback-error')).toContainText('<img src=x onerror=alert(1)>');
+  expect(await field(page, 'mcp', 'feedback-error').locator('img').count()).toBe(0);
+  await expect(field(page, 'mcp', 'feedback-status')).toContainText('outcome is unknown');
+  await expect(field(page, 'mcp', 'feedback-save')).toBeDisabled();
+  expect((await commands(page, 'get_project_feedback_settings')).length).toBe(1);
+  await field(page, 'mcp', 'feedback-check').click();
+  await expect(field(page, 'mcp', 'feedback-enabled')).toBeChecked();
+  await expect(field(page, 'mcp', 'feedback-usage')).toBeChecked();
+  await expect(field(page, 'mcp', 'feedback-error')).toBeHidden();
+  expect((await commands(page, 'set_project_feedback_settings')).length).toBe(1);
+  expect(await commands(page, 'save_config')).toEqual([]);
+});
+
+test('feedback save reports uncertain readback and never acknowledges a failed workflow release', async ({ page }) => {
+  await open(page); await show(page, 'mcp');
+  await field(page, 'mcp', 'feedback-enabled').check();
+  await page.evaluate(() => { window.failNext = 'get_project_feedback_settings'; });
+  await field(page, 'mcp', 'feedback-save').click();
+  await expect(field(page, 'mcp', 'error')).toContainText('could not be verified after saving');
+  await expect(field(page, 'mcp', 'feedback-save')).toBeDisabled();
+  await field(page, 'mcp', 'feedback-check').click();
+  await expect(field(page, 'mcp', 'feedback-enabled')).toBeChecked();
+  await page.evaluate(() => { window.failNext = 'finish_ui_operation'; });
+  await field(page, 'mcp', 'feedback-save').click();
+  await expect(field(page, 'mcp', 'error')).toContainText('Operation state is unknown');
+  await expect(field(page, 'mcp', 'feedback-status')).not.toContainText('Preferences saved and checked');
+  await expect(field(page, 'mcp', 'feedback-save')).toBeDisabled();
+  expect((await commands(page, 'set_project_feedback_settings')).length).toBe(2);
+});
+
+test('feedback readback drift displays actual preferences without claiming the requested save', async ({ page }) => {
+  await open(page); await show(page, 'mcp');
+  await field(page, 'mcp', 'feedback-enabled').check();
+  await page.evaluate(() => { window.hold = 'get_project_feedback_settings'; });
+  await field(page, 'mcp', 'feedback-save').click(); await page.waitForFunction(() => pending.get_project_feedback_settings);
+  await page.evaluate(() => {
+    window.feedbackDocuments['/projects/Creator'].feedbackEnabled = false;
+    window.hold = null; pending.get_project_feedback_settings();
+  });
+  await expect(field(page, 'mcp', 'error')).toContainText('Read-back feedback preferences differ');
+  await expect(field(page, 'mcp', 'feedback-enabled')).not.toBeChecked();
+  await expect(field(page, 'mcp', 'feedback-status')).not.toContainText('Preferences saved and checked');
+  expect((await commands(page, 'set_project_feedback_settings')).length).toBe(1);
 });
 
 test('MCP manual Desktop apply/disconnect and advanced options preserve unknown config fields', async ({ page }) => {

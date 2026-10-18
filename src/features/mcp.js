@@ -32,6 +32,12 @@ export function mount(root, api) {
         <section class="feature-section" aria-label="Connection status"><h3>Connection status</h3><div data-field="checks"></div><p class="feature-note">Saved settings are not proof of a live AI connection. Fully quit and reopen changed AI clients, then ask your AI to call get_bridge_status.</p></section>
       </div>
       <section class="feature-section" aria-label="Saved Unity projects"><div class="feature-heading"><h3>Unity projects</h3><div class="feature-actions"><button data-field="add" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span> Add project</button><button data-field="bridges" class="text-button" type="button">Update bridges</button></div></div><div data-field="projects"></div></section>
+      <section class="feature-section" aria-label="Local project feedback"><div class="feature-heading"><h3>Local project feedback</h3><button data-field="feedback-check" class="icon-button" type="button" title="Check project feedback preferences" aria-label="Check project feedback preferences" disabled><span class="icon icon-refresh" aria-hidden="true"></span></button></div>
+        <label class="feature-check"><input data-field="feedback-enabled" type="checkbox" disabled><span>Enable local feedback for this Unity project</span></label>
+        <label class="feature-check"><input data-field="feedback-usage" type="checkbox" disabled><span>Enable optional usage check-ins</span></label>
+        <p data-field="feedback-status" class="feature-note" role="status">Select and check a Unity project. Local only; nothing is uploaded automatically.</p><p data-field="feedback-error" class="feature-error" role="alert" hidden></p>
+        <button data-field="feedback-save" class="text-button" type="button" disabled>Save project feedback preferences</button>
+      </section>
       <details class="feature-section"><summary>Existing client connections and recovery</summary><p class="feature-note">Review only the clients selected above. Native review keeps backups and asks before changing existing entries.</p><button data-field="review" class="text-button" type="button">Review selected connections</button><button data-field="recovery-check" class="text-button" type="button">Check interrupted changes</button><div data-field="recovery"></div><button data-field="recover" class="text-button" type="button" disabled>Review and resume eligible changes</button></details>
       <details class="feature-section"><summary>Advanced settings</summary>
         <button data-field="product-review-advanced" class="text-button" type="button">Review saved MCP settings</button>
@@ -55,6 +61,8 @@ export function mount(root, api) {
   let productReport = null;
   let productIssue = false;
   let productReviewed = false;
+  let feedbackProject = null;
+  let feedbackRequest = 0;
   const clientUi = new Map();
   const active = () => config?.channels?.find(channel => channel.id === config.active_channel_id);
   const selectedClients = () => clients.filter(([id]) => clientUi.get(id).checkbox.checked);
@@ -108,6 +116,11 @@ export function mount(root, api) {
     }
     $('cli').disabled = !onboarding?.unityCli?.canEnable && !onboarding?.unityCli?.enabled;
     $('recover').disabled = !recovery.some(item => item.canResume);
+    const feedbackReady = feedbackProject !== null && feedbackProject === $('project').value && onboarding?.project?.valid;
+    $('feedback-enabled').disabled = !feedbackReady;
+    $('feedback-usage').disabled = !feedbackReady || !$('feedback-enabled').checked;
+    $('feedback-save').disabled = !feedbackReady;
+    $('feedback-check').disabled = !onboarding?.project?.valid;
   }
   function renderStatus(value) {
     if (!value?.runtime || !Array.isArray(value.clients)) throw new Error('Connection status is incomplete. Check again.');
@@ -138,7 +151,43 @@ export function mount(root, api) {
     ];
     $('guide-steps').replaceChildren(...steps.map(step => node('li', step))); controls();
   }
-  async function check() { renderStatus(await page.call('get_onboarding_status', { unityProjectPath: $('project').value || null })); }
+  function clearFeedback(message) {
+    ++feedbackRequest; feedbackProject = null;
+    $('feedback-enabled').checked = false; $('feedback-usage').checked = false;
+    $('feedback-error').hidden = true; $('feedback-status').textContent = message;
+    controls();
+  }
+  async function readFeedback(project = $('project').value) {
+    clearFeedback('Checking local preferences for this project. Nothing is uploaded automatically.');
+    if (!project.trim() || project !== $('project').value || !onboarding?.project?.valid) {
+      $('feedback-status').textContent = 'Select and check a valid Unity project before changing local feedback.';
+      return false;
+    }
+    const request = feedbackRequest;
+    try {
+      const result = await page.call('get_project_feedback_settings', { unityProjectPath: project });
+      if (request !== feedbackRequest || project !== $('project').value) return false;
+      if (typeof result?.enabled !== 'boolean' || typeof result.usageCheckIns !== 'boolean'
+        || typeof result.file !== 'string' || !result.file || (!result.enabled && result.usageCheckIns)) throw new Error('Project feedback response is incomplete. Preferences were not changed by this check.');
+      feedbackProject = project;
+      $('feedback-enabled').checked = result.enabled; $('feedback-usage').checked = result.usageCheckIns;
+      $('feedback-status').textContent = result.enabled ? `Local feedback: ${result.file}` : 'Local feedback is off for this project. Nothing is uploaded automatically.';
+      controls(); return true;
+    } catch (reason) {
+      if (request === feedbackRequest && project === $('project').value) {
+        $('feedback-status').textContent = 'Preferences could not be verified. Check project feedback before saving.';
+        $('feedback-error').textContent = text(reason); $('feedback-error').hidden = false;
+      }
+      return false;
+    }
+  }
+  async function check() {
+    const project = $('project').value;
+    clearFeedback('Check the Unity connection before changing local feedback.');
+    const result = await page.call('get_onboarding_status', { unityProjectPath: project || null });
+    if (project !== $('project').value) return;
+    renderStatus(result); await readFeedback(project);
+  }
   async function followActive(channel) {
     if (!config.auto_start || !channel) return;
     for (const [id, , commandId] of clients) {
@@ -210,26 +259,58 @@ export function mount(root, api) {
       await page.call(`remove_${commandId}_mcp_config`); await check();
     }, `Disconnecting ${label}`));
   }
-  page.on($('project'), 'input', () => { onboarding = null; controls(); });
+  page.on($('project'), 'input', () => { onboarding = null; clearFeedback('Project changed. Check the Unity connection to load its local feedback preferences.'); });
+  page.on($('feedback-enabled'), 'change', () => { if (!$('feedback-enabled').checked) $('feedback-usage').checked = false; controls(); });
+  page.on($('feedback-check'), 'click', () => run(() => readFeedback(), 'Checking project feedback'));
+  page.on($('feedback-save'), 'click', async () => {
+    if (page.busy() || feedbackProject === null || feedbackProject !== $('project').value || !onboarding?.project?.valid) return;
+    const project = feedbackProject;
+    const enabled = $('feedback-enabled').checked;
+    const usageCheckIns = enabled && $('feedback-usage').checked;
+    const saved = await run(async () => {
+      if (project !== $('project').value || feedbackProject !== project || !onboarding?.project?.valid) throw new Error('Project changed before feedback could be saved. Check the selected project first.');
+      clearFeedback('Saving project feedback preferences.');
+      try {
+        await page.call('set_project_feedback_settings', { unityProjectPath: project, enabled, usageCheckIns });
+      } catch (reason) {
+        $('feedback-status').textContent = 'Save failed or its outcome is unknown. Check project feedback before trying another save.';
+        $('feedback-error').textContent = text(reason); $('feedback-error').hidden = false;
+        throw reason;
+      }
+      if (!await readFeedback(project)) throw new Error('Project feedback preferences could not be verified after saving. Check them before retrying; earlier changes may remain.');
+      if ($('feedback-enabled').checked !== enabled || $('feedback-usage').checked !== usageCheckIns) throw new Error('Read-back feedback preferences differ from the requested values. Review the displayed project preferences before another save.');
+    }, 'Saving project feedback');
+    if (saved && feedbackProject === project) $('feedback-status').textContent += ' Preferences saved and checked.';
+  });
   page.on($('check'), 'click', () => run(check, 'Checking connection'));
   page.on($('retry'), 'click', () => { if (!page.busy()) void api.retry('mcp'); });
   page.on($('product-check'), 'click', () => run(inspectProductSettings, 'Inspecting saved settings'));
   async function reviewProductSettings() {
     if (page.busy()) return;
+    const wasReady = page.initialized && !$('controls').disabled && !productIssue;
+    const wasReviewed = productReviewed;
+    let keepReady = false;
     productReviewed = false;
     page.lock(true);
     productIssue = true; productVisibility();
     const reviewed = await run(async () => {
       const report = await page.call('review_product_settings');
       renderProductSettings(report);
+      if (typeof report.approved !== 'boolean') throw new Error('Settings review outcome is unknown. Check retained settings before continuing.');
       // Report.status/backups alone cannot distinguish a native cancellation.
       if (report.approved !== true) {
-        $('product-status').textContent = 'Review returned without explicit approval. Originals are retained and the form stays locked.';
+        keepReady = wasReady && ['none', 'current', 'identical'].includes(report.status)
+          && report.recovery.every(item => item.historical_completed);
+        $('product-status').textContent = keepReady ? 'No settings change was approved. Existing ready settings remain in use.'
+          : 'Review returned without explicit approval. Originals are retained and the form stays locked.';
         return;
       }
       if (report.recovery.some(item => !item.historical_completed)) throw new Error('Settings recovery still needs review. Nothing was reset.');
       await reload();
     }, 'Reviewing saved settings');
+    if (reviewed && keepReady) {
+      productReviewed = wasReviewed; productIssue = false; productVisibility(); page.lock(false);
+    }
     if (reviewed && productReport?.approved === true && !$('controls').disabled) {
       productReviewed = true;
       $('product-status').textContent = 'Reviewed settings loaded from their existing store. Originals and backups were retained.';
