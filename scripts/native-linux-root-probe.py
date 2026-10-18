@@ -100,6 +100,38 @@ GTK3_REVIEWED_PINS = {
     "HANDOFF_SHA": "75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae",
     "COMPONENT_PINS": copy.deepcopy(GTK3_PREPARATION["components"]),
 }
+CURRENT_CANDIDATE = "retirement-534465a"
+CURRENT_PREPARATION = {
+    "source": "f66d37fae372ad975daaae4ef392089c6d8f784b", "tree": "5c49486ae727f2591fe80695bc22ea62b7699c03",
+    "run": 39041386789, "attempt": 1,
+    "handoffSha256": "1c8218184c49870acecef5335687e3702af3686e4a50427355a1f7bad416b71a",
+    "components": {
+        "mcp": (17328424, "3de059ab73f8e25946ce667df11b34fdb10db1039b05be9fcabd2a18aae96267"),
+        "setup": (16554072, "c960edfdd2f86d1ef994ef639b0d3e1b35041acb78935bf5d61dd7f69f32978c"),
+    },
+}
+CURRENT_REVIEWED_PINS = {
+    "SOURCE": "534465a86554e95b909bf9c7decbbb29cbca5267", "TREE": "db8c7b091d22f598bc789ac97d8d0153c391c8ec",
+    "RUN": 39042746816, "ATTEMPT": 1, "JOB": 117425377351,
+    "ARTIFACT": 12104548664, "ARTIFACT_NAME": "signed-unix-hub-linux-39042746816-1",
+    "ZIP_SIZE": 179416917, "ZIP_SHA": "904b51a0192027ba667702feb4a00721ad2d392fe473540b1f87121c6cacb3de",
+    "PINS": {
+        "creator-hub": (22058224, "178cd9b2623c14cac7c6d7cc475c816ddc1f9f3f5bcf5bb9fb3467cc7a795414", 0o755),
+        "builtin-manifest.json": (3663, "9202a9522fd7a34d101684dc1d8316c99f7f92de4e9f56555d4065145f3acfac", 0o644),
+        "modules.tar.gz": (55567201, "5b4f1fe031752cf14e8354e79f299891dee943a4be0be2034187fda242d3a9bb", 0o644),
+        "signed-unix-assembly.json": (875, "31821db48a13fab5551b231d6b5b769549620e4067015040b808bc95bbe567ec", 0o644),
+    },
+    "DEB_NAME": "Creator Hub_0.1.14_amd64.deb",
+    "DEB_PIN": (62215944, "06beb134dd2be9fbf08dadbb1a49e97a07ff4e591c56967b8d2cc5b8b844b14f", 0o644),
+    "INSTALLED_HUB_PIN": (22058224, "3357f024e3caff3e7563e702838b7e15e08bb8effd7915413e25c444d485ea7d", 0o755),
+    "INTEGRITY_PIN": (2151, "287ad1555c213f43cbfbaf420129f083d4c5417ee416eb21839b722f266a3ea6", 0o644),
+    "PRIVATE_SOURCE": CURRENT_PREPARATION["source"], "PRIVATE_RUN": 39041386789, "PRIVATE_ATTEMPT": 1,
+    "HANDOFF_SHA": CURRENT_PREPARATION["handoffSha256"], "COMPONENT_PINS": copy.deepcopy(CURRENT_PREPARATION["components"]),
+}
+RETIREMENT_FILES = {
+    "/usr/libexec/creator-hub-deb-retirement-helper": (1155128, "b3e4603af16c4c0f7b1962af8466e19b70d646f9b93dd35d82ec5c06639dc813", 0o755),
+    "/usr/share/polkit-1/actions/com.creatorworks.hub.deb-retirement.policy": (889, "5eb715286ff8d8cda8e612f8dc9d28d396068b2cdd470a5f3d92d7355e3e37c9", 0o644),
+}
 SELECTED_CANDIDATE = ORIGINAL_CANDIDATE
 _candidate_configured = False
 TITLE = "Creator Hub - Development Preview"
@@ -145,10 +177,11 @@ def validate_candidate_pins(pins):
         file_pin(pin, 0o755 if name == "creator-hub" else 0o644)
     for key, mode in (("DEB_PIN", 0o644), ("INSTALLED_HUB_PIN", 0o755), ("INTEGRITY_PIN", 0o644)):
         file_pin(pins[key], mode)
-    require(pins["PRIVATE_SOURCE"] == GTK3_PREPARATION["source"]
-            and pins["PRIVATE_RUN"] == GTK3_PREPARATION["run"] and pins["PRIVATE_ATTEMPT"] == GTK3_PREPARATION["attempt"]
-            and pins["HANDOFF_SHA"] == GTK3_PREPARATION["handoffSha256"]
-            and pins["COMPONENT_PINS"] == GTK3_PREPARATION["components"], "GTK3 private preparation binding differs")
+    preparation = CURRENT_PREPARATION if pins["SOURCE"] == CURRENT_REVIEWED_PINS["SOURCE"] else GTK3_PREPARATION
+    require(pins["PRIVATE_SOURCE"] == preparation["source"]
+            and pins["PRIVATE_RUN"] == preparation["run"] and pins["PRIVATE_ATTEMPT"] == preparation["attempt"]
+            and pins["HANDOFF_SHA"] == preparation["handoffSha256"]
+            and pins["COMPONENT_PINS"] == preparation["components"], "GTK3 private preparation binding differs")
     require(pins["SOURCE"] != ORIGINAL_REVIEWED_PINS["SOURCE"] and pins["RUN"] != ORIGINAL_REVIEWED_PINS["RUN"]
             and pins["ARTIFACT"] != ORIGINAL_REVIEWED_PINS["ARTIFACT"] and pins["ZIP_SHA"] != ORIGINAL_REVIEWED_PINS["ZIP_SHA"],
             "Original product cannot be relabeled as the GTK3 assembly")
@@ -156,9 +189,12 @@ def validate_candidate_pins(pins):
 
 def configure_candidate(name):
     global SELECTED_CANDIDATE, _candidate_configured
-    require(name in (ORIGINAL_CANDIDATE, GTK3_CANDIDATE), "Unknown reviewed candidate; paths/URLs/overrides are not accepted")
+    require(name in (ORIGINAL_CANDIDATE, GTK3_CANDIDATE, CURRENT_CANDIDATE), "Unknown reviewed candidate; paths/URLs/overrides are not accepted")
     require(not _candidate_configured or SELECTED_CANDIDATE == name, "Candidate switching within one process refused")
-    if name == GTK3_CANDIDATE:
+    if name == CURRENT_CANDIDATE:
+        validate_candidate_pins(CURRENT_REVIEWED_PINS)
+        selected = CURRENT_REVIEWED_PINS
+    elif name == GTK3_CANDIDATE:
         require(GTK3_REVIEWED_PINS is not None, "GTK3 outer assembly pins unavailable; signed preparation is not an assembled DEB")
         validate_candidate_pins(GTK3_REVIEWED_PINS)
         selected = GTK3_REVIEWED_PINS
@@ -197,10 +233,12 @@ def validate_source(binding):
     require(all(type(v) is int for v in (run["id"], run["run_attempt"], run["repository"]["id"],
                                         artifact["id"], artifact["size_in_bytes"], job["id"], job["run_id"], job["run_attempt"])),
             "Canonical source integers required")
+    event, branch = (("workflow_dispatch", "validation/linux-retirement-candidate-014")
+                     if SELECTED_CANDIDATE == CURRENT_CANDIDATE else ("push", "validation/unix-assembly-014"))
     require(run["id"] == RUN and run["run_attempt"] == ATTEMPT and run["head_sha"] == SOURCE
             and run["status"] == "completed" and run["conclusion"] == "success"
-            and run["repository"]["id"] == REPOSITORY_ID and run["event"] == "push"
-            and run["head_branch"] == "validation/unix-assembly-014"
+            and run["repository"]["id"] == REPOSITORY_ID and run["event"] == event
+            and run["head_branch"] == branch
             and run["path"] == ".github/workflows/unix-managed-assembly.yml", "Assembly run binding differs")
     require(artifact["id"] == ARTIFACT and artifact["name"] == ARTIFACT_NAME and artifact["expired"] is False
             and artifact["size_in_bytes"] == ZIP_SIZE and artifact["digest"] == "sha256:" + ZIP_SHA,
@@ -397,8 +435,9 @@ def verify_inputs(root, full=False):
             and receipt["privateSource"]["buildCommit"] == PRIVATE_SOURCE and receipt["handoffSha256"] == HANDOFF_SHA
             and receipt["privateModulesRecompiled"] is False and receipt["privateModulesResigned"] is False
             and receipt["nativeGuiAccepted"] is False and receipt["releaseReady"] is False, "Original assembly receipt differs")
-    if SELECTED_CANDIDATE == GTK3_CANDIDATE:
-        require(receipt["privateSource"]["sourceTree"] == GTK3_PREPARATION["tree"], "GTK3 preparation source tree differs")
+    if SELECTED_CANDIDATE in (GTK3_CANDIDATE, CURRENT_CANDIDATE):
+        preparation = CURRENT_PREPARATION if SELECTED_CANDIDATE == CURRENT_CANDIDATE else GTK3_PREPARATION
+        require(receipt["privateSource"]["sourceTree"] == preparation["tree"], "GTK3 preparation source tree differs")
     with input_path(root, "creator-hub").open("rb") as stream:
         elf = stream.read(20)
     require(elf[:7] == b"\x7fELF\x02\x01\x01" and elf[18:20] == b"\x3e\x00", "Exact native x86_64 ELF required")
@@ -421,7 +460,8 @@ def validate_integrity(integrity, manifest):
             and integrity["integrityPassed"] is True and integrity["writableGuiAccepted"] is False
             and integrity["releaseReady"] is False, "Original native package integrity refused")
     packages = integrity["packages"]
-    require([v["format"] for v in packages] == ["deb", "rpm", "appimage"], "Complete native format integrity required")
+    formats = ["deb"] if SELECTED_CANDIDATE == CURRENT_CANDIDATE else ["deb", "rpm", "appimage"]
+    require([v["format"] for v in packages] == formats, "Complete native format integrity required")
     expected = {**manifest["modules"]["mcp"]["files"], **manifest["modules"]["setup"]["files"],
                 **manifest["managedRouting"]["files"]}
     require(all(v["files"] == expected for v in packages), "Native package resource inventory differs")
@@ -449,7 +489,21 @@ def verify_stage(root, full=False):
     require(state["packageState"] == "creator-hub\t0.1.14\tamd64\tinstalled\n"
             and state["debSha256"] == DEB_PIN[1] and state["sourceCommit"] == SOURCE,
             "Actual dpkg installation receipt differs; bytes are independently rechecked")
+    if SELECTED_CANDIDATE == CURRENT_CANDIDATE:
+        result["installedRetirementFiles"] = verify_retirement_files()
     result.update(debInstalled=True, installedFiles=actual, packageState=state["packageState"])
+    return result
+
+
+def verify_retirement_files():
+    result = {}
+    for name, pin in RETIREMENT_FILES.items():
+        path = Path(name)
+        for ancestor in (path, *path.parents):
+            info = ancestor.lstat()
+            require(info.st_uid == info.st_gid == 0 and not info.st_mode & 0o7022
+                    and not ancestor.is_symlink(), "Installed privileged path is not root-protected")
+        result[name] = pinned(path, pin, pin[2])
     return result
 
 

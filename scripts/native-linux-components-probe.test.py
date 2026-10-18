@@ -1,4 +1,5 @@
 """Pure/temp contracts only. No application, installer, desktop or user data."""
+import contextlib
 import copy
 import hashlib
 import importlib.util
@@ -175,6 +176,32 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(subject.APPS["mcp"]["hash"], p.APPS["mcp"]["hash"])
         source = (HERE / "native-linux-components-probe.py").read_text()
         self.assertIn("excludes router fix b154e36", source)
+
+    def test_current_fixed_export_and_report_never_claim_old_bytes_or_acceptance(self):
+        subject = load("components_current_fixed_candidate", HERE / "native-linux-components-probe.py")
+        with mock.patch.object(subject, "admission"), \
+                mock.patch.dict(os.environ, {"CREATOR_LINUX_ROOT_CANDIDATE": subject.B.CURRENT_CANDIDATE}, clear=True), \
+                mock.patch.object(subject.sys, "argv", ["probe", "candidate-pins"]), \
+                mock.patch.object(subject.B, "ordinary") as paths, \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            subject.main()
+        exported = json.loads(output.getvalue())
+        self.assertEqual(exported["candidate"], "retirement-534465a")
+        self.assertEqual(exported["SOURCE"], "534465a86554e95b909bf9c7decbbb29cbca5267")
+        self.assertEqual(exported["PRIVATE_SOURCE"], "f66d37fae372ad975daaae4ef392089c6d8f784b")
+        self.assertEqual(exported["RUN"], 39042746816)
+        self.assertEqual(subject.APPS["mcp"]["hash"], "3de059ab73f8e25946ce667df11b34fdb10db1039b05be9fcabd2a18aae96267")
+        self.assertEqual(exported["helperSha256"], hashlib.sha256((HERE / "native-linux-root-probe.py").read_bytes()).hexdigest())
+        paths.assert_not_called()
+        with mock.patch.object(subject.B, "verify_stage", side_effect=RuntimeError("fixture stage stop")), \
+                mock.patch.object(subject.B, "save_json") as save, self.assertRaisesRegex(RuntimeError, "fixture stage stop"):
+            subject.probe(Path("/fixture"), {})
+        report = save.call_args.args[1]
+        self.assertIn("534465a sealed-updater/helper-bearing DEB candidate", report["productScope"])
+        self.assertIn("acceptance unproven", report["productScope"])
+        self.assertNotIn("4f3744d", report["productScope"])
+        self.assertTrue(all(report[key] is False for key in subject.FALSE_GATES))
+        self.assertFalse(report["componentsAccepted"])
 
     def test_compact_capture_upload_precedes_separate_original_zip_and_keeps_refusals(self):
         body = (HERE.parent / ".github/workflows/native-linux-components-014.yml").read_text()
@@ -1480,10 +1507,260 @@ class NativeReceiptTests(unittest.TestCase):
             p.backend_gone({"pid": 42, "startTime": "100"}, helper)
 
 
-class SetupGtkContractTests(unittest.TestCase):
+class DeclinePostClickTests(unittest.TestCase):
+    @contextlib.contextmanager
     def fixture(self):
+        parent, actual, image = NativeReceiptTests().fixture()
+        parent.update(parentPid=41, kernelImageSha256=p.B.INSTALLED_HUB_PIN[1])
+        actual["kernelImageSha256"] = image["sha256"] = p.APPS["mcp"]["hash"]
+        image["size"] = p.APPS["mcp"]["size"]
+        helper = p.B.load_helper()
+        request = types.SimpleNamespace(action="snapshot", pid=42, start="100", window=88,
+                                        sha256=parent["kernelImageSha256"], executable=parent["executable"])
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(p.os, "getuid", return_value=parent["uids"][0], create=True))
+            value = p.receipt(parent, actual, image, "mcp")
+            pins = ["42", "100", parent["kernelImageSha256"], actual["kernelImageSha256"], p.B.SOURCE, str(p.B.RUN)]
+            parsed = helper.Receipt.parse(value, pins)
+            child = helper.Request.sealed(["click", "77", p.APPS["mcp"]["title"], "ALERT", "Not now"], parsed)
+            binding = types.SimpleNamespace(receipt=parsed, parent_and_image=mock.Mock(return_value=image))
+            proc = types.SimpleNamespace(stat=mock.Mock(return_value=self.stat()))
+            root_xres = {"pid": 42, "client": 2, "title": p.B.TITLE, "mapped": True}
+            child_xres = {"pid": 43, "client": 3, "title": child.title, "mapped": True}
+            identity = stack.enter_context(mock.patch.object(helper, "identity"))
+            window = stack.enter_context(mock.patch.object(helper, "bound_window", side_effect=lambda req, _: root_xres if req is request else child_xres))
+            stack.enter_context(mock.patch.object(helper, "Proc", return_value=proc))
+            native = stack.enter_context(mock.patch.object(p.B, "native_process", return_value=parent))
+            uids = stack.enter_context(mock.patch.object(p.B, "process_uids", return_value=actual["uids"]))
+            clients = stack.enter_context(mock.patch.object(p.B, "client_ids", return_value=[88, 77]))
+            save = stack.enter_context(mock.patch.object(p.B, "save_json"))
+            perform = stack.enter_context(mock.patch.object(helper, "perform", return_value={"actionCount": 1}))
+            yield types.SimpleNamespace(parent=parent, actual=actual, helper=helper, request=request, child=child,
+                                        binding=binding, proc=proc, root_xres=root_xres, child_xres=child_xres,
+                                        identity=identity, window=window, native=native, uids=uids,
+                                        clients=clients, save=save, perform=perform)
+
+    @staticmethod
+    def stat(state="S", start="110", parent=42):
+        return f"43 (private process name) {state} {parent} " + "0 " * 17 + start
+
+    def observe(self, f):
+        return p.decline_observation(f.request, f.child, f.helper, object(), f.parent, f.actual, f.binding)
+
+    def perform(self, f):
+        return p.perform_mcp_decline(Path("/fixture"), f.request, f.child, f.helper, object(), object(),
+                                     f.parent, f.actual, f.binding)
+
+    def test_before_after_state_and_exact_dialog_retained_without_exit_or_input_authority(self):
+        with self.fixture() as f:
+            result = self.perform(f)
+            diagnostic = f.save.call_args.args[1]
+            self.assertIs(result, f.perform.return_value)
+            f.perform.assert_called_once()
+            self.assertEqual(f.save.call_args.args[0].name, "mcp-decline-post-click.json")
+            self.assertEqual(diagnostic["exceptionChain"], {"records": [], "truncated": False})
+            for observation in (diagnostic["before"], diagnostic["after"]):
+                self.assertTrue(observation["rootStable"])
+                self.assertFalse(observation["dialogGone"])
+                self.assertTrue(observation["child"]["matchesOwnedIdentity"])
+                self.assertEqual(observation["child"]["beforeStatus"]["state"], "S")
+                self.assertEqual(observation["rootWindow"]["window"], 88)
+                self.assertEqual(observation["dialogWindow"]["window"], 77)
+                self.assertFalse(observation["normalExitVerified"])
+                self.assertEqual(observation["actionCount"], 0)
+            self.assertLessEqual(len(json.dumps(diagnostic, indent=2).encode()), 32768)
+            self.assertNotIn("private process name", json.dumps(diagnostic))
+
+    def test_original_post_action_cause_chain_and_zombie_are_evidence_not_recovery(self):
+        with self.fixture() as f:
+            cause = {}
+            exec(compile("def observed_child():\n    raise RuntimeError('private cause')\n",
+                         str(HERE / "native-unix-window.py"), "exec"), cause)
+            def terminal(*_):
+                f.proc.stat.return_value = self.stat("Z")
+                f.clients.return_value = [88]
+                try:
+                    cause["observed_child"]()
+                except RuntimeError as error:
+                    raise f.helper.ActionError("private outer") from error
+            f.perform.side_effect = terminal
+            with self.assertRaises(f.helper.ActionError) as caught:
+                self.perform(f)
+            self.assertEqual(str(caught.exception), "private outer")
+            diagnostic = f.save.call_args.args[1]
+            self.assertEqual([r["errorType"] for r in diagnostic["exceptionChain"]["records"]], ["ActionError", "RuntimeError"])
+            self.assertEqual([r["relation"] for r in diagnostic["exceptionChain"]["records"]], ["original", "cause"])
+            self.assertEqual(diagnostic["exceptionChain"]["records"][1]["frames"][-1],
+                             {"file": "native-unix-window.py", "function": "observed_child", "line": 2})
+            self.assertEqual(diagnostic["before"]["child"]["beforeStatus"]["state"], "S")
+            self.assertEqual(diagnostic["after"]["child"]["beforeStatus"]["state"], "Z")
+            self.assertTrue(diagnostic["after"]["dialogGone"])
+            self.assertTrue(diagnostic["after"]["rootStable"])
+            self.assertTrue(diagnostic["actionMayHaveRun"])
+            self.assertFalse(diagnostic["normalExitVerified"])
+            self.assertNotIn("private", json.dumps(diagnostic))
+            f.perform.assert_called_once()
+
+    def test_actual_helper_live_to_zombie_fixture_keeps_failure_and_one_click(self):
+        native = load("decline_real_helper_fixtures", HERE / "native-unix-window.test.py")
+        f = native.fixture()
+        value, pins = native.receipt_fixture()
+        helper, proc = native.h, native.KernelProc()
+        parsed = helper.Receipt.parse(value, pins)
+        binding = helper.KernelBinding(parsed, proc)
+        child = helper.Request.sealed(["click", "456", "Open MCP in Creator Hub?", "DIALOG", "Not now"], parsed)
+        request = helper.Request("snapshot", 200, "9999", native.EXE, "b" * 64, 888, p.B.TITLE, "FRAME")
+        parent = {"pid": 200, "startTime": "9999", "parentPid": 0, "uids": [1000] * 4,
+                  "executable": native.EXE, "kernelImageSha256": "b" * 64}
+        actual = {"pid": 123, "startTime": "9876", "parentPid": 200, "uids": [1000] * 4,
+                  "kernelImageSha256": native.DIGEST}
+        state = {"afterAction": False, "postChildReads": 0}
+        original_stat, original_action = proc.stat, f[3].do_action
+        def changing_stat(pid):
+            if state["afterAction"] and pid == 123:
+                state["postChildReads"] += 1
+                proc.child_state = "S" if state["postChildReads"] == 1 else "Z"
+            return original_stat(pid)
+        def action(index):
+            result = original_action(index)
+            state["afterAction"] = True
+            return result
+        proc.stat, f[3].do_action = changing_stat, action
+        root_xres = {"pid": 200, "client": 888, "title": p.B.TITLE, "mapped": True}
+        try:
+            with mock.patch.dict(p.APPS["mcp"], {"hash": native.DIGEST}), \
+                    mock.patch.object(helper, "Proc", return_value=proc), \
+                    mock.patch.object(helper, "bound_window", side_effect=lambda req, _: root_xres if req is request else dict(f[2].info)), \
+                    mock.patch.object(p.B, "native_process", return_value=parent), \
+                    mock.patch.object(p.B, "process_uids", return_value=[1000] * 4), \
+                    mock.patch.object(p.B, "client_ids", side_effect=lambda _: [888] if state["afterAction"] else [888, 456]), \
+                    mock.patch.object(p.B, "save_json") as save, \
+                    self.assertRaisesRegex(helper.ActionError, "Owned process is not live"):
+                p.perform_mcp_decline(Path("/fixture"), request, child, helper, f[2], f[0], parent, actual, binding)
+            diagnostic = save.call_args.args[1]
+            self.assertEqual(f[3].calls, 1)
+            self.assertEqual(diagnostic["before"]["child"]["beforeStatus"]["state"], "S")
+            self.assertEqual(diagnostic["after"]["child"]["beforeStatus"]["state"], "Z")
+            self.assertTrue(diagnostic["after"]["rootStable"])
+            self.assertTrue(diagnostic["after"]["dialogGone"])
+            self.assertEqual(diagnostic["exceptionChain"]["records"][1]["frames"][-1]["function"], "require")
+            self.assertIn("parse_start", [frame["function"] for frame in diagnostic["exceptionChain"]["records"][1]["frames"]])
+            self.assertFalse(diagnostic["normalExitVerified"])
+        finally:
+            binding.close()
+
+    def test_absence_pid_reuse_uid_drift_and_inaccessible_state_are_not_exit_receipts(self):
+        for change in ("absent", "start", "parent", "uid", "oversized", "inaccessible", "status-race"):
+            with self.subTest(change=change), self.fixture() as f:
+                if change == "absent":
+                    f.proc.stat.side_effect = FileNotFoundError("private")
+                elif change == "start":
+                    f.proc.stat.return_value = self.stat(start="999")
+                elif change == "parent":
+                    f.proc.stat.return_value = self.stat(parent=99)
+                elif change == "uid":
+                    f.uids.return_value = [9999] * 4
+                elif change == "oversized":
+                    f.proc.stat.return_value = "private" * 1000
+                elif change == "inaccessible":
+                    f.proc.stat.side_effect = PermissionError("private")
+                else:
+                    f.proc.stat.side_effect = [self.stat(), self.stat(start="999")]
+                result = self.observe(f)
+                self.assertTrue(result["rootStable"])
+                self.assertFalse(result["child"]["matchesOwnedIdentity"])
+                self.assertFalse(result["normalExitVerified"])
+                self.assertFalse(result["authorization"])
+                self.assertNotIn("private", json.dumps(result))
+                if change in ("start", "parent"):
+                    f.uids.assert_not_called()
+                f.perform.assert_not_called()
+
+    def test_foreign_request_or_root_binding_refuses_before_child_window_or_uid_queries(self):
+        for change in ("button", "image", "root", "window", "held-image"):
+            with self.subTest(change=change), self.fixture() as f:
+                if change == "button":
+                    child = f.child.__dict__ | {"button": "Enable MCP controls"}
+                    f.child = types.SimpleNamespace(**child)
+                elif change == "image":
+                    f.actual["kernelImageSha256"] = "f" * 64
+                elif change == "root":
+                    f.native.return_value = f.parent | {"startTime": "999"}
+                elif change == "window":
+                    f.window.side_effect = RuntimeError("private")
+                else:
+                    f.binding.parent_and_image.side_effect = RuntimeError("private")
+                result = self.observe(f)
+                self.assertFalse(result["rootStable"])
+                self.assertIn("captureRefusal", result)
+                self.assertIsNone(result["dialogGone"])
+                f.proc.stat.assert_not_called()
+                f.uids.assert_not_called()
+                f.clients.assert_not_called()
+                f.perform.assert_not_called()
+
+    def test_root_recheck_and_unknown_dialog_never_manufacture_gone_or_stability(self):
+        for change in ("root", "dialog"):
+            with self.subTest(change=change), self.fixture() as f:
+                if change == "root":
+                    f.native.side_effect = [f.parent, f.parent | {"startTime": "999"}]
+                else:
+                    f.window.side_effect = lambda req, _: f.root_xres if req is f.request else (_ for _ in ()).throw(RuntimeError("private"))
+                result = self.observe(f)
+                self.assertFalse(result["normalExitVerified"])
+                if change == "root":
+                    self.assertFalse(result["rootStable"])
+                else:
+                    self.assertIsNone(result["dialogGone"])
+                    self.assertIn("dialogCaptureRefusal", result)
+
+    def test_retention_failure_cannot_replace_original_error_or_retry_action(self):
+        with self.fixture() as f, mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            original = f.helper.ActionError("private")
+            f.perform.side_effect = original
+            f.save.side_effect = OSError("private")
+            with self.assertRaises(f.helper.ActionError) as caught:
+                self.perform(f)
+            self.assertIs(caught.exception, original)
+            self.assertEqual(json.loads(stderr.getvalue()), {"declineCaptureRefusal": "OSError"})
+            f.perform.assert_called_once()
+
+    def test_cause_context_cycle_and_depth_are_bounded_without_remote_text(self):
+        errors = [RuntimeError("private") for _ in range(10)]
+        for first, second in zip(errors, errors[1:]):
+            first.__cause__ = second
+        self.assertEqual(len(p.exception_causes(errors[0])["records"]), 8)
+        self.assertTrue(p.exception_causes(errors[0])["truncated"])
+        errors[1].__cause__ = errors[0]
+        self.assertEqual(len(p.exception_causes(errors[0])["records"]), 2)
+        self.assertTrue(p.exception_causes(errors[0])["truncated"])
+        context = RuntimeError("private")
+        context.__context__ = ValueError("private")
+        self.assertEqual(p.exception_causes(context)["records"][1]["relation"], "context")
+        context.__suppress_context__ = True
+        self.assertEqual(len(p.exception_causes(context)["records"]), 1)
+        self.assertNotIn("private", json.dumps(p.exception_causes(context)))
+
+    def test_source_decline_requests_child_exit_but_diagnostic_cannot_accept_or_relax_it(self):
+        source = (HERE.parent / "modules/mcp/launcher/src-tauri/src/hosted.rs").read_text()
+        self.assertIn('return Err("Opening MCP in Hub was declined. Standalone MCP is unchanged.".into());', source)
+        self.assertIn('Err(error) => {\n            send(output, &hello.session, 0, Err(error))?;\n            return Ok(());', source)
+        self.assertIn('app.exit(if result.is_ok() { 0 } else { 1 });', source)
+        probe = (HERE / "native-linux-components-probe.py").read_text()
+        observation = probe.split("def decline_observation(", 1)[1].split("def perform_mcp_decline(", 1)[0]
+        for forbidden in (".perform(", "do_action(", "get_action_iface", "time.sleep", "proc_children(", "get_parent("):
+            self.assertNotIn(forbidden, observation)
+        wrapper = probe.split("def perform_mcp_decline(", 1)[1].split("def consent(", 1)[0]
+        self.assertEqual(wrapper.count("helper.perform("), 1)
+        self.assertIn("retain(error)\n        raise", wrapper)
+        consent = probe.split("def consent(", 1)[1].split("def worker(", 1)[0]
+        self.assertIn('if action == "mcp-decline":', consent)
+
+
+class SetupGtkContractTests(unittest.TestCase):
+    def fixture(self, candidate=None):
         subject = load("captured_setup_gtk_contract", HERE / "native-linux-components-probe.py")
-        subject.configure_component_candidate(subject.B.GTK3_CANDIDATE)
+        subject.configure_component_candidate(candidate or subject.B.GTK3_CANDIDATE)
         parent, actual, image = NativeReceiptTests().fixture()
         parent["kernelImageSha256"] = subject.B.INSTALLED_HUB_PIN[1]
         actual["kernelImageSha256"] = image["sha256"] = subject.APPS["setup"]["hash"]
@@ -1523,24 +1800,26 @@ class SetupGtkContractTests(unittest.TestCase):
             decline=decline, atspi=atspi, x11=x11, request=request, info=info)
 
     def test_captured_alert_information_with_title_label_passes_snapshot_without_consent(self):
-        f = self.fixture()
-        with mock.patch.object(f.p.os, "getuid", return_value=f.parent["uids"][0], create=True), \
-                mock.patch.object(f.p.B, "native_process", side_effect=lambda pid, *_args: copy.deepcopy(f.records[pid])), \
-                mock.patch.object(f.p.B, "process_uids", return_value=f.parent["uids"]), \
-                mock.patch.object(f.p.B, "save_json") as save, \
-                mock.patch.object(f.p, "direct_backend", return_value=(f.actual, f.image)), \
-                mock.patch.object(f.p, "dialog_window", return_value=77), \
-                mock.patch.object(f.helper, "Proc", return_value=f.proc), \
-                mock.patch.object(f.helper, "KernelBinding", return_value=f.binding), \
-                self.assertRaisesRegex(RuntimeError, "Capture-only stop before component consent input"):
-            f.p.consent(Path("/fixture"), "setup-capture", f.request, f.helper, f.x11, f.atspi, f.parent)
-        snapshot = save.call_args.args[1]["strictSnapshot"]
-        self.assertEqual(snapshot["role"], "ALERT")
-        self.assertEqual(snapshot["axName"], "Information")
-        self.assertEqual(snapshot["title"], "Open Setup in Creator Hub?")
-        self.assertEqual(snapshot["actionCount"], 0)
-        f.approve.action.do_action.assert_not_called()
-        f.decline.action.do_action.assert_not_called()
+        for candidate in (p.B.GTK3_CANDIDATE, p.B.CURRENT_CANDIDATE):
+            with self.subTest(candidate=candidate):
+                f = self.fixture(candidate)
+                with mock.patch.object(f.p.os, "getuid", return_value=f.parent["uids"][0], create=True), \
+                        mock.patch.object(f.p.B, "native_process", side_effect=lambda pid, *_args: copy.deepcopy(f.records[pid])), \
+                        mock.patch.object(f.p.B, "process_uids", return_value=f.parent["uids"]), \
+                        mock.patch.object(f.p.B, "save_json") as save, \
+                        mock.patch.object(f.p, "direct_backend", return_value=(f.actual, f.image)), \
+                        mock.patch.object(f.p, "dialog_window", return_value=77), \
+                        mock.patch.object(f.helper, "Proc", return_value=f.proc), \
+                        mock.patch.object(f.helper, "KernelBinding", return_value=f.binding), \
+                        self.assertRaisesRegex(RuntimeError, "Capture-only stop before component consent input"):
+                    f.p.consent(Path("/fixture"), "setup-capture", f.request, f.helper, f.x11, f.atspi, f.parent)
+                snapshot = save.call_args.args[1]["strictSnapshot"]
+                self.assertEqual(snapshot["role"], "ALERT")
+                self.assertEqual(snapshot["axName"], "Information")
+                self.assertEqual(snapshot["title"], "Open Setup in Creator Hub?")
+                self.assertEqual(snapshot["actionCount"], 0)
+                f.approve.action.do_action.assert_not_called()
+                f.decline.action.do_action.assert_not_called()
 
     def test_root_routing_requires_snapshot_before_exact_native_approval(self):
         f = self.fixture()

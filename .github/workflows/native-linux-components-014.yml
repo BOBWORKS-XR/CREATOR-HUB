@@ -1,9 +1,9 @@
-name: Pinned Linux 14 GTK components (4f baseline, not migration acceptance)
+name: Pinned Linux 14 GTK components (not migration acceptance)
 
 on:
   workflow_dispatch:
   push:
-    branches: [validation/linux-components-014]
+    branches: [validation/linux-components-014, validation/linux-current-components-014]
 
 permissions:
   actions: read
@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 12
     env:
       CREATOR_LINUX_COMPONENTS_PROBE: '1'
-      CREATOR_LINUX_ROOT_CANDIDATE: setup-gtk3-77367ae
+      CREATOR_LINUX_ROOT_CANDIDATE: ${{ github.ref == 'refs/heads/validation/linux-current-components-014' && 'retirement-534465a' || 'setup-gtk3-77367ae' }}
       CREATOR_LINUX_ROOT_PROBE: '1'
       CREATOR_UNIX_WINDOW_TEST: '1'
     steps:
@@ -45,15 +45,19 @@ jobs:
             const temp=fs.realpathSync(process.env.RUNNER_TEMP);
             const pinBytes=fs.readFileSync(path.join(temp,'linux-components-reviewed-pins.json'));assert.ok(pinBytes.length<=16384);
             const pins=JSON.parse(pinBytes.toString('utf8'));
-            assert.equal(pins.candidate,'setup-gtk3-77367ae');assert.equal(pins.PRIVATE_SOURCE,'77367ae881413d6868e484f77e12a48c5aa58b00');
-            assert.equal(pins.PRIVATE_RUN,38647206970);assert.equal(pins.HANDOFF_SHA,'75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae');
+            const current=process.env.CREATOR_LINUX_ROOT_CANDIDATE==='retirement-534465a';
+            assert.equal(pins.candidate,process.env.CREATOR_LINUX_ROOT_CANDIDATE);
+            assert.equal(pins.PRIVATE_SOURCE,current?'f66d37fae372ad975daaae4ef392089c6d8f784b':'77367ae881413d6868e484f77e12a48c5aa58b00');
+            assert.equal(pins.PRIVATE_RUN,current?39041386789:38647206970);
+            assert.equal(pins.HANDOFF_SHA,current?'1c8218184c49870acecef5335687e3702af3686e4a50427355a1f7bad416b71a':'75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae');
             assert.equal(crypto.createHash('sha256').update(fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE,'scripts/native-linux-root-probe.py'))).digest('hex'),pins.helperSha256);
             const repo=context.repo,sha=pins.SOURCE,tree=pins.TREE;
             const runId=pins.RUN,artifactId=pins.ARTIFACT,zipSize=pins.ZIP_SIZE,zipSha=pins.ZIP_SHA;
             const {data:run}=await github.rest.actions.getWorkflowRun({...repo,run_id:runId});
             assert.equal(run.id,runId);assert.equal(run.run_attempt,pins.ATTEMPT);assert.equal(run.head_sha,sha);
             assert.equal(run.repository.id,1364807512);assert.equal(run.status,'completed');assert.equal(run.conclusion,'success');
-            assert.equal(run.event,'push');assert.equal(run.head_branch,'validation/unix-assembly-014');
+            assert.equal(run.event,current?'workflow_dispatch':'push');
+            assert.equal(run.head_branch,current?'validation/linux-retirement-candidate-014':'validation/unix-assembly-014');
             assert.equal(run.path,'.github/workflows/unix-managed-assembly.yml');
             const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:artifactId});
             assert.equal(artifact.id,artifactId);assert.equal(artifact.name,pins.ARTIFACT_NAME);
@@ -100,7 +104,7 @@ jobs:
         run: python3 -B scripts/native-linux-root-probe.py install
       # 38711448824 proved a producer/client Paragraph enum mismatch. Read-only
       # collection now recognizes the pinned WebKit paragraph contract; same input gates.
-      - name: Native components probe with reviewed WebKit text collection (immutable 4f package)
+      - name: Native components probe with reviewed WebKit text collection (fixed immutable package)
         env:
           GDK_BACKEND: x11
           NO_AT_BRIDGE: '0'

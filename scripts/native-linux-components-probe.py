@@ -17,7 +17,7 @@ import time
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
-ROOT_SHA = "1d5f7c4fca899b80905967ec515cfab273af12a13d5e88673cbd2db8f84ae384"
+ROOT_SHA = "317231055650ec3640d94f5448ab9b4ddf3570c3d8707374fa48b5659bcaf30d"
 SCOPE = "pinned-native-deb-embedded-components-only"
 FALSE_GATES = {key: False for key in ("releaseReady", "migrationAccepted", "retirementAccepted",
                                     "signedUpdateAccepted", "flatpakHostIntegrationAccepted",
@@ -966,10 +966,122 @@ def routing_permission(root, request, helper, x11, atspi, root_record, xid):
     return {"dialogSnapshot": before, "input": result, "native": root_record}
 
 
+def exception_causes(error):
+    """Original local call sites, including causes; no exception text or locals."""
+    records, seen, relation = [], set(), "original"
+    while error is not None and id(error) not in seen and len(records) < 8:
+        seen.add(id(error))
+        records.append({"relation": relation, **failure_site(error)})
+        if error.__cause__ is not None:
+            error, relation = error.__cause__, "cause"
+        elif not error.__suppress_context__:
+            error, relation = error.__context__, "context"
+        else:
+            error = None
+    return {"records": records, "truncated": error is not None}
+
+
+def decline_observation(request, child_request, helper, x11, root_record, actual, binding):
+    """One read-only observation of the already-bound Root, child and exact XID.
+
+    A missing/zombie child or absent XID is evidence only, not an exit receipt,
+    post-action liveness exception, replacement authority or permission to retry.
+    """
+    result = {"readOnly": True, "authorization": False, "actionCount": 0, "nativeAcceptance": False,
+              "normalExitVerified": False, "rootStable": False, "dialogGone": None}
+    try:
+        r = child_request.receipt
+        require(child_request.action == "click" and child_request.title == APPS["mcp"]["title"]
+                and child_request.button == "Not now" and r is not None and r == binding.receipt
+                and r.child_pid == actual["pid"] and r.child_start == actual["startTime"]
+                and r.child_hash == actual["kernelImageSha256"] == APPS["mcp"]["hash"]
+                and r.parent_pid == actual["parentPid"] == request.pid == root_record["pid"]
+                and r.parent_start == request.start == root_record["startTime"], "Unbound decline diagnostic")
+        proc = helper.Proc()
+
+        def root_check():
+            helper.identity(request, proc)
+            require(B.native_process(request.pid, helper) == root_record, "Diagnostic Root identity changed")
+            return helper.bound_window(request, x11)
+
+        root_window = root_check()
+        result["root"] = {key: root_record[key] for key in
+                          ("pid", "startTime", "parentPid", "uids", "executable", "kernelImageSha256")}
+        result["rootWindow"] = {"window": request.window, **root_window}
+        result["heldKernelImage"] = binding.parent_and_image()
+        child = result["child"] = {"expectedPid": actual["pid"], "expectedStartTime": actual["startTime"],
+                                   "expectedParentPid": actual["parentPid"], "matchesOwnedIdentity": False}
+
+        def child_stat():
+            record = proc.stat(actual["pid"])
+            start = helper.parse_start(record, actual["pid"], require_live=False)
+            fields = record[record.rfind(")") + 2:].split()
+            require(len(start) <= 20 and len(fields[0]) == 1 and fields[0] in "RSDZTtXxKWPI"
+                    and fields[1].isdigit() and 0 <= int(fields[1]) < 2**31, "Invalid diagnostic process fields")
+            observation = {"pid": actual["pid"], "startTime": start, "state": fields[0], "parentPid": int(fields[1])}
+            return observation
+
+        try:
+            child["beforeStatus"] = first = child_stat()
+            require(first["startTime"] == actual["startTime"] and first["parentPid"] == actual["parentPid"],
+                    "Diagnostic child PID/start/parent changed")
+            child["uids"] = B.process_uids(actual["pid"])
+            child["afterStatus"] = last = child_stat()
+            child["matchesOwnedIdentity"] = (last["startTime"] == actual["startTime"]
+                                             and last["parentPid"] == actual["parentPid"]
+                                             and child["uids"] == actual["uids"] == root_record["uids"])
+        except FileNotFoundError:
+            child["processFileAbsent"] = True
+        except Exception as error:
+            child["captureRefusal"] = {"errorType": type(error).__name__[:64]}
+        try:
+            if child_request.window not in B.client_ids(x11):
+                result.update(dialogGone=True, dialogEvidence="exact-XID-absent-from-bounded-WM-client-list")
+            else:
+                result["dialogWindow"] = {"window": child_request.window, **helper.bound_window(child_request, x11)}
+                result["dialogGone"] = False
+        except Exception as error:
+            result["dialogCaptureRefusal"] = {"errorType": type(error).__name__[:64]}
+        require(root_check() == root_window, "Diagnostic Root window changed")
+        result["rootStable"] = True
+    except Exception as error:
+        result["captureRefusal"] = {"errorType": type(error).__name__[:64]}
+    return result
+
+
+def perform_mcp_decline(root, request, child_request, helper, x11, atspi, root_record, actual, binding):
+    # Pinned modules/mcp/.../hosted.rs: authorize declines with Err; serve_authorized
+    # sends it and returns Ok, then run requests app.exit(0) if sending succeeded.
+    # This source contract does not prove the native child's actual state/exit.
+    before = decline_observation(request, child_request, helper, x11, root_record, actual, binding)
+
+    def retain(error=None):
+        try:
+            diagnostic = {"readOnly": True, "authorization": False, "actionCount": 0, "nativeAcceptance": False,
+                          "normalExitVerified": False, "timing": "around-one-consent-call-no-retry",
+                          "helperCallCount": 1, "actionMayHaveRun": error is None or isinstance(error, helper.ActionError),
+                          "before": before,
+                          "after": decline_observation(request, child_request, helper, x11, root_record, actual, binding),
+                          "exceptionChain": exception_causes(error)}
+            require(len((json.dumps(diagnostic, ensure_ascii=True, indent=2) + "\n").encode()) <= 32768,
+                    "Decline diagnostic exceeds bound")
+            B.save_json(root / "mcp-decline-post-click.json", diagnostic)
+        except Exception as capture_error:
+            print(json.dumps({"declineCaptureRefusal": type(capture_error).__name__[:64]}), file=sys.stderr)
+
+    try:
+        result = helper.perform(child_request, atspi, helper.Proc(), x11, binding)
+    except Exception as error:
+        retain(error)
+        raise
+    retain()
+    return result
+
+
 def consent(root, action, request, helper, x11, atspi, root_record):
     app, choice = action.split("-", 1)
     require(app in APPS and (choice in ("decline", "approve") or action == "setup-capture"), "Unknown native consent action")
-    gtk_component = B.SELECTED_CANDIDATE == B.GTK3_CANDIDATE
+    gtk_component = B.SELECTED_CANDIDATE in (B.GTK3_CANDIDATE, B.CURRENT_CANDIDATE)
     role = "ALERT" if gtk_component else "DIALOG"
     deadline, routing, observed, matched = time.monotonic() + 20, None, {}, None
     while time.monotonic() < deadline:
@@ -1029,7 +1141,10 @@ def consent(root, action, request, helper, x11, atspi, root_record):
                             "Not now" if choice == "decline" else APPS[app]["approve"]]
                     req = helper.Request.sealed(args, parsed, gtk_message_info_frame=frame)
                     require(B.process_uids(actual["pid"]) == uid_before, "Backend UID changed before consent")
-                    result = helper.perform(req, atspi, helper.Proc(), x11, binding)
+                    if action == "mcp-decline":
+                        result = perform_mcp_decline(root, request, req, helper, x11, atspi, root_record, actual, binding)
+                    else:
+                        result = helper.perform(req, atspi, helper.Proc(), x11, binding)
                     B.save_json(root / (action + "-backend.json"), {"receipt": value, "native": actual})
                     return {"app": app, "choice": choice, "native": actual, "receipt": value,
                             "dialogSnapshot": before, "input": result, "routing": routing}
@@ -1194,7 +1309,9 @@ def probe(root, env, capture_only=False):
     report = {"scope": SCOPE, **FALSE_GATES, "phase": "verify", "workers": [], "backends": [],
               "componentOrder": list(COMPONENT_ORDER),
               "candidate": B.SELECTED_CANDIDATE, "productSource": B.SOURCE, "privateSource": B.PRIVATE_SOURCE,
-              "productScope": "4f3744d GTK3 baseline; excludes router fix b154e36; not final release acceptance",
+              "productScope": ("534465a sealed-updater/helper-bearing DEB candidate; native operation/update/migration acceptance unproven"
+                               if B.SELECTED_CANDIDATE == B.CURRENT_CANDIDATE else
+                               "4f3744d GTK3 baseline; excludes router fix b154e36; not final release acceptance"),
               "testSource": env.get("GITHUB_SHA"), "testRunId": env.get("GITHUB_RUN_ID"),
               "componentsAccepted": False, "normalExitVerified": False, "backendExitCodesObserved": False,
               "captureOnly": capture_only}
@@ -1314,7 +1431,8 @@ def probe(root, env, capture_only=False):
 def main():
     admission(os.environ, sys.platform, platform.machine())
     selected = configure_component_candidate(os.environ.get("CREATOR_LINUX_ROOT_CANDIDATE", B.GTK3_CANDIDATE))
-    require(B.SELECTED_CANDIDATE == B.GTK3_CANDIDATE, "Old component native dispatches are held; reviewed GTK3 assembly required")
+    require(B.SELECTED_CANDIDATE in (B.GTK3_CANDIDATE, B.CURRENT_CANDIDATE),
+            "Old component native dispatches are held; reviewed GTK3 assembly required")
     args = sys.argv[1:]
     if args == ["candidate-pins"]:
         print(json.dumps(selected, ensure_ascii=True))

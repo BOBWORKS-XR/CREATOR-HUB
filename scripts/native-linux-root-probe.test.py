@@ -1194,6 +1194,83 @@ class CandidatePinTests(unittest.TestCase):
         self.assertEqual(env["CREATOR_LINUX_ROOT_CANDIDATE"], p.SELECTED_CANDIDATE)
         self.assertFalse(set(env).intersection(("GITHUB_TOKEN", "NODE_OPTIONS", "LD_PRELOAD")))
 
+    def current(self):
+        subject = self.subject()
+        subject.configure_candidate(subject.CURRENT_CANDIDATE)
+        return subject
+
+    def current_binding(self, subject):
+        binding = source_fixture()
+        binding["run"].update(id=subject.RUN, head_sha=subject.SOURCE, event="workflow_dispatch",
+                              head_branch="validation/linux-retirement-candidate-014")
+        binding["artifact"].update(id=subject.ARTIFACT, name=subject.ARTIFACT_NAME,
+                                   size_in_bytes=subject.ZIP_SIZE, digest="sha256:" + subject.ZIP_SHA)
+        binding["artifact"]["workflow_run"].update(id=subject.RUN, head_sha=subject.SOURCE)
+        binding["job"].update(id=subject.JOB, run_id=subject.RUN)
+        binding["commit"] = {"sha": subject.SOURCE, "tree": {"sha": subject.TREE}}
+        return binding
+
+    def test_current_candidate_has_its_own_exact_successful_assembly_and_private_pins(self):
+        subject = self.current()
+        self.assertEqual(subject.RUN, 39042746816)
+        self.assertEqual(subject.ARTIFACT, 12104548664)
+        self.assertEqual(subject.PRIVATE_RUN, 39041386789)
+        self.assertEqual(subject.DEB_PIN[:2], (62215944, "06beb134dd2be9fbf08dadbb1a49e97a07ff4e591c56967b8d2cc5b8b844b14f"))
+        self.assertNotEqual(subject.COMPONENT_PINS["mcp"], subject.GTK3_PREPARATION["components"]["mcp"])
+        subject.validate_source(self.current_binding(subject))
+
+    def test_current_candidate_cannot_accept_old_assembly_event_branch_or_installer(self):
+        subject = self.current()
+        for section, field, wrong in (("run", "event", "push"), ("run", "head_branch", "validation/unix-assembly-014"),
+                                      ("artifact", "digest", "sha256:" + p.ZIP_SHA), ("job", "id", p.JOB)):
+            binding = self.current_binding(subject)
+            binding[section][field] = wrong
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                subject.validate_source(binding)
+        with self.assertRaisesRegex(RuntimeError, "switching"):
+            subject.configure_candidate(subject.GTK3_CANDIDATE)
+
+    def test_current_preparation_cannot_reuse_old_router_or_component_authority(self):
+        subject = self.subject()
+        for key in ("PRIVATE_SOURCE", "PRIVATE_RUN", "HANDOFF_SHA", "COMPONENT_PINS"):
+            pins = copy.deepcopy(subject.CURRENT_REVIEWED_PINS)
+            pins[key] = copy.deepcopy(subject.GTK3_REVIEWED_PINS[key])
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                subject.validate_candidate_pins(pins)
+
+    def test_deb_only_integrity_is_current_candidate_only_not_relaxed_historical_format_coverage(self):
+        subject = self.current()
+        manifest = {"modules": {"mcp": {"files": {"mcp/a": "a"*64}}, "setup": {"files": {"setup/a": "b"*64}}},
+                    "managedRouting": {"files": {"routing/a": "c"*64}}}
+        row = {"format": "deb", "path": "native-packages/" + subject.DEB_NAME, "sha256": subject.DEB_PIN[1],
+               "hubSha256": subject.INSTALLED_HUB_PIN[1], "files": {"mcp/a": "a"*64, "setup/a": "b"*64, "routing/a": "c"*64}}
+        integrity = {"schemaVersion": 1, "platform": "linux", "arch": "x86_64", "experimental": True,
+                     "mcpMode": "writable", "integrityPassed": True, "writableGuiAccepted": False,
+                     "releaseReady": False, "packages": [row]}
+        subject.validate_integrity(integrity, manifest)
+        old = self.subject()
+        with self.assertRaisesRegex(RuntimeError, "Complete native format"):
+            old.validate_integrity(integrity, manifest)
+        integrity["packages"].append({**row, "format": "rpm"})
+        with self.assertRaisesRegex(RuntimeError, "Complete native format"):
+            subject.validate_integrity(integrity, manifest)
+
+    def test_installed_helper_policy_and_every_ancestor_must_be_root_owned_and_protected(self):
+        subject = self.current()
+        good = types.SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | 0o755)
+        with mock.patch.object(Path, "lstat", return_value=good), mock.patch.object(Path, "is_symlink", return_value=False), \
+                mock.patch.object(subject, "pinned", return_value={"pinned": True}) as pinned:
+            self.assertEqual(set(subject.verify_retirement_files()), set(subject.RETIREMENT_FILES))
+            self.assertEqual(pinned.call_count, 2)
+        for changes in ({"st_uid": 1001}, {"st_gid": 1001}, {"st_mode": stat.S_IFREG | 0o777}):
+            bad = types.SimpleNamespace(**{**vars(good), **changes})
+            with mock.patch.object(Path, "lstat", return_value=bad), mock.patch.object(Path, "is_symlink", return_value=False), \
+                    self.assertRaisesRegex(RuntimeError, "root-protected"):
+                subject.verify_retirement_files()
+        with mock.patch.object(Path, "lstat", return_value=good), mock.patch.object(Path, "is_symlink", return_value=True), \
+                self.assertRaisesRegex(RuntimeError, "root-protected"):
+            subject.verify_retirement_files()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
