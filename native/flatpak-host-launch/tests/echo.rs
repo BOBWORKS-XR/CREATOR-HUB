@@ -1,11 +1,24 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 // A real child binary and transport, without a Flatpak install or settings reads.
+#[path = "../src/gui_protocol.rs"]
+#[allow(dead_code)]
+mod gui_protocol;
 #[path = "../src/linux.rs"]
 #[allow(dead_code)]
 mod linux;
 #[path = "../src/protocol.rs"]
 mod protocol;
+use gui_protocol::{GuiMessage, GuiRequest};
+
+// Same private error projection as EchoFailure below, not a session constructor.
+#[derive(Debug)]
+#[allow(dead_code)] // GUI error projection is compiled here; this harness exercises echo only.
+struct GuiError {
+    reason: &'static str,
+    owned_child_reaped: bool,
+    outcome_unknown: bool,
+}
 
 use std::{
     process::Command,

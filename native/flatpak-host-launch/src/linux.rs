@@ -1,3 +1,7 @@
+#[path = "linux/gui.rs"]
+pub(crate) mod gui;
+#[path = "linux/gui_install.rs"]
+mod gui_install;
 #[path = "linux/identity.rs"]
 pub(crate) mod identity;
 #[path = "linux/launch.rs"]

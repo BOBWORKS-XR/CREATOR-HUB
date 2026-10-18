@@ -27,19 +27,19 @@ pub(crate) fn run() -> String {
 }
 
 // Constructed immediately after our own spawn, so constructor failures also reap.
-struct OwnedLaunch {
-    socket: Option<OwnedFd>,
-    child: Child,
-    cleaned: bool,
-    reaped: bool,
+pub(super) struct OwnedLaunch {
+    pub(super) socket: Option<OwnedFd>,
+    pub(super) child: Child,
+    pub(super) cleaned: bool,
+    pub(super) reaped: bool,
 }
 
 impl OwnedLaunch {
-    fn socket(&self) -> Result<&OwnedFd> {
+    pub(super) fn socket(&self) -> Result<&OwnedFd> {
         self.socket.as_ref().ok_or("echo-session-closed")
     }
 
-    fn cleanup(&mut self) -> bool {
+    pub(super) fn cleanup(&mut self) -> bool {
         if !self.cleaned {
             self.cleaned = true;
             drop(self.socket.take());
@@ -382,7 +382,7 @@ pub(crate) fn reap(child: &mut Child, deadline: Instant) -> Option<std::process:
     }
 }
 
-fn nonce() -> Result<[u8; 32]> {
+pub(super) fn nonce() -> Result<[u8; 32]> {
     let mut bytes = [0; 32];
     if unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), bytes.len(), libc::GRND_NONBLOCK) }
         != bytes.len() as isize
@@ -393,7 +393,7 @@ fn nonce() -> Result<[u8; 32]> {
     Ok(bytes)
 }
 
-fn read_instance(fd: &OwnedFd, deadline: Instant) -> Result<String> {
+pub(super) fn read_instance(fd: &OwnedFd, deadline: Instant) -> Result<String> {
     let mut value = Vec::new();
     loop {
         transport::wait(fd, libc::POLLIN | libc::POLLHUP, deadline)?;

@@ -7,7 +7,7 @@ use std::{
     io::Read,
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::fs::MetadataExt,
+        unix::fs::{FileExt, MetadataExt},
     },
     path::{Component, Path},
     time::Instant,
@@ -203,8 +203,8 @@ fn stat_fields(stat: &str) -> Result<(u32, u64)> {
     ))
 }
 
-pub(crate) fn sender(
-    message: &transport::Message,
+pub(crate) fn sender<const N: usize>(
+    message: &transport::Message<N>,
     expected: Option<(u32, u64)>,
     owner: (u32, u64),
     uid: u32,
@@ -261,10 +261,6 @@ pub(crate) fn deployment(
     uid: u32,
     deadline: Instant,
 ) -> Result<()> {
-    transport::alive(&message.pidfd)?;
-    let proc = process(message.credentials.pid as u32, uid)?;
-    // These are the only intentional procfs magic-link traversals, never RPC paths.
-    let sandbox = at(&proc.dir, "root", libc::O_PATH | libc::O_DIRECTORY)?;
     let app_path = root.join(format!(
         "flatpak/app/{APP}/x86_64/flatpak-test/{}/files",
         pins.app
@@ -273,7 +269,172 @@ pub(crate) fn deployment(
         "/var/lib/flatpak/runtime/org.gnome.Platform/x86_64/50/{}/files",
         pins.runtime
     ));
-    for (name, expected) in [("app", &app_path), ("usr", &runtime_path)] {
+    deployment_image(
+        message,
+        &Deployment {
+            app_path: &app_path,
+            runtime_path: &runtime_path,
+            executable_directory: "libexec",
+            executable: "creator-hub-flatpak-launch-echo",
+            executable_hash: pins.echo,
+            app_commit: pins.app,
+            runtime_commit: pins.runtime,
+            instance,
+            sandbox: Sandbox::Echo(root),
+        },
+        uid,
+        deadline,
+    )
+}
+
+pub(crate) enum Sandbox<'a> {
+    Echo(&'a Path),
+    Gui(&'a GuiImagePin),
+}
+
+// No atime: inspection reads must not invalidate a lease. ctime catches even a
+// write followed by restoration of length/mtime. Any stamp drift refuses; it
+// never renews a pin or silently rehashes/adopts changed bytes.
+#[derive(Debug, PartialEq, Eq)]
+struct Stamp {
+    object: (u64, u64),
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    links: u64,
+    length: u64,
+    ctime: (i64, i64),
+    mtime: (i64, i64),
+}
+impl Stamp {
+    fn of(file: &File) -> Result<Self> {
+        let m = file.metadata().map_err(|_| "gui-pinned-stat")?;
+        Ok(Self {
+            object: object(&m),
+            uid: m.uid(),
+            gid: m.gid(),
+            mode: m.mode(),
+            links: m.nlink(),
+            length: m.len(),
+            ctime: (m.ctime(), m.ctime_nsec()),
+            mtime: (m.mtime(), m.mtime_nsec()),
+        })
+    }
+}
+
+pub(crate) struct GuiImagePin {
+    image: File,
+    image_stamp: Stamp,
+    app: File,
+    app_stamp: Stamp,
+    runtime: File,
+    runtime_stamp: Stamp,
+}
+impl GuiImagePin {
+    pub fn admit(
+        app_path: &Path,
+        runtime_path: &Path,
+        expected: &str,
+        uid: u32,
+        deadline: Instant,
+    ) -> Result<Self> {
+        let app = directory(app_path, uid, false)?;
+        let runtime = directory(runtime_path, uid, false)?;
+        let app_stamp = Stamp::of(&app)?;
+        let runtime_stamp = Stamp::of(&runtime)?;
+        let bin = directory(&app_path.join("bin"), uid, false)?;
+        let image = at(
+            &bin,
+            "creator-hub",
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )?;
+        let image_stamp = Stamp::of(&image)?;
+        if (image_stamp.uid != 0 && image_stamp.uid != uid)
+            || image_stamp.mode & 0o7022 != 0
+            || image_stamp.mode & 0o111 == 0
+        {
+            return Err("gui-image-owner-mode");
+        }
+        let mut magic = [0; 20];
+        if image.read_at(&mut magic, 0).map_err(|_| "gui-image-elf")? != magic.len()
+            || magic[..6] != [127, 69, 76, 70, 2, 1]
+            || magic[18..20] != 62u16.to_le_bytes()
+        {
+            return Err("gui-image-elf");
+        }
+        digest(
+            image.try_clone().map_err(|_| "gui-image-pin")?,
+            expected,
+            deadline,
+        )?;
+        let result = Self {
+            image,
+            image_stamp,
+            app,
+            app_stamp,
+            runtime,
+            runtime_stamp,
+        };
+        result.held()?;
+        Ok(result)
+    }
+    fn held(&self) -> Result<()> {
+        for (file, expected) in [
+            (&self.image, &self.image_stamp),
+            (&self.app, &self.app_stamp),
+            (&self.runtime, &self.runtime_stamp),
+        ] {
+            if Stamp::of(file)? != *expected {
+                return Err("gui-pinned-image-or-root-changed");
+            }
+        }
+        Ok(())
+    }
+    fn root(&self, name: &str, mounted: &File, installed: &File) -> Result<()> {
+        self.held()?;
+        let expected = if name == "app" {
+            &self.app_stamp
+        } else {
+            &self.runtime_stamp
+        };
+        if Stamp::of(mounted)? != *expected || Stamp::of(installed)? != *expected {
+            return Err("gui-pinned-root-changed");
+        }
+        Ok(())
+    }
+    fn image(&self, actual: &File, installed: &File) -> Result<()> {
+        self.held()?;
+        if Stamp::of(actual)? != self.image_stamp || Stamp::of(installed)? != self.image_stamp {
+            return Err("gui-pinned-image-changed");
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct Deployment<'a> {
+    pub app_path: &'a Path,
+    pub runtime_path: &'a Path,
+    pub executable_directory: &'a str,
+    pub executable: &'a str,
+    pub executable_hash: &'a str,
+    pub app_commit: &'a str,
+    pub runtime_commit: &'a str,
+    pub instance: &'a str,
+    pub sandbox: Sandbox<'a>,
+}
+
+pub(crate) fn deployment_image<const N: usize>(
+    message: &transport::Message<N>,
+    profile: &Deployment<'_>,
+    uid: u32,
+    deadline: Instant,
+) -> Result<()> {
+    let gui = matches!(profile.sandbox, Sandbox::Gui(_));
+    transport::alive(&message.pidfd)?;
+    let proc = process(message.credentials.pid as u32, uid)?;
+    // Only kernel-derived procfs links are traversed; no peer pathname selects a read.
+    let sandbox = at(&proc.dir, "root", libc::O_PATH | libc::O_DIRECTORY)?;
+    for (name, expected) in [("app", profile.app_path), ("usr", profile.runtime_path)] {
         let mounted = at(
             &sandbox,
             name,
@@ -285,36 +446,59 @@ pub(crate) fn deployment(
         {
             return Err("deployment-mount-mismatch");
         }
+        if let Sandbox::Gui(pin) = profile.sandbox {
+            pin.root(name, &mounted, &expected)?;
+        }
     }
     let actual = at(&proc.dir, "exe", libc::O_RDONLY)?;
-    let installed = directory(&app_path.join("libexec"), uid, false)?;
+    let installed = directory(
+        &profile.app_path.join(profile.executable_directory),
+        uid,
+        false,
+    )?;
     let installed = at(
         &installed,
-        "creator-hub-flatpak-launch-echo",
-        libc::O_RDONLY | libc::O_NOFOLLOW,
+        profile.executable,
+        libc::O_RDONLY | libc::O_NOFOLLOW | if gui { libc::O_NONBLOCK } else { 0 },
     )?;
-    if object(&actual.metadata().map_err(|_| "image-stat")?)
-        != object(&installed.metadata().map_err(|_| "image-stat")?)
+    let installed_meta = installed.metadata().map_err(|_| "image-stat")?;
+    if gui
+        && ((installed_meta.uid() != 0 && installed_meta.uid() != uid)
+            || installed_meta.mode() & 0o7022 != 0
+            || installed_meta.mode() & 0o111 == 0)
     {
-        return Err("echo-image-object-mismatch");
+        return Err("gui-image-owner-mode");
     }
-    digest(actual, pins.echo, deadline)?;
+    if object(&actual.metadata().map_err(|_| "image-stat")?) != object(&installed_meta) {
+        return Err(if gui {
+            "gui-image-object-mismatch"
+        } else {
+            "echo-image-object-mismatch"
+        });
+    }
+    match profile.sandbox {
+        Sandbox::Echo(_) => digest(actual, profile.executable_hash, deadline)?,
+        Sandbox::Gui(pin) => pin.image(&actual, &installed)?,
+    }
     let metadata = read(&sandbox, ".flatpak-info", 65536)?;
     let fields = keyfile(&metadata)?;
     for (group, key, expected) in [
         ("Application", "name", APP),
-        ("Instance", "app-commit", pins.app),
-        ("Instance", "runtime-commit", pins.runtime),
-        ("Instance", "instance-id", instance),
+        ("Instance", "app-commit", profile.app_commit),
+        ("Instance", "runtime-commit", profile.runtime_commit),
+        ("Instance", "instance-id", profile.instance),
         (
             "Instance",
             "app-path",
-            app_path.to_str().ok_or("app-path-encoding")?,
+            profile.app_path.to_str().ok_or("app-path-encoding")?,
         ),
         (
             "Instance",
             "runtime-path",
-            runtime_path.to_str().ok_or("runtime-path-encoding")?,
+            profile
+                .runtime_path
+                .to_str()
+                .ok_or("runtime-path-encoding")?,
         ),
     ] {
         if fields
@@ -327,21 +511,34 @@ pub(crate) fn deployment(
     }
     for ((section, key), value) in &fields {
         if section == "Instance" && replacement_metadata(key, value) {
-            return replacement_refusal(root, &fields, key, uid);
+            return match profile.sandbox {
+                Sandbox::Echo(root) => replacement_refusal(root, &fields, key, uid),
+                Sandbox::Gui(_) => Err("replacement-deployment"),
+            };
         }
         if section == "Instance" && ["build", "devel"].contains(&key.as_str()) && value != "false" {
             return Err("development-sandbox");
+        }
+        if gui && section == "Environment" {
+            return Err("gui-environment-override");
+        }
+        if section == "Session Bus Policy" && gui {
+            if key != "com.creatorworks.hub.Host" || value != "talk" {
+                return Err("unexpected-bus-policy");
+            }
+            continue;
         }
         if section == "Session Bus Policy" || section == "System Bus Policy" {
             return Err("unexpected-bus-policy");
         }
         if section == "Context" {
             let expected: &[&str] = match key.as_str() {
+                "shared" if gui => &["ipc", "network"],
                 "shared" => &["ipc"],
                 "sockets" => &["fallback-x11", "wayland"],
                 "devices" => &["dri"],
                 "features" if value.is_empty() || value == "!devel;" => &[],
-                _ if value.is_empty() => &[],
+                _ if value.is_empty() && !gui => &[],
                 _ => return Err("unexpected-sandbox-grant"),
             };
             let mut actual = value
@@ -355,6 +552,23 @@ pub(crate) fn deployment(
             if actual != expected {
                 return Err("unexpected-sandbox-grant");
             }
+        }
+    }
+    if gui {
+        for key in ["shared", "sockets", "devices"] {
+            if !fields.contains_key(&("Context".to_owned(), key.to_owned())) {
+                return Err("missing-sandbox-grant");
+            }
+        }
+        if fields
+            .get(&(
+                "Session Bus Policy".to_owned(),
+                "com.creatorworks.hub.Host".to_owned(),
+            ))
+            .map(String::as_str)
+            != Some("talk")
+        {
+            return Err("missing-bootstrap-policy");
         }
     }
     for name in ["mnt", "pid"] {
@@ -491,7 +705,7 @@ fn write_metadata_refusal(
 }
 
 // Deliberately accepts only Flatpak's simple generated subset, not arbitrary INI.
-fn keyfile(input: &str) -> Result<BTreeMap<(String, String), String>> {
+pub(crate) fn keyfile(input: &str) -> Result<BTreeMap<(String, String), String>> {
     let mut group = "";
     let mut fields = BTreeMap::new();
     for line in input.lines() {
@@ -532,6 +746,98 @@ mod tests {
     };
 
     struct DiagnosticRoot(PathBuf);
+
+    struct PinFiles(DiagnosticRoot);
+    impl PinFiles {
+        fn fresh() -> Self {
+            let root = DiagnosticRoot::fresh();
+            for name in ["app", "app/bin", "runtime"] {
+                fs::create_dir(root.0.join(name)).unwrap();
+            }
+            let mut image = vec![0; 128];
+            image[..6].copy_from_slice(&[127, 69, 76, 70, 2, 1]);
+            image[18..20].copy_from_slice(&62u16.to_le_bytes());
+            fs::write(root.0.join("app/bin/creator-hub"), image).unwrap();
+            fs::set_permissions(
+                root.0.join("app/bin/creator-hub"),
+                fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            Self(root)
+        }
+        fn admit(&self) -> GuiImagePin {
+            let path = self.0 .0.join("app/bin/creator-hub");
+            let hash = format!("{:x}", Sha256::digest(fs::read(&path).unwrap()));
+            GuiImagePin::admit(
+                &self.0 .0.join("app"),
+                &self.0 .0.join("runtime"),
+                &hash,
+                unsafe { libc::getuid() },
+                Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .unwrap()
+        }
+    }
+    impl Drop for PinFiles {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(self.0 .0.join("app/bin/creator-hub"));
+            let _ = fs::remove_file(self.0 .0.join("app/changed"));
+            for name in ["app/bin", "app", "runtime"] {
+                let _ = fs::remove_dir(self.0 .0.join(name));
+            }
+        }
+    }
+    #[test]
+    fn gui_pin_hashes_initially_then_checks_without_reading_image_bytes() {
+        use std::io::{Seek, SeekFrom};
+        let fixture = PinFiles::fresh();
+        assert!(GuiImagePin::admit(
+            &fixture.0 .0.join("app"),
+            &fixture.0 .0.join("runtime"),
+            &"0".repeat(64),
+            unsafe { libc::getuid() },
+            Instant::now() + std::time::Duration::from_secs(2)
+        )
+        .is_err());
+        let pin = fixture.admit();
+        let path = fixture.0 .0.join("app/bin/creator-hub");
+        let mut cursor = &pin.image;
+        cursor.seek(SeekFrom::Start(7)).unwrap();
+        for _ in 0..32 {
+            pin.image(&File::open(&path).unwrap(), &File::open(&path).unwrap())
+                .unwrap();
+        }
+        assert_eq!(cursor.stream_position().unwrap(), 7);
+        assert_eq!(fs::read(&path).unwrap().len(), 128);
+    }
+    #[test]
+    fn gui_pin_refuses_image_mode_bytes_replacement_and_root_drift_without_renewal() {
+        for change in ["bytes", "mode", "replacement", "root"] {
+            let fixture = PinFiles::fresh();
+            let pin = fixture.admit();
+            let path = fixture.0 .0.join("app/bin/creator-hub");
+            match change {
+                "bytes" => {
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes.push(1);
+                    fs::write(&path, bytes).unwrap();
+                }
+                "mode" => fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap(),
+                "replacement" => {
+                    let bytes = fs::read(&path).unwrap();
+                    fs::remove_file(&path).unwrap();
+                    fs::write(&path, bytes).unwrap();
+                }
+                _ => fs::write(fixture.0 .0.join("app/changed"), b"fixture").unwrap(),
+            }
+            assert!(
+                pin.image(&File::open(&path).unwrap(), &File::open(&path).unwrap())
+                    .is_err(),
+                "{change}"
+            );
+            assert!(pin.held().is_err(), "{change}");
+        }
+    }
 
     #[test]
     fn metadata_refusal_empty_usb_serialization_is_not_a_deployment_override() {

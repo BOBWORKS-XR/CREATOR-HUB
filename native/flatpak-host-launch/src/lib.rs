@@ -9,7 +9,15 @@
 //! use creator_hub_flatpak_host_launch::FixedEchoSession;
 //! let forged = FixedEchoSession::from_trusted(true);
 //! ```
+#[cfg_attr(
+    not(all(target_os = "linux", target_arch = "x86_64")),
+    allow(dead_code)
+)]
+mod gui_protocol;
 pub mod protocol;
+pub use gui_protocol::{GuiMessage, GuiRequest};
+mod gui_api;
+pub use gui_api::{GuiError, GuiPeer, GuiSession};
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod linux;
