@@ -3,6 +3,7 @@ import ast
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -387,17 +388,99 @@ class ActivationTests(unittest.TestCase):
         _, calls = self.identity_case()
         self.assertEqual(calls, [123, 124])
 
-    def test_diagnostic_only_trial_stops_before_namespace_ax_or_input_even_if_identity_matches(self):
-        self.assertIs(M.IDENTITY_DIAGNOSTIC_ONLY, True)
+    def test_bootstrap_freezes_only_after_native_mapping_before_worker_with_existing_input_guards(self):
         source = (HERE / 'native-linux-flatpak-activation.py').read_text()
-        worker = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == 'gtk_worker')
-        guard = next(node for node in ast.walk(worker) if isinstance(node, ast.If)
-                     and isinstance(node.test, ast.Name) and node.test.id == 'IDENTITY_DIAGNOSTIC_ONLY')
-        self.assertTrue(any(isinstance(node, ast.Raise) for node in guard.body))
-        for call in (node for node in ast.walk(worker) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                     and node.func.attr in ('native_ax_references', 'do_action')):
-            self.assertLess(guard.lineno, call.lineno)
-        self.assertLess(source.index('if IDENTITY_DIAGNOSTIC_ONLY:'), source.index('rb"^NSpid:'))
+        self.assertLess(source.index('bwrap = protected_bwrap(native)'), source.index('cli = launch(["/usr/bin/flatpak"'))
+        self.assertLess(source.index('require(properties["mapped"]'), source.index('bootstrap.freeze(after)'))
+        self.assertLess(source.index('bootstrap.freeze(after)'), source.index('"cli": frozen_cli'))
+        worker = source[source.index('def gtk_worker'):source.index('def exercise')]
+        self.assertLess(worker.index('check()\n'), worker.index('native.native_ax_references()'))
+        self.assertIn('stable_pair(native, helper, context, root, phase)', worker)
+        self.assertIn('reported_pid in (ids[0], ids[-1])', worker)
+        self.assertLess(worker.index('report["lastAxReference"]'), worker.index('require(peer["pid"] in peers'))
+        self.assertIn('report["kernelNamespacePids"] = ids', worker)
+        self.assertIn('peer["pid"] in peers and peer["uid"] == os.getuid()', worker)
+        self.assertEqual(worker.count('action.do_action(0)'), 1)
+
+    def bootstrap_fixture(self):
+        image = {'st_dev': '1', 'st_ino': '200', 'st_size': '100', 'st_mode': str(stat.S_IFREG | 0o755),
+                 'st_uid': '0', 'st_gid': '0', 'st_mtime_ns': '10', 'st_ctime_ns': '20'}
+        protected = {'path': M.BWRAP, 'image': image, 'file': {'size': 100, 'sha256': 'b' * 64, 'uid': 0, 'gid': 0, 'mode': 0o755}}
+        before = {'pid': 123, 'startTime': '30', 'parentPid': 122, 'uids': [1001] * 4, 'executable': '/usr/bin/flatpak',
+                  'image': {**image, 'st_ino': '199'}, 'kernelImageSha256': 'a' * 64}
+        after = {**copy.deepcopy(before), 'executable': M.BWRAP, 'image': copy.deepcopy(image), 'kernelImageSha256': 'b' * 64}
+        return before, protected, after
+
+    def test_exact_bootstrap_transition_is_one_use_and_frozen_record_is_independent(self):
+        before, protected, after = self.bootstrap_fixture()
+        binding = M.CliBootstrap(before, protected, 1001, 122)
+        frozen = binding.freeze(after)
+        self.assertEqual(frozen, after)
+        after['image']['st_ino'] = 'mutated'
+        self.assertEqual(frozen['image']['st_ino'], '200')
+        with self.assertRaisesRegex(RuntimeError, 'already consumed'):
+            binding.freeze(frozen)
+        native = SimpleNamespace(native_process=lambda *args: {key: val for key, val in frozen.items() if key != 'kernelImageSha256'})
+        M.stable(native, None, frozen)
+        native.native_process = lambda *args: {key: val for key, val in after.items() if key != 'kernelImageSha256'}
+        with self.assertRaisesRegex(RuntimeError, 'Owned process identity changed'):
+            M.stable(native, None, frozen)
+
+    def test_bootstrap_rejects_foreign_executable_hash_image_pid_start_parent_and_every_uid(self):
+        before, protected, after = self.bootstrap_fixture()
+        variants = []
+        for field, value in (('executable', '/tmp/bwrap'), ('executable', '/usr/bin/flatpak'), ('kernelImageSha256', 'c' * 64),
+                             ('pid', 999), ('startTime', '31'), ('parentPid', 121)):
+            changed = copy.deepcopy(after); changed[field] = value; variants.append(changed)
+        changed = copy.deepcopy(after); changed['image']['st_ino'] = '201'; variants.append(changed)
+        for index in range(4):
+            changed = copy.deepcopy(after); changed['uids'][index] = 0; variants.append(changed)
+        for changed in variants:
+            with self.subTest(changed=changed):
+                binding = M.CliBootstrap(before, protected, 1001, 122)
+                with self.assertRaises(RuntimeError):
+                    binding.freeze(changed)
+                with self.assertRaisesRegex(RuntimeError, 'already consumed'):
+                    binding.freeze(after)
+        for field, value in (('executable', M.BWRAP), ('parentPid', 121), ('uids', [0] * 4)):
+            changed = copy.deepcopy(before); changed[field] = value
+            with self.assertRaises(RuntimeError):
+                M.CliBootstrap(changed, protected, 1001, 122)
+
+    def test_fixed_bwrap_measurement_requires_root_owned_protected_ancestors_and_executable_elf(self):
+        paths = ('/usr/libexec/flatpak-bwrap', '/usr/libexec', '/usr', '/')
+        def measure(changed=None, bad_header=False, image_changed=False):
+            infos = {name: SimpleNamespace(st_dev=1, st_ino=index, st_uid=0, st_gid=0,
+                st_mode=(stat.S_IFREG if index == 0 else stat.S_IFDIR) | 0o755) for index, name in enumerate(paths)}
+            if changed:
+                name, field, value = changed; setattr(infos[name], field, value)
+            header = bytearray(64); header[:7] = bytes((127, 69, 76, 70, 2, 1, 1)); header[16] = 3; header[18] = 62
+            if bad_header:
+                header[18] = 3
+            class FakePath:
+                def __init__(self, name): self.name = name
+                @property
+                def parents(self): return [FakePath(name) for name in paths[1:]]
+                def lstat(self): return infos[self.name]
+                def resolve(self, strict): return self
+                def open(self, mode): return io.BytesIO(header)
+                def __str__(self): return self.name
+            calls = []
+            def image(name):
+                self.assertEqual(name, M.BWRAP); calls.append(name)
+                return {'st_ino': '2' if image_changed and len(calls) == 2 else '1'}
+            with patch.object(M, 'Path', FakePath), patch.object(M.P, 'record', return_value={
+                    'size': 100, 'sha256': 'b' * 64, 'uid': 0, 'gid': 0, 'mode': 0o755}):
+                return M.protected_bwrap(SimpleNamespace(image_identity=image))
+        self.assertEqual(measure()['path'], M.BWRAP)
+        for changed in ((paths[0], 'st_uid', 1001), (paths[0], 'st_gid', 1001),
+                        (paths[0], 'st_mode', stat.S_IFLNK | 0o755), (paths[0], 'st_mode', stat.S_IFREG | 0o4755),
+                        (paths[1], 'st_mode', stat.S_IFDIR | 0o777), (paths[2], 'st_gid', 1001),
+                        (paths[3], 'st_uid', 1001)):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                measure(changed)
+        with self.assertRaises(RuntimeError): measure(bad_header=True)
+        with self.assertRaises(RuntimeError): measure(image_changed=True)
 
     def test_python310_syntax(self):
         ast.parse((HERE / "native-linux-flatpak-activation.py").read_text(), feature_version=(3, 10))

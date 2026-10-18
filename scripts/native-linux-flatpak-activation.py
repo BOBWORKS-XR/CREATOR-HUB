@@ -3,6 +3,7 @@
 No host command relay, product rebuild, signing, publication or native-dialog
 bypass. Imports only proof primitives from the separately owned pages harness.
 """
+import copy
 import hashlib
 import importlib.util
 import json
@@ -11,6 +12,7 @@ from pathlib import Path
 import platform
 import re
 import select
+import stat
 import subprocess
 import sys
 import time
@@ -33,7 +35,7 @@ ZIP = {"size": 182723403, "sha256": "71a2a4e42a1b1e2fe5e1e64f363f7d3c06444b03b5d
 SOURCE = "5065fb1112b9e96978e40e64503fa979f559baae"
 SERVICE = Path("/usr/share/dbus-1/services/com.creatorworks.hub.Host.service")
 PROXY = "/usr/libexec/flatpak-dbus-proxy"
-IDENTITY_DIAGNOSTIC_ONLY = True
+BWRAP = "/usr/libexec/flatpak-bwrap"
 SERVICE_BYTES = b"[D-BUS Service]\nName=com.creatorworks.hub.Host\nExec=/usr/bin/creator-hub --flatpak-activate\n"
 GATES = {key: False for key in ("releaseReady", "flatpakAccepted", "migrationAccepted", "signedUpdateAccepted", "restartAccepted",
                               "publisherSignatureAccepted", "nativeAuthenticationAccepted", "steamDeckAccepted", "finalCandidateQualified")}
@@ -174,6 +176,48 @@ def stable_pair(native, helper, context, root, phase):
         stable(native, helper, context[role], lambda actual, role=role: refused(role, actual))
 
 
+def protected_bwrap(native):
+    path, ancestors = Path(BWRAP), []
+    for entry in path.parents:
+        value = entry.lstat()
+        require(entry.resolve(strict=True) == entry and stat.S_ISDIR(value.st_mode)
+                and value.st_uid == value.st_gid == 0 and stat.S_IMODE(value.st_mode) == 0o755,
+                f"Fixed bubblewrap ancestor refused: {entry}, uid={value.st_uid}, gid={value.st_gid}, mode={oct(stat.S_IMODE(value.st_mode))}")
+        ancestors.append({"path": str(entry), "dev": str(value.st_dev), "ino": str(value.st_ino), "uid": value.st_uid,
+                          "gid": value.st_gid, "mode": stat.S_IMODE(value.st_mode)})
+    value = path.lstat()
+    require(path.resolve(strict=True) == path and stat.S_ISREG(value.st_mode) and value.st_uid == value.st_gid == 0
+            and stat.S_IMODE(value.st_mode) == 0o755, "Fixed bubblewrap file is not root-protected")
+    image = native.image_identity(BWRAP)
+    file = P.record(path, 16 * 1024 * 1024)
+    require((file["uid"], file["gid"], file["mode"]) == (0, 0, 0o755), "Fixed bubblewrap numeric owner/mode changed")
+    with path.open("rb") as stream:
+        header = stream.read(64)
+    require(len(header) == 64 and header[:7] == bytes((127, 69, 76, 70, 2, 1, 1))
+            and int.from_bytes(header[16:18], "little") in (2, 3)
+            and int.from_bytes(header[18:20], "little") == 62, "Fixed bubblewrap is not an x86_64 executable ELF")
+    require(native.image_identity(BWRAP) == image, "Fixed bubblewrap changed during independent measurement")
+    return {"path": BWRAP, "file": file, "image": image, "ancestors": ancestors}
+
+
+class CliBootstrap:
+    def __init__(self, before, protected, caller, parent):
+        require(before["executable"] == "/usr/bin/flatpak" and before["parentPid"] == parent
+                and before["uids"] == [caller] * 4 and protected["path"] == BWRAP,
+                "Initial owned Flatpak CLI identity differs")
+        self._before, self._protected, self._used = copy.deepcopy(before), copy.deepcopy(protected), False
+
+    def freeze(self, after):
+        require(not self._used, "CLI bootstrap transition already consumed")
+        self._used = True
+        require(all(after[key] == self._before[key] for key in ("pid", "startTime", "parentPid", "uids")),
+                "CLI bootstrap PID/start/parent/UID changed")
+        require(after["executable"] == BWRAP and after["image"] == self._protected["image"]
+                and after["kernelImageSha256"] == self._protected["file"]["sha256"],
+                "CLI bootstrap did not become the independently protected bubblewrap image")
+        return copy.deepcopy(after)
+
+
 def owner(bus, name=NAME):
     from gi.repository import Gio, GLib
     def query(method, target, signature):
@@ -206,15 +250,13 @@ def gtk_worker(root, phase):
             require(chain.get(launcher["pid"]) == {k: v for k, v in launcher.items() if k != "kernelImageSha256"}, "Launcher left owned Flatpak tree")
             require(x11.inspect(context["window"]) == context["xres"], "GTK native window changed")
         check()
-        if IDENTITY_DIAGNOSTIC_ONLY:
-            report["identityChecksMatched"] = True
-            raise RuntimeError("Diagnostic-only trial: ownership matched; no GTK input permitted")
         status = Path(f'/proc/{launcher["pid"]}/status').read_bytes()
         require(len(status) <= 16384, "Process status bound")
         match = re.search(rb"^NSpid:\s+([0-9 \t]+)$", status, re.M)
         require(match is not None, "Kernel namespace PID tuple unavailable")
         ids = [int(v) for v in match[1].split()]
         require(1 <= len(ids) <= 8 and ids[0] == launcher["pid"], "Unexpected namespace PID identity")
+        report["kernelNamespacePids"] = ids
         references, ax_bus = native.native_ax_references()
         peers = {v["pid"]: v for v in [launcher, *proxies]}
         aliases = {}
@@ -223,7 +265,10 @@ def gtk_worker(root, phase):
             require(type(name) is str and len(name) <= 255 and re.fullmatch(r"(?::[0-9]+\.[0-9]+|org\.[A-Za-z0-9_.-]+)", name)
                     and type(pathname) is str and re.fullmatch(r"/org/a11y/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+", pathname) and len(pathname) <= 256, "Invalid GTK AX wire reference")
             peer = references.resolve(name)
-            require(peer["pid"] in peers and peer["uid"] == os.getuid() and node.get_process_id() in (ids[0], ids[-1]), "GTK AX owner is not the kernel-bound launcher/proxy")
+            reported_pid = node.get_process_id()
+            report["lastAxReference"] = {"name": name, "path": pathname, "reportedPid": reported_pid,
+                "peer": {key: peer[key] for key in ("owner", "pid", "uid")}}
+            require(peer["pid"] in peers and peer["uid"] == os.getuid() and reported_pid in (ids[0], ids[-1]), "GTK AX owner is not the kernel-bound launcher/proxy")
             stable(native, helper, peers[peer["pid"]])
             require(name not in aliases or aliases[name] == peer, "GTK AX owner changed")
             aliases[name] = peer
@@ -347,8 +392,12 @@ def exercise(root):
         require(proxy_image["uid"] == proxy_image["gid"] == 0 and proxy_image["mode"] == 0o755, "OS proxy is not protected")
         report.update(warmRoot=warm, warmWindow=window, launcher=binding, settingsBefore=snapshot_fixtures(root))
         def disclosure_action(phase, action, expected_windows):
+            bwrap = protected_bwrap(native)
+            P.save(root / (phase + "-bwrap-protected.json"), bwrap)
             cli = launch(["/usr/bin/flatpak", "run", "--user", REF], phase)
             cli_record = native.native_process(cli.pid, helper)
+            P.save(root / (phase + "-cli-before.json"), cli_record)
+            bootstrap = CliBootstrap(cli_record, bwrap, os.getuid(), os.getpid())
             peers = {}
             def found():
                 nonlocal peers
@@ -365,7 +414,16 @@ def exercise(root):
             require(len(matches) == 1, "Exact kernel-owned GTK window missing")
             gtk_window = matches[0]; properties = x11.inspect(gtk_window)
             require(properties["mapped"] and properties["title"] == "Creator Hub", "Wrong native disclosure window")
-            P.save(root / (phase + "-context.json"), {"controller": os.getpid(), "cli": cli_record, "launcher": launcher,
+            after = native.native_process(cli.pid, helper)
+            receipt = {"before": cli_record, "after": after, "protectedBubblewrap": bwrap,
+                       "transitionVerified": False, **GATES}
+            try:
+                require(protected_bwrap(native) == bwrap, "Independent bubblewrap pin changed before binding")
+                frozen_cli = bootstrap.freeze(after)
+                receipt["transitionVerified"] = True
+            finally:
+                P.save(root / (phase + "-cli-bootstrap.json"), receipt)
+            P.save(root / (phase + "-context.json"), {"controller": os.getpid(), "cli": frozen_cli, "launcher": launcher,
                 "proxies": proxies, "window": gtk_window, "xres": properties, "action": action})
             worker = launch(["/usr/bin/python3", "-B", str(Path(__file__).resolve()), "gtk", phase], phase + "-worker")
             wait(lambda: worker.poll() is not None, 35); require(worker.wait() == 0, "Owned GTK selector refused; inspect its bounded capture")
