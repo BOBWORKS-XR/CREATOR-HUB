@@ -104,6 +104,18 @@ class PagesTests(unittest.TestCase):
         driver.click.assert_called_once_with('#convergence-later')
         driver.request.assert_not_called()
 
+    def test_notice_acknowledgement_is_required_before_hiding_and_restart_does_not_reaccept(self):
+        driver = Mock()
+        driver.read.side_effect = [False, 'Confirm hiding this notice', False, True, '']
+        driver.elements.side_effect = [['dialog-id'], []]
+        M.usage_notice(driver, False)
+        self.assertEqual([call.args[0] for call in driver.click.call_args_list], [
+            '#feature-mcp [data-field="notice-remember"]', '#feature-mcp [data-field="notice-close"]',
+            '#feature-mcp dialog[open] input[type="checkbox"]', '#feature-mcp dialog[open] .primary-button'])
+        driver = Mock(); driver.read.return_value = True
+        M.usage_notice(driver, True)
+        driver.click.assert_not_called(); driver.elements.assert_not_called()
+
     def test_http_outcomes_reject_overflow_truncation_errors_and_unknown_shapes(self):
         for response in (Response(b'x' * 131073), Response(b''), Response(b'{"value":null}', length="999999"),
                          Response(length="invalid"), Response(length="1"), Response(status=204),

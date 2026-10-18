@@ -204,6 +204,26 @@ def defer_migration(driver):
     wait(lambda: driver.read("#convergence-dialog", "attribute/open") is None)
 
 
+def usage_notice(driver, previously_hidden):
+    prefix = '#feature-mcp '
+    notice = prefix + '[data-field="notice"]'
+    require(driver.read(notice, 'property/hidden') is previously_hidden,
+            "AI notice preference did not match the native launch phase")
+    if previously_hidden:
+        return
+    driver.click(prefix + '[data-field="notice-remember"]')
+    driver.click(prefix + '[data-field="notice-close"]')
+    dialog = prefix + 'dialog[open]'
+    wait(lambda: len(driver.elements(dialog)) == 1)
+    require(driver.read(dialog + ' h3') == 'Confirm hiding this notice', "Unexpected acknowledgement dialog")
+    require(driver.read(dialog + ' .primary-button', 'enabled') is False, "Notice did not require acknowledgement")
+    driver.click(dialog + ' input[type="checkbox"]')
+    driver.click(dialog + ' .primary-button')
+    wait(lambda: not driver.elements(dialog))
+    require(driver.read(notice, 'property/hidden') is True, "AI notice preference was not saved")
+    require(driver.read(prefix + '[data-field="error"]') == '', "AI notice save reported an error")
+
+
 def png_dimensions(png):
     require(33 <= len(png) <= 6 * 1024 * 1024 and png[:16] == b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR", "Invalid bounded PNG")
     width, height = struct.unpack(">II", png[16:24])
@@ -401,6 +421,9 @@ def run(binding, root, report, home=None, expected_groups="core"):
                     wait(lambda: d.read(prefix + ' [data-field="setup-result"]').startswith("Options saved."))
                     wait(lambda: d.read(prefix, "attribute/aria-busy") == "false" and d.read(prefix + ' [data-field="status"]') == "Ready")
                 preserved(home, binding["fixtures"], binding["config"], "read")
+                usage_notice(d, expected_groups == "read")
+                report["noticePreviouslyHidden"] = expected_groups == "read"
+                report["noticePreferenceObserved"] = True
             else:
                 require(d.read(prefix + ' [data-field="platform"]') == "linux", "Wrong Setup platform")
             # WebKit's screenshot command can stall after a successful page switch.
