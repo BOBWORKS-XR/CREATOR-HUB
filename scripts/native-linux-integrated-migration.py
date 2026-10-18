@@ -232,11 +232,84 @@ class Session:
     def __init__(self, root, binding, pages, helper, native, report, label):
         self.root, self.binding, self.pages, self.helper, self.native = root, binding, pages, helper, native
         self.report, self.label, self.dialogs = report, label, set()
+        self.child, self.logs, self.native_driver, self.native_pidfd = None, None, None, None
+        report[label] = {"phase": "constructor", "cleanupErrors": []}
+        try:
+            self._start()
+        except Exception as error:
+            report[label]["initialError"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+            try:
+                self.capture_startup_failure()
+            except Exception as capture_error:
+                report[label]["cleanupErrors"].append({"phase": "startup-capture", "type": type(capture_error).__name__, "message": str(capture_error)[:500]})
+            raise
+
+    def drivers_ready(self):
+        self.logs.pump()
+        require(self.child.poll() is None, "Owned intermediary exited before readiness")
+        require(self.native.native_process(self.child.pid, self.helper) == self.driver_process, "Intermediary identity changed before session")
+        peers = self.pages.subtree(self.child.pid, self.helper, self.native)
+        candidates = [p for p in peers.values() if p["executable"] == "/usr/bin/WebKitWebDriver"]
+        require(len(candidates) <= 1, "Ambiguous native WebKit driver")
+        if not candidates:
+            return False
+        actual = self.native.native_process(candidates[0]["pid"], self.helper)
+        require(actual["parentPid"] == self.child.pid and actual["uids"] == [os.getuid()] * 4
+                and actual["kernelImageSha256"] == self.system_driver["sha256"], "Native WebKit driver ownership/image differs")
+        if self.native_driver is None:
+            self.native_driver, self.native_pidfd = actual, os.pidfd_open(actual["pid"])
+        require(actual == self.native_driver, "Native WebKit driver changed before session")
+        self.report[self.label].update(driver=self.driver_process, nativeDriver=actual)
+        if not (self.pages.listener(self.child.pid, 4444) and self.pages.listener(actual["pid"], 4445)):
+            return False
+        status = self.driver.request("GET", "/status")
+        require(type(status) is dict and type(status.get("ready")) is bool, "Malformed native driver readiness")
+        require(self.child.poll() is None and self.native.native_process(self.child.pid, self.helper) == self.driver_process
+                and self.native.native_process(actual["pid"], self.helper) == self.native_driver
+                and self.pages.listener(self.child.pid, 4444) and self.pages.listener(actual["pid"], 4445), "Driver identity/listeners changed during readiness")
+        self.report[self.label]["preSessionReadiness"] = {"intermediaryPort": 4444, "nativePort": 4445, "status": status}
+        return status["ready"]
+
+    def capture_startup_failure(self):
+        receipt = self.report[self.label]
+        receipt["lastRequest"] = getattr(getattr(self, "driver", None), "last_request", None)
+        receipt["driverExitCode"] = self.child.poll() if self.child is not None else None
+        receipt["nativeDriverExit"] = {"bound": self.native_driver is not None, "exitObserved": None, "exitCode": None,
+                                       "waitStatusAvailable": False}
+        for phase, capture in (("driver-log-drain", self.logs),):
+            if capture is not None:
+                try:
+                    deadline = time.monotonic() + 1
+                    while time.monotonic() < deadline and not all(v["eof"] for v in capture.metadata().values()):
+                        capture.pump(0.02)
+                    receipt["driverCapture"] = capture.metadata()
+                except Exception as error:
+                    receipt["cleanupErrors"].append({"phase": phase, "type": type(error).__name__, "message": str(error)[:500]})
+        if self.child is not None:
+            receipt["driverExitCode"] = self.child.poll()
+            if receipt["driverExitCode"] is None and hasattr(self, "driver_process"):
+                try:
+                    require(self.native.native_process(self.child.pid, self.helper) == self.driver_process, "Driver changed during failure capture")
+                    receipt["failureProcesses"] = list(self.pages.subtree(self.child.pid, self.helper, self.native).values())
+                except Exception as error:
+                    receipt["cleanupErrors"].append({"phase": "failure-process-capture", "type": type(error).__name__, "message": str(error)[:500]})
+        if self.native_pidfd is not None:
+            receipt["nativeDriverExit"]["exitObserved"] = bool(select.select([self.native_pidfd], [], [], 0)[0])
+            os.close(self.native_pidfd)
+            self.native_pidfd = None
+
+    def _start(self):
+        root, binding, pages, helper, native, report, label = self.root, self.binding, self.pages, self.helper, self.native, self.report, self.label
         self.x11, self.driver = helper.X11(), pages.Driver()
+        self.system_driver = pages.record("/usr/bin/WebKitWebDriver")
+        require((self.system_driver["uid"], self.system_driver["gid"], self.system_driver["mode"]) == (0, 0, 0o755), "Unprotected native WebKit driver")
         self.child = subprocess.Popen([binding["driver"]["path"], "--native-driver", "/usr/bin/WebKitWebDriver"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.logs = native.Capture(self.child, root, label + "-driver")
         self.driver_process = native.native_process(self.child.pid, helper)
-        pages.wait(lambda: pages.listener(self.child.pid, 4444))
+        require(self.driver_process["kernelImageSha256"] == binding["driver"]["sha256"] and self.driver_process["uids"] == [os.getuid()] * 4, "Intermediary kernel image/UID differs")
+        report[label].update(driver=self.driver_process, nativeDriverSystemFile=self.system_driver, phase="driver-readiness")
+        pages.wait(self.drivers_ready)
+        report[label]["phase"] = "create-session"
         response = self.driver.request("POST", "/session", {"capabilities": {"alwaysMatch": {"tauri:options": {"application": HUB, "args": []}}}})
         self.driver.session = response["sessionId"]
         peers = pages.subtree(self.child.pid, helper, native)
@@ -246,8 +319,7 @@ class Session:
         require(self.owned["kernelImageSha256"] == binding["hub"]["sha256"], "Root kernel image differs")
         parent = native.native_process(self.owned["parentPid"], helper)
         require(parent["pid"] in peers and parent["executable"] == "/usr/bin/WebKitWebDriver" and parent["parentPid"] == self.child.pid
-                and parent["kernelImageSha256"] == pages.record("/usr/bin/WebKitWebDriver")["sha256"], "Native driver ancestry differs")
-        self.native_driver = parent
+                and parent == self.native_driver, "Native driver ancestry differs")
         self.pidfd = os.pidfd_open(self.owned["pid"])
         pages.wait(lambda: len(native.client_ids(self.x11)) == 1)
         self.window = native.client_ids(self.x11)[0]
@@ -264,12 +336,13 @@ class Session:
         self.gtk = gtk
         self.driver.guard = self.guard
         self.guard()
-        report[label] = {"root": self.owned, "driver": self.driver_process, "nativeDriver": parent, "xres": self.xres}
+        report[label].update(root=self.owned, xres=self.xres, phase="ready")
 
     def process_guard(self):
         require(self.child.poll() is None and self.native.native_process(self.owned["pid"], self.helper) == self.owned, "Installed Root identity changed")
         require(self.native.native_process(self.child.pid, self.helper) == self.driver_process
-                and self.pages.listener(self.child.pid, 4444), "Driver identity/listener changed")
+                and self.native.native_process(self.native_driver["pid"], self.helper) == self.native_driver
+                and self.pages.listener(self.child.pid, 4444) and self.pages.listener(self.native_driver["pid"], 4445), "Driver identity/listener changed")
         self.pages.subtree(self.child.pid, self.helper, self.native)
 
     def guard(self):
@@ -379,13 +452,16 @@ class Session:
             self.report[self.label]["sessionCleanup"] = str(error)[:300]
         # Only the two independently bound fixture drivers may be terminated,
         # after the installed product has already closed normally.
-        native_fd = os.pidfd_open(self.native_driver["pid"])
-        require(self.native.native_process(self.native_driver["pid"], self.helper) == self.native_driver, "Native driver changed before fixture cleanup")
+        native_fd = self.native_pidfd
+        require(native_fd is not None, "Native driver pidfd missing")
+        if not select.select([native_fd], [], [], 0)[0]:
+            require(self.native.native_process(self.native_driver["pid"], self.helper) == self.native_driver, "Native driver changed before fixture cleanup")
         self.child.terminate(); self.child.wait(timeout=10)
         if not select.select([native_fd], [], [], 0)[0]:
             signal.pidfd_send_signal(native_fd, signal.SIGTERM)
             self.pages.wait(lambda: bool(select.select([native_fd], [], [], 0.1)[0]), 5)
         os.close(native_fd)
+        self.native_pidfd = None
         self.logs.pump(); self.logs.close()
         os.close(self.pidfd); self.x11.dispose()
 
@@ -394,7 +470,8 @@ def run(binding, root, pages, helper, native, report):
     pages.pinned(HUB, binding["hub"], 0, 0o755)
     require(native.run_tool(root, "dpkg-verify", ["/usr/bin/dpkg", "--verify", "creator-hub"])[1] == b"", "Installed DEB differs")
     wm = subprocess.Popen(["/usr/bin/openbox", "--sm-disable"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    session = None
+    session, primary_error = None, None
+    report["cleanupErrors"] = []
     try:
         session = Session(root, binding, pages, helper, native, report, "first")
         d = session.driver
@@ -423,13 +500,23 @@ def run(binding, root, pages, helper, native, report):
         require(report["afterReopen"] == report["afterMigration"] == report["afterClose"], "Migration did not persist")
         session.close(); session = None
         report.update(migrationAccepted=True, normalReopenPersistenceAccepted=True)
+    except Exception as error:
+        primary_error = error
+        raise
     finally:
+        if primary_error is not None:
+            report["captureOnlyStop"] = True
         if session is not None:
             report["captureOnlyStop"] = True
             report["lastRequest"] = session.driver.last_request
         else:
-            subprocess.run(["/usr/bin/openbox", "--exit"], check=True, timeout=10)
-            wm.wait(timeout=10)
+            try:
+                subprocess.run(["/usr/bin/openbox", "--exit"], check=True, timeout=10)
+                wm.wait(timeout=10)
+            except Exception as error:
+                report["cleanupErrors"].append({"phase": "window-manager", "type": type(error).__name__, "message": str(error)[:500]})
+                if primary_error is None:
+                    raise
 
 
 def main():

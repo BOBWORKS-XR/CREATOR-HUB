@@ -2,6 +2,7 @@
 import ast
 import copy
 import hashlib
+import http.client
 import importlib.util
 import io
 import json
@@ -14,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 import zipfile
 
 sys.dont_write_bytecode = True
@@ -47,6 +49,27 @@ def archive(entries):
             z.writestr(entry, value)
     buffer.seek(0)
     return buffer
+
+
+def ready_session():
+    session = object.__new__(M.Session)
+    uid = 1000
+    intermediary = {"pid": 101, "parentPid": 90, "uids": [uid] * 4, "executable": "/fixture/tauri-driver", "kernelImageSha256": "a" * 64}
+    native = {"pid": 102, "parentPid": 101, "uids": [uid] * 4, "executable": "/usr/bin/WebKitWebDriver", "kernelImageSha256": "b" * 64}
+    session.child = mock.Mock(pid=101)
+    session.child.poll.return_value = None
+    session.driver_process = intermediary
+    session.native_driver, session.native_pidfd = None, None
+    session.system_driver = {"sha256": "b" * 64}
+    session.logs, session.driver = mock.Mock(), mock.Mock(last_request=None)
+    session.logs.metadata.return_value = {"stdout": {"eof": True, "truncated": False}}
+    session.driver.request.return_value = {"ready": True, "message": "ready"}
+    session.pages, session.native, session.helper = mock.Mock(), mock.Mock(), object()
+    session.pages.subtree.return_value = {101: intermediary, 102: native}
+    session.native.native_process.side_effect = lambda pid, _: copy.deepcopy({101: intermediary, 102: native}[pid])
+    session.pages.listener.return_value = True
+    session.label, session.report = "first", {"first": {"cleanupErrors": []}}
+    return session
 
 
 class Tests(unittest.TestCase):
@@ -194,6 +217,84 @@ class Tests(unittest.TestCase):
         cls = next(n for n in helper.body if isinstance(n, ast.ClassDef) and n.name == "RootOwnership")
         constructor = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
         self.assertTrue({"system_check", "references"} <= {a.arg for a in constructor.args.args})
+
+    def test_both_owned_listeners_and_status_ready_required_before_session(self):
+        s = ready_session()
+        with mock.patch.object(M.os, "getuid", return_value=1000, create=True), mock.patch.object(M.os, "pidfd_open", return_value=77, create=True) as opened:
+            s.pages.listener.side_effect = lambda pid, port: (pid, port) == (101, 4444)
+            self.assertFalse(s.drivers_ready())
+            s.driver.request.assert_not_called()
+            s.pages.listener.return_value, s.pages.listener.side_effect = True, None
+            s.driver.request.return_value = {"ready": False}
+            self.assertFalse(s.drivers_ready())
+            s.driver.request.return_value = {"ready": True}
+            self.assertTrue(s.drivers_ready())
+            opened.assert_called_once_with(102)
+            self.assertTrue(all(call.args == ("GET", "/status") for call in s.driver.request.call_args_list))
+            self.assertEqual(s.report["first"]["preSessionReadiness"]["status"], {"ready": True})
+        source = (HERE / "native-linux-integrated-migration.py").read_text()
+        start = source.split("    def _start(self):", 1)[1].split("    def process_guard", 1)[0]
+        self.assertLess(start.index("pages.wait(self.drivers_ready)"), start.index('self.driver.request("POST", "/session"'))
+        self.assertEqual(source.count('self.driver.request("POST", "/session"'), 1)
+
+    def test_native_driver_foreign_uid_image_parent_or_changed_listener_refuses(self):
+        for field, value in (("uids", [999] * 4), ("kernelImageSha256", "0" * 64), ("parentPid", 999)):
+            s = ready_session()
+            s.pages.subtree.return_value[102][field] = value
+            with self.subTest(field=field), mock.patch.object(M.os, "getuid", return_value=1000, create=True), self.assertRaises(RuntimeError):
+                s.drivers_ready()
+            s.driver.request.assert_not_called()
+        s = ready_session()
+        s.pages.listener.side_effect = [True, True, True, False]
+        with mock.patch.object(M.os, "getuid", return_value=1000, create=True), mock.patch.object(M.os, "pidfd_open", return_value=77, create=True), self.assertRaises(RuntimeError):
+            s.drivers_ready()
+
+    def test_constructor_preserves_initial_failure_and_drains_bounded_logs(self):
+        original = http.client.RemoteDisconnected("original session disconnect")
+        report = {}
+        capture = mock.Mock()
+        capture.metadata.side_effect = [{"stderr": {"eof": False}}, {"stderr": {"eof": True}}, {"stderr": {"eof": True}}]
+        def fail(session):
+            session.child = mock.Mock()
+            session.child.poll.return_value = 3
+            session.logs = capture
+            session.driver = SimpleNamespace(last_request={"method": "POST", "route": "/session"})
+            raise original
+        with mock.patch.object(M.Session, "_start", fail), self.assertRaises(http.client.RemoteDisconnected) as caught:
+            M.Session(None, {}, None, None, None, report, "first")
+        self.assertIs(caught.exception, original)
+        self.assertEqual(report["first"]["initialError"]["type"], "RemoteDisconnected")
+        self.assertEqual(report["first"]["driverExitCode"], 3)
+        self.assertFalse(report["first"]["nativeDriverExit"]["bound"])
+        capture.pump.assert_called_once_with(0.02)
+        report = {}
+        with mock.patch.object(M.Session, "_start", fail), mock.patch.object(M.Session, "capture_startup_failure", side_effect=RuntimeError("capture failed")), self.assertRaises(http.client.RemoteDisconnected) as caught:
+            M.Session(None, {}, None, None, None, report, "first")
+        self.assertIs(caught.exception, original)
+        self.assertEqual(report["first"]["cleanupErrors"][0]["phase"], "startup-capture")
+
+    def test_bound_native_exit_observation_does_not_invent_grandchild_wait_status(self):
+        s = ready_session()
+        s.native_driver, s.native_pidfd = s.pages.subtree.return_value[102], 77
+        s.child.poll.return_value = 1
+        with mock.patch.object(M.select, "select", return_value=([77], [], [])), mock.patch.object(M.os, "close") as close:
+            s.capture_startup_failure()
+        self.assertEqual(s.report["first"]["nativeDriverExit"], {"bound": True, "exitObserved": True, "exitCode": None, "waitStatusAvailable": False})
+        self.assertEqual(s.report["first"]["driverExitCode"], 1)
+        close.assert_called_once_with(77)
+        self.assertIsNone(s.native_pidfd)
+
+    def test_cleanup_timeout_cannot_replace_original_session_failure(self):
+        original = http.client.RemoteDisconnected("original session disconnect")
+        pages, native, report = mock.Mock(), mock.Mock(), {}
+        native.run_tool.return_value = (0, b"")
+        wm = mock.Mock()
+        wm.wait.side_effect = subprocess.TimeoutExpired(["/usr/bin/openbox"], 10)
+        with mock.patch.object(M, "Session", side_effect=original), mock.patch.object(M.subprocess, "Popen", return_value=wm), mock.patch.object(M.subprocess, "run"), self.assertRaises(http.client.RemoteDisconnected) as caught:
+            M.run({"hub": {}}, Path("/fixture"), pages, object(), native, report)
+        self.assertIs(caught.exception, original)
+        self.assertEqual(report["cleanupErrors"][0]["type"], "TimeoutExpired")
+        self.assertNotIn("migrationAccepted", report)
 
     def test_workflow_branch_permissions_producer_and_legacy_pins(self):
         import yaml
