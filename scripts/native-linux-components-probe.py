@@ -768,10 +768,14 @@ def fresh_source_inventory(window, owner, atspi, observation, phase):
             row["states"] = {state: states.contains(getattr(atspi.StateType, state)) for state in
                              ("VISIBLE", "SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY")}
             if source_id == "connection-guide-dialog" and phase in ("mcp-ready", "save-guide"):
-                source["modalMatches"] = states.contains(atspi.StateType.MODAL)
+                # Native 39113636046: showModal() in the pinned iframe has MODAL=false.
+                # Page.cpp::axObjectCache initializes from the main document;
+                # AXObjectCache.cpp::modalNode is not the iframe's HTML modal state.
+                row["atspiModalObserved"] = states.contains(atspi.StateType.MODAL)
             if len(observation["sourceObservations"]) < 8:
                 observation["sourceObservations"].append({"reference": list(reference), "role": int(role),
-                                                          **source, "states": dict(row["states"])})
+                    **source, "states": dict(row["states"]),
+                    **({"atspiModalObserved": row["atspiModalObserved"]} if "atspiModalObserved" in row else {})})
             ids.setdefault(source_id, []).append((reference, ancestors))
         nodes[reference] = node
         paths[reference] = ancestors

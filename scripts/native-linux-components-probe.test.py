@@ -1764,8 +1764,8 @@ class SourceGuidePathTests(unittest.TestCase):
                     "collectedParent": f.owner.references.identity(f.web, f.owner)}])
             f.button.action.do_action.assert_not_called()
 
-    def test_swapped_duplicate_missing_source_ids_roles_names_and_not_modal_refuse(self):
-        for change in ("swapped", "duplicate", "missing", "tag", "role", "computed-role", "toolkit", "name", "modal", "hidden", "disabled"):
+    def test_swapped_duplicate_missing_source_ids_roles_names_hidden_and_disabled_refuse(self):
+        for change in ("swapped", "duplicate", "missing", "tag", "role", "computed-role", "toolkit", "name", "hidden", "disabled"):
             with self.subTest(change=change), self.fixture() as f:
                 attrs = f.attributes[id(f.button)]
                 if change == "swapped":
@@ -1778,8 +1778,6 @@ class SourceGuidePathTests(unittest.TestCase):
                     f.button.role = 16
                 elif change == "name":
                     f.button.name = "private wrong name"
-                elif change == "modal":
-                    f.dialog.states.remove(9)
                 elif change == "hidden":
                     f.heading.states.remove(8)
                 elif change == "disabled":
@@ -1792,7 +1790,7 @@ class SourceGuidePathTests(unittest.TestCase):
                 self.assertNotIn("private", json.dumps(f.save.call_args.args[1]))
 
     def test_stale_edges_or_action_interface_mutation_refuse_even_with_same_button_wire_id(self):
-        for change in ("edges", "id-during-interface", "image", "bus-owner", "geometry", "runtime"):
+        for change in ("edges", "id-during-interface", "image", "bus-owner", "geometry", "runtime", "modal-state"):
             with self.subTest(change=change), self.fixture() as f:
                 original = p.fresh_guide_walk
                 calls = []
@@ -1809,6 +1807,8 @@ class SourceGuidePathTests(unittest.TestCase):
                             f.bus_records[":1.43"]["owner"] = ":1.99"
                         elif change == "runtime":
                             f.runtime_state.return_value = {"fixture": "changed"}
+                        elif change == "modal-state":
+                            f.dialog.states.remove(9)
                     return result
                 if change == "id-during-interface":
                     def verb(_):
@@ -1823,6 +1823,21 @@ class SourceGuidePathTests(unittest.TestCase):
                 with mock.patch.object(p, "fresh_guide_walk", side_effect=walk), self.assertRaises(RuntimeError):
                     self.run_guide(f)
                 f.button.action.do_action.assert_not_called()
+
+    def test_native_39113636046_iframe_modal_bit_is_diagnostic_not_html_modal_authority(self):
+        # The native capture matched all four DOM IDs/roles/tags/names; only
+        # Atspi.MODAL was false. No DOM modality or native action is inferred here.
+        for action in ("mcp-ready", "save-guide"):
+            with self.subTest(action=action), self.fixture() as f:
+                f.dialog.states.remove(9)
+                result = self.run_guide(f, action)
+                self.assertEqual(result["actionCount"], int(action == "save-guide"))
+                self.assertTrue(result["freshWalksMatched"])
+                for walk in result["walks"]:
+                    dialog = next(row for row in walk["sourceObservations"] if row["id"] == "connection-guide-dialog")
+                    self.assertFalse(dialog["atspiModalObserved"])
+                    self.assertTrue(all(dialog[key] for key in ("roleMatches", "tagMatches", "computedRoleMatches", "toolkitMatches", "nameMatches")))
+                self.assertFalse(result["nativeAcceptance"])
 
     def test_cycle_child_count_drift_and_runtime_refusal_never_press(self):
         for change in ("cycle", "count", "runtime"):
