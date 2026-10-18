@@ -26,7 +26,14 @@ const goodReport = () => ({ schemaVersion: 1, scope: 'synthetic-owned-flatpak-la
   ...Object.fromEntries(harness.FALSE_FIELDS.map(key => [key, false])) });
 
 test('admission requires exact disposable native repository, branch, event and opt-in', () => {
-  assert.equal(harness.admission(validEnv(), 'linux', 'x64', 1001, 1001).uid, 1001);
+  for (const event of ['push', 'workflow_dispatch']) {
+    const env = { ...validEnv(), GITHUB_EVENT_NAME: event };
+    assert.equal(harness.admission(env, 'linux', 'x64', 1001, 1001).uid, 1001);
+    for (const ref of ['refs/heads/main', 'refs/heads/validation/flatpak-host-launch-014',
+      harness.BRANCH + '-foreign', 'refs/tags/v0.1.14']) {
+      assert.throws(() => harness.admission({ ...env, GITHUB_REF: ref }, 'linux', 'x64', 1001, 1001));
+    }
+  }
   for (const key of Object.keys(validEnv())) {
     const env = validEnv(); delete env[key];
     assert.throws(() => harness.admission(env, 'linux', 'x64', 1001, 1001), key);
@@ -35,7 +42,8 @@ test('admission requires exact disposable native repository, branch, event and o
     ['linux', 'x64', 0, 1001], ['linux', 'x64', 1001, 0]]) {
     assert.throws(() => harness.admission(validEnv(), platform, arch, uid, gid));
   }
-  for (const [key, value] of [['GITHUB_EVENT_NAME', 'push'], ['GITHUB_REF', 'refs/heads/main'],
+  for (const [key, value] of [['GITHUB_EVENT_NAME', 'pull_request'], ['GITHUB_EVENT_NAME', 'workflow_run'],
+    ['GITHUB_EVENT_NAME', 'schedule'], ['GITHUB_REF', 'refs/heads/main'],
     ['RUNNER_ENVIRONMENT', 'self-hosted'], ['GITHUB_REPOSITORY_ID', '1'], ['FLATPAK_ID', harness.APP]]) {
     assert.throws(() => harness.admission({ ...validEnv(), [key]: value }, 'linux', 'x64', 1001, 1001));
   }
@@ -177,15 +185,24 @@ test('no product build, host reader, settings operations, deletion, override or 
   assert.match(source, /native\.error \|\| native\.signal \? null : native\.status/);
 });
 
-test('workflow is manual, finite, Linux only, read-only token and parent-reviewed branch only', () => {
-  assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
+test('dispatch HTTP404 bootstrap regression: exact-branch three-file push works without default registration; manual remains', () => {
+  // Parent observed dispatch HTTP404 at 984640a before default-branch registration.
+  // A change to this workflow itself must be an eligible bootstrap push.
+  assert.deepEqual(Object.keys(workflow.on).sort(), ['push', 'workflow_dispatch']);
+  assert.equal(workflow.on.workflow_dispatch, null);
+  assert.deepEqual(workflow.on.push, {
+    branches: [harness.BRANCH.slice('refs/heads/'.length)],
+    paths: ['.github/workflows/flatpak-installed-host-launch-014.yml',
+      'scripts/native-flatpak-installed-transport.cjs', 'scripts/native-flatpak-installed-transport.test.cjs'],
+  });
   assert.deepEqual(workflow.permissions, { contents: 'read' });
   assert.deepEqual(Object.keys(workflow.jobs), ['installed-transport']);
   const job = workflow.jobs['installed-transport'];
   assert.equal(job['runs-on'], 'ubuntu-22.04'); assert.equal(job['timeout-minutes'], 25);
-  assert.ok(job.if.includes(harness.BRANCH));
-  for (const guard of ["github.repository == 'BOBWORKS-XR/CREATOR-HUB'", "github.repository_id == '1364807512'",
-    "github.event_name == 'workflow_dispatch'"]) assert.ok(job.if.includes(guard));
+  assert.equal(job.if.trim(), "github.repository == 'BOBWORKS-XR/CREATOR-HUB' && "
+    + "github.repository_id == '1364807512' && "
+    + `github.ref == '${harness.BRANCH}' && `
+    + "(github.event_name == 'push' || github.event_name == 'workflow_dispatch')");
   assert.equal(job.steps[0].with['persist-credentials'], false);
   assert.doesNotMatch(workflowText, /secrets\.|contents: write|gh release|workflow_call|windows-|macos-|publish-hub|sysctl|apparmor|--no-sandbox|sudo node/);
 });

@@ -1,6 +1,12 @@
 name: Installed synthetic Flatpak host launch (not Hub integration acceptance)
 
 on:
+  push:
+    branches: [validation/flatpak-installed-host-launch-014]
+    paths:
+      - .github/workflows/flatpak-installed-host-launch-014.yml
+      - scripts/native-flatpak-installed-transport.cjs
+      - scripts/native-flatpak-installed-transport.test.cjs
   workflow_dispatch:
 
 permissions:
@@ -12,7 +18,7 @@ jobs:
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' &&
       github.repository_id == '1364807512' &&
       github.ref == 'refs/heads/validation/flatpak-installed-host-launch-014' &&
-      github.event_name == 'workflow_dispatch'
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     env:

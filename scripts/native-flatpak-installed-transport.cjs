@@ -28,8 +28,9 @@ function admission(env = process.env, platform = process.platform, arch = proces
   assert.ok(Number.isInteger(uid) && uid > 0 && Number.isInteger(gid) && gid > 0, 'Non-root runner required');
   for (const [key, value] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
     RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64', GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB',
-    GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: BRANCH,
+    GITHUB_REPOSITORY_ID: '1364807512', GITHUB_REF: BRANCH,
     CREATOR_FLATPAK_INSTALLED_TRANSPORT: '1' })) assert.equal(env[key], value, key);
+  assert.ok(['push', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME), 'Unsupported workflow event');
   assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/);
   assert.match(env.GITHUB_RUN_ID || '', /^[1-9][0-9]*$/);
   assert.match(env.GITHUB_RUN_ATTEMPT || '', /^[1-9][0-9]*$/);
