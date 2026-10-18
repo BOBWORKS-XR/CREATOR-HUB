@@ -25,6 +25,15 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Read-only fixed ancestry preflight before downloading inputs
+        run: python3 -B scripts/native-linux-integrated-update.py path-preflight
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integrated-update-preflight-paths-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/integrated-update-path-preflight.json
+          retention-days: 7
+          if-no-files-found: error
       - uses: actions/setup-node@v6
         with:
           node-version: 24.17.0
@@ -102,6 +111,15 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Read-only same-runner ancestry before input download or installation
+        run: python3 -B scripts/native-linux-integrated-update.py path-preflight
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integrated-update-native-paths-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/integrated-update-path-preflight.json
+          retention-days: 7
+          if-no-files-found: error
       - uses: actions/setup-node@v6
         with:
           node-version: 24.17.0

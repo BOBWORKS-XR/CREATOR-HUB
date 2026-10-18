@@ -78,6 +78,59 @@ class Contracts(unittest.TestCase):
                 admit.assert_not_called()
         self.assertTrue(all(value is False for value in M.FALSE_GATES.values()))
 
+    def test_protected_refusal_reports_exact_checked_metadata_without_relaxing_guard(self):
+        for uid, gid, mode, redirect in ((0, 0, 0o777, False), (1001, 0, 0o755, False),
+                                         (0, 1001, 0o755, False), (0, 0, 0o4755, False), (0, 0, 0o755, True)):
+            info = SimpleNamespace(st_uid=uid, st_gid=gid, st_mode=stat.S_IFDIR | mode)
+            with self.subTest(uid=uid, gid=gid, mode=mode, redirect=redirect), \
+                    patch.object(Path, 'lstat', return_value=info), \
+                    patch.object(Path, 'resolve', autospec=True, side_effect=lambda item, strict: Path('/foreign') if redirect else item):
+                with self.assertRaisesRegex(RuntimeError, '^Protected fixed source/ancestor required: ') as raised:
+                    M.protected(Path('/opt'))
+                row = json.loads(str(raised.exception).split(': ', 1)[1])
+                self.assertEqual(row, {'path': str(Path('/opt')), 'uid': uid, 'gid': gid, 'mode': format(mode, '04o'),
+                                      'resolvedPath': str(Path('/foreign') if redirect else Path('/opt')), 'redirect': redirect})
+        with patch.object(Path, 'lstat', return_value=SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)), \
+                patch.object(Path, 'resolve', autospec=True, side_effect=lambda item, strict: item):
+            self.assertEqual(M.protected(Path('/opt')), Path('/opt'))
+
+    def preflight_metadata(self, *, mode=0o755, save_error=None):
+        def metadata(item):
+            if item == M.BASE or M.BASE in item.parents:
+                raise FileNotFoundError(2, 'not present')
+            return SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | (mode if item == Path('/opt') else 0o755))
+        with patch.object(Path, 'lstat', autospec=True, side_effect=metadata), \
+                patch.object(Path, 'resolve', autospec=True, side_effect=lambda item, strict: item), \
+                patch.object(Path, 'open') as opening, patch.object(Path, 'read_bytes') as reading, \
+                patch.object(M.os, 'chmod') as chmod, patch.object(M, 'command') as command, \
+                patch.object(M, 'evidence', side_effect=save_error) as save, patch('builtins.print'):
+            if mode == 0o755 and save_error is None:
+                M.path_preflight({'RUNNER_TEMP': '/tmp'})
+            else:
+                with self.assertRaises(RuntimeError if mode != 0o755 else OSError) as raised:
+                    M.path_preflight({'RUNNER_TEMP': '/tmp'})
+                if mode != 0o755:
+                    self.assertTrue(str(raised.exception).startswith('Protected fixed source/ancestor required: '))
+            opening.assert_not_called(); reading.assert_not_called(); chmod.assert_not_called(); command.assert_not_called()
+            return save.call_args.args[1]
+
+    def test_early_preflight_is_bounded_metadata_only_and_absence_is_not_a_fixture_read(self):
+        report = self.preflight_metadata()
+        self.assertTrue(report['guardPassed']); self.assertTrue(report['readOnly'])
+        self.assertEqual(len(report['paths']), 5)
+        self.assertEqual(report['paths'][1], {'path': str(Path('/opt')), 'exists': True, 'uid': 0, 'gid': 0,
+                                            'mode': '0755', 'resolvedPath': str(Path('/opt')), 'redirect': False})
+        self.assertEqual(report['paths'][-1], {'path': str(M.BASE / 'binding.json'), 'exists': False, 'lstatErrno': 2})
+        self.assertLess(len(json.dumps(report).encode()), 8192)
+
+    def test_unsafe_ancestry_refuses_and_diagnostic_save_failure_cannot_replace_original_error(self):
+        report = self.preflight_metadata(mode=0o777)
+        self.assertFalse(report['guardPassed'])
+        self.assertEqual(report['paths'][1]['mode'], '0777')
+        self.assertEqual(report['error']['type'], 'RuntimeError')
+        self.preflight_metadata(mode=0o777, save_error=OSError('cleanup failed'))
+        self.preflight_metadata(save_error=OSError('save failed'))
+
     def test_pins_are_current_integrated_producers_not_old_fixture(self):
         self.assertEqual(M.SOURCE, '5065fb1112b9e96978e40e64503fa979f559baae')
         self.assertEqual(M.ELF14, (27369792, '3ac7fdd5cedf85df41844c32c7dcdeb180ca14fc66a7f6e274c1ace5fc5e39b8'))
@@ -237,6 +290,13 @@ class Contracts(unittest.TestCase):
         self.assertEqual(workflow['jobs']['native']['if'], "github.event_name == 'workflow_dispatch'")
         trigger = workflow.get('on', workflow.get(True))
         self.assertIsNone(trigger['workflow_dispatch'])  # no mode/version/path override inputs
+        for job in ('preflight', 'native'):
+            steps = workflow['jobs'][job]['steps']
+            diagnostic = next(i for i, step in enumerate(steps) if step.get('run', '').endswith(' path-preflight'))
+            self.assertEqual(diagnostic, 1)  # checkout then metadata; no input download/install first
+            upload = steps[diagnostic + 1]
+            self.assertEqual(upload['if'], 'always()')
+            self.assertEqual(upload['with']['path'], '${{ runner.temp }}/integrated-update-path-preflight.json')
         bash = shutil.which('bash')
         if sys.platform == 'win32':
             git_bash = Path('C:/Program Files/Git/bin/bash.exe')

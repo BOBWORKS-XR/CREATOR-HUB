@@ -155,9 +155,48 @@ def protected(file):
     file = Path(file)
     for item in (file, *file.parents):
         info = item.lstat()
-        require(item.resolve(strict=True) == item and info.st_uid == info.st_gid == 0
-                and not info.st_mode & 0o7022, 'Protected fixed source/ancestor required')
+        resolved = item.resolve(strict=True)
+        require(resolved == item and info.st_uid == info.st_gid == 0
+                and not info.st_mode & 0o7022, 'Protected fixed source/ancestor required: ' + json.dumps({
+                    'path': str(item), 'uid': info.st_uid, 'gid': info.st_gid,
+                    'mode': format(stat.S_IMODE(info.st_mode), '04o'),
+                    'resolvedPath': str(resolved), 'redirect': resolved != item}, separators=(',', ':')))
     return file
+
+
+def path_preflight(env):
+    """Metadata only, before inputs or fixture preparation; never repair ancestry."""
+    report = {'readOnly': True, 'guardPassed': False, 'paths': []}
+    for item in (Path('/'), Path('/opt'), BASE, BASE / 'scripts', BASE / 'binding.json'):
+        row = {'path': str(item)}
+        try:
+            info = item.lstat()
+            row.update(exists=True, uid=info.st_uid, gid=info.st_gid, mode=format(stat.S_IMODE(info.st_mode), '04o'))
+            try:
+                resolved = item.resolve(strict=True)
+                row.update(resolvedPath=str(resolved), redirect=resolved != item)
+            except OSError as error:
+                row['resolveErrno'] = error.errno
+        except OSError as error:
+            row.update(exists=False, lstatErrno=error.errno)
+        report['paths'].append(row)
+    try:
+        protected(Path('/opt'))
+        report['guardPassed'] = True
+    except Exception as error:
+        report['error'] = {'type': type(error).__name__, 'message': str(error)[:4096]}
+        raise
+    finally:
+        original = sys.exc_info()[1]
+        try:
+            raw = json.dumps(report, separators=(',', ':'), allow_nan=False)
+            require(len(raw.encode()) <= 8192, 'Path metadata diagnostic exceeds fixed bound')
+            print(raw, flush=True)
+            evidence(Path(env['RUNNER_TEMP']) / 'integrated-update-path-preflight.json', report, 8192)
+        except Exception as error:
+            if original is None:
+                raise
+            print('Path diagnostic save failed: ' + type(error).__name__, file=sys.stderr, flush=True)
 
 
 def command(args, **kwargs):
@@ -659,10 +698,12 @@ def broker(env):
 
 
 def main():
-    require(len(sys.argv) == 2 and sys.argv[1] in ('stage', 'prepare', 'broker', 'session'), 'Finite stage/prepare/broker/session only')
-    admission(os.environ, sys.platform, platform.machine() if sys.platform == 'linux' else '', native=True)
+    require(len(sys.argv) == 2 and sys.argv[1] in ('path-preflight', 'stage', 'prepare', 'broker', 'session'), 'Finite path-preflight/stage/prepare/broker/session only')
     action = sys.argv[1]
-    if action == 'stage':
+    admission(os.environ, sys.platform, platform.machine() if sys.platform == 'linux' else '', native=action != 'path-preflight')
+    if action == 'path-preflight':
+        path_preflight(os.environ)
+    elif action == 'stage':
         require(os.getuid() == os.geteuid() != 0, 'Runner staging only')
         stage(Path(os.environ['RUNNER_TEMP']).resolve())
     else:
