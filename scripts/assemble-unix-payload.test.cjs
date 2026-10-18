@@ -140,8 +140,14 @@ test('small Linux receipts are retained before the large immutable package artif
   const step = workflow.slice(start, full);
   assert.match(step, /if: success\(\) && runner\.os == 'Linux'/);
   const names = [...step.matchAll(/^\s+artifacts\/unified\/ci-signed-unix-hub\/(\S+)\r?$/gm)].map(value => value[1]);
-  assert.deepEqual(names, ['linux-byte-receipts.json', 'builtin-manifest.json', 'signed-unix-assembly.json', 'unix-package-integrity.json']);
+  assert.deepEqual(names, ['linux-byte-receipts.json', 'builtin-manifest.json', 'signed-unix-assembly.json', 'unix-package-integrity.json',
+    'direct-features-candidate.json', 'linux-retirement-candidate.json', 'linux-retirement-package-integrity.json']);
   assert.doesNotMatch(step, /\*|native-packages|modules\/|\.exe|\.AppImage/);
+  const helpers = workflow.slice(workflow.indexOf('name: Retain separate acceptance-only helper and authorization package receipts'),
+    workflow.indexOf('name: Retain only owned fresh14 package metadata'));
+  assert.ok(helpers.includes('(inputs.linux_retirement_test_candidate || inputs.linux_integrated_candidate)'));
+  for (const name of ['linux-retirement-candidate.json', 'linux-retirement-package-integrity.json',
+    'tauri-linux-integrated-candidate.json', 'direct-features-candidate.json', 'native-activation.service']) assert.ok(helpers.includes(`/${name}`));
 });
 test('retained pre-wrapper is the signed manifest and original preparation is separately immutable', () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unix-manifest-test-')));

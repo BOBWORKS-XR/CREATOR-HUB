@@ -268,6 +268,9 @@ jobs:
             artifacts/unified/ci-signed-unix-hub/builtin-manifest.json
             artifacts/unified/ci-signed-unix-hub/signed-unix-assembly.json
             artifacts/unified/ci-signed-unix-hub/unix-package-integrity.json
+            artifacts/unified/ci-signed-unix-hub/direct-features-candidate.json
+            artifacts/unified/ci-signed-unix-hub/linux-retirement-candidate.json
+            artifacts/unified/ci-signed-unix-hub/linux-retirement-package-integrity.json
       - name: Retain signed build evidence, not publication or migration acceptance
         if: always()
         uses: actions/upload-artifact@v4
@@ -289,7 +292,7 @@ jobs:
             artifacts/unified/ci-signed-unix-hub/modules.tar.gz
             artifacts/unified/ci-signed-unix-hub/modules/
       - name: Retain separate acceptance-only helper and authorization package receipts
-        if: always() && runner.os == 'Linux' && inputs.linux_retirement_test_candidate
+        if: always() && runner.os == 'Linux' && (inputs.linux_retirement_test_candidate || inputs.linux_integrated_candidate)
         uses: actions/upload-artifact@v4
         with:
           name: linux-retirement-development-receipts-${{ github.run_id }}-${{ github.run_attempt }}
@@ -299,6 +302,9 @@ jobs:
             artifacts/unified/ci-signed-unix-hub/linux-retirement-candidate.json
             artifacts/unified/ci-signed-unix-hub/linux-retirement-package-integrity.json
             artifacts/unified/ci-signed-unix-hub/tauri-linux-retirement-acceptance.json
+            artifacts/unified/ci-signed-unix-hub/tauri-linux-integrated-candidate.json
+            artifacts/unified/ci-signed-unix-hub/direct-features-candidate.json
+            artifacts/unified/ci-signed-unix-hub/native-activation.service
       - name: Retain only owned fresh14 package metadata and Root diagnostic reports, including refusals
         if: always() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
