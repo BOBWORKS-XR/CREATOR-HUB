@@ -29,6 +29,30 @@ QUESTION = "Authentication is needed to run `/usr/bin/true' as the super user"
 STOCK_POLICY = "/usr/share/polkit-1/actions/org.freedesktop.policykit.policy"
 ADMIN_CONFIG = Path("/etc/polkit-1/localauthority.conf.d/51-ubuntu-admin.conf")
 ADMIN_CONFIG_PIN = (65, "2d07cca6b69c06239f03a0ce8c0c0e95645deb1cbe67df22419ac78bb76bd348")
+FRESHNESS_CHECK = r'''
+import json, os, stat, sys
+from pathlib import Path
+target = Path("/opt/creator-polkit-fixture/result/home")
+result = {"path": str(target), "uid": os.getuid(), "readOnly": True, "fresh": False}
+try:
+    if os.getuid() != 21314 or os.geteuid() != 21314:
+        raise RuntimeError("Exact fixture reader UID required")
+    parent = target.parent
+    info = parent.lstat()
+    result.update(resultUid=info.st_uid, resultGid=info.st_gid, resultMode=stat.S_IMODE(info.st_mode))
+    if parent.resolve(strict=True) != parent or not stat.S_ISDIR(info.st_mode) or info.st_uid != 21314 or info.st_gid != 21314 or stat.S_IMODE(info.st_mode) != 0o700:
+        raise RuntimeError("Exact canonical private fixture result directory required")
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        result["fresh"] = True
+    else:
+        raise RuntimeError("Refusing an already used fixture session")
+except Exception as error:
+    result["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+print(json.dumps(result))
+sys.exit(0 if result["fresh"] else 1)
+'''
 STOCK_ARCHIVE = ("https://archive.ubuntu.com/ubuntu/pool/main/p/policykit-1/polkitd_0.105-33ubuntu0.2_amd64.deb",
                  80152, "8a8e123a44e2c3deef2c072db7248e94d9d7ad7c874127facc7d1abaf622ea85")
 HELPERS = {"native-linux-root-probe.py": "91983346c5bac811028135b41c11a0dfc10e40a61c9f65aab535df326e354e72",
@@ -177,17 +201,23 @@ def prepare_admin_capture(env, output):
     try:
         require(capture_mode(env) == "admin-capture" and os.getuid() == os.geteuid() and os.getuid() not in (0, UID),
                 "Only disposable provisioning runner may prepare manual admin capture")
-        require(not (BASE / "result/home").exists(), "Refusing an already used fixture session")
         account = pwd.getpwnam(USER)
         identity = (account.pw_uid, account.pw_gid, account.pw_dir, account.pw_shell)
         require(identity == (UID, UID, "/var/lib/creator-polkit-fixture", "/bin/bash"), "Exact freshly created fixture identity required")
         require(set(os.getgrouplist(USER, UID)) == {UID}, "Fixture already has supplementary groups")
+        receipt["phase"] = "private-fixture-freshness"
+        code, raw = base().run_tool(output, "admin-capture-freshness",
+            ["/usr/bin/sudo", "-n", "--user", USER, "/usr/bin/python3", "-B", "-c", FRESHNESS_CHECK], allowed=(0, 1), timeout=8)
+        receipt["freshness"] = base().unique_json(raw)
+        require(code == 0 and receipt["freshness"] == {"path": "/opt/creator-polkit-fixture/result/home", "uid": UID,
+                "readOnly": True, "fresh": True, "resultUid": UID, "resultGid": UID, "resultMode": 0o700},
+                "Exact fixture-owned freshness check failed; original observation retained")
         before, policy = group_inventory(), admin_config()
         require("sudo" in before and before["sudo"]["gid"] not in (0, UID)
                 and not any(USER in group["members"] for group in before.values()), "Fresh fixture must have no supplementary memberships")
         receipt["phase"] = "append-only-sudo"
         code, _raw = base().run_tool(output, "admin-capture-group-append",
-            ["/usr/bin/sudo", "-n", "/usr/sbin/usermod", "--append", "--groups", "sudo", USER], seconds=8)
+            ["/usr/bin/sudo", "-n", "/usr/sbin/usermod", "--append", "--groups", "sudo", USER], timeout=8)
         require(code == 0, "Fixed fixture-only supplementary-group append failed")
         after = group_inventory()
         admin_group_delta(before, after)

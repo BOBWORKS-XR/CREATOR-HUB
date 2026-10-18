@@ -483,6 +483,53 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(p.windows(21, None, x11)[0]["title"], "Unexpected native title")
 
 
+class FreshnessReaderTests(unittest.TestCase):
+    def reader(self, *, uid=p.UID, present=False, error=None, owner=p.UID, mode=0o700):
+        target, parent = mock.MagicMock(), mock.MagicMock()
+        target.__str__.return_value = "/opt/creator-polkit-fixture/result/home"
+        target.parent = parent
+        parent.resolve.return_value = parent
+        parent.lstat.return_value = types.SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=owner, st_gid=p.UID)
+        target.lstat.side_effect = error if error is not None else (None if present else FileNotFoundError("absent"))
+        def exit_code(code):
+            raise SystemExit(code)
+        output = io.StringIO()
+        modules = {"os": types.SimpleNamespace(getuid=lambda: uid, geteuid=lambda: uid),
+                   "pathlib": types.SimpleNamespace(Path=lambda path: target), "sys": types.SimpleNamespace(exit=exit_code)}
+        with mock.patch.dict(sys.modules, modules), contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+            exec(compile(p.FRESHNESS_CHECK, "<fixed-freshness-reader>", "exec"), {})
+        return stopped.exception.code, json.loads(output.getvalue()), target
+
+    def test_exact_owner_can_check_private_directory_and_only_missing_leaf_is_fresh(self):
+        code, result, target = self.reader()
+        self.assertEqual(code, 0)
+        self.assertEqual(result, {"path": "/opt/creator-polkit-fixture/result/home", "uid": p.UID,
+            "readOnly": True, "fresh": True, "resultUid": p.UID, "resultGid": p.UID, "resultMode": 0o700})
+        target.lstat.assert_called_once()
+
+    def test_permission_error_is_not_absence_and_retains_original_refusal(self):
+        error = PermissionError(13, "Permission denied", "/opt/creator-polkit-fixture/result/home")
+        code, result, _target = self.reader(error=error)
+        self.assertEqual(code, 1)
+        self.assertFalse(result["fresh"])
+        self.assertEqual(result["refusal"], {"type": "PermissionError", "message": str(error)})
+
+    def test_existing_or_dangling_leaf_never_counts_as_fresh(self):
+        code, result, target = self.reader(present=True)
+        self.assertEqual(code, 1)
+        self.assertFalse(result["fresh"])
+        target.lstat.assert_called_once()
+        target.exists.assert_not_called()
+
+    def test_wrong_actor_owner_or_permissions_never_probe_leaf(self):
+        for change in ({"uid": 0}, {"uid": 1001}, {"owner": 1001}, {"mode": 0o755}):
+            with self.subTest(change=change):
+                code, result, target = self.reader(**change)
+                self.assertEqual(code, 1)
+                self.assertFalse(result["fresh"])
+                target.lstat.assert_not_called()
+
+
 class AdminCaptureTests(unittest.TestCase):
     def test_factory_admin_mapping_must_be_exact_root_owned_canonical_0644_without_any_chmod(self):
         path = mock.MagicMock()
@@ -551,14 +598,22 @@ class AdminCaptureTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(p, "BASE", output / "fresh-fixture"))
             groups = stack.enter_context(mock.patch.object(p, "group_inventory", side_effect=[before, after]))
             policy = stack.enter_context(mock.patch.object(p, "admin_config", return_value={"sha256": p.ADMIN_CONFIG_PIN[1]}))
-            command = stack.enter_context(mock.patch.object(b, "run_tool", return_value=(0, b"")))
+            freshness = {"path": "/opt/creator-polkit-fixture/result/home", "uid": p.UID, "readOnly": True,
+                         "fresh": True, "resultUid": p.UID, "resultGid": p.UID, "resultMode": 0o700}
+            def tool(_output, label, _argv, **_options):
+                return (0 if freshness["fresh"] else 1, json.dumps(freshness).encode()) if label == "admin-capture-freshness" else (0, b"")
+            command = stack.enter_context(mock.patch.object(b, "run_tool", autospec=True, side_effect=tool))
             yield types.SimpleNamespace(**locals())
 
     def test_provision_uses_one_fixed_append_only_command_no_password_or_policy_write(self):
         with self.provision() as f:
             result = p.prepare_admin_capture(f.env, f.output)
-            f.command.assert_called_once_with(f.output, "admin-capture-group-append",
-                ["/usr/bin/sudo", "-n", "/usr/sbin/usermod", "--append", "--groups", "sudo", p.USER], seconds=8)
+            f.command.assert_has_calls([
+                mock.call(f.output, "admin-capture-freshness", ["/usr/bin/sudo", "-n", "--user", p.USER,
+                    "/usr/bin/python3", "-B", "-c", p.FRESHNESS_CHECK], allowed=(0, 1), timeout=8),
+                mock.call(f.output, "admin-capture-group-append",
+                    ["/usr/bin/sudo", "-n", "/usr/sbin/usermod", "--append", "--groups", "sudo", p.USER], timeout=8)])
+            self.assertEqual(f.command.call_count, 2)
             self.assertTrue(result["membershipVerified"])
             self.assertTrue(result["otherMembershipsPreserved"])
             self.assertFalse(result["passwordProvisioned"])
@@ -578,12 +633,14 @@ class AdminCaptureTests(unittest.TestCase):
                 elif change == "existing-membership":
                     f.memberships.side_effect = [[p.UID, 27]]
                 elif change == "already-used":
-                    (p.BASE / "result/home").mkdir(parents=True)
+                    f.freshness.update(fresh=False, refusal={"type": "RuntimeError", "message": "already used"})
                 else:
                     f.policy.side_effect = RuntimeError("stock config pin differs")
                 with self.assertRaises(RuntimeError):
                     p.prepare_admin_capture(f.env, f.output)
-                f.command.assert_not_called()
+                self.assertFalse(any(c.args[1] == "admin-capture-group-append" for c in f.command.call_args_list))
+                if change in ("mode", "event", "uid", "existing-membership"):
+                    f.command.assert_not_called()
                 retained = json.loads((f.output / "polkit-admin-group-preflight.json").read_text())
                 self.assertIn("refusal", retained)
                 self.assertFalse(retained["membershipVerified"])
@@ -593,10 +650,38 @@ class AdminCaptureTests(unittest.TestCase):
             f.after["sudo"]["members"].remove("packer")
             with self.assertRaises(RuntimeError):
                 p.prepare_admin_capture(f.env, f.output)
-            f.command.assert_called_once()
+            self.assertEqual(f.command.call_count, 2)
             retained = json.loads((f.output / "polkit-admin-group-preflight.json").read_text())
             self.assertFalse(retained["membershipVerified"])
             self.assertEqual(retained["phase"], "append-only-sudo")
+
+    def test_provisioning_user_does_not_traverse_private_result_directory_regression(self):
+        with self.provision() as f:
+            base = mock.MagicMock()
+            base.__truediv__.return_value.exists.side_effect = PermissionError("39117042294: private 0700 result/home")
+            with mock.patch.object(p, "BASE", base):
+                result = p.prepare_admin_capture(f.env, f.output)
+            base.__truediv__.return_value.exists.assert_not_called()
+            self.assertTrue(result["membershipVerified"])
+            self.assertEqual(result["freshness"], f.freshness)
+
+    def test_reader_permission_error_or_foreign_metadata_is_retained_and_blocks_append(self):
+        for change in ("permission", "uid", "mode", "path"):
+            with self.subTest(change=change), self.provision() as f:
+                if change == "permission":
+                    f.freshness.update(fresh=False, refusal={"type": "PermissionError", "message": "fixed private path refused"})
+                elif change == "uid":
+                    f.freshness["uid"] = 0
+                elif change == "mode":
+                    f.freshness["resultMode"] = 0o755
+                else:
+                    f.freshness["path"] = "/unrelated"
+                with self.assertRaises(RuntimeError):
+                    p.prepare_admin_capture(f.env, f.output)
+                self.assertEqual(f.command.call_count, 1)
+                retained = json.loads((f.output / "polkit-admin-group-preflight.json").read_text())
+                self.assertEqual(retained["freshness"], f.freshness)
+                self.assertFalse(retained["membershipVerified"])
 
     def test_observation_retains_actual_selector_labels_never_selects_or_reads_password(self):
         agent, helper, atspi, refs, app, _label, password, _edit = CaptureTests().fixture()
@@ -953,6 +1038,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertLess(text.index("sudo useradd"), text.index(block))
         self.assertLess(text.index(block), text.index("sudo systemd-run"))
         self.assertIn("polkit-admin-group-preflight.json", text)
+        for suffix in ("json", "stdout", "stderr"):
+            self.assertIn("${{ runner.temp }}/admin-capture-freshness." + suffix, text)
         source = (HERE / "native-linux-polkit-probe.py").read_text()
         admin_branch = source.split('if record["mode"] == "admin-capture":\n            record["adminIdentityObservation"]', 1)[1].split('if record["mode"] == "cancel":', 1)[0]
         self.assertNotIn("cancel_once", admin_branch)
@@ -972,6 +1059,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_all_bash_embedded_python_and_sources_parse_without_execution(self):
         ast.parse((HERE / "native-linux-polkit-probe.py").read_text())
+        ast.parse(p.FRESHNESS_CHECK)
         ast.parse(Path(__file__).read_text())
         bash = Path("C:/Program Files/Git/bin/bash.exe") if os.name == "nt" else Path("/usr/bin/bash")
         self.assertTrue(bash.is_file())

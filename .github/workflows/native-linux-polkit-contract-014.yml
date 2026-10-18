@@ -186,4 +186,7 @@ jobs:
             ${{ runner.temp }}/polkit-stock-policy-preflight.json
             ${{ runner.temp }}/polkit-script-binding.json
             ${{ runner.temp }}/polkit-admin-group-preflight.json
+            ${{ runner.temp }}/admin-capture-freshness.json
+            ${{ runner.temp }}/admin-capture-freshness.stdout
+            ${{ runner.temp }}/admin-capture-freshness.stderr
             ${{ runner.temp }}/polkit-capture/*
