@@ -617,11 +617,11 @@ class TreeRefusalMetadataTests(unittest.TestCase):
 class FixedControlHitTestTests(unittest.TestCase):
     def fixture(self, trap_traversal=True):
         f, owner = OwnershipTests().fixture()
-        f.atspi.Role.HEADING = 78
+        f.atspi.Role.HEADING = 83
         f.atspi.StateType.VISIBLE = 8
         f.atspi.CoordType = types.SimpleNamespace(SCREEN=0)
         f.button.name = p.CONTROLS["save-guide"][0]
-        f.heading = fixtures.AxNode(43, 78, p.CONTROLS["save-guide"][1], parent=f.web)
+        f.heading = fixtures.AxNode(43, 83, p.CONTROLS["save-guide"][1], parent=f.web)
         f.native_rect = (10, 20, 800, 600)
         nodes = [f.window, f.container, f.web, f.button, f.heading]
         for node in nodes:
@@ -908,6 +908,127 @@ class FixedControlHitTestTests(unittest.TestCase):
             self.assertIn("hitTestCaptureRefusal", caught.exception.observation)
             self.assertNotIn("private", json.dumps(caught.exception.observation))
             f.button.action.do_action.assert_not_called()
+
+
+class PinnedWebKitHeadingTests(unittest.TestCase):
+    def fixture(self, trap_traversal=True):
+        f, owner, collected = FixedControlHitTestTests().fixture(trap_traversal)
+        f.atspi.Role.DOCUMENT_FRAME = 82
+        f.heading.role = 82
+        f.heading.get_attributes = mock.Mock(return_value={"id": "connection-guide-title", "tag": "h2",
+            "computed-role": "heading", "toolkit": "WebKitGTK"})
+        return f, owner, collected
+
+    def test_actual_39042527460_heading82_is_pinned_producer_contract_not_native_heading83(self):
+        f, owner, collected = self.fixture()
+        dialog = fixtures.AxNode(43, 16, p.CONTROLS["save-guide"][1], states=(1, 2, 3, 8))
+        h1 = fixtures.AxNode(43, 82, "Other source heading", states=(1, 2, 3, 8))
+        h1.get_attributes = mock.Mock(side_effect=AssertionError("Wrong context must not use the h2 contract"))
+        for node in (dialog, h1):
+            collected[tuple(owner.references.identity(node, owner))] = node
+        result = FixedControlHitTestTests().observe(f, owner, collected)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["candidateCount"], 1)
+        self.assertEqual(result["headingCount"], 1)
+        self.assertEqual(result["headingRole"], 82)
+        self.assertEqual(result["clientHeadingRole"], 83)
+        self.assertEqual(result["headingReference"], owner.references.identity(f.heading, owner))
+        self.assertEqual(result["headingComparison"], "pinned-WebKitGTK-2.50.4-exact-DOM")
+        self.assertEqual(f.heading.get_role(), 82)
+        self.assertEqual(f.atspi.Role.DOCUMENT_FRAME, 82)
+        self.assertEqual(f.atspi.Role.HEADING, 83)
+        self.assertEqual(f.heading.get_attributes.call_count, 2)
+        h1.get_attributes.assert_not_called()
+        for node in (f.window, f.container, f.web, f.button, f.heading):
+            for getter in ("get_parent", "clear_cache", "get_child_at_index", "get_text_iface", "get_action_iface"):
+                getattr(node, getter).assert_not_called()
+
+    def test_native_heading_enum_comparison_does_not_read_webkit_dom_attributes(self):
+        f, owner, collected = self.fixture()
+        f.heading.role = f.atspi.Role.HEADING
+        f.heading.get_attributes.side_effect = AssertionError("Native enum must not depend on the WebKit contract")
+        result = FixedControlHitTestTests().observe(f, owner, collected)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["headingComparison"], "native-Atspi")
+        self.assertEqual(result["headingRole"], 83)
+        f.heading.get_attributes.assert_not_called()
+
+    def test_numeric82_alone_wrong_dom_version_image_or_pid_never_qualifies(self):
+        changes = ("id", "missing-id", "tag", "computed-role", "toolkit", "id-type", "map-type", "map-size",
+                   "inaccessible-attributes", "version", "renderer-hash", "renderer-image", "system-hash", "pid",
+                   "role81", "role84", "dialog16", "context")
+        for change in changes:
+            with self.subTest(change=change):
+                f, owner, collected = self.fixture()
+                attrs = f.heading.get_attributes.return_value
+                version = p.B.WEBKIT_VERSION
+                if change in ("id", "tag", "computed-role", "toolkit"):
+                    attrs[change] = {"id": "private-other-id", "tag": "h1", "computed-role": "generic", "toolkit": "GTK"}[change]
+                elif change == "missing-id":
+                    del attrs["id"]
+                elif change == "id-type":
+                    attrs["id"] = None
+                elif change == "map-type":
+                    f.heading.get_attributes.return_value = []
+                elif change == "map-size":
+                    attrs.update({str(i): "private" for i in range(33)})
+                elif change == "inaccessible-attributes":
+                    f.heading.get_attributes.side_effect = PermissionError("private getter detail")
+                elif change == "version":
+                    version = "2.50.5-0ubuntu0.22.04.1"
+                elif change == "renderer-hash":
+                    owner.renderer["kernelImageSha256"] = f.records[43]["kernelImageSha256"] = "f" * 64
+                elif change == "renderer-image":
+                    owner.renderer["executable"] = f.records[43]["executable"] = "/private/foreign-renderer"
+                elif change == "system-hash":
+                    owner.system_file["sha256"] = f.system["sha256"] = "f" * 64
+                elif change == "pid":
+                    f.heading.pid = 42
+                    f.heading.app.bus_name = ":1.42"
+                    collected = {tuple(owner.references.identity(node, owner)): node for node in collected.values()}
+                elif change.startswith("role"):
+                    f.heading.role = int(change[4:])
+                elif change == "dialog16":
+                    f.heading.role = 16
+                else:
+                    f.heading.name = "private other context"
+                with mock.patch.object(p.B, "WEBKIT_VERSION", version), \
+                        mock.patch.object(p, "source_heading_observation", return_value={"diagnosticOnly": True}):
+                    result = FixedControlHitTestTests().observe(f, owner, collected)
+                self.assertFalse(result["verified"])
+                self.assertEqual(result["refusal"]["stage"], "fixed-controls")
+                self.assertEqual(result.get("headingCount", 0), 0)
+                self.assertNotIn("private", json.dumps(result))
+                f.window.component.get_accessible_at_point.assert_not_called()
+
+    def test_pinned_heading_dom_contract_is_rechecked_after_hit_chain(self):
+        for field, changed in (("id", "other-id"), ("tag", "h1"), ("computed-role", "generic"), ("toolkit", "GTK")):
+            with self.subTest(field=field):
+                f, owner, collected = self.fixture()
+                def change_after_hit(*_):
+                    f.heading.get_attributes.return_value[field] = changed
+                    return f.button
+                f.web.component.get_accessible_at_point.side_effect = change_after_hit
+                result = FixedControlHitTestTests().observe(f, owner, collected)
+                self.assertFalse(result["verified"])
+                self.assertEqual(result["refusal"]["stage"], "recheck")
+
+    def test_pinned_diagnostic_hit_proof_cannot_bypass_original_tree_refusal_or_press(self):
+        f, owner, _ = self.fixture(trap_traversal=False)
+        external = fixtures.AxNode(43, 20)
+        f.button.parent = external
+        external.get_role = mock.Mock(side_effect=AssertionError("Uncollected Parent must not be queried"))
+        with mock.patch.object(p.B, "visible_rectangle", return_value=f.native_rect), self.assertRaises(p.TreeRefusal) as caught:
+            p.press("save-guide", owner, f.atspi)
+        result = caught.exception.observation["fixedControlHitTest"]
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["headingRole"], 82)
+        self.assertFalse(result["authorization"])
+        self.assertFalse(result["nativeAcceptance"])
+        self.assertEqual(result["actionCount"], 0)
+        self.assertEqual(caught.exception.observation["missingCount"], 1)
+        external.get_role.assert_not_called()
+        f.button.action.do_action.assert_not_called()
 
 
 class SourceHeadingObservationTests(unittest.TestCase):

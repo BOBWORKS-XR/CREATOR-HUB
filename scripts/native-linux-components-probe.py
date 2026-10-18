@@ -267,8 +267,8 @@ def source_heading_observation(collected, roles, owner, atspi):
         except Exception as error:
             failed("attributes", error)
         allowed = record.get("attributes", {})
-        # These are evidence rows only. In particular, an exact name/id under
-        # another numeric role does not satisfy the HEADING gate below.
+        # Evidence rows never satisfy context by themselves. The read-only hit
+        # test separately checks the full pinned-producer heading contract.
         if (record.get("idEqualsSourceHeading") or record.get("idEqualsFixedButton")
                 or record.get("nameEqualsSourceHeading") or record.get("nameEqualsFixedButton")
                 or record["roleEqualsHeading"] or allowed.get("tag") == "h2"
@@ -328,13 +328,38 @@ def fixed_control_hit_test(window, collected, owner, atspi):
 
         stage = "fixed-controls"
         name, heading = CONTROLS["save-guide"]
+
+        def heading_matches(reference, node):
+            role = roles[reference]
+            if role not in (atspi.Role.HEADING, 82) or fixed_name(node) != heading:
+                return False
+            if role == atspi.Role.HEADING:
+                return True
+            # This producer omits Footer, so Heading=82; libatspi Heading=83.
+            # Its GetRole sends role() as uint32 without translating the enum.
+            # WebKit/webkitgtk-2.50.4: AccessibilityAtspiEnums.h and
+            # AccessibilityObjectAtspi.cpp (GetRole/role). Not a global offset.
+            renderer = owner.renderer
+            if (B.WEBKIT_VERSION != "2.50.4-0ubuntu0.22.04.1" or renderer is None
+                    or renderer["kernelImageSha256"] != B.WEBKIT_SHA or renderer["executable"] != B.WEBKIT
+                    or owner.system_file.get("sha256") != B.WEBKIT_SHA
+                    or node.get_process_id() != renderer["pid"]):
+                return False
+            owner.recheck(full=True)
+            owner.node(node)
+            require(tuple(owner.references.identity(node, owner)) == reference, "Diagnostic heading wire ID changed")
+            attributes = node.get_attributes()
+            expected = {"id": "connection-guide-title", "tag": "h2", "computed-role": "heading", "toolkit": "WebKitGTK"}
+            return (type(attributes) is dict and len(attributes) <= 32
+                    and all(type(attributes.get(key)) is str and attributes[key] == value for key, value in expected.items()))
+
         candidates, headings = [], []
         # Only the source button/heading roles are inspected; no returned names
         # or arbitrary UI text are retained in this diagnostic.
         for reference, node in collected.items():
             if roles[reference] == atspi.Role.PUSH_BUTTON and fixed_name(node) == name:
                 candidates.append(reference)
-            elif roles[reference] == atspi.Role.HEADING and fixed_name(node) == heading:
+            elif heading_matches(reference, node):
                 headings.append(reference)
         result.update(candidateCount=len(candidates), headingCount=len(headings))
         if not headings:
@@ -345,6 +370,9 @@ def fixed_control_hit_test(window, collected, owner, atspi):
         require(len(candidates) == len(headings) == 1, "Exact unique source button/heading required")
         target_ref, heading_ref = candidates[0], headings[0]
         target, source_heading = collected[target_ref], collected[heading_ref]
+        result.update(headingReference=list(heading_ref), headingRole=int(roles[heading_ref]),
+                      clientHeadingRole=int(atspi.Role.HEADING), headingComparison="native-Atspi"
+                      if roles[heading_ref] == atspi.Role.HEADING else "pinned-WebKitGTK-2.50.4-exact-DOM")
         require(target.get_process_id() == source_heading.get_process_id() == owner.renderer["pid"],
                 "Source controls are not in the bound renderer")
         shown(source_heading)
@@ -435,7 +463,7 @@ def fixed_control_hit_test(window, collected, owner, atspi):
                 shown(node)
             if roles[reference] == atspi.Role.PUSH_BUTTON and fixed_name(node) == name:
                 final_candidates.append(reference)
-            elif roles[reference] == atspi.Role.HEADING and fixed_name(node) == heading:
+            elif heading_matches(reference, node):
                 final_headings.append(reference)
         shown(source_heading)
         require(final_candidates == candidates and final_headings == headings
