@@ -650,6 +650,8 @@ class FixedControlHitTestTests(unittest.TestCase):
         f.button.name = p.CONTROLS["save-guide"][0]
         f.heading = fixtures.AxNode(43, 83, p.CONTROLS["save-guide"][1], parent=f.web)
         f.native_rect = (10, 20, 800, 600)
+        f.native_frame = f.native_rect
+        f.x11.frame_rectangle = mock.Mock(return_value=f.native_frame)
         nodes = [f.window, f.container, f.web, f.button, f.heading]
         for node in nodes:
             node.states.add(8)
@@ -698,10 +700,111 @@ class FixedControlHitTestTests(unittest.TestCase):
         for node in (f.window, f.container, f.web):
             node.component.get_accessible_at_point.assert_called_once_with(200, 120, f.atspi.CoordType.SCREEN)
         f.button.component.get_accessible_at_point.assert_not_called()
-        for node in (f.window, f.button):
+        for node in (f.window, f.button, f.heading):
             self.assertEqual(node.component.get_extents.call_args_list, [mock.call(0), mock.call(0)])
+        self.assertEqual(f.x11.frame_rectangle.call_args_list, [mock.call(owner.request.window)] * 2)
         self.assertNotIn(p.CONTROLS["save-guide"][0], json.dumps(result))
         self.assertNotIn(p.CONTROLS["save-guide"][1], json.dumps(result))
+
+    @staticmethod
+    def decorate(f):
+        f.native_rect = (171, 130, 940, 580)
+        f.native_frame = (170, 110, 942, 605)
+        f.x11.frame_rectangle.return_value = f.native_frame
+        for node, rect in ((f.window, f.native_frame), (f.button, (190, 220, 200, 40)),
+                           (f.heading, (190, 160, 300, 28))):
+            node.component.get_extents.return_value = types.SimpleNamespace(
+                x=rect[0], y=rect[1], width=rect[2], height=rect[3])
+
+    def test_measured_wm_decorations_match_exact_ax_frame_not_client_without_input(self):
+        f, owner, collected = PinnedWebKitHeadingTests().fixture()
+        self.decorate(f)
+        result = self.observe(f, owner, collected)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["headingRole"], 82)
+        self.assertEqual(result["nativeRectangle"], [171, 130, 940, 580])
+        self.assertEqual(result["nativeFrameRectangle"], [170, 110, 942, 605])
+        self.assertEqual(result["frameRectangle"], result["nativeFrameRectangle"])
+        self.assertEqual(result["nativeFrameRectangleAfter"], result["nativeFrameRectangle"])
+        self.assertEqual(result["nativeRectangleAfter"], result["nativeRectangle"])
+        self.assertEqual(result["headingRectangle"], [190, 160, 300, 28])
+        self.assertEqual(result["headingRectangleAfter"], result["headingRectangle"])
+        self.assertEqual(f.x11.frame_rectangle.call_args_list, [mock.call(owner.request.window)] * 2)
+        for node in collected.values():
+            for getter in ("get_parent", "clear_cache", "get_child_at_index", "get_text_iface", "get_action_iface"):
+                getattr(node, getter).assert_not_called()
+
+    def test_wm_frame_mismatch_or_unavailable_metadata_never_uses_padding_or_client_fallback(self):
+        for change in ("ax-x", "ax-width", "none", "list", "bool", "oversize", "excludes-client", "inaccessible", "xres"):
+            with self.subTest(change=change):
+                f, owner, collected = self.fixture()
+                self.decorate(f)
+                if change == "ax-x":
+                    f.window.component.get_extents.return_value.x += 1
+                elif change == "ax-width":
+                    f.window.component.get_extents.return_value.width -= 1
+                elif change == "none":
+                    f.x11.frame_rectangle.return_value = None
+                elif change == "list":
+                    f.x11.frame_rectangle.return_value = list(f.native_frame)
+                elif change == "bool":
+                    f.x11.frame_rectangle.return_value = (True, 110, 942, 605)
+                elif change == "oversize":
+                    f.x11.frame_rectangle.return_value = (170, 110, 1921, 605)
+                elif change == "excludes-client":
+                    f.x11.frame_rectangle.return_value = (172, 110, 940, 605)
+                elif change == "inaccessible":
+                    f.x11.frame_rectangle.side_effect = PermissionError("private metadata error")
+                else:
+                    def drift(_xid):
+                        f.info["client"] = 99
+                        return f.native_frame
+                    f.x11.frame_rectangle.side_effect = drift
+                result = self.observe(f, owner, collected)
+                self.assertFalse(result["verified"])
+                self.assertEqual(result["refusal"]["stage"], "geometry")
+                self.assertNotIn("private", json.dumps(result))
+                f.window.component.get_accessible_at_point.assert_not_called()
+
+    def test_control_and_heading_in_wm_decoration_but_outside_client_refuse(self):
+        for target in ("button", "heading"):
+            with self.subTest(target=target):
+                f, owner, collected = self.fixture()
+                self.decorate(f)
+                rect = getattr(f, target).component.get_extents.return_value
+                rect.y, rect.height = 111, 10
+                result = self.observe(f, owner, collected)
+                self.assertFalse(result["verified"])
+                self.assertEqual(result["refusal"]["stage"], "geometry")
+                field = "controlRectangle" if target == "button" else "headingRectangle"
+                self.assertEqual(result[field][1], 111)
+                f.window.component.get_accessible_at_point.assert_not_called()
+
+    def test_native_client_and_wm_frame_both_rechecked_after_hit(self):
+        for changed in ("client", "frame", "heading"):
+            with self.subTest(changed=changed):
+                f, owner, collected = self.fixture()
+                self.decorate(f)
+                def drift(*_):
+                    if changed == "client":
+                        f.native_rect = (172, 130, 940, 580)
+                    elif changed == "frame":
+                        f.x11.frame_rectangle.return_value = (169, 110, 943, 605)
+                    else:
+                        f.heading.component.get_extents.return_value.y = 111
+                    return f.button
+                f.web.component.get_accessible_at_point.side_effect = drift
+                with mock.patch.object(p.B, "visible_rectangle", side_effect=lambda *_: f.native_rect):
+                    result = p.fixed_control_hit_test(f.window, collected, owner, f.atspi)
+                self.assertFalse(result["verified"])
+                self.assertEqual(result["refusal"]["stage"], "recheck")
+                self.assertEqual(f.x11.frame_rectangle.call_args_list, [mock.call(owner.request.window)] * 2)
+                self.assertIn("nativeRectangleAfter", result)
+                self.assertIn("nativeFrameRectangleAfter", result)
+                self.assertEqual(result["actionCount"], 0)
+                self.assertFalse(result["authorization"])
+                self.assertFalse(result["nativeAcceptance"])
+                f.button.action.do_action.assert_not_called()
 
     def test_original_tree_refusal_captures_hit_proof_but_still_refuses_save_guide_action(self):
         f, owner, _ = self.fixture(trap_traversal=False)
@@ -854,7 +957,7 @@ class FixedControlHitTestTests(unittest.TestCase):
                     self.assertEqual(result["controlRectangle"], [900, 100, 200, 40])
                 elif change == "outside-frame":
                     self.assertEqual(result["frameRectangle"], [10, 20, 100, 600])
-                    self.assertEqual(result["controlRectangle"], [100, 100, 200, 40])
+                    self.assertNotIn("controlRectangle", result)
                 f.window.component.get_accessible_at_point.assert_not_called()
 
     def test_hit_chain_is_bounded_to_thirty_two_already_collected_objects(self):

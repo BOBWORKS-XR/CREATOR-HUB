@@ -391,7 +391,18 @@ def fixed_control_hit_test(window, collected, owner, atspi):
                     and inner[0] + inner[2] <= outer[0] + outer[2]
                     and inner[1] + inner[3] <= outer[1] + outer[3])
 
-        def geometry(node, field):
+        # GTK's AX Frame includes WM decorations; content controls do not.
+        # Use the existing exact-XID _NET_FRAME_EXTENTS reader, never padding.
+        owner.recheck(full=True)
+        native_frame = owner.x11.frame_rectangle(req.window)
+        owner.recheck(full=True)
+        require(type(native_frame) is tuple and len(native_frame) == 4
+                and all(type(v) is int and 0 <= v <= 0x7fffffff for v in native_frame)
+                and 0 < native_frame[2] <= 1920 and 0 < native_frame[3] <= 1080
+                and inside(native_rect, native_frame), "Native frame unavailable/oversized or excludes client")
+        result["nativeFrameRectangle"] = list(native_frame)
+
+        def geometry(node, field, bounds=native_rect):
             shown(node)
             component = node.get_component_iface()
             require(component is not None, "Component interface absent")
@@ -400,12 +411,14 @@ def fixed_control_hit_test(window, collected, owner, atspi):
             require(all(type(v) is int and -0x80000000 <= v <= 0x7fffffff for v in rect),
                     "Component rectangle type/range exceeds bound")
             result[field] = list(rect)
-            require(0 < rect[2] <= 1920 and 0 < rect[3] <= 1080 and inside(rect, native_rect),
+            require(0 < rect[2] <= 1920 and 0 < rect[3] <= 1080 and inside(rect, bounds),
                     "Component rectangle escapes native window")
             return component, rect
 
-        frame_component, frame_rect = geometry(window, "frameRectangle")
+        frame_component, frame_rect = geometry(window, "frameRectangle", native_frame)
+        require(frame_rect == native_frame, "AX Frame differs from exact native WM frame")
         _target_component, target_rect = geometry(target, "controlRectangle")
+        _heading_component, heading_rect = geometry(source_heading, "headingRectangle")
         require(inside(target_rect, frame_rect), "Control rectangle escapes AX frame")
         point = (target_rect[0] + target_rect[2] // 2, target_rect[1] + target_rect[3] // 2)
         result["point"] = list(point)
@@ -450,10 +463,15 @@ def fixed_control_hit_test(window, collected, owner, atspi):
 
         stage = "recheck"
         owner.recheck(full=True)
-        require(B.visible_rectangle(req, helper, owner.x11) == native_rect, "Native rectangle changed")
-        require(geometry(window, "frameRectangleAfter")[1] == frame_rect
-                and geometry(target, "controlRectangleAfter")[1] == target_rect,
-                "Frame/control rectangle changed")
+        client_after = B.visible_rectangle(req, helper, owner.x11)
+        frame_after = owner.x11.frame_rectangle(req.window)
+        owner.recheck(full=True)
+        result.update(nativeRectangleAfter=list(client_after), nativeFrameRectangleAfter=list(frame_after))
+        require(client_after == native_rect and frame_after == native_frame, "Native client/frame rectangle changed")
+        require(geometry(window, "frameRectangleAfter", native_frame)[1] == frame_rect
+                and geometry(target, "controlRectangleAfter")[1] == target_rect
+                and geometry(source_heading, "headingRectangleAfter")[1] == heading_rect,
+                "Frame/control/heading rectangle changed")
         final_candidates, final_headings = [], []
         for reference, node in collected.items():
             owner.node(node)
