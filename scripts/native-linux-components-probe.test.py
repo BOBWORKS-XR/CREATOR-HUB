@@ -1965,11 +1965,18 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                     get_text=mock.Mock(side_effect=lambda _start, _end: f.recipe_text.name))
                 f.recipe.get_text_iface.return_value = f.recipe_interface
                 f.target = add(43, "Check requirements again", f.setup_doc, "refresh-button")
-                f.requirements = add(84, "", f.setup_doc, "requirements")
+                f.requirements = add(109, "", f.setup_doc)
+                f.attributes[id(f.requirements)].update(tag="section", **{"computed-role": "region"})
+                f.requirements_heading = add(82, "Requirements", f.requirements, "requirements-heading")
+                f.requirements_heading.get_text_iface.return_value = types.SimpleNamespace(
+                    get_character_count=lambda: len("Requirements"), get_text=lambda *_: "Requirements")
                 f.requirement_label = add(84, "", f.requirements)
                 f.attributes[id(f.requirement_label)].update(tag="span", **{"computed-role": "generic"})
                 f.requirement_label.get_text_iface.return_value = types.SimpleNamespace(
                     get_character_count=lambda: len("Unity Hub or Unity CLI"), get_text=lambda *_: "Unity Hub or Unity CLI")
+                f.editor_label = add(117, "", f.requirements)
+                f.editor_label.get_text_iface.return_value = types.SimpleNamespace(
+                    get_character_count=lambda: len("Unity 6000.3.21f1"), get_text=lambda *_: "Unity 6000.3.21f1")
             if hasattr(f, "status"):
                 f.version_text = types.SimpleNamespace(
                     get_character_count=mock.Mock(side_effect=lambda: len(f.version.name)),
@@ -2056,7 +2063,7 @@ class FiniteSourceSequenceTests(unittest.TestCase):
 
     def test_setup_raw_generic_84_text_without_names_or_static_children_is_source_scoped(self):
         self.assertEqual(p.SETUP_SEQUENCE_IDS["recipe-line"][0], 84)
-        self.assertEqual(p.SETUP_SEQUENCE_IDS["requirements"][0], 84)
+        self.assertEqual(p.SETUP_SEQUENCE_IDS["requirements-heading"][0], 82)
         with self.fixture("requirements") as f:
             self.assertEqual(f.recipe.name, "")
             self.assertEqual(f.recipe.children, [])
@@ -2079,15 +2086,130 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                 self.assertIn("Unity Hub or Unity CLI", [row["text"].get("value") for row in walk["nodes"]])
             self.assertLessEqual(len((json.dumps(diagnostic, indent=2) + "\n").encode()), 32768)
 
+    def test_native_39115772723_heading_section_and_recipe_text_need_no_requirements_wrapper(self):
+        with self.fixture("requirements") as f:
+            self.assertNotIn("requirements", p.SETUP_SEQUENCE_IDS)
+            self.assertNotIn("id", f.attributes[id(f.requirements)])
+            # Anonymous/native Text projections keep their actual numeric role;
+            # no name, HTML tag or guessed role conversion supplies a row value.
+            f.attributes[id(f.requirement_label)] = {"toolkit": "WebKitGTK"}
+            f.requirement_label.name = f.editor_label.name = ""
+            result = p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+            self.assertEqual(result["actionCount"], 1)
+            self.assertEqual(f.editor_label.role, 117)
+            for walk in result["walks"]:
+                self.assertEqual(walk["sourceCounts"]["requirements-heading"], 1)
+                self.assertEqual([row["text"] for row in walk["requirementRows"]],
+                                 ["Unity Hub or Unity CLI", "Unity 6000.3.21f1"])
+                self.assertIn("requirements-section", walk["sourcePaths"])
+            captured = next(call.args[1] for call in f.save.call_args_list if call.args[0].name.endswith("-setup-text-interfaces.json"))
+            self.assertTrue(all(walk["complete"] for walk in captured["walks"]))
+            self.assertTrue(all(walk["requirementsSection"] for walk in captured["walks"]))
+
+    def test_requirements_exact_heading_and_canonical_section_guards_refuse_before_input(self):
+        for change in ("missing-id", "duplicate-id", "wrong-name", "wrong-text", "wrong-tag", "wrong-role", "hidden-heading",
+                       "direct-document", "wrong-section-role", "wrong-section-tag", "wrong-section-producer", "hidden-section", "foreign"):
+            with self.subTest(change=change), self.fixture("requirements") as f:
+                heading = f.requirements_heading
+                if change == "missing-id": f.attributes[id(heading)].pop("id")
+                elif change == "duplicate-id": f.add(82, "Requirements", f.requirements, "requirements-heading")
+                elif change == "wrong-name": heading.name = "Other heading"
+                elif change == "wrong-text":
+                    heading.get_text_iface.return_value = types.SimpleNamespace(get_character_count=lambda: 12, get_text=lambda *_: "x" * 12)
+                elif change == "wrong-tag": f.attributes[id(heading)]["tag"] = "div"
+                elif change == "wrong-role": heading.role = 83
+                elif change == "hidden-heading": heading.states.remove(1)
+                elif change == "direct-document":
+                    f.requirements.children.remove(heading)
+                    f.setup_doc.children.append(heading)
+                    heading.parent = f.setup_doc
+                elif change == "wrong-section-role": f.requirements.role = 84
+                elif change == "wrong-section-tag": f.attributes[id(f.requirements)]["tag"] = "div"
+                elif change == "wrong-section-producer": f.attributes[id(f.requirements)]["toolkit"] = "other"
+                elif change == "hidden-section": f.requirements.states.remove(1)
+                else: f.requirements.pid = 99
+                with self.assertRaises(RuntimeError):
+                    p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+                f.target.action.do_action.assert_not_called()
+
+    def test_requirement_row_text_missing_bounds_drift_decoy_or_duplicate_cannot_authorize_refresh(self):
+        label = "Unity Hub or Unity CLI"
+        for change in ("missing", "oversize", "bool", "count-drift", "text-drift", "prefix", "decoy-name", "outside", "duplicate", "second-row"):
+            with self.subTest(change=change), self.fixture("requirements") as f:
+                interface = types.SimpleNamespace(get_character_count=mock.Mock(return_value=len(label)), get_text=mock.Mock(return_value=label))
+                f.requirement_label.get_text_iface.return_value = interface
+                if change == "missing": f.requirement_label.get_text_iface.return_value = None
+                elif change == "oversize": interface.get_character_count.return_value = 2049
+                elif change == "bool": interface.get_character_count.return_value = True
+                elif change == "count-drift": interface.get_character_count.side_effect = [len(label), len(label) + 1]
+                elif change == "text-drift": interface.get_text.side_effect = [label, "x" * len(label)]
+                elif change == "prefix":
+                    text = label + " is required to manage the Editor and license."
+                    interface.get_character_count.return_value, interface.get_text.return_value = len(text), text
+                elif change == "decoy-name":
+                    f.requirement_label.name = label
+                    interface.get_text.return_value = "x" * len(label)
+                elif change == "outside":
+                    f.requirements.children.remove(f.requirement_label)
+                    f.setup_doc.children.append(f.requirement_label)
+                    f.requirement_label.parent = f.setup_doc
+                elif change == "duplicate":
+                    node = f.add(84, "", f.requirements)
+                    node.get_text_iface.return_value = interface
+                else: f.editor_label.get_text_iface.return_value = None
+                with self.assertRaises(RuntimeError):
+                    p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+                f.target.action.do_action.assert_not_called()
+
+    def test_requirements_text_projection_on_single_ancestor_chain_is_not_a_second_row(self):
+        with self.fixture("requirements") as f:
+            parent = f.add(84, "", f.requirements)
+            parent.get_text_iface.return_value = f.requirement_label.get_text_iface.return_value
+            f.requirements.children.remove(f.requirement_label)
+            parent.children.append(f.requirement_label)
+            f.requirement_label.parent = parent
+            result = p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+            self.assertEqual(result["actionCount"], 1)
+            self.assertEqual(len(result["walks"][0]["requirementRows"]), 2)
+
+    def test_requirements_section_walk_drift_or_heading_geometry_refuses_before_input(self):
+        for change in ("parent-drift", "geometry"):
+            with self.subTest(change=change), self.fixture("requirements") as f:
+                if change == "geometry":
+                    f.requirements_heading.get_component_iface.return_value.get_extents.return_value.x = 9000
+                else:
+                    other = f.add(109, "", f.setup_doc)
+                    f.attributes[id(other)].update(tag="section", **{"computed-role": "region"})
+                    def drift(_):
+                        f.requirements.children.remove(f.requirements_heading)
+                        other.children.append(f.requirements_heading)
+                        f.requirements_heading.parent = other
+                        return "press"
+                    f.target.action.get_action_name = drift
+                with self.assertRaises(RuntimeError):
+                    p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+                f.target.action.do_action.assert_not_called()
+
+    def test_complete_requirements_context_still_stops_with_bounded_capture_when_text_inventory_is_oversize(self):
+        with self.fixture("requirements") as f:
+            for _ in range(65):
+                f.add(20, "", f.requirements)
+            with self.assertRaisesRegex(RuntimeError, "Bound Setup Text diagnostic incomplete"):
+                p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+            captured = next(call.args[1] for call in f.save.call_args_list if call.args[0].name.endswith("-setup-text-interfaces.json"))
+            self.assertFalse(captured["walks"][0]["complete"])
+            self.assertLessEqual(len((json.dumps(captured, indent=2) + "\n").encode()), 32768)
+            f.target.action.do_action.assert_not_called()
+
     def test_setup_unknown_missing_duplicate_or_wrong_role_context_stops_with_preinput_diagnostic(self):
-        for change in ("missing-recipe", "missing-requirements", "recipe-85", "requirements-85", "swapped-ids", "duplicate-recipe"):
+        for change in ("missing-recipe", "missing-requirements", "recipe-85", "section-85", "swapped-ids", "duplicate-recipe"):
             with self.subTest(change=change), self.fixture("requirements") as f:
                 if change == "missing-recipe": f.attributes[id(f.recipe)].pop("id")
-                elif change == "missing-requirements": f.attributes[id(f.requirements)].pop("id")
+                elif change == "missing-requirements": f.attributes[id(f.requirements_heading)].pop("id")
                 elif change == "recipe-85": f.recipe.role = 85
-                elif change == "requirements-85": f.requirements.role = 85
+                elif change == "section-85": f.requirements.role = 85
                 elif change == "swapped-ids":
-                    f.attributes[id(f.recipe)]["id"], f.attributes[id(f.requirements)]["id"] = "requirements", "recipe-line"
+                    f.attributes[id(f.recipe)]["id"], f.attributes[id(f.requirements_heading)]["id"] = "requirements-heading", "recipe-line"
                 else:
                     f.add(84, "", f.setup_doc, "recipe-line")
                 with self.assertRaises(RuntimeError):
@@ -2133,7 +2255,7 @@ class FiniteSourceSequenceTests(unittest.TestCase):
 
     def test_setup_missing_context_retention_failure_preserves_original_not_diagnostic_error(self):
         with self.fixture("requirements") as f, mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
-            f.attributes[id(f.requirements)].pop("id")
+            f.attributes[id(f.requirements_heading)].pop("id")
             def save(file, _value):
                 if file.name.endswith("-setup-text-interfaces.json"):
                     raise OSError("private retention error")
@@ -2146,7 +2268,7 @@ class FiniteSourceSequenceTests(unittest.TestCase):
 
     def test_setup_diagnostic_bounds_capture_and_never_authorize_unknown_large_context(self):
         with self.fixture("requirements") as f:
-            f.attributes[id(f.requirements)].pop("id")
+            f.attributes[id(f.requirements_heading)].pop("id")
             for _ in range(65):
                 node = f.add(84, "", f.setup_doc)
                 f.attributes[id(node)].update(tag="span", **{"computed-role": "generic"})
@@ -2168,7 +2290,7 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                 text = f.add(84, "private", control)
                 f.attributes[id(text)].update(tag="div", **{"computed-role": "generic"})
                 control.get_text_iface.side_effect = text.get_text_iface.side_effect = AssertionError("Sensitive text read")
-            f.attributes[id(f.requirements)].pop("id")
+            f.attributes[id(f.requirements_heading)].pop("id")
             with self.assertRaisesRegex(RuntimeError, "Exact unique source guide IDs required"):
                 p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
             control.get_text_iface.assert_not_called()

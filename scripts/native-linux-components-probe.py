@@ -631,7 +631,7 @@ SETUP_SEQUENCE_IDS = {
     "recipe-line": (84, "div", "generic", None),
     "refresh-button": (43, "button", "button", "Check requirements again"),
     "hosted-status": MCP_SAVED_IDS["hosted-status"],
-    "requirements": (84, "div", "generic", None),
+    "requirements-heading": (82, "h2", "heading", "Requirements"),
 }
 SOURCE_SEQUENCE = ("mcp-ready", "save-guide", "mcp-saved", "close-mcp", "mcp-closed", "return-apps",
                    "view-setup", "setup-ready", "requirements", "setup-checked")
@@ -993,7 +993,7 @@ def source_guide(root, action, owner, atspi):
             print(json.dumps({"sourceGuideCaptureRefusal": type(error).__name__[:64]}), file=sys.stderr)
 
 
-def setup_text_observation(rows, nodes, paths, iframe, document, owner, atspi):
+def setup_text_observation(rows, nodes, paths, iframe, document, owner, atspi, requirements_section=None):
     """Read only the already bound Setup document; never discover a new target.
 
     WebKit 2.50.4 AccessibilityObjectAtspi.cpp::atspiRole/interfacesForObject:
@@ -1003,6 +1003,8 @@ def setup_text_observation(rows, nodes, paths, iframe, document, owner, atspi):
     """
     result = {"readOnly": True, "authorization": False, "actionCount": 0, "complete": False,
               "iframe": list(iframe), "document": list(document), "nodes": []}
+    if requirements_section is not None:
+        result["requirementsSection"] = list(requirements_section)
     values, blocked = {}, set()
     deadline = time.monotonic() + 5
     try:
@@ -1025,9 +1027,14 @@ def setup_text_observation(rows, nodes, paths, iframe, document, owner, atspi):
             metadata.append((row, ref, node, attrs, states, unsafe))
         for row, ref, node, attrs, states, unsafe in metadata:
             require(time.monotonic() < deadline, "Setup read-only diagnostic deadline")
-            known_ids = (*SETUP_SEQUENCE_IDS, "requirements-heading", "new-project-pane", "setup-workspace", "project-details")
+            known_ids = (*SETUP_SEQUENCE_IDS, "requirements", "new-project-pane", "setup-workspace", "project-details")
             source_id = attrs.get("id") if attrs.get("id") in known_ids else None
-            text_shape = (row["role"], attrs.get("tag"), attrs.get("computed-role")) in (
+            in_requirements = requirements_section is not None \
+                and (ref == requirements_section or requirements_section in paths[ref])
+            # Inside the exact source heading's section, query the actual Text
+            # interface, including anonymous row projections. This is not a role
+            # conversion or an action admission; names never supply row values.
+            text_shape = in_requirements or (row["role"], attrs.get("tag"), attrs.get("computed-role")) in (
                 (84, "div", "generic"), (84, "span", "generic"), (72, "p", "paragraph"),
                 (82, "h2", "heading"), (29, "label", None))
             if ref not in (iframe, document) and source_id is None and not text_shape \
@@ -1084,6 +1091,36 @@ def setup_text_observation(rows, nodes, paths, iframe, document, owner, atspi):
 def setup_subtree_values(values, paths, reference):
     # Only caller-verified source IDs may select these diagnostic Text reads.
     return [value for ref, value in values.items() if ref == reference or reference in paths[ref]]
+
+
+def setup_requirements_scope(nodes, paths, document, heading, owner, atspi):
+    # Native 39115772723: exact h2 -> section; generic #requirements is ignored.
+    require(document in paths[heading], "Requirements heading escaped exact Setup document")
+    section = paths[heading][-1]
+    node = nodes[section]
+    require(section != document and document in paths[section] and node.get_process_id() == owner.renderer["pid"]
+            and node.get_role() == 109 and all(node.get_attributes().get(key) == value for key, value in
+                {"tag": "section", "computed-role": "region", "toolkit": "WebKitGTK"}.items()),
+            "Requirements heading has no exact source section parent")
+    states = node.get_state_set()
+    require(states.contains(atspi.StateType.VISIBLE) and states.contains(atspi.StateType.SHOWING)
+            and not any(states.contains(getattr(atspi.StateType, key)) for key in ("DEFUNCT", "BUSY", "EDITABLE")),
+            "Requirements section is not visible/ready")
+    return section
+
+
+def setup_requirement_rows(values, paths, section, heading, observation):
+    require(values.get(heading) == "Requirements", "Exact source Requirements heading Text missing")
+    # renderEnvironment always emits these first two labels, even without Unity.
+    labels = ("Unity Hub or Unity CLI", "Unity 6000.3.21f1")
+    observation["requirementRows"] = []
+    for label in labels:
+        matches = [ref for ref, text in values.items() if section in paths[ref] and text == label]
+        # The same Text may be projected on ancestors and a leaf; never accept
+        # two independent matching branches or a decoy outside this section.
+        leaves = [ref for ref in matches if not any(ref in paths[child] for child in matches)]
+        require(len(leaves) == 1, "Exact unique source requirement row Text missing or ambiguous")
+        observation["requirementRows"].append({"text": label, "reference": list(leaves[0])})
 
 
 def retain_setup_text(root, action, walks):
@@ -1152,12 +1189,20 @@ def source_sequence_walk(owner, atspi, action, observation, setup_diagnostics):
     setup_read = action in ("setup-ready", "setup-checked")
     iframe, = source_context(rows, ids, ("setup-host-frame",))
     document = source_document(rows, nodes, paths, iframe, owner, observation)
-    diagnostic, values = setup_text_observation(rows, nodes, paths, iframe, document, owner, atspi)
+    section, context_error = None, None
+    try:
+        iframe, recipe, refresh, status, heading = source_context(rows, ids, tuple(SETUP_SEQUENCE_IDS), setup_read=setup_read)
+        require(all(document in paths[ref] for ref in (recipe, refresh, heading)) and iframe not in paths[status],
+                "Setup source controls escaped exact document")
+        section = setup_requirements_scope(nodes, paths, document, heading, owner, atspi)
+        observation["sourcePaths"]["requirements-section"] = [list(ref) for ref in (*paths[section], section)]
+    except Exception as error:
+        context_error = error
+    diagnostic, values = setup_text_observation(rows, nodes, paths, iframe, document, owner, atspi, section)
     setup_diagnostics.append(diagnostic)
     observation["setupTextDiagnostic"] = {key: diagnostic[key] for key in ("readOnly", "actionCount", "complete")}
-    iframe, recipe, refresh, status, requirements = source_context(rows, ids, tuple(SETUP_SEQUENCE_IDS), setup_read=setup_read)
-    require(all(document in paths[ref] for ref in (recipe, refresh, requirements)) and iframe not in paths[status],
-            "Setup source controls escaped exact document")
+    if context_error is not None:
+        raise context_error
     source_version(nodes, paths, status, APPS["setup"]["version"], atspi, observation, setup_read=setup_read)
     require(not any(row["role"] == 2 and nodes[tuple(row["reference"])].get_state_set().contains(atspi.StateType.SHOWING)
                     for row in rows), "Visible Setup/Root source alert")
@@ -1170,8 +1215,8 @@ def source_sequence_walk(owner, atspi, action, observation, setup_diagnostics):
     if setup_read and "Loading approved recipe\u2026" in recipe_values:
         raise SourceNotReady("Bound Setup recipe is still loading")
     require(RECIPE in recipe_values, "Exact pinned Setup recipe is not ready")
-    require("Unity Hub or Unity CLI" in setup_subtree_values(values, paths, requirements), "Actual Setup requirements missing")
-    return rows, nodes, (frame, iframe, recipe, refresh), refresh
+    setup_requirement_rows(values, paths, section, heading, observation)
+    return rows, nodes, (frame, iframe, recipe, refresh, heading), refresh
 
 
 def source_sequence(root, action, owner, atspi):
