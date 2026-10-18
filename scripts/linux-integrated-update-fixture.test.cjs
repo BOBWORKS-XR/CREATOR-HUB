@@ -45,8 +45,22 @@ test('the test target retains native direct features and independent public-sign
   assert.ok(source.includes('builder.stageIntegrationService(output, overlay)'));
   assert.ok(source.includes('verify-package-input'));
   assert.ok(source.includes("git(['diff', '--exit-code', BASELINE.source, 'HEAD', '--', ...PRIVATE])"));
-  assert.ok(source.includes('checkSource(root, entries, changes); baseline(input)'));
+  assert.ok(source.includes('checkSource(root, entries, changes)'));
+  assert.ok(source.includes('generatedSchemaOutputs'));
   assert.ok(source.includes('signedUpdateAccepted: false, restartAccepted: false, releaseReady: false'));
   assert.ok(!source.includes('signDetached') && !source.includes('release upload') && !source.includes('dpkg --install'));
   assert.deepEqual(fixture.PRIVATE.slice(0, 3), ['modules/mcp', 'modules/project-setup', 'native/mcp-router']);
+});
+
+test('only known tauri-build schema outputs are distinct from verified precompile sources', () => {
+  for (const app of ['mcp/launcher', 'project-setup']) {
+    for (const name of ['acl-manifests', 'capabilities', 'desktop-schema', 'linux-schema', 'windows-schema']) {
+      assert.equal(fixture.generatedSchema(`modules/${app}/src-tauri/gen/schemas/${name}.json`), true);
+    }
+  }
+  for (const name of ['modules/mcp/launcher/src-tauri/capabilities/default.json',
+    'modules/mcp/launcher/src-tauri/tauri.conf.json', 'modules/mcp/launcher/src-tauri/src/lib.rs',
+    'modules/mcp/launcher/src-tauri/gen/schemas/unknown.json', '../modules/project-setup/src-tauri/gen/schemas/linux-schema.json']) {
+    assert.equal(fixture.generatedSchema(name), false);
+  }
 });

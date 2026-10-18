@@ -24,6 +24,9 @@ const FROM = '0.1.14', TO = '0.1.15';
 const PRIVATE = ['modules/mcp', 'modules/project-setup', 'native/mcp-router',
   'native/host_parent_macos.rs', 'native/plugins_retirement.rs', 'native/convergence-server-unix.rs',
   'src-tauri/src/module_archive.rs', 'src-tauri/src/catalog-key.pub'];
+function generatedSchema(name) {
+  return /^modules\/(?:mcp\/launcher|project-setup)\/src-tauri\/gen\/schemas\/(?:acl-manifests|capabilities|desktop-schema|linux-schema|windows-schema)\.json$/.test(name);
+}
 
 function admission(env, platform, arch) {
   assert.equal(platform, 'linux'); assert.equal(arch, 'x64');
@@ -115,19 +118,29 @@ function build(root, input, metadata, services = {}) {
   const integrity = unix.validatePackages({ output, bundleDirectory: path.join(target, 'release/bundle'), manifest,
     productName: 'Creator Hub', rawHub: raw, archiveDecoder: decoder, mcpMode: 'writable', linuxRetirementCandidate: true });
   const helperReceipt = retirement.verifyDeb(root, output, integrity, staged, execute);
-  checkSource(root, entries, changes); baseline(input);
+  // tauri-build writes these schema outputs from the unchanged capability inputs.
+  // All tracked bytes were checked before compilation; source checks still cover
+  // every non-generated file afterward. Retain the generated output hashes too.
+  checkSource(root, Object.fromEntries(Object.entries(entries).filter(([name]) => !generatedSchema(name))), changes);
+  const generatedSchemaOutputs = Object.fromEntries(Object.keys(entries).filter(generatedSchema)
+    .map(name => {
+      const file = path.join(root, name); const record = capture(file, 4 * 1024 * 1024);
+      assert.equal(typeof JSON.parse(fs.readFileSync(file, 'utf8')), 'object');
+      return [name, record];
+    }));
+  baseline(input);
   for (const [name, expected] of Object.entries(files)) if (!name.startsWith('routing/runtime.')) {
     assert.equal(capture(path.join(modules, name), original.payloadArchive.files[name].size).sha256, expected);
   }
   const receipt = { schemaVersion: 1, acceptanceOnly: true, sourceCommit: env.GITHUB_SHA,
     baselineSource: BASELINE.source, sourceVersion: FROM, targetVersion: TO, changedSourceFiles: VERSIONS,
-    standalonePayloadRecompiled: false, integratedLibrariesCompiled: true, integrity, helperReceipt,
+    standalonePayloadRecompiled: false, integratedLibrariesCompiled: true, generatedSchemaOutputs, integrity, helperReceipt,
     signedUpdateAccepted: false, restartAccepted: false, releaseReady: false };
   fs.writeFileSync(path.join(output, 'fixture-receipt.json'), JSON.stringify(receipt, null, 2), { flag: 'wx' });
   return receipt;
 }
 
-module.exports = { admission, baseline, build, BASELINE, FROM, TO, PRIVATE };
+module.exports = { admission, baseline, build, BASELINE, FROM, TO, PRIVATE, generatedSchema };
 if (require.main === module) {
   const [root, input, metadata] = process.argv.slice(2);
   assert.equal(process.argv.length, 5);
