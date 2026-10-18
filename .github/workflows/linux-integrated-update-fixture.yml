@@ -1,0 +1,148 @@
+name: Private integrated Linux outgoing update target (never release)
+on:
+  push:
+    branches: [validation/linux-integrated-update-fixture]
+    paths:
+      - .github/workflows/linux-integrated-update-fixture.yml
+      - scripts/linux-integrated-update-fixture.cjs
+      - scripts/linux-integrated-update-fixture.test.cjs
+permissions:
+  contents: read
+  actions: read
+jobs:
+  metadata:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    # GitHub requires write capability for draft reads. This job has no checkout,
+    # candidate execution or write API; the native build job stays read-only.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            assert.equal(`${context.repo.owner}/${context.repo.repo}`,'BOBWORKS-XR/CREATOR-HUB');
+            assert.equal(process.env.GITHUB_REF,'refs/heads/validation/linux-integrated-update-fixture');
+            assert.equal(process.env.GITHUB_EVENT_NAME,'push');assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
+            const {data:release}=await github.rest.repos.getRelease({...context.repo,release_id:411494394});
+            assert.equal(release.draft,true);assert.equal(release.tag_name,'v0.1.13-validation');
+            const directory=path.join(fs.realpathSync(process.env.RUNNER_TEMP),'integrated-runtime15');fs.mkdirSync(directory,{mode:0o700});
+            for(const [id,name,size,digest,destination] of [
+              [653612747,'integrated-runtime15-39130359610.json',1133,'f2be0e8a841f7b3bbab543a70041105af5849a7e89082e3d5ad5578eabe0d747','runtime15.json'],
+              [653612745,'integrated-runtime15-39130359610.minisig',299,'41ce6357a8b3c60357141518191c5c369a412d530061210fe04b1d6f252dac9f','runtime15.minisig'],
+            ]) {
+              const {data:asset}=await github.rest.repos.getReleaseAsset({...context.repo,asset_id:id});
+              assert.equal(asset.name,name);assert.equal(asset.size,size);assert.equal(asset.state,'uploaded');
+              assert.equal(asset.digest,`sha256:${digest}`);
+              const {data}=await github.rest.repos.getReleaseAsset({...context.repo,asset_id:id,headers:{accept:'application/octet-stream'}});
+              const bytes=Buffer.from(data);assert.equal(bytes.length,size);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),digest);
+              fs.writeFileSync(path.join(directory,destination),bytes,{flag:'wx',mode:0o644});
+            }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: integrated-runtime15-input
+          path: ${{ runner.temp }}/integrated-runtime15/*
+          retention-days: 7
+          if-no-files-found: error
+  target:
+    needs: metadata
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Portable finite-profile tests before native downloads
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          node --test scripts/linux-integrated-update-fixture.test.cjs
+      - uses: actions/download-artifact@v5
+        with:
+          name: integrated-runtime15-input
+          path: ${{ runner.temp }}/integrated-runtime15
+      - name: Bind the original successful integrated package producer and raw archive
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            const repo=context.repo,source='bbd0a5d58562a3d8af0c84e5360eef9d26803eef',runId=39130359610,id=12137857868;
+            const {data:run}=await github.rest.actions.getWorkflowRun({...repo,run_id:runId});
+            assert.equal(run.head_sha,source);assert.equal(run.run_attempt,1);assert.equal(run.conclusion,'success');
+            assert.equal(run.status,'completed');assert.equal(run.event,'workflow_dispatch');assert.equal(run.repository.id,1364807512);
+            assert.equal(run.path,'.github/workflows/unix-managed-assembly.yml');assert.equal(run.head_branch,'validation/linux-integrated-candidate-014');
+            const {data:job}=await github.rest.actions.getJobForWorkflowRun({...repo,job_id:117684180444});
+            assert.equal(job.run_id,runId);assert.equal(job.conclusion,'success');assert.ok(job.name.startsWith('assembly (linux,'));
+            const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:id});
+            assert.equal(artifact.expired,false);assert.equal(artifact.name,'signed-unix-hub-linux-39130359610-1');
+            assert.equal(artifact.workflow_run.id,runId);assert.equal(artifact.workflow_run.head_sha,source);
+            assert.equal(artifact.workflow_run.repository_id,1364807512);assert.equal(artifact.workflow_run.head_repository_id,1364807512);
+            assert.equal(artifact.size_in_bytes,182723307);
+            const digest='c76c138b3297e347e834d43c1ac1a82eb883b41663df08ea44f008c5846e03e5';
+            assert.equal(artifact.digest,`sha256:${digest}`);
+            const {data}=await github.rest.actions.downloadArtifact({...repo,artifact_id:id,archive_format:'zip'});
+            const bytes=Buffer.from(data);assert.equal(bytes.length,182723307);
+            assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),digest);
+            fs.writeFileSync(path.join(fs.realpathSync(process.env.RUNNER_TEMP),'integrated-baseline.zip'),bytes,{flag:'wx',mode:0o600});
+      - name: Stage only the verified native payload and original DEB
+        run: |
+          python3 -B - <<'PY'
+          import hashlib,json,os,stat,zipfile
+          from pathlib import Path
+          temp=Path(os.environ['RUNNER_TEMP']).resolve(); dest=temp/'integrated-baseline'; dest.mkdir(mode=0o700)
+          with zipfile.ZipFile(temp/'integrated-baseline.zip') as archive:
+              entries=archive.infolist(); assert 0<len(entries)<=64 and sum(e.file_size for e in entries)<=768*1024*1024
+              names=set()
+              for e in entries:
+                  name=e.filename
+                  assert name not in names and '\\' not in name and ':' not in name and not name.startswith('/')
+                  assert all(p not in ('','..','.') for p in name.rstrip('/').split('/'))
+                  assert stat.S_IFMT(e.external_attr>>16) in (0,stat.S_IFREG,stat.S_IFDIR)
+                  assert 0<=e.file_size<=256*1024*1024 and not e.flag_bits&1
+                  names.add(name)
+              raw=archive.read('builtin-manifest.json')
+              assert len(raw)==3663 and hashlib.sha256(raw).hexdigest()=='cabbc045eea9b29901f44d4b0c4cb1da1ffdf570821003a5118b25edb6a84996'
+              manifest=json.loads(raw)
+              expected={**manifest['modules']['mcp']['files'],**manifest['modules']['setup']['files'],**manifest['managedRouting']['files']}
+              selected={'builtin-manifest.json':(3663,hashlib.sha256(raw).hexdigest(),0o644),
+                  'native-packages/Creator Hub_0.1.14_amd64.deb':(63874886,'a4d2db459966f475a982cbe72591f32222e9c7050a1a7f4c870e1c6634c0f8b3',0o644)}
+              for name,record in manifest['payloadArchive']['files'].items():
+                  selected['modules/'+name]=(record['size'],expected[name],record['mode'])
+              assert set(selected)<=names
+              for name,(size,digest,mode) in selected.items():
+                  entry=archive.getinfo(name); assert not entry.is_dir() and entry.file_size==size
+                  data=archive.read(entry); assert len(data)==size and hashlib.sha256(data).hexdigest()==digest
+                  target=dest/name; target.parent.mkdir(parents=True,exist_ok=True)
+                  with target.open('xb') as stream: stream.write(data)
+                  os.chmod(target,mode)
+          PY
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Provision native compilation dependencies on the disposable runner only
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            libxdo-dev librsvg2-dev patchelf libssl-dev build-essential pkg-config
+      - name: Build the higher-version direct Hub test target with unchanged standalone payloads
+        run: node scripts/linux-integrated-update-fixture.cjs "$GITHUB_WORKSPACE" "$RUNNER_TEMP/integrated-baseline" "$RUNNER_TEMP/integrated-runtime15"
+      - name: Retain private target and receipts, never publish or install
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-integrated-update-target15-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/linux-integrated-update-15/fixture-receipt.json
+            artifacts/linux-integrated-update-15/unix-package-integrity.json
+            artifacts/linux-integrated-update-15/linux-retirement-package-integrity.json
+            artifacts/linux-integrated-update-15/builtin-manifest.json
+            artifacts/linux-integrated-update-15/creator-hub
+            artifacts/linux-integrated-update-15/native-packages/*.deb

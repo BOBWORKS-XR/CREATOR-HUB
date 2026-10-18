@@ -8,7 +8,8 @@ const { yaml } = require('playwright-core/lib/utilsBundle');
 const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
 const workflows = ['native-linux-components-014.yml', 'linux-installed-candidate-014.yml',
   'linux-outer-update-fixture-014.yml', 'flatpak-installed-host-launch-014.yml',
-  'linux-integrated-features.yml', 'native-linux-integrated-pages.yml'];
+  'linux-integrated-features.yml', 'native-linux-integrated-pages.yml',
+  'linux-integrated-update-fixture.yml'];
 for (const name of workflows) test(`Linux preflight: ${name} YAML, Bash and embedded JS syntax`, () => {
   const body = fs.readFileSync(path.join(__dirname, '../.github/workflows', name), 'utf8');
   const workflow = yaml.parse(body, { uniqueKeys: true });
