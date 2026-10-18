@@ -268,7 +268,11 @@ pub(crate) fn dispatch(app: &tauri::AppHandle, command: &str, args: Value) -> Re
             let selection = app
                 .dialog()
                 .file()
-                .set_title("Select a folder (read-only preview)")
+                .set_title(if crate::integration_context::active() {
+                    "Select Unity project"
+                } else {
+                    "Select a folder (read-only preview)"
+                })
                 .blocking_pick_folder();
             Ok(json!(selection.map(|path| path.to_string())))
         }

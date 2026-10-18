@@ -105,6 +105,14 @@ pub(super) struct Report {
     pub recovery: Vec<recovery::Report>,
 }
 
+/// Service-only native consent receipt; approval does not imply recovery completed.
+#[derive(Serialize)]
+pub(crate) struct ReviewReceipt {
+    #[serde(flatten)]
+    report: Report,
+    approved: bool,
+}
+
 fn backup_path(path: &Path, bytes: &[u8]) -> PathBuf {
     path.parent()
         .unwrap()
@@ -709,6 +717,13 @@ pub(super) fn save(config: crate::LauncherConfig) -> Result<(), String> {
 }
 
 pub(super) fn native_review(app: &tauri::AppHandle, base: &Path) -> Result<Report, String> {
+    native_review_decision(app, base).map(|receipt| receipt.report)
+}
+
+pub(crate) fn native_review_decision(
+    app: &tauri::AppHandle,
+    base: &Path,
+) -> Result<ReviewReceipt, String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     if !crate::settings_review_admission::enabled() {
         return Err(
@@ -716,33 +731,63 @@ pub(super) fn native_review(app: &tauri::AppHandle, base: &Path) -> Result<Repor
         );
     }
     let paths = Paths::new(base)?;
+    review_with(
+        &paths,
+        |report| {
+            app.dialog().message(format!("Review the interrupted MCP settings save at {}?\n\nOnly an unchanged reviewed before-image can be resumed. Conflicting, unknown or changed outcomes are not rolled back or overwritten. Exact before/after images remain local. No AI client, Unity project, sign-in or installation is changed.", report.journal.display()))
+            .title("Review MCP settings recovery").kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom("Review and resume".into(), "Keep unchanged".into())).blocking_show()
+        },
+        |paths| {
+            app.dialog().message(format!("Keep exact local backups of these MCP settings?\n\nCurrent: {}\nLegacy (kept): {}\n\nCurrent settings remain preferred; legacy-only settings remain in their existing location. Different files are not merged, copied to a new Hub store or overwritten. Unknown fields, projects, terms and installed apps are unchanged.", paths.current.display(), paths.legacy.display()))
+            .title("Preserve MCP product settings").kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom("Keep backups".into(), "Keep unchanged".into())).blocking_show()
+        },
+    )
+}
+
+fn review_with(
+    paths: &Paths,
+    mut approve_recovery: impl FnMut(&recovery::Report) -> bool,
+    approve_backup: impl FnOnce(&Paths) -> bool,
+) -> Result<ReviewReceipt, String> {
     let mut reviewed_recovery = false;
-    for transaction in transactions(&paths)? {
+    let mut any_approved = false;
+    let mut any_declined = false;
+    for transaction in transactions(paths)? {
         let report = transaction.inspect()?;
         if report.historical_completed {
             continue;
         }
         reviewed_recovery = true;
         transaction.resume(|report| {
-            app.dialog().message(format!("Review the interrupted MCP settings save at {}?\n\nOnly an unchanged reviewed before-image can be resumed. Conflicting, unknown or changed outcomes are not rolled back or overwritten. Exact before/after images remain local. No AI client, Unity project, sign-in or installation is changed.", report.journal.display()))
-                .title("Review MCP settings recovery").kind(MessageDialogKind::Warning)
-                .buttons(MessageDialogButtons::OkCancelCustom("Review and resume".into(), "Keep unchanged".into())).blocking_show()
+            let approved = approve_recovery(report);
+            any_approved |= approved;
+            any_declined |= !approved;
+            approved
         })?;
     }
     if reviewed_recovery {
-        return inspect_paths(&paths);
+        return Ok(ReviewReceipt {
+            report: inspect_paths(paths)?,
+            approved: any_approved && !any_declined,
+        });
     }
-    let saved = inventory(&paths)?;
+    let saved = inventory(paths)?;
     if saved.current.is_none() && saved.legacy.is_none() {
-        return inspect_paths(&paths);
+        return Ok(ReviewReceipt {
+            report: inspect_paths(paths)?,
+            approved: false,
+        });
     }
-    let approved = app.dialog().message(format!("Keep exact local backups of these MCP settings?\n\nCurrent: {}\nLegacy (kept): {}\n\nCurrent settings remain preferred; legacy-only settings remain in their existing location. Different files are not merged, copied to a new Hub store or overwritten. Unknown fields, projects, terms and installed apps are unchanged.", paths.current.display(), paths.legacy.display()))
-        .title("Preserve MCP product settings").kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom("Keep backups".into(), "Keep unchanged".into())).blocking_show();
+    let approved = approve_backup(paths);
     if approved {
-        preserve(&paths, &saved)?;
+        preserve(paths, &saved)?;
     }
-    inspect_paths(&paths)
+    Ok(ReviewReceipt {
+        report: inspect_paths(paths)?,
+        approved,
+    })
 }
 fn preserve(paths: &Paths, reviewed: &Snapshot) -> Result<(), String> {
     let mut held = Vec::new();

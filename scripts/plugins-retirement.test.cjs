@@ -13,7 +13,7 @@ test('native and browser retirement use the same exact UTC cutoff', () => {
 });
 
 test('every native app enforces retirement before dispatch and registers the fixed opener', () => {
-  for (const file of ['src-tauri/src/main.rs', 'modules/mcp/launcher/src-tauri/src/main.rs', 'modules/project-setup/src-tauri/src/main.rs']) {
+  for (const file of ['src-tauri/src/main.rs', 'modules/mcp/launcher/src-tauri/src/lib.rs', 'modules/project-setup/src-tauri/src/lib.rs']) {
     const source = read(file);
     assert.match(source, /native\/plugins_retirement.rs/);
     assert.match(source, /plugins_retirement::open_plugins_website,/);

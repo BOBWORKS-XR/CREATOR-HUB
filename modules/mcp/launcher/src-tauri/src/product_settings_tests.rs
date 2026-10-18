@@ -56,6 +56,198 @@ fn after() -> Vec<u8> {
         .to_vec()
 }
 
+fn pending_review_save(fixture: &Fixture, path: &Path) -> recovery::Transaction {
+    let before = after();
+    let mut changed: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    changed["futureCurrent"] = "reviewed change".into();
+    fs::write(path, &before).unwrap();
+    recovery::Transaction::prepare(
+        &fixture.paths.journal,
+        vec![recovery::ReviewedWrite::new(
+            "MCP settings review fixture",
+            path,
+            &before,
+            &serde_json::to_vec(&changed).unwrap(),
+        )],
+    )
+    .unwrap()
+}
+
+#[test]
+fn review_receipt_preserves_report_wire_and_uses_only_the_actual_backup_decision() {
+    for status in [
+        Status::Current,
+        Status::LegacyOnly,
+        Status::Identical,
+        Status::Conflict,
+    ] {
+        for approved in [false, true] {
+            let fixture = Fixture::new();
+            let legacy = fixture.legacy();
+            match status {
+                Status::Current => {
+                    fs::write(&fixture.paths.current, &legacy).unwrap();
+                    fs::remove_file(&fixture.paths.legacy).unwrap();
+                }
+                Status::LegacyOnly => {}
+                Status::Identical => fs::write(&fixture.paths.current, &legacy).unwrap(),
+                Status::Conflict => fs::write(&fixture.paths.current, after()).unwrap(),
+                Status::None => unreachable!(),
+            }
+            let before = inventory(&fixture.paths).unwrap();
+            let mut prompts = 0;
+            let receipt = review_with(
+                &fixture.paths,
+                |_| panic!("No recovery"),
+                |_| {
+                    prompts += 1;
+                    approved
+                },
+            )
+            .unwrap();
+            assert_eq!(prompts, 1);
+            assert_eq!(receipt.report.status, status);
+            assert_eq!(receipt.approved, approved);
+            assert_eq!(inventory(&fixture.paths).unwrap(), before);
+            let mut service_wire = serde_json::to_value(&receipt).unwrap();
+            assert_eq!(
+                service_wire.as_object_mut().unwrap().remove("approved"),
+                Some(approved.into())
+            );
+            let report_wire = serde_json::to_value(&receipt.report).unwrap();
+            assert_eq!(service_wire, report_wire);
+            assert!(report_wire.get("approved").is_none());
+            assert_eq!(
+                report_wire,
+                serde_json::to_value(fixture.inspect()).unwrap()
+            );
+            assert_eq!(receipt.report.backups.is_empty(), !approved);
+        }
+    }
+}
+
+#[test]
+fn review_receipt_without_a_prompt_is_not_approval() {
+    let fixture = Fixture::new();
+    let receipt = review_with(
+        &fixture.paths,
+        |_| panic!("No recovery"),
+        |_| panic!("No settings"),
+    )
+    .unwrap();
+    assert_eq!(receipt.report.status, Status::None);
+    assert!(!receipt.approved);
+    assert!(!fixture.paths.current.exists());
+    assert!(!fixture.paths.legacy.exists());
+    assert!(!fixture.paths.journal.exists());
+}
+
+#[test]
+fn review_receipt_records_recovery_approval_or_decline_without_inference() {
+    for approved in [false, true] {
+        let fixture = Fixture::new();
+        let transaction = pending_review_save(&fixture, &fixture.paths.current);
+        let pending = transaction.inspect().unwrap().journal.join("pending.json");
+        let before = fs::read(&pending).unwrap();
+        let mut prompts = 0;
+        let receipt = review_with(
+            &fixture.paths,
+            |_| {
+                prompts += 1;
+                approved
+            },
+            |_| panic!("Recovery path must not ask for a backup decision"),
+        )
+        .unwrap();
+        assert_eq!(prompts, 1);
+        assert_eq!(receipt.approved, approved);
+        assert_eq!(receipt.report.recovery.len(), 1);
+        assert_eq!(receipt.report.recovery[0].completed, approved);
+        assert_eq!(fs::read(pending).unwrap(), before);
+        if !approved {
+            assert_eq!(fs::read(&fixture.paths.current).unwrap(), after());
+        }
+    }
+}
+
+#[test]
+fn review_receipt_is_false_if_any_recovery_decision_is_declined() {
+    let fixture = Fixture::new();
+    pending_review_save(&fixture, &fixture.paths.current);
+    pending_review_save(&fixture, &fixture.paths.legacy);
+    let mut prompts = 0;
+    let receipt = review_with(
+        &fixture.paths,
+        |_| {
+            prompts += 1;
+            prompts == 1
+        },
+        |_| panic!("Recovery path"),
+    )
+    .unwrap();
+    assert_eq!(prompts, 2);
+    assert!(!receipt.approved);
+    assert_eq!(
+        receipt
+            .report
+            .recovery
+            .iter()
+            .filter(|report| report.completed)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn review_receipt_does_not_reuse_historical_approval_after_cancel() {
+    let fixture = Fixture::new();
+    let transaction = pending_review_save(&fixture, &fixture.paths.current);
+    assert!(transaction.resume(|_| true).unwrap().completed);
+    let before = inventory(&fixture.paths).unwrap();
+    let receipt = review_with(
+        &fixture.paths,
+        |_| panic!("Completed history is not a new decision"),
+        |_| false,
+    )
+    .unwrap();
+    assert!(!receipt.approved);
+    assert!(receipt.report.recovery[0].historical_completed);
+    assert_eq!(inventory(&fixture.paths).unwrap(), before);
+}
+
+#[test]
+fn review_receipt_cannot_report_success_after_an_approved_stale_backup() {
+    let fixture = Fixture::new();
+    fixture.legacy();
+    assert!(review_with(
+        &fixture.paths,
+        |_| panic!("No recovery"),
+        |paths| {
+            fs::write(&paths.legacy, after()).unwrap();
+            true
+        }
+    )
+    .is_err());
+    assert_eq!(fs::read(&fixture.paths.legacy).unwrap(), after());
+    assert!(!fixture.paths.current.exists());
+}
+
+#[test]
+fn review_receipt_is_service_only_and_native_dialog_answers_stay_explicit() {
+    let _: fn(&tauri::AppHandle, &Path) -> Result<Report, String> = native_review;
+    let _: fn(&tauri::AppHandle, &Path) -> Result<ReviewReceipt, String> = native_review_decision;
+    let hosted = include_str!("hosted_commands.rs");
+    assert!(hosted.contains("product_settings::native_review(app, &base)?"));
+    assert!(!hosted.contains("native_review_decision"));
+    let service = include_str!("service.rs");
+    assert!(service.contains("if command == \"review_product_settings\""));
+    assert!(service.contains("product_settings::native_review_decision("));
+    assert!(service.contains("serde_json::from_value::<NoArgs>(args)"));
+    assert!(crate::hosted_commands::needs_workflow(
+        "review_product_settings"
+    ));
+}
+
 #[test]
 fn reviewed_server_transition_changes_only_path_and_preserves_identical_stores() {
     let fixture = Fixture::new();

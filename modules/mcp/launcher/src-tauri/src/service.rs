@@ -216,6 +216,23 @@ fn emit(app: &AppHandle, frame: &[u8]) -> Result<(), String> {
     .map_err(|_| "MCP lifecycle delivery failed. Check the last outcome before retrying.".into())
 }
 
+fn dispatch(app: &AppHandle, command: &str, args: Value) -> Result<Value, String> {
+    if command == "review_product_settings" {
+        serde_json::from_value::<NoArgs>(args)
+            .map_err(|_| "Invalid hosted command arguments.".to_owned())?;
+        let base = dirs::config_dir().ok_or("Cannot locate MCP configuration directory.")?;
+        return serde_json::to_value(hosted_commands::product_settings::native_review_decision(
+            app, &base,
+        )?)
+        .map_err(|_| "Cannot encode MCP result.".into());
+    }
+    if matches!(command, "get_hosted_snapshot" | "pick_project_folder") {
+        crate::hosted::dispatch(app, command, args)
+    } else {
+        hosted_commands::dispatch(app, command, args)
+    }
+}
+
 /// Synchronous: Root calls from a blocking worker and retains its native operation lease.
 /// Only existing finite, typed handlers are callable. Arguments/results are never journaled.
 pub fn call(app: &AppHandle, command: &str, args: Value) -> Result<Value, String> {
@@ -240,11 +257,7 @@ pub fn call(app: &AppHandle, command: &str, args: Value) -> Result<Value, String
         |frame| emit(app, frame),
         |command, args| {
             let _scope = crate::integration_context::Scope::enter()?;
-            if matches!(command, "get_hosted_snapshot" | "pick_project_folder") {
-                crate::hosted::dispatch(app, command, args)
-            } else {
-                hosted_commands::dispatch(app, command, args)
-            }
+            dispatch(app, command, args)
         },
     )
 }
