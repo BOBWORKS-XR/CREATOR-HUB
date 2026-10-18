@@ -1960,6 +1960,11 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                 f.target = add(43, "Check requirements again", f.setup_doc, "refresh-button")
                 f.requirements = add(85, "", f.setup_doc, "requirements")
                 add(117, "Unity Hub or Unity CLI", f.requirements)
+            if hasattr(f, "status"):
+                f.version_text = types.SimpleNamespace(
+                    get_character_count=mock.Mock(side_effect=lambda: len(f.version.name)),
+                    get_text=mock.Mock(side_effect=lambda _start, _end: f.version.name))
+                f.status.get_text_iface = mock.Mock(return_value=f.version_text)
             with mock.patch.object(p, "own_tree", side_effect=AssertionError("No generic own_tree exemption")), \
                     mock.patch.object(p, "press", side_effect=AssertionError("No name-only generic action")):
                 yield f
@@ -1976,6 +1981,32 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                 self.assertEqual(f.target.action.do_action.call_count, int(writing))
                 self.assertFalse(result["nativeAcceptance"])
                 self.assertEqual(len(result["walks"]), 2)
+
+    def test_native_39114019943_status_text_needs_no_accessible_name_or_text_child(self):
+        with self.fixture("mcp-saved") as f:
+            f.status.children.clear()
+            self.assertEqual(f.status.get_name(), "")
+            result = p.source_guide(Path("/fixture"), "mcp-saved", f.owner, f.atspi)
+            self.assertEqual(result["actionCount"], 0)
+            for walk in result["walks"]:
+                self.assertEqual(walk["hostedVersionRead"], {"reader": "exact-hosted-status-Text", "interfacePresent": True,
+                    "characterCount": len(p.APPS["mcp"]["version"]), "knownState": p.APPS["mcp"]["version"]})
+            self.assertEqual(f.version_text.get_text.call_count, 2)
+            f.target.action.do_action.assert_not_called()
+
+    def test_status_text_mismatch_bounds_missing_interface_and_changed_count_never_use_decoy_names(self):
+        for change in ("wrong-text", "count", "oversize", "bool", "missing", "raises"):
+            with self.subTest(change=change), self.fixture("close-mcp") as f:
+                if change == "wrong-text":
+                    f.version_text.get_text.side_effect = lambda *_: "x" * len(f.version.name)
+                elif change == "count": f.version_text.get_character_count.side_effect = [9, 10]
+                elif change == "oversize": f.version_text.get_character_count.side_effect = lambda: 129
+                elif change == "bool": f.version_text.get_character_count.side_effect = lambda: True
+                elif change == "missing": f.status.get_text_iface.return_value = None
+                else: f.version_text.get_text.side_effect = RuntimeError("unavailable")
+                with self.assertRaises(RuntimeError):
+                    p.source_sequence(Path("/fixture"), "close-mcp", f.owner, f.atspi)
+                f.target.action.do_action.assert_not_called()
 
     def test_post_save_and_navigation_contexts_refuse_visible_guide_or_iframe_and_wrong_ids(self):
         for phase, change in (("mcp-saved", "visible-guide"), ("mcp-saved", "version"), ("close-mcp", "outside"),

@@ -852,12 +852,24 @@ def source_document(rows, nodes, paths, iframe, owner, observation):
 
 
 def source_version(nodes, paths, status, expected, atspi, observation, setup_read=False):
-    version_nodes = [node for ref, node in nodes.items() if ref == status or status in paths[ref]]
-    require(0 < len(version_nodes) <= 8, "Hosted version source subtree exceeds bound")
-    matches = any(node.get_state_set().contains(atspi.StateType.SHOWING) and node.get_name() == expected for node in version_nodes)
+    # This exact role=status span renders its content; Accessible.Name is not
+    # its text. WebKitGTK 2.50.4 interfacesForObject exposes inline-renderer Text.
+    node = nodes[status]
+    node.clear_cache()
+    interface = node.get_text_iface()
+    detail = {"reader": "exact-hosted-status-Text", "interfacePresent": interface is not None}
+    observation["hostedVersionRead"] = detail
+    require(interface is not None, "Exact source status Text interface absent")
+    count = interface.get_character_count()
+    detail["characterCount"] = count if type(count) is int and 0 <= count <= 128 else None
+    require(type(count) is int and 0 < count <= 128, "Source hosted version text exceeds bound")
+    text = interface.get_text(0, count)
+    require(type(text) is str and len(text) == count and len(text.encode()) <= 512
+            and interface.get_character_count() == count, "Source hosted version text changed or exceeded bound")
+    matches = node.get_state_set().contains(atspi.StateType.SHOWING) and text == expected
+    detail["knownState"] = text if text in (APPS["mcp"]["version"], APPS["setup"]["version"], "Opening app") else "other"
     observation["hostedVersionMatches"] = matches
-    if not matches and setup_read and any(node.get_state_set().contains(atspi.StateType.SHOWING)
-                                         and node.get_name() == "Opening app" for node in version_nodes):
+    if not matches and setup_read and text == "Opening app":
         raise SourceNotReady("Bound Setup initial workflow is still opening")
     require(matches, "Exact source hosted component version is not ready")
 
