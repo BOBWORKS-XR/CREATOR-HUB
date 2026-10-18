@@ -329,6 +329,86 @@ class Tests(unittest.TestCase):
         self.assertLess(run.index("continue_completed_guide(d, pages)"), run.index('report["afterMigration"] = preserved'))
         self.assertFalse(M.FALSE_GATES["standaloneRemovalAccepted"])
 
+    def test_protocol_uses_official_sdk_codec_initialize_list_and_eof_only(self):
+        sdk_path = str(HERE.parent / "modules/mcp/package.json")
+        script = M.PROTOCOL_JS + "\n" + r"""
+const { PassThrough } = require('node:stream');
+const sdk = createRequire(SDK_PATH), codec = sdk('@modelcontextprotocol/sdk/shared/stdio.js');
+const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
+(async () => {
+  const input = new PassThrough(), output = new PassThrough(), diagnostics = new PassThrough();
+  const transport = new EofTransport(input, output, diagnostics, codec), requests = new codec.ReadBuffer();
+  input.on('data', chunk => {
+    requests.append(chunk);
+    for (let message; (message = requests.readMessage()) !== null;) {
+      let value;
+      if (message.method === 'initialize') value = { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'creator-works-mcp', version: '2.7.7' } };
+      else if (message.method === 'tools/list') value = { tools: CORE.map(name => ({ name, inputSchema: { type: 'object' } })) };
+      else { assert.equal(message.method, 'notifications/initialized'); continue; }
+      const bytes = Buffer.from(codec.serializeMessage({ jsonrpc: '2.0', id: message.id, result: value }));
+      output.write(bytes.subarray(0, 7)); output.write(bytes.subarray(7));
+    }
+  });
+  input.on('finish', () => { output.end(); diagnostics.end(); });
+  const client = new Client({ name: 'portable-memory-only', version: '1' });
+  await client.connect(transport, { timeout: 1000 });
+  const tools = await client.listTools({}, { timeout: 1000 });
+  await client.close();
+  const receipt = result(client, tools, transport);
+  assert.equal(receipt.signalsRequested, false); assert.equal(receipt.eofSent, true);
+  await assert.rejects(transport.send({ jsonrpc: '2.0', id: 999, method: 'tools/call' }));
+  assert.throws(() => result({ getServerVersion: () => ({ name: 'foreign', version: '2.7.7' }) }, tools, transport));
+  assert.throws(() => result(client, { ...tools, nextCursor: 'more' }, transport));
+  assert.throws(() => result(client, { tools: tools.tools.slice(1) }, transport));
+  assert.throws(() => result(client, { tools: [...tools.tools.slice(1), { name: 'foreign' }] }, transport));
+  console.log('Official SDK memory handshake, fragmented codec, finite methods and EOF PASS');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+""".replace("SDK_PATH", json.dumps(sdk_path))
+        checked = subprocess.run(["node", "--check"], input=M.PROTOCOL_JS, text=True, capture_output=True, timeout=10)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        completed = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("EOF PASS", completed.stdout)
+        self.assertNotIn("StdioClientTransport", M.PROTOCOL_JS)
+        self.assertNotIn("child_process", M.PROTOCOL_JS)
+        self.assertNotIn(".kill(", M.PROTOCOL_JS)
+
+    def test_protocol_requires_exact_router_supervisor_sealed_node_tree(self):
+        peers = {
+            101: {"pid": 101, "parentPid": 90, "executable": "/route/router", "kernelImageSha256": "a" * 64, "uids": [1000] * 4},
+            102: {"pid": 102, "parentPid": 101, "executable": "/route/router", "kernelImageSha256": "a" * 64, "uids": [1000] * 4},
+            103: {"pid": 103, "parentPid": 102, "executable": "/memfd:creator-hub-node (deleted)", "kernelImageSha256": "b" * 64, "uids": [1000] * 4}}
+        actual = M.validate_protocol_processes(peers, 101, "/route/router", "a" * 64, "b" * 64, 1000, 90)
+        self.assertEqual(actual["node"]["pid"], 103)
+        for pid in peers:
+            for field, value in (("parentPid", 999), ("executable", "/usr/bin/creator-hub"), ("kernelImageSha256", "0" * 64), ("uids", [999] * 4)):
+                altered = copy.deepcopy(peers); altered[pid][field] = value
+                with self.subTest(pid=pid, field=field), self.assertRaises(RuntimeError):
+                    M.validate_protocol_processes(altered, 101, "/route/router", "a" * 64, "b" * 64, 1000, 90)
+        with self.assertRaises(RuntimeError):
+            M.validate_protocol_processes({**peers, 104: peers[103]}, 101, "/route/router", "a" * 64, "b" * 64, 1000, 90)
+
+    def test_protocol_is_after_normal_close_and_preservation_is_rechecked(self):
+        source = (HERE / "native-linux-integrated-migration.py").read_text()
+        run = source.split("def run(", 1)[1]
+        self.assertLess(run.index("session.close(); session = None"), run.index("protocol_smoke(root"))
+        self.assertLess(run.index("protocol_smoke(root"), run.index('report["afterProtocol"] = preserved'))
+        self.assertLess(run.index('report["afterProtocol"] = preserved'), run.index('"reopened"'))
+        smoke = source.split("def protocol_smoke(", 1)[1].split("def run(", 1)[0]
+        self.assertIn('report["first"]["normalCloseObserved"] is True', smoke)
+        self.assertIn("validate_protocol_processes", smoke)
+        self.assertIn("pass_fds=fds", smoke)
+        self.assertIn("select.select([fd]", smoke)
+        self.assertIn('os.getuid(), 0o500)', smoke)
+        self.assertNotIn(".kill(", smoke)
+        self.assertNotIn(".terminate(", smoke)
+        self.assertNotIn("pidfd_send_signal", smoke)
+        lock = (HERE.parent / "modules/mcp/package-lock.json").read_bytes().replace(b"\r\n", b"\n")
+        self.assertEqual(M.digest(lock), M.SDK_LOCK_SHA)
+        workflow = WORKFLOW.read_text()
+        self.assertIn(M.SDK_LOCK_SHA, workflow)
+        self.assertIn("npm ci --prefix modules/mcp --ignore-scripts --no-audit --no-fund", workflow)
+
     def test_workflow_branch_permissions_producer_and_legacy_pins(self):
         import yaml
         value = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)

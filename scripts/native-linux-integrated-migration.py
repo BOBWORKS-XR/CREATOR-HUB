@@ -31,7 +31,90 @@ OLD = {"release": 402569194, "asset": 608030423, "source": "9cd12e28d1dd05057b84
        "serverSize": 1221209, "serverSha256": "8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149"}
 HUB = "/usr/bin/creator-hub"
 FALSE_GATES = dict.fromkeys(("releaseReady", "signedUpdateAccepted", "restartAccepted", "flatpakAccepted",
-                            "liveAiAccepted", "standaloneRemovalAccepted", "nativeAuthenticationAccepted"), False)
+                            "liveAiAccepted", "unityInteropAccepted", "standaloneRemovalAccepted", "nativeAuthenticationAccepted"), False)
+SDK_LOCK_SHA = "ded7a99b78aca304253d5287cc1b884a845afde083eb32d1a2abecd14468ba60"
+PROTOCOL_JS = r"""
+const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
+const { createRequire } = require('node:module');
+const METHODS = ['initialize', 'notifications/initialized', 'tools/list'];
+const CORE = ['get_bridge_status', 'get_unity_command_status', 'list_unity_projects', 'select_unity_project'];
+class EofTransport {
+  constructor(input, output, diagnostics, codec) {
+    this.input = input; this.output = output; this.codec = codec; this.buffer = new codec.ReadBuffer();
+    this.methods = []; this.bytes = 0; this.stderrBytes = 0; this.closed = false;
+    this.ended = new Promise(resolve => { this.resolveEnd = resolve; });
+    diagnostics.on('data', chunk => {
+      this.stderrBytes += chunk.length;
+      if (this.stderrBytes > 65536) this.onerror?.(Error('Bounded server stderr exceeded'));
+    });
+    diagnostics.on('error', error => this.onerror?.(error));
+  }
+  async start() {
+    this.output.on('data', chunk => {
+      try {
+        this.bytes += chunk.length; assert.ok(this.bytes <= 524288, 'Bounded protocol output exceeded');
+        this.buffer.append(chunk);
+        for (let message; (message = this.buffer.readMessage()) !== null;) this.onmessage?.(message);
+      } catch (error) { this.onerror?.(error); }
+    });
+    this.output.on('error', error => this.onerror?.(error));
+    this.input.on('error', error => this.onerror?.(error));
+    this.output.once('end', () => { this.closed = true; this.resolveEnd(); this.onclose?.(); });
+  }
+  async send(message) {
+    assert.equal(message.jsonrpc, '2.0');
+    assert.equal(message.method, METHODS[this.methods.length], 'Only the three finite protocol messages are permitted');
+    assert.ok(this.methods.length < METHODS.length);
+    this.methods.push(message.method);
+    const raw = this.codec.serializeMessage(message); assert.ok(Buffer.byteLength(raw) <= 16384);
+    await new Promise((resolve, reject) => this.input.write(raw, error => error ? reject(error) : resolve()));
+  }
+  async close() {
+    if (!this.eof) { this.eof = true; this.input.end(); }
+    let timer;
+    try {
+      await Promise.race([this.ended, new Promise((_, reject) => { timer = setTimeout(() => reject(Error('EOF response deadline; no signal sent')), 10000); })]);
+    } finally { clearTimeout(timer); }
+  }
+}
+function result(client, tools, transport) {
+  assert.deepEqual(client.getServerVersion(), { name: 'creator-works-mcp', version: '2.7.7' });
+  assert.equal(tools.nextCursor, undefined); assert.ok(Array.isArray(tools.tools) && tools.tools.length === CORE.length);
+  const names = tools.tools.map(tool => tool.name).sort(); assert.deepEqual(names, CORE);
+  assert.deepEqual(transport.methods, METHODS);
+  assert.ok(transport.bytes <= 524288 && transport.stderrBytes <= 65536, 'Protocol/diagnostic byte bound exceeded');
+  assert.equal(transport.eof, true); assert.equal(transport.closed, true);
+  return { server: client.getServerVersion(), tools: names, methods: transport.methods,
+    stdoutBytes: transport.bytes, stderrBytes: transport.stderrBytes, eofSent: true, serverStdoutEnded: true,
+    signalsRequested: false, liveAiAccepted: false, unityInteropAccepted: false, standaloneRemovalAccepted: false };
+}
+async function main() {
+  const [pkg, ...numbers] = process.argv.slice(1);
+  const fds = numbers.map(v => { assert.match(v, /^[0-9]{1,3}$/); const n = Number(v); assert.ok(n > 2 && n < 256); return n; });
+  assert.equal(fds.length, 3); assert.equal(new Set(fds).size, 3);
+  const sdk = createRequire(pkg), clientPath = sdk.resolve('@modelcontextprotocol/sdk/client/index.js');
+  assert.equal(JSON.parse(fs.readFileSync(path.resolve(path.dirname(clientPath), '../../../package.json'))).version, '1.29.0');
+  const codec = sdk('@modelcontextprotocol/sdk/shared/stdio.js');
+  const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
+  const transport = new EofTransport(fs.createWriteStream(null, { fd: fds[0], autoClose: true }),
+    fs.createReadStream(null, { fd: fds[1], autoClose: true }), fs.createReadStream(null, { fd: fds[2], autoClose: true }), codec);
+  const client = new Client({ name: 'linux-migrated-router-eof-smoke', version: '1' });
+  const hardDeadline = setTimeout(() => { transport.input.end(); process.stderr.write('Bounded SDK helper deadline; EOF only\n'); process.exit(1); }, 25000);
+  let failure;
+  try {
+    await client.connect(transport, { timeout: 10000, maxTotalTimeout: 10000 });
+    assert.deepEqual(client.getServerVersion(), { name: 'creator-works-mcp', version: '2.7.7' });
+    const tools = await client.listTools({}, { timeout: 10000, maxTotalTimeout: 10000 });
+    await client.close();
+    process.stdout.write(JSON.stringify(result(client, tools, transport)) + '\n');
+  } catch (error) { failure = error; throw error; }
+  finally {
+    try { await transport.close(); }
+    catch (error) { if (!failure) throw error; }
+    finally { clearTimeout(hardDeadline); }
+  }
+}
+"""
 BACKUP_QUESTION = "Let Creator Hub use your existing MCP and Project Setup settings?\n\nHub will ask verified idle standalone app windows to close normally, then keep exact local backups. Busy or unverified apps are not force-closed. AI clients, Unity and Node connections stay open.\n\nSettings remain in their current locations; Unity projects are not moved or edited. Existing AI connections are reviewed separately before changing them. No standalone installation is removed by this step. Cancel leaves the current setup unchanged."
 ROUTING_QUESTION = "Enable Creator Hub's managed MCP connection?\n\nA signed retained router will keep AI-client command paths stable across compatible Hub updates. Existing client settings are not changed by this action. Moving their connections still requires your approval. Old apps and Unity projects stay in place."
 FINISH_QUESTION = "Finish moving to Creator Hub?\n\nYour settings backups and existing AI connections have been reviewed. No known standalone MCP or Project Setup installation was found. This step only finishes the guide; it does not remove an app, change client settings, move projects or stop a connection.\n\nCancel keeps the guide open."
@@ -484,6 +567,95 @@ def continue_completed_guide(driver, pages):
     return {"title": title, "summary": summary, "button": button, "continueActionCount": 1}
 
 
+def validate_protocol_processes(peers, router_pid, router_path, router_sha, node_sha, uid, parent_pid):
+    require(len(peers) == 3 and router_pid in peers, "Exact router/supervisor/Node tree required")
+    router = peers[router_pid]
+    supervisors = [p for p in peers.values() if p["parentPid"] == router_pid]
+    require(router["executable"] == str(router_path) and router["kernelImageSha256"] == router_sha
+            and router["parentPid"] == parent_pid and len(supervisors) == 1, "Router kernel identity/parent/child differs")
+    supervisor = supervisors[0]
+    nodes = [p for p in peers.values() if p["parentPid"] == supervisor["pid"]]
+    require(supervisor["executable"] == str(router_path) and supervisor["kernelImageSha256"] == router_sha
+            and len(nodes) == 1, "Supervisor kernel identity/child differs")
+    node = nodes[0]
+    require(node["executable"] == "/memfd:creator-hub-node (deleted)" and node["kernelImageSha256"] == node_sha
+            and all(p["uids"] == [uid] * 4 for p in peers.values()), "Sealed Node kernel image/UID differs")
+    return {"router": router, "supervisor": supervisor, "node": node}
+
+
+def protocol_smoke(root, binding, pages, helper, native, report):
+    require(report["first"]["normalCloseObserved"] is True, "Root must close normally before protocol smoke")
+    router_path, server, _ = route_paths(root / "home", binding["runtime"])
+    node_path = server.parent / "runtime/node"
+    node_sha = binding["runtime"]["module"]["files"]["mcp/server/runtime/node"]
+    pages.pinned(router_path, {"size": pages.record(router_path)["size"], "sha256": binding["routerSha256"]}, os.getuid(), 0o500)
+    require(pages.record(node_path)["sha256"] == node_sha, "SDK helper runtime differs from signed Node")
+    require(digest((HERE.parent / "modules/mcp/package-lock.json").read_bytes()) == SDK_LOCK_SHA, "Pinned SDK lock differs")
+    home = root / "home"
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "config"), "XDG_DATA_HOME": str(home / "data"),
+           "XDG_CACHE_HOME": str(home / "cache"), "XDG_RUNTIME_DIR": str(root / "runtime"), "TMPDIR": str(root / "tmp"),
+           "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "CREATOR_WORKS_CONFIG_OWNER": "creator-hub-v1",
+           "UNITY_PROJECT_PATH": str(home / "retained-project"), "CREATOR_WORKS_TOOL_GROUPS": "none"}
+    child = subprocess.Popen([str(router_path)], cwd=home, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    receipt = report["protocol"] = {"protocolSmoke": False, "profile": "four-always-available-tools-only", "routerPid": child.pid,
+                                    "signalsRequested": False, "liveAiAccepted": False, "unityInteropAccepted": False, "standaloneRemovalAccepted": False}
+    pidfds, sdk_child, capture = {}, None, None
+    try:
+        def ready():
+            require(child.poll() is None, "Router exited before independent process binding")
+            peers = pages.subtree(child.pid, helper, native)
+            require(len(peers) <= 3, "Unexpected router descendant")
+            if len(peers) != 3:
+                return False
+            full = {pid: native.native_process(pid, helper) for pid in peers}
+            receipt["processes"] = validate_protocol_processes(full, child.pid, router_path, binding["routerSha256"], node_sha, os.getuid(), os.getpid())
+            return True
+        pages.wait(ready)
+        for name, identity in receipt["processes"].items():
+            pidfds[name] = os.pidfd_open(identity["pid"])
+            require(native.native_process(identity["pid"], helper) == identity, "Router tree changed before SDK handoff")
+        fds = [child.stdin.fileno(), child.stdout.fileno(), child.stderr.fileno()]
+        sdk_child = subprocess.Popen([str(node_path), "-e", PROTOCOL_JS + "\nmain().catch(error => { console.error(String(error.message).slice(0, 1000)); process.exitCode = 1; });",
+            str(HERE.parent / "modules/mcp/package.json"), *map(str, fds)], cwd=home, env=env, pass_fds=fds,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        receipt["sdkProcess"] = native.native_process(sdk_child.pid, helper)
+        require(receipt["sdkProcess"]["kernelImageSha256"] == node_sha and receipt["sdkProcess"]["parentPid"] == os.getpid()
+                and receipt["sdkProcess"]["uids"] == [os.getuid()] * 4, "Owned SDK helper Node differs")
+        capture = native.Capture(sdk_child, root, "router-sdk")
+        # Only the helper retains these pipe ends; its EOF-only close cannot signal a process.
+        for stream in (child.stdin, child.stdout, child.stderr):
+            stream.close()
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            capture.pump(0.02)
+            if sdk_child.poll() is not None and all(v["eof"] for v in capture.metadata().values()):
+                break
+        receipt["sdkExitCode"], receipt["capture"] = sdk_child.poll(), capture.metadata()
+        require(receipt["sdkExitCode"] is not None, "SDK helper deadline; no signal sent")
+        sdk_child.wait(timeout=0)
+        require(receipt["sdkExitCode"] == 0 and all(v["eof"] and not v["truncated"] for v in capture.metadata().values()), "SDK protocol/EOF smoke failed")
+        raw = bytes(capture.items["stdout"]["kept"])
+        require(len(raw) <= 16384, "SDK receipt exceeds bound")
+        receipt["sdk"] = pages.parse(raw)
+        require(receipt["sdk"]["eofSent"] is True and receipt["sdk"]["serverStdoutEnded"] is True
+                and receipt["sdk"]["signalsRequested"] is False, "EOF-only SDK receipt missing")
+        for name, fd in pidfds.items():
+            pages.wait(lambda: bool(select.select([fd], [], [], 0.02)[0]), 10)
+            require(not Path(f"/proc/{receipt['processes'][name]['pid']}").exists(), "Owned router descendant was not reaped")
+        receipt["routerExitCode"] = child.wait(timeout=0)
+        require(receipt["routerExitCode"] == 0, "Router did not return a successful Node exit")
+        receipt.update(protocolSmoke=True, ownedRouterNodeExitObserved=True)
+        report["protocolSmoke"] = True
+    finally:
+        for stream in (child.stdin, child.stdout, child.stderr):
+            if not stream.closed:
+                stream.close()
+        for fd in pidfds.values():
+            os.close(fd)
+        if capture is not None:
+            capture.pump(); capture.close()
+
+
 def run(binding, root, pages, helper, native, report):
     pages.pinned(HUB, binding["hub"], 0, 0o755)
     require(native.run_tool(root, "dpkg-verify", ["/usr/bin/dpkg", "--verify", "creator-hub"])[1] == b"", "Installed DEB differs")
@@ -505,6 +677,9 @@ def run(binding, root, pages, helper, native, report):
         report["afterMigration"] = preserved(root, binding, binding["fixtures"], pages)
         session.close(); session = None
         report["afterClose"] = preserved(root, binding, binding["fixtures"], pages)
+        protocol_smoke(root, binding, pages, helper, native, report)
+        report["afterProtocol"] = preserved(root, binding, binding["fixtures"], pages)
+        require(report["afterProtocol"] == report["afterClose"], "Read-only protocol smoke changed retained settings")
         session = Session(root, binding, pages, helper, native, report, "reopened")
         require(session.owned["pid"] != report["first"]["root"]["pid"], "Root did not reopen as a new process")
         d = session.driver
@@ -563,7 +738,7 @@ def main():
         return
     require(all(os.environ.get(k) == str(root / p) for k, p in {"HOME": "home", "XDG_CONFIG_HOME": "home/config", "XDG_DATA_HOME": "home/data", "XDG_RUNTIME_DIR": "runtime"}.items()), "Isolated HOME required")
     binding["fixtures"] = pages.parse((root / "fixtures.json").read_bytes())
-    report = {**FALSE_GATES, "migrationAccepted": False, "normalReopenPersistenceAccepted": False, "source": SOURCE, "harness": os.environ["GITHUB_SHA"], "approvals": []}
+    report = {**FALSE_GATES, "protocolSmoke": False, "migrationAccepted": False, "normalReopenPersistenceAccepted": False, "source": SOURCE, "harness": os.environ["GITHUB_SHA"], "approvals": []}
     try:
         run(binding, root, pages, helper, native, report)
     except Exception as error:

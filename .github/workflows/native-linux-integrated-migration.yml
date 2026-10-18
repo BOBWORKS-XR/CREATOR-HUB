@@ -34,6 +34,8 @@ jobs:
           persist-credentials: false
       - name: Portable refusal and finite native contract tests
         run: |
+          test "$(sha256sum modules/mcp/package-lock.json | cut -d' ' -f1)" = ded7a99b78aca304253d5287cc1b884a845afde083eb32d1a2abecd14468ba60
+          npm ci --prefix modules/mcp --ignore-scripts --no-audit --no-fund
           python3 -m pip install --disable-pip-version-check PyYAML==6.0.2
           python3 -B scripts/native-linux-integrated-migration.test.py
       - name: Read only the exact current producer and previous public release
