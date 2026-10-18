@@ -28,13 +28,19 @@ test('a refused local invocation cannot run a compiler or inspect/change source'
 });
 
 test('the native baseline is fixed and changed metadata refuses before payload access', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'integrated-update-test-'));
+  const parent = fs.realpathSync(os.tmpdir());
+  const dir = fs.mkdtempSync(path.join(parent, 'integrated-update-test-'));
   try {
     fs.writeFileSync(path.join(dir, 'builtin-manifest.json'), '{}');
     assert.throws(() => fixture.baseline(dir));
     assert.equal(fixture.FROM, '0.1.14'); assert.equal(fixture.TO, '0.1.15');
     assert.equal(fixture.BASELINE.deb, 'a4d2db459966f475a982cbe72591f32222e9c7050a1a7f4c870e1c6634c0f8b3');
-  } finally { fs.rmSync(dir, { recursive: true }); }
+  } finally {
+    assert.equal(fs.realpathSync(dir), dir);
+    assert.equal(path.dirname(dir), parent);
+    assert.ok(path.basename(dir).startsWith('integrated-update-test-'));
+    fs.rmSync(dir, { recursive: true });
+  }
 });
 
 test('the test target retains native direct features and independent public-signature verification', () => {
