@@ -131,6 +131,84 @@ class Contracts(unittest.TestCase):
         self.preflight_metadata(mode=0o777, save_error=OSError('cleanup failed'))
         self.preflight_metadata(save_error=OSError('save failed'))
 
+    def opt_fixture(self, *, mode=0o777, changes=None, before_change=None, after_change=None, redirect=False, save_error=None):
+        root = dict(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755, st_dev=10, st_ino=1, st_mtime_ns=11, st_ctime_ns=12)
+        opt = {**root, 'st_mode': stat.S_IFDIR | mode, 'st_ino': 2}
+        if changes:
+            opt.update(changes)
+        count = 0
+        def metadata(item):
+            nonlocal count
+            if item == Path('/'):
+                count += 1
+                if count == 2 and before_change:
+                    before_change(root, opt)
+                return SimpleNamespace(**root)
+            self.assertEqual(item, Path('/opt'))
+            return SimpleNamespace(**opt)
+        def chmod(args):
+            self.assertEqual(args, ['/usr/bin/sudo', '-n', '/usr/bin/chmod', '0755', '/opt'])
+            opt['st_mode'] = stat.S_IFDIR | 0o755; opt['st_ctime_ns'] += 1
+            if after_change:
+                after_change(root, opt)
+        with patch.object(M.sys, 'platform', 'linux'), patch.object(M.platform, 'machine', return_value='x86_64'), \
+                patch.object(Path, 'lstat', autospec=True, side_effect=metadata), \
+                patch.object(Path, 'resolve', autospec=True, side_effect=lambda item, strict: Path('/foreign') if redirect and item == Path('/opt') else item), \
+                patch.object(M, 'command', side_effect=chmod) as command, patch.object(M.os, 'chmod') as local_chmod, \
+                patch.object(Path, 'read_bytes') as reading, patch.object(M, 'evidence', side_effect=save_error) as save, patch('builtins.print'):
+            try:
+                M.tighten_opt({**ENV, 'RUNNER_TEMP': '/tmp'})
+                error = None
+            except Exception as caught:
+                error = caught
+            local_chmod.assert_not_called(); reading.assert_not_called()
+            return error, save.call_args.args[1], command
+
+    def test_only_observed_opt_0777_is_tightened_once_with_stable_root_and_inode(self):
+        error, report, command = self.opt_fixture()
+        self.assertIsNone(error); command.assert_called_once_with(['/usr/bin/sudo', '-n', '/usr/bin/chmod', '0755', '/opt'])
+        self.assertTrue(report['guardPassed']); self.assertTrue(report['changed']); self.assertEqual(report['chmodAttemptCount'], 1)
+        self.assertEqual(report['before']['root'], report['after']['root'])
+        self.assertEqual(report['before']['opt']['mode'], '0777'); self.assertEqual(report['after']['opt']['mode'], '0755')
+        for key in ('uid', 'gid', 'dev', 'inode', 'mtimeNs'):
+            self.assertEqual(report['before']['opt'][key], report['after']['opt'][key])
+        error, report, command = self.opt_fixture(mode=0o755)
+        self.assertIsNone(error); command.assert_not_called()
+        self.assertEqual(report['before'], report['after']); self.assertFalse(report['changed'])
+        self.assertLess(len(json.dumps(report).encode()), 8192)
+
+    def test_opt_nonroot_link_unknown_mode_and_preaction_root_changes_never_chmod(self):
+        cases = [{'changes': {'st_uid': 1001}}, {'changes': {'st_gid': 1001}}, {'redirect': True},
+                 {'changes': {'st_mode': stat.S_IFLNK | 0o777}}, {'mode': 0o775}, {'mode': 0o1777}, {'mode': 0o700}]
+        for key in ('st_uid', 'st_gid', 'st_dev', 'st_ino', 'st_mode', 'st_mtime_ns', 'st_ctime_ns'):
+            cases.append({'before_change': lambda root, opt, key=key: root.update({key: root[key] + 1})})
+            cases.append({'before_change': lambda root, opt, key=key: opt.update({key: opt[key] + 1})})
+        for args in cases:
+            with self.subTest(args=args):
+                error, report, command = self.opt_fixture(**args)
+                self.assertIsInstance(error, RuntimeError); command.assert_not_called()
+                self.assertFalse(report['guardPassed']); self.assertEqual(report['chmodAttemptCount'], 0)
+
+    def test_postchmod_root_or_opt_identity_changes_refuse_and_original_error_survives_save_failure(self):
+        for target in ('root', 'opt'):
+            keys = ('st_uid', 'st_gid', 'st_dev', 'st_ino', 'st_mode', 'st_mtime_ns') + (('st_ctime_ns',) if target == 'root' else ())
+            for key in keys:
+                with self.subTest(target=target, key=key):
+                    def change(root, opt):
+                        value = root if target == 'root' else opt
+                        value[key] += 1
+                    error, report, command = self.opt_fixture(after_change=change)
+                    self.assertIsInstance(error, RuntimeError); self.assertFalse(report['guardPassed'])
+                    self.assertEqual(command.call_count, 1)
+        error, report, command = self.opt_fixture(mode=0o775, save_error=OSError('save failed'))
+        self.assertIsInstance(error, RuntimeError); command.assert_not_called()
+
+    def test_opt_tightening_rejects_foreign_context_before_metadata_or_sudo(self):
+        with patch.object(M.sys, 'platform', 'win32'), patch.object(Path, 'lstat') as lstat, \
+                patch.object(M, 'command') as command, patch.object(M, 'evidence'), patch('builtins.print'):
+            with self.assertRaises(RuntimeError): M.tighten_opt({**ENV, 'RUNNER_TEMP': '/tmp'})
+            lstat.assert_not_called(); command.assert_not_called()
+
     def test_pins_are_current_integrated_producers_not_old_fixture(self):
         self.assertEqual(M.SOURCE, '5065fb1112b9e96978e40e64503fa979f559baae')
         self.assertEqual(M.ELF14, (27369792, '3ac7fdd5cedf85df41844c32c7dcdeb180ca14fc66a7f6e274c1ace5fc5e39b8'))
@@ -292,11 +370,12 @@ class Contracts(unittest.TestCase):
         self.assertIsNone(trigger['workflow_dispatch'])  # no mode/version/path override inputs
         for job in ('preflight', 'native'):
             steps = workflow['jobs'][job]['steps']
-            diagnostic = next(i for i, step in enumerate(steps) if step.get('run', '').endswith(' path-preflight'))
+            diagnostic = next(i for i, step in enumerate(steps) if step.get('run', '').endswith(' path-tighten'))
             self.assertEqual(diagnostic, 1)  # checkout then metadata; no input download/install first
             upload = steps[diagnostic + 1]
             self.assertEqual(upload['if'], 'always()')
-            self.assertEqual(upload['with']['path'], '${{ runner.temp }}/integrated-update-path-preflight.json')
+            self.assertEqual(upload['with']['path'].splitlines(), ['${{ runner.temp }}/integrated-update-path-preflight.json',
+                                                                 '${{ runner.temp }}/integrated-update-opt-tightening.json'])
         bash = shutil.which('bash')
         if sys.platform == 'win32':
             git_bash = Path('C:/Program Files/Git/bin/bash.exe')

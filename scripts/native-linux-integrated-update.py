@@ -199,6 +199,53 @@ def path_preflight(env):
             print('Path diagnostic save failed: ' + type(error).__name__, file=sys.stderr, flush=True)
 
 
+def tighten_opt(env):
+    """Only the observed disposable-runner /opt 0777 -> 0755 setup correction."""
+    def inspect(item, modes):
+        info = item.lstat()
+        row = {'path': str(item), 'dev': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid, 'gid': info.st_gid,
+               'mode': format(stat.S_IMODE(info.st_mode), '04o'), 'mtimeNs': info.st_mtime_ns, 'ctimeNs': info.st_ctime_ns}
+        resolved = item.resolve(strict=True)
+        require(resolved == item and stat.S_ISDIR(info.st_mode)
+                and info.st_uid == info.st_gid == 0 and stat.S_IMODE(info.st_mode) in modes,
+                'Exact root-owned nonlinked CI directory/mode required: ' + json.dumps({**row,
+                    'resolvedPath': str(resolved), 'redirect': resolved != item, 'directory': stat.S_ISDIR(info.st_mode)}, separators=(',', ':')))
+        return row
+
+    root, opt = Path('/'), Path('/opt')
+    report = {'ciOnly': True, 'changed': False, 'chmodAttemptCount': 0, 'guardPassed': False}
+    try:
+        admission(env, sys.platform, platform.machine() if sys.platform == 'linux' else '', native=False)
+        before_root, before_opt = inspect(root, (0o755,)), inspect(opt, (0o755, 0o777))
+        report['before'] = {'root': before_root, 'opt': before_opt}
+        require(inspect(root, (0o755,)) == before_root and inspect(opt, (0o755, 0o777)) == before_opt,
+                'CI directory metadata changed before tightening')
+        if before_opt['mode'] == '0777':
+            report['chmodAttemptCount'] = 1
+            command(['/usr/bin/sudo', '-n', '/usr/bin/chmod', '0755', '/opt'])
+            report['changed'] = True
+        after_root, after_opt = inspect(root, (0o755,)), inspect(opt, (0o755,))
+        report['after'] = {'root': after_root, 'opt': after_opt}
+        require(after_root == before_root and all(after_opt[k] == v for k, v in before_opt.items() if k not in ('mode', 'ctimeNs')),
+                'CI root/opt identity or metadata changed during tightening')
+        protected(opt)
+        report['guardPassed'] = True
+    except Exception as error:
+        report['error'] = {'type': type(error).__name__, 'message': str(error)[:4096]}
+        raise
+    finally:
+        original = sys.exc_info()[1]
+        try:
+            raw = json.dumps(report, separators=(',', ':'), allow_nan=False)
+            require(len(raw.encode()) <= 8192, 'CI tightening diagnostic exceeds fixed bound')
+            print(raw, flush=True)
+            evidence(Path(env['RUNNER_TEMP']) / 'integrated-update-opt-tightening.json', report, 8192)
+        except Exception as error:
+            if original is None:
+                raise
+            print('CI tightening diagnostic save failed: ' + type(error).__name__, file=sys.stderr, flush=True)
+
+
 def command(args, **kwargs):
     return subprocess.run(args, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           env={'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C'}, timeout=60, **kwargs).stdout
@@ -698,10 +745,13 @@ def broker(env):
 
 
 def main():
-    require(len(sys.argv) == 2 and sys.argv[1] in ('path-preflight', 'stage', 'prepare', 'broker', 'session'), 'Finite path-preflight/stage/prepare/broker/session only')
+    require(len(sys.argv) == 2 and sys.argv[1] in ('path-tighten', 'path-preflight', 'stage', 'prepare', 'broker', 'session'), 'Finite path-tighten/path-preflight/stage/prepare/broker/session only')
     action = sys.argv[1]
-    admission(os.environ, sys.platform, platform.machine() if sys.platform == 'linux' else '', native=action != 'path-preflight')
-    if action == 'path-preflight':
+    admission(os.environ, sys.platform, platform.machine() if sys.platform == 'linux' else '', native=action not in ('path-tighten', 'path-preflight'))
+    if action == 'path-tighten':
+        tighten_opt(os.environ)
+        path_preflight(os.environ)
+    elif action == 'path-preflight':
         path_preflight(os.environ)
     elif action == 'stage':
         require(os.getuid() == os.geteuid() != 0, 'Runner staging only')
