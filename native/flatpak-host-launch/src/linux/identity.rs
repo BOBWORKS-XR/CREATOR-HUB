@@ -326,7 +326,7 @@ pub(crate) fn deployment(
         }
     }
     for ((section, key), value) in &fields {
-        if section == "Instance" && REPLACEMENT_KEYS.contains(&key.as_str()) {
+        if section == "Instance" && replacement_metadata(key, value) {
             return replacement_refusal(root, &fields, key, uid);
         }
         if section == "Instance" && ["build", "devel"].contains(&key.as_str()) && value != "false" {
@@ -367,6 +367,18 @@ pub(crate) fn deployment(
         }
     }
     transport::alive(&message.pidfd)
+}
+
+fn replacement_metadata(key: &str, value: &str) -> bool {
+    // Native39106656388: an otherwise exact installed deployment emits this
+    // empty list twice. Flatpak1.18.4 flatpak-context.c:3579-3588 unconditionally
+    // serializes enumerable and hidden USB lists, even when both are empty.
+    // This is not permission to accept nonempty USB queries or other CLI args.
+    match key {
+        "extra-args" => value != "--usb-list=;--usb-list=;",
+        "original-app-path" | "original-runtime-path" => true,
+        _ => false,
+    }
 }
 
 fn replacement_refusal(
@@ -520,6 +532,33 @@ mod tests {
     };
 
     struct DiagnosticRoot(PathBuf);
+
+    #[test]
+    fn metadata_refusal_empty_usb_serialization_is_not_a_deployment_override() {
+        assert!(!replacement_metadata(
+            "extra-args",
+            "--usb-list=;--usb-list=;"
+        ));
+        for value in [
+            "",
+            "--usb-list=;",
+            "--usb-list=;--usb-list=; ",
+            "--usb-list=all;--usb-list=;",
+            "--usb-list=;--usb-list=vnd:1234;",
+            "--usb-list=;--usb-list=;--filesystem=home;",
+            "--usb-list=;--usb-list=;--share=network;",
+            "--usb-list=\\;--usb-list=\\;",
+            "--command=/different",
+        ] {
+            assert!(replacement_metadata("extra-args", value), "{value}");
+        }
+        for key in ["original-app-path", "original-runtime-path"] {
+            for value in ["", "/expected/files", "--usb-list=;--usb-list=;"] {
+                assert!(replacement_metadata(key, value));
+            }
+        }
+        assert!(!replacement_metadata("unrelated", "value"));
+    }
 
     impl DiagnosticRoot {
         fn fresh() -> Self {
