@@ -1,0 +1,252 @@
+name: Native Flatpak disclosure and DEB activation (not release acceptance)
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/linux-flatpak-activation-next]
+    paths:
+      - .github/workflows/native-linux-flatpak-activation.yml
+      - scripts/native-linux-flatpak-activation.py
+      - scripts/native-linux-flatpak-activation.test.py
+permissions:
+  contents: read
+  actions: read
+jobs:
+  activation:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-flatpak-activation-next' &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'push')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    env:
+      CREATOR_FLATPAK_ACTIVATION_TEST: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Portable contracts before any candidate download or installation
+        run: |
+          python3 -B scripts/native-linux-flatpak-activation.test.py
+          node --test scripts/flatpak-native-activation.test.cjs
+      - name: Bind the exact existing direct-pages producer and immutable ZIP
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            const repo=context.repo,source='5065fb1112b9e96978e40e64503fa979f559baae',runId=39134487363,id=12139109123;
+            assert.equal(`${repo.owner}/${repo.repo}`,'BOBWORKS-XR/CREATOR-HUB');
+            assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
+            assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted');assert.equal(process.env.RUNNER_OS,'Linux');
+            const {data:run}=await github.rest.actions.getWorkflowRun({...repo,run_id:runId});
+            assert.equal(run.head_sha,source);assert.equal(run.run_attempt,1);assert.equal(run.conclusion,'success');
+            assert.equal(run.status,'completed');assert.equal(run.event,'workflow_dispatch');
+            assert.equal(run.path,'.github/workflows/unix-managed-assembly.yml');
+            assert.equal(run.head_branch,'validation/linux-integrated-candidate-014');assert.equal(run.repository.id,1364807512);
+            const {data:job}=await github.rest.actions.getJobForWorkflowRun({...repo,job_id:117696169938});
+            assert.equal(job.run_id,runId);assert.equal(job.conclusion,'success');assert.ok(job.name.startsWith('assembly (linux,'));
+            const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:id});
+            assert.equal(artifact.expired,false);assert.equal(artifact.name,'signed-unix-hub-linux-39134487363-1');
+            assert.equal(artifact.workflow_run.id,runId);assert.equal(artifact.workflow_run.head_sha,source);
+            assert.equal(artifact.workflow_run.repository_id,1364807512);assert.equal(artifact.workflow_run.head_repository_id,1364807512);
+            assert.equal(artifact.size_in_bytes,182723403);
+            const digest='71a2a4e42a1b1e2fe5e1e64f363f7d3c06444b03b5d2177b2e4565ad8a710c4c';
+            assert.equal(artifact.digest,`sha256:${digest}`);
+            const {data}=await github.rest.actions.downloadArtifact({...repo,artifact_id:id,archive_format:'zip'});
+            assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer);
+            const bytes=Buffer.from(data);assert.equal(bytes.length,182723403);
+            assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),digest);
+            const temp=fs.realpathSync(process.env.RUNNER_TEMP);
+            fs.writeFileSync(path.join(temp,'flatpak-activation-input.zip'),bytes,{flag:'wx',mode:0o600});
+            fs.writeFileSync(path.join(temp,'flatpak-activation-producer.json'),JSON.stringify({sourceCommit:source,runId,artifactId:id,
+              artifactSha256:digest,packageSha256:'8f9ff4b4694d00150bf86f7a5befc6a1cfc80610d55212b717d602ceb84fe86c',
+              installedHubSha256:'3ac7fdd5cedf85df41844c32c7dcdeb180ca14fc66a7f6e274c1ace5fc5e39b8',releaseReady:false},null,2),{flag:'wx',mode:0o600});
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Provision disposable native validation dependencies only
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder build-essential pkg-config libgtk-3-dev \
+            libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libxdo3 libxres1 librsvg2-2 python3-gi \
+            gir1.2-gtk-3.0 gir1.2-gdkpixbuf-2.0 gir1.2-atspi-2.0 at-spi2-core libatk-adaptor \
+            webkit2gtk-driver dbus-x11 xvfb xauth openbox fonts-dejavu-core policykit-1
+      - name: Reuse reviewed native Flatpak 1.18.4 toolchain on this disposable runner
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends meson ninja-build bison gettext gperf git curl ca-certificates \
+            libcap-dev libarchive-dev libglib2.0-dev libcurl4-openssl-dev libxml2-dev libzstd-dev \
+            libsystemd-dev libfuse3-dev fuse3 libxau-dev libostree-dev libjson-glib-dev libappstream-dev \
+            libgdk-pixbuf-2.0-dev libseccomp-dev libgpgme-dev libdbus-1-dev libselinux1-dev python3-pyparsing ostree
+          src="$RUNNER_TEMP/flatpak-1.18.4-source"
+          mkdir -m 700 "$src"
+          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
+            'https://github.com/flatpak/flatpak/releases/download/1.18.4/flatpak-1.18.4.tar.xz' --output "$src/upstream.tar.xz"
+          test "$(stat -c %s "$src/upstream.tar.xz")" = 1363232
+          printf '%s  %s\n' b899a7a00c48d2c626cb8ec33fe556720b376c25805d7222430c0fdca4c6ac8d "$src/upstream.tar.xz" | sha256sum --check --strict
+          tar -xJf "$src/upstream.tar.xz" --directory "$src" --no-same-owner
+          meson setup "$src/build" "$src/flatpak-1.18.4" --prefix=/usr --sysconfdir=/etc \
+            --localstatedir=/var --libdir=lib/x86_64-linux-gnu --buildtype=release \
+            -Dtests=false -Dinstalled_tests=false -Ddocbook_docs=disabled -Dman=disabled -Dgtkdoc=disabled \
+            -Dgir=disabled -Dmalcontent=disabled -Ddconf=disabled -Dselinux_module=disabled \
+            -Dsystem_helper=disabled -Dwayland_security_context=disabled
+          test "$(git -C "$src/flatpak-1.18.4/subprojects/bubblewrap" rev-parse HEAD)" = 2a76602a8c71f36c1527cf9fc3417d9149822e0c
+          test "$(git -C "$src/flatpak-1.18.4/subprojects/dbus-proxy" rev-parse HEAD)" = 72b40c8f6d9d585cfbdb249690724f740d207087
+          meson compile -C "$src/build" -j 2
+          sudo meson install -C "$src/build" --no-rebuild
+          sudo ldconfig
+          test "$(/usr/bin/flatpak --version)" = 'Flatpak 1.18.4'
+      - name: Stage original exact DEB, actual server and fresh synthetic profile
+        run: python3 -B scripts/native-linux-flatpak-activation.py stage
+      - name: Inspect current package controls before installation
+        run: |
+          python3 -B scripts/linux-retirement-package-verify.py "$RUNNER_TEMP/flatpak-activation/native.deb" \
+            8b9e937f3b0c2e9336732b0c92f6a6bf33b8f25f693f52c9a27a34f1585d232c \
+            5eb715286ff8d8cda8e612f8dc9d28d396068b2cdd470a5f3d92d7355e3e37c9 0.1.14 --profile integrated-candidate
+      - name: Protect only the known disposable session-service ancestry
+        run: |
+          python3 -B - <<'PY'
+          import os,stat,subprocess
+          from pathlib import Path
+          assert os.environ['GITHUB_REF']=='refs/heads/validation/linux-flatpak-activation-next'
+          assert os.environ['RUNNER_ENVIRONMENT']=='github-hosted' and os.environ['GITHUB_REPOSITORY_ID']=='1364807512'
+          for text in ('/','/usr','/usr/share','/usr/share/dbus-1','/usr/share/dbus-1/services'):
+              path=Path(text); before=path.lstat()
+              print('service-ancestor-before',text,before.st_uid,before.st_gid,oct(stat.S_IMODE(before.st_mode)),flush=True)
+              assert path.resolve()==path and stat.S_ISDIR(before.st_mode) and before.st_uid==before.st_gid==0, text
+              assert stat.S_IMODE(before.st_mode) in (0o755,0o777), text
+              if stat.S_IMODE(before.st_mode)==0o777:
+                  assert text in ('/usr/share','/usr/share/dbus-1','/usr/share/dbus-1/services'), text
+                  subprocess.run(['/usr/bin/sudo','-n','/usr/bin/chmod','0755',text],check=True)
+              after=path.lstat()
+              assert (after.st_dev,after.st_ino,after.st_uid,after.st_gid)==(before.st_dev,before.st_ino,0,0), text
+              assert stat.S_IMODE(after.st_mode)==0o755, text
+              print('service-ancestor-after',text,after.st_uid,after.st_gid,oct(stat.S_IMODE(after.st_mode)),flush=True)
+          PY
+      - name: Install existing candidate on this disposable DEB host only
+        run: sudo dpkg --install "$RUNNER_TEMP/flatpak-activation/native.deb"
+      - name: Build only the actual GTK launcher and pinned external WebDriver
+        run: |
+          cargo build --locked --release --manifest-path native/flatpak-native-activation/Cargo.toml \
+            --target-dir "$RUNNER_TEMP/flatpak-activation/launcher-build" --bin creator-hub-flatpak-activate
+          cargo install tauri-driver --version 2.1.0 --locked --root "$RUNNER_TEMP/flatpak-activation/driver"
+          node - <<'NODE'
+          const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),cp=require('node:child_process'),assert=require('node:assert/strict');
+          const p=require('./scripts/flatpak-native-activation.cjs'),root=path.join(process.env.RUNNER_TEMP,'flatpak-activation');
+          const compiled=path.join(root,'launcher-build/release/creator-hub-flatpak-activate'),before=fs.lstatSync(compiled);
+          const compiledStat={size:before.size,nlink:before.nlink,mode:before.mode,uid:before.uid,gid:before.gid,
+            dev:before.dev,ino:before.ino,regular:before.isFile(),releaseReady:false};
+          fs.writeFileSync(path.join(root,'launcher-compiled-stat.json'),JSON.stringify(compiledStat),{flag:'wx',mode:0o600});
+          console.log('compiled-launcher-stat',JSON.stringify(compiledStat));
+          const stamp=s=>['dev','ino','size','mode','nlink','mtimeMs','ctimeMs'].map(k=>s[k]);
+          assert.ok(before.isFile()&&before.size>=64&&before.size<=64*1024*1024);
+          const fd=fs.openSync(compiled,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
+          let bytes;
+          try {
+            assert.deepEqual(stamp(fs.fstatSync(fd)),stamp(before));
+            const buffer=Buffer.alloc(before.size+1);let length=0,count;
+            while(length<buffer.length&&(count=fs.readSync(fd,buffer,length,buffer.length-length,null))>0)length+=count;
+            assert.equal(length,before.size);bytes=buffer.subarray(0,length);
+            assert.deepEqual(stamp(fs.fstatSync(fd)),stamp(before));
+            assert.deepEqual(stamp(fs.lstatSync(compiled)),stamp(before));
+          } finally { fs.closeSync(fd); }
+          // Cargo may hardlink outputs. The strict packager still receives a new single-link snapshot.
+          const launcher=path.join(root,'launcher-input');
+          fs.writeFileSync(launcher,bytes,{flag:'wx',mode:0o755});fs.chmodSync(launcher,0o755);
+          const copied=fs.lstatSync(launcher);assert.ok(copied.isFile()&&copied.nlink===1&&copied.size===bytes.length);
+          assert.equal(crypto.createHash('sha256').update(fs.readFileSync(launcher)).digest('hex'),crypto.createHash('sha256').update(bytes).digest('hex'));
+          fs.writeFileSync(path.join(root,'launcher-input.json'),JSON.stringify({compiled:{size:before.size,nlink:before.nlink},
+            snapshot:{size:copied.size,nlink:copied.nlink},releaseReady:false}),{flag:'wx',mode:0o600});
+          p.prepare(launcher,{schemaVersion:1,version:p.version(),sourceCommit:process.env.GITHUB_SHA,
+            sourceTree:cp.execFileSync('git',['rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim(),
+            launcherSize:bytes.length,launcherSha256:crypto.createHash('sha256').update(bytes).digest('hex')},path.join(root,'stage'));
+          NODE
+      - name: Query actual GNOME 50 refs before installing or building with them
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/flatpak-activation"
+          env -i PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            HOME="$root/home" XDG_CONFIG_HOME="$root/home/config" XDG_DATA_HOME="$root/home/data" \
+            XDG_CACHE_HOME="$root/home/cache" XDG_RUNTIME_DIR="$root/runtime" FLATPAK_USER_DIR="$root/installation" \
+            /bin/bash -s -- "$root" <<'SH'
+          set -euo pipefail
+          root="$1"
+          flatpak --version > "$root/flatpak-version.txt"
+          flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          : > "$root/runtime-query.txt"
+          for ref in runtime/org.gnome.Platform/x86_64/50 runtime/org.gnome.Sdk/x86_64/50; do
+            printf '%s\n' "$ref" >> "$root/runtime-query.txt"
+            flatpak --user remote-info --show-ref flathub "$ref" >> "$root/runtime-query.txt"
+            flatpak --user remote-info --show-commit flathub "$ref" >> "$root/runtime-query.txt"
+          done
+          SH
+      - name: Pin queried runtime commits before building/installing local launcher recipe
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/flatpak-activation"
+          env -i PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            HOME="$root/home" XDG_CONFIG_HOME="$root/home/config" XDG_DATA_HOME="$root/home/data" \
+            XDG_CACHE_HOME="$root/home/cache" XDG_RUNTIME_DIR="$root/runtime" FLATPAK_USER_DIR="$root/installation" \
+            /bin/bash -s -- "$root" <<'SH'
+          set -euo pipefail
+          root="$1"
+          mapfile -t query < "$root/runtime-query.txt"
+          [[ ${#query[@]} == 6 ]]
+          [[ "${query[0]}" == runtime/org.gnome.Platform/x86_64/50 && "${query[1]}" == "${query[0]}" ]]
+          [[ "${query[3]}" == runtime/org.gnome.Sdk/x86_64/50 && "${query[4]}" == "${query[3]}" ]]
+          [[ "${query[2]}" =~ ^[a-f0-9]{64}$ && "${query[5]}" =~ ^[a-f0-9]{64}$ ]]
+          flatpak --user install --noninteractive --assumeyes --no-related flathub "${query[0]}" "${query[3]}"
+          flatpak --user update --noninteractive --assumeyes --no-related --commit="${query[2]}" "${query[0]}"
+          flatpak --user update --noninteractive --assumeyes --no-related --commit="${query[5]}" "${query[3]}"
+          [[ "$(flatpak --user info --show-commit "${query[0]}")" == "${query[2]}" ]]
+          [[ "$(flatpak --user info --show-commit "${query[3]}")" == "${query[5]}" ]]
+          flatpak-builder --user --disable-download --repo="$root/repo" "$root/build" "$root/stage/com.creatorworks.hub.json" > "$root/build.log" 2>&1
+          # An unsigned local fixture repository is not a publisher/GPG acceptance claim.
+          flatpak --user remote-add --no-gpg-verify creator-activation-fixture "file://$root/repo"
+          flatpak --user install --noninteractive --assumeyes --no-related creator-activation-fixture app/com.creatorworks.hub/x86_64/native-activation-test
+          flatpak --user info --show-metadata app/com.creatorworks.hub/x86_64/native-activation-test > "$root/installed-metadata.txt"
+          flatpak --user info --show-permissions app/com.creatorworks.hub/x86_64/native-activation-test > "$root/installed-permissions.txt"
+          flatpak --user info --show-commit app/com.creatorworks.hub/x86_64/native-activation-test > "$root/installed-commit.txt"
+          flatpak --user list --runtime --columns=ref,active,origin > "$root/installed-runtime.txt"
+          SH
+          node - <<'NODE'
+          const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+          const p=require('./scripts/flatpak-native-activation.cjs'),parse=require('./scripts/flatpak-disposable.cjs').parseSections;
+          const root=path.join(process.env.RUNNER_TEMP,'flatpak-activation');
+          const metadata=parse(fs.readFileSync(path.join(root,'installed-metadata.txt'),'utf8'));
+          assert.equal(metadata.Application.name,p.ID);assert.equal(metadata.Application.command,p.COMMAND);
+          assert.equal(metadata.Application.runtime,'org.gnome.Platform/x86_64/50');
+          const permissions=parse(fs.readFileSync(path.join(root,'installed-permissions.txt'),'utf8'));
+          assert.deepEqual(Object.keys(permissions).sort(),['Context','Session Bus Policy']);
+          assert.deepEqual(Object.keys(permissions.Context),['sockets']);
+          const sockets=permissions.Context.sockets.split(';').filter(Boolean).sort();
+          assert.ok(JSON.stringify(sockets)===JSON.stringify(['fallback-x11','wayland']) || JSON.stringify(sockets)===JSON.stringify(['fallback-x11','wayland','x11']));
+          assert.deepEqual(permissions['Session Bus Policy'],{[p.NAME]:'talk'});
+          const staged=JSON.parse(fs.readFileSync(path.join(root,'stage/flatpak-native-activation-stage.json')));
+          const commit=fs.readFileSync(path.join(root,'installed-commit.txt'),'utf8').trim();assert.match(commit,/^[a-f0-9]{64}$/);
+          fs.writeFileSync(path.join(root,'launcher-binding.json'),JSON.stringify({commit,sha256:staged.provenance.launcherSha256,
+            size:staged.provenance.launcherSize,sourceCommit:staged.provenance.sourceCommit,permissions:p.PERMISSIONS,
+            publisherSignatureAccepted:false,releaseReady:false}),{flag:'wx',mode:0o600});
+          NODE
+      - name: Real bounded GTK cancel, warm focus and cold native service activation
+        run: /usr/bin/python3 -B scripts/native-linux-flatpak-activation.py session
+      - name: Retain only scoped native validation evidence and synthetic fixture hashes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-flatpak-activation-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/flatpak-activation-producer.json
+            ${{ runner.temp }}/flatpak-activation/*.json
+            ${{ runner.temp }}/flatpak-activation/*.txt
+            ${{ runner.temp }}/flatpak-activation/*.log
+            ${{ runner.temp }}/flatpak-activation/*.stdout
+            ${{ runner.temp }}/flatpak-activation/*.stderr
+            ${{ runner.temp }}/flatpak-activation/warm-surface/*.png
+            ${{ runner.temp }}/flatpak-activation/cold-surface/*.png
+            ${{ runner.temp }}/flatpak-activation/stage/flatpak-native-activation-stage.json
