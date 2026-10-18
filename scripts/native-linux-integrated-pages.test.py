@@ -96,6 +96,14 @@ class PagesTests(unittest.TestCase):
     def test_null_success_is_not_a_process_exit_claim(self):
         self.assertIsNone(self.driver(Response()).request("DELETE", "/session/one"))
 
+    def test_existing_settings_page_test_uses_only_the_nonmutating_migration_defer_control(self):
+        driver = Mock()
+        driver.read.side_effect = ['true', None]
+        M.defer_migration(driver)
+        self.assertEqual(driver.read.call_count, 2)
+        driver.click.assert_called_once_with('#convergence-later')
+        driver.request.assert_not_called()
+
     def test_http_outcomes_reject_overflow_truncation_errors_and_unknown_shapes(self):
         for response in (Response(b'x' * 131073), Response(b''), Response(b'{"value":null}', length="999999"),
                          Response(length="invalid"), Response(length="1"), Response(status=204),

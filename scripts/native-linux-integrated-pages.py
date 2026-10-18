@@ -190,6 +190,12 @@ def feature_status(status, error, enabled):
     require(not error and status == "Ready" and enabled is True, "Feature not ready: " + status + " " + error)
 
 
+def defer_migration(driver):
+    wait(lambda: driver.read("#convergence-dialog", "attribute/open") is not None)
+    driver.click("#convergence-later")
+    wait(lambda: driver.read("#convergence-dialog", "attribute/open") is None)
+
+
 def png_dimensions(png):
     require(33 <= len(png) <= 6 * 1024 * 1024 and png[:16] == b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR", "Invalid bounded PNG")
     width, height = struct.unpack(">II", png[16:24])
@@ -346,6 +352,10 @@ def run(binding, root, report):
                 and consent["policyVersion"] == POLICY and type(consent["acceptedAtMs"]) is int
                 and started <= consent["acceptedAtMs"] <= time.time_ns() // 1000000, "Native terms record missing/differs")
         report["termsObserved"] = True
+        report["phase"] = "defer-migration-for-page-test"
+        defer_migration(d)
+        report["migrationDeferred"] = True
+        preserved(root / "home", binding["fixtures"], binding["config"], "core")
         for feature in ("mcp", "setup"):
             report["phase"] = "open-" + feature
             if feature == "mcp":
