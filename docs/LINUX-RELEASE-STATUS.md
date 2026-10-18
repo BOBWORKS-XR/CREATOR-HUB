@@ -4,6 +4,48 @@
 published Windows 0.1.14 artifacts and local Windows installations are unchanged.
 Mac support remains suspended. No TEST ONLY package is a release candidate.
 
+## Current Direct Integration Checkpoint
+
+These newer results supersede only the corresponding historical tests below;
+they do not qualify a public Linux release.
+
+- Integrated Root assembly [39134487363](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39134487363)
+  uses product source `5065fb1112b9e96978e40e64503fa979f559baae`.
+  Its DEB SHA256 is
+  `8f9ff4b4694d00150bf86f7a5befc6a1cfc80610d55212b717d602ceb84fe86c`.
+  MCP and Setup are first-party pages backed by internal Rust libraries, not
+  iframes or launched companion GUIs. Existing Windows builds remain unchanged.
+- Actual installed pages, notice acknowledgement, saved preferences, normal
+  close and manual reopen passed on those bytes in
+  [39135547995](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39135547995).
+  Configuration migration, exact backups, preserved foreign entries, signed
+  routing and fresh reopen passed in
+  [39138256641](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39138256641).
+  The latter also exercised the actual router, sealed Node and MCP SDK stdio
+  initialize/tools-list/EOF flow without tool calls or termination signals.
+  It did not install or retire old standalone DEBs or run an AI application.
+- The integrated signed update target is built and independently verified, but
+  actual system cancellation, authorized installation and automatic restart are
+  still unaccepted. Target 0.1.15 remains private acceptance-only test input.
+- Flatpak's native-window launcher has built and installed on disposable Ubuntu.
+  Run [39138975316](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39138975316)
+  verified the launcher process/window but stopped before any disclosure action:
+  its AT-SPI application PID did not match the test's bound launcher namespace
+  PIDs. Cancel, warm/cold activation and signed update remain unaccepted. This
+  is not evidence of a product activation failure or SteamOS support.
+- Read-only inspection and an isolated loader test on actual Steam Deck OLED
+  hardware running SteamOS 3.8.16 confirmed that the integrated native ELF needs
+  `libwebkit2gtk-4.1.so.0` and `libjavascriptcoregtk-4.1.so.0`, which are absent
+  from that host. The exact private version-only 0.1.15 test ELF exited 127
+  before starting Hub. The current DEB-host Flatpak launcher cannot supply
+  those libraries. A self-contained SteamOS host package and its install/update
+  path are unfinished implementation work, not a test that already passed.
+- That Deck's existing desktop shortcut still selects 0.1.8; its downloaded
+  0.1.12 AppImage is mode 0644. The old log contains the optional GTK module
+  messages, but no captured EGL failure. No old shortcut, downloaded image,
+  real settings, package installation or GPU setting was changed. Do not infer
+  an EGL fix or failure from the dependency test.
+
 ## Implemented Boundaries
 
 - Root has a nondefault `experimental-linux-migration` route for the exact MCP
