@@ -61,6 +61,31 @@ test('finite baseline and version-only field allowlist remain independent of Win
   assert.deepEqual(VERSIONS, ['package.json', 'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock']);
   assert.match(fixture.BASELINE.deb, /^[a-f0-9]{64}$/);
 });
+test('next-version descriptor and manifest are Linux-only, finite, acceptance-only and protocol guarded', () => {
+  const descriptor = fixture.releaseDescriptor();
+  assert.equal(descriptor.version, '0.1.15'); assert.equal(descriptor.minHubVersion, '0.1.14');
+  assert.equal(descriptor.platform, 'linux'); assert.equal(descriptor.packageType, 'deb');
+  assert.equal(descriptor.installerProtocol, 1); assert.equal(descriptor.assetName, fixture.TARGET.asset);
+  assert.equal(descriptor.sha256, fixture.TARGET.files['native-packages/Creator Hub_0.1.15_amd64.deb'].sha256);
+  assert.equal(descriptor.executableSha256, fixture.TARGET.installed);
+  const signature = Buffer.from('untrusted comment: synthetic envelope only, not signature acceptance\n');
+  const manifest = fixture.releaseManifest(signature);
+  assert.deepEqual(Object.keys(manifest.platforms), ['linux-x86_64-deb']);
+  assert.equal(manifest.platforms['linux-x86_64-deb'].url,
+    `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.15/${fixture.TARGET.asset}`);
+  assert.equal(manifest.platforms['linux-x86_64-deb'].signature, signature.toString('base64'));
+  for (const invalid of [undefined, '', Buffer.alloc(0), Buffer.from('invalid'), Buffer.alloc(4097)]) {
+    assert.throws(() => fixture.releaseManifest(invalid));
+  }
+});
+test('target signing refuses missing pinned input before key selection, output or execution', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-linux-target-refusal-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let called = false;
+  assert.throws(() => fixture.prepareRelease('linux-update15-signed-test', { root, platform: 'win32',
+    signer: { signingKey() { called = true; } }, execute() { called = true; } }));
+  assert.equal(called, false); assert.equal(fs.existsSync(path.join(root, 'artifacts/linux-update15-signed-test')), false);
+});
 test('native workflow uses exact14 inputs and private15 metadata with no publication or Windows jobs', () => {
   const { yaml } = require('playwright-core/lib/utilsBundle');
   const body = fs.readFileSync(path.join(__dirname, '../.github/workflows/linux-outer-update-fixture-014.yml'), 'utf8');

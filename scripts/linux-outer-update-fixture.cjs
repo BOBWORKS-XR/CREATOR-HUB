@@ -20,6 +20,19 @@ const BASELINE = Object.freeze({
   helper: 'b3e4603af16c4c0f7b1962af8466e19b70d646f9b93dd35d82ec5c06639dc813',
   policy: '5eb715286ff8d8cda8e612f8dc9d28d396068b2cdd470a5f3d92d7355e3e37c9',
 });
+const TARGET = Object.freeze({
+  directory: 'artifacts/linux-update-target15-39105404389/CREATOR-HUB/CREATOR-HUB/product/artifacts/linux-outer-update-15',
+  asset: 'Creator_Hub_0.1.15_amd64-acceptance-only.deb',
+  descriptor: 'creator-hub-linux-x86_64-deb.json',
+  installed: '7629379fbd3d0b7db0a996d727aa166750e08165478d622fe0d7c5047f2d50fe',
+  files: {
+    'creator-hub': { size: 22048768, sha256: '016a773237a46d8aeccf4544846ce6ef03e247978a02502b591f51e1466afcba' },
+    'builtin-manifest.json': { size: 3663, sha256: 'e8f221d2f84ab7257a0c7d5ed6ac4192376e8ccb00c808fca9e8228d5b653466' },
+    'fixture-receipt.json': { size: 4899, sha256: '5e6673942d0b2548e7a1ff839b8bc3b2032e3e49efc9e8cba5167b90636c5b1e' },
+    'unix-package-integrity.json': { size: 2151, sha256: 'f4a9ce6f6420187adfdd4c01d793017216c65871e04b44b9f42ae9edb22c226c' },
+    'native-packages/Creator Hub_0.1.15_amd64.deb': { size: 62212268, sha256: '98aa9750cecf387a960f994d24726e5ca09100a5ce3723607939eeaa08d80796' },
+  },
+});
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const fileHash = file => capture(file, 512 * 1024 * 1024).sha256;
 function baseline(input) {
@@ -71,6 +84,70 @@ function prepareRuntime(label, services = {}) {
   assert.deepEqual(fs.readFileSync(json), runtimeBody(baseline(input)));
   return { output, acceptanceOnly: true, targetVersion: TO, runtimeSha256: hash(body), signatureSha256: hash(signature),
     privateModulesRecompiled: false, releaseReady: false };
+}
+function releaseDescriptor() {
+  const file = TARGET.files['native-packages/Creator Hub_0.1.15_amd64.deb'];
+  return { schemaVersion: 1, appId: 'creator-hub', version: TO, platform: 'linux', architecture: 'x86_64',
+    packageType: 'deb', assetName: TARGET.asset, byteLength: file.size, sha256: file.sha256,
+    executableSha256: TARGET.installed, identityProtocol: 0, lifecycleProtocol: 0, installerProtocol: 1, minHubVersion: FROM };
+}
+function releaseManifest(signature) {
+  assert.ok(Buffer.isBuffer(signature) && signature.length > 0 && signature.length <= 4096
+    && signature.toString('utf8').startsWith('untrusted comment:'), 'Bounded Tauri minisig required');
+  return { version: TO, notes: 'Acceptance-only Linux outgoing updater test. Never publish.', platforms: {
+    'linux-x86_64-deb': { signature: signature.toString('base64'),
+      url: `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v${TO}/${TARGET.asset}` },
+  } };
+}
+function prepareRelease(label, services = {}) {
+  const root = services.root || ROOT, execute = services.execute || execFileSync, signer = services.signer || routing;
+  assert.equal(services.platform || process.platform, 'win32');
+  assert.match(label, /^linux-update15-signed-[a-z0-9-]{1,60}$/);
+  const input = path.join(root, TARGET.directory);
+  const recheck = () => {
+    for (const [name, record] of Object.entries(TARGET.files)) assert.deepEqual(capture(path.join(input, name), record.size), record);
+  };
+  recheck();
+  const receipt = JSON.parse(fs.readFileSync(path.join(input, 'fixture-receipt.json')));
+  assert.equal(receipt.acceptanceOnly, true); assert.equal(receipt.releaseReady, false);
+  assert.equal(receipt.sourceCommit, BASELINE.source); assert.equal(receipt.sourceTree, BASELINE.tree);
+  assert.equal(receipt.sourceVersion, FROM); assert.equal(receipt.targetVersion, TO);
+  assert.equal(receipt.privateModulesRecompiled, false); assert.equal(receipt.privateModulesResigned, false);
+  assert.deepEqual(receipt.changedSourceFiles, VERSIONS);
+  const raw = fs.readFileSync(path.join(input, 'creator-hub')), token = Buffer.from('__TAURI_BUNDLE_TYPE_VAR_UNK');
+  const at = raw.indexOf(token); assert.ok(at >= 0 && raw.indexOf(token, at + 1) === -1);
+  const installed = Buffer.from(raw); Buffer.from('DEB').copy(installed, at + token.length - 3);
+  unix.verifyLinuxHub(raw, installed, 'deb');
+  assert.equal(hash(installed), TARGET.installed, 'Exact native package image identity differs');
+  const output = path.join(root, 'artifacts', label); assert.equal(fs.existsSync(output), false);
+  fs.mkdirSync(output, { mode: 0o700 });
+  const descriptor = path.join(output, TARGET.descriptor), packageFile = path.join(output, TARGET.asset);
+  const body = Buffer.from(JSON.stringify(releaseDescriptor(), null, 2));
+  fs.writeFileSync(descriptor, body, { flag: 'wx', mode: 0o644 });
+  fs.copyFileSync(path.join(input, 'native-packages/Creator Hub_0.1.15_amd64.deb'), packageFile, fs.constants.COPYFILE_EXCL);
+  assert.deepEqual(capture(packageFile, 512 * 1024 * 1024), TARGET.files['native-packages/Creator Hub_0.1.15_amd64.deb']);
+  const verifier = path.join(root, 'src-tauri/target/release/examples/verify-package-input.exe');
+  const verifierPin = capture(verifier, 256 * 1024 * 1024, true);
+  const key = signer.signingKey(root);
+  const descriptorSignature = signer.signDetached(descriptor, key);
+  fs.writeFileSync(`${descriptor}.minisig`, descriptorSignature, { flag: 'wx', mode: 0o644 });
+  assert.equal(String(execute(verifier, [descriptor, `${descriptor}.minisig`], {
+    encoding: 'utf8', windowsHide: true, timeout: 30000 })).trim(),
+  `Verified trusted package signature: ${hash(body)}. No activation or client changes.`);
+  recheck(); assert.deepEqual(fs.readFileSync(descriptor), body);
+  const packageSignature = signer.signDetached(packageFile, key);
+  const manifest = Buffer.from(JSON.stringify(releaseManifest(packageSignature), null, 2));
+  fs.writeFileSync(path.join(output, 'latest.json'), manifest, { flag: 'wx', mode: 0o644 });
+  recheck(); assert.deepEqual(capture(verifier, verifierPin.size, true), verifierPin);
+  assert.deepEqual(capture(packageFile, 512 * 1024 * 1024), TARGET.files['native-packages/Creator Hub_0.1.15_amd64.deb']);
+  const result = { schemaVersion: 1, acceptanceOnly: true, targetVersion: TO,
+    artifactRun: 39105404389, artifactId: 12127943519,
+    pins: { descriptor: hash(body), descriptorSignature: hash(descriptorSignature),
+      installer: releaseDescriptor().sha256, manifest: hash(manifest), executable: TARGET.installed },
+    descriptorSignatureVerified: true, nativeReleaseInputsVerified: false,
+    signedUpdateAccepted: false, restartAccepted: false, releaseReady: false };
+  fs.writeFileSync(path.join(output, 'signing-receipt.json'), JSON.stringify(result, null, 2), { flag: 'wx', mode: 0o600 });
+  return { output, ...result };
 }
 function nativeAdmission(env, platform, arch) {
   assert.equal(platform, 'linux'); assert.equal(arch, 'x64');
@@ -169,11 +246,13 @@ function build(root, input, metadata, services = {}) {
   fs.writeFileSync(path.join(output, 'fixture-receipt.json'), JSON.stringify(receipt, null, 2), { flag: 'wx' });
   return { output, receipt };
 }
-module.exports = { BASELINE, FROM, TO, baseline, runtimeBody, prepareRuntime, nativeAdmission, checkSource, build };
+module.exports = { BASELINE, TARGET, FROM, TO, baseline, runtimeBody, prepareRuntime, prepareRelease,
+  releaseDescriptor, releaseManifest, nativeAdmission, checkSource, build };
 if (require.main === module) {
   try {
     const [command, ...args] = process.argv.slice(2);
     if (command === 'prepare-runtime' && args.length === 1) console.log(JSON.stringify(prepareRuntime(args[0])));
+    else if (command === 'prepare-release' && args.length === 1) console.log(JSON.stringify(prepareRelease(args[0])));
     else if (command === 'build' && args.length === 3) console.log(JSON.stringify(build(...args)));
     else throw Error('Use prepare-runtime LABEL or build PINNED_PRODUCT_ROOT PINNED_INPUT METADATA_DIRECTORY');
   } catch { console.error('Linux acceptance fixture stopped; preserve owned evidence. No release acceptance.'); process.exitCode = 1; }

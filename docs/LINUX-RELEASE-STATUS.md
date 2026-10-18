@@ -1,6 +1,6 @@
 # Linux Release Status
 
-2026-10-17. Linux and Flatpak remain **unpublished development work**. The
+2026-10-18. Linux and Flatpak remain **unpublished development work**. The
 published Windows 0.1.14 artifacts and local Windows installations are unchanged.
 Mac support remains suspended. No TEST ONLY package is a release candidate.
 
@@ -48,8 +48,26 @@ Mac support remains suspended. No TEST ONLY package is a release candidate.
   changed. The canonical packer now tests raw names on Windows too, and staging
   runs before dependency installation. Corrected assembly
   [39042746816](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39042746816)
-  at `534465a` passed that early staging check and is still running at this
-  checkpoint. No completed package or install is claimed.
+  at `534465a` passed the complete helper-bearing DEB build and archive audit.
+  It is a frozen acceptance-only package, not a public installer qualification.
+- Actual fresh installation and manual public 0.1.12 -> current 0.1.14 replacement both
+  passed in [39105776879](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39105776879).
+  The exact installed Hub/helper/policy bytes, root ownership/modes, dpkg state
+  and clean `dpkg --verify` were checked. Synthetic settings, client configs,
+  retained runtime, backup and project fixtures were unchanged. No app or AI
+  client was launched; this does not establish migration, consent, system
+  authentication or in-app updating. See the [scoped receipt](evidence/linux-installed-candidate-39105776879.json).
+- An outer-only Linux 0.1.15 target passed native build/package verification in
+  [39105404389](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39105404389).
+  It uses product source `534465a`, changes only four Root version fields and
+  signed runtime metadata, and retains the exact compiled MCP/Setup/router and
+  helper/policy binaries. The local signed update descriptor is verified; the
+  installer signature still requires the actual-source input verifier. All 0.1.15
+  bytes are acceptance-only and must never be published. This creates an update
+  target, not an update/restart acceptance result. The earlier private-draft read
+  failure [39105308246](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39105308246)
+  occurred before compilation; draft-read capability is now isolated from the
+  read-only native builder.
 - Linux-only test packaging now adds the fixed retirement helper and one
   fixed-path polkit action requiring uncached `auth_admin` in all contexts.
   It does not use `argv1`, which polkit 0.105 does not enforce. The helper still
@@ -65,8 +83,8 @@ Mac support remains suspended. No TEST ONLY package is a release candidate.
 
 ## Remaining Release Gates
 
-1. Finish native acceptance-only helper packaging, then qualify the production
-   helper and test actual GUI-close/reopen
+1. Qualify the production helper after the acceptance-only package and installation
+   checks, and test actual GUI-close/reopen
    races, system lock contention,
    cancellation, interruption and recovery. A pre-authentication idle check is
    not proof against a GUI reopened while authentication is pending.
