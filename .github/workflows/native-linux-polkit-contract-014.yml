@@ -1,0 +1,156 @@
+name: Native GNOME polkit contract (read-only synthetic dialog)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/linux-polkit-contract-014]
+    paths:
+      - scripts/native-linux-polkit-probe.py
+      - scripts/native-linux-polkit-probe.test.py
+      - .github/workflows/native-linux-polkit-contract-014.yml
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-polkit-contract-014' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
+    env:
+      CREATOR_LINUX_POLKIT_PROBE: '1'
+      CREATOR_LINUX_ROOT_PROBE: '1'
+      CREATOR_UNIX_WINDOW_TEST: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Pure contracts and YAML Bash Python JavaScript syntax before provisioning
+        run: |
+          npm ci --ignore-scripts
+          python3 -B scripts/native-linux-polkit-probe.test.py
+      - name: Exact primary source contract before native work
+        run: python3 -B scripts/native-linux-polkit-probe.py source-contract > "$RUNNER_TEMP/polkit-source-contract.json"
+      - name: Install exact system packages and GUI dependencies only
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends policykit-1-gnome=0.105-7ubuntu3 \
+            pkexec=0.105-33ubuntu0.2 polkitd=0.105-33ubuntu0.2 coreutils=8.32-4.1ubuntu1.4 \
+            python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core \
+            libx11-6 libxres1 dbus-x11 xvfb xauth openbox libpam-systemd
+          sudo systemctl start systemd-logind.service polkit.service
+      - name: Secure only established hosted-runner policy ancestry
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true && test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY_ID" = 1364807512 && test "$RUNNER_OS" = Linux
+          test "$GITHUB_REF" = refs/heads/validation/linux-polkit-contract-014
+          /usr/bin/python3 -B - <<'PY'
+          import json, os, stat, subprocess
+          from pathlib import Path
+          paths = tuple(map(Path, ('/usr/share', '/usr/share/polkit-1', '/usr/share/polkit-1/actions')))
+          for parent in (Path('/usr'), Path('/')):
+              before = parent.lstat()
+              assert stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0 and not before.st_mode & 0o7022
+          original = {}
+          for target in paths:
+              assert target.resolve(strict=True) == target
+              before = target.lstat()
+              assert stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+              assert stat.S_IMODE(before.st_mode) in (0o755, 0o777)
+              original[target] = before
+          entries = []
+          for target in paths:
+              before = original[target]
+              if stat.S_IMODE(before.st_mode) == 0o777:
+                  subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/chmod', '0755', str(target)], check=True)
+              after = target.lstat()
+              assert (after.st_dev, after.st_ino, after.st_uid, after.st_gid) == (before.st_dev, before.st_ino, 0, 0)
+              assert stat.S_IMODE(after.st_mode) == 0o755 and target.resolve(strict=True) == target
+              entries.append({'path': str(target), 'beforeMode': stat.S_IMODE(before.st_mode), 'afterMode': 0o755})
+          with (Path(os.environ['RUNNER_TEMP']) / 'polkit-directory-preflight.json').open('x') as stream:
+              json.dump({'scope': 'disposable-runner-only', 'recursiveChange': False, 'policyOverride': False, 'directories': entries}, stream)
+          PY
+      - name: Create one locked synthetic account and root-owned fixed fixture source
+        run: |
+          set -euo pipefail
+          test ! -e /opt/creator-polkit-fixture
+          if getent passwd creator-polkit-fixture || getent passwd 21314 || getent group 21314; then
+            echo 'Synthetic fixture identity already exists; refusing reuse' >&2
+            exit 1
+          fi
+          sudo useradd --uid 21314 --user-group --create-home --home-dir /var/lib/creator-polkit-fixture \
+            --shell /bin/bash creator-polkit-fixture
+          sudo install -d -o 0 -g 0 -m 0755 /opt/creator-polkit-fixture /opt/creator-polkit-fixture/scripts
+          sudo install -d -o 21314 -g 21314 -m 0700 /opt/creator-polkit-fixture/result
+          for name in native-linux-polkit-probe.py native-linux-root-probe.py native-unix-window.py; do
+            sudo install -o 0 -g 0 -m 0644 "scripts/$name" "/opt/creator-polkit-fixture/scripts/$name"
+          done
+          /usr/bin/python3 -B - <<'PY'
+          import hashlib, json, os, stat
+          from pathlib import Path
+          root = Path('/opt/creator-polkit-fixture')
+          hashes = {}
+          for name in ('native-linux-polkit-probe.py', 'native-linux-root-probe.py', 'native-unix-window.py'):
+              installed = root / 'scripts' / name
+              info = installed.lstat()
+              assert installed.resolve(strict=True) == installed and stat.S_ISREG(info.st_mode)
+              assert info.st_uid == info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o644
+              digest = hashlib.sha256(installed.read_bytes()).hexdigest()
+              assert digest == hashlib.sha256((Path('scripts') / name).read_bytes()).hexdigest()
+              hashes[name] = digest
+          target = Path(os.environ['RUNNER_TEMP']) / 'polkit-script-binding.json'
+          with target.open('x') as stream:
+              json.dump({'source': os.environ['GITHUB_SHA'], 'files': hashes}, stream)
+          PY
+          sudo install -o 0 -g 0 -m 0644 "$RUNNER_TEMP/polkit-script-binding.json" /opt/creator-polkit-fixture/source-binding.json
+      - name: Real PAM logind session and private GUI (no authentication input)
+        run: |
+          set -euo pipefail
+          # PAMName=login supplies a real logind session. Do not fake XDG_SESSION_ID
+          # or replace the system authority. The locked account receives no password.
+          sudo systemd-run --wait --pipe --collect --unit=creator-polkit-fixture \
+            --uid=creator-polkit-fixture --property=PAMName=login --property=Type=exec \
+            --property=WorkingDirectory=/opt/creator-polkit-fixture --property=RuntimeMaxSec=100 \
+            --setenv=HOME=/var/lib/creator-polkit-fixture --setenv=USER=creator-polkit-fixture \
+            --setenv=GITHUB_ACTIONS=true --setenv=RUNNER_ENVIRONMENT=github-hosted \
+            --setenv=RUNNER_OS=Linux --setenv=RUNNER_ARCH=X64 \
+            --setenv=GITHUB_REPOSITORY=BOBWORKS-XR/CREATOR-HUB --setenv=GITHUB_REPOSITORY_ID=1364807512 \
+            --setenv=GITHUB_REF="$GITHUB_REF" --setenv=GITHUB_SHA="$GITHUB_SHA" --setenv=GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
+            --setenv=CREATOR_LINUX_POLKIT_PROBE=1 --setenv=CREATOR_LINUX_ROOT_PROBE=1 --setenv=CREATOR_UNIX_WINDOW_TEST=1 \
+            --setenv=GDK_BACKEND=x11 --setenv=NO_AT_BRIDGE=0 --setenv=LANG=C --setenv=LC_ALL=C \
+            /usr/bin/dbus-run-session -- /usr/bin/xvfb-run -a --server-args='-screen 0 1280x800x24' /bin/sh -eu -c '
+              /usr/bin/openbox --sm-disable >/opt/creator-polkit-fixture/result/openbox.log 2>&1 & manager=$!
+              trap '\''/usr/bin/openbox --exit; wait "$manager"'\'' EXIT
+              /usr/bin/python3 -B /opt/creator-polkit-fixture/scripts/native-linux-polkit-probe.py probe
+            '
+      - name: Retain bounded original read-only capture even on refusal
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$RUNNER_TEMP/polkit-capture"
+          # Copy only these known reports/logs. Never account files or credentials.
+          if test -d /opt/creator-polkit-fixture/result; then
+            for name in polkit-report.json original-gtk-contract.json agent.stdout agent.stderr pkexec.stdout pkexec.stderr openbox.log; do
+              if sudo test -f "/opt/creator-polkit-fixture/result/$name"; then
+                sudo cat "/opt/creator-polkit-fixture/result/$name" > "$RUNNER_TEMP/polkit-capture/$name"
+              fi
+            done
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-linux-polkit-contract-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/polkit-source-contract.json
+            ${{ runner.temp }}/polkit-directory-preflight.json
+            ${{ runner.temp }}/polkit-script-binding.json
+            ${{ runner.temp }}/polkit-capture/*
