@@ -19,6 +19,7 @@ import xml.etree.ElementTree as ET
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
 BRANCH = "refs/heads/validation/linux-polkit-contract-014"
+ADMIN_BRANCH = "refs/heads/validation/linux-polkit-admin-014"
 BASE = Path("/opt/creator-polkit-fixture")
 USER, UID = "creator-polkit-fixture", 21314
 AGENT = "/usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1"
@@ -75,7 +76,7 @@ def base():
 
 def admission(env, system, machine):
     base().admission(env, system, machine)
-    require(env.get("CREATOR_LINUX_POLKIT_PROBE") == "1" and env.get("GITHUB_REF") == BRANCH
+    require(env.get("CREATOR_LINUX_POLKIT_PROBE") == "1"
             and env.get("GITHUB_EVENT_NAME") in ("push", "workflow_dispatch")
             and re.fullmatch("[a-f0-9]{40}", env.get("GITHUB_SHA", "")), "Exact polkit CI branch/event/source required")
     capture_mode(env)
@@ -84,7 +85,11 @@ def admission(env, system, machine):
 def capture_mode(env):
     mode = env.get("CREATOR_LINUX_POLKIT_MODE", "read-only")
     require(mode in ("read-only", "cancel", "admin-capture"), "Unknown finite polkit fixture mode")
-    require(mode == "read-only" or env.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "Non-default mode requires explicit manual CI mode")
+    ref, event = env.get("GITHUB_REF"), env.get("GITHUB_EVENT_NAME")
+    require((ref == BRANCH and ((event == "push" and mode == "read-only")
+                               or (event == "workflow_dispatch" and mode in ("read-only", "cancel"))))
+            or (ref == ADMIN_BRANCH and event == "workflow_dispatch" and mode == "admin-capture"),
+            "Exact fixture branch/event/mode combination required")
     return mode
 
 

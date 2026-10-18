@@ -54,7 +54,7 @@ class ContractTests(unittest.TestCase):
     def test_cancel_requires_exact_explicit_manual_mode_and_readonly_stays_default(self):
         self.assertEqual(p.capture_mode(runner()), "read-only")
         p.admission(runner() | {"GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "cancel"}, "linux", "x86_64")
-        p.admission(runner() | {"GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "admin-capture"}, "linux", "x86_64")
+        p.admission(runner() | {"GITHUB_REF": p.ADMIN_BRANCH, "GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "admin-capture"}, "linux", "x86_64")
         for event, mode in (("push", "cancel"), ("workflow_dispatch", "authenticate"), ("workflow_dispatch", ""),
                             ("workflow_dispatch", "cancel; true"), ("push", "admin-capture")):
             with self.subTest(event=event, mode=mode), self.assertRaises(RuntimeError):
@@ -541,7 +541,7 @@ class AdminCaptureTests(unittest.TestCase):
     def provision(self):
         before, after = self.groups()
         account = types.SimpleNamespace(pw_uid=p.UID, pw_gid=p.UID, pw_dir="/var/lib/creator-polkit-fixture", pw_shell="/bin/bash")
-        env = runner() | {"GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "admin-capture"}
+        env = runner() | {"GITHUB_REF": p.ADMIN_BRANCH, "GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "admin-capture"}
         with tempfile.TemporaryDirectory() as temp, contextlib.ExitStack() as stack:
             output = Path(temp).resolve()
             stack.enter_context(mock.patch.dict(sys.modules, {"pwd": types.SimpleNamespace(getpwnam=lambda _name: account)}))
@@ -883,9 +883,57 @@ class WorkflowTests(unittest.TestCase):
         job = w["jobs"]["contract"]
         self.assertEqual(job["runs-on"], "ubuntu-22.04")
         self.assertIn(p.BRANCH, job["if"])
-        self.assertIn("github.event_name == 'push' || github.event_name == 'workflow_dispatch'", job["if"])
+        self.assertIn(p.ADMIN_BRANCH, job["if"])
         self.assertNotIn("container", job)
         self.assertFalse(job["steps"][0]["with"]["persist-credentials"])
+
+    def test_actual_skipped_admin_dispatch_regression_and_full_ref_event_mode_matrix(self):
+        cases, expected, envs = [], [], []
+        for ref in (p.BRANCH, p.ADMIN_BRANCH, "refs/heads/main"):
+            for event in ("push", "workflow_dispatch", "pull_request"):
+                for mode in (None, "read-only", "cancel", "admin-capture", "authenticate"):
+                    effective = mode or "read-only"
+                    allowed = (ref == p.BRANCH and ((event == "push" and effective == "read-only")
+                        or (event == "workflow_dispatch" and effective in ("read-only", "cancel")))) \
+                        or (ref == p.ADMIN_BRANCH and event == "workflow_dispatch" and effective == "admin-capture")
+                    env = runner() | {"GITHUB_REF": ref, "GITHUB_EVENT_NAME": event}
+                    if mode is not None:
+                        env["CREATOR_LINUX_POLKIT_MODE"] = mode
+                    context = {"github": {"repository": "BOBWORKS-XR/CREATOR-HUB", "repository_id": "1364807512", "ref": ref, "event_name": event},
+                               "inputs": {} if mode is None else {"mode": mode}}
+                    cases.append(context)
+                    expected.append(allowed)
+                    envs.append(env)
+                    with self.subTest(ref=ref, event=event, mode=mode):
+                        if allowed:
+                            p.admission(env, "linux", "x86_64")
+                        else:
+                            with self.assertRaises(RuntimeError):
+                                p.admission(env, "linux", "x86_64")
+        for change in ({"repository": "foreign/repo"}, {"repository_id": "1"}):
+            cases.append({"github": {"repository": "BOBWORKS-XR/CREATOR-HUB", "repository_id": "1364807512", "ref": p.ADMIN_BRANCH,
+                                     "event_name": "workflow_dispatch", **change}, "inputs": {"mode": "admin-capture"}})
+            expected.append(False)
+        script = r"""
+        const fs=require('node:fs'),vm=require('node:vm'),d=JSON.parse(fs.readFileSync(0,'utf8'));
+        process.stdout.write(JSON.stringify(d.cases.map(c=>vm.runInNewContext(d.expression,c,{timeout:1000}))));
+        """
+        result = subprocess.run([shutil.which("node") or "node", "-e", script], input=json.dumps({
+            "expression": self.workflow["jobs"]["contract"]["if"], "cases": cases}).encode(),
+            capture_output=True, check=True, timeout=15)
+        self.assertEqual(json.loads(result.stdout), expected)
+        step = next(s for s in self.workflow["jobs"]["contract"]["steps"] if s.get("name") == "Secure only established hosted-runner policy ancestry")
+        body = step["run"]
+        guard = body[body.index('case "$GITHUB_REF:'):body.index("\nesac") + len("\nesac")]
+        bash = Path("C:/Program Files/Git/bin/bash.exe") if os.name == "nt" else Path("/usr/bin/bash")
+        for env, allowed in zip(envs, expected):
+            # Execute ONLY the case guard; no provisioning/native statements.
+            child_env = {k: os.environ[k] for k in ("PATH", "SystemRoot") if k in os.environ}
+            child_env.update({"GITHUB_REF": env["GITHUB_REF"], "GITHUB_EVENT_NAME": env["GITHUB_EVENT_NAME"],
+                              "CREATOR_LINUX_POLKIT_MODE": env.get("CREATOR_LINUX_POLKIT_MODE", "read-only")})
+            checked = subprocess.run([str(bash), "-c", guard], env=child_env, capture_output=True, timeout=10)
+            with self.subTest(shell=child_env["GITHUB_REF"], event=child_env["GITHUB_EVENT_NAME"], mode=child_env["CREATOR_LINUX_POLKIT_MODE"]):
+                self.assertEqual(checked.returncode, 0 if allowed else 1, checked.stderr.decode(errors="replace"))
 
     def test_cancel_is_explicit_dispatch_choice_not_automatic_push_or_authentication(self):
         choice = self.workflow["on"]["workflow_dispatch"]["inputs"]["mode"]

@@ -23,8 +23,12 @@ jobs:
   contract:
     if: >-
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
-      github.ref == 'refs/heads/validation/linux-polkit-contract-014' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      ((github.ref == 'refs/heads/validation/linux-polkit-contract-014' &&
+        ((github.event_name == 'push' && (inputs.mode || 'read-only') == 'read-only') ||
+         (github.event_name == 'workflow_dispatch' &&
+          ((inputs.mode || 'read-only') == 'read-only' || inputs.mode == 'cancel')))) ||
+       (github.ref == 'refs/heads/validation/linux-polkit-admin-014' &&
+        github.event_name == 'workflow_dispatch' && inputs.mode == 'admin-capture'))
     runs-on: ubuntu-22.04
     timeout-minutes: 8
     env:
@@ -58,7 +62,13 @@ jobs:
           set -euo pipefail
           test "$GITHUB_ACTIONS" = true && test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$GITHUB_REPOSITORY_ID" = 1364807512 && test "$RUNNER_OS" = Linux
-          test "$GITHUB_REF" = refs/heads/validation/linux-polkit-contract-014
+          case "$GITHUB_REF:$GITHUB_EVENT_NAME:$CREATOR_LINUX_POLKIT_MODE" in
+            refs/heads/validation/linux-polkit-contract-014:push:read-only|\
+            refs/heads/validation/linux-polkit-contract-014:workflow_dispatch:read-only|\
+            refs/heads/validation/linux-polkit-contract-014:workflow_dispatch:cancel|\
+            refs/heads/validation/linux-polkit-admin-014:workflow_dispatch:admin-capture) ;;
+            *) echo 'Exact fixture branch/event/mode required' >&2; exit 1 ;;
+          esac
           /usr/bin/python3 -B - <<'PY'
           import json, os, stat, subprocess
           from pathlib import Path
