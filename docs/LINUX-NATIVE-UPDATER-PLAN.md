@@ -30,6 +30,44 @@ below is retained as a historical checkpoint, not the current build status.
 All0.1.15 fixtures and the private v0.1.13-validation release remain forbidden
 publication inputs. Windows bytes and public update metadata remain unchanged.
 
+### Restart Source Check
+
+The locked Tauri2.11.5 `process::current_binary` delegates to
+tauri-utils2.9.3 `platform::current_exe`. Its `starting_binary.rs` constructor
+caches and canonicalizes the original executable path before `main`; it does
+not resolve `/proc/self/exe` after dpkg replaces the image. The suspected late
+`(deleted)` executable-path lookup is therefore not present in this dependency.
+The locked single-instance2.4.4 Linux plugin releases its D-Bus name on
+`RunEvent::Exit`; Root uses `request_restart`, which requests that event.
+These source checks do not prove actual restart, replacement image execution,
+or restored views. No production restart change was made.
+
+Native discovery/confirmation-capture run39109115768 passed at test sourced1e2b93
+using the same frozen14/15 inputs. The installed Hub pressed its normal check,
+fetched the signed descriptor/signature and package, reported15 ready to install,
+and opened the real native GTK confirmation. Native title `Update Creator Hub`,
+AX `Information`/`ALERT`, exact question and both buttons were captured. No
+confirmation input occurred, the installed image remained14, and no installer
+manifest or system authorization was requested. See the
+[scoped receipt](evidence/linux-signed-discovery-39109115768.json).
+
+Earlier39108644582 failed on the harness's raw Capture item/metadata mismatch;
+39108880419 failed on a paragraph-only readiness read of `p[role=status]`.
+Both corrections have focused regressions. The second reads only the source
+status ID, exact tag/computed role and renderer; it does not make hidden controls
+actionable. The generic action/Parent rules were unchanged.
+
+Subsequent native `Not now` cancellation passed in39109603217 at test
+source57d3ac7. A separate source-bound GTK path tied the exact ALERT frame,
+Root kernel/bus identity, complete fresh tree edges, exact question and two
+buttons to the captured XID. It performed one `Not now` action, observed the
+dialog dismissed and updater actionable again, checked the same live Root,
+unchanged14 package/image and saved acknowledgement, then reaped normal exit0.
+No installer manifest or system authorization was requested. There were no live
+module views in this fixture: it does not qualify their cancellation retention,
+system Cancel, installation or automatic restart. See the
+[cancellation receipt](evidence/linux-update-confirmation-cancel-39109603217.json).
+
 ## Original Prerequisites
 
 2026-10-17. Full in-app signed-update acceptance is **blocked**, not implemented

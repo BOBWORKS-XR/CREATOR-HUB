@@ -76,6 +76,23 @@ Mac support remains suspended. No TEST ONLY package is a release candidate.
   admits only finite commands. The default production refusal remains closed;
   Windows and Mac default build paths are unchanged. See the
   [acceptance recipe](../packaging/linux/RETIREMENT-ACCEPTANCE.md).
+- Actual installed Hub signed15 discovery and native confirmation capture passed
+  [39109115768](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39109115768).
+  The normal check fetched the signed descriptor/signature and target package,
+  and the real GTK confirmation displayed the expected question and buttons.
+  It stopped before confirmation input; installed14 was unchanged. This is a
+  disposable TLS lab result, not public discovery, installation, authentication,
+  restart or restored-view acceptance. See the
+  [scoped receipt](evidence/linux-signed-discovery-39109115768.json).
+- Native Hub-level `Not now` cancellation then passed
+  [39109603217](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39109603217).
+  Exactly one source-bound GTK cancellation dismissed the dialog; the same Root
+  stayed live, updater controls became actionable again, package/image14 and
+  saved acknowledgement stayed unchanged, and normal close exited0. No installer
+  manifest or system authorization was requested. This fixture had no open
+  module views; system Cancel, successful installation, restart and view
+  restoration remain separate gates. See its
+  [scoped receipt](evidence/linux-update-confirmation-cancel-39109603217.json).
 - Native [39042096460](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39042096460)
   passed Flatpak transport Clippy, real kernel credentials/pidfds and the actual
   inherited-FD echo-child lifecycle. This did not launch an installed Flatpak,
@@ -93,6 +110,27 @@ Mac support remains suspended. No TEST ONLY package is a release candidate.
   nonempty USB queries, other args and replacement app/runtime paths still refuse.
 
 ## Remaining Release Gates
+
+2026-10-18 audit: helper source6073b93 has no post-authentication GUI-presence
+check before `transaction-attempted` and dpkg. Root's last check occurs before
+pkexec. This was a confirmed missing guard, not demonstrated corruption.
+Helper correctione711ef5 now pins and hashes the protected fixed GUI, acquires a
+non-truncating/non-writing writer descriptor, verifies the same file identity,
+and holds it across the complete transaction before marking any attempt. Linux
+write-open/exec exclusion covers normal execution of that exact inode, not
+copied/replacement images or explicit loader execution. Owned WSL kernel tests
+passed busy-open, held-exec refusal, rename/unlink compatibility, unchanged bytes
+and modes, and execution after close; this is not dpkg or Hub authentication
+acceptance. Native helper fixtures and actual dpkg-under-guard qualification
+remain pending. The default production removal refusal is unchanged.
+
+Native component run39108555106 at test sourceb3e5b73 retained successful
+terms, permission decline/retry/approval and normal Root exit. It still stopped
+before module operations on semantic Parent containment. The corrected WM-frame
+diagnostic matched the real decorated frame exactly, but its hit-test path did
+not reach the remote WebKit control. Neither diagnostic authorizes input or
+establishes component acceptance. The pinned GTK/WebKit source contract must
+resolve this harness mismatch before another operation attempt.
 
 1. Qualify the production helper after the acceptance-only package and installation
    checks, and test actual GUI-close/reopen
