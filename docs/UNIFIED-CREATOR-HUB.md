@@ -3,6 +3,13 @@
 Direction approved by the user on 2026-10-03. This supersedes the separate-product
 directions in PROJECT-SETUP-IN-HUB.md and SHARED-MCP-DIRECTION.md.
 
+2026-10-18 clarification: the requested end state is MCP and Project Setup as
+direct Hub pages/functions, not separately hosted app interfaces. The current
+iframe/private-backend design is packaged consolidation, not that completed
+integration. Further Linux/Flatpak packaging and publication of this design are
+held. See [the native integration decision and acceptance criteria](HUB-NATIVE-INTEGRATION.md).
+Published Windows bytes and all existing settings/runtime routes stay unchanged.
+
 2026-10-15: the Windows 0.1.14 package, current native results and publication
 status are recorded in [the release evidence](RELEASE-0.1.14.md). Windows ships
 first; Linux/Flatpak are deferred and macOS support is suspended. The dated

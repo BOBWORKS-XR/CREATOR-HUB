@@ -2,6 +2,14 @@
 
 ## Unified Product Work
 
+- User clarification 2026-10-18: unification means MCP and Project Setup are
+  first-party Hub pages/functions, not separate app documents inside iframes.
+  The current private-backend/iframe design is packaged consolidation only.
+  Hold further Linux/Flatpak packaging and publication of that design. Read
+  `docs/HUB-NATIVE-INTEGRATION.md` before resuming integration work. Preserve
+  settings, existing runtime routes, candidate evidence and published Windows
+  bytes. Do not equate a passing hosted-component test with native-page acceptance.
+
 - User decision 2026-10-15: release unified 0.1.14 for Windows first. Linux and
   Flatpak remain unpublished development work, not blockers for a Windows-only
   release. Do not ship their current experimental packages or claim their
