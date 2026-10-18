@@ -1914,6 +1914,7 @@ class FiniteSourceSequenceTests(unittest.TestCase):
     @contextlib.contextmanager
     def fixture(self, phase):
         with SourceGuidePathTests().fixture() as f:
+            f.atspi.StateType.EDITABLE = 10
             def add(role, name, parent, source_id=None, rect=(200, 240, 300, 30), contract=None):
                 node = fixtures.AxNode(43, role, name, parent=parent, states=(1, 2, 3, 8), verb="press" if role == 43 else None)
                 SourceGuidePathTests.fresh_node(node)
@@ -1925,6 +1926,7 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                     attributes.update(tag="button", **{"computed-role": "button"})
                 f.attributes[id(node)] = attributes
                 node.get_attributes = lambda node=node: dict(f.attributes[id(node)])
+                node.get_text_iface = mock.Mock(return_value=None)
                 node.get_component_iface = mock.Mock(return_value=types.SimpleNamespace(get_extents=mock.Mock(return_value=types.SimpleNamespace(
                     x=rect[0], y=rect[1], width=rect[2], height=rect[3]))))
                 return node
@@ -1946,20 +1948,28 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                     f.title = add(82, "Creator Works MCP", f.context, "builtin-title")
                     f.target = add(43, "All apps", f.context)
                 else:
-                    f.context = add(109, "Apps", f.web, "view-hub")
-                    f.entry = add(85, "", f.context, "entry-setup")
-                    f.target = add(43, p.APPS["setup"]["view"], f.entry)
+                    f.top_doc = add(94, "Creator Hub", f.web)
+                    f.context = add(109, "Apps", f.top_doc, "view-hub")
+                    f.entry = f.context
+                    f.target = add(43, p.APPS["setup"]["view"], f.context)
             else:
                 f.web.children.clear()
                 f.status = add(54, "", f.web, "hosted-status")
                 f.version = add(117, p.APPS["setup"]["version"], f.status)
                 f.setup_frame = add(39, "Creator Project Setup", f.web, "setup-host-frame", f.native_rect)
                 f.setup_doc = add(94, "Creator Project Setup", f.setup_frame)
-                f.recipe = add(85, "", f.setup_doc, "recipe-line")
-                f.recipe_text = add(117, p.RECIPE, f.recipe)
+                f.recipe = add(84, "", f.setup_doc, "recipe-line")
+                f.recipe_text = types.SimpleNamespace(name=p.RECIPE)
+                f.recipe_interface = types.SimpleNamespace(
+                    get_character_count=mock.Mock(side_effect=lambda: len(f.recipe_text.name)),
+                    get_text=mock.Mock(side_effect=lambda _start, _end: f.recipe_text.name))
+                f.recipe.get_text_iface.return_value = f.recipe_interface
                 f.target = add(43, "Check requirements again", f.setup_doc, "refresh-button")
-                f.requirements = add(85, "", f.setup_doc, "requirements")
-                add(117, "Unity Hub or Unity CLI", f.requirements)
+                f.requirements = add(84, "", f.setup_doc, "requirements")
+                f.requirement_label = add(84, "", f.requirements)
+                f.attributes[id(f.requirement_label)].update(tag="span", **{"computed-role": "generic"})
+                f.requirement_label.get_text_iface.return_value = types.SimpleNamespace(
+                    get_character_count=lambda: len("Unity Hub or Unity CLI"), get_text=lambda *_: "Unity Hub or Unity CLI")
             if hasattr(f, "status"):
                 f.version_text = types.SimpleNamespace(
                     get_character_count=mock.Mock(side_effect=lambda: len(f.version.name)),
@@ -2006,6 +2016,208 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                 else: f.version_text.get_text.side_effect = RuntimeError("unavailable")
                 with self.assertRaises(RuntimeError):
                     p.source_sequence(Path("/fixture"), "close-mcp", f.owner, f.atspi)
+                f.target.action.do_action.assert_not_called()
+
+    def test_native_39114359801_ignored_entry_wrapper_uses_exact_top_document_and_direct_apps_button(self):
+        with self.fixture("view-setup") as f:
+            result = p.source_sequence(Path("/fixture"), "view-setup", f.owner, f.atspi)
+            self.assertEqual(result["actionCount"], 1)
+            self.assertEqual(result["walks"][0]["sourceCounts"]["entry-setup"], 0)
+            self.assertEqual(len(result["walks"]), 2)
+            self.assertIn("root-top-document", result["walks"][0]["sourcePaths"])
+            self.assertIn("setup-button", result["walks"][0]["sourcePaths"])
+            f.target.action.do_action.assert_called_once_with(0)
+
+    def test_setup_navigation_missing_duplicate_foreign_hidden_or_nested_contexts_never_press(self):
+        for change in ("no-document", "two-documents", "wrong-document", "hidden-document", "outside-document", "duplicate-hub",
+                       "foreign", "wrong-role", "wrong-tag", "hidden", "nested", "two-buttons", "other-region"):
+            with self.subTest(change=change), self.fixture("view-setup") as f:
+                if change == "no-document": f.top_doc.role = 20
+                elif change == "two-documents": f.add(94, "Creator Hub", f.web)
+                elif change == "wrong-document": f.top_doc.name = "Other app"
+                elif change == "hidden-document": f.top_doc.states.remove(1)
+                elif change == "outside-document":
+                    f.top_doc.children.remove(f.context)
+                    f.web.children.append(f.context)
+                elif change == "duplicate-hub": f.add(109, "Apps", f.top_doc, "view-hub")
+                elif change == "foreign": f.target.pid = 99
+                elif change == "wrong-role": f.target.role = 44
+                elif change == "wrong-tag": f.attributes[id(f.target)]["tag"] = "a"
+                elif change == "hidden": f.target.states.remove(1)
+                elif change == "two-buttons": f.add(43, p.APPS["setup"]["view"], f.context)
+                else:
+                    f.context.children.remove(f.target)
+                    parent = f.add(84, "", f.context if change == "nested" else f.top_doc)
+                    parent.children.append(f.target)
+                    f.target.parent = parent
+                with self.assertRaises(RuntimeError):
+                    p.source_sequence(Path("/fixture"), "view-setup", f.owner, f.atspi)
+                f.target.action.do_action.assert_not_called()
+
+    def test_setup_raw_generic_84_text_without_names_or_static_children_is_source_scoped(self):
+        self.assertEqual(p.SETUP_SEQUENCE_IDS["recipe-line"][0], 84)
+        self.assertEqual(p.SETUP_SEQUENCE_IDS["requirements"][0], 84)
+        with self.fixture("requirements") as f:
+            self.assertEqual(f.recipe.name, "")
+            self.assertEqual(f.recipe.children, [])
+            def press(_):
+                self.assertTrue(any(call.args[0].name.endswith("-setup-text-interfaces.json") for call in f.save.call_args_list))
+                return True
+            f.target.action.do_action.side_effect = press
+            result = p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+            self.assertEqual(result["actionCount"], 1)
+            captures = [call.args for call in f.save.call_args_list if call.args[0].name.endswith("-setup-text-interfaces.json")]
+            self.assertEqual(len(captures), 1)
+            diagnostic = captures[0][1]
+            self.assertTrue(diagnostic["readOnly"])
+            self.assertFalse(diagnostic["authorization"])
+            self.assertEqual(diagnostic["actionCount"], 0)
+            self.assertEqual(len(diagnostic["walks"]), 2)
+            for walk in diagnostic["walks"]:
+                self.assertTrue(walk["complete"])
+                self.assertIn(p.RECIPE, [row["text"].get("value") for row in walk["nodes"]])
+                self.assertIn("Unity Hub or Unity CLI", [row["text"].get("value") for row in walk["nodes"]])
+            self.assertLessEqual(len((json.dumps(diagnostic, indent=2) + "\n").encode()), 32768)
+
+    def test_setup_unknown_missing_duplicate_or_wrong_role_context_stops_with_preinput_diagnostic(self):
+        for change in ("missing-recipe", "missing-requirements", "recipe-85", "requirements-85", "swapped-ids", "duplicate-recipe"):
+            with self.subTest(change=change), self.fixture("requirements") as f:
+                if change == "missing-recipe": f.attributes[id(f.recipe)].pop("id")
+                elif change == "missing-requirements": f.attributes[id(f.requirements)].pop("id")
+                elif change == "recipe-85": f.recipe.role = 85
+                elif change == "requirements-85": f.requirements.role = 85
+                elif change == "swapped-ids":
+                    f.attributes[id(f.recipe)]["id"], f.attributes[id(f.requirements)]["id"] = "requirements", "recipe-line"
+                else:
+                    f.add(84, "", f.setup_doc, "recipe-line")
+                with self.assertRaises(RuntimeError):
+                    p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+                if change != "duplicate-recipe":
+                    captures = [call.args[1] for call in f.save.call_args_list
+                                if call.args[0].name.endswith("-setup-text-interfaces.json")]
+                    self.assertEqual(len(captures), 1)
+                    self.assertEqual(captures[0]["actionCount"], 0)
+                    self.assertEqual(len(captures[0]["walks"]), 1)
+                    if change == "missing-requirements":
+                        self.assertIn("Unity Hub or Unity CLI", [row["text"].get("value") for row in captures[0]["walks"][0]["nodes"]])
+                f.target.action.do_action.assert_not_called()
+
+    def test_setup_text_bounds_drift_and_decoy_names_never_authorize_refresh(self):
+        for change in ("wrong-text", "oversize", "bool", "missing", "count-drift", "text-drift", "editable-drift", "password-drift", "raises"):
+            with self.subTest(change=change), self.fixture("requirements") as f:
+                f.recipe.name = p.RECIPE
+                f.add(117, p.RECIPE, f.recipe)
+                if change == "wrong-text": f.recipe_text.name = "x" * len(p.RECIPE)
+                elif change == "oversize": f.recipe_interface.get_character_count.side_effect = lambda: 2049
+                elif change == "bool": f.recipe_interface.get_character_count.side_effect = lambda: True
+                elif change == "missing": f.recipe.get_text_iface.return_value = None
+                elif change == "count-drift": f.recipe_interface.get_character_count.side_effect = [len(p.RECIPE), len(p.RECIPE) + 1]
+                elif change == "text-drift": f.recipe_interface.get_text.side_effect = [p.RECIPE, "x" * len(p.RECIPE)]
+                elif change == "editable-drift":
+                    def changed():
+                        f.recipe.states.add(f.atspi.StateType.EDITABLE)
+                        return f.recipe_interface
+                    f.recipe.get_text_iface.side_effect = changed
+                elif change == "password-drift":
+                    def changed():
+                        f.recipe.role = 40
+                        return f.recipe_interface
+                    f.recipe.get_text_iface.side_effect = changed
+                else: f.recipe_interface.get_text.side_effect = OSError("private unavailable text")
+                with self.assertRaises(RuntimeError):
+                    p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+                f.target.action.do_action.assert_not_called()
+                self.assertNotIn("private unavailable text", json.dumps([call.args[1] for call in f.save.call_args_list]))
+                if change in ("editable-drift", "password-drift"):
+                    f.recipe_interface.get_text.assert_not_called()
+
+    def test_setup_missing_context_retention_failure_preserves_original_not_diagnostic_error(self):
+        with self.fixture("requirements") as f, mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            f.attributes[id(f.requirements)].pop("id")
+            def save(file, _value):
+                if file.name.endswith("-setup-text-interfaces.json"):
+                    raise OSError("private retention error")
+            f.save.side_effect = save
+            with self.assertRaisesRegex(RuntimeError, "Exact unique source guide IDs required"):
+                p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+            self.assertIn("setupTextCaptureRefusal", stderr.getvalue())
+            self.assertNotIn("private", stderr.getvalue())
+            f.target.action.do_action.assert_not_called()
+
+    def test_setup_diagnostic_bounds_capture_and_never_authorize_unknown_large_context(self):
+        with self.fixture("requirements") as f:
+            f.attributes[id(f.requirements)].pop("id")
+            for _ in range(65):
+                node = f.add(84, "", f.setup_doc)
+                f.attributes[id(node)].update(tag="span", **{"computed-role": "generic"})
+            with self.assertRaisesRegex(RuntimeError, "Exact unique source guide IDs required"):
+                p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+            captured = next(call.args[1] for call in f.save.call_args_list if call.args[0].name.endswith("-setup-text-interfaces.json"))
+            self.assertFalse(captured["walks"][0]["complete"])
+            self.assertIn("captureRefusal", captured["walks"][0])
+            self.assertLessEqual(len((json.dumps(captured, indent=2) + "\n").encode()), 32768)
+            f.target.action.do_action.assert_not_called()
+
+    def test_setup_diagnostic_never_reads_editable_password_or_their_descendants_and_keeps_original_refusal(self):
+        with self.fixture("requirements") as f:
+            f.setup_doc.get_text_iface.side_effect = AssertionError("Ancestor of a sensitive field must not be read")
+            for role, tag, editable in ((40, "input", False), (84, "div", True)):
+                control = f.add(role, "private", f.setup_doc)
+                f.attributes[id(control)].update(tag=tag, **{"computed-role": "generic"})
+                if editable: control.states.add(f.atspi.StateType.EDITABLE)
+                text = f.add(84, "private", control)
+                f.attributes[id(text)].update(tag="div", **{"computed-role": "generic"})
+                control.get_text_iface.side_effect = text.get_text_iface.side_effect = AssertionError("Sensitive text read")
+            f.attributes[id(f.requirements)].pop("id")
+            with self.assertRaisesRegex(RuntimeError, "Exact unique source guide IDs required"):
+                p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+            control.get_text_iface.assert_not_called()
+            text.get_text_iface.assert_not_called()
+            f.setup_doc.get_text_iface.assert_not_called()
+            retained = json.dumps([call.args[1] for call in f.save.call_args_list])
+            self.assertIn("editable-or-password-subtree", retained)
+            self.assertNotIn("private", retained)
+            f.target.action.do_action.assert_not_called()
+
+    def test_setup_text_graph_change_between_complete_walks_refuses_without_refresh(self):
+        with self.fixture("requirements") as f:
+            value = f.add(84, "", f.requirements)
+            f.attributes[id(value)].update(tag="span", **{"computed-role": "generic"})
+            state = {"value": "Missing"}
+            value.get_text_iface.return_value = types.SimpleNamespace(
+                get_character_count=lambda: len(state["value"]), get_text=lambda *_: state["value"])
+            def changed(_):
+                state["value"] = "Present"
+                return "press"
+            f.target.action.get_action_name = changed
+            with self.assertRaisesRegex(RuntimeError, "Fresh finite source graph/control changed"):
+                p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+            f.target.action.do_action.assert_not_called()
+
+    def test_setup_known_checking_read_waits_before_two_ready_text_walks_but_visible_alert_refuses(self):
+        for alert in (False, True):
+            with self.subTest(alert=alert), self.fixture("setup-checked") as f:
+                f.target.states.remove(2)
+                f.recipe_interface.get_text.side_effect = OSError("transient while checking")
+                if alert: f.add(2, "Actual source alert", f.setup_doc)
+                original, calls = p.fresh_source_inventory, []
+                def inventory(*args, **kwargs):
+                    calls.append(True)
+                    if len(calls) == 2:
+                        f.target.states.add(2)
+                        f.recipe_interface.get_text.side_effect = lambda *_: p.RECIPE
+                    return original(*args, **kwargs)
+                with mock.patch.object(p, "fresh_source_inventory", side_effect=inventory), mock.patch.object(p.time, "sleep") as sleep:
+                    if alert:
+                        with self.assertRaisesRegex(RuntimeError, "Visible Setup/Root source alert"):
+                            p.source_sequence(Path("/fixture"), "setup-checked", f.owner, f.atspi)
+                        sleep.assert_not_called()
+                    else:
+                        result = p.source_sequence(Path("/fixture"), "setup-checked", f.owner, f.atspi)
+                        self.assertEqual(result["readinessObservations"], 1)
+                        self.assertEqual(len(result["walks"]), 2)
+                        self.assertEqual(result["actionCount"], 0)
+                        self.assertTrue(all(walk["setupTextDiagnostic"]["complete"] for walk in result["walks"]))
                 f.target.action.do_action.assert_not_called()
 
     def test_post_save_and_navigation_contexts_refuse_visible_guide_or_iframe_and_wrong_ids(self):
@@ -2143,7 +2355,12 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                 self.assertEqual(result["actionCount"], 0)
         with self.fixture("setup-checked") as f:
             f.target.states.remove(2)
-            with mock.patch.object(p.time, "monotonic", side_effect=[0, 16]), self.assertRaisesRegex(RuntimeError, "read-only readiness deadline"):
+            original_diagnostic = p.setup_text_observation
+            def diagnostic(*args):
+                with mock.patch.object(p.time, "monotonic", return_value=0):
+                    return original_diagnostic(*args)
+            with mock.patch.object(p, "setup_text_observation", side_effect=diagnostic), \
+                    mock.patch.object(p.time, "monotonic", side_effect=[0, 16]), self.assertRaisesRegex(RuntimeError, "read-only readiness deadline"):
                 p.source_sequence(Path("/fixture"), "setup-checked", f.owner, f.atspi)
             f.target.action.do_action.assert_not_called()
         with self.fixture("requirements") as f, mock.patch.object(p.time, "sleep") as sleep:

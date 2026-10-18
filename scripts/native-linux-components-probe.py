@@ -624,14 +624,14 @@ ROOT_SEQUENCE_IDS = {
     "view-builtin": (109, "section", "region", None),
     "builtin-title": (82, "h2", "heading", "Creator Works MCP"),
     "view-hub": (109, "section", "region", "Apps"),
-    "entry-setup": (85, "div", "generic", None),
+    "entry-setup": (84, "div", "generic", None),
 }
 SETUP_SEQUENCE_IDS = {
     "setup-host-frame": (39, "iframe", "group", "Creator Project Setup"),
-    "recipe-line": (85, "div", "generic", None),
+    "recipe-line": (84, "div", "generic", None),
     "refresh-button": (43, "button", "button", "Check requirements again"),
     "hosted-status": MCP_SAVED_IDS["hosted-status"],
-    "requirements": (85, "div", "generic", None),
+    "requirements": (84, "div", "generic", None),
 }
 SOURCE_SEQUENCE = ("mcp-ready", "save-guide", "mcp-saved", "close-mcp", "mcp-closed", "return-apps",
                    "view-setup", "setup-ready", "requirements", "setup-checked")
@@ -993,18 +993,110 @@ def source_guide(root, action, owner, atspi):
             print(json.dumps({"sourceGuideCaptureRefusal": type(error).__name__[:64]}), file=sys.stderr)
 
 
-def fixed_subtree_values(nodes, paths, reference, atspi):
-    values = []
-    selected = [node for ref, node in nodes.items() if ref == reference or reference in paths[ref]]
-    require(0 < len(selected) <= 64, "Fixed source text subtree exceeds bound")
-    for node in selected:
-        if not node.get_state_set().contains(atspi.StateType.SHOWING):
-            continue
-        name = node.get_name()
-        require(type(name) is str and len(name) <= 2048, "Source text name exceeds bound")
-        values.extend(value for value in (name, node_text(node, atspi)) if value)
-    require(sum(len(value.encode()) for value in values) <= 16384, "Fixed source text aggregate exceeds bound")
-    return values
+def setup_text_observation(rows, nodes, paths, iframe, document, owner, atspi):
+    """Read only the already bound Setup document; never discover a new target.
+
+    WebKit 2.50.4 AccessibilityObjectAtspi.cpp::atspiRole/interfacesForObject:
+    Generic -> Section=84 implements Text. Rendered generic text
+    need not have an Accessible.Name or a separately exposed StaticText child.
+    Missing source contexts remain fatal even if this diagnostic finds text.
+    """
+    result = {"readOnly": True, "authorization": False, "actionCount": 0, "complete": False,
+              "iframe": list(iframe), "document": list(document), "nodes": []}
+    values, blocked = {}, set()
+    deadline = time.monotonic() + 5
+    try:
+        scoped = [row for row in rows if tuple(row["reference"]) in (iframe, document)
+                  or document in paths[tuple(row["reference"])]]
+        require(len(scoped) <= 256 and hasattr(atspi.StateType, "EDITABLE"), "Setup diagnostic safety/bound unavailable")
+        metadata = []
+        for row in scoped:
+            require(time.monotonic() < deadline, "Setup read-only diagnostic deadline")
+            ref = tuple(row["reference"])
+            node = nodes[ref]
+            owner.node(node)
+            require(node.get_process_id() == owner.renderer["pid"], "Setup diagnostic escaped bound renderer")
+            attrs, states = node.get_attributes(), node.get_state_set()
+            require(type(attrs) is dict and attrs.get("toolkit") == "WebKitGTK", "Setup diagnostic producer differs")
+            unsafe = states.contains(atspi.StateType.EDITABLE) or row["role"] in (40, 78) \
+                or attrs.get("tag") in ("input", "textarea")
+            if unsafe:
+                blocked.add(ref)
+            metadata.append((row, ref, node, attrs, states, unsafe))
+        for row, ref, node, attrs, states, unsafe in metadata:
+            require(time.monotonic() < deadline, "Setup read-only diagnostic deadline")
+            known_ids = (*SETUP_SEQUENCE_IDS, "requirements-heading", "new-project-pane", "setup-workspace", "project-details")
+            source_id = attrs.get("id") if attrs.get("id") in known_ids else None
+            text_shape = (row["role"], attrs.get("tag"), attrs.get("computed-role")) in (
+                (84, "div", "generic"), (84, "span", "generic"), (72, "p", "paragraph"),
+                (82, "h2", "heading"), (29, "label", None))
+            if ref not in (iframe, document) and source_id is None and not text_shape \
+                    and not (row["role"] == 109 and attrs.get("tag") == "section"):
+                continue
+            require(len(result["nodes"]) < 64, "Setup diagnostic relevant-node bound")
+            record = {"reference": list(ref), "parent": row["parent"], "role": row["role"],
+                      "id": source_id, "tag": attrs.get("tag") if attrs.get("tag") in
+                      ("iframe", "div", "span", "p", "h2", "label", "button", "section") else None,
+                      "computedRole": attrs.get("computed-role") if attrs.get("computed-role") in
+                      ("group", "generic", "paragraph", "heading", "button", "region", "tabpanel") else None,
+                      "showing": states.contains(atspi.StateType.SHOWING)}
+            result["nodes"].append(record)
+            if unsafe or any(parent in blocked for parent in paths[ref]) or any(ref in paths[item] for item in blocked):
+                record["text"] = {"skipped": "editable-or-password-subtree"}
+                continue
+            detail = record["text"] = {}
+            try:
+                node.clear_cache()
+                interface = node.get_text_iface()
+                detail["interfacePresent"] = interface is not None
+                if interface is not None and text_shape and record["showing"]:
+                    count = interface.get_character_count()
+                    detail["characterCount"] = count if type(count) is int and 0 <= count <= 2048 else None
+                    require(type(count) is int and 0 <= count <= 2048, "Setup Text character bound")
+                    require(not node.get_state_set().contains(atspi.StateType.EDITABLE)
+                            and node.get_role() == row["role"] and node.get_attributes() == attrs, "Setup Text safety changed")
+                    text = interface.get_text(0, count)
+                    require(type(text) is str and len(text) == count and len(text.encode()) <= 8192
+                            and interface.get_character_count() == count
+                            and not node.get_state_set().contains(atspi.StateType.EDITABLE)
+                            and node.get_role() == row["role"] and node.get_attributes() == attrs
+                            and interface.get_text(0, count) == text
+                            and interface.get_character_count() == count,
+                            "Setup Text changed or exceeded byte bound")
+                    detail.update(value=text, stable=True)
+                    values[ref] = text
+                    # Two full ready walks also compare the rendered text, not names.
+                    row["setupTextSha256"] = hashlib.sha256(text.encode()).hexdigest()
+                require(sum(len(value.encode()) for value in values.values()) <= 8192, "Setup Text aggregate bound")
+            except Exception as error:
+                detail["errorType"] = type(error).__name__[:64]
+        owner.recheck(full=True)
+        result["complete"] = not any("errorType" in row["text"] for row in result["nodes"])
+    except Exception as error:
+        result["captureRefusal"] = {"errorType": type(error).__name__[:64]}
+    while len((json.dumps(result, indent=2) + "\n").encode()) > 16300:
+        result["complete"] = False
+        result["captureRefusal"] = {"errorType": "OutputBound"}
+        result["nodes"].pop()
+    return result, values
+
+
+def setup_subtree_values(values, paths, reference):
+    # Only caller-verified source IDs may select these diagnostic Text reads.
+    return [value for ref, value in values.items() if ref == reference or reference in paths[ref]]
+
+
+def retain_setup_text(root, action, walks):
+    result = {"readOnly": True, "authorization": False, "actionCount": 0,
+              "timing": "before-finite-Setup-input", "walks": walks}
+    while len((json.dumps(result, indent=2) + "\n").encode()) > 32768:
+        populated = [walk for walk in walks if walk["nodes"]]
+        require(populated, "Setup diagnostic metadata exceeds bound")
+        walk = max(populated, key=lambda value: len(value["nodes"]))
+        walk["complete"] = False
+        walk["captureRefusal"] = {"errorType": "OutputBound"}
+        walk["nodes"].pop()
+    B.save_json(root / (action + "-setup-text-interfaces.json"), result)
 
 
 def source_button(nodes, paths, context, name, owner, atspi):
@@ -1021,7 +1113,7 @@ def source_button(nodes, paths, context, name, owner, atspi):
     return ref
 
 
-def source_sequence_walk(owner, atspi, action, observation):
+def source_sequence_walk(owner, atspi, action, observation, setup_diagnostics):
     window = owner.helper.select_window(owner.request, atspi)
     if action == "close-mcp":
         rows, nodes, refs = fresh_guide_walk(window, owner, atspi, observation, saved=True)
@@ -1040,28 +1132,45 @@ def source_sequence_walk(owner, atspi, action, observation):
             require(context in paths[heading], "Closed MCP heading escaped built-in context")
             target = source_button(nodes, paths, context, "All apps", owner, atspi)
             return rows, nodes, (frame, heading, target), target
-        hub, entry = source_context(rows, ids, ("view-hub", "entry-setup"))
-        require(hub in paths[entry], "Setup app entry escaped Apps context")
-        target = source_button(nodes, paths, entry, APPS["setup"]["view"], owner, atspi)
+        hub, = source_context(rows, ids, ("view-hub",))
+        documents = [tuple(row["reference"]) for row in rows if row["role"] == 94]
+        require(len(documents) == 1, "Exact one Root top document required for Setup navigation")
+        document, = documents
+        top = nodes[document]
+        require(top.get_process_id() == owner.renderer["pid"] and top.get_name() == "Creator Hub"
+                and top.get_attributes().get("toolkit") == "WebKitGTK" and document in paths[hub]
+                and top.get_state_set().contains(atspi.StateType.SHOWING)
+                and not any(top.get_state_set().contains(getattr(atspi.StateType, state)) for state in ("DEFUNCT", "BUSY")),
+                "Apps region escaped exact Root top document")
+        target = source_button(nodes, paths, hub, APPS["setup"]["view"], owner, atspi)
+        # Native 39114359801: ignored app-list/entry divs, direct Apps AX child.
+        require(paths[target][-1] == hub, "Setup button is not the captured direct Apps child")
+        observation["sourcePaths"]["root-top-document"] = [list(ref) for ref in (*paths[document], document)]
+        observation["sourcePaths"]["setup-button"] = [list(ref) for ref in (*paths[target], target)]
         return rows, nodes, (frame, target), target
     require(action in ("setup-ready", "requirements", "setup-checked"), "Unknown finite source operation")
     setup_read = action in ("setup-ready", "setup-checked")
-    iframe, recipe, refresh, status, requirements = source_context(rows, ids, tuple(SETUP_SEQUENCE_IDS), setup_read=setup_read)
+    iframe, = source_context(rows, ids, ("setup-host-frame",))
     document = source_document(rows, nodes, paths, iframe, owner, observation)
+    diagnostic, values = setup_text_observation(rows, nodes, paths, iframe, document, owner, atspi)
+    setup_diagnostics.append(diagnostic)
+    observation["setupTextDiagnostic"] = {key: diagnostic[key] for key in ("readOnly", "actionCount", "complete")}
+    iframe, recipe, refresh, status, requirements = source_context(rows, ids, tuple(SETUP_SEQUENCE_IDS), setup_read=setup_read)
     require(all(document in paths[ref] for ref in (recipe, refresh, requirements)) and iframe not in paths[status],
             "Setup source controls escaped exact document")
     source_version(nodes, paths, status, APPS["setup"]["version"], atspi, observation, setup_read=setup_read)
-    recipe_values = fixed_subtree_values(nodes, paths, recipe, atspi)
-    if setup_read and "Loading approved recipe\u2026" in recipe_values:
-        raise SourceNotReady("Bound Setup recipe is still loading")
-    require(RECIPE in recipe_values, "Exact pinned Setup recipe is not ready")
-    require("Unity Hub or Unity CLI" in fixed_subtree_values(nodes, paths, requirements, atspi), "Actual Setup requirements missing")
     require(not any(row["role"] == 2 and nodes[tuple(row["reference"])].get_state_set().contains(atspi.StateType.SHOWING)
                     for row in rows), "Visible Setup/Root source alert")
     if setup_read:
         states = nodes[refresh].get_state_set()
         if not (states.contains(atspi.StateType.ENABLED) and states.contains(atspi.StateType.SENSITIVE)):
             raise SourceNotReady("Bound Setup refresh is still checking")
+    require(diagnostic["complete"], "Bound Setup Text diagnostic incomplete; no input")
+    recipe_values = setup_subtree_values(values, paths, recipe)
+    if setup_read and "Loading approved recipe\u2026" in recipe_values:
+        raise SourceNotReady("Bound Setup recipe is still loading")
+    require(RECIPE in recipe_values, "Exact pinned Setup recipe is not ready")
+    require("Unity Hub or Unity CLI" in setup_subtree_values(values, paths, requirements), "Actual Setup requirements missing")
     return rows, nodes, (frame, iframe, recipe, refresh), refresh
 
 
@@ -1070,14 +1179,17 @@ def source_sequence(root, action, owner, atspi):
             and B.SELECTED_CANDIDATE == B.CURRENT_CANDIDATE, "Fixed current source sequence only")
     report = {"action": action, "readOnly": True, "authorization": False, "actionCount": 0,
               "nativeAcceptance": False, "walks": []}
+    setup_diagnostics = []
+    setup_diagnostic_saved = False
     try:
         report["runtime"] = guide_runtime_provenance(root, action, owner)
         deadline = time.monotonic() + 15
         while True:
             before = {}
             report["walks"] = [before]
+            setup_diagnostics.clear()
             try:
-                rows, nodes, refs, target = source_sequence_walk(owner, atspi, action, before)
+                rows, nodes, refs, target = source_sequence_walk(owner, atspi, action, before, setup_diagnostics)
                 break
             except SourceNotReady:
                 require(action in ("setup-ready", "setup-checked") and time.monotonic() < deadline,
@@ -1093,13 +1205,17 @@ def source_sequence(root, action, owner, atspi):
                     "Exact single source press required")
         after = {}
         report["walks"].append(after)
-        current, final_nodes, final_refs, final_target = source_sequence_walk(owner, atspi, action, after)
+        current, final_nodes, final_refs, final_target = source_sequence_walk(owner, atspi, action, after, setup_diagnostics)
         require(rows == current and refs == final_refs and target == final_target, "Fresh finite source graph/control changed")
         require(source_rectangles(owner, atspi, final_nodes, final_refs) == geometry, "Finite source geometry changed")
         require(guide_runtime_state(owner) == report["runtime"]["mappedFiles"], "Finite source runtime changed")
         report.update(freshWalksMatched=True, geometry=geometry)
         require(len((json.dumps(report, indent=2) + "\n").encode()) <= 32768, "Finite source report exceeds bound")
         if interface is not None:
+            if setup_diagnostics:
+                retain_setup_text(root, action, setup_diagnostics)
+                setup_diagnostic_saved = True
+                require(all(walk["complete"] for walk in setup_diagnostics), "Bound Setup diagnostic truncated; no input")
             owner.helper.ready(final_nodes[final_target], atspi)
             owner.recheck(full=True)
             try:
@@ -1111,6 +1227,11 @@ def source_sequence(root, action, owner, atspi):
             report.update(actionCount=1, readOnly=False)
         return report
     finally:
+        if setup_diagnostics and not setup_diagnostic_saved:
+            try:
+                retain_setup_text(root, action, setup_diagnostics)
+            except Exception as error:
+                print(json.dumps({"setupTextCaptureRefusal": type(error).__name__[:64]}), file=sys.stderr)
         try:
             require(len((json.dumps(report, indent=2) + "\n").encode()) <= 32768, "Finite source capture exceeds bound")
             B.save_json(root / (action + "-source-sequence.json"), report)
