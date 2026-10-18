@@ -8,7 +8,7 @@ const { yaml } = require('playwright-core/lib/utilsBundle');
 const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
 const workflows = ['native-linux-components-014.yml', 'linux-installed-candidate-014.yml',
   'linux-outer-update-fixture-014.yml', 'flatpak-installed-host-launch-014.yml',
-  'linux-integrated-features.yml'];
+  'linux-integrated-features.yml', 'native-linux-integrated-pages.yml'];
 for (const name of workflows) test(`Linux preflight: ${name} YAML, Bash and embedded JS syntax`, () => {
   const body = fs.readFileSync(path.join(__dirname, '../.github/workflows', name), 'utf8');
   const workflow = yaml.parse(body, { uniqueKeys: true });
@@ -55,6 +55,26 @@ test('direct Hub libraries compile natively only after real payload preparation,
   assert.match(commands, /modules\/mcp\/launcher\/src-tauri\/Cargo.toml --lib --tests --features integrated-service/);
   assert.match(commands, /cargo test --locked --manifest-path src-tauri\/Cargo.toml --features integrated-features/);
   assert.doesNotMatch(commands, /--ignored|tauri build|gh release|--publish|signing|auth\.json|--privileged/);
+  assert.equal(job.steps.find(step => step.uses === 'actions/checkout@v6').with['persist-credentials'], false);
+});
+
+test('installed direct-page checks use a pinned successful package and read-only API permissions, not a product rebuild', () => {
+  const body = fs.readFileSync(path.join(__dirname, '../.github/workflows/native-linux-integrated-pages.yml'), 'utf8');
+  const workflow = yaml.parse(body, { uniqueKeys: true });
+  assert.deepEqual(workflow.permissions, { contents: 'read', actions: 'read' });
+  assert.deepEqual(workflow.on.push.branches, ['validation/linux-integrated-pages']);
+  const job = workflow.jobs.pages;
+  for (const guard of ["github.repository_id == '1364807512'", "github.ref == 'refs/heads/validation/linux-integrated-pages'",
+    "github.event_name == 'workflow_dispatch'", "github.event_name == 'push'"]) assert.ok(job.if.includes(guard));
+  assert.equal(job.env.CREATOR_LINUX_INTEGRATED_PAGES, '1');
+  const script = job.steps.find(step => step.uses === 'actions/github-script@v8').with.script;
+  for (const pin of ['39130359610', '12137857868', 'bbd0a5d58562a3d8af0c84e5360eef9d26803eef',
+    'c76c138b3297e347e834d43c1ac1a82eb883b41663df08ea44f008c5846e03e5',
+    "assert.equal(run.conclusion,'success')", 'crypto.createHash(\'sha256\')']) assert.ok(script.includes(pin));
+  const commands = job.steps.filter(step => step.run).map(step => step.run).join('\n');
+  assert.ok(commands.indexOf('linux-retirement-package-verify.py') < commands.indexOf('sudo dpkg --install'));
+  assert.match(commands, /cargo install tauri-driver --version 2\.1\.0 --locked/);
+  assert.doesNotMatch(commands, /cargo build|tauri build|signer sign|gh release|--privileged|auth\.json|NODE_TLS_REJECT_UNAUTHORIZED|--no-sandbox/);
   assert.equal(job.steps.find(step => step.uses === 'actions/checkout@v6').with['persist-credentials'], false);
 });
 test('39106292475 runner-only polkit hardening is fixed, guarded and never relaxes app ownership checks', () => {

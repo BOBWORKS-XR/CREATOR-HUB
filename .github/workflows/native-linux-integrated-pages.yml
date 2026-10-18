@@ -1,0 +1,178 @@
+name: Installed Linux direct Hub pages (not release acceptance)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/linux-integrated-pages]
+    paths:
+      - .github/workflows/native-linux-integrated-pages.yml
+      - scripts/native-linux-integrated-pages.py
+      - scripts/native-linux-integrated-pages.test.py
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  pages:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-integrated-pages' &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'push')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      CREATOR_LINUX_INTEGRATED_PAGES: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Test the finite driver without opening or installing any app
+        run: python3 -B scripts/native-linux-integrated-pages.test.py
+      - name: Bind the successful producer and original immutable ZIP before decoding
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            const repo=context.repo,source='bbd0a5d58562a3d8af0c84e5360eef9d26803eef',runId=39130359610,id=12137857868;
+            assert.equal(`${repo.owner}/${repo.repo}`,'BOBWORKS-XR/CREATOR-HUB');
+            assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
+            assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted');assert.equal(process.env.RUNNER_OS,'Linux');
+            const {data:run}=await github.rest.actions.getWorkflowRun({...repo,run_id:runId});
+            assert.equal(run.head_sha,source);assert.equal(run.run_attempt,1);assert.equal(run.conclusion,'success');
+            assert.equal(run.status,'completed');assert.equal(run.event,'workflow_dispatch');
+            assert.equal(run.path,'.github/workflows/unix-managed-assembly.yml');
+            assert.equal(run.head_branch,'validation/linux-integrated-candidate-014');assert.equal(run.repository.id,1364807512);
+            const {data:job}=await github.rest.actions.getJobForWorkflowRun({...repo,job_id:117684180444});
+            assert.equal(job.run_id,runId);assert.equal(job.conclusion,'success');assert.ok(job.name.startsWith('assembly (linux,'));
+            const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:id});
+            assert.equal(artifact.expired,false);assert.equal(artifact.name,'signed-unix-hub-linux-39130359610-1');
+            assert.equal(artifact.workflow_run.id,runId);assert.equal(artifact.workflow_run.head_sha,source);
+            assert.equal(artifact.workflow_run.repository_id,1364807512);assert.equal(artifact.workflow_run.head_repository_id,1364807512);
+            assert.equal(artifact.size_in_bytes,182723307);
+            const digest='c76c138b3297e347e834d43c1ac1a82eb883b41663df08ea44f008c5846e03e5';
+            assert.equal(artifact.digest,`sha256:${digest}`);
+            const {data}=await github.rest.actions.downloadArtifact({...repo,artifact_id:id,archive_format:'zip'});
+            assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer);
+            const bytes=Buffer.from(data);assert.equal(bytes.length,182723307);
+            assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),digest);
+            const temp=fs.realpathSync(process.env.RUNNER_TEMP);
+            fs.writeFileSync(path.join(temp,'integrated-pages-input.zip'),bytes,{flag:'wx',mode:0o600});
+            fs.writeFileSync(path.join(temp,'integrated-pages-producer.json'),JSON.stringify({sourceCommit:source,runId,artifactId:id,
+              artifactSha256:digest,packageSha256:'a4d2db459966f475a982cbe72591f32222e9c7050a1a7f4c870e1c6634c0f8b3',
+              installedHubSha256:'97717cf5b454315598ac3addaf59d98b7a27c2fdff710563412cfa6b8ec3e0ea',releaseReady:false},null,2),{flag:'wx',mode:0o600});
+      - name: Stage only the exact DEB and real server, with no ZIP path extraction
+        run: |
+          python3 -B - <<'PY'
+          import hashlib, os, stat, zipfile
+          from pathlib import Path, PurePosixPath
+          temp=Path(os.environ['RUNNER_TEMP']).resolve()
+          target=temp/'integrated-pages-input'
+          target.mkdir(mode=0o700)
+          selected={
+            'native-packages/Creator Hub_0.1.14_amd64.deb': ('native.deb',63874886,'a4d2db459966f475a982cbe72591f32222e9c7050a1a7f4c870e1c6634c0f8b3'),
+            'modules/mcp/server/creator-works-mcp.mjs': ('creator-works-mcp.mjs',1621513,'62d410eba4d81646a35ee274b5904a17287026bdc4d765426d6cf3b07d04141a'),
+          }
+          with zipfile.ZipFile(temp/'integrated-pages-input.zip') as archive:
+              entries=archive.infolist()
+              assert 0<len(entries)<=64 and sum(e.file_size for e in entries)<=768*1024*1024
+              names=set()
+              for entry in entries:
+                  name=entry.filename
+                  assert name not in names and '\\' not in name and ':' not in name
+                  assert not name.startswith('/') and all(p not in ('','..','.') for p in name.rstrip('/').split('/'))
+                  assert stat.S_IFMT(entry.external_attr>>16) in (0,stat.S_IFREG,stat.S_IFDIR)
+                  assert 0<=entry.file_size<=256*1024*1024 and not entry.flag_bits&1
+                  names.add(name)
+              assert set(selected)<=names
+              for name,(destination,size,digest) in selected.items():
+                  entry=archive.getinfo(name)
+                  assert not entry.is_dir() and entry.file_size==size
+                  raw=archive.read(entry)
+                  assert len(raw)==size and hashlib.sha256(raw).hexdigest()==digest
+                  file=target/destination
+                  with file.open('xb') as stream:
+                      os.chmod(file,0o600)
+                      stream.write(raw)
+          PY
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Provision only native test dependencies on this disposable runner
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libayatana-appindicator3-1 \
+            libxdo3 libxres1 librsvg2-2 python3-gi gir1.2-gtk-3.0 gir1.2-gdkpixbuf-2.0 \
+            webkit2gtk-driver dbus-x11 xvfb xauth openbox fonts-dejavu-core policykit-1
+      - name: Verify package controls, helper, policy and service before native installation
+        run: |
+          python3 -B scripts/linux-retirement-package-verify.py "$RUNNER_TEMP/integrated-pages-input/native.deb" \
+            8b9e937f3b0c2e9336732b0c92f6a6bf33b8f25f693f52c9a27a34f1585d232c \
+            5eb715286ff8d8cda8e612f8dc9d28d396068b2cdd470a5f3d92d7355e3e37c9 0.1.14 \
+            --profile integrated-candidate
+      - name: Secure only the known disposable runner policy ancestry
+        run: |
+          python3 -B - <<'PY'
+          import os,stat,subprocess
+          from pathlib import Path
+          assert os.environ['GITHUB_REF']=='refs/heads/validation/linux-integrated-pages'
+          assert os.environ['RUNNER_ENVIRONMENT']=='github-hosted' and os.environ['GITHUB_REPOSITORY_ID']=='1364807512'
+          for path in map(Path,('/','/usr')):
+              before=path.lstat()
+              assert path.resolve()==path and stat.S_ISDIR(before.st_mode) and before.st_uid==before.st_gid==0 and not before.st_mode&0o7022
+          paths=list(map(Path,('/usr/share','/usr/share/polkit-1','/usr/share/polkit-1/actions')))
+          before={path:path.lstat() for path in paths}
+          for path,value in before.items():
+              assert path.resolve()==path and stat.S_ISDIR(value.st_mode) and value.st_uid==value.st_gid==0
+              assert stat.S_IMODE(value.st_mode) in (0o755,0o777)
+          for path,value in before.items():
+              if stat.S_IMODE(value.st_mode)==0o777:
+                  subprocess.run(['/usr/bin/sudo','-n','/usr/bin/chmod','0755',str(path)],check=True)
+              after=path.lstat()
+              assert (after.st_dev,after.st_ino,after.st_uid,after.st_gid)==(value.st_dev,value.st_ino,0,0)
+              assert stat.S_IMODE(after.st_mode)==0o755
+          PY
+      - name: Install the verified package only on the disposable runner
+        run: sudo dpkg --install "$RUNNER_TEMP/integrated-pages-input/native.deb"
+      - name: Build the pinned test driver, not product code
+        run: cargo install tauri-driver --version 2.1.0 --locked --root "$RUNNER_TEMP/integrated-driver"
+      - name: Bind driver bytes and installed ELF for the private native session
+        run: |
+          python3 -B - <<'PY'
+          import hashlib,json,os,stat
+          from pathlib import Path
+          temp=Path(os.environ['RUNNER_TEMP']).resolve()
+          def pin(path,mode,uid):
+              value=path.lstat()
+              assert path.resolve()==path and stat.S_ISREG(value.st_mode) and stat.S_IMODE(value.st_mode)==mode and value.st_uid==uid
+              raw=path.read_bytes()
+              return {'path':str(path),'size':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
+          package=pin(temp/'integrated-pages-input/native.deb',0o600,os.getuid())
+          package['version']='0.1.14'
+          hub=pin(Path('/usr/bin/creator-hub'),0o755,0)
+          assert hub['size']==27368608 and hub['sha256']=='97717cf5b454315598ac3addaf59d98b7a27c2fdff710563412cfa6b8ec3e0ea'
+          del hub['path']
+          binding={'schemaVersion':1,'sourceCommit':'bbd0a5d58562a3d8af0c84e5360eef9d26803eef','package':package,'hub':hub,
+                   'driver':pin(temp/'integrated-driver/bin/tauri-driver',0o755,os.getuid()),
+                   'server':pin(temp/'integrated-pages-input/creator-works-mcp.mjs',0o600,os.getuid())}
+          file=temp/'linux-integrated-pages-input.json'
+          with file.open('x') as stream:
+              os.chmod(file,0o600)
+              json.dump(binding,stream)
+          PY
+      - name: Exercise real native pages, settings writes and normal owned close
+        run: /usr/bin/python3 -B scripts/native-linux-integrated-pages.py "$RUNNER_TEMP/linux-integrated-pages-input.json"
+      - name: Retain only the owned fixture reports and window screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-integrated-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/integrated-pages-producer.json
+            ${{ runner.temp }}/linux-integrated-pages/report.json
+            ${{ runner.temp }}/linux-integrated-pages/*.png
+            ${{ runner.temp }}/linux-integrated-pages/physical-*/*.png
+            ${{ runner.temp }}/linux-integrated-pages/*.stdout
+            ${{ runner.temp }}/linux-integrated-pages/*.stderr
+            ${{ runner.temp }}/linux-integrated-pages/fixture-binding.json
