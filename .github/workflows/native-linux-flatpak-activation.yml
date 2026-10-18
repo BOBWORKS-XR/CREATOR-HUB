@@ -113,14 +113,16 @@ jobs:
           assert os.environ['RUNNER_ENVIRONMENT']=='github-hosted' and os.environ['GITHUB_REPOSITORY_ID']=='1364807512'
           for text in ('/','/usr','/usr/share','/usr/share/dbus-1','/usr/share/dbus-1/services'):
               path=Path(text); before=path.lstat()
-              assert path.resolve()==path and stat.S_ISDIR(before.st_mode) and before.st_uid==before.st_gid==0
-              assert stat.S_IMODE(before.st_mode) in (0o755,0o777)
+              print('service-ancestor-before',text,before.st_uid,before.st_gid,oct(stat.S_IMODE(before.st_mode)),flush=True)
+              assert path.resolve()==path and stat.S_ISDIR(before.st_mode) and before.st_uid==before.st_gid==0, text
+              assert stat.S_IMODE(before.st_mode) in (0o755,0o777), text
               if stat.S_IMODE(before.st_mode)==0o777:
-                  assert text=='/usr/share'
+                  assert text in ('/usr/share','/usr/share/dbus-1','/usr/share/dbus-1/services'), text
                   subprocess.run(['/usr/bin/sudo','-n','/usr/bin/chmod','0755',text],check=True)
               after=path.lstat()
-              assert (after.st_dev,after.st_ino,after.st_uid,after.st_gid)==(before.st_dev,before.st_ino,0,0)
-              assert stat.S_IMODE(after.st_mode)==0o755
+              assert (after.st_dev,after.st_ino,after.st_uid,after.st_gid)==(before.st_dev,before.st_ino,0,0), text
+              assert stat.S_IMODE(after.st_mode)==0o755, text
+              print('service-ancestor-after',text,after.st_uid,after.st_gid,oct(stat.S_IMODE(after.st_mode)),flush=True)
           PY
       - name: Install existing candidate on this disposable DEB host only
         run: sudo dpkg --install "$RUNNER_TEMP/flatpak-activation/native.deb"

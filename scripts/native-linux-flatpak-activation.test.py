@@ -6,8 +6,10 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -180,6 +182,53 @@ class ActivationTests(unittest.TestCase):
         self.assertLess(source.index('close_root(warm,'), source.index('d.call("DELETE", "")'))
         self.assertIn('"rootExitCode": None', source)
         self.assertTrue(all(value is False for value in M.GATES.values()))
+
+    def test_ci_service_setup_only_tightens_exact_root_owned_ancestors(self):
+        workflow = (HERE.parent / ".github/workflows/native-linux-flatpak-activation.yml").read_text()
+        start = workflow.index("          import os,stat,subprocess\n")
+        block = workflow[start:workflow.index("          PY\n", start)]
+        tree = ast.parse("\n".join(line[10:] for line in block.splitlines()))
+        tree.body = [node for node in tree.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
+        program = compile(tree, "exact-ci-service-setup", "exec")
+        paths = ('/', '/usr', '/usr/share', '/usr/share/dbus-1', '/usr/share/dbus-1/services')
+
+        def run(changed=None, replace_inode=False):
+            records = {name: SimpleNamespace(st_uid=0, st_gid=0, st_dev=1, st_ino=i,
+                st_mode=stat.S_IFDIR | (0o755 if i < 2 else 0o777)) for i, name in enumerate(paths)}
+            if changed:
+                name, key, value = changed
+                setattr(records[name], key, value)
+            calls = []
+
+            class FakePath:
+                def __init__(self, text):
+                    self.text = text
+                def resolve(self):
+                    return self
+                def lstat(self):
+                    return copy.copy(records[self.text])
+
+            def chmod(args, check):
+                self.assertTrue(check)
+                self.assertEqual(args[:4], ['/usr/bin/sudo', '-n', '/usr/bin/chmod', '0755'])
+                self.assertIn(args[4], paths[2:])
+                calls.append(args[4])
+                records[args[4]].st_mode = stat.S_IFDIR | 0o755
+                if replace_inode:
+                    records[args[4]].st_ino += 1
+
+            exec(program, {'os': SimpleNamespace(environ=ENV), 'stat': stat, 'Path': FakePath,
+                           'subprocess': SimpleNamespace(run=chmod), 'print': lambda *a, **kw: None})
+            return calls
+
+        self.assertEqual(run(), list(paths[2:]))
+        for changed in (('/', 'st_mode', stat.S_IFDIR | 0o777), ('/usr/share', 'st_uid', 1000),
+                        ('/usr/share/dbus-1', 'st_gid', 1000), ('/usr/share/dbus-1/services', 'st_mode', stat.S_IFDIR | 0o775),
+                        ('/usr/share/dbus-1/services', 'st_mode', stat.S_IFLNK | 0o777)):
+            with self.subTest(changed=changed), self.assertRaises(AssertionError):
+                run(changed)
+        with self.assertRaises(AssertionError):
+            run(replace_inode=True)
 
     def test_python310_syntax(self):
         ast.parse((HERE / "native-linux-flatpak-activation.py").read_text(), feature_version=(3, 10))
