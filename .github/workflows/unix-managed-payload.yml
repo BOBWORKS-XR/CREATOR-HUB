@@ -58,6 +58,8 @@ jobs:
           cargo tree --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target x86_64-unknown-linux-gnu -e features -i rfd
       - name: Test and build the shared bounded transfer consumer
         run: |
+          rustc --test --edition=2021 modules/mcp/launcher/src-tauri/build_payload_inputs.rs -o "$RUNNER_TEMP/mcp-build-input-tests"
+          "$RUNNER_TEMP/mcp-build-input-tests"
           cargo fmt --manifest-path native/unix-transfer/Cargo.toml --check
           cargo clippy --release --locked --manifest-path native/unix-transfer/Cargo.toml --all-targets -- -D warnings
           cargo test --release --locked --manifest-path native/unix-transfer/Cargo.toml

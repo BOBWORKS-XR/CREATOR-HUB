@@ -62,6 +62,23 @@ test('integrated Linux DEB profile is explicit and refuses incompatible flags be
     execute() { throw Error('Must refuse before execution'); } }), /requires signed native Linux/);
 });
 
+test('internal MCP compile snapshots use the already verified staged payload, never inherited or standalone paths', () => {
+  const { integrationEnvironment } = require('./build-unified.cjs');
+  const environment = { KEEP: 'original' };
+  assert.equal(integrationEnvironment(environment, 'unused', false), environment);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-integrated-input-'));
+  try {
+    const payload = path.join(dir, 'modules', 'mcp', 'server');
+    fs.mkdirSync(payload, { recursive: true });
+    assert.deepEqual(integrationEnvironment(environment, dir, true),
+      { KEEP: 'original', CREATOR_HUB_INTEGRATED_MCP_PAYLOAD: payload });
+    assert.deepEqual(environment, { KEEP: 'original' });
+    assert.throws(() => integrationEnvironment({ CREATOR_HUB_INTEGRATED_MCP_PAYLOAD: payload }, dir, true), /inherited environment/);
+    fs.rmdirSync(payload);
+    assert.throws(() => integrationEnvironment(environment, dir, true));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('Linux staged data and executables get canonical archive modes without changing other platform policy', () => {
   const writes = [];
   const chmod = (file, mode) => writes.push({ file, mode });

@@ -23,6 +23,17 @@ function candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, 
   }
   return linuxIntegratedCandidate ? 'integrated-candidate' : 'retirement-acceptance';
 }
+function integrationEnvironment(environment, output, enabled) {
+  if (!enabled) return environment;
+  const variable = 'CREATOR_HUB_INTEGRATED_MCP_PAYLOAD';
+  if (Object.hasOwn(environment, variable)) throw Error('Integrated payload inputs must come from the verified assembly, not inherited environment.');
+  const payload = path.join(output, 'modules', 'mcp', 'server');
+  for (const directory of [output, path.join(output, 'modules'), path.join(output, 'modules', 'mcp'), payload]) {
+    if (!path.isAbsolute(directory) || fs.realpathSync(directory) !== directory
+      || !fs.lstatSync(directory).isDirectory()) throw Error('Verified integrated MCP payload directory is redirected or missing.');
+  }
+  return { ...environment, [variable]: payload };
+}
 function stageIntegrationService(output, overlay) {
   const activation = require('./flatpak-native-activation.cjs');
   const config = JSON.parse(fs.readFileSync(overlay, 'utf8'));
@@ -213,7 +224,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   const overlay = path.join(output, 'tauri-unified.json');
   fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources } }, null, 2));
   if (integratedFeatures) stageIntegrationService(output, overlay);
-  const env = { ...buildEnv, CREATOR_BUILTIN_MANIFEST: descriptor,
+  const env = { ...integrationEnvironment(buildEnv, output, integratedFeatures), CREATOR_BUILTIN_MANIFEST: descriptor,
     CREATOR_MCP_HOST_WRITABLE: plan.mcpMode === 'writable' ? '1' : '0', CREATOR_MCP_HOST_READONLY_EVENTS: '1',
     CARGO_TARGET_DIR: path.resolve(environment.CARGO_TARGET_DIR || (plan.experimentalUnix ? path.join(output, 'hub-target') : path.join(root, 'src-tauri/target'))) };
   const bundleDirectory = path.join(releaseDirectory(env.CARGO_TARGET_DIR), 'bundle');
@@ -258,7 +269,7 @@ function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCan
   const preWrapper = structuredClone(manifest);
   const unix = require('./unix-package-payload.cjs');
   const plan = unix.nativePlan(platform, arch, { installer, managed: true, experimentalUnix: true, experimentalWritable: true });
-  const env = { ...unix.packageEnvironment(environment, platform, 'writable'),
+  const env = { ...integrationEnvironment(unix.packageEnvironment(environment, platform, 'writable'), output, integratedFeatures),
     CREATOR_BUILTIN_MANIFEST: path.join(output, 'builtin-manifest.json'),
     CARGO_TARGET_DIR: path.join(output, 'hub-target') };
   const npm = environment.npm_execpath;
@@ -335,7 +346,7 @@ function parseBuildOptions(args) {
   }
   return options;
 }
-module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, integrationArguments, candidateProfile, stageIntegrationService, build, parseBuildOptions, writeAssemblyManifests };
+module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, integrationArguments, integrationEnvironment, candidateProfile, stageIntegrationService, build, parseBuildOptions, writeAssemblyManifests };
 if (require.main === module) {
   try {
     if (!process.argv[2]) throw Error('Provide one build name.');

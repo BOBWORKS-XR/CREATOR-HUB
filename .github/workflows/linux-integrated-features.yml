@@ -47,6 +47,8 @@ jobs:
       - name: Compile the in-process Hub APIs and reject warnings
         run: |
           set -euo pipefail
+          rustc --test --edition=2021 modules/mcp/launcher/src-tauri/build_payload_inputs.rs -o "$RUNNER_TEMP/mcp-build-input-tests"
+          "$RUNNER_TEMP/mcp-build-input-tests"
           cargo clippy --locked --manifest-path src-tauri/Cargo.toml --tests --features integrated-features,experimental-flatpak-host,experimental-linux-migration -- -D warnings
           cargo clippy --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --lib --tests -- -D warnings
           cargo clippy --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --lib --tests --features integrated-service -- -D warnings
