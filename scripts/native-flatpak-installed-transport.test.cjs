@@ -193,7 +193,7 @@ test('no product build, host reader, settings operations, deletion, override or 
   assert.match(source, /native\.error \|\| native\.signal \? null : native\.status/);
 });
 
-test('dispatch HTTP404 bootstrap regression: exact-branch three-file push works without default registration; manual remains', () => {
+test('dispatch bootstrap and native-dependency changes trigger only the exact validation branch; manual remains', () => {
   // Parent observed dispatch HTTP404 at 984640a before default-branch registration.
   // A change to this workflow itself must be an eligible bootstrap push.
   assert.deepEqual(Object.keys(workflow.on).sort(), ['push', 'workflow_dispatch']);
@@ -201,7 +201,8 @@ test('dispatch HTTP404 bootstrap regression: exact-branch three-file push works 
   assert.deepEqual(workflow.on.push, {
     branches: [harness.BRANCH.slice('refs/heads/'.length)],
     paths: ['.github/workflows/flatpak-installed-host-launch-014.yml',
-      'scripts/native-flatpak-installed-transport.cjs', 'scripts/native-flatpak-installed-transport.test.cjs'],
+      'scripts/native-flatpak-installed-transport.cjs', 'scripts/native-flatpak-installed-transport.test.cjs',
+      'scripts/flatpak-host-launch.test.cjs', 'native/flatpak-host-launch/**'],
   });
   assert.deepEqual(workflow.permissions, { contents: 'read' });
   assert.deepEqual(Object.keys(workflow.jobs), ['installed-transport']);

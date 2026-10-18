@@ -7,6 +7,8 @@ on:
       - .github/workflows/flatpak-installed-host-launch-014.yml
       - scripts/native-flatpak-installed-transport.cjs
       - scripts/native-flatpak-installed-transport.test.cjs
+      - scripts/flatpak-host-launch.test.cjs
+      - native/flatpak-host-launch/**
   workflow_dispatch:
 
 permissions:
