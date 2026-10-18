@@ -100,6 +100,37 @@ jobs:
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libayatana-appindicator3-1 \
             libxdo3 librsvg2-2 python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core \
             libx11-6 libxres1 dbus-x11 xvfb xauth openbox
+      - name: Secure the observed world-writable hosted-runner polkit directory (not an app repair)
+        if: github.ref == 'refs/heads/validation/linux-current-components-014'
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true && test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY_ID" = 1364807512 && test "$RUNNER_OS" = Linux
+          test "$GITHUB_REF" = refs/heads/validation/linux-current-components-014
+          /usr/bin/python3 -B - <<'PY'
+          import json, os, stat, subprocess
+          from pathlib import Path
+          target = Path('/usr/share/polkit-1/actions')
+          assert target.resolve(strict=True) == target
+          for parent in target.parents:
+              before = parent.lstat()
+              assert stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0 and not before.st_mode & 0o7022
+          before = target.lstat()
+          assert stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+          mode = stat.S_IMODE(before.st_mode)
+          assert mode in (0o755, 0o777), 'Unreviewed runner policy-directory state'
+          if mode == 0o777:
+              # Native39106292475 observed this hosted-image setting. Never shipped.
+              subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/chmod', '0755', str(target)], check=True)
+          after = target.lstat()
+          assert (after.st_dev, after.st_ino, after.st_uid, after.st_gid) == (before.st_dev, before.st_ino, 0, 0)
+          assert stat.S_IMODE(after.st_mode) == 0o755 and target.resolve(strict=True) == target
+          record = {'scope': 'disposable-runner-environment-only', 'path': str(target), 'beforeMode': mode,
+                    'afterMode': 0o755, 'sameDirectory': True, 'applicationRepair': False, 'authenticationAccepted': False}
+          output = Path(os.environ['RUNNER_TEMP']) / 'linux-runner-polkit-directory.json'
+          with output.open('x') as stream:
+              json.dump(record, stream)
+          PY
       - name: Inspect control metadata and install only the exact fresh DEB on this disposable runner
         run: python3 -B scripts/native-linux-root-probe.py install
       # 38711448824 proved a producer/client Paragraph enum mismatch. Read-only
@@ -130,6 +161,7 @@ jobs:
           path: |
             ${{ runner.temp }}/linux-root-source-binding.json
             ${{ runner.temp }}/linux-components-reviewed-pins.json
+            ${{ runner.temp }}/linux-runner-polkit-directory.json
             ${{ runner.temp }}/linux-root-probe/*.json
             ${{ runner.temp }}/linux-root-probe/*.stdout
             ${{ runner.temp }}/linux-root-probe/*.stderr
