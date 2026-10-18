@@ -320,6 +320,85 @@ class ActivationTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertFalse(binding.exists())
 
+    def identity_case(self, role=None, field=None, value=None, inspection_error=False):
+        context = {name: {'pid': pid, 'startTime': '10', 'parentPid': 1, 'uids': [1001] * 4,
+            'executable': '/usr/bin/flatpak' if name == 'cli' else '/app/bin/creator-hub-flatpak-activate',
+            'image': {'st_ino': '100', 'st_ctime_ns': '20'}, 'kernelImageSha256': 'a' * 64}
+            for name, pid in (('cli', 123), ('launcher', 124))}
+        observed = {entry['pid']: {key: copy.deepcopy(val) for key, val in entry.items() if key != 'kernelImageSha256'}
+                    for entry in context.values()}
+        if role:
+            target = observed[context[role]['pid']]
+            if field.startswith('image.'):
+                target['image'][field.split('.', 1)[1]] = value
+            else:
+                target[field] = value
+        calls, actions = [], []
+        def capture(pid, helper, full):
+            self.assertIs(full, False)
+            calls.append(pid)
+            if inspection_error and pid == 124:
+                raise RuntimeError('private diagnostic message must not be logged')
+            return observed[pid]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def guarded_action():
+                M.stable_pair(SimpleNamespace(native_process=capture), None, context, root, 'cancel')
+                actions.append('click')
+            if role:
+                with self.assertRaisesRegex(RuntimeError, '^Owned process identity changed$'):
+                    guarded_action()
+                self.assertEqual(actions, [])
+                report = M.P.parse((root / 'cancel-identity-refusal.json').read_bytes())
+                self.assertTrue(all(report[key] is False for key in M.GATES))
+                return report, calls
+            guarded_action()
+            self.assertEqual(actions, ['click'])
+            self.assertFalse((root / 'cancel-identity-refusal.json').exists())
+            return None, calls
+
+    def test_identity_diagnostic_captures_cli_transition_and_still_refuses_before_action(self):
+        report, calls = self.identity_case('cli', 'executable', '/usr/bin/bwrap')
+        self.assertEqual(report['failedRole'], 'cli')
+        self.assertEqual(report['records']['cli']['changes'], [{'field': 'executable',
+            'expected': '/usr/bin/flatpak', 'actual': '/usr/bin/bwrap'}])
+        self.assertEqual(report['records']['launcher']['changes'], [])
+        self.assertEqual(calls, [123, 124])
+
+    def test_identity_diagnostic_captures_launcher_image_stamp_and_unchanged_cli(self):
+        report, calls = self.identity_case('launcher', 'image.st_ctime_ns', '21')
+        self.assertEqual(report['failedRole'], 'launcher')
+        self.assertEqual(report['records']['launcher']['changes'], [{'field': 'image.st_ctime_ns', 'expected': '20', 'actual': '21'}])
+        self.assertEqual(report['records']['cli']['changes'], [])
+        self.assertEqual(calls, [123, 124, 123])
+
+    def test_identity_diagnostic_bounds_values_and_does_not_log_unknown_fields(self):
+        report, _ = self.identity_case('cli', 'executable', '/' + 'x' * 12000)
+        self.assertLess(len(json.dumps(report)), 24576)
+        self.assertEqual(report['records']['cli']['changes'][0]['actual']['jsonLength'], 12003)
+        delta = M.identity_deltas({'pid': 123, 'unexpected': 'private data'}, {'pid': 123})
+        self.assertTrue(delta['recordShapeChanged'])
+        self.assertNotIn('private data', json.dumps(delta))
+        report, _ = self.identity_case('cli', 'executable', '/usr/bin/bwrap', inspection_error=True)
+        self.assertEqual(report['records']['launcher']['inspectionError'], 'RuntimeError')
+        self.assertNotIn('private diagnostic', json.dumps(report))
+
+    def test_unchanged_identity_keeps_original_hash_exclusion_and_writes_no_diagnostic(self):
+        _, calls = self.identity_case()
+        self.assertEqual(calls, [123, 124])
+
+    def test_diagnostic_only_trial_stops_before_namespace_ax_or_input_even_if_identity_matches(self):
+        self.assertIs(M.IDENTITY_DIAGNOSTIC_ONLY, True)
+        source = (HERE / 'native-linux-flatpak-activation.py').read_text()
+        worker = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == 'gtk_worker')
+        guard = next(node for node in ast.walk(worker) if isinstance(node, ast.If)
+                     and isinstance(node.test, ast.Name) and node.test.id == 'IDENTITY_DIAGNOSTIC_ONLY')
+        self.assertTrue(any(isinstance(node, ast.Raise) for node in guard.body))
+        for call in (node for node in ast.walk(worker) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                     and node.func.attr in ('native_ax_references', 'do_action')):
+            self.assertLess(guard.lineno, call.lineno)
+        self.assertLess(source.index('if IDENTITY_DIAGNOSTIC_ONLY:'), source.index('rb"^NSpid:'))
+
     def test_python310_syntax(self):
         ast.parse((HERE / "native-linux-flatpak-activation.py").read_text(), feature_version=(3, 10))
 

@@ -33,6 +33,7 @@ ZIP = {"size": 182723403, "sha256": "71a2a4e42a1b1e2fe5e1e64f363f7d3c06444b03b5d
 SOURCE = "5065fb1112b9e96978e40e64503fa979f559baae"
 SERVICE = Path("/usr/share/dbus-1/services/com.creatorworks.hub.Host.service")
 PROXY = "/usr/libexec/flatpak-dbus-proxy"
+IDENTITY_DIAGNOSTIC_ONLY = True
 SERVICE_BYTES = b"[D-BUS Service]\nName=com.creatorworks.hub.Host\nExec=/usr/bin/creator-hub --flatpak-activate\n"
 GATES = {key: False for key in ("releaseReady", "flatpakAccepted", "migrationAccepted", "signedUpdateAccepted", "restartAccepted",
                               "publisherSignatureAccepted", "nativeAuthenticationAccepted", "steamDeckAccepted", "finalCandidateQualified")}
@@ -127,8 +128,50 @@ def empty_windows(x11):
     return value[2]
 
 
-def stable(native, helper, expected):
-    require(native.native_process(expected["pid"], helper, False) == {k: v for k, v in expected.items() if k != "kernelImageSha256"}, "Owned process identity changed")
+def stable(native, helper, expected, on_mismatch=None):
+    actual = native.native_process(expected["pid"], helper, False)
+    matches = actual == {k: v for k, v in expected.items() if k != "kernelImageSha256"}
+    try:
+        if not matches and on_mismatch is not None:
+            on_mismatch(actual)
+    finally:
+        require(matches, "Owned process identity changed")
+
+
+def identity_deltas(expected, actual):
+    def bounded(value):
+        encoded = json.dumps(value, ensure_ascii=True, sort_keys=True)
+        return value if len(encoded) <= 256 else {"jsonPrefix": encoded[:128], "jsonLength": len(encoded)}
+    fields = ("pid", "startTime", "parentPid", "uids", "executable")
+    image_fields = ("st_dev", "st_ino", "st_size", "st_mode", "st_uid", "st_gid", "st_mtime_ns", "st_ctime_ns")
+    changes = []
+    for name in fields:
+        if expected.get(name) != actual.get(name):
+            changes.append({"field": name, "expected": bounded(expected.get(name)), "actual": bounded(actual.get(name))})
+    for name in image_fields:
+        if expected.get("image", {}).get(name) != actual.get("image", {}).get(name):
+            changes.append({"field": "image." + name, "expected": bounded(expected.get("image", {}).get(name)),
+                            "actual": bounded(actual.get("image", {}).get(name))})
+    return {"pid": expected["pid"], "changes": changes,
+            "recordShapeChanged": set(expected) - {"kernelImageSha256"} != set(actual)
+                or set(expected.get("image", {})) != set(actual.get("image", {}))}
+
+
+def stable_pair(native, helper, context, root, phase):
+    require(phase in ("cancel", "warm", "cold"), "Unreviewed diagnostic phase")
+    def refused(role, actual):
+        records = {}
+        for peer in ("cli", "launcher"):
+            try:
+                observed = actual if peer == role else native.native_process(context[peer]["pid"], helper, False)
+                records[peer] = identity_deltas(context[peer], observed)
+            except Exception as error:
+                records[peer] = {"pid": context[peer]["pid"], "inspectionError": type(error).__name__[:80]}
+        report = {"failedRole": role, "records": records, "diagnosticOnly": True, **GATES}
+        require(len(json.dumps(report, ensure_ascii=True).encode()) <= 24576, "Identity diagnostic exceeds bound")
+        P.save(root / (phase + "-identity-refusal.json"), report)
+    for role in ("cli", "launcher"):
+        stable(native, helper, context[role], lambda actual, role=role: refused(role, actual))
 
 
 def owner(bus, name=NAME):
@@ -158,11 +201,14 @@ def gtk_worker(root, phase):
         launcher, cli = context["launcher"], context["cli"]
         proxies = context["proxies"]
         def check():
-            stable(native, helper, cli); stable(native, helper, launcher)
+            stable_pair(native, helper, context, root, phase)
             chain = P.subtree(cli["pid"], helper, native)
             require(chain.get(launcher["pid"]) == {k: v for k, v in launcher.items() if k != "kernelImageSha256"}, "Launcher left owned Flatpak tree")
             require(x11.inspect(context["window"]) == context["xres"], "GTK native window changed")
         check()
+        if IDENTITY_DIAGNOSTIC_ONLY:
+            report["identityChecksMatched"] = True
+            raise RuntimeError("Diagnostic-only trial: ownership matched; no GTK input permitted")
         status = Path(f'/proc/{launcher["pid"]}/status').read_bytes()
         require(len(status) <= 16384, "Process status bound")
         match = re.search(rb"^NSpid:\s+([0-9 \t]+)$", status, re.M)
