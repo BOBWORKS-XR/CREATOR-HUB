@@ -42,6 +42,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Wind
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 experimental-linux-migration = []
+experimental-flatpak-host = []
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

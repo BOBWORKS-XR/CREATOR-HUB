@@ -1,5 +1,36 @@
 # Unified Linux And Flatpak Acceptance
 
+## 18 October Host Helper Decision
+
+The user approved a one-time native host-helper installation, with one visible
+Hub window. Linux remains held until native and Flatpak install, migration,
+signed update and restart pass together. Windows assets and installations must
+remain unchanged. The older offline fixtures below are not production support.
+
+The implementation direction is a sandboxed Hub presentation and a native Core
+using the existing host XDG stores, typed Hub handlers, signed module routing,
+backup checks and consent. A narrow session-service bootstrap may start only
+the known Core/GUI pair; it must accept no paths, commands or settings data.
+Do not grant general home access or host command execution to the Flatpak UI.
+Core must admit the actual owned GUI image and deployment before exposing any
+operation. A version mismatch or lost channel must not reset settings or retry
+an operation whose outcome is unknown.
+
+Current progress, not release acceptance:
+
+- Installed fixed-echo lifecycle run `39115354308` at `dd57bb9` passed four tests
+  and preserved all four isolated settings sentinels at ten checkpoints.
+  [Receipt](evidence/flatpak-installed-lifecycle-39115354308.json). This does not
+  authenticate the actual Hub GUI or expose any host operations.
+- `src-tauri/src/flatpak_rpc.rs` adds an explicit typed route for all 36 active
+  shell commands and six existing event names. It calls existing handlers, not
+  a reflective shell/file API. Six local tests and strict Clippy pass; the full
+  local Root suite passes 364 tests, with 13 existing explicit tests ignored.
+  The module is inactive in production builds and is not a transport authority.
+- Real GUI admission, bootstrap installation, event/command wiring, native
+  settings retention, paired update/restart and full product operation are
+  still pending. Keep their acceptance flags false until actual tests pass.
+
 Audit: 2026-10-14, Hub 0.1.14; checkout HEAD
 `cc2c2836da79afb9ef4a02ebbdcd47ab502a295d`, with concurrent uncommitted
 coordinator changes. This is a source/fixture audit, not a frozen payload binding.

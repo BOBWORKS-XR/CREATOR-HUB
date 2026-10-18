@@ -9,6 +9,9 @@ mod convergence;
 mod convergence_linux;
 #[allow(dead_code)]
 mod convergence_dependencies;
+#[cfg(any(all(target_os = "linux", feature = "experimental-flatpak-host"), test))]
+#[allow(dead_code)]
+mod flatpak_rpc;
 #[cfg(all(target_os = "macos", test))]
 #[allow(dead_code)]
 #[path = "../../native/host_parent_macos.rs"]
