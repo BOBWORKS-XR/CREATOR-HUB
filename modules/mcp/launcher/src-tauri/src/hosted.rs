@@ -223,7 +223,11 @@ pub(crate) fn config_snapshot(
     Ok((None, "none"))
 }
 
-pub(crate) fn dispatch(app: &tauri::AppHandle, command: &str, args: Value) -> Result<Value, String> {
+pub(crate) fn dispatch(
+    app: &tauri::AppHandle,
+    command: &str,
+    args: Value,
+) -> Result<Value, String> {
     #[cfg(unix)]
     if command == "bind_verified_resources" {
         // Only serve_authorized's validated initializer can reach this branch.
