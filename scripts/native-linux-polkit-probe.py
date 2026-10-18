@@ -1,4 +1,4 @@
-"""Disposable GNOME polkit dialog attribution only; no dialog input or updater."""
+"""Disposable GNOME polkit capture or one exact Cancel; no authentication/updater."""
 import hashlib
 import importlib.util
 import io
@@ -24,6 +24,7 @@ USER, UID = "creator-polkit-fixture", 21314
 AGENT = "/usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1"
 AGENT_PATH = "/org/gnome/PolicyKit1/AuthenticationAgent"
 COMMAND = ("/usr/bin/pkexec", "--disable-internal-agent", "/usr/bin/true")
+QUESTION = "Authentication is needed to run `/usr/bin/true' as the super user"
 STOCK_POLICY = "/usr/share/polkit-1/actions/org.freedesktop.policykit.policy"
 STOCK_ARCHIVE = ("https://archive.ubuntu.com/ubuntu/pool/main/p/policykit-1/polkitd_0.105-33ubuntu0.2_amd64.deb",
                  80152, "8a8e123a44e2c3deef2c072db7248e94d9d7ad7c874127facc7d1abaf622ea85")
@@ -46,6 +47,7 @@ SOURCES = {
 SOURCE_FILES = {
     "polkit-gnome-0.105/src/main.c": "ba11d1f29399de06fd856a839ff4111a4c91943f6601f7f83fa5f46b91291cc2",
     "polkit-gnome-0.105/src/polkitgnomeauthenticationdialog.c": "e26dd41f1e341b95bf1d477b1872e74846f7248dcb2361d22665392ff4a4fe89",
+    "polkit-gnome-0.105/src/polkitgnomeauthenticator.c": "8580c8f317dbf8bdaf2237ae98c9fccae879274abdea68cce8478e6a19339bc5",
 }
 FLAGS = {k: False for k in ("dialogInputAuthorized", "passwordRead", "authenticationAccepted", "cancelAccepted",
                            "actualUpdaterAccepted", "signedUpdateAccepted", "restartAccepted", "releaseReady")}
@@ -74,6 +76,14 @@ def admission(env, system, machine):
     require(env.get("CREATOR_LINUX_POLKIT_PROBE") == "1" and env.get("GITHUB_REF") == BRANCH
             and env.get("GITHUB_EVENT_NAME") in ("push", "workflow_dispatch")
             and re.fullmatch("[a-f0-9]{40}", env.get("GITHUB_SHA", "")), "Exact polkit CI branch/event/source required")
+    capture_mode(env)
+
+
+def capture_mode(env):
+    mode = env.get("CREATOR_LINUX_POLKIT_MODE", "read-only")
+    require(mode in ("read-only", "cancel"), "Only read-only or Cancel-only mode is supported")
+    require(mode != "cancel" or env.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "Cancel requires explicit manual CI mode")
+    return mode
 
 
 def source_contract(fetch=None):
@@ -101,11 +111,14 @@ def source_contract(fetch=None):
         require(hashlib.sha256(selected[name].encode()).hexdigest() == digest, "Fixed source file differs")
     main = selected["polkit-gnome-0.105/src/main.c"]
     dialog = selected["polkit-gnome-0.105/src/polkitgnomeauthenticationdialog.c"]
+    authenticator = selected["polkit-gnome-0.105/src/polkitgnomeauthenticator.c"]
     require("polkit_unix_session_new_for_process_sync (getpid ()" in main
             and "POLKIT_AGENT_REGISTER_FLAGS_NONE" in main and AGENT_PATH in main
             and "polkit_agent_listener_register" in main and "goto out;" in main, "Session registration source differs")
     require("gtk_entry_set_visibility (GTK_ENTRY (dialog->priv->password_entry), FALSE)" in dialog
             and "GTK_RESPONSE_CANCEL" in dialog and "GTK_RESPONSE_OK" in dialog, "GTK dialog source differs")
+    require("GTK_STOCK_CANCEL," in dialog and "gtk_widget_destroy (authenticator->dialog);" in authenticator,
+            "Native Cancel/finalization source differs")
     series = selected["debian/patches/series"].splitlines()
     patches = [selected["debian/patches/" + s.strip()] for s in series if s.strip() and not s.startswith("#")]
     require(len(patches) == 6 and sum("src/main.c" in patch for patch in patches) == 1
@@ -377,6 +390,158 @@ def raw_ax(agent, helper, atspi, refs):
             "axToXidAssociationVerified": False, **FLAGS}
 
 
+def cancel_profile(agent, helper, atspi, refs, x11, native, geometry):
+    """Exact native GNOME profile; never query a password name/text/action."""
+    require(len(native) == 1 and native[0]["pid"] == agent["pid"] and native[0]["client"] > 0
+            and native[0]["mapped"] and native[0]["title"] == "Authenticate", "Exact single owned native dialog required")
+    require(windows(agent["pid"], helper, x11) == native, "Native dialog changed before profile")
+    frame = x11.frame_rectangle(native[0]["window"])
+    geometry.update(nativeFrame=None if frame is None else list(frame), axFrame=None)
+    require(type(frame) is tuple and len(frame) == 4 and all(type(v) is int for v in frame)
+            and all(0 <= v <= 8192 for v in frame[:2]) and all(0 < v <= 8192 for v in frame[2:]), "Bounded native Cancel frame required")
+    owner = type("Owner", (), {"root": agent, "renderer": None})()
+    refs.recheck()
+    apps = [a for a in helper.fresh_close_children(atspi.get_desktop(0), 64) if a.get_process_id() == agent["pid"]]
+    require(len(apps) == 1, "Exactly one agent AX application required")
+    app = apps[0]
+    app.clear_cache()
+    require(app.get_role() == atspi.Role.APPLICATION and app.get_name() == "polkit-gnome-authentication-agent-1",
+            "Exact native agent application required")
+    root_ref = tuple(refs.identity(app, owner))
+    tops = helper.fresh_close_children(app, 16)
+    require(len(tops) == 1, "Exactly one agent AX top-level required")
+    dialog = tops[0]
+    graph, nodes, seen, pending = [], [], set(), [(dialog, root_ref, 0)]
+    window_roles = {getattr(atspi.Role, k, -1) for k in ("APPLICATION", "DIALOG", "ALERT", "FRAME", "WINDOW")}
+    while pending:
+        node, parent, depth = pending.pop()
+        require(node is not None and len(graph) < 64 and depth < 16, "Cancel graph exceeds bound")
+        node.clear_cache()
+        require(node.get_process_id() == agent["pid"], "Foreign Cancel graph PID")
+        ref = tuple(refs.identity(node, owner))
+        require(ref[0] == root_ref[0] and ref not in seen, "Foreign/duplicate Cancel graph reference")
+        seen.add(ref)
+        actual_parent = node.get_parent()
+        require(actual_parent is not None and tuple(refs.identity(actual_parent, owner)) == parent,
+                "Cancel graph reverse parent differs")
+        role, states = node.get_role(), node.get_state_set()
+        password = role == atspi.Role.PASSWORD_TEXT
+        require(password or not states.contains(atspi.StateType.EDITABLE), "Unexpected editable Cancel graph node")
+        name = None if password else node.get_name()
+        require(name is None if password else type(name) is str and len(name) <= 1024, "Cancel graph name exceeds bound")
+        if depth == 0:
+            require(role == atspi.Role.DIALOG and name == "Authenticate", "Exact GTK dialog role/name required")
+        else:
+            require(role not in window_roles, "Nested Cancel graph window")
+        row = {"reference": list(ref), "parent": list(parent), "role": int(role), "name": name,
+               **{s.lower(): states.contains(getattr(atspi.StateType, s)) for s in ("SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY")}}
+        graph.append(row)
+        nodes.append(node)
+        pending.extend((child, ref, depth + 1) for child in reversed(
+            helper.fresh_close_children(node, min(32, 64 - len(graph) - len(pending)))))
+    labels = [n for n, row in zip(nodes, graph) if row["role"] == int(atspi.Role.LABEL) and row["name"] == QUESTION]
+    buttons = [(n, row) for n, row in zip(nodes, graph) if row["role"] == int(atspi.Role.PUSH_BUTTON)]
+    passwords = [n for n, row in zip(nodes, graph) if row["role"] == int(atspi.Role.PASSWORD_TEXT)]
+    require(len(labels) == len(passwords) == 1 and len(buttons) == 2
+            and {row["name"] for _n, row in buttons} == {"Cancel", "Authenticate"}, "Exact question/buttons/password profile required")
+    for node in [dialog, *labels, *passwords, *(n for n, _row in buttons)]:
+        helper.ready(node, atspi)
+    component = dialog.get_component_iface()
+    require(component is not None, "Cancel dialog Component unavailable")
+    rect = component.get_extents(atspi.CoordType.SCREEN)
+    actual = (rect.x, rect.y, rect.width, rect.height)
+    geometry["axFrame"] = list(actual)
+    # GTK 3.24.33 gtkwindowaccessible.c uses gdk_window_get_frame_extents,
+    # not client bounds. Unknown geometry is retained and refuses input.
+    require(all(type(v) is int for v in actual) and actual == frame, "Cancel AX/native frame differs")
+    controls = {}
+    for node, row in buttons:
+        component = node.get_component_iface()
+        require(component is not None, "Cancel control Component unavailable")
+        rect = component.get_extents(atspi.CoordType.SCREEN)
+        bounds = (rect.x, rect.y, rect.width, rect.height)
+        require(all(type(v) is int for v in bounds) and bounds[2] > 0 and bounds[3] > 0
+                and bounds[0] >= frame[0] and bounds[1] >= frame[1]
+                and bounds[0] + bounds[2] <= frame[0] + frame[2]
+                and bounds[1] + bounds[3] <= frame[1] + frame[3], "Cancel control outside native frame")
+        controls[row["name"]] = list(bounds)
+    refs.recheck()
+    require(windows(agent["pid"], helper, x11) == native and x11.frame_rectangle(native[0]["window"]) == frame,
+            "Cancel native ownership/frame changed")
+    receipt = {"graph": graph, "native": native, "frame": list(frame), "controls": controls,
+               "application": list(root_ref), "axToXidAssociationVerified": True, "passwordRead": False}
+    return next(n for n, row in buttons if row["name"] == "Cancel"), receipt
+
+
+def cancel_once(profile, guard, record):
+    """One finite Cancel action, including ambiguous-return failure; no retry."""
+    require(record.get("mode") == "cancel" and record.get("cancelActionAttempts", 0) == 0, "Cancel mode/unused action required")
+    guard()
+    _first, before = profile()
+    record["cancelProfile"] = before
+    guard()
+    button, current = profile()
+    require(current == before, "Fresh Cancel graph/frame changed")
+    guard()
+    button, current = profile()
+    require(current == before, "Final Cancel graph/frame changed")
+    interface = button.get_action_iface()
+    require(interface is not None and interface.get_n_actions() == 1 and interface.get_action_name(0) == "click",
+            "Exactly one native Cancel click required")
+    record.update(dialogInputAuthorized=True, authorizedControl="Cancel", cancelActionAttempts=1, actionMayHaveRun=True)
+    require(interface.do_action(0), "Cancel action refused or uncertain; do not retry")
+    record["cancelActionReturned"] = True
+
+
+def native_window_absence(x11, helper, target, observation):
+    """Complete bounded server tree, not an EWMH hint or swallowed X error."""
+    c = helper.C
+    query = x11.x.XQueryTree
+    query.argtypes = [c.c_void_p, c.c_ulong, c.POINTER(c.c_ulong), c.POINTER(c.c_ulong),
+                      c.POINTER(c.POINTER(c.c_ulong)), c.POINTER(c.c_uint)]
+    query.restype = c.c_int
+    root = x11.x.XDefaultRootWindow(x11.display)
+    require(type(target) is int and target > 0 and target != root, "Exact non-root target XID required")
+    observation.clear()
+    observation.update(source="complete-native-XQueryTree", root=root, target=target, complete=False)
+    pending, seen = [(root, 0, 0)], set()
+    while pending:
+        xid, expected_parent, depth = pending.pop()
+        require(xid not in seen and len(seen) < 256 and depth < 16, "Native dismissal tree exceeds bound")
+        seen.add(xid)
+        observation.update(lastQuery=xid, nodes=len(seen))
+        root_out, parent, count = c.c_ulong(), c.c_ulong(), c.c_uint()
+        children = c.POINTER(c.c_ulong)()
+        try:
+            require(query(x11.display, xid, c.byref(root_out), c.byref(parent), c.byref(children), c.byref(count)),
+                    "Native dismissal query failed")
+            x11.sync()
+            require(root_out.value == root and parent.value == expected_parent and count.value <= 64
+                    and len(seen) + len(pending) + count.value <= 256
+                    and (not count.value or bool(children)), "Native dismissal tree changed or exceeds bound")
+            pending.extend((children[i], xid, depth + 1) for i in range(count.value))
+        finally:
+            if children:
+                x11.x.XFree(children)
+    observation.update(complete=True, absent=target not in seen)
+    return observation
+
+
+def wait_cancel(request, request_log, guard, x11, helper, target, record):
+    deadline = time.monotonic() + 10
+    record["cancelDismissal"] = {}
+    while time.monotonic() < deadline:
+        guard()
+        request_log.pump(0.02)
+        exit_code = request.poll()
+        require(exit_code is None or exit_code == 126, "pkexec did not return cancellation status 126")
+        native_window_absence(x11, helper, target, record["cancelDismissal"])
+        if exit_code == 126 and record["cancelDismissal"]["complete"] and record["cancelDismissal"]["absent"]:
+            record["cancelAccepted"] = True
+            return
+    raise RuntimeError("Cancel completion deadline; no retry or force-close")
+
+
 def probe(env):
     import gi
     gi.require_version("Atspi", "2.0")
@@ -389,8 +554,9 @@ def probe(env):
             "Root-installed fixture source required")
     require(output.resolve(strict=True) == output and output.stat().st_uid == UID and stat.S_IMODE(output.stat().st_mode) == 0o700,
             "Fresh private result directory required")
-    record = {"scope": "synthetic-system-agent-attribution-only", "source": env["GITHUB_SHA"], "agentAttributed": False,
-              "agentOperationObserved": False, "dialogContractCaptured": False, **FLAGS}
+    record = {"scope": "synthetic-system-agent-attribution-only", "source": env["GITHUB_SHA"], "mode": capture_mode(env),
+              "agentAttributed": False, "agentOperationObserved": False, "dialogContractCaptured": False,
+              "cancelActionAttempts": 0, "actionMayHaveRun": False, **FLAGS}
     agent = request = agent_log = request_log = x11 = axbus = None
     try:
         binding_file = BASE / "source-binding.json"
@@ -467,6 +633,22 @@ def probe(env):
             break
         else:
             raise RuntimeError("Agent GTK dialog deadline; no password/input fallback")
+        if record["mode"] == "cancel":
+            def guard():
+                own_agent(agent, identity, parent, helper)
+                for pid, original in ((os.getpid(), record["session"]), (agent.pid, record["agentSession"])):
+                    current = session(system, pid, GLib)
+                    require(all(current[k] == original[k] for k in ("object", "Id", "User", "Leader")), "Cancel session changed")
+                require(agent_bus_identity(system, identity, GLib) == endpoint, "Cancel system-bus binding changed")
+                refs.recheck()
+
+            record["cancelGeometry"] = {}
+            def profile():
+                require(request.poll() is None, "Fixed request ended before Cancel")
+                return cancel_profile(identity, helper, Atspi, refs, x11, native, record["cancelGeometry"])
+
+            cancel_once(profile, guard, record)
+            wait_cancel(request, request_log, guard, x11, helper, native[0]["window"], record)
     except Exception as error:
         record["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
     finally:
@@ -482,7 +664,8 @@ def probe(env):
             x11.dispose()
         record["sessionTeardownRequired"] = True
         b.save_json(output / "polkit-report.json", record)
-    require(record["dialogContractCaptured"] and "refusal" not in record, "Native polkit capture refused; original evidence retained")
+    require(record["dialogContractCaptured"] and "refusal" not in record
+            and (record["mode"] == "read-only" or record["cancelAccepted"]), "Native polkit capture refused; original evidence retained")
     return record
 
 
@@ -512,5 +695,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        print(json.dumps({"error": type(error).__name__, "captureStopped": True, **FLAGS}))
+        print(json.dumps({"error": type(error).__name__, "captureStopped": True, "inputOutcomeInRetainedReport": True,
+                          **{k: v for k, v in FLAGS.items() if k not in ("dialogInputAuthorized", "cancelAccepted")}}))
         sys.exit(1)

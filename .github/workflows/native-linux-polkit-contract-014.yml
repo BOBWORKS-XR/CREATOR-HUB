@@ -1,7 +1,14 @@
-name: Native GNOME polkit contract (read-only synthetic dialog)
+name: Native GNOME polkit contract (read-only or Cancel-only)
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Synthetic dialog capture only, or one Cancel press without authentication
+        type: choice
+        required: true
+        default: read-only
+        options: [read-only, cancel]
   push:
     branches: [validation/linux-polkit-contract-014]
     paths:
@@ -22,6 +29,7 @@ jobs:
     timeout-minutes: 8
     env:
       CREATOR_LINUX_POLKIT_PROBE: '1'
+      CREATOR_LINUX_POLKIT_MODE: ${{ inputs.mode || 'read-only' }}
       CREATOR_LINUX_ROOT_PROBE: '1'
       CREATOR_UNIX_WINDOW_TEST: '1'
     steps:
@@ -114,11 +122,16 @@ jobs:
               json.dump({'source': os.environ['GITHUB_SHA'], 'files': hashes}, stream)
           PY
           sudo install -o 0 -g 0 -m 0644 "$RUNNER_TEMP/polkit-script-binding.json" /opt/creator-polkit-fixture/source-binding.json
-      - name: Real PAM logind session and private GUI (no authentication input)
+      - name: Real PAM logind session and private GUI (explicit mode, never authentication)
         run: |
           set -euo pipefail
           # PAMName=login supplies a real logind session. Do not fake XDG_SESSION_ID
           # or replace the system authority. The locked account receives no password.
+          case "$CREATOR_LINUX_POLKIT_MODE" in
+            read-only) ;;
+            cancel) test "$GITHUB_EVENT_NAME" = workflow_dispatch ;;
+            *) echo 'Unknown synthetic dialog mode' >&2; exit 1 ;;
+          esac
           sudo systemd-run --wait --pipe --collect --unit=creator-polkit-fixture \
             --uid=creator-polkit-fixture --property=PAMName=login --property=Type=exec \
             --property=WorkingDirectory=/opt/creator-polkit-fixture --property=RuntimeMaxSec=100 \
@@ -128,6 +141,7 @@ jobs:
             --setenv=GITHUB_REPOSITORY=BOBWORKS-XR/CREATOR-HUB --setenv=GITHUB_REPOSITORY_ID=1364807512 \
             --setenv=GITHUB_REF="$GITHUB_REF" --setenv=GITHUB_SHA="$GITHUB_SHA" --setenv=GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
             --setenv=CREATOR_LINUX_POLKIT_PROBE=1 --setenv=CREATOR_LINUX_ROOT_PROBE=1 --setenv=CREATOR_UNIX_WINDOW_TEST=1 \
+            --setenv=CREATOR_LINUX_POLKIT_MODE="$CREATOR_LINUX_POLKIT_MODE" \
             --setenv=GDK_BACKEND=x11 --setenv=NO_AT_BRIDGE=0 --setenv=LANG=C --setenv=LC_ALL=C \
             /usr/bin/dbus-run-session -- /usr/bin/xvfb-run -a --server-args='-screen 0 1280x800x24' /bin/sh -eu -c '
               /usr/bin/openbox --sm-disable >/opt/creator-polkit-fixture/result/openbox.log 2>&1 & manager=$!

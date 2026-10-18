@@ -50,6 +50,14 @@ class ContractTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(RuntimeError):
                 p.admission({k: v for k, v in runner().items() if k != key}, "linux", "x86_64")
 
+    def test_cancel_requires_exact_explicit_manual_mode_and_readonly_stays_default(self):
+        self.assertEqual(p.capture_mode(runner()), "read-only")
+        p.admission(runner() | {"GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "cancel"}, "linux", "x86_64")
+        for event, mode in (("push", "cancel"), ("workflow_dispatch", "authenticate"), ("workflow_dispatch", ""),
+                            ("workflow_dispatch", "cancel; true")):
+            with self.subTest(event=event, mode=mode), self.assertRaises(RuntimeError):
+                p.admission(runner() | {"GITHUB_EVENT_NAME": event, "CREATOR_LINUX_POLKIT_MODE": mode}, "linux", "x86_64")
+
     def test_wrong_platform_branch_repo_or_flatpak_refuses(self):
         for key, value in (("GITHUB_REF", "refs/heads/main"), ("GITHUB_REF", "refs/heads/validation/linux-installed-candidate-014"),
                            ("GITHUB_EVENT_NAME", "pull_request"), ("GITHUB_REPOSITORY_ID", "1"), ("FLATPAK_ID", "foreign")):
@@ -86,10 +94,12 @@ class ContractTests(unittest.TestCase):
 
     def test_source_contract_with_small_frozen_fixture_never_runs_code(self):
         main = 'polkit_unix_session_new_for_process_sync (getpid ()\nPOLKIT_AGENT_REGISTER_FLAGS_NONE\n' + p.AGENT_PATH + '\npolkit_agent_listener_register\ngoto out;'
-        dialog = 'gtk_entry_set_visibility (GTK_ENTRY (dialog->priv->password_entry), FALSE)\nGTK_RESPONSE_CANCEL\nGTK_RESPONSE_OK'
+        dialog = 'gtk_entry_set_visibility (GTK_ENTRY (dialog->priv->password_entry), FALSE)\nGTK_STOCK_CANCEL,\nGTK_RESPONSE_CANCEL\nGTK_RESPONSE_OK'
+        authenticator = 'gtk_widget_destroy (authenticator->dialog);'
         main_name = "polkit-gnome-0.105/src/main.c"
         dialog_name = "polkit-gnome-0.105/src/polkitgnomeauthenticationdialog.c"
-        groups = [{main_name: main, dialog_name: dialog}, {"debian/patches/series": "\n".join(["04-autorestart.patch"] + [f"other-{i}" for i in range(5)]),
+        authenticator_name = "polkit-gnome-0.105/src/polkitgnomeauthenticator.c"
+        groups = [{main_name: main, dialog_name: dialog, authenticator_name: authenticator}, {"debian/patches/series": "\n".join(["04-autorestart.patch"] + [f"other-{i}" for i in range(5)]),
             "debian/patches/04-autorestart.patch": "src/main.c\nregister_client_to_gnome_session();",
             **{f"debian/patches/other-{i}": "other source change" for i in range(5)}}]
         archives = {}
@@ -470,6 +480,249 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(p.windows(21, None, x11)[0]["title"], "Unexpected native title")
 
 
+class CancelTests(unittest.TestCase):
+    def fixture(self):
+        helper = b.load_helper()
+        atspi = types.SimpleNamespace(Role=types.SimpleNamespace(APPLICATION=75, DIALOG=16, ALERT=2, FRAME=23,
+            WINDOW=69, LABEL=29, PASSWORD_TEXT=40, PUSH_BUTTON=43, TEXT=61), CoordType=types.SimpleNamespace(SCREEN=0),
+            StateType=types.SimpleNamespace(SHOWING=1, ENABLED=2, SENSITIVE=3, DEFUNCT=4, BUSY=5, EDITABLE=6))
+        app = fixtures.AxNode(21, 75, "polkit-gnome-authentication-agent-1")
+        dialog = fixtures.AxNode(21, 16, "Authenticate", parent=app)
+        question = fixtures.AxNode(21, 29, p.QUESTION, parent=dialog)
+        password = fixtures.AxNode(21, 40, "NEVER READ", parent=dialog)
+        cancel = fixtures.AxNode(21, 43, "Cancel", parent=dialog, verb="click")
+        authenticate = fixtures.AxNode(21, 43, "Authenticate", parent=dialog, verb="click")
+        for node in (app, dialog, question, password, cancel, authenticate):
+            node.get_child_count = lambda n=node: len(n.children)
+            node.get_child_at_index = lambda i, n=node: n.children[i]
+            node.clear_cache = mock.Mock()
+        desktop = types.SimpleNamespace(get_child_count=lambda: 1, get_child_at_index=lambda _i: app, clear_cache=mock.Mock())
+        atspi.get_desktop = lambda _i: desktop
+        frame = (10, 20, 600, 300)
+        def component(bounds):
+            return types.SimpleNamespace(get_extents=lambda _coord: types.SimpleNamespace(
+                x=bounds[0], y=bounds[1], width=bounds[2], height=bounds[3]))
+        dialog.get_component_iface = lambda: component(frame)
+        cancel.get_component_iface = lambda: component((20, 260, 100, 30))
+        authenticate.get_component_iface = lambda: component((130, 260, 100, 30))
+        password.get_name = mock.Mock(side_effect=AssertionError("Password name read"))
+        password.get_text_iface = mock.Mock(side_effect=AssertionError("Password text read"))
+        password.get_action_iface = mock.Mock(side_effect=AssertionError("Password action read"))
+        authenticate.get_action_iface = mock.Mock(side_effect=AssertionError("Authenticate action read"))
+        cancel.get_action_iface = mock.Mock(return_value=cancel.action)
+        refs = b.AxReferences(lambda name: {"owner": name, "pid": 21, "uid": p.UID})
+        agent = {"pid": 21, "uids": [p.UID] * 4}
+        native = [{"window": 77, "pid": 21, "client": 3, "title": "Authenticate", "mapped": True}]
+        x11 = types.SimpleNamespace(frame_rectangle=mock.Mock(return_value=frame))
+        record = {"mode": "cancel", "cancelActionAttempts": 0, **p.FLAGS}
+        geometry = {}
+        profile = lambda: p.cancel_profile(agent, helper, atspi, refs, x11, native, geometry)
+        return types.SimpleNamespace(**locals())
+
+    def test_fresh_exact_profiles_one_cancel_no_password_or_authenticate_access(self):
+        f = self.fixture()
+        guard = mock.Mock()
+        with mock.patch.object(p, "windows", return_value=f.native):
+            p.cancel_once(f.profile, guard, f.record)
+        f.cancel.action.do_action.assert_called_once_with(0)
+        f.cancel.get_action_iface.assert_called_once()
+        f.authenticate.get_action_iface.assert_not_called()
+        f.password.get_name.assert_not_called()
+        f.password.get_text_iface.assert_not_called()
+        f.password.get_action_iface.assert_not_called()
+        self.assertGreaterEqual(f.dialog.clear_cache.call_count, 2)
+        self.assertEqual(guard.call_count, 3)
+        self.assertEqual(f.record["cancelActionAttempts"], 1)
+        self.assertTrue(f.record["cancelProfile"]["axToXidAssociationVerified"])
+        self.assertFalse(f.record["authenticationAccepted"])
+        self.assertFalse(f.record["cancelAccepted"])
+
+    def test_graph_change_after_identity_guard_is_rechecked_without_input(self):
+        f = self.fixture()
+        def guard():
+            if f.dialog.clear_cache.call_count >= 2:
+                f.cancel.name = "Authenticate"
+        with mock.patch.object(p, "windows", return_value=f.native), self.assertRaises(RuntimeError):
+            p.cancel_once(f.profile, guard, f.record)
+        f.cancel.action.do_action.assert_not_called()
+        f.cancel.get_action_iface.assert_not_called()
+
+    def test_foreign_changed_graph_role_text_state_and_geometry_never_get_input(self):
+        changes = ("pid", "bus-uid", "parent", "duplicate", "role", "question", "question-duplicate", "button-name",
+                   "button-count", "password-role", "busy", "hidden", "frame", "frame-none", "frame-error", "control-bounds", "extra-window")
+        for change in changes:
+            f = self.fixture()
+            if change == "pid":
+                f.cancel.pid = 99
+            elif change == "bus-uid":
+                f.refs.resolve = lambda name: {"owner": name, "pid": 21, "uid": 0}
+            elif change == "parent":
+                f.question.parent = f.app
+            elif change == "duplicate":
+                f.dialog.children.append(f.question)
+            elif change == "role":
+                f.dialog.role = 2
+            elif change == "question":
+                f.question.name = "Run something else"
+            elif change == "question-duplicate":
+                f.authenticate.role, f.authenticate.name = 29, p.QUESTION
+            elif change == "button-name":
+                f.cancel.name = "Authenticate"
+            elif change == "button-count":
+                f.dialog.children.remove(f.authenticate)
+            elif change == "password-role":
+                f.password.role, f.password.states = 61, {1, 2, 3, 6}
+            elif change == "busy":
+                f.cancel.states.add(5)
+            elif change == "hidden":
+                f.password.states.remove(1)
+            elif change == "frame":
+                f.x11.frame_rectangle.return_value = (10, 21, 600, 300)
+            elif change == "frame-none":
+                f.x11.frame_rectangle.return_value = None
+            elif change == "frame-error":
+                f.x11.frame_rectangle.side_effect = RuntimeError("unknown frame extents")
+            elif change == "control-bounds":
+                f.cancel.get_component_iface = lambda: types.SimpleNamespace(get_extents=lambda _coord: types.SimpleNamespace(x=0, y=0, width=1, height=1))
+            elif change == "extra-window":
+                f.app.children.append(f.dialog)
+            with self.subTest(change=change), mock.patch.object(p, "windows", return_value=f.native), self.assertRaises(RuntimeError):
+                p.cancel_once(f.profile, mock.Mock(), f.record)
+            f.cancel.action.do_action.assert_not_called()
+            f.authenticate.get_action_iface.assert_not_called()
+            f.password.get_name.assert_not_called()
+            f.password.get_text_iface.assert_not_called()
+            self.assertEqual(f.record["cancelActionAttempts"], 0)
+
+    def test_native_window_or_fresh_graph_drift_refuses_before_action(self):
+        for change in ("window", "graph", "frame", "kernel-bus-session"):
+            f = self.fixture()
+            def profile():
+                result = f.profile()
+                if change == "graph":
+                    f.question.name = "Changed after first read"
+                return result
+            guard = mock.Mock(side_effect=[None, None, RuntimeError("fresh identity changed")]) if change == "kernel-bus-session" else mock.Mock()
+            windows = [f.native, f.native, [f.native[0] | {"client": 9}]] if change == "window" else None
+            if change == "frame":
+                f.x11.frame_rectangle.side_effect = [f.frame, f.frame, (11, 20, 600, 300)]
+            with self.subTest(change=change), mock.patch.object(p, "windows", side_effect=windows, return_value=f.native), self.assertRaises(RuntimeError):
+                p.cancel_once(profile, guard, f.record)
+            f.cancel.action.do_action.assert_not_called()
+            self.assertEqual(f.record["cancelActionAttempts"], 0)
+
+    def test_refused_or_uncertain_action_is_one_attempt_and_cannot_retry(self):
+        for failure in (False, RuntimeError("native RPC result unknown")):
+            f = self.fixture()
+            if isinstance(failure, Exception):
+                f.cancel.action.do_action.side_effect = failure
+            else:
+                f.cancel.action.do_action.return_value = failure
+            with self.subTest(failure=str(failure)), mock.patch.object(p, "windows", return_value=f.native):
+                with self.assertRaises(RuntimeError):
+                    p.cancel_once(f.profile, mock.Mock(), f.record)
+                with self.assertRaises(RuntimeError):
+                    p.cancel_once(f.profile, mock.Mock(), f.record)
+            f.cancel.action.do_action.assert_called_once_with(0)
+            self.assertEqual(f.record["cancelActionAttempts"], 1)
+            self.assertTrue(f.record["actionMayHaveRun"])
+            self.assertFalse(f.record["cancelAccepted"])
+
+    def test_readonly_mode_cannot_query_or_press_a_cancel_action(self):
+        profile, guard = mock.Mock(), mock.Mock()
+        with self.assertRaises(RuntimeError):
+            p.cancel_once(profile, guard, {"mode": "read-only"})
+        profile.assert_not_called()
+        guard.assert_not_called()
+
+    def test_action_alias_count_or_name_mismatch_refuses_without_input(self):
+        for count, name in ((0, "click"), (2, "click"), (1, "press"), (1, "activate")):
+            f = self.fixture()
+            f.cancel.action.get_n_actions = lambda: count
+            f.cancel.action.get_action_name = lambda _i: name
+            with self.subTest(count=count, name=name), mock.patch.object(p, "windows", return_value=f.native), self.assertRaises(RuntimeError):
+                p.cancel_once(f.profile, mock.Mock(), f.record)
+            f.cancel.action.do_action.assert_not_called()
+
+    def test_cancel_completion_requires_both_126_and_complete_native_absence(self):
+        for exit_code, absent, accepted in ((126, True, True), (126, False, False), (None, True, False), (0, True, False), (127, True, False)):
+            record = {"cancelAccepted": False}
+            request, capture = mock.Mock(), mock.Mock()
+            request.poll.return_value = exit_code
+            def dismissal(_x, _h, _target, observation):
+                observation.update(complete=True, absent=absent)
+            with self.subTest(exit=exit_code, absent=absent), mock.patch.object(p.time, "monotonic", side_effect=[0, 1, 11]), \
+                    mock.patch.object(p, "native_window_absence", side_effect=dismissal):
+                if accepted:
+                    p.wait_cancel(request, capture, mock.Mock(), None, None, 77, record)
+                else:
+                    with self.assertRaises(RuntimeError):
+                        p.wait_cancel(request, capture, mock.Mock(), None, None, 77, record)
+            self.assertEqual(record["cancelAccepted"], accepted)
+
+    def test_post_cancel_identity_refusal_never_claims_cancel_acceptance(self):
+        record = {"cancelAccepted": False}
+        with mock.patch.object(p.time, "monotonic", side_effect=[0, 1]), mock.patch.object(p, "native_window_absence") as query, \
+                self.assertRaises(RuntimeError):
+            p.wait_cancel(mock.Mock(), mock.Mock(), mock.Mock(side_effect=RuntimeError("agent/session changed")), None, None, 77, record)
+        query.assert_not_called()
+        self.assertFalse(record["cancelAccepted"])
+
+
+class NativeDismissalTests(unittest.TestCase):
+    def fixture(self, tree):
+        c = b.load_helper().C
+        retained = []
+        def query(_display, xid, root, parent, children, count):
+            record = tree[xid]
+            if record == "error":
+                return 0
+            parent._obj.value, root._obj.value = record[0], 1
+            values = record[1]
+            count._obj.value = len(values)
+            if values:
+                data = (c.c_ulong * len(values))(*values)
+                retained.append(data)
+                c.cast(children, c.POINTER(c.POINTER(c.c_ulong)))[0] = c.cast(data, c.POINTER(c.c_ulong))
+            return 1
+        x = types.SimpleNamespace(XDefaultRootWindow=lambda _display: 1, XQueryTree=mock.Mock(side_effect=query), XFree=mock.Mock())
+        return types.SimpleNamespace(x=x, display=1, sync=mock.Mock()), types.SimpleNamespace(C=c)
+
+    def test_native_server_tree_independently_reports_present_or_absent_without_ewmh(self):
+        for present in (True, False):
+            tree = {1: (0, [2]), 2: (1, [77] if present else [])}
+            if present:
+                tree[77] = (2, [])
+            x11, helper = self.fixture(tree)
+            observed = {}
+            result = p.native_window_absence(x11, helper, 77, observed)
+            self.assertIs(result, observed)
+            self.assertTrue(result["complete"])
+            self.assertEqual(result["absent"], not present)
+            self.assertEqual(result["nodes"], 3 if present else 2)
+            self.assertEqual(x11.x.XQueryTree.call_count, result["nodes"])
+            self.assertEqual(x11.x.XFree.call_count, 2 if present else 1)
+
+    def test_unknown_query_error_parent_drift_duplicates_or_inventory_bound_never_mean_dismissed(self):
+        for tree in ({1: "error"}, {1: (0, [2]), 2: (99, [])}, {1: (0, [2, 2]), 2: (1, [])},
+                     {1: (0, list(range(2, 67)))}):
+            x11, helper = self.fixture(tree)
+            observed = {}
+            with self.subTest(tree=tree), self.assertRaises(RuntimeError):
+                p.native_window_absence(x11, helper, 77, observed)
+            self.assertFalse(observed["complete"])
+            self.assertNotIn("absent", observed)
+
+    def test_native_x_error_is_not_swallowed_as_a_destroyed_window(self):
+        x11, helper = self.fixture({1: (0, [])})
+        x11.sync.side_effect = RuntimeError("X resource query refused")
+        observed = {}
+        with self.assertRaises(RuntimeError):
+            p.native_window_absence(x11, helper, 77, observed)
+        self.assertFalse(observed["complete"])
+        self.assertNotIn("absent", observed)
+
+
 class WorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -495,6 +748,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("github.event_name == 'push' || github.event_name == 'workflow_dispatch'", job["if"])
         self.assertNotIn("container", job)
         self.assertFalse(job["steps"][0]["with"]["persist-credentials"])
+
+    def test_cancel_is_explicit_dispatch_choice_not_automatic_push_or_authentication(self):
+        choice = self.workflow["on"]["workflow_dispatch"]["inputs"]["mode"]
+        self.assertEqual(choice, {"description": "Synthetic dialog capture only, or one Cancel press without authentication",
+            "type": "choice", "required": True, "default": "read-only", "options": ["read-only", "cancel"]})
+        self.assertEqual(self.workflow["jobs"]["contract"]["env"]["CREATOR_LINUX_POLKIT_MODE"], "${{ inputs.mode || 'read-only' }}")
+        text = WORKFLOW.read_text()
+        self.assertIn('cancel) test "$GITHUB_EVENT_NAME" = workflow_dispatch', text)
+        self.assertIn('--setenv=CREATOR_LINUX_POLKIT_MODE="$CREATOR_LINUX_POLKIT_MODE"', text)
 
     def test_real_pam_session_one_locked_account_no_policy_override_or_credential_read(self):
         text = WORKFLOW.read_text()
@@ -528,10 +790,13 @@ class WorkflowTests(unittest.TestCase):
 
     def test_source_never_authenticates_signals_agent_or_installs_product(self):
         source = (HERE / "native-linux-polkit-probe.py").read_text()
-        for forbidden in (".do_action(", "get_action_iface", "get_editable_text_iface", ".send_signal(", ".terminate(", ".kill(",
+        for forbidden in ("get_editable_text_iface", ".send_signal(", ".terminate(", ".kill(",
                           "os.kill(", "shell=True", "stdin.write", "input(", "getspnam", "open('/etc/shadow", "helper.perform(",
                           "WM_DELETE_WINDOW", "b.install(", "execute_script", "__TAURI_INTERNALS__"):
-            self.assertNotIn(forbidden, source)
+            self.assertFalse(forbidden in source, forbidden)
+        self.assertEqual(source.count(".do_action("), 1)
+        self.assertEqual(source.count("get_action_iface("), 1)
+        self.assertIn('if record["mode"] == "cancel":', source)
         self.assertIn('"original-gtk-contract.json"', source)
         self.assertIn('sensitive = role == atspi.Role.PASSWORD_TEXT', source)
         self.assertIn('"sessionTeardownRequired"] = True', source)
