@@ -100,7 +100,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libayatana-appindicator3-1 \
             libxdo3 librsvg2-2 python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core \
             libx11-6 libxres1 dbus-x11 xvfb xauth openbox
-      - name: Secure the observed world-writable hosted-runner polkit directory (not an app repair)
+      - name: Secure the hosted-runner policy ancestry only (not an app repair)
         if: github.ref == 'refs/heads/validation/linux-current-components-014'
         run: |
           set -euo pipefail
@@ -110,23 +110,32 @@ jobs:
           /usr/bin/python3 -B - <<'PY'
           import json, os, stat, subprocess
           from pathlib import Path
-          target = Path('/usr/share/polkit-1/actions')
-          assert target.resolve(strict=True) == target
-          for parent in target.parents:
+          # Primary image provisioning recursively makes /usr/share writable:
+          # https://github.com/actions/runner-images/blob/main/images/ubuntu/scripts/build/configure-system.sh
+          # Secure only these three directories, never the tree or auth policy.
+          paths = tuple(map(Path, ('/usr/share', '/usr/share/polkit-1', '/usr/share/polkit-1/actions')))
+          for parent in (Path('/usr'), Path('/')):
               before = parent.lstat()
               assert stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0 and not before.st_mode & 0o7022
-          before = target.lstat()
-          assert stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
-          mode = stat.S_IMODE(before.st_mode)
-          assert mode in (0o755, 0o777), 'Unreviewed runner policy-directory state'
-          if mode == 0o777:
-              # Native39106292475 observed this hosted-image setting. Never shipped.
-              subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/chmod', '0755', str(target)], check=True)
-          after = target.lstat()
-          assert (after.st_dev, after.st_ino, after.st_uid, after.st_gid) == (before.st_dev, before.st_ino, 0, 0)
-          assert stat.S_IMODE(after.st_mode) == 0o755 and target.resolve(strict=True) == target
-          record = {'scope': 'disposable-runner-environment-only', 'path': str(target), 'beforeMode': mode,
-                    'afterMode': 0o755, 'sameDirectory': True, 'applicationRepair': False, 'authenticationAccepted': False}
+          original = {}
+          for target in paths:
+              assert target.resolve(strict=True) == target
+              before = target.lstat()
+              assert stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+              mode = stat.S_IMODE(before.st_mode)
+              assert mode in (0o755, 0o777), f'Unreviewed directory state: {target} {mode:04o}'
+              original[target] = before
+          entries = []
+          for target in paths:
+              before = original[target]
+              if stat.S_IMODE(before.st_mode) == 0o777:
+                  subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/chmod', '0755', str(target)], check=True)
+              after = target.lstat()
+              assert (after.st_dev, after.st_ino, after.st_uid, after.st_gid) == (before.st_dev, before.st_ino, 0, 0)
+              assert stat.S_IMODE(after.st_mode) == 0o755 and target.resolve(strict=True) == target
+              entries.append({'path': str(target), 'beforeMode': stat.S_IMODE(before.st_mode), 'afterMode': 0o755, 'sameDirectory': True})
+          record = {'scope': 'disposable-runner-environment-only', 'directories': entries,
+                    'recursiveChange': False, 'applicationRepair': False, 'authenticationAccepted': False}
           output = Path(os.environ['RUNNER_TEMP']) / 'linux-runner-polkit-directory.json'
           with output.open('x') as stream:
               json.dump(record, stream)

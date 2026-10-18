@@ -41,12 +41,14 @@ for (const name of workflows) test(`Linux preflight: ${name} YAML, Bash and embe
 test('39106292475 runner-only polkit hardening is fixed, guarded and never relaxes app ownership checks', () => {
   const body = fs.readFileSync(path.join(__dirname, '../.github/workflows/native-linux-components-014.yml'), 'utf8');
   const job = yaml.parse(body).jobs.components;
-  const step = job.steps.find(s => s.name?.startsWith('Secure the observed'));
+  const step = job.steps.find(s => s.name?.startsWith('Secure the hosted-runner'));
   assert.equal(step.if, "github.ref == 'refs/heads/validation/linux-current-components-014'");
   assert.match(step.run, /mode in \(0o755, 0o777\)/);
   assert.match(step.run, /\['\/usr\/bin\/sudo', '-n', '\/usr\/bin\/chmod', '0755', str\(target\)\]/);
   assert.match(step.run, /after.st_ino/);
   assert.match(step.run, /applicationRepair': False/);
+  assert.match(step.run, /'\/usr\/share', '\/usr\/share\/polkit-1', '\/usr\/share\/polkit-1\/actions'/);
+  assert.match(step.run, /recursiveChange': False/);
   assert.doesNotMatch(step.run, /auth_admin|allow_active|chmod.*777|pkexec|polkit.addRule|rm -/);
   const root = fs.readFileSync(path.join(__dirname, 'native-linux-root-probe.py'), 'utf8');
   assert.match(root, /info.st_uid == info.st_gid == 0 and not info.st_mode & 0o7022/);
