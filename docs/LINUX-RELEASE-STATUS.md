@@ -82,6 +82,15 @@ Mac support remains suspended. No TEST ONLY package is a release candidate.
   expose the host reader or implement Hub/Unity/project operations. Its scoped
   [result](evidence/flatpak-host-transport-39042096460.json) keeps integration,
   migration, signed update and release gates false.
+- The installed synthetic Flatpak exchange then passed in
+  [39107022380](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39107022380):
+  exact app/runtime/image pins, inherited authenticated FD exchange, owned normal
+  exit/reap and unchanged isolated settings. The fixture is unsigned and exposes
+  no host reader or settings/project API. See the [scoped receipt](evidence/flatpak-installed-transport-39107022380.json).
+  Failure39106656388 had captured the actual harmless `extra-args` value
+  `--usb-list=;--usb-list=;`. Flatpak1.18.4 serializes both empty USB lists
+  unconditionally in its context writer. Only that exact form is admitted;
+  nonempty USB queries, other args and replacement app/runtime paths still refuse.
 
 ## Remaining Release Gates
 
@@ -160,3 +169,19 @@ Read-only run 39042527460 subsequently found the exact source heading ID/name on
 an h2 object with numeric role 82, and the fixed button ID on role 43; all 31
 known-object metadata reads completed without errors. That distinguishes a role
 contract mismatch from missing UI. No control action or frame-hit proof followed.
+
+Current-package run39106806681 reached the same read-only diagnostic with exact
+source button/heading matches. It then refused a geometry assumption: the native
+client was `[171,130,940,580]`, while GTK's AX frame was `[170,110,942,605]`.
+The existing X11 helper already provides the EWMH-decorated frame rectangle;
+read-only comparison is being corrected to that contract, not a guessed offset.
+Strict semantic-Parent and action authority still refuse. Normal Root close and
+exit0 passed; component operation, migration and updater acceptance remain false.
+
+Runs39106116170/39106292475 also exposed the hosted image's world-writable policy
+ancestry. The [primary image provisioning](https://github.com/actions/runner-images/blob/main/images/ubuntu/scripts/build/configure-system.sh)
+recursively changes `/usr/share` to0777. The disposable current-component workflow
+now secures only `/usr/share`, `/usr/share/polkit-1` and its `actions` directory to
+0755, after exact root-owner/type/path checks and with retained before/after
+identity records. No recursive chmod, application repair, authentication-policy
+override or production ownership-check relaxation was added.
