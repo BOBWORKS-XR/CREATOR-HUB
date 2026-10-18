@@ -16,6 +16,10 @@ use std::{
 pub(crate) const APP: &str = "com.creatorworks.hub";
 pub(crate) const APP_REF: &str = "app/com.creatorworks.hub/x86_64/flatpak-test";
 pub(crate) const ECHO: &str = "/app/libexec/creator-hub-flatpak-launch-echo";
+const REPLACEMENT_KEYS: [&str; 3] = ["original-app-path", "original-runtime-path", "extra-args"];
+const REFUSAL_FILE: &str = "deployment-metadata-refusal.json";
+const VALUE_PREVIEW_BYTES: usize = 256;
+const REFUSAL_BYTES: usize = 8192;
 
 pub(crate) struct Pins {
     pub app: &'static str,
@@ -322,10 +326,8 @@ pub(crate) fn deployment(
         }
     }
     for ((section, key), value) in &fields {
-        if section == "Instance"
-            && ["original-app-path", "original-runtime-path", "extra-args"].contains(&key.as_str())
-        {
-            return Err("replacement-deployment");
+        if section == "Instance" && REPLACEMENT_KEYS.contains(&key.as_str()) {
+            return replacement_refusal(root, &fields, key, uid);
         }
         if section == "Instance" && ["build", "devel"].contains(&key.as_str()) && value != "false" {
             return Err("development-sandbox");
@@ -367,6 +369,115 @@ pub(crate) fn deployment(
     transport::alive(&message.pidfd)
 }
 
+fn replacement_refusal(
+    root: &Path,
+    fields: &BTreeMap<(String, String), String>,
+    key: &str,
+    uid: u32,
+) -> Result<()> {
+    // Diagnostic failure must never replace the original refusal or grant authority.
+    let _ = write_metadata_refusal(root, fields, key, uid);
+    Err("replacement-deployment")
+}
+
+fn metadata_refusal_payload(
+    fields: &BTreeMap<(String, String), String>,
+    key: &str,
+) -> Result<String> {
+    let key = REPLACEMENT_KEYS
+        .iter()
+        .find(|known| **known == key)
+        .ok_or("diagnostic-key")?;
+    if !fields.contains_key(&("Instance".to_owned(), (*key).to_owned())) {
+        return Err("diagnostic-key");
+    }
+    let mut output = format!("{{\"refusedKey\":\"{key}\",\"values\":{{");
+    for (index, known) in REPLACEMENT_KEYS.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        output.push_str(&format!("\"{known}\":"));
+        if let Some(value) = fields.get(&("Instance".to_owned(), (*known).to_owned())) {
+            quoted_preview(&mut output, value);
+        } else {
+            output.push_str("null");
+        }
+    }
+    output.push_str("}}\n");
+    if output.len() > REFUSAL_BYTES {
+        return Err("diagnostic-limit");
+    }
+    Ok(output)
+}
+
+fn quoted_preview(output: &mut String, value: &str) {
+    const MARKER: &str = "[truncated]";
+    let truncated = value.len() > VALUE_PREVIEW_BYTES;
+    let mut end = if truncated {
+        VALUE_PREVIEW_BYTES - MARKER.len()
+    } else {
+        value.len()
+    };
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.push('"');
+    for character in value[..end].chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            control if control < '\u{20}' => {
+                output.push_str(&format!("\\u{:04x}", u32::from(control)));
+            }
+            other => output.push(other),
+        }
+    }
+    if truncated {
+        output.push_str(MARKER);
+    }
+    output.push('"');
+}
+
+fn write_metadata_refusal(
+    root: &Path,
+    fields: &BTreeMap<(String, String), String>,
+    key: &str,
+    uid: u32,
+) -> Result<()> {
+    let payload = metadata_refusal_payload(fields, key)?;
+    // The caller supplies only prepare()'s fresh fixed proof root. No metadata
+    // value is a pathname; the admitted directory FD anchors the sole new file.
+    let parent = directory(root, uid, true)?;
+    let m = parent.metadata().map_err(|_| "diagnostic-directory-stat")?;
+    if m.uid() != uid || m.mode() & 0o7777 != 0o700 {
+        return Err("diagnostic-directory-mode");
+    }
+    let name = CString::new(REFUSAL_FILE).map_err(|_| "diagnostic-name")?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY
+                | libc::O_CREAT
+                | libc::O_EXCL
+                | libc::O_NOFOLLOW
+                | libc::O_CLOEXEC
+                | libc::O_NONBLOCK,
+            0o600 as libc::mode_t,
+        )
+    };
+    if fd < 0 {
+        return Err("diagnostic-create-new");
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let m = file.metadata().map_err(|_| "diagnostic-stat")?;
+    if !m.is_file() || m.uid() != uid || m.nlink() != 1 || m.mode() & 0o7777 != 0o600 {
+        return Err("diagnostic-file-mode");
+    }
+    std::io::Write::write_all(&mut file, payload.as_bytes()).map_err(|_| "diagnostic-write")?;
+    file.sync_all().map_err(|_| "diagnostic-sync")
+}
+
 // Deliberately accepts only Flatpak's simple generated subset, not arbitrary INI.
 fn keyfile(input: &str) -> Result<BTreeMap<(String, String), String>> {
     let mut group = "";
@@ -401,6 +512,133 @@ fn keyfile(input: &str) -> Result<BTreeMap<(String, String), String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        os::unix::fs::{symlink, PermissionsExt},
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    struct DiagnosticRoot(PathBuf);
+
+    impl DiagnosticRoot {
+        fn fresh() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                ".identity-refusal-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&parent).unwrap();
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+            let root = parent.join("creator-flatpak-launch-proof");
+            fs::create_dir(&root).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for DiagnosticRoot {
+        fn drop(&mut self) {
+            // Only exact objects created by this test, never recursive cleanup.
+            let _ = fs::remove_file(self.0.join(REFUSAL_FILE));
+            let _ = fs::remove_file(self.0.join("untouched"));
+            let _ = fs::remove_dir(&self.0);
+            let _ = fs::remove_dir(self.0.parent().unwrap());
+        }
+    }
+
+    #[test]
+    fn metadata_refusal_payload_only_three_known_values_and_exact_cause() {
+        let fields = keyfile(
+            "[Instance]\nextra-args=--fixed-fixture-flag\n[Other]\nprivate=not-for-output\n",
+        )
+        .unwrap();
+        assert_eq!(
+            metadata_refusal_payload(&fields, "extra-args").unwrap(),
+            "{\"refusedKey\":\"extra-args\",\"values\":{\"original-app-path\":null,\"original-runtime-path\":null,\"extra-args\":\"--fixed-fixture-flag\"}}\n"
+        );
+        assert!(metadata_refusal_payload(&fields, "private").is_err());
+        assert!(metadata_refusal_payload(&fields, "original-app-path").is_err());
+        for key in REPLACEMENT_KEYS {
+            let fields = keyfile(&format!("[Instance]\n{key}=fixture\n")).unwrap();
+            assert!(metadata_refusal_payload(&fields, key)
+                .unwrap()
+                .starts_with(&format!("{{\"refusedKey\":\"{key}\"")));
+        }
+    }
+
+    #[test]
+    fn metadata_refusal_payload_is_bounded_json_with_utf8_and_control_escaping() {
+        let mut output = String::new();
+        quoted_preview(&mut output, "\"\\\n\t\u{1}");
+        assert_eq!(output, "\"\\\"\\\\\\u000a\\u0009\\u0001\"");
+        let fields = REPLACEMENT_KEYS
+            .into_iter()
+            .map(|key| {
+                (
+                    ("Instance".to_owned(), key.to_owned()),
+                    format!("{}tail-not-for-output", "\u{1f642}".repeat(2048)),
+                )
+            })
+            .collect();
+        let payload = metadata_refusal_payload(&fields, "extra-args").unwrap();
+        assert!(payload.len() <= REFUSAL_BYTES);
+        assert_eq!(payload.matches("[truncated]").count(), 3);
+        assert!(!payload.contains("tail-not-for-output"));
+    }
+
+    #[test]
+    fn metadata_refusal_writes_one_private_file_without_fork_or_overwrite() {
+        let root = DiagnosticRoot::fresh();
+        let uid = unsafe { libc::getuid() };
+        let fields = keyfile("[Instance]\nextra-args=first\n").unwrap();
+        assert_eq!(
+            replacement_refusal(&root.0, &fields, "extra-args", uid),
+            Err("replacement-deployment")
+        );
+        let file = root.0.join(REFUSAL_FILE);
+        let before = fs::read(&file).unwrap();
+        assert_eq!(
+            String::from_utf8(before.clone()).unwrap(),
+            metadata_refusal_payload(&fields, "extra-args").unwrap()
+        );
+        let metadata = fs::symlink_metadata(&file).unwrap();
+        assert_eq!(metadata.uid(), uid);
+        assert_eq!(metadata.mode() & 0o7777, 0o600);
+        assert_eq!(metadata.nlink(), 1);
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
+        let changed = keyfile("[Instance]\noriginal-app-path=changed\n").unwrap();
+        assert_eq!(
+            replacement_refusal(&root.0, &changed, "original-app-path", uid),
+            Err("replacement-deployment")
+        );
+        assert_eq!(fs::read(&file).unwrap(), before);
+        assert_eq!(fs::symlink_metadata(&file).unwrap().ino(), metadata.ino());
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn metadata_refusal_symlink_or_nonprivate_root_keeps_original_refusal() {
+        let root = DiagnosticRoot::fresh();
+        let uid = unsafe { libc::getuid() };
+        let fields = keyfile("[Instance]\nextra-args=fixture\n").unwrap();
+        let target = root.0.join("untouched");
+        fs::write(&target, b"untouched-sentinel").unwrap();
+        symlink("untouched", root.0.join(REFUSAL_FILE)).unwrap();
+        assert_eq!(
+            replacement_refusal(&root.0, &fields, "extra-args", uid),
+            Err("replacement-deployment")
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"untouched-sentinel");
+        fs::remove_file(root.0.join(REFUSAL_FILE)).unwrap();
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o750)).unwrap();
+        assert_eq!(
+            replacement_refusal(&root.0, &fields, "extra-args", uid),
+            Err("replacement-deployment")
+        );
+        assert!(!root.0.join(REFUSAL_FILE).exists());
+    }
 
     #[test]
     fn pins_refuse_missing_malformed_and_placeholder_values() {
