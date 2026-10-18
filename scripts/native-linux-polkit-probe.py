@@ -24,6 +24,9 @@ USER, UID = "creator-polkit-fixture", 21314
 AGENT = "/usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1"
 AGENT_PATH = "/org/gnome/PolicyKit1/AuthenticationAgent"
 COMMAND = ("/usr/bin/pkexec", "--disable-internal-agent", "/usr/bin/true")
+STOCK_POLICY = "/usr/share/polkit-1/actions/org.freedesktop.policykit.policy"
+STOCK_ARCHIVE = ("https://archive.ubuntu.com/ubuntu/pool/main/p/policykit-1/polkitd_0.105-33ubuntu0.2_amd64.deb",
+                 80152, "8a8e123a44e2c3deef2c072db7248e94d9d7ad7c874127facc7d1abaf622ea85")
 HELPERS = {"native-linux-root-probe.py": "91983346c5bac811028135b41c11a0dfc10e40a61c9f65aab535df326e354e72",
            "native-unix-window.py": "da62bd6644bebd21059893b2dbfa2685fb2deb9b2ca54281d87c599f4cd3f636"}
 # Independent primary Ubuntu archive bytes, not hashes learned from a live PID.
@@ -109,6 +112,77 @@ def source_contract(fetch=None):
             and "register_client_to_gnome_session();" in selected["debian/patches/04-autorestart.patch"], "Ubuntu session patch set differs")
     return {"scope": "primary-source-contract-only", "archives": records, "sourceFiles": SOURCE_FILES,
             "requiresRealLogindSession": True, "dbusObjectPath": AGENT_PATH, **FLAGS}
+
+
+def stock_policy_contract(tar_bytes):
+    require(0 < len(tar_bytes) <= 1024 * 1024, "Bounded factory package TAR required")
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as archive:
+        members = archive.getmembers()
+        require(len(members) <= 128 and len({m.name for m in members}) == len(members), "Unique bounded factory package inventory required")
+        matches = [m for m in members if m.name == "." + STOCK_POLICY]
+        require(len(matches) == 1, "Exact stock policy package member required")
+        member = matches[0]
+        pin = FILES[STOCK_POLICY]
+        require(member.isfile() and not member.linkname and member.uid == member.gid == 0
+                and member.mode == pin[4] == 0o644 and member.size == pin[2], "Factory stock policy owner/mode/size differs")
+        data = archive.extractfile(member).read()
+        require(len(data) == pin[2] and hashlib.sha256(data).hexdigest() == pin[3], "Factory stock policy hash differs")
+        actions = ET.fromstring(data).findall("action[@id='org.freedesktop.policykit.exec']")
+        require(len(actions) == 1 and [actions[0].findtext("defaults/" + k) for k in ("allow_any", "allow_inactive", "allow_active")]
+                == ["auth_admin"] * 3, "Factory stock authentication policy differs")
+        return {"path": STOCK_POLICY, "uid": 0, "gid": 0, "mode": member.mode, "size": len(data), "sha256": pin[3]}
+
+
+def stock_leaf(path, record):
+    info = path.lstat()
+    require(str(path) == STOCK_POLICY and path.resolve(strict=True) == path and stat.S_ISREG(info.st_mode)
+            and info.st_nlink == 1 and info.st_uid == info.st_gid == 0, "Exact ordinary root-owned stock leaf required")
+    require(stat.S_IMODE(info.st_mode) == record["mode"] and record["mode"] in (0o644, 0o777)
+            and (record["size"], record["sha256"]) == FILES[STOCK_POLICY][2:4], "Unreviewed stock leaf mode/bytes refused")
+
+
+def secure_stock_policy(output):
+    """Restore one proven package mode on disposable CI; never edit policy bytes."""
+    b, report = base(), {"scope": "disposable-runner-stock-leaf-mode-only", "policyContentChanged": False,
+                         "recursiveChange": False, "modeChanged": False, **FLAGS}
+    try:
+        require(os.getuid() > 0 and os.getuid() != UID, "Only non-root provisioning runner may secure the stock leaf")
+        url, size, digest = STOCK_ARCHIVE
+        with urllib.request.urlopen(url, timeout=20) as response:
+            require(response.url == url, "Factory package redirect refused")
+            data = response.read(size + 1)
+        require(len(data) == size and hashlib.sha256(data).hexdigest() == digest, "Independent factory DEB pin differs")
+        deb = output / "polkit-stock-mode-source.deb"
+        b.write_new(deb, data)
+        unpacked = subprocess.run(["/usr/bin/dpkg-deb", "--fsys-tarfile", str(deb)], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, timeout=8)
+        require(unpacked.returncode == 0 and len(unpacked.stderr) <= 8192, "Fixed factory package inspection refused")
+        b.pinned(deb, (size, digest))
+        report["factoryPolicy"] = stock_policy_contract(unpacked.stdout)
+        report["factoryArchive"] = {"url": url, "size": size, "sha256": digest}
+        path = Path(STOCK_POLICY)
+        before = b.file_record(path, FILES[STOCK_POLICY][2])
+        report["before"] = before
+        stock_leaf(path, before)
+        _code, state = b.run_tool(output, "stock-leaf-package", ["/usr/bin/dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n", "polkitd"])
+        _code, owner = b.run_tool(output, "stock-leaf-owner", ["/usr/bin/dpkg-query", "-S", STOCK_POLICY])
+        require(state == b"polkitd\t0.105-33ubuntu0.2\tamd64\tinstalled\n"
+                and owner == ("polkitd: " + STOCK_POLICY + "\n").encode(), "Exact stock leaf package provenance required")
+        require(b.file_record(path, FILES[STOCK_POLICY][2]) == before, "Stock leaf changed before mode restoration")
+        stock_leaf(path, before)
+        if before["mode"] == 0o777:
+            b.run_tool(output, "restore-one-factory-leaf-mode", ["/usr/bin/sudo", "-n", "/usr/bin/chmod", "0644", "--", STOCK_POLICY])
+            report["modeChanged"] = True
+        after = b.pinned(path, FILES[STOCK_POLICY][2:4], 0o644)
+        stock_leaf(path, after)
+        require(all(after[k] == before[k] for k in ("device", "inode", "size", "sha256")), "Stock leaf identity or bytes changed")
+        report["after"] = after
+    except Exception as error:
+        report["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        raise
+    finally:
+        b.save_json(output / "polkit-stock-policy-preflight.json", report)
+    return report
 
 
 def system_file_observation(output):
@@ -398,6 +472,9 @@ def main():
         print(json.dumps(source_contract()))
         return
     admission(os.environ, sys.platform, platform.machine())
+    if sys.argv[1:] == ["secure-stock-policy"]:
+        print(json.dumps(secure_stock_policy(base().ordinary(os.environ["RUNNER_TEMP"]))))
+        return
     require(sys.argv[1:] == ["probe"], "Use source-contract or fixed probe only")
     # Bound native RPC/tree collection without signalling any agent or dialog.
     signal.signal(signal.SIGALRM, deadline_expired)

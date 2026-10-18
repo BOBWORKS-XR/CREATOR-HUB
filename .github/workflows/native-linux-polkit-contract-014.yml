@@ -77,6 +77,10 @@ jobs:
           with (Path(os.environ['RUNNER_TEMP']) / 'polkit-directory-preflight.json').open('x') as stream:
               json.dump({'scope': 'disposable-runner-only', 'recursiveChange': False, 'policyOverride': False, 'directories': entries}, stream)
           PY
+      - name: Restore only independently proven factory stock policy leaf mode on this disposable runner
+        # 39110220875: exact root-owned 1524-byte policy hash, but mode0777.
+        # Never modify contents, other leaves, auth defaults or user machines.
+        run: python3 -B scripts/native-linux-polkit-probe.py secure-stock-policy
       - name: Create one locked synthetic account and root-owned fixed fixture source
         run: |
           set -euo pipefail
@@ -152,5 +156,6 @@ jobs:
           path: |
             ${{ runner.temp }}/polkit-source-contract.json
             ${{ runner.temp }}/polkit-directory-preflight.json
+            ${{ runner.temp }}/polkit-stock-policy-preflight.json
             ${{ runner.temp }}/polkit-script-binding.json
             ${{ runner.temp }}/polkit-capture/*

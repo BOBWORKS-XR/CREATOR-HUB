@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -179,6 +180,77 @@ class SystemFileObservationTests(unittest.TestCase):
         source = (HERE / "native-linux-polkit-probe.py").read_text()
         self.assertIn("b.pinned(path, (size, digest), mode)", source)
         self.assertIn('"Exact system file pin refused: " + filename', source)
+
+
+class StockPolicyModeTests(unittest.TestCase):
+    def package_fixture(self, mode=0o644, uid=0, changed_bytes=False):
+        data = (b'<policyconfig><action id="org.freedesktop.policykit.exec"><defaults>'
+                b'<allow_any>auth_admin</allow_any><allow_inactive>auth_admin</allow_inactive>'
+                b'<allow_active>auth_admin</allow_active></defaults></action></policyconfig>')
+        pin = ("polkitd", "0.105-33ubuntu0.2", len(data), hashlib.sha256(data).hexdigest(), 0o644)
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as archive:
+            member = tarfile.TarInfo("." + p.STOCK_POLICY)
+            member.mode, member.uid, member.gid, member.size = mode, uid, 0, len(data)
+            archive.addfile(member, io.BytesIO(data.replace(b"auth_admin", b"auth_other") if changed_bytes else data))
+        return stream.getvalue(), pin
+
+    def test_factory_archive_contract_proves_exact_root_owned_0644_policy(self):
+        data, pin = self.package_fixture()
+        with mock.patch.dict(p.FILES, {p.STOCK_POLICY: pin}):
+            result = p.stock_policy_contract(data)
+        self.assertEqual(result, {"path": p.STOCK_POLICY, "uid": 0, "gid": 0, "mode": 0o644,
+                                  "size": pin[2], "sha256": pin[3]})
+
+    def test_foreign_factory_mode_owner_or_hash_refuses(self):
+        for mode, uid, changed in ((0o777, 0, False), (0o644, 1, False), (0o644, 0, True)):
+            data, pin = self.package_fixture(mode, uid, changed)
+            with self.subTest(mode=mode, uid=uid, changed=changed), mock.patch.dict(p.FILES, {p.STOCK_POLICY: pin}), self.assertRaises(RuntimeError):
+                p.stock_policy_contract(data)
+
+    def test_only_exact_captured_leaf_states_are_eligible(self):
+        path = mock.MagicMock()
+        path.__str__.return_value = p.STOCK_POLICY
+        path.resolve.return_value = path
+        pin = p.FILES[p.STOCK_POLICY]
+        for mode in (0o644, 0o777):
+            path.lstat.return_value = types.SimpleNamespace(st_mode=stat.S_IFREG | mode, st_nlink=1, st_uid=0, st_gid=0)
+            p.stock_leaf(path, {"mode": mode, "size": pin[2], "sha256": pin[3]})
+        for change in ("mode", "uid", "hardlink", "symlink", "hash", "path"):
+            record = {"mode": 0o777, "size": pin[2], "sha256": pin[3]}
+            info = {"st_mode": stat.S_IFREG | 0o777, "st_nlink": 1, "st_uid": 0, "st_gid": 0}
+            path.__str__.return_value = p.STOCK_POLICY
+            if change == "mode":
+                info["st_mode"], record["mode"] = stat.S_IFREG | 0o755, 0o755
+            elif change == "uid":
+                info["st_uid"] = 1
+            elif change == "hardlink":
+                info["st_nlink"] = 2
+            elif change == "symlink":
+                info["st_mode"] = stat.S_IFLNK | 0o777
+            elif change == "hash":
+                record["sha256"] = "f" * 64
+            else:
+                path.__str__.return_value = "/unrelated/policy"
+            path.lstat.return_value = types.SimpleNamespace(**info)
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                p.stock_leaf(path, record)
+
+    def test_wrong_factory_deb_pin_never_reaches_unpack_or_chmod(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.url = p.STOCK_ARCHIVE[0]
+        response.read.return_value = b"foreign package bytes"
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(p.os, "getuid", return_value=1001, create=True), \
+                mock.patch.object(p.urllib.request, "urlopen", return_value=response), \
+                mock.patch.object(p.subprocess, "run") as unpack, mock.patch.object(b, "run_tool") as chmod, self.assertRaises(RuntimeError):
+            p.secure_stock_policy(Path(temp).resolve())
+        unpack.assert_not_called()
+        chmod.assert_not_called()
+        source = (HERE / "native-linux-polkit-probe.py").read_text().split("def secure_stock_policy(", 1)[1].split("def system_file_observation(", 1)[0]
+        self.assertLess(source.index("stock_policy_contract(unpacked.stdout)"), source.index('"/usr/bin/chmod"'))
+        self.assertLess(source.index("Exact stock leaf package provenance required"), source.index('"/usr/bin/chmod"'))
+        self.assertEqual(source.count('"/usr/bin/chmod", "0644", "--", STOCK_POLICY'), 1)
 
 
 class DbusTests(unittest.TestCase):
@@ -369,7 +441,7 @@ class WorkflowTests(unittest.TestCase):
             for embedded in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", body, re.S):
                 ast.parse(embedded)
                 python_count += 1
-        self.assertEqual(run_count, 7)
+        self.assertEqual(run_count, 8)
         self.assertEqual(python_count, 2)
 
     def test_source_never_authenticates_signals_agent_or_installs_product(self):
