@@ -115,9 +115,10 @@ class PagesTests(unittest.TestCase):
     def test_unknown_mutation_outcome_is_never_retried(self):
         driver = self.driver(Response())
         driver.http.open.side_effect = TimeoutError("unknown click outcome")
-        with self.assertRaises(TimeoutError):
+        with self.assertRaisesRegex(RuntimeError, "transport did not complete; no retry"):
             driver.request("POST", "/session/one/element/two/click", {})
         self.assertEqual(driver.http.open.call_count, 1)
+        self.assertEqual(driver.last_request, {"method": "POST", "route": "/session/one/element/two/click", "phase": "http"})
 
     def test_protocol_errors_retain_bounded_diagnostics_without_retrying(self):
         driver = self.driver(Response())

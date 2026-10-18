@@ -120,13 +120,16 @@ class Driver:
     def __init__(self):
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         self.session, self.guard = "", lambda: None
+        self.last_request = None
 
     def request(self, method, suffix, payload=None, limit=131072):
         require(method in ("GET", "POST", "DELETE") and re.fullmatch(r"/[A-Za-z0-9_./-]+", suffix)
                 and ".." not in suffix, "Invalid finite WebDriver request")
         body = None if payload is None else json.dumps(payload, allow_nan=False).encode()
         require(body is None or len(body) <= 16384, "Oversized WebDriver request")
+        self.last_request = {"method": method, "route": suffix, "phase": "before-guard"}
         self.guard()
+        self.last_request["phase"] = "http"
         request = urllib.request.Request("http://127.0.0.1:4444" + suffix, body, {"Content-Type": "application/json"}, method=method)
         try:
             with self.http.open(request, timeout=15) as response:
@@ -144,13 +147,17 @@ class Driver:
                 except (ValueError, AttributeError, RuntimeError):
                     pass
             raise RuntimeError(f"WebDriver {method} {suffix}: HTTP {error.code}: {detail}") from None
+        except (TimeoutError, urllib.error.URLError):
+            raise RuntimeError(f"WebDriver {method} {suffix}: transport did not complete; no retry") from None
         require(0 < len(raw) <= limit, "Oversized/empty WebDriver response")
         require(length is None or len(raw) == int(length), "Truncated WebDriver response")
         result = parse(raw)
         require(type(result) is dict and "value" in result, "Malformed WebDriver outcome")
         value = result["value"]
         require(not (type(value) is dict and "error" in value), "WebDriver command failed: " + str(value)[:300])
+        self.last_request["phase"] = "after-guard"
         self.guard()
+        self.last_request["phase"] = "returned"
         return value
 
     def call(self, method, suffix, value=None, **kwargs):
@@ -406,6 +413,7 @@ def run(binding, root, report):
         pinned(HUB, hub, 0, 0o755)
         report["pagesObserved"] = True
     except Exception:
+        report["lastRequestAtFailure"] = dict(d.last_request) if d.last_request else None
         if request is not None:
             try:
                 d.guard()
