@@ -296,6 +296,39 @@ class Tests(unittest.TestCase):
         self.assertEqual(report["cleanupErrors"][0]["type"], "TimeoutExpired")
         self.assertNotIn("migrationAccepted", report)
 
+    def test_completed_html_required_and_continue_clicked_exactly_once(self):
+        values = {("#convergence-title", "text"): "Migration complete",
+                  ("#convergence-summary", "text"): "Migration complete. Use MCP and Project Setup in Creator Hub. Your reviewed settings and backups are kept. No standalone installation was removed.",
+                  ("#convergence-dialog", "attribute/aria-busy"): "false", ("#convergence-dialog", "attribute/open"): "",
+                  ("#convergence-later", "text"): "Continue in Hub", ("#convergence-later", "enabled"): True,
+                  ("#convergence-error", "text"): ""}
+        values.update({("#convergence-" + name, "property/hidden"): True for name in ("prepare", "connections", "retire", "refresh")})
+        for altered in (None, *values):
+            state, driver, pages = dict(values), mock.Mock(), mock.Mock()
+            if altered is not None:
+                state[altered] = False if type(state[altered]) is bool else "changed"
+                if altered == ("#convergence-dialog", "attribute/open"):
+                    state[altered] = None
+            driver.read.side_effect = lambda selector, endpoint="text": state[(selector, endpoint)]
+            driver.click.side_effect = lambda _: state.update({("#convergence-dialog", "attribute/open"): None})
+            def ready(check):
+                M.require(check(), "Read-only completed-state check did not pass")
+            pages.wait.side_effect = ready
+            if altered is None:
+                receipt = M.continue_completed_guide(driver, pages)
+                driver.click.assert_called_once_with("#convergence-later")
+                self.assertEqual(receipt["continueActionCount"], 1)
+                self.assertEqual(receipt["title"], "Migration complete")
+                self.assertEqual(pages.wait.call_count, 2)
+            else:
+                with self.subTest(altered=altered), self.assertRaises(RuntimeError):
+                    M.continue_completed_guide(driver, pages)
+                driver.click.assert_not_called()
+        source = (HERE / "native-linux-integrated-migration.py").read_text()
+        run = source.split("def run(", 1)[1]
+        self.assertLess(run.index("continue_completed_guide(d, pages)"), run.index('report["afterMigration"] = preserved'))
+        self.assertFalse(M.FALSE_GATES["standaloneRemovalAccepted"])
+
     def test_workflow_branch_permissions_producer_and_legacy_pins(self):
         import yaml
         value = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)

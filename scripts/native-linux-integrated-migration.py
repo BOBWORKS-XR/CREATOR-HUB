@@ -466,6 +466,24 @@ class Session:
         os.close(self.pidfd); self.x11.dispose()
 
 
+def continue_completed_guide(driver, pages):
+    pages.wait(lambda: driver.read("#convergence-title") == "Migration complete"
+               and driver.read("#convergence-dialog", "attribute/aria-busy") == "false")
+    title = driver.read("#convergence-title")
+    summary = driver.read("#convergence-summary")
+    button = driver.read("#convergence-later")
+    require(title == "Migration complete" and summary == "Migration complete. Use MCP and Project Setup in Creator Hub. Your reviewed settings and backups are kept. No standalone installation was removed."
+            and driver.read("#convergence-dialog", "attribute/open") is not None
+            and driver.read("#convergence-dialog", "attribute/aria-busy") == "false"
+            and not driver.read("#convergence-error")
+            and all(driver.read("#convergence-" + name, "property/hidden") is True for name in ("prepare", "connections", "retire", "refresh"))
+            and button == "Continue in Hub" and driver.read("#convergence-later", "enabled") is True,
+            "Exact completed migration HTML required before continuing")
+    driver.click("#convergence-later")
+    pages.wait(lambda: driver.read("#convergence-dialog", "attribute/open") is None)
+    return {"title": title, "summary": summary, "button": button, "continueActionCount": 1}
+
+
 def run(binding, root, pages, helper, native, report):
     pages.pinned(HUB, binding["hub"], 0, 0o755)
     require(native.run_tool(root, "dpkg-verify", ["/usr/bin/dpkg", "--verify", "creator-hub"])[1] == b"", "Installed DEB differs")
@@ -483,7 +501,7 @@ def run(binding, root, pages, helper, native, report):
         session.migrate_step("#convergence-prepare", all_profiles[:1])
         session.migrate_step("#convergence-connections", all_profiles[1:4])
         session.migrate_step("#convergence-retire", all_profiles[4:])
-        pages.wait(lambda: d.read("#convergence-dialog", "attribute/open") is None)
+        report["completionHtml"] = continue_completed_guide(d, pages)
         report["afterMigration"] = preserved(root, binding, binding["fixtures"], pages)
         session.close(); session = None
         report["afterClose"] = preserved(root, binding, binding["fixtures"], pages)
