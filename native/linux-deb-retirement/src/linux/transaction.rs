@@ -100,6 +100,7 @@ pub(super) fn retire_setup() -> Result<serde_json::Value> {
 fn retire_target(target: Target) -> Result<serde_json::Value> {
     privileged_image()?;
     let mut held = locks()?;
+    refuse_prior_attempt_for(target)?;
     // Refuse a running GUI before creating a preparation stage. Keep its writer
     // descriptor in this parent through dpkg and post-verification; CLOEXEC
     // closes only the child's inherited copy.
