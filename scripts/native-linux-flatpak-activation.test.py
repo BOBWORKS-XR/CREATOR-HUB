@@ -263,6 +263,63 @@ class ActivationTests(unittest.TestCase):
             self.assertEqual((captured['nlink'], captured['size'], captured['regular']), (2, len(raw), True))
             self.assertLess(script.index("'launcher-compiled-stat.json'"), script.index('assert.ok(before.isFile()'))
 
+    def test_actual_exported_sections_parser_rejects_malformed_duplicate_and_overflow(self):
+        script = r"""
+        const assert=require('node:assert/strict'),p=require('./scripts/flatpak-disposable.cjs');
+        assert.equal(typeof p.parseSections,'function');
+        assert.deepEqual(p.parseSections('[Application]\nname=com.creatorworks.hub\n'),{Application:{name:'com.creatorworks.hub'}});
+        for(const input of ['key=value\n','[Application]\nmissing-separator\n','[Application]\n=value\n',
+          '[Application]\n[Application]\n','[Context]\nsockets=wayland;\nsockets=fallback-x11;\n',
+          '[Context]\nvalue='+'x'.repeat(65536),'[Context]\nvalue='+'\u00e9'.repeat(32768)])
+          assert.throws(()=>p.parseSections(input));
+        """
+        result = subprocess.run(['node', '-'], input=script, text=True, capture_output=True, timeout=15, cwd=HERE.parent)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+
+    def test_actual_installed_metadata_block_executes_with_real_exported_parser(self):
+        workflow = (HERE.parent / ".github/workflows/native-linux-flatpak-activation.yml").read_text()
+        script = workflow.split("          node - <<'NODE'\n")[2].split("          NODE\n", 1)[0]
+        script = "\n".join(line[10:] for line in script.splitlines())
+        context = '[Context]\nsockets=fallback-x11;wayland;\n'
+        policy = '[Session Bus Policy]\ncom.creatorworks.hub.Host=talk\n'
+        metadata = ('[Application]\nname=com.creatorworks.hub\nruntime=org.gnome.Platform/x86_64/50\n'
+                    'sdk=org.gnome.Sdk/x86_64/50\ncommand=creator-hub-flatpak-activate\n\n' + context + '\n' + policy)
+        permissions = context + '\n' + policy
+        cases = [('captured-format', metadata, permissions, 'b' * 64, True),
+                 ('implicit-x11', metadata, permissions.replace('fallback-x11;wayland;', 'fallback-x11;wayland;x11;'), 'b' * 64, True),
+                 ('duplicate-section', metadata + '\n[Application]\n', permissions, 'b' * 64, False),
+                 ('duplicate-key', metadata, permissions.replace('sockets=', 'sockets=wayland;\nsockets='), 'b' * 64, False),
+                 ('malformed', metadata, permissions + '\nmalformed\n', 'b' * 64, False),
+                 ('overflow', metadata + '#' + 'x' * 65536, permissions, 'b' * 64, False),
+                 ('foreign-command', metadata.replace('command=creator-hub-flatpak-activate', 'command=foreign'), permissions, 'b' * 64, False),
+                 ('foreign-runtime', metadata.replace('Platform/x86_64/50', 'Platform/x86_64/49'), permissions, 'b' * 64, False),
+                 ('broad-filesystem', metadata, permissions.replace('[Context]\n', '[Context]\nfilesystems=home;\n'), 'b' * 64, False),
+                 ('network', metadata, permissions.replace('[Context]\n', '[Context]\nshared=network;\n'), 'b' * 64, False),
+                 ('foreign-bus', metadata, permissions.replace('com.creatorworks.hub.Host=talk', 'org.example.Foreign=talk'), 'b' * 64, False),
+                 ('system-bus', metadata, permissions + '\n[System Bus Policy]\norg.example.Foreign=talk\n', 'b' * 64, False),
+                 ('bad-commit', metadata, permissions, 'unknown', False)]
+        for name, meta, perms, commit, accepted in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
+                temp = Path(directory).resolve(); root = temp / 'flatpak-activation'
+                (root / 'stage').mkdir(parents=True)
+                (root / 'installed-metadata.txt').write_text(meta, encoding='utf8')
+                (root / 'installed-permissions.txt').write_text(perms, encoding='utf8')
+                (root / 'installed-commit.txt').write_text(commit + '\n', encoding='utf8')
+                provenance = {'launcherSha256': 'a' * 64, 'launcherSize': 596584, 'sourceCommit': 'c' * 40}
+                (root / 'stage/flatpak-native-activation-stage.json').write_text(json.dumps({'provenance': provenance}), encoding='utf8')
+                result = subprocess.run(['node', '-'], input=script, text=True, capture_output=True, timeout=15,
+                    cwd=HERE.parent, env={**os.environ, 'RUNNER_TEMP': str(temp)})
+                binding = root / 'launcher-binding.json'
+                if accepted:
+                    self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+                    receipt = M.P.parse(binding.read_bytes())
+                    self.assertEqual(receipt, {'commit': commit, 'sha256': 'a' * 64, 'size': 596584,
+                        'sourceCommit': 'c' * 40, 'permissions': ['--socket=wayland', '--socket=fallback-x11', '--talk-name=com.creatorworks.hub.Host'],
+                        'publisherSignatureAccepted': False, 'releaseReady': False})
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(binding.exists())
+
     def test_python310_syntax(self):
         ast.parse((HERE / "native-linux-flatpak-activation.py").read_text(), feature_version=(3, 10))
 

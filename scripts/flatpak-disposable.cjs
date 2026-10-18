@@ -279,4 +279,4 @@ if (require.main === module) {
     if (!report.suitePassed) process.exitCode = 1;
   } catch (error) { console.error(String(error.message).slice(0, 1000)); process.exitCode = 1; }
 }
-module.exports = { FLATPAK, BUILDER, RUNTIME, SDK, ABI_SCRIPT, RETENTION_SCRIPT, admission, childEnvironment, inside, parseMetadata, parsePermissions, parseRetention, retentionProbe, linkageDiagnostics, linkageMatches, verifyFiles, run };
+module.exports = { FLATPAK, BUILDER, RUNTIME, SDK, ABI_SCRIPT, RETENTION_SCRIPT, admission, childEnvironment, inside, parseSections, parseMetadata, parsePermissions, parseRetention, retentionProbe, linkageDiagnostics, linkageMatches, verifyFiles, run };
