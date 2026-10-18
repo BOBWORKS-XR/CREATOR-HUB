@@ -78,6 +78,41 @@ def helper_result(code, out, err, repeat=False):
     return result
 
 
+def writer_guard_source():
+    """Source/build provenance only; never a GUI or authorization acceptance."""
+    paths = ("native/linux-deb-retirement/Cargo.toml", "native/linux-deb-retirement/src/linux.rs",
+        "native/linux-deb-retirement/src/linux/gui.rs", "native/linux-deb-retirement/src/linux/transaction.rs")
+    raw = {name: (REPO / name).read_bytes() for name in paths}
+    require(all(0 < len(value) <= 256 * 1024 for value in raw.values()), "Guard source missing/oversized")
+    manifest, linux, gui, transaction = (raw[name].decode("utf-8") for name in paths)
+    gui = gui.split("#[cfg(test)]", 1)[0]
+    require('experimental-transaction = ["dep:signal-hook"]' in manifest
+        and '#[cfg(feature = "experimental-transaction")]\nmod gui;' in linux,
+        "Experimental GUI guard module must be compiled")
+    for text in ('pub(super) struct Guard', '_image: File', '_writer: File',
+            'usr/bin/creator-works-mcp-launcher', 'usr/bin/creator-project-setup',
+            'copy_pinned(&image', 'open(&path, libc::O_RDONLY)', 'open(&path, libc::O_WRONLY)',
+            'stamp(&image.metadata()?)', 'stamp(&writer.metadata()?)'):
+        require(text in gui, "Reviewed fixed GUI writer guard source missing: " + text)
+    require(gui.index('copy_pinned(&image') < gui.index('open(&path, libc::O_WRONLY)')
+        and 'access | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK' in linux,
+        "Protected hash-before-write-open contract missing")
+    acquire = 'let _gui_guard = gui::acquire(target)?;'
+    require(acquire in transaction
+        and transaction.index('privileged_image()?') < transaction.index(acquire)
+        < transaction.index('mark_attempt(&candidate, target)') < transaction.index('held.handoff(')
+        < transaction.index('setup::installed(true)')
+        and 'drop(_gui_guard)' not in transaction,
+        "Writer descriptor must be retained before attempt through post-verification")
+    require(not any(text in gui for text in ('O_CREAT', 'O_TRUNC', 'write_all', '.write(',
+        'PKEXEC_UID', 'require_idle', 'Command::', '/proc')),
+        "Unexpected writer guard mutation or proc/caller dependency")
+    return {"kind": "fixed-gui-inode-write-open-exec-exclusion", "feature": "experimental-transaction",
+        "scope": "source/build provenance only, not GUI/polkit authentication acceptance",
+        "files": [{"path": name, "bytes": len(raw[name]), "sha256": hashlib.sha256(raw[name]).hexdigest()}
+                  for name in paths]}
+
+
 def stage_built_helper(source, destination):
     # Cargo hard-links final binaries from deps. Copy only build output, never
     # relax the single-link checks for packages, installed resources or image.
@@ -290,9 +325,11 @@ class Probe:
         require(not os.path.lexists(HELPER) and not os.path.lexists(PRIVATE), "Existing helper/private state refused")
         code = self.command("initial-package", ["/usr/bin/dpkg-query", "-W", "-f=${db:Status-Status}", fixture.PACKAGE], allowed=(0, 1))[0]
         require(code == 1 and all(not os.path.lexists("/" + n) for n in fixture.RUNTIME | fixture.RETIRED), "Pre-existing baseline refused")
+        guard_source = writer_guard_source()
         target = self.root / "target"
         self.command("build-helper", ["cargo", "build", "--locked", "--release", "--features", "experimental-transaction",
             "--manifest-path", "native/linux-deb-retirement/Cargo.toml", "--target-dir", str(target)], timeout=600)
+        require(writer_guard_source() == guard_source, "Guard source changed during helper build")
         binary = target / "release/creator-hub-linux-deb-retirement"
         metadata = binary.lstat()
         self.save("cargo-helper-source", {"path": str(binary), "links": metadata.st_nlink, "bytes": metadata.st_size,
@@ -305,7 +342,9 @@ class Probe:
         self.command("install-helper", ["/usr/bin/sudo", "-n", "/usr/bin/install", "-T", "-o", "root", "-g", "root", "-m", "0755", str(staged), HELPER])
         image = fixture.fingerprint(Path(HELPER))
         require(image["sha256"] == built["sha256"] and image["uid"] == image["gid"] == 0 and image["mode"] == 0o755, "Installed helper image differs")
-        self.save("helper-image", {"built": built, "installed": image})
+        self.save("helper-image", {"built": built, "installed": image,
+            "guardSource": guard_source, "writerGuardIncluded": True,
+            "nativeAcceptance": False, "productionGates": dict.fromkeys(GATES, False)})
         self.command("apt-update", ["/usr/bin/sudo", "-n", "/usr/bin/apt-get", "update"], timeout=360)
         self.command("install-public-baseline", ["/usr/bin/sudo", "-n", "/usr/bin/apt-get", "install", "-y", "--no-install-recommends", str(self.old)], timeout=None)
         self.plan()

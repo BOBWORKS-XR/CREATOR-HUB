@@ -2,7 +2,20 @@ name: Linux DEB helper actual transaction (disposable mechanism only)
 on:
   push:
     branches: [validation/linux-deb-helper-transaction-014]
-    paths: ['.github/workflows/linux-deb-helper-transaction-014.yml']
+    paths:
+      - .github/workflows/linux-deb-helper-transaction-014.yml
+      - native/linux-deb-retirement/**
+      - rust-toolchain.toml
+      - scripts/linux-deb-helper-transaction-probe.py
+      - scripts/linux-deb-helper-transaction.test.py
+      - scripts/linux-deb-helper-transaction-sdk.cjs
+      - scripts/linux-deb-helper-transaction-sdk.test.cjs
+      - scripts/linux-setup-helper-transaction-probe.py
+      - scripts/linux-setup-helper-transaction.test.py
+      - scripts/linux-deb-retention-probe.py
+      - scripts/linux-deb-retention-sdk.cjs
+      - modules/mcp/package.json
+      - modules/mcp/package-lock.json
 permissions:
   contents: read
   actions: read

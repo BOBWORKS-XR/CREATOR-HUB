@@ -85,6 +85,74 @@ class TransactionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "single-link"):
                 p.fixture.fingerprint(staged)
 
+    def test_writer_source_presence_hashes_exact_files_and_refuses_missing_contracts(self):
+        observed = p.writer_guard_source()
+        self.assertEqual(observed["kind"], "fixed-gui-inode-write-open-exec-exclusion")
+        self.assertEqual(observed["feature"], "experimental-transaction")
+        self.assertNotIn("writerGuardIncluded", observed, "Source presence alone is not a built helper")
+        originals = {row["path"]: (p.REPO / row["path"]).read_bytes() for row in observed["files"]}
+        self.assertEqual(len(originals), 4)
+        for row in observed["files"]:
+            self.assertEqual(row["bytes"], len(originals[row["path"]]))
+            self.assertEqual(row["sha256"], p.hashlib.sha256(originals[row["path"]]).hexdigest())
+        changes = (("Cargo.toml", b'experimental-transaction = ["dep:signal-hook"]', b'experimental-transaction = []'),
+            ("src/linux.rs", b'mod gui;', b'mod missing;'),
+            ("src/linux/gui.rs", b'_writer: File', b'_writer: ()'),
+            ("src/linux/gui.rs", b'copy_pinned(&image', b'unchecked(&image'),
+            ("src/linux/gui.rs", b'libc::O_WRONLY', b'libc::O_WRONLY | libc::O_TRUNC'),
+            ("src/linux/transaction.rs", b'let _gui_guard = gui::acquire(target)?;', b'gui::acquire(target)?;'))
+        for suffix, old, new in changes:
+            with self.subTest(suffix=suffix, old=old), patch.object(p.Path, "read_bytes", autospec=True,
+                    side_effect=lambda name: originals[name.relative_to(p.REPO).as_posix()].replace(old, new)
+                    if name.as_posix().endswith(suffix) else originals[name.relative_to(p.REPO).as_posix()]), \
+                    self.assertRaises(RuntimeError):
+                p.writer_guard_source()
+
+    def test_guard_flag_requires_unchanged_build_source_and_matching_installed_root_image(self):
+        source = p.writer_guard_source()
+        built = {"sha256": "a" * 64, "bytes": 32}
+        for case in ("success", "missing-source", "build-failure", "source-drift", "image-mismatch"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                probe = p.Probe.__new__(p.Probe)
+                probe.root = Path(temporary)
+                probe.old = probe.root / "synthetic-unit-test-baseline.deb"
+                probe.plan = Mock()
+                binary = probe.root / "target/release/creator-hub-linux-deb-retirement"
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"synthetic unit-test build output\n")
+                image = {**built, "uid": 0, "gid": 0, "mode": 0o755}
+                if case == "image-mismatch":
+                    image["sha256"] = "b" * 64
+                def command(label, argv, **kwargs):
+                    if case == "build-failure" and label == "build-helper":
+                        raise RuntimeError("Synthetic build failure")
+                    return (1 if label == "initial-package" else 0), b"", b""
+                probe.command = Mock(side_effect=command)
+                guard = Mock(side_effect=RuntimeError("Missing guard") if case == "missing-source"
+                    else [source, {**source, "kind": "changed"}] if case == "source-drift" else [source, source])
+                with patch.object(p.os.path, "lexists", return_value=False), \
+                        patch.object(p, "writer_guard_source", guard), \
+                        patch.object(p, "stage_built_helper", return_value=built), \
+                        patch.object(p.fixture, "fingerprint", return_value=image):
+                    if case == "success":
+                        probe.install()
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            probe.install()
+                receipt = probe.root / "helper-image.json"
+                if case != "success":
+                    self.assertFalse(receipt.exists(), "Failed proof must not claim guard inclusion")
+                    continue
+                observed = json.loads(receipt.read_text())
+                self.assertTrue(observed["writerGuardIncluded"])
+                self.assertEqual(observed["guardSource"], source)
+                self.assertEqual(observed["built"]["sha256"], observed["installed"]["sha256"])
+                self.assertFalse(observed["nativeAcceptance"])
+                self.assertFalse(any(observed["productionGates"].values()))
+                build_call = next(call for call in probe.command.call_args_list if call.args[0] == "build-helper")
+                self.assertIn("experimental-transaction", build_call.args[1])
+                self.assertIn("native/linux-deb-retirement/Cargo.toml", build_call.args[1])
+
     def test_first_refusal_is_captured_once_and_never_retried_or_promoted(self):
         with tempfile.TemporaryDirectory() as temporary:
             probe = p.Probe.__new__(p.Probe)
@@ -517,7 +585,14 @@ class TransactionTests(unittest.TestCase):
     def test_workflow_is_one_pinned_container_push_job_preflight_first_and_helper_only(self):
         workflow = (p.REPO / ".github/workflows/linux-deb-helper-transaction-014.yml").read_text()
         self.assertIn("branches: [validation/linux-deb-helper-transaction-014]", workflow)
-        self.assertIn("paths: ['.github/workflows/linux-deb-helper-transaction-014.yml']", workflow)
+        paths = workflow.split("    paths:\n", 1)[1].split("permissions:", 1)[0]
+        self.assertEqual([line.strip().removeprefix("- ") for line in paths.splitlines() if line.strip()], [
+            ".github/workflows/linux-deb-helper-transaction-014.yml", "native/linux-deb-retirement/**",
+            "rust-toolchain.toml", "scripts/linux-deb-helper-transaction-probe.py",
+            "scripts/linux-deb-helper-transaction.test.py", "scripts/linux-deb-helper-transaction-sdk.cjs",
+            "scripts/linux-deb-helper-transaction-sdk.test.cjs", "scripts/linux-setup-helper-transaction-probe.py",
+            "scripts/linux-setup-helper-transaction.test.py", "scripts/linux-deb-retention-probe.py",
+            "scripts/linux-deb-retention-sdk.cjs", "modules/mcp/package.json", "modules/mcp/package-lock.json"])
         self.assertEqual(workflow.count("runs-on:"), 1)
         self.assertIn("runs-on: ubuntu-22.04", workflow)
         self.assertEqual(workflow.count(p.CONTAINER_IMAGE), 2)
