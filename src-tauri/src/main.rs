@@ -9,6 +9,9 @@ mod convergence;
 mod convergence_linux;
 #[allow(dead_code)]
 mod convergence_dependencies;
+#[cfg(all(target_os = "linux", any(feature = "experimental-flatpak-host", feature = "experimental-flatpak-ui")))]
+#[allow(dead_code)]
+mod flatpak_bootstrap;
 #[cfg(any(all(target_os = "linux", feature = "experimental-flatpak-host"), test))]
 #[allow(dead_code)]
 mod flatpak_rpc;
