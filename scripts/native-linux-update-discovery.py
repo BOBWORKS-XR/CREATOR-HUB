@@ -1,6 +1,6 @@
-"""One disposable native14 signed15 discovery and read-only GTK contract capture.
+"""Disposable native14 signed15 discovery, GTK capture and explicit cancellation.
 
-Never press a confirmation, install15, authenticate, migrate, or claim release
+Never approve installation, install15, authenticate, migrate, or claim release
 acceptance. Existing B/C own package, terms, AX/renderer and XRes contracts.
 """
 import base64
@@ -284,9 +284,88 @@ def capture_dialog(root, request, helper, x11, atspi, saved):
     raise RuntimeError("Native updater dialog absent; no retry/input")
 
 
+def cancel_confirmation(root, request, helper, x11, atspi, saved):
+    """One source-bound GTK cancellation; no shared dialog allowlist changes."""
+    c, b = components(), components().B
+    contract = b.unique_json(b.bounded_read(root / "updater-confirmation-contract.json", 32768))
+    native, frame = contract["native"], tuple(contract["nativeFrame"])
+    require(len(frame) == 4 and all(type(v) is int and 0 <= v <= 1920 for v in frame)
+            and 0 < frame[2] <= 1920 and 0 < frame[3] <= 1080, "Captured native updater frame exceeds bound")
+    require(contract["root"] == saved["root"] and contract["actionCount"] == 0
+            and native["pid"] == request.pid and native["title"] == "Update Creator Hub"
+            and native["window"] != request.window, "Original native updater binding required")
+    dialog = helper.Request("snapshot", request.pid, request.start, request.executable, request.sha256,
+                            native["window"], "Update Creator Hub", "ALERT", gtk_message_info_frame=frame)
+    require(helper.bound_window(dialog, x11) == contract["xres"], "Captured updater XRes/frame changed")
+    refs = b.unique_json(b.bounded_read(root / "ax-ownership.json", 8192))
+    references, bus = b.native_ax_references(refs)
+    question = "Update Creator Hub to 0.1.15?\n\nHub will close and reopen. Your projects, apps and settings will stay in place."
+
+    def walk():
+        owner.recheck(full=True)
+        current = [w for w in c.owned_windows(request.pid, x11) if w["mapped"] and w["window"] != request.window]
+        require(current == [native], "Additional or changed owned native dialog")
+        window = helper.select_window(dialog, atspi)
+        pending, nodes, seen, edges = [(window, None, 0)], [], set(), []
+        while pending:
+            node, parent, depth = pending.pop()
+            require(node is not None and len(nodes) < 64 and depth < 16, "Updater GTK tree exceeds bound")
+            node.clear_cache()
+            require(node.get_process_id() == request.pid, "Foreign updater GTK node")
+            owner.node(node)
+            reference = tuple(references.identity(node, owner))
+            require(reference not in seen, "Duplicate/cyclic updater GTK node")
+            seen.add(reference)
+            if parent is not None:
+                require(node.get_role() not in (atspi.Role.FRAME, atspi.Role.WINDOW, atspi.Role.DIALOG, atspi.Role.ALERT, atspi.Role.APPLICATION)
+                        and owner.same_node(node.get_parent(), parent), "Updater GTK parent/window escaped")
+            name = node.get_name()
+            require(type(name) is str and len(name) <= 512, "Updater GTK name exceeds bound")
+            # Fresh GetChildren on each complete walk, not cached semantic Parent.
+            children = helper.children(node, min(32, 64 - len(nodes) - len(pending) - 1))
+            edges.append((reference, None if parent is None else tuple(references.identity(parent, owner)), int(node.get_role()), name))
+            nodes.append(node)
+            pending.extend((child, node, depth + 1) for child in reversed(children))
+        for text in ("Update Creator Hub", question):
+            labels = [n for n in nodes if n.get_role() == atspi.Role.LABEL and n.get_name() == text]
+            require(len(labels) == 1, "Exact updater GTK question/title required")
+            helper.ready(labels[0], atspi)
+        buttons = [n for n in nodes if n.get_role() == atspi.Role.PUSH_BUTTON]
+        require(len(buttons) == 2 and {n.get_name() for n in buttons} == {"Update Hub", "Not now"}, "Exact two updater GTK buttons required")
+        target = next(n for n in buttons if n.get_name() == "Not now")
+        helper.ready(target, atspi)
+        interface = target.get_action_iface()
+        require(interface is not None and interface.get_n_actions() == 1 and interface.get_action_name(0) == "click",
+                "Exact native GTK cancellation action required")
+        require(owner.same_node(helper.select_window(dialog, atspi), window), "Updater GTK window changed")
+        owner.recheck(full=True)
+        return edges, target, interface
+
+    try:
+        owner = b.RootOwnership(dialog, helper, x11, saved["root"], contract["xres"], saved["systemWebKit"]["file"], references=references)
+        first, before, _ = walk()
+        second, target, interface = walk()
+        require(first == second and owner.same_node(before, target), "Updater GTK tree/target changed between fresh walks")
+        try:
+            require(interface.do_action(0), "Updater cancellation refused; no retry")
+        except Exception as error:
+            raise helper.ActionError("Updater native cancellation uncertain; no retry") from error
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            require(b.native_process(request.pid, helper) == saved["root"], "Root changed after cancellation")
+            helper.bound_window(request, x11)
+            if not any(w["window"] == native["window"] and w["mapped"] for w in c.owned_windows(request.pid, x11)):
+                return {**FALSE_GATES, "actionCount": 1, "button": "Not now", "dialogDismissed": True,
+                        "confirmationCancellationInputAuthorized": True, "axToXidAssociationVerified": True}
+            time.sleep(0.05)
+        raise RuntimeError("Updater cancellation dismissal deadline; no retry")
+    finally:
+        bus.close_sync(None)
+
+
 def worker(root, args):
     c, b = components(), components().B
-    require(len(args) == 4 and args[0] in (*CONTROLS, "ready", "capture-confirmation"), "Fixed discovery worker required")
+    require(len(args) == 4 and args[0] in (*CONTROLS, "ready", "capture-confirmation", "cancel-confirmation", "cancelled"), "Fixed discovery worker required")
     action, pid, start, xid = args
     b.verify_stage(root)
     helper = b.load_helper()
@@ -304,6 +383,8 @@ def worker(root, args):
         helper.bound_window(request, x11)
         if action == "capture-confirmation":
             return capture_dialog(root, request, helper, x11, Atspi, saved)
+        if action == "cancel-confirmation":
+            return cancel_confirmation(root, request, helper, x11, Atspi, saved)
         refs = b.unique_json(b.bounded_read(root / "ax-ownership.json", 8192))
         renderer = b.unique_json(b.bounded_read(root / "renderer-ownership.json", 8192))
         references, bus = b.native_ax_references(refs)
@@ -313,15 +394,20 @@ def worker(root, args):
             nodes = c.own_tree(helper.select_window(request, Atspi), owner, Atspi)
             last = c.ui_snapshot(nodes, owner, Atspi)
             try:
-                selected_action = "open-confirmation" if action == "ready" else action
+                selected_action = "open-confirmation" if action in ("ready", "cancelled") else action
                 fixed_controls(nodes, selected_action, owner, Atspi)
-                if action in ("ready", "open-confirmation"):
+                if action in ("ready", "open-confirmation", "cancelled"):
                     last["sourceUpdateStatus"] = update_status(nodes, owner, Atspi)
-                    if last["sourceUpdateStatus"]["text"] not in ("Version 0.1.15 is available.", "Version 0.1.15 is ready to install."):
+                    # app.js writes the cancellation message to progress-message,
+                    # not hub-update-status. Here require the ordinary updater
+                    # to become actionable again; never assert a misplaced text.
+                    expected = ("Version 0.1.15 is available.", "Version 0.1.15 is ready to install.")
+                    if last["sourceUpdateStatus"]["text"] not in expected:
                         raise NotReady("Signed15 UI status not observed yet")
-                if action == "ready":
-                    b.save_json(root / "signed15-ui-ready.json", last)
-                    return {"signed15UiReady": True, "actionCount": 0, "ownership": owner.evidence(), **FALSE_GATES}
+                if action in ("ready", "cancelled"):
+                    b.save_json(root / ("signed15-ui-ready.json" if action == "ready" else "cancelled-ui-status.json"), last)
+                    return {"signed15UiReady": action == "ready", "updaterReadyAfterCancel": action == "cancelled",
+                            "actionCount": 0, "ownership": owner.evidence(), **FALSE_GATES}
                 # An enabled control may change between polling and action. A
                 # final two-walk refusal must propagate, never become a retry.
                 break
@@ -448,11 +534,13 @@ def stop_feed(process, output):
         output.close()
 
 
-def probe(root, env):
+def probe(root, env, *, cancel=False):
     b = components().B
     report = {"scope": "native-linux14-signed15-discovery-confirmation-capture-only", **FALSE_GATES,
               "phase": "verify", "workers": [], "testSource": env["GITHUB_SHA"], "productSource": b.SOURCE,
               "dialogContractCaptured": False, "labSignedDiscoveryObserved": False}
+    if cancel:
+        report["scope"] = "native-linux14-signed15-discovery-confirmation-cancel-without-views"
     child = capture = feed = feed_capture = None
     failure = None
     lab = Path(env["RUNNER_TEMP"]) / "creator-linux-update-lab"
@@ -489,6 +577,22 @@ def probe(root, env):
         report["installedImageAfterCapture"] = b.pinned(executable, b.INSTALLED_HUB_PIN, 0o755)
         require(b.native_process(child.pid, helper) == identity and child.poll() is None, "Root changed/exited during capture")
         report["phase"] = "stopped-before-native-confirmation-input"
+        if cancel:
+            acknowledgement = b.file_record(root / "home/data/CreatorHub/consent/hub-usage-terms.json", 16384)
+            for action in ("cancel-confirmation", "cancelled"):
+                report["phase"] = action
+                report[action] = call(root, environment, action, child, start, xid, capture, report)
+            report["installedAfterCancel"] = b.installed_state(root, "installed-after-cancel")
+            report["imageAfterCancel"] = b.pinned(executable, b.INSTALLED_HUB_PIN, 0o755)
+            require(b.file_record(root / "home/data/CreatorHub/consent/hub-usage-terms.json", 16384) == acknowledgement,
+                    "Saved acknowledgement changed during cancellation")
+            require(b.native_process(child.pid, helper) == identity and child.poll() is None, "Root restarted/exited after cancellation")
+            report["confirmationCancelTestedWithoutViews"] = True
+            report["close"] = b.run_worker(root, environment, "close", child.pid, start, xid, capture, report["workers"])
+            child.wait(timeout=10)
+            require(child.returncode == 0, "Root did not close normally after cancellation")
+            report["normalCloseAfterCancel"] = True
+            report["phase"] = "native-confirmation-cancelled-no-install"
     except Exception as error:
         failure = error
         report["error"] = str(error)[:1000]
@@ -536,10 +640,12 @@ def main():
         result = b.install(temp / "linux-root-probe")
     elif args == ["probe"]:
         result = probe(temp / "linux-root-probe", os.environ)
+    elif args == ["cancel-probe"]:
+        result = probe(temp / "linux-root-probe", os.environ, cancel=True)
     elif len(args) == 5 and args[0] == "worker":
         result = worker(temp / "linux-root-probe", args[1:])
     else:
-        raise RuntimeError("Use pins, stage, install14, probe or fixed internal worker")
+        raise RuntimeError("Use pins, stage, install14, probe, cancel-probe or fixed internal worker")
     encoded = json.dumps(result, ensure_ascii=True)
     require(len(encoded.encode("ascii")) <= b.MAX_JSON, "Bounded worker/report output required")
     print(encoded)

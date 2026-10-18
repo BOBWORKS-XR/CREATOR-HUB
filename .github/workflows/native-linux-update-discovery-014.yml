@@ -1,4 +1,4 @@
-name: Native Linux 14 signed15 discovery (capture only)
+name: Native Linux 14 signed15 discovery and native cancellation
 
 on:
   workflow_dispatch:
@@ -220,7 +220,7 @@ jobs:
           PY
       - name: Install only frozen current14 in this empty runner
         run: python3 -B scripts/native-linux-update-discovery.py install14
-      - name: Native signed discovery then read-only GTK confirmation capture without approval
+      - name: Native signed discovery then exact GTK cancellation without installation approval
         env:
           GDK_BACKEND: x11
           NO_AT_BRIDGE: '0'
@@ -235,7 +235,7 @@ jobs:
           dbus-run-session -- xvfb-run -a --server-args='-screen 0 1280x800x24' sh -eu -c '
             openbox --sm-disable >"$RUNNER_TEMP/linux-discovery-session/openbox.log" 2>&1 & manager=$!
             trap '\''openbox --exit; wait "$manager"'\'' EXIT
-            /usr/bin/python3 -B "$GITHUB_WORKSPACE/scripts/native-linux-update-discovery.py" probe
+            /usr/bin/python3 -B "$GITHUB_WORKSPACE/scripts/native-linux-update-discovery.py" cancel-probe
           '
       - name: Retain bounded contracts and source binding only (never ephemeral TLS private material)
         if: always()

@@ -373,6 +373,121 @@ class NativeControlTests(unittest.TestCase):
             f.button.action.do_action.assert_not_called()
 
 
+class ConfirmationCancelTests(unittest.TestCase):
+    def fixture(self):
+        f = fixtures.OwnershipTests()
+        owner = f.fixture()
+        f.atspi.Role.ALERT, f.atspi.Role.DIALOG, f.atspi.Role.LABEL = 2, 16, 29
+        frame = (10, 20, 500, 300)
+        f.alert = fixtures.AxNode(42, 2, "Information")
+        group = fixtures.AxNode(42, 20, parent=f.alert)
+        question = "Update Creator Hub to 0.1.15?\n\nHub will close and reopen. Your projects, apps and settings will stay in place."
+        title = fixtures.AxNode(42, 29, "Update Creator Hub", parent=group)
+        body = fixtures.AxNode(42, 29, question, parent=group)
+        f.approve = fixtures.AxNode(42, 43, "Update Hub", parent=group, verb="click")
+        f.cancel = fixtures.AxNode(42, 43, "Not now", parent=group, verb="click")
+        desktop = fixtures.AxNode(0, 75)
+        app = fixtures.AxNode(42, 75, parent=desktop)
+        app.children = [f.window, f.alert]
+        f.atspi.get_desktop = lambda _: desktop
+        f.atspi.CoordType = types.SimpleNamespace(SCREEN=0)
+        for node in (desktop, app, f.window, f.alert, group, title, body, f.approve, f.cancel):
+            node.get_child_count = lambda node=node: len(node.children)
+            node.get_child_at_index = lambda index, node=node: node.children[index]
+        f.alert.get_component_iface = lambda: types.SimpleNamespace(get_extents=lambda _: types.SimpleNamespace(
+            x=frame[0], y=frame[1], width=frame[2], height=frame[3]))
+        native_helper = b.load_helper()
+        f.helper.Request = native_helper.Request
+        f.helper.select_window, f.helper.ready = native_helper.select_window, native_helper.ready
+        f.helper.bound_window = lambda request, _: dict(f.info) if request.window == 77 else dict(f.xres)
+        f.xres = {"pid": 42, "client": 3, "title": "Update Creator Hub", "mapped": True}
+        f.native = {"window": 78, **f.xres}
+        f.dismissed = False
+        f.cancel.action.do_action.side_effect = lambda _: setattr(f, "dismissed", True) or True
+        f.saved = {"root": owner.root, "systemWebKit": {"file": f.system}}
+        f.contract = {"root": owner.root, "native": f.native, "nativeFrame": list(frame), "xres": f.xres, "actionCount": 0}
+        f.bus = types.SimpleNamespace(close_sync=mock.Mock())
+        return f
+
+    def invoke(self, f):
+        original_owner = b.RootOwnership
+
+        def ownership(*args, **kwargs):
+            return original_owner(*args, **kwargs, reader=f.reader, system_check=lambda: dict(f.system))
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "updater-confirmation-contract.json").write_text(json.dumps(f.contract))
+            (root / "ax-ownership.json").write_text("{}")
+            with mock.patch.object(b, "native_ax_references", return_value=(f.references, f.bus)), \
+                    mock.patch.object(b, "RootOwnership", side_effect=ownership), \
+                    mock.patch.object(b, "native_process", return_value=f.saved["root"]), \
+                    mock.patch.object(c, "owned_windows", side_effect=lambda *_: [] if f.dismissed else [f.native]):
+                return p.cancel_confirmation(root, f.request, f.helper, f.x11, f.atspi, f.saved)
+
+    def test_native_cancel_exact_geometry_root_bus_context_and_one_click(self):
+        f = self.fixture()
+        result = self.invoke(f)
+        self.assertTrue(result["confirmationCancellationInputAuthorized"])
+        self.assertTrue(result["axToXidAssociationVerified"])
+        self.assertTrue(result["dialogDismissed"])
+        self.assertFalse(result["signedUpdateAccepted"])
+        self.assertFalse(result["confirmationAccepted"])
+        f.cancel.action.do_action.assert_called_once_with(0)
+        f.approve.action.do_action.assert_not_called()
+        f.bus.close_sync.assert_called_once_with(None)
+
+    def test_foreign_nested_duplicate_wrong_context_or_native_geometry_refuse_before_input(self):
+        for change in ("foreign", "nested", "duplicate", "context", "geometry", "action", "pid", "uid"):
+            f = self.fixture()
+            if change == "foreign":
+                f.cancel.pid = 43
+            elif change == "nested":
+                f.cancel.role = 23
+            elif change == "duplicate":
+                f.alert.children.append(f.alert.children[0])
+            elif change == "context":
+                f.alert.children[0].children[1].name = "Other question"
+            elif change == "geometry":
+                f.contract["nativeFrame"][2] += 1
+            elif change == "action":
+                f.cancel.action.get_action_name = lambda _: "press"
+            elif change == "pid":
+                f.records[42]["startTime"] = "101"
+            else:
+                f.records[42]["uids"] = [0] * 4
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                self.invoke(f)
+            f.cancel.action.do_action.assert_not_called()
+            f.approve.action.do_action.assert_not_called()
+
+    def test_uncertain_cancellation_is_not_retried(self):
+        f = self.fixture()
+        f.cancel.action.do_action.side_effect = OSError("synthetic uncertain action")
+        with self.assertRaisesRegex(f.helper.ActionError, "no retry"):
+            self.invoke(f)
+        f.cancel.action.do_action.assert_called_once_with(0)
+        f.approve.action.do_action.assert_not_called()
+
+    def test_changed_canonical_target_between_complete_walks_refuses(self):
+        f = self.fixture()
+        select = f.helper.select_window
+        count = 0
+
+        def replace(request, atspi):
+            nonlocal count
+            count += 1
+            if count == 3:
+                f.cancel.path += "changed"
+            return select(request, atspi)
+
+        f.helper.select_window = replace
+        with self.assertRaisesRegex(RuntimeError, "changed between fresh walks"):
+            self.invoke(f)
+        f.cancel.action.do_action.assert_not_called()
+        f.approve.action.do_action.assert_not_called()
+
+
 class ReadOnlyCaptureTests(unittest.TestCase):
     def fixture(self):
         request = types.SimpleNamespace(pid=42, start="100", executable="/usr/bin/creator-hub", sha256="a"*64, window=77)
@@ -468,13 +583,16 @@ class LifecycleTests(unittest.TestCase):
     def test_source_has_no_approval_install15_signing_endpoint_injection_or_root_signals(self):
         source = (HERE / "native-linux-update-discovery.py").read_text()
         ast.parse(source)
-        self.assertEqual(source.count("interface.do_action(0)"), 1)
+        self.assertEqual(source.count("interface.do_action(0)"), 2)
+        self.assertIn('n.get_name() == "Not now"', source)
+        self.assertNotIn('n.get_name() == "Update Hub"', source)
         self.assertEqual(source.count(".send_signal("), 1)
         self.assertIn("process.send_signal(signal.SIGTERM)", source)
         for forbidden in ("child.send_signal", "child.kill", ".terminate(", "os.kill(", "shell=True", "execute_script",
                           "localStorage", "--no-sandbox", "cargo build", "sign_file", "helper.perform(", "check=False"):
             self.assertNotIn(forbidden, source)
-        capture = source.split("def capture_dialog(", 1)[1].split("def worker(", 1)[0]
+        capture = ast.get_source_segment(source, next(n for n in ast.parse(source).body
+            if isinstance(n, ast.FunctionDef) and n.name == "capture_dialog"))
         self.assertNotIn("do_action", capture)
         self.assertNotIn("press_control", capture)
         self.assertIn('"stopped-before-native-confirmation-input"', source)
