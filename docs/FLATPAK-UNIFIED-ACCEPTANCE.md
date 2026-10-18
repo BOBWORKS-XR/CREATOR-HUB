@@ -27,6 +27,16 @@ Current progress, not release acceptance:
   a reflective shell/file API. Six local tests and strict Clippy pass; the full
   local Root suite passes 364 tests, with 13 existing explicit tests ignored.
   The module is inactive in production builds and is not a transport authority.
+- Native run `39118048605` at `db3ec4d` passes both Linux feature compilation
+  checks, strict Core Clippy, six typed-RPC tests, the fixed interface test and
+  an actual private-session-bus test. `Start()` runs its test callback once;
+  supplied arguments and an arbitrary `Execute` method are rejected.
+  [Receipt](evidence/linux-bootstrap-native-contract-39118048605.json). This
+  does not install the service or launch/authenticate a product GUI.
+- Isolated GUI-session admission source is available in
+  `native/flatpak-host-launch/GUI-ADMISSION.md`. It is not wired into Root.
+  Review caught and corrected a bootstrap bus-name mismatch; a regression now
+  reads the real Root activation name instead of testing an independent copy.
 - Real GUI admission, bootstrap installation, event/command wiring, native
   settings retention, paired update/restart and full product operation are
   still pending. Keep their acceptance flags false until actual tests pass.
