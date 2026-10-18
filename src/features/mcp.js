@@ -244,9 +244,10 @@ export function mount(root, api) {
   page.on($('browse'), 'click', () => run(async () => { const path = await page.call('pick_project_folder'); if (path) { $('project').value = path; await check(); } }, 'Choosing project'));
   page.on($('add'), 'click', () => run(async () => {
     const channel = await page.call('add_project', { projectPath: $('project').value });
+    if (typeof channel?.unity_project_path !== 'string' || !channel.unity_project_path.trim()) throw new Error('No confirmed project path was returned. Check the project before retrying.');
     const existing = config.channels.find(item => item.unity_project_path === channel.unity_project_path);
     const next = { ...config, channels: existing ? config.channels : [...config.channels, channel], active_channel_id: existing?.id || channel.id };
-    await page.call('save_config', { config: next }); config = next; renderProjects(); await check();
+    await page.call('save_config', { config: next }); config = next; $('project').value = channel.unity_project_path; renderProjects(); await check();
   }, 'Adding project'));
   page.on($('cli'), 'change', async () => {
     cliTouched = true;
@@ -262,7 +263,7 @@ export function mount(root, api) {
     if (!onboarding?.project?.valid || !onboarding.runtime.ready || !selectedClients().length) throw new Error('Select a valid Unity project and an AI client, then check the connection.');
     if ($('cli').checked && cliConsent !== cliPolicy) throw new Error('Accept experimental Unity CLI consent before enabling it.');
     if (!await confirm(page, { title: 'Review connection setup', detail: `Project: ${$('project').value}\nClients: ${selectedClients().map(([, name]) => name).join(', ')}\nCapabilities: ${config.tool_groups || 'core'}\nCustom scripts: ${config.enable_custom_scripts === true ? 'on' : 'off'}\nAll project tests: ${config.allow_all_tests !== false ? 'allowed' : 'restricted'}\nUnity CLI: ${$('cli').checked ? 'experimental' : 'off for selected clients'}`, accept: 'Apply setup' })) return;
-    await page.call('one_click_setup', {
+    const result = await page.call('one_click_setup', {
       unityProjectPath: $('project').value,
       configureCodex: clientUi.get('codex').checkbox.checked, configureClaude: clientUi.get('claude').checkbox.checked,
       configureClaudeDesktop: clientUi.get('claudeDesktop').checkbox.checked, configureAntigravity: clientUi.get('antigravity').checkbox.checked,
@@ -270,11 +271,17 @@ export function mount(root, api) {
       configureUnityCli: cliTouched || config.unity_cli_enabled === true ? $('cli').checked : null,
       unityCliConsent: $('cli').checked ? cliConsent : null,
     });
+    if (typeof result?.channel?.unity_project_path !== 'string' || !result.channel.unity_project_path.trim()) throw new Error('Setup returned no confirmed project path. Check the connection before retrying; earlier completed steps may remain.');
+    $('project').value = result.channel.unity_project_path;
     cliTouched = false; await reload();
     const next = { ...config, connection_guide_version: 1 }; await page.call('save_config', { config: next }); config = next;
     $('setup-result').textContent = 'Settings saved. Open Unity and resolve Console errors. Fully quit and reopen changed AI clients, then check again. Earlier completed steps may remain if a later check fails.';
   }, 'Setting up MCP'));
-  page.on($('bridges'), 'click', () => run(async () => { const value = await page.call('update_configured_unity_extensions'); $('setup-result').textContent = `Bridges updated: ${value.updated}. Failed: ${value.failed?.length || 0}.`; await check(); }, 'Updating bridges'));
+  page.on($('bridges'), 'click', () => run(async () => {
+    const value = await page.call('update_configured_unity_extensions');
+    lines($('setup-result'), [`Bridges updated: ${value.updated}. Failed: ${value.failed.length}.`, ...value.failed]);
+    await check();
+  }, 'Updating bridges'));
   page.on($('bridge'), 'click', () => run(async () => { await page.call('install_unity_extension', { unityProjectPath: $('project').value }); await check(); }, 'Installing Unity bridge'));
   page.on($('save'), 'click', () => run(async () => {
     const next = { ...config, mcp_server_path: $('server').value.trim(), tool_groups: $('groups').value, auto_start: $('follow').checked, enable_custom_scripts: $('scripts').checked, allow_all_tests: $('tests').checked };

@@ -74,9 +74,24 @@ async function open(page, options = {}) {
             project: { valid: true, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: profile }, clients,
             unityCli: { available: true, canEnable: true, enabled: config.unity_cli_enabled === true, message: 'Unity CLI detected; optional and experimental.' } };
           case 'pick_project_folder': return '/projects/picked';
-          case 'add_project': return { ...channel, id: 'new', unity_project_path: fields.projectPath };
-          case 'one_click_setup': config.unity_cli_enabled = fields.configureUnityCli === true; config.unity_cli_consent_version = fields.unityCliConsent; return {};
-          case 'update_configured_unity_extensions': return { updated: 1, failed: [] };
+          case 'add_project': return { ...channel, id: 'new', scene_path: null, unity_project_path: options.canonicalPath || fields.projectPath };
+          case 'one_click_setup': {
+            const canonical = options.canonicalPath || fields.unityProjectPath;
+            const selected = config.channels.find(item => item.unity_project_path === canonical)
+              || { ...channel, id: 'setup', scene_path: null, unity_project_path: canonical };
+            if (!config.channels.includes(selected)) config.channels.push(selected);
+            config.active_channel_id = selected.id; config.auto_start = true;
+            config.tool_groups = fields.toolGroups; config.enable_custom_scripts = fields.enableCustomScripts;
+            if (fields.configureUnityCli !== null) {
+              config.unity_cli_enabled = fields.configureUnityCli;
+              if (fields.configureUnityCli) config.unity_cli_consent_version = fields.unityCliConsent;
+            }
+            if (options.setupFailureAfterSave) throw new Error('Fixture setup stopped after saving; earlier steps remain.');
+            return { channel: structuredClone(selected), bridgeInstalled: true, codexConfigured: fields.configureCodex,
+              claudeConfigured: fields.configureClaude, claudeDesktopConfigured: fields.configureClaudeDesktop,
+              antigravityConfigured: fields.configureAntigravity, opencodeConfigured: fields.configureOpencode, runtimeCommand: '/private/node' };
+          }
+          case 'update_configured_unity_extensions': return { checked: 1 + (options.bridgeFailures?.length || 0), updated: 1, current: 0, failed: options.bridgeFailures || [] };
           case 'pending_client_recovery': return [];
           case 'review_existing_client_connections': return { status: 'migrated', count: fields.clients.length };
           case 'recover_client_connection': return { completed: true };
@@ -329,6 +344,83 @@ test('optional CLI needs explicit agreement; reviewed setup uses exact client an
     toolGroups: 'core', enableCustomScripts: false, configureUnityCli: true, unityCliConsent: 'unity-cli-experimental-v1' });
   expect((await commands(page, 'begin_ui_operation')).length).toBe((await commands(page, 'finish_ui_operation')).length);
   expect(await page.evaluate(() => savedConfig.unrelatedSetting)).toBe('preserve');
+});
+
+test('explicit setup adopts the returned canonical channel path, enabling Apply after noncanonical input', async ({ page }) => {
+  await open(page, { canonicalPath: '/projects/Canonical' }); await show(page, 'mcp');
+  await field(page, 'mcp', 'project').fill('/projects/Canonical/.'); await field(page, 'mcp', 'check').click();
+  await field(page, 'mcp', 'setup').click();
+  await page.getByRole('dialog', { name: 'Review connection setup' }).getByRole('button', { name: 'Apply setup' }).click();
+  await expect(field(page, 'mcp', 'setup-result')).toContainText('Settings saved');
+  expect((await commands(page, 'one_click_setup'))[0].args.args.unityProjectPath).toBe('/projects/Canonical/.');
+  await expect(field(page, 'mcp', 'project')).toHaveValue('/projects/Canonical');
+  await page.getByRole('button', { name: 'Apply to Codex', exact: true }).click();
+  expect((await commands(page, 'update_codex_mcp_config'))[0].args.args.channel.unity_project_path).toBe('/projects/Canonical');
+  expect(await page.evaluate(() => savedConfig.unrelatedSetting)).toBe('preserve');
+});
+
+test('explicit Add project adopts the returned canonical path only after saving the selected channel', async ({ page }) => {
+  await open(page, { canonicalPath: '/projects/Canonical' }); await show(page, 'mcp');
+  await field(page, 'mcp', 'project').fill('/projects/Canonical/.'); await field(page, 'mcp', 'add').click();
+  await expect(field(page, 'mcp', 'project')).toHaveValue('/projects/Canonical');
+  await expect(page.getByRole('button', { name: 'Apply to Codex', exact: true })).toBeEnabled();
+  expect((await commands(page, 'add_project'))[0].args.args).toEqual({ projectPath: '/projects/Canonical/.' });
+  const saved = (await commands(page, 'save_config'))[0].args.args.config;
+  expect(saved.channels.find(channel => channel.id === saved.active_channel_id).unity_project_path).toBe('/projects/Canonical');
+  expect(saved.unrelatedSetting).toBe('preserve');
+});
+
+for (const partial of [false, true]) test(`failed explicit setup keeps the unconfirmed draft path, partial native save: ${partial}`, async ({ page }) => {
+  await open(page, { canonicalPath: '/projects/Canonical', fail: partial ? undefined : 'one_click_setup', setupFailureAfterSave: partial });
+  await show(page, 'mcp');
+  await field(page, 'mcp', 'project').fill('/projects/Canonical/.'); await field(page, 'mcp', 'check').click();
+  await field(page, 'mcp', 'setup').click();
+  await page.getByRole('dialog', { name: 'Review connection setup' }).getByRole('button', { name: 'Apply setup' }).click();
+  await expect(field(page, 'mcp', 'error')).toContainText(partial ? 'earlier steps remain' : 'one_click_setup');
+  await expect(field(page, 'mcp', 'project')).toHaveValue('/projects/Canonical/.');
+  expect((await commands(page, 'load_config')).length).toBe(1);
+  expect((await commands(page, 'save_config')).length).toBe(0);
+  expect((await commands(page, 'one_click_setup')).length).toBe(1);
+  expect(await page.evaluate(() => savedConfig.channels.find(channel => channel.id === savedConfig.active_channel_id).unity_project_path))
+    .toBe(partial ? '/projects/Canonical' : '/projects/Creator');
+});
+
+for (const failure of ['add_project', 'save_config']) test(`failed Add project keeps the draft when ${failure} refuses`, async ({ page }) => {
+  await open(page, { canonicalPath: '/projects/Canonical', fail: failure }); await show(page, 'mcp');
+  await field(page, 'mcp', 'project').fill('/projects/Canonical/.'); await field(page, 'mcp', 'add').click();
+  await expect(field(page, 'mcp', 'error')).toContainText(failure);
+  await expect(field(page, 'mcp', 'project')).toHaveValue('/projects/Canonical/.');
+  expect(await page.evaluate(() => savedConfig.active_channel_id)).toBe('one');
+  expect((await commands(page, 'load_config')).length).toBe(1);
+  expect((await commands(page, 'add_project')).length).toBe(1);
+});
+
+test('a config reload unrelated to explicit project selection preserves the project draft', async ({ page }) => {
+  await open(page); await show(page, 'mcp');
+  await field(page, 'mcp', 'project').fill('/projects/Unsubmitted/.');
+  await field(page, 'mcp', 'check').click();
+  await page.getByText('Existing client connections and recovery', { exact: true }).click();
+  await field(page, 'mcp', 'review').click();
+  await expect(field(page, 'mcp', 'status')).toHaveText('Ready');
+  await expect(field(page, 'mcp', 'project')).toHaveValue('/projects/Unsubmitted/.');
+  expect((await commands(page, 'load_config')).length).toBe(2);
+  expect((await commands(page, 'one_click_setup')).length).toBe(0);
+  expect((await commands(page, 'add_project')).length).toBe(0);
+  expect(await page.evaluate(() => savedConfig.active_channel_id)).toBe('one');
+});
+
+test('bridge update preserves counts and every failure reason as text, never HTML', async ({ page }) => {
+  const failures = ['First project: <img src=x onerror="window.bridgeInjected=true">', 'Second project: </p><script>window.bridgeInjected=true</script>'];
+  await open(page, { bridgeFailures: failures }); await show(page, 'mcp');
+  await field(page, 'mcp', 'bridges').click();
+  const result = field(page, 'mcp', 'setup-result');
+  await expect(result).toContainText('Bridges updated: 1. Failed: 2.');
+  for (const failure of failures) await expect(result).toContainText(failure);
+  expect(await result.locator('p').allTextContents()).toEqual(['Bridges updated: 1. Failed: 2.', ...failures]);
+  expect(await result.locator('img, script').count()).toBe(0);
+  expect(await page.evaluate(() => window.bridgeInjected)).toBeUndefined();
+  expect((await commands(page, 'update_configured_unity_extensions')).length).toBe(1);
+  await expect(field(page, 'mcp', 'error')).toBeHidden();
 });
 
 test('Desktop is separate from Code and unsupported Linux Desktop cannot be selected or configured', async ({ page }) => {
