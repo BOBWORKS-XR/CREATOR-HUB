@@ -111,12 +111,41 @@ def source_contract(fetch=None):
             "requiresRealLogindSession": True, "dbusObjectPath": AGENT_PATH, **FLAGS}
 
 
+def system_file_observation(output):
+    """Read-only evidence before a guard refuses; never an input allowance."""
+    b, rows = base(), {}
+    for filename, (package, version, size, digest, mode) in FILES.items():
+        path = Path(filename)
+        row = {"expectedPackage": package, "expectedVersion": version, "expectedMode": mode,
+               "expectedSize": size, "expectedSha256": digest, "authorization": False}
+        rows[filename] = row
+        try:
+            info = path.lstat()
+            row.update(mode=stat.S_IMODE(info.st_mode), uid=info.st_uid, gid=info.st_gid, size=info.st_size,
+                       canonical=path.resolve(strict=True) == path, regular=stat.S_ISREG(info.st_mode))
+            if row["canonical"] and row["regular"]:
+                row["file"] = b.file_record(path, 256 * 1024)
+            status, state = b.run_tool(output, "observed-package-" + path.name,
+                ["/usr/bin/dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n", package], allowed=(0, 1))
+            row.update(packageExitCode=status, packageRaw=state.decode("utf-8"))
+            status, owner = b.run_tool(output, "observed-owner-" + path.name,
+                ["/usr/bin/dpkg-query", "-S", filename if package != "coreutils" else "/bin/true"], allowed=(0, 1))
+            row.update(ownerExitCode=status, ownerRaw=owner.decode("utf-8"))
+        except Exception as error:
+            row["observationRefusal"] = type(error).__name__
+    b.save_json(output / "system-files-observation.json", {"scope": "read-only-before-system-file-guards", "files": rows, **FLAGS})
+
+
 def verify_files(output):
     b, result = base(), {}
+    system_file_observation(output)
     for filename, (package, version, size, digest, mode) in FILES.items():
         path = Path(filename)
         require(path.resolve(strict=True) == path and path.stat().st_uid == path.stat().st_gid == 0, "Canonical root-owned system file required")
-        record = b.pinned(path, (size, digest), mode)
+        try:
+            record = b.pinned(path, (size, digest), mode)
+        except Exception as error:
+            raise RuntimeError("Exact system file pin refused: " + filename) from error
         _code, state = b.run_tool(output, "package-" + path.name, ["/usr/bin/dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n", package])
         require(state == f"{package}\t{version}\tamd64\tinstalled\n".encode(), "Exact installed system package required")
         _code, owner = b.run_tool(output, "owner-" + path.name, ["/usr/bin/dpkg-query", "-S", filename if package != "coreutils" else "/bin/true"])

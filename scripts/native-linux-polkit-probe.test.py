@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -138,6 +139,46 @@ class KernelTests(unittest.TestCase):
         with mock.patch.object(b, "native_process") as read, self.assertRaises(RuntimeError):
             p.own_agent(process, agent, parent, None)
         read.assert_not_called()
+
+
+class SystemFileObservationTests(unittest.TestCase):
+    def test_original_mode_bytes_and_package_queries_survive_without_authorization(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp).resolve()
+            image = output / "synthetic-system-file"
+            image.write_bytes(b"synthetic input never executed")
+            image.chmod(0o777)
+            expected = ("fixture-package", "1", image.stat().st_size,
+                        hashlib.sha256(image.read_bytes()).hexdigest(), 0o755)
+            def tool(_output, _label, argv, **_options):
+                return (0, b"fixture-package\t1\tamd64\tinstalled\n") if "-W" in argv else (0, ("fixture-package: " + str(image) + "\n").encode())
+            with mock.patch.dict(p.FILES, {str(image): expected}, clear=True), mock.patch.object(b, "run_tool", side_effect=tool), \
+                    mock.patch.object(p.subprocess, "Popen") as launch:
+                p.system_file_observation(output)
+            launch.assert_not_called()
+            saved = json.loads((output / "system-files-observation.json").read_text())
+            row = saved["files"][str(image)]
+            self.assertEqual(row["mode"], image.stat().st_mode & 0o7777)
+            self.assertEqual(row["expectedMode"], 0o755)
+            self.assertEqual(row["file"]["sha256"], expected[3])
+            self.assertEqual(row["packageRaw"], "fixture-package\t1\tamd64\tinstalled\n")
+            self.assertEqual(row["ownerRaw"], "fixture-package: " + str(image) + "\n")
+            self.assertFalse(row["authorization"])
+            self.assertFalse(saved["authenticationAccepted"])
+
+    def test_observation_failure_is_retained_and_cannot_replace_the_strict_guard(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp).resolve()
+            missing = str(output / "absent")
+            with mock.patch.dict(p.FILES, {missing: ("fixture", "1", 1, "a" * 64, 0o755)}, clear=True), \
+                    mock.patch.object(p.subprocess, "Popen") as launch, self.assertRaises(FileNotFoundError):
+                p.verify_files(output)
+            launch.assert_not_called()
+            saved = json.loads((output / "system-files-observation.json").read_text())
+            self.assertEqual(saved["files"][missing]["observationRefusal"], "FileNotFoundError")
+        source = (HERE / "native-linux-polkit-probe.py").read_text()
+        self.assertIn("b.pinned(path, (size, digest), mode)", source)
+        self.assertIn('"Exact system file pin refused: " + filename', source)
 
 
 class DbusTests(unittest.TestCase):
@@ -341,6 +382,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('sensitive = role == atspi.Role.PASSWORD_TEXT', source)
         self.assertIn('"sessionTeardownRequired"] = True', source)
         self.assertIn("signal.alarm(60)", source)
+        self.assertIn("system-files-observation.json", WORKFLOW.read_text())
 
 
 if __name__ == "__main__":

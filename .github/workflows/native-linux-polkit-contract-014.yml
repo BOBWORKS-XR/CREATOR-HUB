@@ -137,7 +137,7 @@ jobs:
           mkdir -m 700 "$RUNNER_TEMP/polkit-capture"
           # Copy only these known reports/logs. Never account files or credentials.
           if test -d /opt/creator-polkit-fixture/result; then
-            for name in polkit-report.json original-gtk-contract.json agent.stdout agent.stderr pkexec.stdout pkexec.stderr openbox.log; do
+            for name in polkit-report.json system-files-observation.json original-gtk-contract.json agent.stdout agent.stderr pkexec.stdout pkexec.stderr openbox.log; do
               if sudo test -f "/opt/creator-polkit-fixture/result/$name"; then
                 sudo cat "/opt/creator-polkit-fixture/result/$name" > "$RUNNER_TEMP/polkit-capture/$name"
               fi
