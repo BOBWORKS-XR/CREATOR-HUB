@@ -61,8 +61,10 @@ Mac support remains suspended. No TEST ONLY package is a release candidate.
   [39105404389](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39105404389).
   It uses product source `534465a`, changes only four Root version fields and
   signed runtime metadata, and retains the exact compiled MCP/Setup/router and
-  helper/policy binaries. The local signed update descriptor is verified; the
-  installer signature still requires the actual-source input verifier. All 0.1.15
+  helper/policy binaries. The actual catalog/target/minisign source also verified
+  the local descriptor, installer signature, package/ELF hashes and three tamper
+  controls in an offline cross-platform verifier. That is not Linux native
+  installation, discovery or restart acceptance. All 0.1.15
   bytes are acceptance-only and must never be published. This creates an update
   target, not an update/restart acceptance result. The earlier private-draft read
   failure [39105308246](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39105308246)
