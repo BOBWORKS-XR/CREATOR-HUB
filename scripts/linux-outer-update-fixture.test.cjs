@@ -66,12 +66,16 @@ test('native workflow uses exact14 inputs and private15 metadata with no publica
   const body = fs.readFileSync(path.join(__dirname, '../.github/workflows/linux-outer-update-fixture-014.yml'), 'utf8');
   const workflow = yaml.parse(body, { uniqueKeys: true });
   assert.deepEqual(workflow.permissions, { contents: 'read', actions: 'read' });
+  assert.deepEqual(workflow.jobs.metadata.permissions, { contents: 'write', actions: 'read' });
+  assert.equal(workflow.jobs.target.permissions, undefined);
+  assert.equal(workflow.jobs.target.needs, 'metadata');
+  assert.deepEqual(workflow.jobs.metadata.steps.map(s => s.uses), ['actions/github-script@v8', 'actions/upload-artifact@v4']);
   assert.deepEqual(workflow.on.push.branches, ['validation/linux-outer-update-fixture-014']);
   assert.equal(workflow.jobs.target['runs-on'], 'ubuntu-22.04');
   const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : '/usr/bin/bash';
   const { spawnSync } = require('node:child_process');
   let bodies = 0;
-  for (const step of workflow.jobs.target.steps) {
+  for (const step of Object.values(workflow.jobs).flatMap(job => job.steps)) {
     if (step.run) {
       const result = spawnSync(bash, ['-n'], { input: step.run, encoding: 'utf8', timeout: 10000, shell: false });
       assert.equal(result.status, 0, `${step.name}: ${result.stderr}`); bodies++;
@@ -79,7 +83,8 @@ test('native workflow uses exact14 inputs and private15 metadata with no publica
     if (step.with?.script) new (Object.getPrototypeOf(async function(){}).constructor)('github', 'context', step.with.script);
   }
   assert.equal(bodies, 4);
-  assert.doesNotMatch(body, /contents: write|gh release|windows-latest|macos-|publish-hub|secrets\./);
+  assert.doesNotMatch(body, /gh release|windows-latest|macos-|publish-hub|secrets\./);
+  assert.equal([...body.matchAll(/contents: write/g)].length, 1, 'Draft-read capability stays isolated from native execution');
   assert.match(body, /assert.equal\(release.draft,true\)/);
   assert.match(body, /assert.equal\(run.conclusion,'success'\)/);
   assert.match(body, /assert.equal\(artifact.digest,'sha256:904b51a/);

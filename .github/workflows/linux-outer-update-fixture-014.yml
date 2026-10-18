@@ -10,26 +10,16 @@ permissions:
   contents: read
   actions: read
 jobs:
-  target:
+  metadata:
     if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512'
     runs-on: ubuntu-22.04
-    timeout-minutes: 35
-    env:
-      CREATOR_LINUX_OUTER_UPDATE_FIXTURE: '1'
+    timeout-minutes: 5
+    # GitHub refuses draft-release reads with contents:read (39105308246).
+    # Keep this unavoidable capability in an input-only job with no product execution.
+    permissions:
+      contents: write
+      actions: read
     steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24.17.0
-      - name: Finite source and workflow preflight before native downloads
-        run: |
-          set -euo pipefail
-          npm ci --ignore-scripts --no-audit --no-fund
-          node --test scripts/linux-outer-update-fixture.test.cjs
-          node --check scripts/linux-outer-update-fixture.cjs
-          node -e 'require("./scripts/linux-outer-update-fixture.cjs").nativeAdmission(process.env,process.platform,process.arch)'
       - name: Verify successful immutable14 source and independently signed15 metadata
         uses: actions/github-script@v8
         with:
@@ -68,6 +58,39 @@ jobs:
             fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'linux15-source-binding.json'),JSON.stringify({
               source:run.head_sha,tree:commit.tree.sha,runId:run.id,jobId:job.id,artifactId:artifact.id,artifactDigest:artifact.digest,
               runtimeInputs:inputs,acceptanceOnly:true,releaseReady:false},null,2),{flag:'wx',mode:0o600});
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux15-runtime-input
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/linux15-runtime/*
+            ${{ runner.temp }}/linux15-source-binding.json
+  target:
+    needs: metadata
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    env:
+      CREATOR_LINUX_OUTER_UPDATE_FIXTURE: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Finite source and workflow preflight before native downloads
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          node --test scripts/linux-outer-update-fixture.test.cjs
+          node --check scripts/linux-outer-update-fixture.cjs
+          node -e 'require("./scripts/linux-outer-update-fixture.cjs").nativeAdmission(process.env,process.platform,process.arch)'
+      - uses: actions/download-artifact@v5
+        with:
+          name: linux15-runtime-input
+          path: ${{ runner.temp }}
       - uses: actions/download-artifact@v5
         with:
           artifact-ids: '12104548664'
