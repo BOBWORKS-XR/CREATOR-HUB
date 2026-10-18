@@ -30,6 +30,9 @@
   const preferenceFailures = new Map();
   const byId = id => document.getElementById(id);
   const invoke = (command, args) => window.CreatorHubNative.invoke(command, args);
+  const directFeatures = window.CreatorHubNative.integratedFeatures === true;
+  let directReady = false;
+  if (directFeatures) byId('restore-hosted-views').closest('label').lastChild.textContent = ' Return to last tool after updating';
   const platformLabel = () => {
     const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent;
     if (/mac/i.test(platform)) return 'macOS';
@@ -126,7 +129,7 @@
       }));
     }
     renderState();
-    const target = view === 'hub' || window.CreatorHosted.active(view) ? title : document.querySelector(view === 'projects' ? '#hub-tab-projects' : view === 'plugins' ? '#plugins-title' : appState()?.builtIn ? '#builtin-title' : '#tool-title');
+    const target = view === 'hub' || directFeatures || window.CreatorHosted.active(view) ? title : document.querySelector(view === 'projects' ? '#hub-tab-projects' : view === 'plugins' ? '#plugins-title' : appState()?.builtIn ? '#builtin-title' : '#tool-title');
     target.tabIndex = -1;
     target.focus();
   }
@@ -134,6 +137,7 @@
   const hostOpening = new Set();
   const hostFailures = new Map();
   async function openHostedWhenReady(app) {
+    if (directFeatures) return;
     const state = inventory?.apps?.find(item => item.app === app);
     if (busy || inventoryError || !inventory?.supported || hostAttempts.has(app) || window.CreatorHosted.active(app)
       || !(state?.installed && state.trusted && state.hostedPreview && state.hostedCompatible === true && !state.issue)) return;
@@ -162,6 +166,12 @@
   function selectView(view) {
     hostAttempts.delete(view);
     show(view);
+    if (directFeatures) {
+      void invoke('feature_select', { feature: Object.hasOwn(tools, view) ? view : null }).catch(reason => {
+        error.textContent = `Could not remember the selected page: ${String(reason)}`;
+        error.classList.remove('hidden');
+      });
+    }
     if (Object.hasOwn(tools, view)) void openHostedWhenReady(view);
   }
   for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => selectView(button.dataset.view));
@@ -249,13 +259,15 @@
   }
   function renderState() {
     renderToolView();
-    byId('check-updates').disabled = busy;
+    const featureBusy = directFeatures && window.CreatorFeaturePages?.busy() === true;
+    byId('check-updates').disabled = busy || featureBusy;
     byId('retry-inventory').disabled = busy;
     byId('inventory-error').classList.toggle('hidden', !inventoryError);
     byId('inventory-error-message').textContent = inventoryError ? `App discovery failed: ${inventoryError}${inventory ? ' Last-known versions are shown; retry before using app controls.' : ''}` : '';
     for (const id of Object.keys(tools)) {
       const state = inventory?.apps?.find(app => app.app === id);
-      const label = inventory?.supported === false ? 'Not supported' : !inventory && busy ? 'Checking' : appStatus(state);
+      const label = directFeatures ? state?.issue ? 'Unavailable' : 'Included in Hub'
+        : inventory?.supported === false ? 'Not supported' : !inventory && busy ? 'Checking' : appStatus(state);
       const status = byId(`status-${id}`);
       status.replaceChildren();
       if ((label.startsWith('Installed') || state?.builtIn) && state?.trusted && !state.issue) {
@@ -268,10 +280,10 @@
       status.classList.toggle('not-installed', label.startsWith('Not installed'));
       status.classList.toggle('installed', (label.startsWith('Installed') || state?.builtIn) && state?.trusted && !state.issue);
       status.classList.toggle('unverified', label.startsWith('Installed') && !state?.trusted);
-      byId(`menu-status-${id}`).textContent = inventory?.supported === false ? 'Not supported'
+      byId(`menu-status-${id}`).textContent = directFeatures ? label : inventory?.supported === false ? 'Not supported'
         : inventoryError ? 'Check failed' : !inventory && busy ? 'Checking' : appStatus(state);
       const menuDownload = byId(`menu-download-${id}`);
-      const canDownload = Boolean(inventory?.supported && !inventoryError && state && !state.builtIn
+      const canDownload = Boolean(!directFeatures && inventory?.supported && !inventoryError && state && !state.builtIn
         && (!state.installed || state.updateAvailable) && !state.downloaded && !state.issue && !state.installBlocked);
       menuDownload.classList.toggle('hidden', !canDownload);
       menuDownload.disabled = busy;
@@ -279,7 +291,7 @@
       menuDownload.setAttribute('aria-label', menuDownload.title);
     }
     for (const [id] of preferenceControls) byId(id).disabled = !preferencesReady || preferencesSaving || (id === 'preview-channel' && busy);
-    byId('hub-update-button').disabled = busy || preferencesSaving || !hubUpdate?.availableVersion || Boolean(hubUpdate?.installBlocked);
+    byId('hub-update-button').disabled = busy || featureBusy || preferencesSaving || !hubUpdate?.availableVersion || Boolean(hubUpdate?.installBlocked);
     byId('hub-update-status').textContent = !hubUpdate ? 'Hub update check is unavailable. Try Check for updates.'
       : hubUpdate.availableVersion ? `Version ${hubUpdate.availableVersion}${hubUpdate.downloaded ? ' is ready to install.' : ' is available.'}`
       : hubUpdate.warning ? 'Could not check for a Hub update.' : `You are using Hub ${hubUpdate.currentVersion}. No newer update was found.`;
@@ -287,7 +299,7 @@
     byId('hub-update-warning').classList.toggle('hidden', !byId('hub-update-warning').textContent);
     for (const app of inventory?.apps || []) {
       const update = byId(`update-${app.app}`), reason = byId(`update-reason-${app.app}`);
-      const available = Boolean(app.installed && app.updateAvailable);
+      const available = Boolean(!directFeatures && app.installed && app.updateAvailable);
       const hosted = window.CreatorHosted.active(app.app);
       update.classList.toggle('hidden', !available);
       update.disabled = busy || Boolean(inventoryError) || !inventory.supported || Boolean(app.issue) || !app.trusted
@@ -386,6 +398,17 @@
   }
 
   function renderToolView() {
+    if (directFeatures) {
+      const tool = tools[current];
+      window.CreatorHosted.show(null);
+      document.body.classList.remove('hosting-app');
+      byId('view-detail').classList.add('hidden');
+      byId('view-builtin').classList.add('hidden');
+      window.CreatorFeaturePages?.show(tool ? current : null, { load: directReady });
+      title.innerHTML = current === 'plugins' ? '<span>CREATOR</span> <strong>PLUGINS</strong>' : '<span>CREATOR</span> <strong>HUB</strong>';
+      byId('mode-description').textContent = tool?.summary || (current === 'plugins' ? 'Plugins retirement' : 'Unity tools. One place.');
+      return;
+    }
     const state = appState();
     const tool = tools[current];
     const builtIn = Boolean(state?.builtIn);
@@ -451,7 +474,7 @@
       hubChecked = true;
     } catch (reason) { hubUpdate = { warning: String(reason) }; }
     finally { busy = false; renderState(); }
-    if (check && succeeded && automaticDownloads() && inventory?.supported) {
+    if (!directFeatures && check && succeeded && automaticDownloads() && inventory?.supported) {
       for (const app of [...inventory.apps]) {
         if (!automaticDownloads()) break;
         if (app.updateAvailable && !app.downloaded && !app.issue && !app.installBlocked) await action('download_app', app.app, app.availableVersion);
@@ -464,6 +487,10 @@
 
   async function hubAction(command) {
     if (busy || !hubUpdate?.availableVersion || hubUpdate.installBlocked) return;
+    if (directFeatures && window.CreatorFeaturePages?.busy()) {
+      error.textContent = 'MCP or Project Setup is still working. Finish that operation before updating Hub.';
+      error.classList.remove('hidden'); return;
+    }
     if (command === 'install_hub_update' && window.CreatorHosted.busy()) {
       error.textContent = 'An app view is still working. Wait for it to finish, then update Hub. No views were closed.';
       error.classList.remove('hidden'); return;
@@ -492,6 +519,15 @@
       status.classList.remove('hidden');
       const failures = [];
       for (const app of pending) {
+        if (directFeatures) {
+          try {
+            const restored = await invoke('restore_hosted_app', { app });
+            if (restored?.direct !== true || restored.app !== app) throw Error('Hub page restoration was not verified.');
+            selectView(app);
+            await invoke('complete_hosted_restore', { app });
+          } catch (reason) { failures.push(`${tools[app].title}: ${String(reason)}`); }
+          continue;
+        }
         message.textContent = `Reopening ${tools[app].title} after the Hub update... Check for the app's permission window.`;
         try {
           // Native recovery records are authoritative even if the close event is delayed.
@@ -499,7 +535,8 @@
           await window.CreatorHosted.start(app, true);
         } catch (reason) { failures.push(`${tools[app].title}: ${String(reason)}`); }
       }
-      message.textContent = failures.length ? `Some app views could not reopen. ${failures.join(' ')}` : 'Your app views have reopened. Select an app from the menu.';
+      message.textContent = failures.length ? `Some app views could not reopen. ${failures.join(' ')}`
+        : directFeatures ? 'Your Hub page has been restored.' : 'Your app views have reopened. Select an app from the menu.';
       retry.classList.toggle('hidden', !failures.length);
       // Reopening backends must not navigate away from Apps or interrupt a user's selection.
       show(current, true);
@@ -603,6 +640,7 @@
     }
   });
   byId('hub-update-button').addEventListener('click', () => hubAction('install_hub_update'));
+  window.addEventListener('creator-feature-state', () => { if (directFeatures) renderState(); });
   byId('cancel-download').addEventListener('click', async () => {
     byId('cancel-download').disabled = true;
     try { await invoke('cancel_download'); } catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
@@ -644,6 +682,8 @@
     window.CreatorHosted.updating(false); busy = false;
     await refresh(false);
     await refresh(true);
+    directReady = true;
+    renderState();
   }
   window.CreatorUsageTerms.requireAcceptance().then(async () => {
     await loadPreferences();

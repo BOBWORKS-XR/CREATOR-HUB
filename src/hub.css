@@ -120,6 +120,8 @@ button.app-row:hover { background: #181d21; }
 .hosted-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 0 24px; min-height: 28px; font-size: 11px; color: #9ba7af; }
 #hosted-content { flex: 1; min-height: 360px; display: flex; }
 #hosted-content iframe { border: 0; width: 100%; min-width: 0; flex: 1; min-height: calc(100vh - 106px); background: #090b0d; }
+#view-native-features { min-width: 0; }
+#hub-help-content[hidden], #feature-help-content[hidden] { display: none !important; }
 .hosting-app #action-error, .hosting-app #operation-progress { margin: 8px 24px; }
 /* Compatibility remains separate from installation and preview availability. */
 .compatibility-note { border-left: 2px solid #00cce8; padding: 8px 12px; margin: 16px 0; }

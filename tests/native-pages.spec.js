@@ -1,0 +1,613 @@
+const { test, expect } = require('@playwright/test');
+const path = require('node:path');
+const { helpOcclusion } = require('./help-layout.cjs');
+
+// Controller cases isolate feature calls; shell cases also run actual app.js routing.
+async function open(page, options = {}) {
+  if (!options.shell) await page.route('**/app.js', route => route.fulfill({ contentType: 'text/javascript', body: '' }));
+  await page.addInitScript(options => {
+    localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00Z' }));
+    window.__CREATOR_HUB_FEATURE_PROTOCOL__ = 1;
+    window.__actualShellTest = options.shell === true;
+    window.calls = []; window.events = {}; window.pending = {};
+    window.failNext = options.fail || null;
+    const recipe = { editorVersion: '6000.3.21f1', creatorSdkVersion: '4.0.14', urpVersion: '17.3.0', inputSystemVersion: '1.20.0' };
+    const channel = { id: 'one', name: 'Creator project', unity_project_path: '/projects/Creator', enabled: true };
+    const profile = { profile: 'creator', label: 'Creator SDK 4.0.14', packages: [] };
+    const config = { channels: [channel], active_channel_id: 'one', mcp_server_path: '/private/server.mjs',
+      tool_groups: 'core', auto_start: true, enable_custom_scripts: false, allow_all_tests: true,
+      connection_guide_version: options.guide ? 0 : 1, unrelatedSetting: 'preserve' };
+    window.savedConfig = config;
+    window.pendingRestore = options.restore ? [options.restore] : [];
+    const productStatus = options.productStatus || 'current';
+    window.productRecovery = options.productRecovery || options.productRecoveryCompleted ? [{ journal: '/retained/recovery', historical_completed: options.productRecoveryCompleted === true, completed: options.productRecoveryCompleted === true, files: [] }] : [];
+    const productReport = () => ({ status: productStatus, currentPath: '/settings/current.json', legacyPath: '/settings/legacy.json',
+      evidencePath: '/retained/evidence.json', backups: options.productStatus ? ['/retained/exact-backup'] : [], recovery: structuredClone(window.productRecovery) });
+    const clients = ['codex', 'claude', 'claudeDesktop', 'antigravity', 'opencode'].map(id => ({ id,
+      detected: ['codex', 'claudeDesktop'].includes(id), configured: true,
+      supported: id !== 'claudeDesktop' || !options.linux }));
+    window.emitFeature = (feature, name, payload) => window.events['feature-event']?.({ payload: { feature, name, payload } });
+    window.__TAURI__ = {
+      event: { listen: async (name, callback) => { window.events[name] = callback; return () => { delete window.events[name]; }; } },
+      core: { invoke: async (command, args = {}) => {
+        window.calls.push({ command, args: structuredClone(args) });
+        if (command === 'open_resource') {
+          if (Object.keys(args).length !== 1 || args.resource !== 'unity-cli-docs') throw new Error('Unexpected resource request');
+          return null;
+        }
+        if (command === 'feature_select') return;
+        if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, builtIn: true, installed: true, trusted: true, hostedCompatible: true, hostedPreview: 'writable', installedVersion: app === 'mcp' ? '2.7.7' : '0.3.7' })) };
+        if (command === 'hub_update_status') return { currentVersion: '0.1.14', availableVersion: null, downloaded: false };
+        if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
+        if (command === 'project_inventory') return { projects: [], warnings: [] };
+        if (command === 'pending_hosted_restore') return [...window.pendingRestore];
+        if (command === 'restore_hosted_app') return { direct: true, app: args.app };
+        if (command === 'complete_hosted_restore') { window.pendingRestore = window.pendingRestore.filter(app => app !== args.app); return; }
+        if (command === 'feature_status') return { integrated: options.integrated !== false, features: ['setup', 'mcp'], issue: options.integrated === false ? 'Native features not linked in this build.' : undefined };
+        if (command !== 'feature_call') throw new Error('Unexpected outer command: ' + command);
+        const { feature, command: name, args: fields } = args;
+        if (!['setup', 'mcp'].includes(feature) || !fields || Array.isArray(fields)) throw new Error('Invalid feature request');
+        if (window.failNext === name) { window.failNext = null; throw new Error('Fixture failure: ' + name); }
+        if (window.hold === name) await new Promise(resolve => { window.pending[name] = resolve; });
+        switch (name) {
+          case 'probe_environment': return { platform: options.linux ? 'linux' : 'windows', ready: true, hubInstalled: true, hubVersion: '3.21.1', hubAutoRegistration: true,
+            recipe, editors: [{ exactRecipe: true, androidPlayer: true, androidSdk: true, androidNdk: true, openJdk: true, windowsStandalone: true, urpTemplate: 'urp.tgz' }], blockers: [], suggestedProjectParent: '/projects' };
+          case 'pick_parent_folder': return '/projects/chosen';
+          case 'create_project': return { success: true, projectPath: '/projects/Space', message: 'Validated project', hub: { registered: true, refreshPending: true, message: 'Registered in Unity Hub' } };
+          case 'inspect_project': return { projectPath: fields.path, fingerprint: 'reviewed-fingerprint', canRepair: true, canValidate: true,
+            findings: [{ title: 'Visual Scripting', detail: options.hostile ? '<img src=x onerror=alert(1)>' : 'Initialization needs repair', status: 'repair' }], proposedChanges: ['Initialize node database'] };
+          case 'run_existing_project': return { success: true, projectPath: fields.request.projectPath, message: 'Validation passed', backupPath: '/backups/settings', reportPath: '/reports/validation.json' };
+          case 'open_project': case 'launch_hub': case 'register_project': return { registered: true, message: 'Registered' };
+          case 'restart_hub': return true;
+          case 'begin_ui_operation': return 17;
+          case 'finish_ui_operation': return null;
+          case 'product_settings_status': return productReport();
+          case 'review_product_settings': {
+            if (window.approveProduct === true) window.productRecovery = window.productRecovery.map(item => ({ ...item, historical_completed: true, completed: true }));
+            window.lastProductReview = { ...productReport(), approved: window.approveProduct === true };
+            return structuredClone(window.lastProductReview);
+          }
+          case 'load_config': return structuredClone(config);
+          case 'save_config': Object.assign(config, structuredClone(fields.config)); return null;
+          case 'discover_unity_projects': return [{ name: 'Creator project', path: '/projects/Creator' }];
+          case 'get_onboarding_status': return { managedRouting: true, runtime: { ready: true, bundled: true },
+            project: { valid: true, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: profile }, clients,
+            unityCli: { available: true, canEnable: true, enabled: config.unity_cli_enabled === true, message: 'Unity CLI detected; optional and experimental.' } };
+          case 'pick_project_folder': return '/projects/picked';
+          case 'add_project': return { ...channel, id: 'new', unity_project_path: fields.projectPath };
+          case 'one_click_setup': config.unity_cli_enabled = fields.configureUnityCli === true; config.unity_cli_consent_version = fields.unityCliConsent; return {};
+          case 'update_configured_unity_extensions': return { updated: 1, failed: [] };
+          case 'pending_client_recovery': return [];
+          case 'review_existing_client_connections': return { status: 'migrated', count: fields.clients.length };
+          case 'recover_client_connection': return { completed: true };
+          case 'update_codex_mcp_config': case 'update_claude_mcp_config': case 'update_claude_desktop_mcp_config':
+          case 'update_antigravity_mcp_config': case 'update_opencode_mcp_config':
+          case 'remove_codex_mcp_config': case 'remove_claude_mcp_config': case 'remove_claude_desktop_mcp_config':
+          case 'remove_antigravity_mcp_config': case 'remove_opencode_mcp_config':
+          case 'set_unity_custom_scripts': case 'set_unity_allow_all_tests': case 'install_unity_extension': return null;
+          default: throw new Error('Unexpected feature command: ' + name);
+        }
+      } },
+    };
+  }, options);
+  await page.goto('http://127.0.0.1:4188/');
+  await page.evaluate(async () => {
+    await window.CreatorUsageTerms.requireAcceptance();
+    if (!window.__actualShellTest) for (const id of ['view-hub', 'view-projects', 'view-detail', 'view-builtin', 'hub-pages']) document.getElementById(id).classList.add('hidden');
+  });
+}
+const field = (page, feature, name) => page.locator(`#feature-${feature} [data-field="${name}"]`);
+const commands = (page, name) => page.evaluate(name => calls.filter(call => call.command === 'feature_call' && call.args.command === name), name);
+const show = (page, feature, load = true) => page.evaluate(({ feature, load }) => CreatorFeaturePages.show(feature, { load }), { feature, load });
+
+test('actual Root navigation opens Setup and MCP as pages without hosted startup or frame authority', async ({ page }) => {
+  await open(page, { shell: true });
+  await expect(page.locator('#catalog-status')).toContainText('Update check complete');
+  await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
+  await expect(field(page, 'setup', 'create')).toBeEnabled();
+  await page.locator('#suite-trigger').click(); await page.locator('#suite-menu [data-view="mcp"]').click();
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  expect(await page.locator('iframe').count()).toBe(0);
+  expect(await page.evaluate(() => calls.filter(call => ['start_hosted_app', 'hosted_app_call', 'stop_hosted_app'].includes(call.command)))).toEqual([]);
+  expect(await page.evaluate(() => calls.filter(call => call.command === 'feature_select').map(call => call.args.feature))).toEqual(expect.arrayContaining(['setup', 'mcp']));
+});
+
+test('actual Root maps old pending app restoration directly without permission/backend startup', async ({ page }) => {
+  await open(page, { shell: true, restore: 'mcp' });
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  expect(await page.evaluate(() => pendingRestore)).toEqual([]);
+  expect(await page.evaluate(() => calls.filter(call => call.command === 'restore_hosted_app').map(call => call.args.app))).toEqual(['mcp']);
+  expect(await page.evaluate(() => calls.filter(call => call.command === 'complete_hosted_restore').map(call => call.args.app))).toEqual(['mcp']);
+  expect(await page.locator('iframe').count()).toBe(0);
+  expect(await page.locator('#convergence-dialog')).not.toBeVisible();
+  expect(await page.evaluate(() => calls.filter(call => ['start_hosted_app', 'hosted_app_call', 'stop_hosted_app'].includes(call.command)))).toEqual([]);
+});
+
+test('real direct pages mount with scoped IDs, original font and icons, no module globals or iframes', async ({ page }) => {
+  await open(page); await show(page, 'setup'); await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  expect(await page.locator('iframe').count()).toBe(0);
+  expect(await page.evaluate(() => window.CreatorRuntime)).toBeUndefined();
+  expect(await page.evaluate(() => CreatorHubNative.integratedFeatures)).toBe(true);
+  expect(await page.evaluate(() => { const ids = [...document.querySelectorAll('[id]')].map(el => el.id); return ids.filter((id, index) => ids.indexOf(id) !== index); })).toEqual([]);
+  expect(await page.locator('#context-help-open').count()).toBe(1);
+  expect(await page.locator('#usage-terms-dialog').count()).toBe(1);
+  expect(await field(page, 'mcp', 'project').evaluate(el => getComputedStyle(el).fontFamily)).toBe(await page.locator('body').evaluate(el => getComputedStyle(el).fontFamily));
+  expect(await field(page, 'mcp', 'check').locator('.icon').evaluate(el => getComputedStyle(el).getPropertyValue('--icon'))).toContain('refresh');
+  expect(await page.evaluate(() => calls.some(call => ['start_hosted_app', 'hosted_app_call', 'install_app'].includes(call.command)))).toBe(false);
+  await show(page, 'setup');
+  for (const name of ['open', 'another', 'register', 'restart', 'open-existing']) await expect(field(page, 'setup', name)).toBeHidden();
+});
+
+test('load false does no API work; repeated true boot initializes once, failed boot retries only explicitly', async ({ page }) => {
+  await open(page, { fail: 'probe_environment' });
+  await show(page, 'setup', false);
+  await expect(field(page, 'setup', 'create')).toBeDisabled();
+  expect(await page.evaluate(() => calls.length)).toBe(0);
+  await page.evaluate(() => Promise.all(Array.from({ length: 5 }, () => CreatorFeaturePages.show('setup', { load: true }))));
+  await expect(field(page, 'setup', 'error')).toContainText('probe_environment');
+  expect((await commands(page, 'probe_environment')).length).toBe(1);
+  await field(page, 'setup', 'retry').click();
+  await expect(field(page, 'setup', 'create')).toBeEnabled();
+  expect((await commands(page, 'probe_environment')).length).toBe(2);
+  await expect(field(page, 'setup', 'retry')).toBeHidden();
+});
+
+test('Root load permission survives default show, navigation and Retry until explicit load true', async ({ page }) => {
+  await open(page); await show(page, 'setup', false);
+  for (const feature of ['setup', 'mcp']) {
+    await page.evaluate(feature => CreatorFeaturePages.show(feature), feature);
+    await expect(field(page, feature, 'retry')).toBeHidden();
+    await field(page, feature, 'retry').dispatchEvent('click');
+    await page.evaluate(feature => CreatorFeaturePages.show(feature), feature);
+    await expect(field(page, feature, 'controls')).toHaveAttribute('disabled', '');
+    await expect(field(page, feature, feature === 'setup' ? 'create' : 'setup')).toBeDisabled();
+    await expect(field(page, feature, 'status')).toHaveText('Waiting for Hub startup');
+    expect(await page.evaluate(() => calls)).toEqual([]);
+  }
+  await page.evaluate(() => CreatorFeaturePages.show(null));
+  await page.evaluate(() => CreatorFeaturePages.show('setup'));
+  expect(await page.evaluate(() => calls)).toEqual([]);
+  await show(page, 'setup', true);
+  await expect(field(page, 'setup', 'create')).toBeEnabled();
+  await page.evaluate(() => CreatorFeaturePages.show('mcp'));
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  expect((await commands(page, 'probe_environment')).length).toBe(1);
+  expect((await commands(page, 'load_config')).length).toBe(1);
+});
+
+test('failed startup Retry cannot bypass a later Root hold and remains explicit after unlock', async ({ page }) => {
+  await open(page, { fail: 'probe_environment' });
+  await page.evaluate(() => CreatorFeaturePages.show('setup'));
+  await expect(field(page, 'setup', 'retry')).toBeVisible();
+  await show(page, 'setup', false);
+  await field(page, 'setup', 'retry').dispatchEvent('click');
+  await page.evaluate(() => CreatorFeaturePages.show('setup'));
+  expect((await commands(page, 'probe_environment')).length).toBe(1);
+  await show(page, 'setup', true);
+  await expect(field(page, 'setup', 'retry')).toBeVisible();
+  expect((await commands(page, 'probe_environment')).length).toBe(1);
+  await field(page, 'setup', 'retry').click();
+  await expect(field(page, 'setup', 'create')).toBeEnabled();
+  await expect(field(page, 'setup', 'retry')).toBeHidden();
+  expect((await commands(page, 'probe_environment')).length).toBe(2);
+});
+
+test('unlinked native mode stays disabled, shows reason and never falls back to a hosted app', async ({ page }) => {
+  await open(page, { integrated: false }); expect(await show(page, 'setup')).toBe(false);
+  await expect(field(page, 'setup', 'error')).toContainText('not linked');
+  await expect(field(page, 'setup', 'create')).toBeDisabled();
+  await expect(field(page, 'setup', 'retry')).toBeVisible();
+  expect((await commands(page, 'probe_environment')).length).toBe(0);
+  expect(await page.locator('iframe').count()).toBe(0);
+});
+
+test('dispose cancels queued mount without late controller or native work', async ({ page }) => {
+  await open(page);
+  expect(await page.evaluate(async () => {
+    const pending = CreatorFeaturePages.show('setup', { load: false });
+    const disposed = CreatorFeaturePages.dispose(); await pending; return disposed;
+  })).toBe(true);
+  expect(await page.locator('#feature-setup').count()).toBe(0);
+  expect(await page.evaluate(() => calls.length)).toBe(0);
+  await show(page, 'setup'); await expect(field(page, 'setup', 'create')).toBeEnabled();
+});
+
+test('navigation retains both forms and does not reinitialize, help uses one shell dialog', async ({ page }) => {
+  await open(page); await show(page, 'setup');
+  await field(page, 'setup', 'name').fill('Keep this name'); await field(page, 'setup', 'parent').fill('/keep/me');
+  await show(page, 'mcp'); await field(page, 'mcp', 'project').fill('/another/project');
+  await page.locator('#context-help-open').click(); await expect(page.locator('#context-help-title')).toHaveText('Creator Works MCP help');
+  await page.locator('#context-help-close').click();
+  await show(page, 'setup'); await expect(field(page, 'setup', 'name')).toHaveValue('Keep this name');
+  await expect(field(page, 'setup', 'parent')).toHaveValue('/keep/me');
+  await show(page, 'mcp'); await expect(field(page, 'mcp', 'project')).toHaveValue('/another/project');
+  expect((await commands(page, 'load_config')).length).toBe(1);
+  expect((await commands(page, 'probe_environment')).length).toBe(1);
+  await page.evaluate(() => CreatorFeaturePages.show(null)); await expect(page.locator('#view-native-features')).toBeHidden();
+});
+
+test('one Refresh call, no duplicate operation or automatic retry, error remains feature-scoped', async ({ page }) => {
+  await open(page); await show(page, 'setup');
+  await page.evaluate(() => { window.hold = 'probe_environment'; });
+  await field(page, 'setup', 'refresh').click();
+  await page.waitForFunction(() => pending.probe_environment);
+  await field(page, 'setup', 'refresh').dispatchEvent('click');
+  expect((await commands(page, 'probe_environment')).length).toBe(2);
+  await expect(field(page, 'setup', 'create')).toBeDisabled();
+  expect(await page.evaluate(() => CreatorFeaturePages.dispose())).toBe(false);
+  await page.evaluate(() => { window.hold = null; pending.probe_environment(); });
+  await expect(field(page, 'setup', 'create')).toBeEnabled();
+  await page.evaluate(() => { window.failNext = 'probe_environment'; }); await field(page, 'setup', 'refresh').click();
+  await expect(field(page, 'setup', 'error')).toContainText('Fixture failure');
+  await expect(field(page, 'setup', 'retry')).toBeHidden();
+  await expect(field(page, 'setup', 'refresh')).toBeEnabled();
+  await show(page, 'mcp'); await expect(field(page, 'mcp', 'error')).toBeHidden();
+  expect((await commands(page, 'probe_environment')).length).toBe(3);
+});
+
+test('Setup creates once with exact DTO, consumes only scoped progress and completes while hidden', async ({ page }) => {
+  await open(page); await show(page, 'mcp'); await show(page, 'setup');
+  await field(page, 'setup', 'name').fill('Space');
+  await page.evaluate(() => { window.hold = 'create_project'; }); await field(page, 'setup', 'create').click();
+  await page.waitForFunction(() => pending.create_project);
+  await field(page, 'setup', 'create').dispatchEvent('click');
+  expect((await commands(page, 'create_project')).length).toBe(1);
+  expect((await commands(page, 'create_project'))[0].args.args).toEqual({ request: { projectName: 'Space', parentDirectory: '/projects' } });
+  await page.evaluate(() => {
+    emitFeature('mcp', 'setup-progress', { step: 2, detail: 'Foreign progress' });
+    emitFeature('setup', 'setup-progress', { step: 3, detail: '<img src=x onerror=alert(1)>' });
+  });
+  await expect(field(page, 'setup', 'detail')).toHaveText('<img src=x onerror=alert(1)>');
+  expect(await field(page, 'setup', 'detail').locator('img').count()).toBe(0);
+  await show(page, 'mcp'); await page.evaluate(() => emitFeature('setup', 'requirements-progress', { stage: 'Download', detail: 'Download in progress', percent: 35, transfer: { downloadedBytes: 350, totalBytes: 1000, bytesPerSecond: 25 } }));
+  await expect(field(page, 'mcp', 'status')).toHaveText('Ready');
+  await page.evaluate(() => { window.hold = null; pending.create_project(); }); await show(page, 'setup');
+  await expect(field(page, 'setup', 'created')).toContainText('Validated project');
+  await expect(field(page, 'setup', 'open')).toBeVisible();
+  await expect(field(page, 'setup', 'restart')).toBeVisible();
+});
+
+test('inspection is read-only; repairs require approval and reuse exact reviewed fingerprint; changed path invalidates', async ({ page }) => {
+  await open(page, { hostile: true }); await show(page, 'setup'); await field(page, 'setup', 'existing-tab').click();
+  await field(page, 'setup', 'existing-path').fill('/projects/review'); await field(page, 'setup', 'inspect').click();
+  await expect(field(page, 'setup', 'findings')).toContainText('<img src=x onerror=alert(1)>');
+  expect(await field(page, 'setup', 'findings').locator('img').count()).toBe(0);
+  await expect(field(page, 'setup', 'repair')).toBeDisabled();
+  expect((await commands(page, 'run_existing_project')).length).toBe(0);
+  await field(page, 'setup', 'approval').check(); await field(page, 'setup', 'repair').click();
+  await expect(field(page, 'setup', 'existing-result')).toContainText('Backup: /backups/settings');
+  expect((await commands(page, 'run_existing_project'))[0].args.args).toEqual({ request: { projectPath: '/projects/review', fingerprint: 'reviewed-fingerprint', repair: true, approved: true } });
+  await field(page, 'setup', 'inspect').click(); await field(page, 'setup', 'approval').check();
+  await field(page, 'setup', 'existing-path').fill('/different'); await expect(field(page, 'setup', 'repair')).toBeDisabled();
+});
+
+test('first-run guide has no connection writes; saving skip failure remains recoverable', async ({ page }) => {
+  await open(page, { guide: true }); await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'guide-dialog')).toBeVisible();
+  expect((await commands(page, 'one_click_setup')).length).toBe(0);
+  expect((await commands(page, 'save_config')).length).toBe(0);
+  await page.evaluate(() => { window.failNext = 'save_config'; }); await field(page, 'mcp', 'guide-skip').click();
+  await expect(field(page, 'mcp', 'guide-dialog')).toBeVisible();
+  await field(page, 'mcp', 'guide-skip').click(); await expect(field(page, 'mcp', 'guide-dialog')).toBeHidden();
+  expect((await commands(page, 'save_config')).at(-1).args.args.config.connection_guide_version).toBe(1);
+});
+
+test('Unity CLI documentation uses only the fixed Hub resource key, not an MCP or shell opener', async ({ page }) => {
+  await open(page, { shell: true });
+  await expect(page.locator('#catalog-status')).toContainText('Update check complete');
+  await page.getByRole('button', { name: 'View Creator Works MCP', exact: true }).click();
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  await page.getByText('Optional Unity CLI', { exact: true }).click();
+  await field(page, 'mcp', 'cli-docs').click();
+  await expect(field(page, 'mcp', 'status')).toHaveText('Ready');
+  expect(await page.evaluate(() => calls.filter(call => call.command === 'open_resource'))).toEqual([
+    { command: 'open_resource', args: { resource: 'unity-cli-docs' } },
+  ]);
+  expect((await commands(page, 'open_official_url')).length).toBe(0);
+  expect(await page.evaluate(() => calls.filter(call => /shell|opener/.test(call.command)))).toEqual([]);
+  await expect(field(page, 'mcp', 'error')).toBeHidden();
+});
+
+test('optional CLI needs explicit agreement; reviewed setup uses exact client and consent DTO, balanced lease', async ({ page }) => {
+  await open(page); await show(page, 'mcp');
+  await field(page, 'mcp', 'cli').locator('xpath=ancestor::details').locator('summary').click();
+  await expect(field(page, 'mcp', 'cli')).not.toBeChecked(); await field(page, 'mcp', 'cli').click();
+  let modal = page.getByRole('dialog', { name: 'Experimental Unity CLI', exact: true });
+  await expect(modal.getByRole('button', { name: 'Agree and enable' })).toBeDisabled();
+  await modal.getByRole('button', { name: 'Cancel' }).click(); await expect(field(page, 'mcp', 'cli')).not.toBeChecked();
+  await field(page, 'mcp', 'cli').click(); modal = page.getByRole('dialog', { name: 'Experimental Unity CLI', exact: true });
+  await modal.getByRole('checkbox').check(); await modal.getByRole('button', { name: 'Agree and enable' }).click();
+  await expect(field(page, 'mcp', 'cli')).toBeChecked();
+  await field(page, 'mcp', 'setup').click();
+  await page.getByRole('dialog', { name: 'Review connection setup' }).getByRole('button', { name: 'Cancel' }).click();
+  expect((await commands(page, 'one_click_setup')).length).toBe(0);
+  await field(page, 'mcp', 'setup').click(); await page.getByRole('dialog', { name: 'Review connection setup' }).getByRole('button', { name: 'Apply setup' }).click();
+  await expect(field(page, 'mcp', 'setup-result')).toContainText('Settings saved');
+  const request = (await commands(page, 'one_click_setup'))[0].args.args;
+  expect(request).toEqual({ unityProjectPath: '/projects/Creator', configureCodex: true, configureClaude: true, configureClaudeDesktop: true, configureAntigravity: true, configureOpencode: true,
+    toolGroups: 'core', enableCustomScripts: false, configureUnityCli: true, unityCliConsent: 'unity-cli-experimental-v1' });
+  expect((await commands(page, 'begin_ui_operation')).length).toBe((await commands(page, 'finish_ui_operation')).length);
+  expect(await page.evaluate(() => savedConfig.unrelatedSetting)).toBe('preserve');
+});
+
+test('Desktop is separate from Code and unsupported Linux Desktop cannot be selected or configured', async ({ page }) => {
+  await open(page, { linux: true }); await show(page, 'mcp');
+  await expect(page.locator('#feature-mcp [data-client="claudeDesktop"]')).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Apply to Claude Desktop', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Apply to Claude Code', exact: true }).click();
+  expect((await commands(page, 'update_claude_mcp_config')).length).toBe(1);
+  expect((await commands(page, 'update_claude_desktop_mcp_config')).length).toBe(0);
+});
+
+test('MCP errors do not mutate Setup and an unreleased native workflow stays locked', async ({ page }) => {
+  await open(page); await show(page, 'setup'); await show(page, 'mcp');
+  await page.evaluate(() => { window.failNext = 'update_codex_mcp_config'; }); await page.getByRole('button', { name: 'Apply to Codex', exact: true }).click();
+  await expect(field(page, 'mcp', 'error')).toContainText('update_codex_mcp_config');
+  expect((await commands(page, 'update_codex_mcp_config')).length).toBe(1);
+  await show(page, 'setup'); await expect(field(page, 'setup', 'error')).toBeHidden();
+  await show(page, 'mcp'); await page.evaluate(() => { window.failNext = 'finish_ui_operation'; });
+  await field(page, 'mcp', 'check').click(); await expect(field(page, 'mcp', 'error')).toContainText('Operation state is unknown');
+  await expect(field(page, 'mcp', 'setup')).toBeDisabled();
+});
+
+test('first initialization waits for other feature completion, then Root-style rendering initializes once', async ({ page }) => {
+  await open(page); await show(page, 'setup');
+  await page.evaluate(() => { window.hold = 'create_project'; }); await field(page, 'setup', 'create').click();
+  await page.waitForFunction(() => pending.create_project);
+  await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'status')).toContainText('Waiting for the other feature');
+  expect((await commands(page, 'load_config')).length).toBe(0);
+  await page.evaluate(() => {
+    window.addEventListener('creator-feature-state', () => { void CreatorFeaturePages.show('mcp'); });
+    window.hold = null; pending.create_project();
+  });
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  expect((await commands(page, 'load_config')).length).toBe(1);
+  expect((await commands(page, 'create_project')).length).toBe(1);
+});
+
+test('guide never acknowledges completion if releasing its workflow fails', async ({ page }) => {
+  await open(page, { guide: true }); await show(page, 'mcp');
+  await page.evaluate(() => { window.failNext = 'finish_ui_operation'; }); await field(page, 'mcp', 'guide-skip').click();
+  await expect(field(page, 'mcp', 'guide-dialog')).toBeVisible();
+  await expect(field(page, 'mcp', 'guide-error')).toContainText('Operation state is unknown');
+  expect((await commands(page, 'save_config')).length).toBe(1);
+  await field(page, 'mcp', 'guide-skip').click();
+  expect((await commands(page, 'save_config')).length).toBe(1);
+});
+
+for (const settings of [{ productStatus: 'current' }, { productStatus: 'none' }, { productStatus: 'identical' }, { productRecoveryCompleted: true }]) test(`healthy saved settings stay out of the connection page: ${JSON.stringify(settings)}`, async ({ page }) => {
+  await open(page, settings); await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  await expect(field(page, 'mcp', 'product-panel')).toBeHidden();
+  await expect(field(page, 'mcp', 'retry')).toBeHidden();
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await expect(field(page, 'mcp', 'product-review-advanced')).toBeEnabled();
+  await field(page, 'mcp', 'product-review-advanced').click();
+  await expect(field(page, 'mcp', 'product-panel')).toBeVisible();
+  await expect(field(page, 'mcp', 'setup')).toBeDisabled();
+  await expect(field(page, 'mcp', 'product-review')).toBeEnabled();
+  await expect(field(page, 'mcp', 'product-status')).toContainText('without explicit approval');
+  expect((await commands(page, 'load_config')).length).toBe(1);
+  await page.evaluate(() => { window.approveProduct = true; }); await field(page, 'mcp', 'product-review').click();
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  await expect(field(page, 'mcp', 'product-panel')).toBeHidden();
+  expect((await commands(page, 'load_config')).length).toBe(2);
+  expect((await commands(page, 'save_config')).length).toBe(0);
+});
+
+test('ordinary MCP errors keep the existing Check control without startup Retry or settings panel', async ({ page }) => {
+  await open(page); await show(page, 'mcp');
+  await page.evaluate(() => { window.failNext = 'get_onboarding_status'; }); await field(page, 'mcp', 'check').click();
+  await expect(field(page, 'mcp', 'error')).toContainText('get_onboarding_status');
+  await expect(field(page, 'mcp', 'check')).toBeEnabled();
+  await expect(field(page, 'mcp', 'retry')).toBeHidden();
+  await expect(field(page, 'mcp', 'product-panel')).toBeHidden();
+  await field(page, 'mcp', 'check').click();
+  await expect(field(page, 'mcp', 'error')).toBeHidden();
+  expect((await commands(page, 'load_config')).length).toBe(1);
+});
+
+test('saved-settings status failures expose recovery actions outside the disabled main form', async ({ page }) => {
+  await open(page, { fail: 'product_settings_status' }); await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'product-panel')).toBeVisible();
+  await expect(field(page, 'mcp', 'setup')).toBeDisabled();
+  await expect(field(page, 'mcp', 'product-review')).toBeEnabled();
+  await expect(field(page, 'mcp', 'product-status')).toContainText('product_settings_status');
+  await expect(field(page, 'mcp', 'retry')).toBeVisible();
+  expect((await commands(page, 'load_config')).length).toBe(0);
+});
+
+for (const settings of [{ productStatus: 'conflict' }, { productStatus: 'legacy-only' }, { productRecovery: true }]) test(`retained settings review stays outside locked form: ${JSON.stringify(settings)}`, async ({ page }) => {
+  await open(page, settings); await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'setup')).toBeDisabled();
+  await expect(field(page, 'mcp', 'product-review')).toBeEnabled();
+  await expect(field(page, 'mcp', 'product-panel')).toBeVisible();
+  await expect(field(page, 'mcp', 'retry')).toBeHidden();
+  await expect(field(page, 'mcp', 'product-evidence')).toContainText('/retained/evidence.json');
+  expect((await commands(page, 'load_config')).length).toBe(0);
+  await field(page, 'mcp', 'product-review').click();
+  await expect(field(page, 'mcp', 'product-status')).toContainText('without explicit approval');
+  await expect(field(page, 'mcp', 'setup')).toBeDisabled();
+  expect(await page.evaluate(() => lastProductReview)).toMatchObject({ approved: false, status: settings.productStatus || 'current' });
+  expect((await commands(page, 'load_config')).length).toBe(0);
+  expect((await commands(page, 'save_config')).length).toBe(0);
+  await page.evaluate(() => { window.approveProduct = true; }); await field(page, 'mcp', 'product-review').click();
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  expect(await page.evaluate(() => lastProductReview)).toMatchObject({ approved: true, status: settings.productStatus || 'current' });
+  await expect(field(page, 'mcp', 'product-status')).toContainText('existing store');
+  expect((await commands(page, 'load_config')).length).toBe(1);
+  expect(await page.evaluate(() => savedConfig.unrelatedSetting)).toBe('preserve');
+  expect((await commands(page, 'save_config')).length).toBe(0);
+  if (settings.productStatus) {
+    await field(page, 'mcp', 'product-check').click();
+    await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+    await expect(field(page, 'mcp', 'product-status')).toContainText('Reviewed settings remain in use');
+    expect((await commands(page, 'review_product_settings')).length).toBe(2);
+    expect((await commands(page, 'load_config')).length).toBe(1);
+    expect((await commands(page, 'save_config')).length).toBe(0);
+  }
+});
+
+test('a new pending recovery after approved conflict still locks the form for explicit review', async ({ page }) => {
+  await open(page, { productStatus: 'conflict' }); await show(page, 'mcp');
+  await page.evaluate(() => { window.approveProduct = true; }); await field(page, 'mcp', 'product-review').click();
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  await page.evaluate(() => { window.productRecovery = [{ journal: '/retained/new-recovery', historical_completed: false, completed: false, files: [] }]; });
+  await field(page, 'mcp', 'product-check').click();
+  await expect(field(page, 'mcp', 'setup')).toBeDisabled();
+  await expect(field(page, 'mcp', 'product-status')).toContainText('recovery review');
+  await expect(field(page, 'mcp', 'product-review')).toBeEnabled();
+  expect((await commands(page, 'review_product_settings')).length).toBe(1);
+  expect((await commands(page, 'load_config')).length).toBe(1);
+  expect((await commands(page, 'save_config')).length).toBe(0);
+});
+
+test('protected load refusal leaves settings review reachable and does not replace retained configuration', async ({ page }) => {
+  await open(page, { fail: 'load_config' }); await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'setup')).toBeDisabled();
+  await expect(field(page, 'mcp', 'error')).toContainText('load_config');
+  await expect(field(page, 'mcp', 'product-panel')).toBeVisible();
+  await expect(field(page, 'mcp', 'product-review')).toBeEnabled();
+  await field(page, 'mcp', 'product-review').click();
+  expect((await commands(page, 'load_config')).length).toBe(1);
+  await page.evaluate(() => { window.approveProduct = true; }); await field(page, 'mcp', 'product-review').click();
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  expect((await commands(page, 'load_config')).length).toBe(2);
+  await expect(field(page, 'mcp', 'retry')).toBeHidden();
+  expect((await commands(page, 'save_config')).length).toBe(0);
+});
+
+test('MCP manual Desktop apply/disconnect and advanced options preserve unknown config fields', async ({ page }) => {
+  await open(page); await show(page, 'mcp');
+  await page.getByRole('button', { name: 'Apply to Claude Desktop', exact: true }).click();
+  const applied = (await commands(page, 'update_claude_desktop_mcp_config'))[0];
+  expect(applied.args.args).toMatchObject({ channel: { id: 'one', unity_project_path: '/projects/Creator' }, mcpServerPath: '/private/server.mjs', toolGroups: 'core' });
+  await page.getByRole('button', { name: 'Disconnect Claude Desktop', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Disconnect Claude Desktop?' }).getByRole('button', { name: 'Disconnect', exact: true }).click();
+  expect((await commands(page, 'remove_claude_desktop_mcp_config')).length).toBe(1);
+  expect((await commands(page, 'remove_claude_mcp_config')).length).toBe(0);
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await field(page, 'mcp', 'server').fill('/private/new-server.mjs'); await field(page, 'mcp', 'groups').selectOption('read');
+  await field(page, 'mcp', 'scripts').check(); await field(page, 'mcp', 'save').click();
+  await expect(field(page, 'mcp', 'setup-result')).toContainText('Options saved');
+  const saved = (await commands(page, 'save_config')).at(-1).args.args.config;
+  expect(saved).toMatchObject({ unrelatedSetting: 'preserve', mcp_server_path: '/private/new-server.mjs', tool_groups: 'read', enable_custom_scripts: true });
+  expect((await commands(page, 'set_unity_custom_scripts')).at(-1).args.args).toEqual({ unityProjectPath: '/projects/Creator', enabled: true });
+  expect((await commands(page, 'update_codex_mcp_config')).at(-1).args.args.toolGroups).toBe('read');
+});
+
+test('hide during reviewed setup cancels its dialog, releases workflow and never writes setup', async ({ page }) => {
+  await open(page); await show(page, 'mcp'); await field(page, 'mcp', 'setup').click();
+  await expect(page.getByRole('dialog', { name: 'Review connection setup' })).toBeVisible();
+  await page.evaluate(() => CreatorFeaturePages.hide());
+  await expect.poll(async () => (await commands(page, 'begin_ui_operation')).length - (await commands(page, 'finish_ui_operation')).length).toBe(0);
+  expect((await commands(page, 'one_click_setup')).length).toBe(0);
+  expect(await page.evaluate(() => CreatorFeaturePages.dispose())).toBe(true);
+  expect(await page.evaluate(() => Boolean(events['feature-event']))).toBe(false);
+});
+
+test('persistent notice requires consent and storage verification before hiding', async ({ page }) => {
+  await open(page); await show(page, 'mcp');
+  await field(page, 'mcp', 'notice-remember').check(); await field(page, 'mcp', 'notice-close').click();
+  const modal = page.getByRole('dialog', { name: 'Confirm hiding this notice' });
+  await expect(modal.getByRole('button', { name: 'Confirm and hide' })).toBeDisabled();
+  await modal.getByRole('checkbox').check();
+  await page.evaluate(() => { Storage.prototype.setItem = () => { throw new Error('Fixture storage denied'); }; });
+  await modal.getByRole('button', { name: 'Confirm and hide' }).click();
+  await expect(field(page, 'mcp', 'notice')).toBeVisible();
+  await expect(field(page, 'mcp', 'error')).toContainText('warning remains visible');
+});
+
+async function layoutProblems(page, selector) {
+  return page.locator(selector).evaluate(root => {
+    const items = [];
+    const controls = 'button, input, select, textarea, progress';
+    const add = (element, rect, kind) => {
+      if (rect.width > 0 && rect.height > 0) items.push({ element, rect, kind,
+        label: `${element.tagName.toLowerCase()}[${element.dataset.field || element.id || element.textContent.trim().slice(0, 45)}]` });
+    };
+    for (const element of root.querySelectorAll('*')) {
+      if (!element.checkVisibility({ checkVisibilityCSS: true })) continue;
+      if (element.matches(controls)) {
+        add(element, element.getBoundingClientRect(), 'control');
+      } else if (!element.closest(controls) && getComputedStyle(element).visibility === 'visible') {
+        for (const child of element.childNodes) {
+          if (child.nodeType !== Node.TEXT_NODE || !child.textContent.trim()) continue;
+          const range = document.createRange(); range.selectNodeContents(child);
+          for (const rect of range.getClientRects()) add(element, rect, 'text');
+        }
+      }
+    }
+    const problems = items.filter(({ rect }) => rect.left < -0.5 || rect.right > innerWidth + 0.5)
+      .map(({ label, rect }) => ({ kind: 'horizontal-overflow', label, rect: rect.toJSON() }));
+    for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
+      const a = items[i], b = items[j];
+      if (a.element === b.element) continue;
+      if (Math.min(a.rect.right, b.rect.right) - Math.max(a.rect.left, b.rect.left) > 1
+        && Math.min(a.rect.bottom, b.rect.bottom) - Math.max(a.rect.top, b.rect.top) > 1) {
+        problems.push({ kind: 'overlap', a: a.label, b: b.label, aRect: a.rect.toJSON(), bRect: b.rect.toJSON() });
+      }
+    }
+    return problems.slice(0, 12);
+  });
+}
+
+for (const width of [1280, 390, 320]) test(`actual Root feature layouts have no overlap and centered dialogs at ${width}px`, async ({ page }, testInfo) => {
+  const height = 780;
+  await page.setViewportSize({ width, height }); await open(page, { shell: true });
+  await expect(page.locator('#catalog-status')).toContainText('Update check complete');
+  await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
+  await expect(field(page, 'setup', 'create')).toBeEnabled();
+  const capture = async (name, fullPage = true) => {
+    const screenshot = path.resolve(__dirname, '../artifacts/direct-feature-pages', `${width}-${name}.png`);
+    await page.screenshot({ path: screenshot, fullPage });
+    await testInfo.attach(name, { path: screenshot, contentType: 'image/png' });
+  };
+  const checkPage = async feature => {
+    await page.evaluate(async () => { await document.fonts.ready; await Promise.all(document.getAnimations().map(animation => animation.finished.catch(() => {}))); });
+    expect(await page.locator('iframe').count()).toBe(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(await layoutProblems(page, `#feature-${feature}`)).toEqual([]);
+    expect(await helpOcclusion(page, `#feature-${feature} :is(button, input, select):not(details:not([open]) *)`)).toBeNull();
+    await page.evaluate(() => scrollTo(0, 0));
+  };
+  const checkDialog = async (dialog, name, selector = '[open].feature-dialog') => {
+    await expect(dialog).toBeVisible();
+    const box = await dialog.boundingBox();
+    expect(Math.abs(box.x + box.width / 2 - width / 2)).toBeLessThan(2);
+    expect(Math.abs(box.y + box.height / 2 - height / 2)).toBeLessThan(2);
+    expect(box.x).toBeGreaterThanOrEqual(0); expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(width);
+    expect(box.y + box.height).toBeLessThanOrEqual(height);
+    expect(await layoutProblems(page, selector)).toEqual([]);
+    await capture(name, false);
+  };
+  const checkHelp = async feature => {
+    await page.locator('#context-help-open').click();
+    await expect(page.locator('#context-help-title')).toHaveText(feature === 'setup' ? 'Project Setup help' : 'Creator Works MCP help');
+    await expect(page.locator('#hub-help-content')).toBeHidden();
+    await page.locator('#feature-help-content details').first().locator('summary').click();
+    await checkDialog(page.locator('#context-help-dialog'), `${feature}-help`, '#context-help-dialog');
+    await page.locator('#context-help-close').click();
+  };
+  await checkPage('setup'); await capture('setup');
+  await checkHelp('setup');
+  await field(page, 'setup', 'existing-tab').click();
+  await checkPage('setup'); await capture('setup-existing');
+  await page.locator('#suite-trigger').click(); await page.locator('#suite-menu [data-view="mcp"]').click();
+  await expect(field(page, 'mcp', 'setup')).toBeEnabled();
+  await checkPage('mcp'); await capture('mcp');
+  await checkHelp('mcp');
+  await field(page, 'mcp', 'guide').click();
+  await checkDialog(field(page, 'mcp', 'guide-dialog'), 'mcp-guide');
+  await page.keyboard.press('Escape');
+  await field(page, 'mcp', 'notice-remember').check(); await field(page, 'mcp', 'notice-close').click();
+  await checkDialog(page.getByRole('dialog', { name: 'Confirm hiding this notice' }), 'mcp-consent');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await field(page, 'mcp', 'setup').click();
+  await checkDialog(page.getByRole('dialog', { name: 'Review connection setup' }), 'mcp-setup-review');
+  await page.keyboard.press('Escape');
+  expect(await page.evaluate(() => calls.filter(call => ['start_hosted_app', 'hosted_app_call', 'stop_hosted_app'].includes(call.command)))).toEqual([]);
+});
