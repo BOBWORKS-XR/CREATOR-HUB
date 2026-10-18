@@ -255,8 +255,10 @@ def listener(pid, port):
             sockets.add(os.readlink(file))
         except FileNotFoundError:
             pass
-    raw = Path(f"/proc/{pid}/net/tcp").read_bytes()
-    require(len(raw) <= 65536, "Socket inventory exceeds bound")
+    # This is the network namespace table, including closed WebDriver sockets.
+    with Path(f"/proc/{pid}/net/tcp").open("rb") as stream:
+        raw = stream.read(1024 * 1024 + 1)
+    require(len(raw) <= 1024 * 1024, "Socket inventory exceeds bound")
     matches = [line.split() for line in raw.decode("ascii").splitlines()[1:]
                if line.split()[1:2] == [f"0100007F:{port:04X}"] and line.split()[3:4] == ["0A"]]
     return len(matches) == 1 and f"socket:[{matches[0][9]}]" in sockets

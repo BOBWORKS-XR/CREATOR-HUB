@@ -160,6 +160,26 @@ class PagesTests(unittest.TestCase):
             driver.click("#one")
         driver.call.assert_not_called()
 
+    def test_listener_requires_owned_exact_loopback_listener_in_a_bounded_namespace_table(self):
+        own = b'0: 0100007F:115C 00000000:0000 0A 0:0 0:0 0 1001 0 12345 1\n'
+        closed = b'1: 0100007F:FFFF 0100007F:115C 06 0:0 0:0 0 1001 0 0 1\n'
+        table = b'header\n' + closed * 1400 + own
+        self.assertGreater(len(table), 65536)
+        with patch.object(M.Path, 'iterdir', return_value=[Path('/proc/1/fd/7')]), \
+                patch.object(M.os, 'readlink', return_value='socket:[12345]'), \
+                patch.object(M.Path, 'open', return_value=io.BytesIO(table)):
+            self.assertTrue(M.listener(1, 4444))
+        for raw in (b'header\n' + closed, b'header\n' + own + own, b'x' * (1024 * 1024 + 1)):
+            with self.subTest(length=len(raw)), \
+                    patch.object(M.Path, 'iterdir', return_value=[Path('/proc/1/fd/7')]), \
+                    patch.object(M.os, 'readlink', return_value='socket:[99999]'), \
+                    patch.object(M.Path, 'open', return_value=io.BytesIO(raw)):
+                if len(raw) > 1024 * 1024:
+                    with self.assertRaisesRegex(RuntimeError, 'Socket inventory exceeds bound'):
+                        M.listener(1, 4444)
+                else:
+                    self.assertFalse(M.listener(1, 4444))
+
     def test_feature_status_requires_ready_without_error_and_enabled(self):
         M.feature_status("Ready", "", True)
         for value in (("Checking", "", True), ("Ready", "error", True), ("Ready", "", False),
