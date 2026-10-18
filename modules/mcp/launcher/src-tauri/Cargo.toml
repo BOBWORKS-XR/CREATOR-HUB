@@ -41,5 +41,6 @@ libc = "0.2"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+integrated-service = []
 # Disposable native acceptance only. Never enable in a production package yet.
 experimental-unix-hosting = []

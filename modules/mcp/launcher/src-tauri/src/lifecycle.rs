@@ -96,6 +96,15 @@ impl Lifecycle {
         Ok(())
     }
 
+    /// A query, not a close request: future commands remain admissible.
+    pub fn is_idle(&self) -> Result<bool, &'static str> {
+        let state = self
+            .0
+            .lock()
+            .map_err(|_| "Launcher lifecycle unavailable")?;
+        Ok(state.commands == 0 && state.workflow.is_none() && !state.closing)
+    }
+
     pub fn request_close(&self) -> bool {
         let Ok(mut state) = self.0.lock() else {
             return false;
@@ -195,6 +204,22 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     #[test]
+    fn idle_query_neither_closes_nor_releases_any_guard() {
+        let life = Lifecycle::new();
+        assert!(life.is_idle().unwrap());
+        let command = life.command().unwrap();
+        assert!(!life.is_idle().unwrap());
+        drop(command);
+        let workflow = life.begin_workflow().unwrap();
+        assert!(!life.is_idle().unwrap());
+        life.finish_workflow(workflow).unwrap();
+        assert!(life.is_idle().unwrap());
+        assert!(life.command().is_ok());
+        assert!(life.request_close());
+        assert!(!life.is_idle().unwrap());
+    }
+
+    #[test]
     fn close_refuses_commands_and_workflows_including_gaps() {
         let life = Lifecycle::new();
         let workflow = life.begin_workflow().unwrap();
@@ -252,6 +277,7 @@ mod tests {
             panic!("test fixture");
         });
         assert!(!life.request_close());
+        assert!(life.is_idle().is_err());
         assert!(life.command().is_err());
         assert!(life.begin_workflow().is_err());
     }

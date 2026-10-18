@@ -1,5 +1,8 @@
-//! Native review stays private-module-only; Unix requires an explicit test build.
+//! Native review requires admitted private hosting or the explicit in-process Hub context.
 pub(crate) fn enabled() -> bool {
+    if crate::integration_context::active() {
+        return cfg!(feature = "integrated-service") && cfg!(any(windows, target_os = "linux"));
+    }
     policy(
         std::env::consts::OS,
         cfg!(feature = "experimental-unix-hosting"),

@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 
-const main = fs.readFileSync('launcher/src-tauri/src/main.rs', 'utf8');
+const main = fs.readFileSync('launcher/src-tauri/src/lib.rs', 'utf8');
 const lifecycle = fs.readFileSync('launcher/src-tauri/src/lifecycle.rs', 'utf8');
 
 test('writable Windows UI reserves settings ownership after read-only entries and before building UI', () => {
-  const entry = main.slice(main.indexOf('fn main()'));
+  const entry = main.slice(main.indexOf('pub fn run()'));
   assert.ok(entry.indexOf('hosted::run()') < entry.indexOf('GuiWriteOwner::current_user()'));
   assert.ok(entry.indexOf('GuiWriteOwner::current_user()') < entry.indexOf('tauri::Builder::default()'));
   assert.match(entry, /let _gui_owner = match/);

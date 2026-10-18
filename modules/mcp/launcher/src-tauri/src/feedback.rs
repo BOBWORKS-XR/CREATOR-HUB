@@ -58,7 +58,7 @@ impl Drop for Lock {
 }
 
 pub fn write(project: &str, enabled: bool, check_ins: bool) -> Result<Value, String> {
-    let protected = option_env!("CREATOR_HUB_INTERNAL_MODULE") == Some("1");
+    let protected = crate::integration_context::protected_writers();
     write_using(
         project,
         enabled,

@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 
-const main = fs.readFileSync("launcher/src-tauri/src/main.rs", "utf8");
+const main = fs.readFileSync("launcher/src-tauri/src/lib.rs", "utf8");
+const binary = fs.readFileSync("launcher/src-tauri/src/main.rs", "utf8");
 const hub = fs.readFileSync("launcher/src-tauri/src/hub.rs", "utf8");
 
 test("Hub metadata dispatch precedes all existing launcher startup code", () => {
-  const entry = main.slice(main.indexOf("fn main() {"));
-  assert.match(entry, /^fn main\(\) \{\s*if let Some\(code\) = hub::handle_entry/);
+  assert.match(binary, /fn main\(\) \{\s*creator_works_mcp_launcher::run\(\);\s*\}/);
+  const entry = main.slice(main.indexOf("pub fn run() {"));
+  assert.match(entry, /^pub fn run\(\) \{\s*if let Some\(code\) = hub::handle_entry/);
   assert.ok(entry.indexOf("std::process::exit(code)") < entry.indexOf("tauri::Builder"));
   assert.ok(entry.indexOf("std::process::exit(code)") < entry.indexOf("env::set_var"));
 });

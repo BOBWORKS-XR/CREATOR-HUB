@@ -3,7 +3,7 @@
 use std::{fs, path::Path};
 
 pub(crate) fn protected() -> bool {
-    cfg!(any(windows, unix)) && option_env!("CREATOR_HUB_INTERNAL_MODULE") == Some("1")
+    cfg!(any(windows, unix)) && crate::integration_context::protected_writers()
 }
 
 pub(crate) fn snapshot(path: &Path) -> Result<Option<String>, String> {

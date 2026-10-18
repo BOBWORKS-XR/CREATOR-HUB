@@ -44,6 +44,13 @@ impl<'a> HostedSession<'a> {
     pub fn has_workflow(&self) -> bool {
         self.workflow.is_some()
     }
+
+    pub fn is_idle(&self) -> Result<bool, &'static str> {
+        Ok(!self.draining
+            && self.active.is_none()
+            && self.workflow.is_none()
+            && self.lifecycle.is_idle()?)
+    }
     pub fn read_only(lifecycle: &'a Lifecycle, session: &str) -> Result<Self, &'static str> {
         if session.len() != 64 || !session.bytes().all(|c| c.is_ascii_hexdigit()) {
             return Err("Invalid native hosted session identity");

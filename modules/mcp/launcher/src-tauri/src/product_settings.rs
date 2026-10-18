@@ -471,7 +471,7 @@ pub(super) fn native_review_server(app: &tauri::AppHandle) -> Result<ServerTrans
 // Only the owned form's load_config handler may renew this UI before-image.
 // Background inspection/discovery/onboarding continues using read-only readers.
 pub(super) fn load_form(app: &tauri::AppHandle) -> Result<crate::LauncherConfig, String> {
-    if option_env!("CREATOR_HUB_INTERNAL_MODULE") != Some("1") {
+    if !crate::integration_context::protected_writers() {
         return crate::load_config(app.clone());
     }
     let paths =
@@ -515,7 +515,7 @@ fn load_operation_at(
 pub(crate) fn load_operation(
     app: &tauri::AppHandle,
 ) -> Result<(crate::LauncherConfig, Option<Operation>), String> {
-    if option_env!("CREATOR_HUB_INTERNAL_MODULE") != Some("1") {
+    if !crate::integration_context::protected_writers() {
         return Ok((crate::load_config(app.clone())?, None));
     }
     let paths =
@@ -538,7 +538,11 @@ fn encoded_config(mut config: crate::LauncherConfig) -> Result<Vec<u8>, String> 
 }
 
 fn require_writable() -> Result<(), String> {
-    if cfg!(windows) || cfg!(all(unix, feature = "experimental-unix-hosting")) {
+    if cfg!(windows)
+        || cfg!(all(unix, feature = "experimental-unix-hosting"))
+        || cfg!(all(target_os = "linux", feature = "integrated-service"))
+            && crate::integration_context::active()
+    {
         Ok(())
     } else {
         Err("Production Unix writable settings remain disabled.".into())
@@ -549,7 +553,7 @@ pub(crate) fn save_operation(
     config: crate::LauncherConfig,
     operation: Option<Operation>,
 ) -> Result<(), String> {
-    if option_env!("CREATOR_HUB_INTERNAL_MODULE") != Some("1") {
+    if !crate::integration_context::protected_writers() {
         return crate::save_config(config);
     }
     require_writable()?;
@@ -570,7 +574,7 @@ pub(crate) fn commit_document(
     before: Option<&[u8]>,
     after: &str,
 ) -> Result<(), String> {
-    if option_env!("CREATOR_HUB_INTERNAL_MODULE") != Some("1") {
+    if !crate::integration_context::protected_writers() {
         return crate::atomic_write(path, after);
     }
     require_writable()?;
@@ -687,7 +691,7 @@ fn save_snapshot(paths: &Paths, loaded: &Snapshot, after: &[u8]) -> Result<Snaps
     Ok(fresh)
 }
 pub(super) fn save(config: crate::LauncherConfig) -> Result<(), String> {
-    if option_env!("CREATOR_HUB_INTERNAL_MODULE") != Some("1") {
+    if !crate::integration_context::protected_writers() {
         return crate::save_config(config);
     }
     require_writable()?;

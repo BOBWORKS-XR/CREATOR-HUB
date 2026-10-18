@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 
-const launcherSource = fs.readFileSync("launcher/src-tauri/src/main.rs", "utf8");
+const launcherSource = fs.readFileSync("launcher/src-tauri/src/lib.rs", "utf8");
 const launcherHtml = fs.readFileSync("launcher/src/index.html", "utf8");
 const launcherApp = fs.readFileSync("launcher/src/app.js", "utf8");
 const tauriConfig = fs.readFileSync("launcher/src-tauri/tauri.conf.json", "utf8");
