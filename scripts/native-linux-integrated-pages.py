@@ -172,7 +172,8 @@ class Driver:
         return self.call("GET", "/element/" + self.element(selector) + "/" + endpoint)
 
     def click(self, selector):
-        require(self.read(selector, "displayed") is True and self.read(selector, "enabled") is True, "Control not actionable")
+        require(self.read(selector, "displayed") is True and self.read(selector, "enabled") is True,
+                "Control not actionable: " + selector)
         self.call("POST", "/element/" + self.element(selector) + "/click", {})
 
 
@@ -361,7 +362,10 @@ def run(binding, root, report):
             if feature == "mcp":
                 d.click('#entry-mcp .app-row')
             else:
-                d.click("#suite-trigger"); d.click('#suite-menu [data-view="setup"]')
+                d.click("#suite-trigger")
+                selector = '#suite-menu [data-view="setup"]'
+                wait(lambda: d.read(selector, "displayed") is True and d.read(selector, "enabled") is True)
+                d.click(selector)
             prefix = "#feature-" + feature
             wait(lambda: bool(d.elements(prefix + ' [data-field="status"]')) and d.read(prefix + ' [data-field="status"]') == "Ready"
                  and d.read(prefix, "attribute/aria-busy") == "false")
