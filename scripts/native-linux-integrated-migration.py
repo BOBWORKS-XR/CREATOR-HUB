@@ -14,11 +14,12 @@ import subprocess
 import sys
 import time
 import signal
+import zipfile
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
 BRANCH = "refs/heads/validation/linux-integrated-migration"
-SOURCE = "bbd0a5d58562a3d8af0c84e5360eef9d26803eef"
+SOURCE = "5065fb1112b9e96978e40e64503fa979f559baae"
 HELPER_SOURCE = "4f2243591fa51243c10250b8a23a30e60f8d2888"
 HELPERS = {
     "native-linux-integrated-pages.py": (29342, "cdb370433c563058b5f4afba303755388aa025bf56d8d133f3739c1d57b821cb"),
@@ -43,6 +44,40 @@ def require(value, message):
 
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def stage_archive(archive, out, selected, *, legacy_windows=False):
+    """Read fixed members only; never extract an archive-supplied filesystem path."""
+    legacy_member = "Creator-Works-MCP-2.7.7/creator-works-mcp.mjs"
+    require(not legacy_windows or set(selected) == {legacy_member}, "Only the fixed legacy server may use Windows ZIP names")
+    with zipfile.ZipFile(archive) as z:
+        entries = z.infolist()
+        require(0 < len(entries) <= 128 and sum(e.file_size for e in entries) <= 768 * 1024 * 1024, "Archive inventory exceeds bound")
+        names = {}
+        for e in entries:
+            # ZipInfo.filename normalizes backslashes on Windows but not Linux.
+            original = e.orig_filename
+            if legacy_windows:
+                require(original.startswith("Creator-Works-MCP-2.7.7\\") and "/" not in original, "Unexpected legacy ZIP naming")
+                name = original.replace("\\", "/")
+            else:
+                require("\\" not in original, "Backslash in current ZIP")
+                name = original
+            require(name not in names and ":" not in name and not name.startswith("/")
+                    and all(p not in ("", ".", "..") for p in name.rstrip("/").split("/")), "Unsafe/duplicate ZIP member: " + repr(original))
+            require(stat.S_IFMT(e.external_attr >> 16) in (0, stat.S_IFREG, stat.S_IFDIR)
+                    and not e.flag_bits & 1 and 0 <= e.file_size <= 256 * 1024 * 1024, "Unsafe ZIP member metadata")
+            names[name] = e
+        require(set(selected) <= names.keys(), "Fixed ZIP member missing")
+        for name, (dest, size, sha) in selected.items():
+            require(Path(dest).name == dest and dest not in ("", ".", "..") and "/" not in dest and "\\" not in dest, "Output must be a fixed leaf")
+            entry = names[name]
+            require(not name.endswith("/") and entry.file_size <= (size or 16384), "ZIP member exceeds bound")
+            raw = z.read(entry)
+            require(size is None or (len(raw) == size and digest(raw) == sha), "ZIP member pin differs")
+            with (out / dest).open("xb") as f:
+                os.chmod(f.name, 0o600)
+                f.write(raw)
 
 
 def admission(env, system, machine):

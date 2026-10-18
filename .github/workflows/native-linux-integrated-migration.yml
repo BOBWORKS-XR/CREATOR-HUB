@@ -41,7 +41,7 @@ jobs:
         with:
           script: |
             const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
-            const repo=context.repo,source='bbd0a5d58562a3d8af0c84e5360eef9d26803eef',runId=39130359610,id=12137857868;
+            const repo=context.repo,source='5065fb1112b9e96978e40e64503fa979f559baae',runId=39134487363,id=12139109123;
             assert.equal(`${repo.owner}/${repo.repo}`,'BOBWORKS-XR/CREATOR-HUB');
             assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
             assert.equal(process.env.GITHUB_REF,'refs/heads/validation/linux-integrated-migration');
@@ -50,19 +50,19 @@ jobs:
             assert.equal(run.head_sha,source);assert.equal(run.run_attempt,1);assert.equal(run.conclusion,'success');
             assert.equal(run.status,'completed');assert.equal(run.event,'workflow_dispatch');assert.equal(run.repository.id,1364807512);
             assert.equal(run.path,'.github/workflows/unix-managed-assembly.yml');assert.equal(run.head_branch,'validation/linux-integrated-candidate-014');
-            const {data:job}=await github.rest.actions.getJobForWorkflowRun({...repo,job_id:117684180444});
+            const {data:job}=await github.rest.actions.getJobForWorkflowRun({...repo,job_id:117696169938});
             assert.equal(job.run_id,runId);assert.equal(job.conclusion,'success');assert.ok(job.name.startsWith('assembly (linux,'));
             const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:id});
-            assert.equal(artifact.expired,false);assert.equal(artifact.name,'signed-unix-hub-linux-39130359610-1');
+            assert.equal(artifact.expired,false);assert.equal(artifact.name,'signed-unix-hub-linux-39134487363-1');
             assert.equal(artifact.workflow_run.id,runId);assert.equal(artifact.workflow_run.head_sha,source);
             assert.equal(artifact.workflow_run.repository_id,1364807512);assert.equal(artifact.workflow_run.head_repository_id,1364807512);
-            assert.equal(artifact.size_in_bytes,182723307);
+            assert.equal(artifact.size_in_bytes,182723403);
             const hash=raw=>crypto.createHash('sha256').update(raw).digest('hex');
-            assert.equal(artifact.digest,'sha256:c76c138b3297e347e834d43c1ac1a82eb883b41663df08ea44f008c5846e03e5');
+            assert.equal(artifact.digest,'sha256:71a2a4e42a1b1e2fe5e1e64f363f7d3c06444b03b5d2177b2e4565ad8a710c4c');
             const temp=fs.realpathSync(process.env.RUNNER_TEMP);
             function write(name,bytes){fs.writeFileSync(path.join(temp,name),bytes,{flag:'wx',mode:0o600});}
             const {data:zip}=await github.rest.actions.downloadArtifact({...repo,artifact_id:id,archive_format:'zip'});
-            const raw=Buffer.from(zip);assert.equal(raw.length,182723307);assert.equal(hash(raw),artifact.digest.slice(7));write('migration-current.zip',raw);
+            const raw=Buffer.from(zip);assert.equal(raw.length,182723403);assert.equal(hash(raw),artifact.digest.slice(7));write('migration-current.zip',raw);
             const {data:helpers}=await github.rest.actions.getWorkflowRun({...repo,run_id:39133351860});
             assert.equal(helpers.head_sha,'4f2243591fa51243c10250b8a23a30e60f8d2888');assert.equal(helpers.conclusion,'success');
             assert.equal(helpers.path,'.github/workflows/native-linux-integrated-pages.yml');assert.equal(helpers.repository.id,1364807512);
@@ -97,32 +97,19 @@ jobs:
       - name: Stage fixed original archive members only
         run: |
           python3 -B - <<'PY'
-          import hashlib,json,os,stat,zipfile
+          import importlib.util,os
           from pathlib import Path
+          spec=importlib.util.spec_from_file_location('migration','scripts/native-linux-integrated-migration.py')
+          migration=importlib.util.module_from_spec(spec);spec.loader.exec_module(migration)
           temp=Path(os.environ['RUNNER_TEMP']).resolve();out=temp/'integrated-migration-input';out.mkdir(mode=0o700)
           chosen={
-            'native-packages/Creator Hub_0.1.14_amd64.deb':('native.deb',63874886,'a4d2db459966f475a982cbe72591f32222e9c7050a1a7f4c870e1c6634c0f8b3'),
+            'native-packages/Creator Hub_0.1.14_amd64.deb':('native.deb',63874630,'8f9ff4b4694d00150bf86f7a5befc6a1cfc80610d55212b717d602ceb84fe86c'),
             'modules/mcp/server/runtime/node':('node',123459976,'62d66443847de1f527f74afe715900b12884ace52136dc9cd8e91e61acc2f527'),
             'modules/routing/runtime.json':('runtime.json',None,None),
             'modules/routing/router.json':('router.json',None,None),
           }
-          def take(archive,selected):
-              with zipfile.ZipFile(archive) as z:
-                  entries=z.infolist();assert 0<len(entries)<=128 and sum(e.file_size for e in entries)<=768*1024*1024
-                  names=set()
-                  for e in entries:
-                      n=e.filename;assert n not in names and '\\' not in n and ':' not in n and not n.startswith('/')
-                      assert all(p not in ('','.','..') for p in n.rstrip('/').split('/'))
-                      assert stat.S_IFMT(e.external_attr>>16) in (0,stat.S_IFREG,stat.S_IFDIR) and not e.flag_bits&1
-                      assert 0<=e.file_size<=256*1024*1024;names.add(n)
-                  assert set(selected)<=names
-                  for n,(dest,size,sha) in selected.items():
-                      e=z.getinfo(n);assert not e.is_dir() and e.file_size<=(size or 16384)
-                      raw=z.read(e)
-                      if size is not None:assert len(raw)==size and hashlib.sha256(raw).hexdigest()==sha
-                      with (out/dest).open('xb') as f:os.chmod(f.name,0o600);f.write(raw)
-          take(temp/'migration-current.zip',chosen)
-          take(temp/'migration-previous.zip',{'Creator-Works-MCP-2.7.7/creator-works-mcp.mjs':('legacy-server.mjs',1221209,'8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149')})
+          migration.stage_archive(temp/'migration-current.zip',out,chosen)
+          migration.stage_archive(temp/'migration-previous.zip',out,{'Creator-Works-MCP-2.7.7/creator-works-mcp.mjs':('legacy-server.mjs',1221209,'8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149')},legacy_windows=True)
           PY
       - uses: dtolnay/rust-toolchain@1.99.0
       - name: Provision native fixture dependencies only
@@ -164,9 +151,9 @@ jobs:
               s=p.lstat();assert p.resolve()==p and stat.S_ISREG(s.st_mode) and stat.S_IMODE(s.st_mode)==mode and s.st_uid==uid
               return {'path':str(p),'size':s.st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}
           hub=pin(Path('/usr/bin/creator-hub'),0o755,0)
-          assert hub['size']==27368608 and hub['sha256']=='97717cf5b454315598ac3addaf59d98b7a27c2fdff710563412cfa6b8ec3e0ea'
+          assert hub['size']==27369792 and hub['sha256']=='3ac7fdd5cedf85df41844c32c7dcdeb180ca14fc66a7f6e274c1ace5fc5e39b8'
           package=pin(d/'native.deb',0o600,os.getuid());package['version']='0.1.14'
-          b={'schemaVersion':1,'sourceCommit':'bbd0a5d58562a3d8af0c84e5360eef9d26803eef','package':package,'hub':hub,
+          b={'schemaVersion':1,'sourceCommit':'5065fb1112b9e96978e40e64503fa979f559baae','package':package,'hub':hub,
              'driver':pin(t/'migration-driver/bin/tauri-driver',0o755,os.getuid()),'legacyServer':pin(d/'legacy-server.mjs',0o600,os.getuid()),
              'node':pin(d/'node',0o600,os.getuid()),'runtime':json.loads((d/'runtime.json').read_bytes()),
              'runtimeSha256':hashlib.sha256((d/'runtime.json').read_bytes()).hexdigest(),'routerSha256':json.loads((d/'router.json').read_bytes())['sha256']}

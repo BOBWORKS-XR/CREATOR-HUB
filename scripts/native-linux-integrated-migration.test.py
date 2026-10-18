@@ -3,6 +3,7 @@ import ast
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import zipfile
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -33,6 +36,17 @@ def graph(profile):
     return [{"ref": [":1.7", "/node/" + str(i)], "parent": None if i == 0 else [":1.7", "/node/0"],
              "pid": 123, "role": role, "name": name, "ready": True, "frame": frame if i == 0 else None}
             for i, (role, name) in enumerate(values)]
+
+
+def archive(entries):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as z:
+        for name, value in entries:
+            entry = zipfile.ZipInfo()
+            entry.filename = name
+            z.writestr(entry, value)
+    buffer.seek(0)
+    return buffer
 
 
 class Tests(unittest.TestCase):
@@ -116,6 +130,38 @@ class Tests(unittest.TestCase):
         self.assertNotIn("/execute", source)
         self.assertTrue(all(v is False for v in M.FALSE_GATES.values()))
 
+    def test_real_legacy_windows_zip_naming_on_both_python_platforms(self):
+        canonical = "Creator-Works-MCP-2.7.7/creator-works-mcp.mjs"
+        raw = canonical.replace("/", "\\")
+        for separator in ("/", "\\"):
+            with tempfile.TemporaryDirectory() as directory, mock.patch.object(zipfile.os, "sep", separator):
+                data = archive([(raw, b"pinned")])
+                with zipfile.ZipFile(data) as z:
+                    self.assertEqual(z.infolist()[0].orig_filename, raw)
+                    self.assertEqual(z.infolist()[0].filename, raw if separator == "/" else canonical)
+                data.seek(0)
+                M.stage_archive(data, Path(directory), {canonical: ("server.mjs", 6, M.digest(b"pinned"))}, legacy_windows=True)
+                self.assertEqual((Path(directory) / "server.mjs").read_bytes(), b"pinned")
+
+    def test_archive_foreign_paths_aliases_and_pin_changes_still_refuse(self):
+        canonical = "Creator-Works-MCP-2.7.7/creator-works-mcp.mjs"
+        raw = canonical.replace("/", "\\")
+        for foreign in (canonical, "C:\\server", "\\absolute", "Creator-Works-MCP-2.7.7\\..\\other",
+                        "Creator-Works-MCP-2.7.7\\.\\other", "Creator-Works-MCP-2.7.7\\\\other",
+                        "Creator-Works-MCP-2.7.7\\mixed/name", raw):
+            with self.subTest(foreign=foreign), tempfile.TemporaryDirectory() as directory, self.assertRaises(RuntimeError):
+                M.stage_archive(archive([(raw, b"pinned"), (foreign, b"x")]), Path(directory),
+                                {canonical: ("server.mjs", 6, M.digest(b"pinned"))}, legacy_windows=True)
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            for selected, legacy in (({canonical: ("server.mjs", 6, "0" * 64)}, True),
+                                     ({canonical: ("server.mjs", 6, M.digest(b"pinned"))}, False),
+                                     ({canonical: ("../escape", 6, M.digest(b"pinned"))}, True),
+                                     ({"other": ("server.mjs", 6, M.digest(b"pinned"))}, True)):
+                with self.assertRaises(RuntimeError):
+                    M.stage_archive(archive([(raw, b"pinned")]), out, selected, legacy_windows=legacy)
+            self.assertEqual(list(out.iterdir()), [])
+
     def test_approvals_are_double_walk_identity_guarded_and_capture_before_action(self):
         source = (HERE / "native-linux-integrated-migration.py").read_text()
         body = source.split("    def approve(self, profile):", 1)[1].split("    def migrate_step", 1)[0]
@@ -159,7 +205,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(job["runs-on"], "ubuntu-22.04")
         self.assertIn(M.BRANCH, job["if"])
         text = WORKFLOW.read_text()
-        for required in (M.SOURCE, M.HELPER_SOURCE, M.OLD["source"], M.OLD["sha256"], M.OLD["serverSha256"], "39130359610", "12137857868", "63874886", "97717cf5b454315598ac3addaf59d98b7a27c2fdff710563412cfa6b8ec3e0ea"):
+        for required in (M.SOURCE, M.HELPER_SOURCE, M.OLD["source"], M.OLD["sha256"], M.OLD["serverSha256"], "39134487363", "12139109123", "63874630", "3ac7fdd5cedf85df41844c32c7dcdeb180ca14fc66a7f6e274c1ace5fc5e39b8"):
             self.assertIn(required, text)
         self.assertNotIn("contents: write", text)
         self.assertNotIn("gh release", text)
