@@ -277,6 +277,35 @@ class DbusTests(unittest.TestCase):
         self.assertEqual(result["uid"], p.UID)
         self.assertEqual({c.args[4] for c in calls.call_args_list}, {"ListNames", "Introspect"})
 
+    def test_original_introspection_refusal_is_retained_without_authorizing_or_substituting_an_agent(self):
+        error = RuntimeError("GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: fixed Introspect request denied")
+        def call(*args):
+            if args[4] == "Introspect":
+                raise error
+            return self.call(*args)
+        observation = {}
+        with mock.patch.object(p, "bus_identity", side_effect=lambda _b, n, _g: self.identity(n)), \
+                mock.patch.object(p, "dbus_call", side_effect=call) as calls:
+            result = p.registered_agent(None, {"pid": 21}, None, observation)
+        self.assertIsNone(result)
+        self.assertEqual(observation["candidates"], [{"owner": ":1.3", "pid": 21, "uid": p.UID,
+            "objectPath": p.AGENT_PATH, "introspectionRefusal": {"type": "RuntimeError", "message": str(error)}}])
+        self.assertFalse(observation["authorization"])
+        self.assertEqual(observation["actionCount"], 0)
+        self.assertEqual({c.args[4] for c in calls.call_args_list}, {"ListNames", "Introspect"})
+
+    def test_actual_interface_observation_is_bounded_and_keeps_last_attempt_only(self):
+        observation = {"stale": "must not accumulate retries"}
+        with mock.patch.object(p, "bus_identity", side_effect=lambda _b, n, _g: self.identity(n)), \
+                mock.patch.object(p, "dbus_call", side_effect=self.call):
+            result = p.registered_agent(None, {"pid": 21}, None, observation)
+        self.assertIsNotNone(result)
+        self.assertNotIn("stale", observation)
+        self.assertEqual(observation["candidates"][0]["interfaces"], ["org.freedesktop.PolicyKit1.AuthenticationAgent"])
+        self.assertEqual(len(observation["candidates"][0]["introspectionSha256"]), 64)
+        self.assertFalse(observation["authorization"])
+        self.assertLess(len(json.dumps(observation)), 4096)
+
     def test_foreign_pid_uid_changed_endpoint_or_wrong_method_contract_not_attributed(self):
         for change in ("pid", "uid", "methods", "changed-owner", "ambiguous"):
             def identity(_bus, name, _glib):

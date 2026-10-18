@@ -269,11 +269,15 @@ def session(bus, pid, glib):
     return {"object": obj, **result}
 
 
-def registered_agent(bus, agent, glib):
+def registered_agent(bus, agent, glib, observation=None):
     authority = bus_identity(bus, "org.freedesktop.PolicyKit1", glib)
     require(authority["uid"] == 0, "Root-owned system authority required")
     names = dbus_call(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames", None, (), "(as)", glib)[0]
     require(len(names) <= 256, "System bus name inventory exceeds bound")
+    if observation is not None:
+        observation.clear()
+        observation.update(readOnly=True, authorization=False, actionCount=0, authority=authority,
+                           objectPath=AGENT_PATH, candidates=[])
     matches = []
     for name in names:
         if not re.fullmatch(r":[0-9]+\.[0-9]+", name):
@@ -282,12 +286,24 @@ def registered_agent(bus, agent, glib):
         if identity["pid"] != agent["pid"]:
             continue
         require(identity["uid"] == UID, "Foreign system agent UID")
+        candidate = {**identity, "objectPath": AGENT_PATH}
+        if observation is not None:
+            require(len(observation["candidates"]) < 4, "Agent system-bus candidate inventory exceeds bound")
+            observation["candidates"].append(candidate)
         try:
             xml = dbus_call(bus, name, AGENT_PATH, "org.freedesktop.DBus.Introspectable", "Introspect", None, (), "(s)", glib)[0]
-        except Exception:
-            continue  # Fixed source object may not have been registered yet.
+        except Exception as error:
+            # This fixed, argument-free read carries no authentication cookie
+            # or password. Preserve its error instead of assuming registration
+            # has not happened yet. A refusal never grants authority.
+            candidate["introspectionRefusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+            continue
         require(type(xml) is str and len(xml.encode()) <= 32768, "Bounded source object introspection required")
-        interfaces = ET.fromstring(xml).findall("interface[@name='org.freedesktop.PolicyKit1.AuthenticationAgent']")
+        document = ET.fromstring(xml)
+        interface_names = [i.get("name", "") for i in document.findall("interface")]
+        require(len(interface_names) <= 32 and all(len(n) <= 128 for n in interface_names), "Bounded source interface names required")
+        candidate.update(interfaces=interface_names, introspectionSha256=hashlib.sha256(xml.encode()).hexdigest())
+        interfaces = document.findall("interface[@name='org.freedesktop.PolicyKit1.AuthenticationAgent']")
         if len(interfaces) != 1:
             continue
         methods = {m.attrib["name"]: [a.attrib["type"] for a in m.findall("arg") if a.get("direction", "in") == "in"]
@@ -403,11 +419,12 @@ def probe(env):
         record["agentSession"] = session(system, agent.pid, GLib)
         require(all(record["agentSession"][key] == record["session"][key] for key in ("object", "Id", "User", "Leader")),
                 "Agent and probe must share the same real session")
+        record["registrationObservation"] = {}
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             own_agent(agent, identity, parent, helper)
             agent_log.pump(0.02)
-            endpoint = registered_agent(system, identity, GLib)
+            endpoint = registered_agent(system, identity, GLib, record["registrationObservation"])
             if endpoint is not None:
                 break
         else:
