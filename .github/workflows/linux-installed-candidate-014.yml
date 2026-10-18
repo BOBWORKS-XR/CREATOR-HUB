@@ -1,0 +1,145 @@
+name: Linux immutable 14 DEB fresh and public 12 manual install (not release acceptance)
+
+on:
+  workflow_dispatch:
+  # First registration cannot rely on dispatch before this workflow is on default.
+  push:
+    branches: [validation/linux-installed-candidate-014]
+    paths:
+      - scripts/native-linux-installed-candidate.py
+      - scripts/native-linux-installed-candidate.test.py
+      - .github/workflows/linux-installed-candidate-014.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  installed-candidate:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/validation/linux-installed-candidate-014'
+    name: Disposable DEB install - ${{ matrix.lane }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [fresh, public12]
+    container:
+      image: ubuntu:22.04@sha256:08ea48a03a3e78ebc7cd526e6a275053223aadd88bfc09cc49b06d5281525fde
+      options: --cpus 2 --memory 6g
+    env:
+      CREATOR_LINUX_INSTALLED_CANDIDATE: '1'
+      CREATOR_LINUX_INSTALLED_IMAGE: ubuntu:22.04@sha256:08ea48a03a3e78ebc7cd526e6a275053223aadd88bfc09cc49b06d5281525fde
+      CREATOR_LINUX_INSTALL_LANE: ${{ matrix.lane }}
+      DEBIAN_FRONTEND: noninteractive
+    defaults:
+      run:
+        shell: sudo -H -u fixture -E env HOME=/home/fixture XDG_CONFIG_HOME=/home/fixture/.config XDG_DATA_HOME=/home/fixture/.local/share bash --noprofile --norc -eo pipefail {0}
+    steps:
+      - name: Admit only the fixed disposable Ubuntu container and create fixture UID 1001
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" = 0 && test -f /.dockerenv
+          test "$GITHUB_ACTIONS" = true && test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY" = BOBWORKS-XR/CREATOR-HUB && test "$GITHUB_REPOSITORY_ID" = 1364807512
+          case "$GITHUB_EVENT_NAME" in workflow_dispatch|push) ;; *) exit 1 ;; esac
+          test "$GITHUB_REF" = refs/heads/validation/linux-installed-candidate-014
+          test "$RUNNER_OS" = Linux && test "$RUNNER_ARCH" = X64 && test "$(uname -m)" = x86_64
+          test "$CREATOR_LINUX_INSTALLED_IMAGE" = ubuntu:22.04@sha256:08ea48a03a3e78ebc7cd526e6a275053223aadd88bfc09cc49b06d5281525fde
+          . /etc/os-release
+          test "$ID" = ubuntu && test "$VERSION_ID" = 22.04
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 sudo \
+            libwebkit2gtk-4.1-0 libgtk-3-0 policykit-1 libayatana-appindicator3-1 librsvg2-2 libxdo3
+          test -z "$(getent passwd 1001)" && test -z "$(getent group 1001)"
+          groupadd --gid 1001 fixture
+          useradd --uid 1001 --gid 1001 --create-home --shell /bin/bash fixture
+          printf '%s\n' 'fixture ALL=(root) NOPASSWD: /usr/bin/dpkg --version, /usr/bin/dpkg --install /__w/_temp/linux-installed-candidate/input/candidate.deb, /usr/bin/dpkg --install /__w/_temp/linux-installed-candidate-baseline12.deb' > /etc/sudoers.d/creator-installed-candidate
+          chmod 0440 /etc/sudoers.d/creator-installed-candidate
+          visudo -cf /etc/sudoers.d/creator-installed-candidate
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Give fixture ownership only of the exact disposable checkout and temp
+        shell: bash
+        run: |
+          python3 -B - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          assert os.getuid() == 0 and Path('/.dockerenv').is_file()
+          paths = (Path(os.environ['GITHUB_WORKSPACE']), Path(os.environ['RUNNER_TEMP']))
+          assert paths == (Path('/__w/CREATOR-HUB/CREATOR-HUB'), Path('/__w/_temp'))
+          assert all(p.resolve(strict=True) == p and p.is_dir() for p in paths)
+          subprocess.run(['/usr/bin/chown', '-R', '-P', '--no-dereference', '--', '1001:1001', *map(str, paths)], check=True)
+          PY
+      - name: Syntax and focused regression preflight before downloading immutable inputs
+        run: |
+          python3 -B -c "import ast,pathlib; [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in ['scripts/native-linux-installed-candidate.py','scripts/native-linux-installed-candidate.test.py']]"
+          python3 -B scripts/native-linux-installed-candidate.test.py
+          python3 -B scripts/linux-retirement-package-verify.test.py
+      - name: Bind exact successful producer and public baseline; download original ZIP without rebuilding
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),cp=require('node:child_process');
+            assert.equal(`${context.repo.owner}/${context.repo.repo}`,'BOBWORKS-XR/CREATOR-HUB');
+            assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
+            assert.ok(['workflow_dispatch','push'].includes(context.eventName));assert.equal(context.ref,'refs/heads/validation/linux-installed-candidate-014');
+            const pins=JSON.parse(cp.execFileSync('/usr/bin/python3',['-B','scripts/native-linux-installed-candidate.py','pins'],{encoding:'utf8',maxBuffer:16384}));
+            const repo=context.repo;
+            const {data:run}=await github.rest.actions.getWorkflowRun({...repo,run_id:pins.run});
+            assert.equal(run.id,pins.run);assert.equal(run.run_attempt,pins.attempt);assert.equal(run.head_sha,pins.source);
+            assert.equal(run.repository.id,pins.repositoryId);assert.equal(run.status,'completed');assert.equal(run.conclusion,'success');
+            assert.equal(run.event,'workflow_dispatch');assert.equal(run.head_branch,'validation/linux-retirement-candidate-014');
+            assert.equal(run.path,'.github/workflows/unix-managed-assembly.yml');
+            const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:pins.artifact});
+            assert.equal(artifact.id,pins.artifact);assert.equal(artifact.name,pins.artifactName);assert.equal(artifact.expired,false);
+            assert.equal(artifact.size_in_bytes,pins.zipBytes);assert.equal(artifact.digest,`sha256:${pins.zipSha256}`);
+            assert.equal(artifact.workflow_run.id,pins.run);assert.equal(artifact.workflow_run.head_sha,pins.source);
+            assert.equal(artifact.workflow_run.repository_id,pins.repositoryId);assert.equal(artifact.workflow_run.head_repository_id,pins.repositoryId);
+            const {data:jobs}=await github.rest.actions.listJobsForWorkflowRunAttempt({...repo,run_id:pins.run,attempt_number:pins.attempt,per_page:100});
+            assert.ok(jobs.jobs.length<=16&&jobs.total_count===jobs.jobs.length);
+            const native=jobs.jobs.filter(j=>j.name.startsWith('assembly (linux,'));assert.equal(native.length,1);
+            const job=native[0];assert.equal(job.id,pins.job);assert.equal(job.run_id,pins.run);assert.equal(job.run_attempt,pins.attempt);assert.equal(job.conclusion,'success');
+            const {data:commit}=await github.rest.git.getCommit({...repo,commit_sha:pins.source});
+            assert.equal(commit.sha,pins.source);assert.equal(commit.tree.sha,pins.tree);
+            const {data:release}=await github.rest.repos.getReleaseByTag({...repo,tag:'v0.1.12'});
+            assert.equal(release.tag_name,'v0.1.12');assert.equal(release.draft,false);assert.equal(release.prerelease,false);
+            const matches=release.assets.filter(a=>a.id===pins.baselineAsset);assert.equal(matches.length,1);
+            const baseline=matches[0];assert.equal(baseline.name,pins.baselineName);assert.equal(baseline.size,pins.baselineBytes);
+            assert.equal(baseline.state,'uploaded');assert.equal(baseline.browser_download_url,pins.baselineUrl);
+            const binding={run:{id:run.id,run_attempt:run.run_attempt,head_sha:run.head_sha,repository:{id:run.repository.id},
+              status:run.status,conclusion:run.conclusion,event:run.event,head_branch:run.head_branch,path:run.path},
+              artifact:{id:artifact.id,name:artifact.name,expired:artifact.expired,size_in_bytes:artifact.size_in_bytes,digest:artifact.digest,workflow_run:artifact.workflow_run},
+              job:{id:job.id,run_id:job.run_id,run_attempt:job.run_attempt,name:job.name,conclusion:job.conclusion},
+              commit:{sha:commit.sha,tree:{sha:commit.tree.sha}},
+              baseline:{id:baseline.id,name:baseline.name,size:baseline.size,state:baseline.state,browser_download_url:baseline.browser_download_url},
+              baselineRelease:{tag_name:release.tag_name,draft:release.draft,prerelease:release.prerelease}};
+            const temp=fs.realpathSync(process.env.RUNNER_TEMP);assert.equal(temp,'/__w/_temp');
+            function save(name,bytes){const target=path.join(temp,name);fs.writeFileSync(target,bytes,{flag:'wx',mode:0o600});fs.chownSync(target,1001,1001);}
+            save('linux-installed-candidate-source.json',JSON.stringify(binding,null,2)+'\n');
+            const {data}=await github.rest.actions.downloadArtifact({...repo,artifact_id:pins.artifact,archive_format:'zip'});
+            assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer,'Original Octokit ZIP bytes required');
+            const zip=Buffer.from(data);assert.equal(zip.length,pins.zipBytes);assert.equal(crypto.createHash('sha256').update(zip).digest('hex'),pins.zipSha256);
+            save('linux-installed-candidate-original.zip',zip);
+            if(process.env.CREATOR_LINUX_INSTALL_LANE==='public12'){
+              const response=await fetch(pins.baselineUrl);assert.ok(response.ok);
+              const old=Buffer.from(await response.arrayBuffer());assert.equal(old.length,pins.baselineBytes);
+              assert.equal(crypto.createHash('sha256').update(old).digest('hex'),pins.baselineSha256);
+              save('linux-installed-candidate-baseline12.deb',old);
+            }
+      - name: Actual dpkg installation and exact installed-file plus fixture preservation checks (no launch)
+        run: python3 -B scripts/native-linux-installed-candidate.py run
+      - name: Retain bounded success or refusal evidence without executables or fixture contents
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-installed-candidate-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            /__w/_temp/linux-installed-candidate-source.json
+            /__w/_temp/linux-installed-candidate/*.json
+            /__w/_temp/linux-installed-candidate/*.stdout
+            /__w/_temp/linux-installed-candidate/*.stderr
