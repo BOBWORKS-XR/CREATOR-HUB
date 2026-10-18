@@ -159,7 +159,7 @@ jobs:
               os.chmod(file,0o600)
               json.dump(binding,stream)
           PY
-      - name: Exercise real native pages, settings writes and normal owned close
+      - name: Exercise real native pages, settings writes and normal close/reopen
         run: /usr/bin/python3 -B scripts/native-linux-integrated-pages.py "$RUNNER_TEMP/linux-integrated-pages-input.json"
       - name: Retain only the owned fixture reports and window screenshots
         if: always()
@@ -176,3 +176,6 @@ jobs:
             ${{ runner.temp }}/linux-integrated-pages/*.stdout
             ${{ runner.temp }}/linux-integrated-pages/*.stderr
             ${{ runner.temp }}/linux-integrated-pages/fixture-binding.json
+            ${{ runner.temp }}/linux-integrated-pages/restart/*.stdout
+            ${{ runner.temp }}/linux-integrated-pages/restart/*.stderr
+            ${{ runner.temp }}/linux-integrated-pages/restart/physical-*/*.png

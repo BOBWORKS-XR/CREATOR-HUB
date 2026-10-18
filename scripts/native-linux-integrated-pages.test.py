@@ -252,6 +252,10 @@ class PagesTests(unittest.TestCase):
         self.assertIn('native.bitmap(request, physical, helper, x11)', source)
         self.assertIn('surface.get("nonblank") is True', source)
         self.assertNotIn('d.call("GET", "/screenshot"', source)
+        self.assertIn('home=root / "home", expected_groups="read"', source)
+        self.assertIn('new["pid"] != old["pid"]', source)
+        self.assertIn('report["termsAfter"] == report["termsBeforeRestart"]', source)
+        self.assertIn('"MCP did not load the persisted capabilities"', source)
         self.assertTrue(all(v is False for v in M.FALSE_GATES.values()))
 
 

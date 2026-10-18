@@ -289,7 +289,9 @@ def subtree(pid, helper, native):
     return found
 
 
-def run(binding, root, report):
+def run(binding, root, report, home=None, expected_groups="core"):
+    home = root / "home" if home is None else home
+    require(expected_groups in ("core", "read"), "Unknown finite settings phase")
     helper, native = helpers()
     import gi
     gi.require_version("Gdk", "3.0")
@@ -351,12 +353,17 @@ def run(binding, root, report):
             helper.bound_window(request, x11)
         d.guard = guard
         require(len(d.call("GET", "/window/handles")) == 1 and not d.elements("iframe,object,embed"), "Unexpected webview/frame")
-        terms = root / "home/data/CreatorHub/consent/hub-usage-terms.json"
-        require(not terms.exists(), "Terms were already seeded/accepted")
-        wait(lambda: d.read("#usage-terms-dialog", "attribute/open") is not None)
-        started = time.time_ns() // 1000000
-        d.click("#usage-terms-checkbox"); d.click("#usage-terms-continue")
-        wait(lambda: d.read("#usage-terms-dialog", "attribute/open") is None)
+        terms = home / "data/CreatorHub/consent/hub-usage-terms.json"
+        if expected_groups == "core":
+            require(not terms.exists(), "Terms were already seeded/accepted")
+            wait(lambda: d.read("#usage-terms-dialog", "attribute/open") is not None)
+            started = time.time_ns() // 1000000
+            d.click("#usage-terms-checkbox"); d.click("#usage-terms-continue")
+            wait(lambda: d.read("#usage-terms-dialog", "attribute/open") is None)
+        else:
+            require(record(terms) == report["termsBeforeRestart"], "Terms record changed before restart")
+            wait(lambda: d.read("#usage-terms-dialog", "attribute/open") is None)
+            started = 1
         consent = parse(terms.read_bytes())
         require(set(consent) == {"schemaVersion", "policyVersion", "acceptedAtMs"} and consent["schemaVersion"] == 1
                 and consent["policyVersion"] == POLICY and type(consent["acceptedAtMs"]) is int
@@ -365,7 +372,7 @@ def run(binding, root, report):
         report["phase"] = "defer-migration-for-page-test"
         defer_migration(d)
         report["migrationDeferred"] = True
-        preserved(root / "home", binding["fixtures"], binding["config"], "core")
+        preserved(home, binding["fixtures"], binding["config"], expected_groups)
         for feature in ("mcp", "setup"):
             report["phase"] = "open-" + feature
             if feature == "mcp":
@@ -381,16 +388,19 @@ def run(binding, root, report):
             feature_status(d.read(prefix + ' [data-field="status"]'), d.read(prefix + ' [data-field="error"]'), d.read(prefix + ' [data-field="controls"]', "attribute/disabled") is None)
             require(not d.elements("iframe,object,embed") and len(d.call("GET", "/window/handles")) == 1, "Separate webview/frame")
             if feature == "mcp":
-                preserved(root / "home", binding["fixtures"], binding["config"], "core")
+                preserved(home, binding["fixtures"], binding["config"], expected_groups)
                 require(d.read(prefix + ' [data-field="project"]', "property/value") == "", "A project was selected unexpectedly")
                 summaries = d.elements(prefix + " details.feature-section > summary")
                 require(len(summaries) == 2, "Advanced settings structure changed")
                 require(d.call("GET", "/element/" + summaries[1] + "/text") == "Advanced settings", "Wrong summary")
                 d.call("POST", "/element/" + summaries[1] + "/click", {})
-                d.click(prefix + ' [data-field="groups"] option[value="read"]'); d.click(prefix + ' [data-field="save"]')
-                wait(lambda: d.read(prefix + ' [data-field="setup-result"]').startswith("Options saved."))
-                wait(lambda: d.read(prefix, "attribute/aria-busy") == "false" and d.read(prefix + ' [data-field="status"]') == "Ready")
-                preserved(root / "home", binding["fixtures"], binding["config"], "read")
+                require(d.read(prefix + ' [data-field="groups"]', "property/value") == expected_groups,
+                        "MCP did not load the persisted capabilities")
+                if expected_groups == "core":
+                    d.click(prefix + ' [data-field="groups"] option[value="read"]'); d.click(prefix + ' [data-field="save"]')
+                    wait(lambda: d.read(prefix + ' [data-field="setup-result"]').startswith("Options saved."))
+                    wait(lambda: d.read(prefix, "attribute/aria-busy") == "false" and d.read(prefix + ' [data-field="status"]') == "Ready")
+                preserved(home, binding["fixtures"], binding["config"], "read")
             else:
                 require(d.read(prefix + ' [data-field="platform"]') == "linux", "Wrong Setup platform")
             # WebKit's screenshot command can stall after a successful page switch.
@@ -403,7 +413,10 @@ def run(binding, root, report):
             d.guard()
             require(surface.get("nonblank") is True, "Native feature surface is blank")
             report[feature] = {"status": "Ready", "nativeSurface": surface}
-        preserved(root / "home", binding["fixtures"], binding["config"], "read")
+        preserved(home, binding["fixtures"], binding["config"], "read")
+        report["termsAfter"] = record(terms)
+        if expected_groups == "read":
+            require(report["termsAfter"] == report["termsBeforeRestart"], "Terms acknowledgement did not persist")
         pinned(HUB, hub, 0, 0o755)
         report["pagesObserved"] = True
     except Exception:
@@ -453,7 +466,7 @@ def run(binding, root, report):
         report["logs"] = logs.metadata()
         logs.close(); wm_log.close()
         if report["normalCloseObserved"] and report.get("pagesObserved"):
-            preserved(root / "home", binding["fixtures"], binding["config"], "read")
+            preserved(home, binding["fixtures"], binding["config"], "read")
             pinned(HUB, hub, 0, 0o755)
             report["fixturesPreservedAfterClose"] = True
 
@@ -494,6 +507,18 @@ def main():
     try:
         run(binding, root, report)
         require(report["normalCloseObserved"], "Normal owned close not observed")
+        restart_root = root / "restart"
+        restart_root.mkdir(mode=0o700)
+        restart = {"normalCloseObserved": False, "rootExitCode": None,
+                   "termsBeforeRestart": report["termsAfter"]}
+        report["restart"] = restart
+        run(binding, restart_root, restart, home=root / "home", expected_groups="read")
+        old, new = report["rootProcess"], restart["rootProcess"]
+        require(new["pid"] != old["pid"] and int(new["startTime"]) > int(old["startTime"]),
+                "Restart did not create a fresh owned Root")
+        require(restart.get("pagesObserved") and restart.get("fixturesPreservedAfterClose")
+                and restart["normalCloseObserved"], "Restart page/preservation/close check incomplete")
+        report["manualRestartObserved"] = True
     except Exception as error:
         report["error"] = str(error)[:1000]
         raise
