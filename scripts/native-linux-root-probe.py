@@ -502,7 +502,8 @@ def verify_retirement_files():
         for ancestor in (path, *path.parents):
             info = ancestor.lstat()
             require(info.st_uid == info.st_gid == 0 and not info.st_mode & 0o7022
-                    and not ancestor.is_symlink(), "Installed privileged path is not root-protected")
+                    and not ancestor.is_symlink(), "Installed privileged path is not root-protected: "
+                    + str(ancestor) + f" uid={info.st_uid} gid={info.st_gid} mode={stat.S_IMODE(info.st_mode):04o}")
         result[name] = pinned(path, pin, pin[2])
     return result
 
