@@ -342,7 +342,7 @@ def call(root, env, action, child, start, xid, capture, report):
         record.update(exitCode=process.poll(), output=output.metadata())
         require(record["exitCode"] is not None, "Discovery worker timeout; no signal or retry; teardown required")
         process.wait(timeout=0)
-        require(all(v["eof"] and not v["truncated"] for v in output.items.values()), "Worker EOF/size refused")
+        require(all(v["eof"] and not v["truncated"] for v in output.metadata().values()), "Worker EOF/size refused")
         value = b.unique_json(bytes(output.items["stdout"]["kept"]))
         record["result"] = value
         require(record["exitCode"] == 0 and not value.get("error"), "Discovery worker refused; original capture retained")

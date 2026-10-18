@@ -108,6 +108,49 @@ class AdmissionTests(unittest.TestCase):
                 p.child_environment(base, root, value)
 
 
+class CaptureTests(unittest.TestCase):
+    def test_raw_capture_schema_has_truncation_only_in_metadata(self):
+        capture = b.Capture.__new__(b.Capture)
+        capture.items = {"stdout": {"bytes": 2, "eof": True, "kept": bytearray(b"{}")}}
+        self.assertNotIn("truncated", capture.items["stdout"])
+        metadata = capture.metadata()["stdout"]
+        self.assertTrue(metadata["eof"])
+        self.assertFalse(metadata["truncated"])
+        capture.items["stdout"]["bytes"] = b.MAX_LOG + 1
+        self.assertTrue(capture.metadata()["stdout"]["truncated"])
+        self.assertIn('for v in output.metadata().values()', Path(p.__file__).read_text())
+
+    def worker_call(self, body):
+        original = subprocess.Popen
+        commands = []
+
+        def fixture_child(command, **options):
+            commands.append(command)
+            return original([sys.executable, "-c", body], **options)
+
+        report = {"workers": []}
+        with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, runner()), \
+                mock.patch.object(p.subprocess, "Popen", side_effect=fixture_child):
+            result = p.call(Path(temp), runner(), "check-updates", types.SimpleNamespace(pid=123), "456", 789,
+                            types.SimpleNamespace(pump=lambda: None), report)
+        self.assertEqual(commands[0][3:5], ["worker", "check-updates"])
+        return result, report
+
+    @unittest.skipIf(os.name == "nt", "POSIX pipe selector; executed in Linux preflight")
+    def test_actual_capture_item_schema_uses_metadata_for_truncation(self):
+        result, report = self.worker_call('print(\'{"action":"check-updates","actionCount":1}\')')
+        self.assertEqual(result, {"action": "check-updates", "actionCount": 1})
+        self.assertEqual(report["workers"][0]["exitCode"], 0)
+        for item in report["workers"][0]["output"].values():
+            self.assertTrue(item["eof"])
+            self.assertFalse(item["truncated"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX pipe selector; executed in Linux preflight")
+    def test_actual_capture_truncated_worker_output_refuses_before_json(self):
+        with self.assertRaisesRegex(RuntimeError, "Worker EOF/size refused"):
+            self.worker_call(f'import sys; sys.stdout.write("x" * {b.MAX_LOG + 1})')
+
+
 class InputTests(unittest.TestCase):
     def test_exact_metadata_producer_binding(self):
         p.validate_target_binding(target_binding())
