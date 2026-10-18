@@ -28,7 +28,7 @@ STOCK_POLICY = "/usr/share/polkit-1/actions/org.freedesktop.policykit.policy"
 STOCK_ARCHIVE = ("https://archive.ubuntu.com/ubuntu/pool/main/p/policykit-1/polkitd_0.105-33ubuntu0.2_amd64.deb",
                  80152, "8a8e123a44e2c3deef2c072db7248e94d9d7ad7c874127facc7d1abaf622ea85")
 HELPERS = {"native-linux-root-probe.py": "91983346c5bac811028135b41c11a0dfc10e40a61c9f65aab535df326e354e72",
-           "native-unix-window.py": "da62bd6644bebd21059893b2dbfa2685fb2deb9b2ca54281d87c599f4cd3f636"}
+           "native-unix-window.py": "a8aa761c41b26c4cd4a52f4f3c698046ca4cca20e97c08ee5cd41d68afbfb83f"}
 # Independent primary Ubuntu archive bytes, not hashes learned from a live PID.
 FILES = {
     AGENT: ("policykit-1-gnome", "0.105-7ubuntu3", 55448, "871825e1437644fbf8bde51b27b65e93f43e439df662183f012983258e45e48c", 0o755),
@@ -269,7 +269,8 @@ def session(bus, pid, glib):
     return {"object": obj, **result}
 
 
-def registered_agent(bus, agent, glib, observation=None):
+def agent_bus_identity(bus, agent, glib, observation=None):
+    """Find the held agent's unique connection, not proof of registration."""
     authority = bus_identity(bus, "org.freedesktop.PolicyKit1", glib)
     require(authority["uid"] == 0, "Root-owned system authority required")
     names = dbus_call(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames", None, (), "(as)", glib)[0]
@@ -277,7 +278,7 @@ def registered_agent(bus, agent, glib, observation=None):
     if observation is not None:
         observation.clear()
         observation.update(readOnly=True, authorization=False, actionCount=0, authority=authority,
-                           objectPath=AGENT_PATH, candidates=[])
+                           objectPath=AGENT_PATH, registrationProven=False, candidates=[])
     matches = []
     for name in names:
         if not re.fullmatch(r":[0-9]+\.[0-9]+", name):
@@ -290,29 +291,28 @@ def registered_agent(bus, agent, glib, observation=None):
         if observation is not None:
             require(len(observation["candidates"]) < 4, "Agent system-bus candidate inventory exceeds bound")
             observation["candidates"].append(candidate)
-        try:
-            xml = dbus_call(bus, name, AGENT_PATH, "org.freedesktop.DBus.Introspectable", "Introspect", None, (), "(s)", glib)[0]
-        except Exception as error:
-            # This fixed, argument-free read carries no authentication cookie
-            # or password. Preserve its error instead of assuming registration
-            # has not happened yet. A refusal never grants authority.
-            candidate["introspectionRefusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
-            continue
-        require(type(xml) is str and len(xml.encode()) <= 32768, "Bounded source object introspection required")
-        document = ET.fromstring(xml)
-        interface_names = [i.get("name", "") for i in document.findall("interface")]
-        require(len(interface_names) <= 32 and all(len(n) <= 128 for n in interface_names), "Bounded source interface names required")
-        candidate.update(interfaces=interface_names, introspectionSha256=hashlib.sha256(xml.encode()).hexdigest())
-        interfaces = document.findall("interface[@name='org.freedesktop.PolicyKit1.AuthenticationAgent']")
-        if len(interfaces) != 1:
-            continue
-        methods = {m.attrib["name"]: [a.attrib["type"] for a in m.findall("arg") if a.get("direction", "in") == "in"]
-                   for m in interfaces[0].findall("method")}
-        require(methods == {"BeginAuthentication": ["s", "s", "s", "a{ss}", "s", "a(sa{sv})"], "CancelAuthentication": ["s"]}, "Source agent interface differs")
+            # Stock system.conf denies unlisted method calls; polkit 0.105's
+            # PolicyKit1.conf grants root the agent interface, not our UID
+            # Introspect access. This read is diagnostic, never registration proof.
+            try:
+                xml = dbus_call(bus, name, AGENT_PATH, "org.freedesktop.DBus.Introspectable", "Introspect", None, (), "(s)", glib)[0]
+                require(type(xml) is str and len(xml.encode()) <= 32768, "Bounded source object introspection required")
+                document = ET.fromstring(xml)
+                interface_names = [i.get("name", "") for i in document.findall("interface")]
+                require(len(interface_names) <= 32 and all(len(n) <= 128 for n in interface_names), "Bounded source interface names required")
+                candidate.update(interfaces=interface_names, introspectionSha256=hashlib.sha256(xml.encode()).hexdigest())
+                interfaces = document.findall("interface[@name='org.freedesktop.PolicyKit1.AuthenticationAgent']")
+                methods = {m.attrib["name"]: [a.attrib["type"] for a in m.findall("arg") if a.get("direction", "in") == "in"]
+                           for m in interfaces[0].findall("method")} if len(interfaces) == 1 else None
+                candidate["sourceInterfaceMatches"] = methods == {
+                    "BeginAuthentication": ["s", "s", "s", "a{ss}", "s", "a(sa{sv})"], "CancelAuthentication": ["s"]}
+            except Exception as error:
+                # No cookies or passwords in this fixed, argument-free read.
+                candidate["introspectionRefusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
         require(bus_identity(bus, name, glib) == identity, "Source agent bus identity changed")
-        matches.append({**identity, "authority": authority, "objectPath": AGENT_PATH, "methods": methods,
-                        "introspectionSha256": hashlib.sha256(xml.encode()).hexdigest()})
-    require(len(matches) <= 1, "Ambiguous system agent source object")
+        matches.append({**identity, "authority": authority, "objectPath": AGENT_PATH})
+    require(bus_identity(bus, "org.freedesktop.PolicyKit1", glib) == authority, "System authority changed")
+    require(len(matches) <= 1, "Ambiguous system agent connection")
     return matches[0] if matches else None
 
 
@@ -390,7 +390,7 @@ def probe(env):
     require(output.resolve(strict=True) == output and output.stat().st_uid == UID and stat.S_IMODE(output.stat().st_mode) == 0o700,
             "Fresh private result directory required")
     record = {"scope": "synthetic-system-agent-attribution-only", "source": env["GITHUB_SHA"], "agentAttributed": False,
-              "dialogContractCaptured": False, **FLAGS}
+              "agentOperationObserved": False, "dialogContractCaptured": False, **FLAGS}
     agent = request = agent_log = request_log = x11 = axbus = None
     try:
         binding_file = BASE / "source-binding.json"
@@ -419,22 +419,22 @@ def probe(env):
         record["agentSession"] = session(system, agent.pid, GLib)
         require(all(record["agentSession"][key] == record["session"][key] for key in ("object", "Id", "User", "Leader")),
                 "Agent and probe must share the same real session")
-        record["registrationObservation"] = {}
+        record["agentBusObservation"] = {}
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             own_agent(agent, identity, parent, helper)
             agent_log.pump(0.02)
-            endpoint = registered_agent(system, identity, GLib, record["registrationObservation"])
+            endpoint = agent_bus_identity(system, identity, GLib, record["agentBusObservation"])
             if endpoint is not None:
                 break
         else:
-            raise RuntimeError("Fixed agent registration deadline; no alternate agent/session fallback")
+            raise RuntimeError("Fixed agent bus-identity deadline; no alternate agent/session fallback")
         record["systemBusAgent"] = endpoint
-        record["agentAttributed"] = True
+        x11 = helper.X11()
+        require(not windows(agent.pid, helper, x11), "Agent already has a window before the fixed request")
         request = subprocess.Popen(list(COMMAND), env=child_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         request_log = b.Capture(request, output, "pkexec")
         record["pkexec"] = {"pid": request.pid, "command": list(COMMAND), "requestedProgram": "/usr/bin/true"}
-        x11 = helper.X11()
         refs, axbus = b.native_ax_references()
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
@@ -451,11 +451,17 @@ def probe(env):
                 continue
             # Retain unmodified bounded GTK names/roles before interpreting them.
             b.save_json(output / "original-gtk-contract.json", {"native": native, "ax": observed, **FLAGS})
-            require(any(n["showing"] and n["role"] in (int(Atspi.Role.DIALOG), int(Atspi.Role.ALERT)) for n in observed["nodes"]),
+            require(any(n["showing"] and not n["defunct"] and n["role"] in (int(Atspi.Role.DIALOG), int(Atspi.Role.ALERT)) for n in observed["nodes"]),
                     "Agent GTK dialog role not captured; no title-based fallback")
             own_agent(agent, identity, parent, helper)
-            require(windows(agent.pid, helper, x11) == native and registered_agent(system, identity, GLib) == endpoint,
+            for pid, original in ((os.getpid(), record["session"]), (agent.pid, record["agentSession"])):
+                current = session(system, pid, GLib)
+                require(all(current[key] == original[key] for key in ("object", "Id", "User", "Leader")), "Real session binding changed")
+            require(windows(agent.pid, helper, x11) == native and agent_bus_identity(system, identity, GLib) == endpoint,
                     "Native/system agent ownership changed during read-only capture")
+            require(request.poll() is None, "Fixed request ended during capture; no authentication claimed")
+            record["agentOperationObserved"] = True
+            record["agentAttributed"] = True
             record["dialogContractCaptured"] = True
             record["native"] = native
             break

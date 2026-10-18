@@ -268,14 +268,15 @@ class DbusTests(unittest.TestCase):
         self.assertEqual(object_path, p.AGENT_PATH)
         return (self.XML,)
 
-    def test_exact_registered_source_path_interface_and_system_bus_pid_uid(self):
+    def test_identity_requires_system_bus_pid_uid_not_readable_introspection(self):
         with mock.patch.object(p, "bus_identity", side_effect=lambda _b, n, _g: self.identity(n)), \
                 mock.patch.object(p, "dbus_call", side_effect=self.call) as calls:
-            result = p.registered_agent(None, {"pid": 21}, None)
+            result = p.agent_bus_identity(None, {"pid": 21}, None)
         self.assertEqual(result["pid"], 21)
         self.assertEqual(result["objectPath"], p.AGENT_PATH)
         self.assertEqual(result["uid"], p.UID)
-        self.assertEqual({c.args[4] for c in calls.call_args_list}, {"ListNames", "Introspect"})
+        self.assertEqual(result["authority"], self.identity("org.freedesktop.PolicyKit1"))
+        self.assertEqual({c.args[4] for c in calls.call_args_list}, {"ListNames"})
 
     def test_original_introspection_refusal_is_retained_without_authorizing_or_substituting_an_agent(self):
         error = RuntimeError("GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: fixed Introspect request denied")
@@ -286,11 +287,14 @@ class DbusTests(unittest.TestCase):
         observation = {}
         with mock.patch.object(p, "bus_identity", side_effect=lambda _b, n, _g: self.identity(n)), \
                 mock.patch.object(p, "dbus_call", side_effect=call) as calls:
-            result = p.registered_agent(None, {"pid": 21}, None, observation)
-        self.assertIsNone(result)
+            result = p.agent_bus_identity(None, {"pid": 21}, None, observation)
+        self.assertEqual(result, self.identity(":1.3") | {"objectPath": p.AGENT_PATH,
+            "authority": self.identity("org.freedesktop.PolicyKit1")})
         self.assertEqual(observation["candidates"], [{"owner": ":1.3", "pid": 21, "uid": p.UID,
             "objectPath": p.AGENT_PATH, "introspectionRefusal": {"type": "RuntimeError", "message": str(error)}}])
         self.assertFalse(observation["authorization"])
+        self.assertFalse(observation["registrationProven"])
+        self.assertNotIn("agentOperationObserved", result)
         self.assertEqual(observation["actionCount"], 0)
         self.assertEqual({c.args[4] for c in calls.call_args_list}, {"ListNames", "Introspect"})
 
@@ -298,41 +302,69 @@ class DbusTests(unittest.TestCase):
         observation = {"stale": "must not accumulate retries"}
         with mock.patch.object(p, "bus_identity", side_effect=lambda _b, n, _g: self.identity(n)), \
                 mock.patch.object(p, "dbus_call", side_effect=self.call):
-            result = p.registered_agent(None, {"pid": 21}, None, observation)
+            result = p.agent_bus_identity(None, {"pid": 21}, None, observation)
         self.assertIsNotNone(result)
         self.assertNotIn("stale", observation)
         self.assertEqual(observation["candidates"][0]["interfaces"], ["org.freedesktop.PolicyKit1.AuthenticationAgent"])
         self.assertEqual(len(observation["candidates"][0]["introspectionSha256"]), 64)
+        self.assertTrue(observation["candidates"][0]["sourceInterfaceMatches"])
+        self.assertFalse(observation["registrationProven"])
         self.assertFalse(observation["authorization"])
         self.assertLess(len(json.dumps(observation)), 4096)
 
-    def test_foreign_pid_uid_changed_endpoint_or_wrong_method_contract_not_attributed(self):
-        for change in ("pid", "uid", "methods", "changed-owner", "ambiguous"):
+    def test_unavailable_or_differing_introspection_never_changes_identity_or_claims_operation(self):
+        for xml in ("<node/>", self.XML.replace('type="a{ss}"', 'type="s"'), "invalid XML", "x" * 32769):
+            def call(*args):
+                return (xml,) if args[4] == "Introspect" else self.call(*args)
+            observation = {}
+            with self.subTest(xml=xml[:32]), mock.patch.object(p, "bus_identity", side_effect=lambda _b, n, _g: self.identity(n)), \
+                    mock.patch.object(p, "dbus_call", side_effect=call):
+                result = p.agent_bus_identity(None, {"pid": 21}, None, observation)
+                self.assertEqual(result, p.agent_bus_identity(None, {"pid": 21}, None))
+            candidate = observation["candidates"][0]
+            self.assertTrue("introspectionRefusal" in candidate or not candidate["sourceInterfaceMatches"])
+            self.assertFalse(observation["registrationProven"])
+            self.assertFalse(observation["authorization"])
+            self.assertNotIn("agentOperationObserved", result)
+
+    def test_foreign_pid_uid_authority_or_changed_endpoint_and_ambiguity_refuse(self):
+        for change in ("pid", "uid", "authority-uid", "changed-owner", "authority-changed", "ambiguous"):
+            seen = {"agent": 0, "authority": 0}
             def identity(_bus, name, _glib):
                 result = self.identity(name)
                 if name.startswith(":"):
+                    seen["agent"] += 1
                     if change == "pid":
                         result["pid"] = 99
                     elif change == "uid":
                         result["uid"] = 0
+                    elif change == "changed-owner" and seen["agent"] > 1:
+                        result["pid"] = 99
+                else:
+                    seen["authority"] += 1
+                    if change == "authority-uid":
+                        result["uid"] = p.UID
+                    elif change == "authority-changed" and seen["authority"] > 1:
+                        result["owner"] = ":1.99"
                 return result
             def call(*args):
                 if args[4] == "ListNames" and change == "ambiguous":
                     return ([":1.3", ":1.4"],)
-                if args[4] == "Introspect" and change == "methods":
-                    return (self.XML.replace('type="a{ss}"', 'type="s"'),)
                 return self.call(*args)
-            if change == "changed-owner":
-                identities = [self.identity("org.freedesktop.PolicyKit1"), self.identity(":1.3"), self.identity(":1.3") | {"pid": 99}]
-                mocked_identity = mock.Mock(side_effect=identities)
-            else:
-                mocked_identity = mock.Mock(side_effect=identity)
-            with self.subTest(change=change), mock.patch.object(p, "bus_identity", mocked_identity), mock.patch.object(p, "dbus_call", side_effect=call):
+            with self.subTest(change=change), mock.patch.object(p, "bus_identity", side_effect=identity), mock.patch.object(p, "dbus_call", side_effect=call):
                 if change == "pid":
-                    self.assertIsNone(p.registered_agent(None, {"pid": 21}, None))
+                    self.assertIsNone(p.agent_bus_identity(None, {"pid": 21}, None))
                 else:
                     with self.assertRaises(RuntimeError):
-                        p.registered_agent(None, {"pid": 21}, None)
+                        p.agent_bus_identity(None, {"pid": 21}, None)
+
+    def test_identity_change_cannot_be_swallowed_as_an_optional_introspection_error(self):
+        error = RuntimeError("GDBus.Error:org.freedesktop.DBus.Error.AccessDenied")
+        for changed in (self.identity(":1.3") | {"pid": 99}, self.identity(":1.3") | {"uid": 0}):
+            identities = [self.identity("org.freedesktop.PolicyKit1"), self.identity(":1.3"), changed]
+            with self.subTest(changed=changed), mock.patch.object(p, "bus_identity", side_effect=identities), \
+                    mock.patch.object(p, "dbus_call", side_effect=[([":1.3"],), error]), self.assertRaises(RuntimeError):
+                p.agent_bus_identity(None, {"pid": 21}, None, {})
 
     def test_real_session_uid_and_remote_status_checked_not_environment_session_id(self):
         properties = {"Id": "c9", "User": (p.UID, "/user/fixture"), "Leader": 11, "Class": "background", "Type": "unspecified", "Remote": False, "State": "active"}
@@ -347,6 +379,27 @@ class DbusTests(unittest.TestCase):
 
 
 class CaptureTests(unittest.TestCase):
+    def test_operation_claim_is_after_new_owned_prompt_and_fresh_identity_guards_only(self):
+        source = (HERE / "native-linux-polkit-probe.py").read_text().split("def probe(env):", 1)[1].split("def deadline_expired", 1)[0]
+        self.assertIn('"agentAttributed": False', source)
+        self.assertIn('"agentOperationObserved": False', source)
+        self.assertEqual(source.count('record["agentAttributed"] = True'), 1)
+        self.assertEqual(source.count('record["agentOperationObserved"] = True'), 1)
+        baseline = source.index('require(not windows(agent.pid, helper, x11)')
+        request = source.index('request = subprocess.Popen(list(COMMAND)')
+        capture = source.index('b.save_json(output / "original-gtk-contract.json"')
+        role = source.index('n["showing"] and not n["defunct"]')
+        kernel = source.index('own_agent(agent, identity, parent, helper)', role)
+        session = source.index('"Real session binding changed"', kernel)
+        binding = source.index('windows(agent.pid, helper, x11) == native and agent_bus_identity(system, identity, GLib) == endpoint', session)
+        pending = source.index('require(request.poll() is None', binding)
+        operation = source.index('record["agentOperationObserved"] = True')
+        attributed = source.index('record["agentAttributed"] = True')
+        complete = source.index('record["dialogContractCaptured"] = True')
+        positions = [baseline, request, capture, role, kernel, session, binding, pending, operation, attributed, complete]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn('registered_agent(', source)
+
     def fixture(self):
         roles = types.SimpleNamespace(APPLICATION=75, DIALOG=16, ALERT=2, LABEL=29, TEXT=61, STATIC=116, PARAGRAPH=73, PASSWORD_TEXT=40)
         states = types.SimpleNamespace(SHOWING=1, ENABLED=2, SENSITIVE=3, DEFUNCT=4, BUSY=5, EDITABLE=6)
