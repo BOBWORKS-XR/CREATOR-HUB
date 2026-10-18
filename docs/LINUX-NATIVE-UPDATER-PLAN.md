@@ -1,5 +1,37 @@
 # Native Linux Updater Acceptance Plan
 
+## 2026-10-18 Progress
+
+Full in-app acceptance is still **not passed**. The original prerequisite list
+below is retained as a historical checkpoint, not the current build status.
+
+- Current-source14 assembly39042746816 and actual fresh/manual12 upgrade
+  run39105776879 passed. Product source534465a, private sourcef66d37f and exact
+  package/image pins are recorded in LINUX-RELEASE-STATUS.md and its receipts.
+- Outer-only15 run39105404389 passed without rebuilding/re-signing private
+  binaries. Target DEB SHA256 is
+  `98aa9750cecf387a960f994d24726e5ca09100a5ce3723607939eeaa08d80796`;
+  installed ELF SHA256 is
+  `7629379fbd3d0b7db0a996d727aa166750e08165478d622fe0d7c5047f2d50fe`.
+- `verify-linux-update-fixture` imports the actual catalog/target source and
+  verifies those signed local inputs plus changed-descriptor, foreign-Windows
+  and changed-installer refusal. Its cross-platform offline pass is not Linux
+  installation, discovery, authentication or restart acceptance.
+- `linux-update-lab-feed.cjs` passed22 tests, including real loopback CONNECT/TLS
+  routing and rejection controls. It serves only exact pinned GitHub paths and
+  does not forward requests or install a CA. Native-session trust/bootstrap and
+  the real Hub discovery/dialog capture are being integrated separately.
+- Current-package component run39106806681 accepted terms and native component
+  permission boundaries but stopped before operation input. The read-only
+  geometry diagnostic must compare GTK's outer frame with the existing EWMH
+  frame contract, not require it to fit inside its undecorated client rectangle.
+  Semantic-Parent/action authority is not relaxed by that diagnostic correction.
+
+All0.1.15 fixtures and the private v0.1.13-validation release remain forbidden
+publication inputs. Windows bytes and public update metadata remain unchanged.
+
+## Original Prerequisites
+
 2026-10-17. Full in-app signed-update acceptance is **blocked**, not implemented
 or passed. This task owns only `scripts/native-linux-update-acceptance.py`, its
 matching `.test.py`, and this plan. No existing probe, package helper, workflow,
