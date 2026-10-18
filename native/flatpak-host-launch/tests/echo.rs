@@ -12,6 +12,24 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Error projection for the source-included modules in this isolated test crate;
+// this is not a constructor for a live session or a replacement proof path.
+#[derive(Debug)]
+struct EchoFailure {
+    reason: &'static str,
+    owned_child_reaped: bool,
+}
+
+impl EchoFailure {
+    fn reason(&self) -> &'static str {
+        self.reason
+    }
+
+    fn owned_child_reaped(&self) -> bool {
+        self.owned_child_reaped
+    }
+}
+
 #[test]
 #[ignore = "parent-coordinated disposable Linux kernel execution only"]
 fn native_echo_binary_inherits_fd3_completes_protocol_and_exits() {

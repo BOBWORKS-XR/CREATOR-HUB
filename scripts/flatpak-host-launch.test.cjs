@@ -96,6 +96,47 @@ test('fixed protocol and finite owned cleanup cannot expose reader or claim rele
   }
 });
 
+test('live fixed echo capability is opaque and minted only by the existing installed proof', () => {
+  const session = launch.split('pub struct FixedEchoSession {')[1].split('\nimpl FixedEchoSession')[0];
+  assert.doesNotMatch(session, /^\s*pub(?:\([^)]*\))?\s+\w+\s*:/m);
+  for (const field of ['owned: OwnedLaunch', 'pins: Pins', 'messages: Vec<transport::Message>',
+    'owner: (u32, u64)', 'sender: (u32, u64)', 'deadline: Instant', 'phase: Phase']) {
+    assert.ok(session.includes(field), field);
+  }
+  assert.match(launch, /pub fn launch_installed\(\) -> std::result::Result<Self, EchoFailure>/);
+  assert.match(launch, /prepare\(deadline\)\.map_err/);
+  assert.ok(launch.indexOf('identity::deployment(&ready') < launch.indexOf('Ok(Self {'));
+  assert.match(launch, /FixedEchoSession::launch_installed\(\)\.and_then\(FixedEchoSession::finish\)/);
+  assert.doesNotMatch(api + launch, /derive\([^\n]*(?:Clone|Serialize|Deserialize)[^\n]*\).*FixedEchoSession|pub fn (?:from_|new|trust|authenticate)|pub .*AsRawFd|pub .*into_raw/);
+  assert.match(api, /compile_fail/);
+  assert.match(api, /FixedEchoSession \{\}/);
+  assert.match(api, /FixedEchoSession::from_trusted\(true\)/);
+});
+
+test('each echo response reuses kernel deployment checks and failures close permanently', () => {
+  const checked = launch.split('fn checked(')[1].split('\n    fn failure(')[0];
+  assert.match(checked, /Instant::now\(\) >= self\.deadline/);
+  assert.match(checked, /identity::sender\(message, Some\(self\.sender\), self\.owner, self\.uid\)/);
+  assert.match(checked, /identity::deployment/);
+  assert.match(launch, /self\.checked\(&echo\)\?/);
+  assert.match(launch, /self\.checked\(&closed\)\?/);
+  assert.match(launch, /self\.phase = Phase::Failed/);
+  assert.match(launch, /pub fn finish\(mut self\)/);
+  assert.match(launch, /self\.messages\.push\(closed\)/);
+  const drop = launch.split('impl Drop for OwnedLaunch {')[1].split('\n#[derive')[0];
+  assert.match(drop, /self\.cleanup\(\)/);
+  assert.doesNotMatch(drop, /report\(|println|accept|success/);
+  const cleanup = launch.split('fn cleanup(')[1].split('\nimpl Drop')[0];
+  assert.match(cleanup, /if !self\.cleaned/);
+  assert.match(cleanup, /self\.child\.try_wait\(\)/);
+  assert.match(cleanup, /Ok\(None\) => \{\s*let _ = self\.child\.kill\(\)/);
+  assert.match(cleanup, /Err\(_\) => false/);
+  for (const fixture of ['installed_session_retains_live_echo_and_finishes_explicitly',
+    'duplicate_challenge_poison_closes_without_retry',
+    'drop_reaps_only_its_owned_child_and_other_session_remains_live',
+    'expired_live_session_refuses_and_cannot_restart_exchange']) assert.ok(launch.includes(fixture));
+});
+
 test('native tests exercise forked writers, real ancillary rejection, and a spawned echo binary', () => {
   for (const token of ['libc::fork', 'libc::sendmsg', 'libc::SO_PEERCRED', 'sender-exited',
     'sender-changed', 'foreign-launch-tree', 'read_dir("/proc/self/fd")', 'libc::SCM_RIGHTS']) {

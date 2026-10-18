@@ -123,6 +123,123 @@ test('success is only synthetic installed launch and owned reap, never broader a
   assert.throws(() => harness.nativeReport('x'.repeat(8193), 0));
 });
 
+// Observed portable libtest output; only the requested test name is substituted.
+const testOutput = name => `\nrunning 1 test\ntest ${name} ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s\n\n`;
+const testResult = name => ({ status: 0, signal: null, stdout: testOutput(name), stderr: '' });
+
+test('four lifecycle names are immutable, exact and present as installed-profile Rust tests', () => {
+  assert.ok(Object.isFrozen(harness.LIFECYCLE_TESTS));
+  assert.deepEqual(harness.LIFECYCLE_TESTS, [
+    'linux::launch::tests::installed_session_retains_live_echo_and_finishes_explicitly',
+    'linux::launch::tests::duplicate_challenge_poison_closes_without_retry',
+    'linux::launch::tests::drop_reaps_only_its_owned_child_and_other_session_remains_live',
+    'linux::launch::tests::expired_live_session_refuses_and_cannot_restart_exchange',
+  ]);
+  const rust = fs.readFileSync(path.join(root, 'native/flatpak-host-launch/src/linux/launch.rs'), 'utf8');
+  for (const name of harness.LIFECYCLE_TESTS) assert.ok(rust.includes(`fn ${name.split('::').at(-1)}()`), name);
+});
+
+test('Cargo JSON binds exactly one successful library test executable to the separate target', () => {
+  const target = path.resolve('owned-lifecycle-target');
+  const executable = path.join(target, 'release', 'deps', 'creator_hub_flatpak_host_launch-' + 'a'.repeat(16));
+  const artifact = { reason: 'compiler-artifact', executable,
+    target: { name: 'creator_hub_flatpak_host_launch', kind: ['lib'] }, profile: { test: true } };
+  const finished = { reason: 'build-finished', success: true };
+  const encode = rows => rows.map(row => JSON.stringify(row)).join('\n') + '\n';
+  assert.equal(harness.lifecycleExecutable(encode([artifact, finished]), target), executable);
+  for (const rows of [[finished], [artifact], [artifact, artifact, finished], [artifact, finished, finished],
+    [artifact, { ...finished, success: false }],
+    [{ ...artifact, profile: { test: false } }, finished],
+    [{ ...artifact, target: { ...artifact.target, name: 'foreign' } }, finished],
+    [{ ...artifact, target: { ...artifact.target, kind: ['bin'] } }, finished],
+    [{ ...artifact, executable: path.join(target, 'debug', 'deps', path.basename(executable)) }, finished],
+    [{ ...artifact, executable: path.join(target, 'release', 'deps', 'foreign') }, finished],
+    [{ ...artifact, executable: 'relative' }, finished]]) {
+    assert.throws(() => harness.lifecycleExecutable(encode(rows), target));
+  }
+  assert.throws(() => harness.lifecycleExecutable('not-json', target));
+  assert.throws(() => harness.lifecycleExecutable('x'.repeat(1024 * 1024 + 1), target));
+});
+
+test('libtest status zero cannot hide zero, ignored, wrong-name or failed tests', () => {
+  const name = harness.LIFECYCLE_TESTS[0];
+  assert.deepEqual(harness.lifecycleResult(name, testResult(name)), { name, passed: 1, failed: 0, ignored: 0 });
+  for (const changed of [{ status: 1 }, { signal: 'SIGTERM' }, { error: { code: 'ETIMEDOUT' } },
+    { stdout: testOutput(name).replace('running 1 test', 'running 0 tests') },
+    { stdout: testOutput('foreign') }, { stdout: testOutput(name).replace('0 ignored', '1 ignored') },
+    { stdout: testOutput(name).replace('1 passed; 0 failed', '0 passed; 1 failed') },
+    { stdout: testOutput(name) + 'test result: ok. 0 passed\n' },
+    { stdout: 'x'.repeat(16385) }, { stderr: 'x'.repeat(16385) }]) {
+    assert.throws(() => harness.lifecycleResult(name, { ...testResult(name), ...changed }));
+  }
+  assert.throws(() => harness.lifecycleResult('foreign', testResult('foreign')));
+  assert.throws(() => harness.nativeReport(JSON.stringify({ ...goodReport(), fixedEchoLifecycleTestsPassed: true }), 0),
+    'The original CLI report schema must not acquire the harness flag');
+});
+
+test('observed libtest summary requires zero measured tests and rejects unknown counts', () => {
+  const name = harness.LIFECYCLE_TESTS[0];
+  const output = testOutput(name);
+  assert.deepEqual(harness.lifecycleResult(name, { ...testResult(name), stdout: output.replace(/\n/g, '\r\n') }),
+    { name, passed: 1, failed: 0, ignored: 0 });
+  for (const [before, after] of [
+    ['0 measured; ', ''], ['0 measured', '1 measured'], ['0 measured', 'unknown measured'],
+    ['1 passed', 'unknown passed'], ['0 failed', 'unknown failed'], ['0 ignored', 'unknown ignored'],
+    ['1 filtered out', 'unknown filtered out'], ['1 filtered out', '-1 filtered out'],
+    ['0 measured;', '0 measured; 0 unknown;'],
+  ]) {
+    assert.throws(() => harness.lifecycleResult(name, { ...testResult(name), stdout: output.replace(before, after) }),
+      `${before} -> ${after}`);
+  }
+});
+
+test('lifecycle sequence is finite, exact and bracketed by independent checkpoints', () => {
+  const steps = [];
+  const results = harness.runLifecycleTests(args => {
+    steps.push(['execute', args]); return testResult(args[0]);
+  }, (phase, index, name) => steps.push([phase, index, name]));
+  assert.equal(results.length, 4);
+  assert.deepEqual(steps, harness.LIFECYCLE_TESTS.flatMap((name, index) => [
+    ['before', index, name], ['execute', [name, '--exact', '--ignored', '--test-threads=1', '--color=never']],
+    ['after', index, name],
+  ]));
+});
+
+test('test failure, execution exception or checkpoint drift stops without retries', () => {
+  for (const failure of ['test', 'execution', 'before', 'after']) {
+    const executed = [], checkpoints = [];
+    assert.throws(() => harness.runLifecycleTests(args => {
+      executed.push(args[0]);
+      if (failure === 'execution') throw Error('Synthetic execution failure');
+      return { ...testResult(args[0]), status: failure === 'test' ? 1 : 0 };
+    }, phase => {
+      checkpoints.push(phase);
+      if (failure === phase) throw Error('Synthetic checkpoint drift');
+    }));
+    assert.equal(executed.length, failure === 'before' ? 0 : 1);
+    assert.deepEqual(checkpoints, failure === 'before' ? ['before'] : ['before', 'after']);
+  }
+});
+
+test('lifecycle build and execution reuse the reviewed pins, native cwd and finite proof environment', () => {
+  const cli = source.indexOf('const proof = nativeReport(');
+  const compile = source.indexOf("const compiled = invoke(cargo, ['test'");
+  const execute = source.indexOf('const results = runLifecycleTests(');
+  const scopedPass = source.indexOf('report.fixedEchoLifecycleTestsPassed = true');
+  assert.ok(cli > 0 && cli < compile && compile < execute && execute < scopedPass);
+  assert.match(source, /invoke\(cargo, cargoArgs\(HOST\), pinnedBuildEnv/);
+  assert.match(source, /'--message-format=json', '--manifest-path', manifest, '--target-dir', lifecycleTarget\], pinnedBuildEnv/);
+  assert.match(source, /invoke\(report\.hostImage\.path, \['prove-installed'\], proofEnv, 42000, false\)/);
+  assert.match(source, /invoke\(executable, args, proofEnv, 75000, false\)/);
+  assert.match(source, /spawnSync\(file, args, \{ cwd: source, env: childEnv/);
+  assert.match(source, /const lifecycleTarget = path\.join\(work, 'lifecycle-target'\)/);
+  assert.match(source, /fixedEchoLifecycleTestsPassed: false/);
+  for (const check of ['Deployment changed during lifecycle tests', 'Pinned host changed during lifecycle tests',
+    'Lifecycle executable changed', 'Runtime/extension inventory changed', 'Frozen echo changed',
+    'Echo recompiled during host-only build', 'Isolated settings changed']) assert.ok(source.includes(check), check);
+  assert.match(source, /\+\+count <= 300/);
+});
+
 test('system and user directories are separately checked without adopting writable or symlinked ancestors', t => {
   const target = path.resolve('owned-temp', 'fixture');
   const stat = (uid, mode) => ({ uid, mode, isDirectory: () => true });

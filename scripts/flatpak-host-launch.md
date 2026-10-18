@@ -154,3 +154,46 @@ Primary contracts: [Flatpak foreground FD preservation](https://github.com/flatp
 [per-message Linux credentials/pidfds](https://github.com/torvalds/linux/blob/v6.6/include/net/scm.h#L124),
 [credentials validation](https://github.com/torvalds/linux/blob/v6.6/net/core/scm.c#L45),
 [procfs access limitations](https://man7.org/linux/man-pages/man5/proc_pid_root.5.html).
+
+## Opaque Live Fixed-Echo Lifetime Prerequisite
+
+`FixedEchoSession::launch_installed()` now returns a live, opaque capability only
+after the existing fixed profile's Ready sender/kernel/deployment checks pass.
+The four compiled pins, isolated paths, opt-ins and fixed command remain required.
+No paths, descriptors, environment values or trust booleans are constructor inputs.
+There is no production Hub constructor, host operation, settings reader or new
+permission. This proves the fixed ECHO peer, not a signed publisher or Hub UI.
+
+```rust,ignore
+let mut echo = creator_hub_flatpak_host_launch::FixedEchoSession::launch_installed()?;
+echo.revalidate()?;
+echo.challenge()?;
+echo.finish()?;
+```
+
+Private fields retain the socket, unreaped owned Child, sender identity and all
+validated messages/pidfds. Each new response and explicit revalidation reuse
+the existing sender/deployment checks. The one challenge is generated internally;
+a partial/failed or repeated exchange closes and poisons the session, with no
+automatic retry. The original 30-second budget is not renewed by API calls.
+
+Consuming `finish()` completes any pending challenge, performs Close/Closed/Release,
+requires normal outer exit 0, closes the socket and reaps. Errors retain the
+original bounded reason and measured owned-child reap status, not acceptance.
+Drop closes/cleans only this retained child, at most once with the existing
+two-second cleanup allowance; it emits no report. Failed child-ownership
+inspection does not authorize a signal. This still cannot certify every
+descendant's cleanup or bound a syscall blocked inside the kernel.
+
+`run()` uses launch plus finish and retains its CLI/report schema and false
+production flags. The type is not Clone/serializable, has no public field or FD
+access, and may become invalid after construction: any future consumer must
+revalidate it, never promote its existence to Hub or publisher authority.
+
+Portable tests include unsupported-construction refusal and two compile-fail
+forgery checks. Source checks cover the private API, shared validation path,
+failure poisoning and one-shot cleanup. Four additional ignored Linux tests use
+the actual installed-profile constructor for live finish, duplicate challenge,
+expired-session refusal and dropping one session while another stays live.
+They are **not run locally**; parent review and the already qualified installed
+fixture with reviewed compiled pins are prerequisites. No workflow was changed.

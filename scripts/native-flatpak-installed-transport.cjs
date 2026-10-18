@@ -20,6 +20,12 @@ const CHILDREN = ['home', 'config', 'data', 'cache', 'runtime', 'tmp', 'flatpak'
 const FALSE_FIELDS = ['signedDeploymentVerified', 'uiCallerAuthenticated', 'hostReaderExposed',
   'hostIntegrationAccepted', 'migrationAccepted', 'releaseReady'];
 const SHA = /^(?!0{64}$)[a-f0-9]{64}$/;
+const LIFECYCLE_TESTS = Object.freeze([
+  'linux::launch::tests::installed_session_retains_live_echo_and_finishes_explicitly',
+  'linux::launch::tests::duplicate_challenge_poison_closes_without_retry',
+  'linux::launch::tests::drop_reaps_only_its_owned_child_and_other_session_remains_live',
+  'linux::launch::tests::expired_live_session_refuses_and_cannot_restart_exchange',
+]);
 
 function admission(env = process.env, platform = process.platform, arch = process.arch,
   uid = process.getuid?.(), gid = process.getgid?.()) {
@@ -155,6 +161,52 @@ function fixtureMetadata() {
   return `[Application]\nname=${APP}\nruntime=${RUNTIME.slice(8)}\ncommand=/app/libexec/${ECHO}\n`;
 }
 
+function lifecycleExecutable(text, target) {
+  assert.ok(Buffer.byteLength(text) <= 1024 * 1024, 'Cargo output limit');
+  const rows = text.trimEnd().split('\n').map(line => JSON.parse(line));
+  const finished = rows.filter(row => row.reason === 'build-finished');
+  assert.equal(finished.length, 1); assert.equal(finished[0].success, true);
+  const artifacts = rows.filter(row => row.reason === 'compiler-artifact' && row.executable);
+  assert.equal(artifacts.length, 1, 'Exactly one library test executable required');
+  const artifact = artifacts[0];
+  assert.equal(artifact.target.name, 'creator_hub_flatpak_host_launch');
+  assert.deepEqual(artifact.target.kind, ['lib']); assert.equal(artifact.profile.test, true);
+  const executable = artifact.executable;
+  assert.ok(path.isAbsolute(executable)); assert.equal(path.resolve(executable), executable);
+  assert.equal(path.dirname(executable), path.join(target, 'release', 'deps'));
+  assert.match(path.basename(executable), /^creator_hub_flatpak_host_launch-[a-f0-9]{16}$/);
+  return executable;
+}
+
+function lifecycleResult(name, result) {
+  assert.ok(LIFECYCLE_TESTS.includes(name), 'Only fixed lifecycle tests are supported');
+  assert.ok(!result.error && !result.signal && result.status === 0, 'Lifecycle test failed; original logs retained');
+  assert.ok(Buffer.byteLength(result.stdout || '') <= 16384 && Buffer.byteLength(result.stderr || '') <= 16384,
+    'Lifecycle output limit');
+  const lines = (result.stdout || '').split(/\r?\n/);
+  assert.ok(lines.includes('running 1 test'), 'Exactly one test must execute');
+  assert.ok(lines.includes(`test ${name} ... ok`), 'The exact requested test must pass');
+  assert.equal(lines.filter(line => line.startsWith('test result:')).length, 1);
+  assert.ok(lines.some(line => /^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9.]+s$/.test(line)),
+    'Only one passed test with zero failed, ignored or measured tests can earn a pass');
+  return { name, passed: 1, failed: 0, ignored: 0 };
+}
+
+function runLifecycleTests(execute, checkpoint) {
+  const results = [];
+  for (const [index, name] of LIFECYCLE_TESTS.entries()) {
+    checkpoint('before', index, name);
+    let result;
+    try {
+      result = execute([name, '--exact', '--ignored', '--test-threads=1', '--color=never']);
+    } finally {
+      checkpoint('after', index, name);
+    }
+    results.push(lifecycleResult(name, result));
+  }
+  return results;
+}
+
 function run() {
   const env = process.env;
   const { work, uid, gid } = admission();
@@ -164,12 +216,13 @@ function run() {
   // Exclusive creation: never adopt, repair, clear, or delete an existing store.
   fs.mkdirSync(work, { mode: 0o700 });
   safeDirectory(work, uid, 0o700);
-  for (const name of [...CHILDREN, 'logs', 'frozen', 'build', 'target']) {
+  for (const name of [...CHILDREN, 'logs', 'frozen', 'build', 'target', 'lifecycle-target']) {
     fs.mkdirSync(path.join(work, name), { mode: 0o700 });
   }
   const report = { schemaVersion: 1, scope: 'installed-synthetic-flatpak-transport-only', phase: 'prepare',
     sourceCommit: env.GITHUB_SHA, runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT,
     unsignedFixture: true, flatpakDeploymentTested: false, syntheticLaunchProofPassed: false,
+    fixedEchoLifecycleTestsPassed: false,
     signedUpdateAccepted: false, ...Object.fromEntries(FALSE_FIELDS.map(key => [key, false])) };
   const base = childEnvironment(work);
   const source = path.resolve(__dirname, '..');
@@ -178,7 +231,8 @@ function run() {
   let count = 0;
   const save = (name, value) => fs.writeFileSync(path.join(work, name), `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
   const invoke = (file, args, childEnv = base, timeout = 30000, mustPass = true) => {
-    const index = String(++count).padStart(2, '0');
+    assert.ok(++count <= 300, 'Finite fixture command budget exceeded');
+    const index = String(count).padStart(2, '0');
     const result = spawnSync(file, args, { cwd: source, env: childEnv, encoding: 'utf8',
       timeout, killSignal: 'SIGTERM', maxBuffer: 1024 * 1024, shell: false });
     for (const channel of ['stdout', 'stderr']) {
@@ -231,10 +285,11 @@ function run() {
     assert.equal(info(true, '--show-location', RUNTIME), runtimeLocation, 'Alternate runtime deployment refused');
     safeDirectory(runtimeLocation, uid);
     const runtimeFiles = ordinary(`${runtimeLocation}/files`, uid, { directory: true, system: true });
-    save('runtime-provenance.json', { ref: RUNTIME, commit: runtimeCommit, location: runtimeLocation,
+    const runtimeProvenance = { ref: RUNTIME, commit: runtimeCommit, location: runtimeLocation,
       origin: 'flathub', signatureAcceptance: false, metadata: info(true, '--show-metadata', RUNTIME),
       installedRuntimeAndExtensionInventory: fp(['list', '--system', '--runtime', '--columns=ref,active,origin']),
-      files: { dev: runtimeFiles.dev, ino: runtimeFiles.ino, uid: runtimeFiles.uid, mode: runtimeFiles.mode & 0o777 } });
+      files: { dev: runtimeFiles.dev, ino: runtimeFiles.ino, uid: runtimeFiles.uid, mode: runtimeFiles.mode & 0o777 } };
+    save('runtime-provenance.json', runtimeProvenance);
 
     const cargo = env.CREATOR_FLATPAK_FIXTURE_CARGO;
     assert.ok(path.isAbsolute(cargo || '') && path.basename(cargo) === 'cargo', 'Explicit Cargo executable required');
@@ -275,6 +330,11 @@ function run() {
       assert.equal(info(false, '--show-runtime', REF), RUNTIME.slice(8));
       assert.equal(info(true, '--show-commit', RUNTIME), runtimeCommit);
       assert.equal(info(true, '--show-location', RUNTIME), runtimeLocation);
+      assert.equal(info(true, '--show-ref', RUNTIME), runtimeProvenance.ref);
+      assert.equal(info(true, '--show-origin', RUNTIME), runtimeProvenance.origin);
+      assert.equal(info(true, '--show-metadata', RUNTIME), runtimeProvenance.metadata);
+      assert.equal(fp(['list', '--system', '--runtime', '--columns=ref,active,origin']),
+        runtimeProvenance.installedRuntimeAndExtensionInventory, 'Runtime/extension inventory changed');
       const appMetadata = fp(['info', '--user', '--show-metadata', REF]); metadata(appMetadata);
       const permissions = fp(['info', '--user', '--show-permissions', REF]); metadata(permissions, true);
       safeDirectory(appLocation, uid);
@@ -286,7 +346,7 @@ function run() {
       assert.deepEqual(image(frozen, uid), frozenImage, 'Frozen echo changed');
       assert.deepEqual(image(originalEcho.path, uid), originalEcho, 'Echo recompiled during host-only build');
       const rt = ordinary(`${runtimeLocation}/files`, uid, { directory: true, system: true });
-      assert.equal(rt.dev, runtimeFiles.dev); assert.equal(rt.ino, runtimeFiles.ino);
+      assert.deepEqual({ dev: rt.dev, ino: rt.ino, uid: rt.uid, mode: rt.mode & 0o777 }, runtimeProvenance.files);
       return { ref: REF, commit: exportedCommit, location: appLocation, metadata: appMetadata, permissions,
         appFiles: { dev: appFiles.dev, ino: appFiles.ino, uid: appFiles.uid, mode: appFiles.mode & 0o777 }, echo };
     };
@@ -296,13 +356,15 @@ function run() {
       exportedCommit, runtimeCommit, installedBefore, runtimeLocation, compileHostAfterThisReceipt: true });
     report.phase = 'compile-pinned-host';
     // Only the host bin is built after independent installed deployment/image inspection.
-    invoke(cargo, cargoArgs(HOST), { ...buildEnv, ...pins }, 180000);
+    const pinnedBuildEnv = Object.freeze({ ...buildEnv, ...pins });
+    invoke(cargo, cargoArgs(HOST), pinnedBuildEnv, 180000);
     assert.deepEqual(inspect(), installedBefore, 'Deployment changed during host compilation');
     report.hostImage = image(path.join(work, 'target', 'release', HOST), uid);
     report.phase = 'native-prove-installed';
-    const native = invoke(report.hostImage.path, ['prove-installed'], { ...base, RUNNER_TEMP: env.RUNNER_TEMP,
+    const proofEnv = Object.freeze({ ...base, RUNNER_TEMP: env.RUNNER_TEMP,
       GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB',
-      CREATOR_FLATPAK_LAUNCH_PROOF: '1' }, 42000, false);
+      CREATOR_FLATPAK_LAUNCH_PROOF: '1' });
+    const native = invoke(report.hostImage.path, ['prove-installed'], proofEnv, 42000, false);
     save('native-result.json', { status: native.status, signal: native.signal, error: native.error?.code || null,
       stdout: native.stdout || '', stderr: native.stderr || '' });
     assert.deepEqual(image(report.hostImage.path, uid), report.hostImage, 'Host image changed during native exchange');
@@ -310,7 +372,36 @@ function run() {
     assert.deepEqual(settingsSnapshot(), beforeSettings, 'Isolated settings changed');
     const proof = nativeReport(native.stdout || '', native.error || native.signal ? null : native.status);
     report.native = proof; report.pins = pins; report.flatpakDeploymentTested = true;
-    report.syntheticLaunchProofPassed = true; report.ownedChildReaped = true; report.phase = 'complete';
+    report.syntheticLaunchProofPassed = true; report.ownedChildReaped = true;
+    const checkpoint = (label, testImage) => {
+      const deployment = inspect();
+      assert.deepEqual(deployment, installedBefore, 'Deployment changed during lifecycle tests');
+      assert.deepEqual(image(report.hostImage.path, uid), report.hostImage, 'Pinned host changed during lifecycle tests');
+      const sentinels = settingsSnapshot(); assert.deepEqual(sentinels, beforeSettings, 'Isolated settings changed');
+      if (testImage) assert.deepEqual(image(testImage.path, uid), testImage, 'Lifecycle executable changed');
+      save(`lifecycle-${label}.json`, { scope: 'fixed-installed-echo-lifecycle-only', deployment,
+        runtime: runtimeProvenance, hostImage: report.hostImage, testImage, settings: sentinels,
+        ...Object.fromEntries(FALSE_FIELDS.map(key => [key, false])), signedUpdateAccepted: false });
+    };
+    report.phase = 'compile-lifecycle-tests';
+    checkpoint('before-build');
+    const lifecycleTarget = path.join(work, 'lifecycle-target');
+    // A separate library-test target cannot overwrite the pinned host/echo bins.
+    const compiled = invoke(cargo, ['test', '--locked', '--offline', '--release', '--lib', '--no-run',
+      '--message-format=json', '--manifest-path', manifest, '--target-dir', lifecycleTarget], pinnedBuildEnv, 180000);
+    const executable = lifecycleExecutable(compiled.stdout, lifecycleTarget);
+    safeDirectory(path.dirname(executable), uid);
+    const testImage = image(executable, uid); report.lifecycleTestImage = testImage;
+    checkpoint('after-build', testImage);
+    report.phase = 'native-fixed-echo-lifecycle';
+    const results = runLifecycleTests(args => invoke(executable, args, proofEnv, 75000, false),
+      (phase, index, name) => {
+        report.phase = `native-fixed-echo-lifecycle-${index + 1}-${phase}`;
+        checkpoint(`${index + 1}-${phase}`, testImage);
+      });
+    save('lifecycle-tests.json', { scope: 'fixed-installed-echo-lifecycle-only', tests: results,
+      ...Object.fromEntries(FALSE_FIELDS.map(key => [key, false])), signedUpdateAccepted: false });
+    report.lifecycleTests = results; report.fixedEchoLifecycleTestsPassed = true; report.phase = 'complete';
   } catch (error) {
     report.failure = String(error.message).slice(0, 2048);
     process.exitCode = 1;
@@ -320,6 +411,7 @@ function run() {
       assert.deepEqual(after, beforeSettings); report.isolatedSettingsPreserved = true;
     } catch (error) {
       report.isolatedSettingsPreserved = false; report.settingsFailure = String(error.message).slice(0, 1024);
+      report.fixedEchoLifecycleTestsPassed = false;
       process.exitCode = 1;
     }
     save('report.json', report);
@@ -338,4 +430,4 @@ if (require.main === module) {
 }
 module.exports = { APP, REF, RUNTIME, ECHO, HOST, BRANCH, CHILDREN, FALSE_FIELDS,
   admission, childEnvironment, ordinary, safeDirectory, image, commit, sections, context, metadata,
-  nativeReport, pinsFrom, fixtureMetadata };
+  nativeReport, pinsFrom, fixtureMetadata, LIFECYCLE_TESTS, lifecycleExecutable, lifecycleResult, runLifecycleTests };

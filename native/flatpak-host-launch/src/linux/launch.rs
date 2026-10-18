@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     protocol::{self, Kind},
-    report,
+    report, EchoFailure,
 };
 use std::{
     os::{
@@ -20,64 +20,227 @@ const BUDGET: Duration = Duration::from_secs(30);
 const CLOSE_RANGE_CLOEXEC: u32 = 4;
 
 pub(crate) fn run() -> String {
-    let deadline = Instant::now() + BUDGET;
-    match prepare(deadline) {
-        Err(reason) => report(false, false, reason),
-        Ok((pins, root, uid, mut command, host, child_fd, id_read, id_write)) => {
-            let mut child = match spawn(&mut command, &child_fd, Some(&id_write)) {
-                Ok(child) => child,
-                Err(reason) => return report(false, false, reason),
-            };
-            drop(child_fd);
-            drop(id_write);
-            let proof = (|| -> Result<()> {
-                let outer = identity::process(child.id(), uid)?;
-                let owner = (child.id(), outer.start);
-                let instance = read_instance(&id_read, deadline)?;
-                let ready = transport::receive(&host, deadline)?;
-                if !protocol::matches(&ready.bytes, Kind::Ready, [0; 32]) {
-                    return Err("expected-ready");
-                }
-                let sender = identity::sender(&ready, None, owner, uid)?;
-                identity::deployment(&ready, &root, &pins, &instance, uid, deadline)?;
-                let nonce = nonce()?;
-                transport::send(&host, &protocol::packet(Kind::Challenge, nonce), deadline)?;
-                let echo = transport::receive(&host, deadline)?;
-                identity::sender(&echo, Some(sender), owner, uid)?;
-                identity::deployment(&echo, &root, &pins, &instance, uid, deadline)?;
-                if !protocol::matches(&echo.bytes, Kind::Echo, nonce) {
-                    return Err("echo-mismatch");
-                }
-                transport::send(&host, &protocol::packet(Kind::Close, nonce), deadline)?;
-                let closed = transport::receive(&host, deadline)?;
-                identity::sender(&closed, Some(sender), owner, uid)?;
-                identity::deployment(&closed, &root, &pins, &instance, uid, deadline)?;
-                if !protocol::matches(&closed.bytes, Kind::Closed, nonce) {
-                    return Err("close-mismatch");
-                }
-                transport::send(&host, &protocol::packet(Kind::Release, nonce), deadline)?;
-                // Keep all sender pidfds alive until the owned outer process exits.
-                let status = reap(&mut child, deadline).ok_or("owned-exit-deadline")?;
-                if !status.success() {
-                    return Err("owned-exit-nonzero");
-                }
-                Ok(())
-            })();
-            drop(host);
-            let reaped = match child.try_wait() {
+    match FixedEchoSession::launch_installed().and_then(FixedEchoSession::finish) {
+        Ok(()) => report(true, true, "synthetic-echo-and-owned-exit"),
+        Err(error) => report(false, error.owned_child_reaped(), error.reason()),
+    }
+}
+
+// Constructed immediately after our own spawn, so constructor failures also reap.
+struct OwnedLaunch {
+    socket: Option<OwnedFd>,
+    child: Child,
+    cleaned: bool,
+    reaped: bool,
+}
+
+impl OwnedLaunch {
+    fn socket(&self) -> Result<&OwnedFd> {
+        self.socket.as_ref().ok_or("echo-session-closed")
+    }
+
+    fn cleanup(&mut self) -> bool {
+        if !self.cleaned {
+            self.cleaned = true;
+            drop(self.socket.take());
+            self.reaped = match self.child.try_wait() {
                 Ok(Some(_)) => true,
-                _ => {
-                    // The retained Child cannot refer to a reused PID before reap.
-                    let _ = child.kill();
-                    reap(&mut child, Instant::now() + Duration::from_secs(2)).is_some()
+                Ok(None) => {
+                    let _ = self.child.kill();
+                    reap(&mut self.child, Instant::now() + Duration::from_secs(2)).is_some()
                 }
+                // An unresolved child ownership/reap state is not permission to signal.
+                Err(_) => false,
             };
-            report(
-                proof.is_ok() && reaped,
-                reaped,
-                proof.err().unwrap_or("synthetic-echo-and-owned-exit"),
-            )
         }
+        self.reaped
+    }
+}
+
+impl Drop for OwnedLaunch {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum Phase {
+    Ready,
+    Echoed,
+    Failed,
+}
+
+pub struct FixedEchoSession {
+    owned: OwnedLaunch,
+    pins: Pins,
+    root: PathBuf,
+    uid: u32,
+    owner: (u32, u64),
+    sender: (u32, u64),
+    instance: String,
+    messages: Vec<transport::Message>,
+    deadline: Instant,
+    phase: Phase,
+    nonce: [u8; 32],
+}
+
+impl FixedEchoSession {
+    /// Launch only the original compiled-pin, opted-in installed echo profile.
+    pub fn launch_installed() -> std::result::Result<Self, EchoFailure> {
+        let deadline = Instant::now() + BUDGET;
+        let (pins, root, uid, mut command, host, child_fd, id_read, id_write) =
+            prepare(deadline).map_err(|reason| EchoFailure {
+                reason,
+                owned_child_reaped: false,
+            })?;
+        let child =
+            spawn(&mut command, &child_fd, Some(&id_write)).map_err(|reason| EchoFailure {
+                reason,
+                owned_child_reaped: false,
+            })?;
+        let mut owned = OwnedLaunch {
+            socket: Some(host),
+            child,
+            cleaned: false,
+            reaped: false,
+        };
+        drop(child_fd);
+        drop(id_write);
+        let validated = (|| -> Result<_> {
+            let outer = identity::process(owned.child.id(), uid)?;
+            let owner = (owned.child.id(), outer.start);
+            let instance = read_instance(&id_read, deadline)?;
+            let ready = transport::receive(owned.socket()?, deadline)?;
+            if !protocol::matches(&ready.bytes, Kind::Ready, [0; 32]) {
+                return Err("expected-ready");
+            }
+            let sender = identity::sender(&ready, None, owner, uid)?;
+            identity::deployment(&ready, &root, &pins, &instance, uid, deadline)?;
+            Ok((owner, instance, ready, sender))
+        })();
+        let (owner, instance, ready, sender) = validated.map_err(|reason| EchoFailure {
+            reason,
+            owned_child_reaped: owned.cleanup(),
+        })?;
+        Ok(Self {
+            owned,
+            pins,
+            root,
+            uid,
+            owner,
+            sender,
+            instance,
+            messages: vec![ready],
+            deadline,
+            phase: Phase::Ready,
+            nonce: [0; 32],
+        })
+    }
+
+    fn checked(&self, message: &transport::Message) -> Result<()> {
+        if Instant::now() >= self.deadline {
+            return Err("deadline");
+        }
+        identity::sender(message, Some(self.sender), self.owner, self.uid)?;
+        identity::deployment(
+            message,
+            &self.root,
+            &self.pins,
+            &self.instance,
+            self.uid,
+            self.deadline,
+        )
+    }
+
+    fn failure(&mut self, reason: &'static str) -> EchoFailure {
+        self.phase = Phase::Failed;
+        EchoFailure {
+            reason,
+            owned_child_reaped: self.owned.cleanup(),
+        }
+    }
+
+    /// Recheck the retained last-message pidfd, sender and fixed deployment.
+    pub fn revalidate(&mut self) -> std::result::Result<(), EchoFailure> {
+        let result = if self.phase == Phase::Failed {
+            Err("echo-session-closed")
+        } else {
+            self.messages
+                .last()
+                .ok_or("echo-session-closed")
+                .and_then(|message| self.checked(message))
+        };
+        result.map_err(|reason| self.failure(reason))
+    }
+
+    /// Exactly one fixed random challenge. Failure permanently closes this session.
+    pub fn challenge(&mut self) -> std::result::Result<(), EchoFailure> {
+        if self.phase != Phase::Ready {
+            return Err(self.failure("echo-challenge-order"));
+        }
+        // Poison before I/O: a partial exchange can never be retried.
+        self.phase = Phase::Failed;
+        let result = (|| -> Result<()> {
+            self.checked(self.messages.last().ok_or("echo-session-closed")?)?;
+            self.nonce = nonce()?;
+            transport::send(
+                self.owned.socket()?,
+                &protocol::packet(Kind::Challenge, self.nonce),
+                self.deadline,
+            )?;
+            let echo = transport::receive(self.owned.socket()?, self.deadline)?;
+            self.checked(&echo)?;
+            if !protocol::matches(&echo.bytes, Kind::Echo, self.nonce) {
+                return Err("echo-mismatch");
+            }
+            self.messages.push(echo);
+            Ok(())
+        })();
+        result.map_err(|reason| self.failure(reason))?;
+        self.phase = Phase::Echoed;
+        Ok(())
+    }
+
+    /// Complete the fixed exchange once, close the socket and reap normal exit.
+    /// This consumes the capability and makes no Hub/publisher acceptance claim.
+    pub fn finish(mut self) -> std::result::Result<(), EchoFailure> {
+        if self.phase == Phase::Ready {
+            self.challenge()?;
+        }
+        if self.phase != Phase::Echoed {
+            return Err(self.failure("echo-session-closed"));
+        }
+        self.phase = Phase::Failed;
+        let result = (|| -> Result<()> {
+            self.checked(self.messages.last().ok_or("echo-session-closed")?)?;
+            transport::send(
+                self.owned.socket()?,
+                &protocol::packet(Kind::Close, self.nonce),
+                self.deadline,
+            )?;
+            let closed = transport::receive(self.owned.socket()?, self.deadline)?;
+            self.checked(&closed)?;
+            if !protocol::matches(&closed.bytes, Kind::Closed, self.nonce) {
+                return Err("close-mismatch");
+            }
+            self.messages.push(closed);
+            transport::send(
+                self.owned.socket()?,
+                &protocol::packet(Kind::Release, self.nonce),
+                self.deadline,
+            )?;
+            // All received sender pidfds remain owned until the outer exit is reaped.
+            let status = reap(&mut self.owned.child, self.deadline).ok_or("owned-exit-deadline")?;
+            if !status.success() {
+                return Err("owned-exit-nonzero");
+            }
+            Ok(())
+        })();
+        result.map_err(|reason| self.failure(reason))?;
+        if !self.owned.cleanup() {
+            return Err(self.failure("owned-exit-deadline"));
+        }
+        Ok(())
     }
 }
 
@@ -261,6 +424,58 @@ mod tests {
     fn missing_pins_cannot_start_flatpak() {
         if Pins::compiled().is_err() {
             assert!(run().contains("unreviewed-build-pins"));
+            assert_eq!(
+                FixedEchoSession::launch_installed().err().unwrap().reason(),
+                "unreviewed-build-pins"
+            );
         }
+    }
+
+    #[test]
+    #[ignore = "parent-coordinated fixed installed Flatpak profile only"]
+    fn installed_session_retains_live_echo_and_finishes_explicitly() {
+        let mut session = FixedEchoSession::launch_installed().unwrap();
+        assert!(session.owned.child.try_wait().unwrap().is_none());
+        assert_eq!(session.messages.len(), 1);
+        session.revalidate().unwrap();
+        session.challenge().unwrap();
+        assert_eq!(session.messages.len(), 2);
+        session.revalidate().unwrap();
+        session.finish().unwrap();
+    }
+
+    #[test]
+    #[ignore = "parent-coordinated fixed installed Flatpak profile only"]
+    fn duplicate_challenge_poison_closes_without_retry() {
+        let mut session = FixedEchoSession::launch_installed().unwrap();
+        session.challenge().unwrap();
+        let failure = session.challenge().unwrap_err();
+        assert_eq!(failure.reason(), "echo-challenge-order");
+        assert!(failure.owned_child_reaped());
+        assert!(session.revalidate().is_err());
+        assert!(session.finish().is_err());
+    }
+
+    #[test]
+    #[ignore = "parent-coordinated fixed installed Flatpak profile only"]
+    fn drop_reaps_only_its_owned_child_and_other_session_remains_live() {
+        let session = FixedEchoSession::launch_installed().unwrap();
+        let mut other = FixedEchoSession::launch_installed().unwrap();
+        drop(session);
+        assert!(other.owned.child.try_wait().unwrap().is_none());
+        other.revalidate().unwrap();
+        other.finish().unwrap();
+    }
+
+    #[test]
+    #[ignore = "parent-coordinated fixed installed Flatpak profile only"]
+    fn expired_live_session_refuses_and_cannot_restart_exchange() {
+        let mut session = FixedEchoSession::launch_installed().unwrap();
+        session.deadline = Instant::now();
+        let failure = session.challenge().unwrap_err();
+        assert_eq!(failure.reason(), "deadline");
+        assert!(failure.owned_child_reaped());
+        assert!(session.challenge().is_err());
+        assert!(session.finish().is_err());
     }
 }
