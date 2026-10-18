@@ -21,7 +21,7 @@ decision is not a claim of Flathub eligibility or completed Flatpak support.
 
 ## Verified Current State
 
-- **Confirmed mismatch:** `src/hosted.js` creates an iframe and reconstructs each
+- **Legacy design, retained for existing builds:** `src/hosted.js` creates an iframe and reconstructs each
   module's full document; `src-tauri/src/hosted.rs` starts its private executable.
   `scripts/build-unified.cjs` packages both launcher executables. This consolidates
   installation, but not the app interfaces or backend entrypoints.
@@ -35,6 +35,36 @@ decision is not a claim of Flathub eligibility or completed Flatpak support.
   restart, complete migration, production Flatpak host operation and direct Hub
   page operation. Prior component/authentication tests cover their named
   mechanisms only; they do not establish these outcomes.
+
+## Direct Implementation Checkpoint (2026-10-18)
+
+The default-off `integrated-features` Cargo feature now compiles Setup and MCP
+as internal Rust libraries. `src-tauri/src/features.rs` dispatches a finite,
+bounded command set on blocking workers; no module GUI or module webview is
+started. `src/features/` contains scoped pages under the existing Hub shell.
+Legacy app-opening commands refuse in this mode, including development builds
+without a bundled descriptor. Existing Windows builds do not enable the feature.
+
+Setup retains its existing creation, installation and repair handlers. MCP uses
+an explicit, thread-bound integration scope, retained writer locks, exact
+before-images and operation/recovery journals. Its service-only settings review
+receipt records the actual native approval; conflict/legacy stores are not
+silently merged or reset. Cancelled review keeps the form locked. MCP's stable
+managed route is bound only for operations that require it, not page navigation.
+
+Hub owns operation/close/update leases. A returned or panicked MCP workflow can
+be closed only after native approval and a second worker-state check; it is not
+replayed, rolled back or marked successful. Migration retains its operation
+lease through the saved completion record. Update restoration uses normal Hub
+navigation, never a saved standalone executable. These mechanisms have portable
+tests; native GUI interleavings and installed acceptance remain separate gates.
+
+The experimental Linux host build now registers fixed session activation on its
+normal integrated window. An explicit integrated-candidate DEB profile combines
+the existing retirement helper/policy with the fixed D-Bus service. Candidate
+receipts keep all native operation and release-readiness flags false. The first
+native compile/test job is `linux-integrated-features.yml`; it neither signs nor
+installs nor publishes software. No new version has been selected or published.
 
 ## Implementation Order
 
@@ -86,5 +116,6 @@ The target is one product and interface, not an artificial single-process limit.
   window, host settings preservation, restart/reactivation and safe removal.
   Do not claim sandboxed Hub operation when the native helper hosts the window.
 
-Do not choose a release number or publish based on this document. This records
-the required architecture and work order, not completed integration or acceptance.
+Do not choose a release number or publish based on this document. Source and
+portable test results do not establish installed migration, update, restart or
+Flatpak acceptance.

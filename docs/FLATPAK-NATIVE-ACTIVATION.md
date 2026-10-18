@@ -8,7 +8,8 @@ sandbox**, with native host XDG/settings and native MCP/Setup functions. It is
 not the earlier sandboxed-GUI/native-Core relay and does not host old app pages.
 
 **Source and portable tests only. Not release-ready or installed support.** Root
-startup wiring, a signed native installer containing the service, a real Flatpak
+startup wiring exists behind `integrated-features` plus
+`experimental-flatpak-host`. A signed native installer containing the service, a real Flatpak
 launcher build, installed activation, host settings retention, signed DEB update,
 automatic restart/reactivation and removal remain required acceptance gates.
 The historical echo/kernel fixtures and their receipts remain unchanged.
@@ -23,8 +24,10 @@ alone is not a working universal Linux installation. The service itself adds no
 systemd unit or polkit rule; this does not generalize Ubuntu test results to
 other desktops or authentication agents.
 
-No Root main/Cargo/index/page code, Windows release bytes, website, signing keys,
-published release, existing recipe or CI workflow is modified by this slice.
+The launcher foundation did not modify Root startup. The subsequent direct Hub
+integration adds native service wiring and an explicit integrated DEB candidate
+profile. Installed/published Windows bytes, website and existing test-only
+package profiles remain unchanged.
 
 ## Launcher Contract
 
@@ -65,7 +68,7 @@ It is never redirected to an unverified arbitrary/latest URL by runtime data.
 Each native update still uses Hub's existing signed native updater; a compatible
 `Host1.Start()` protocol need not require a second paired GUI binary update.
 
-## Root Integration Required From Parent
+## Root Contract And Remaining Acceptance
 
 1. Feature-gate the approved native activation flag `--flatpak-activate`. This
    starts the normal integrated Hub, **not** the experimental zero-window Core
@@ -161,4 +164,7 @@ in-memory package checks are available. Linux cross-Clippy currently stops in
 the GTK/GIO sys build scripts because no Linux GTK sysroot/pkg-config is
 configured. The local WSL image also lacks pkg-config. No stub, permission
 relaxation, substitute success flag or native/CI dispatch was used to hide that.
-The real Linux GTK build and installed Flatpak/DEB operations remain unverified.
+Native GTK compilation is now dispatched in the dedicated, read-only
+`linux-integrated-features.yml` workflow. Its result and installed Flatpak/DEB
+operations must be recorded independently; no native acceptance is inferred from
+the source wiring or the local cross-compile limitation.

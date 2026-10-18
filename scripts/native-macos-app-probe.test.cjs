@@ -72,11 +72,11 @@ test('fresh version/source options are all-or-none independent pins, not action 
 });
 test('current Linux-only assembly default preserves exact pins and split permissions; archived Mac capture is separate', () => {
   const expected = [
-    { target: 'linux', os: 'ubuntu-22.04', assetId: 641477926, zipBytes: 58332901, zipSha256: '679c376684bc705f1cb453e12f421cc5dd729007315454742ff4f94f1ee88001', handoffSha256: '77bf64dcf8c82d4e9ad5e4112445a59639425e6315d4723f910bd8058c9a1a62' },
+    { target: 'linux', os: 'ubuntu-22.04', assetId: 641883669, zipBytes: 53946597, zipSha256: '28887d8d783468e04583d75905ca732237986f90110dea1d4929a103e37c6eb5', handoffSha256: '75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae' },
   ];
   const matrices = [...assemblyWorkflow.matchAll(/fromJSON\(inputs.signed_inputs \|\| '([^']+)'\)/g)];
   assert.equal(matrices.length, 2); for (const [, value] of matrices) assert.deepEqual(JSON.parse(value), expected);
-  assert.match(assemblyWorkflow, /branches: \[validation\/unix-assembly-014\]\n    paths: \['\.github\/workflows\/unix-managed-assembly.yml'\]/);
+  assert.match(assemblyWorkflow, /push:\n    branches: \[validation\/unix-assembly-014\]\n  workflow_dispatch:/);
   assert.match(assemblyWorkflow, /permissions:\n  contents: read\njobs:/);
   assert.equal((assemblyWorkflow.match(/contents: write/g) || []).length, 1);
   const stage = assemblyWorkflow.split('  stage-input:')[1].split('  assembly:')[0];
