@@ -1,6 +1,7 @@
 """Pure/temp contracts only. Never launches an agent, pkexec or native session."""
 import ast
 import copy
+import contextlib
 import hashlib
 import importlib.util
 import io
@@ -53,8 +54,9 @@ class ContractTests(unittest.TestCase):
     def test_cancel_requires_exact_explicit_manual_mode_and_readonly_stays_default(self):
         self.assertEqual(p.capture_mode(runner()), "read-only")
         p.admission(runner() | {"GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "cancel"}, "linux", "x86_64")
+        p.admission(runner() | {"GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "admin-capture"}, "linux", "x86_64")
         for event, mode in (("push", "cancel"), ("workflow_dispatch", "authenticate"), ("workflow_dispatch", ""),
-                            ("workflow_dispatch", "cancel; true")):
+                            ("workflow_dispatch", "cancel; true"), ("push", "admin-capture")):
             with self.subTest(event=event, mode=mode), self.assertRaises(RuntimeError):
                 p.admission(runner() | {"GITHUB_EVENT_NAME": event, "CREATOR_LINUX_POLKIT_MODE": mode}, "linux", "x86_64")
 
@@ -95,7 +97,8 @@ class ContractTests(unittest.TestCase):
     def test_source_contract_with_small_frozen_fixture_never_runs_code(self):
         main = 'polkit_unix_session_new_for_process_sync (getpid ()\nPOLKIT_AGENT_REGISTER_FLAGS_NONE\n' + p.AGENT_PATH + '\npolkit_agent_listener_register\ngoto out;'
         dialog = 'gtk_entry_set_visibility (GTK_ENTRY (dialog->priv->password_entry), FALSE)\nGTK_STOCK_CANCEL,\nGTK_RESPONSE_CANCEL\nGTK_RESPONSE_OK'
-        authenticator = 'gtk_widget_destroy (authenticator->dialog);'
+        dialog += '\nTEXT_COL, _("Select user...")\ngtk_combo_box_set_active (GTK_COMBO_BOX (combo), 0);\ng_strv_length (dialog->priv->users) > 1\ndialog->priv->selected_user = g_strdup (dialog->priv->users[0]);'
+        authenticator = 'gtk_widget_destroy (authenticator->dialog);\ng_ascii_strncasecmp (request, "password:", 9)\nstrcmp (g_get_user_name (), authenticator->selected_user)'
         main_name = "polkit-gnome-0.105/src/main.c"
         dialog_name = "polkit-gnome-0.105/src/polkitgnomeauthenticationdialog.c"
         authenticator_name = "polkit-gnome-0.105/src/polkitgnomeauthenticator.c"
@@ -480,6 +483,141 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(p.windows(21, None, x11)[0]["title"], "Unexpected native title")
 
 
+class AdminCaptureTests(unittest.TestCase):
+    def test_factory_admin_mapping_must_be_exact_root_owned_canonical_0644_without_any_chmod(self):
+        path = mock.MagicMock()
+        path.resolve.return_value = path
+        path.lstat.return_value = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0, st_gid=0, st_nlink=1)
+        with mock.patch.object(p, "ADMIN_CONFIG", path), mock.patch.object(b, "pinned", return_value={"sha256": p.ADMIN_CONFIG_PIN[1]}) as pin, \
+                mock.patch.object(b, "run_tool") as command:
+            self.assertEqual(p.admin_config()["sha256"], p.ADMIN_CONFIG_PIN[1])
+        pin.assert_called_once_with(path, p.ADMIN_CONFIG_PIN, 0o644)
+        command.assert_not_called()
+        for change in ("owner", "symlink", "hardlink", "pin"):
+            path.lstat.return_value = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o644,
+                st_uid=1 if change == "owner" else 0, st_gid=0, st_nlink=2 if change == "hardlink" else 1)
+            path.resolve.return_value = Path("/different") if change == "symlink" else path
+            with self.subTest(change=change), mock.patch.object(p, "ADMIN_CONFIG", path), \
+                    mock.patch.object(b, "pinned", side_effect=RuntimeError("factory bytes/mode differ")), self.assertRaises(RuntimeError):
+                p.admin_config()
+
+    def groups(self):
+        before = {"root": {"gid": 0, "members": []}, "sudo": {"gid": 27, "members": ["packer"]},
+                  "docker": {"gid": 120, "members": ["runner"]}, p.USER: {"gid": p.UID, "members": []}}
+        after = copy.deepcopy(before)
+        after["sudo"]["members"] = sorted(["packer", p.USER])
+        return before, after
+
+    def test_only_fresh_fixture_append_preserves_every_other_membership(self):
+        before, after = self.groups()
+        p.admin_group_delta(before, after)
+        for change in ("remove-existing", "other-user", "other-group", "gid", "already-member", "missing-group"):
+            original, changed = copy.deepcopy(before), copy.deepcopy(after)
+            if change == "remove-existing":
+                changed["sudo"]["members"].remove("packer")
+            elif change == "other-user":
+                changed["sudo"]["members"].append("foreign")
+            elif change == "other-group":
+                changed["docker"]["members"].remove("runner")
+            elif change == "gid":
+                changed["sudo"]["gid"] = 28
+            elif change == "already-member":
+                original["sudo"]["members"].append(p.USER)
+            elif change == "missing-group":
+                del changed["docker"]
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                p.admin_group_delta(original, changed)
+
+    def test_group_inventory_selects_only_public_metadata_not_credential_fields(self):
+        before, _after = self.groups()
+        entries = [types.SimpleNamespace(gr_name=n, gr_gid=v["gid"], gr_mem=v["members"]) for n, v in before.items()]
+        with mock.patch.dict(sys.modules, {"grp": types.SimpleNamespace(getgrall=lambda: entries)}):
+            self.assertEqual(p.group_inventory(), before)
+        entries.append(entries[0])
+        with mock.patch.dict(sys.modules, {"grp": types.SimpleNamespace(getgrall=lambda: entries)}), self.assertRaises(RuntimeError):
+            p.group_inventory()
+
+    @contextlib.contextmanager
+    def provision(self):
+        before, after = self.groups()
+        account = types.SimpleNamespace(pw_uid=p.UID, pw_gid=p.UID, pw_dir="/var/lib/creator-polkit-fixture", pw_shell="/bin/bash")
+        env = runner() | {"GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "admin-capture"}
+        with tempfile.TemporaryDirectory() as temp, contextlib.ExitStack() as stack:
+            output = Path(temp).resolve()
+            stack.enter_context(mock.patch.dict(sys.modules, {"pwd": types.SimpleNamespace(getpwnam=lambda _name: account)}))
+            stack.enter_context(mock.patch.object(p.os, "getuid", return_value=1001, create=True))
+            stack.enter_context(mock.patch.object(p.os, "geteuid", return_value=1001, create=True))
+            memberships = stack.enter_context(mock.patch.object(p.os, "getgrouplist", side_effect=[[p.UID], [p.UID, 27]], create=True))
+            stack.enter_context(mock.patch.object(p, "BASE", output / "fresh-fixture"))
+            groups = stack.enter_context(mock.patch.object(p, "group_inventory", side_effect=[before, after]))
+            policy = stack.enter_context(mock.patch.object(p, "admin_config", return_value={"sha256": p.ADMIN_CONFIG_PIN[1]}))
+            command = stack.enter_context(mock.patch.object(b, "run_tool", return_value=(0, b"")))
+            yield types.SimpleNamespace(**locals())
+
+    def test_provision_uses_one_fixed_append_only_command_no_password_or_policy_write(self):
+        with self.provision() as f:
+            result = p.prepare_admin_capture(f.env, f.output)
+            f.command.assert_called_once_with(f.output, "admin-capture-group-append",
+                ["/usr/bin/sudo", "-n", "/usr/sbin/usermod", "--append", "--groups", "sudo", p.USER], seconds=8)
+            self.assertTrue(result["membershipVerified"])
+            self.assertTrue(result["otherMembershipsPreserved"])
+            self.assertFalse(result["passwordProvisioned"])
+            self.assertFalse(result["policyChanged"])
+            self.assertTrue(all(result[k] is False for k in p.FLAGS))
+            self.assertEqual(json.loads((f.output / "polkit-admin-group-preflight.json").read_text()), result)
+
+    def test_wrong_mode_reused_identity_memberships_or_policy_refuse_before_mutation(self):
+        for change in ("mode", "event", "uid", "existing-membership", "already-used", "policy"):
+            with self.subTest(change=change), self.provision() as f:
+                if change == "mode":
+                    f.env["CREATOR_LINUX_POLKIT_MODE"] = "cancel"
+                elif change == "event":
+                    f.env["GITHUB_EVENT_NAME"] = "push"
+                elif change == "uid":
+                    f.account.pw_uid = 999
+                elif change == "existing-membership":
+                    f.memberships.side_effect = [[p.UID, 27]]
+                elif change == "already-used":
+                    (p.BASE / "result/home").mkdir(parents=True)
+                else:
+                    f.policy.side_effect = RuntimeError("stock config pin differs")
+                with self.assertRaises(RuntimeError):
+                    p.prepare_admin_capture(f.env, f.output)
+                f.command.assert_not_called()
+                retained = json.loads((f.output / "polkit-admin-group-preflight.json").read_text())
+                self.assertIn("refusal", retained)
+                self.assertFalse(retained["membershipVerified"])
+
+    def test_other_membership_changes_after_command_are_retained_not_repaired_or_retried(self):
+        with self.provision() as f:
+            f.after["sudo"]["members"].remove("packer")
+            with self.assertRaises(RuntimeError):
+                p.prepare_admin_capture(f.env, f.output)
+            f.command.assert_called_once()
+            retained = json.loads((f.output / "polkit-admin-group-preflight.json").read_text())
+            self.assertFalse(retained["membershipVerified"])
+            self.assertEqual(retained["phase"], "append-only-sudo")
+
+    def test_observation_retains_actual_selector_labels_never_selects_or_reads_password(self):
+        agent, helper, atspi, refs, app, _label, password, _edit = CaptureTests().fixture()
+        atspi.Role.COMBO_BOX = 11
+        selector = fixtures.AxNode(agent["pid"], 11, "Select user...", parent=app.children[0])
+        selector.get_action_iface = mock.Mock(side_effect=AssertionError("Identity selection attempted"))
+        raw = p.raw_ax(agent, helper, atspi, refs)
+        result = p.admin_identity_observation(raw, atspi)
+        self.assertEqual([row.get("name") for row in result["selectorNodes"]], ["Select user..."])
+        self.assertFalse(result["identitySelected"])
+        self.assertFalse(result["selectedIdentityVerified"])
+        self.assertTrue(all(result[k] is False for k in p.FLAGS))
+        selector.get_action_iface.assert_not_called()
+        password.get_name.assert_not_called()
+        password.get_text_iface.assert_not_called()
+        self.assertNotIn("MUST NOT READ", json.dumps(result))
+        raw["nodes"][-1] = next(row for row in raw["nodes"] if row["role"] == 40) | {"name": "must stay omitted"}
+        with self.assertRaises(RuntimeError):
+            p.admin_identity_observation(raw, atspi)
+
+
 class CancelTests(unittest.TestCase):
     def fixture(self):
         helper = b.load_helper()
@@ -751,12 +889,27 @@ class WorkflowTests(unittest.TestCase):
 
     def test_cancel_is_explicit_dispatch_choice_not_automatic_push_or_authentication(self):
         choice = self.workflow["on"]["workflow_dispatch"]["inputs"]["mode"]
-        self.assertEqual(choice, {"description": "Synthetic dialog capture only, or one Cancel press without authentication",
-            "type": "choice", "required": True, "default": "read-only", "options": ["read-only", "cancel"]})
+        self.assertEqual(choice, {"description": "Locked-account capture, one Cancel press, or locked synthetic-admin capture; never authentication",
+            "type": "choice", "required": True, "default": "read-only", "options": ["read-only", "cancel", "admin-capture"]})
         self.assertEqual(self.workflow["jobs"]["contract"]["env"]["CREATOR_LINUX_POLKIT_MODE"], "${{ inputs.mode || 'read-only' }}")
         text = WORKFLOW.read_text()
-        self.assertIn('cancel) test "$GITHUB_EVENT_NAME" = workflow_dispatch', text)
+        self.assertIn('cancel|admin-capture) test "$GITHUB_EVENT_NAME" = workflow_dispatch', text)
         self.assertIn('--setenv=CREATOR_LINUX_POLKIT_MODE="$CREATOR_LINUX_POLKIT_MODE"', text)
+
+    def test_admin_membership_preparation_is_after_fresh_creation_and_only_for_admin_capture(self):
+        text = WORKFLOW.read_text()
+        block = 'if test "$CREATOR_LINUX_POLKIT_MODE" = admin-capture; then\n            python3 -B scripts/native-linux-polkit-probe.py prepare-admin-capture\n          fi'
+        self.assertEqual(text.count("prepare-admin-capture"), 1)
+        self.assertIn(block, text)
+        self.assertLess(text.index("Synthetic fixture identity already exists"), text.index("sudo useradd"))
+        self.assertLess(text.index("sudo useradd"), text.index(block))
+        self.assertLess(text.index(block), text.index("sudo systemd-run"))
+        self.assertIn("polkit-admin-group-preflight.json", text)
+        source = (HERE / "native-linux-polkit-probe.py").read_text()
+        admin_branch = source.split('if record["mode"] == "admin-capture":\n            record["adminIdentityObservation"]', 1)[1].split('if record["mode"] == "cancel":', 1)[0]
+        self.assertNotIn("cancel_once", admin_branch)
+        self.assertNotIn(".do_action(", admin_branch)
+        self.assertNotIn("pw_passwd", source)
 
     def test_real_pam_session_one_locked_account_no_policy_override_or_credential_read(self):
         text = WORKFLOW.read_text()

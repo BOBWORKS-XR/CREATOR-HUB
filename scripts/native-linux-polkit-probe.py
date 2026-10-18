@@ -26,6 +26,8 @@ AGENT_PATH = "/org/gnome/PolicyKit1/AuthenticationAgent"
 COMMAND = ("/usr/bin/pkexec", "--disable-internal-agent", "/usr/bin/true")
 QUESTION = "Authentication is needed to run `/usr/bin/true' as the super user"
 STOCK_POLICY = "/usr/share/polkit-1/actions/org.freedesktop.policykit.policy"
+ADMIN_CONFIG = Path("/etc/polkit-1/localauthority.conf.d/51-ubuntu-admin.conf")
+ADMIN_CONFIG_PIN = (65, "2d07cca6b69c06239f03a0ce8c0c0e95645deb1cbe67df22419ac78bb76bd348")
 STOCK_ARCHIVE = ("https://archive.ubuntu.com/ubuntu/pool/main/p/policykit-1/polkitd_0.105-33ubuntu0.2_amd64.deb",
                  80152, "8a8e123a44e2c3deef2c072db7248e94d9d7ad7c874127facc7d1abaf622ea85")
 HELPERS = {"native-linux-root-probe.py": "91983346c5bac811028135b41c11a0dfc10e40a61c9f65aab535df326e354e72",
@@ -81,8 +83,8 @@ def admission(env, system, machine):
 
 def capture_mode(env):
     mode = env.get("CREATOR_LINUX_POLKIT_MODE", "read-only")
-    require(mode in ("read-only", "cancel"), "Only read-only or Cancel-only mode is supported")
-    require(mode != "cancel" or env.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "Cancel requires explicit manual CI mode")
+    require(mode in ("read-only", "cancel", "admin-capture"), "Unknown finite polkit fixture mode")
+    require(mode == "read-only" or env.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "Non-default mode requires explicit manual CI mode")
     return mode
 
 
@@ -119,12 +121,103 @@ def source_contract(fetch=None):
             and "GTK_RESPONSE_CANCEL" in dialog and "GTK_RESPONSE_OK" in dialog, "GTK dialog source differs")
     require("GTK_STOCK_CANCEL," in dialog and "gtk_widget_destroy (authenticator->dialog);" in authenticator,
             "Native Cancel/finalization source differs")
+    require('TEXT_COL, _("Select user...")' in dialog and 'gtk_combo_box_set_active (GTK_COMBO_BOX (combo), 0);' in dialog
+            and 'g_strv_length (dialog->priv->users) > 1' in dialog
+            and 'dialog->priv->selected_user = g_strdup (dialog->priv->users[0]);' in dialog
+            and 'g_ascii_strncasecmp (request, "password:", 9)' in authenticator
+            and 'strcmp (g_get_user_name (), authenticator->selected_user)' in authenticator,
+            "Native administrator-selection/prompt source differs")
     series = selected["debian/patches/series"].splitlines()
     patches = [selected["debian/patches/" + s.strip()] for s in series if s.strip() and not s.startswith("#")]
     require(len(patches) == 6 and sum("src/main.c" in patch for patch in patches) == 1
             and "register_client_to_gnome_session();" in selected["debian/patches/04-autorestart.patch"], "Ubuntu session patch set differs")
     return {"scope": "primary-source-contract-only", "archives": records, "sourceFiles": SOURCE_FILES,
-            "requiresRealLogindSession": True, "dbusObjectPath": AGENT_PATH, **FLAGS}
+            "requiresRealLogindSession": True, "dbusObjectPath": AGENT_PATH,
+            "identitySelection": {"multiIdentityInitialLabel": "Select user...", "singleIdentitySelectsOnlyUser": True,
+                                  "ownPasswordLabel": "Password:", "otherPasswordLabel": "Password for %s:"}, **FLAGS}
+
+
+def admin_config():
+    info = ADMIN_CONFIG.lstat()
+    require(ADMIN_CONFIG.resolve(strict=True) == ADMIN_CONFIG and stat.S_ISREG(info.st_mode)
+            and info.st_uid == info.st_gid == 0 and info.st_nlink == 1, "Exact ordinary root-owned stock admin mapping required")
+    return base().pinned(ADMIN_CONFIG, ADMIN_CONFIG_PIN, 0o644)
+
+
+def group_inventory():
+    import grp
+    entries = grp.getgrall()
+    require(0 < len(entries) <= 256 and len({g.gr_name for g in entries}) == len(entries), "Bounded unique group inventory required")
+    require(all(type(g.gr_gid) is int and g.gr_gid >= 0 and len(g.gr_mem) <= 128
+                and type(g.gr_name) is str and 0 < len(g.gr_name) <= 128
+                and all(type(n) is str and 0 < len(n) <= 128 for n in g.gr_mem)
+                and len(set(g.gr_mem)) == len(g.gr_mem) for g in entries), "Ordinary bounded group memberships required")
+    # Select public names/GIDs/members only, never credential fields.
+    return {g.gr_name: {"gid": g.gr_gid, "members": sorted(g.gr_mem)} for g in entries}
+
+
+def admin_group_delta(before, after):
+    require("sudo" in before and before["sudo"]["gid"] not in (0, UID)
+            and not any(USER in group["members"] for group in before.values()), "Fresh fixture must have no supplementary memberships")
+    expected = {name: {"gid": group["gid"], "members": list(group["members"])} for name, group in before.items()}
+    expected["sudo"]["members"] = sorted([*expected["sudo"]["members"], USER])
+    require(after == expected, "Only the fresh fixture may be appended to sudo; all other memberships must stay identical")
+
+
+def prepare_admin_capture(env, output):
+    import pwd
+    receipt = {"scope": "disposable-fresh-fixture-sudo-membership-only", "source": env["GITHUB_SHA"],
+               "fixture": USER, "uid": UID, "group": "sudo", "passwordProvisioned": False, "policyChanged": False,
+               "membershipVerified": False, "phase": "fresh-identity-preflight", **FLAGS}
+    try:
+        require(capture_mode(env) == "admin-capture" and os.getuid() == os.geteuid() and os.getuid() not in (0, UID),
+                "Only disposable provisioning runner may prepare manual admin capture")
+        require(not (BASE / "result/home").exists(), "Refusing an already used fixture session")
+        account = pwd.getpwnam(USER)
+        identity = (account.pw_uid, account.pw_gid, account.pw_dir, account.pw_shell)
+        require(identity == (UID, UID, "/var/lib/creator-polkit-fixture", "/bin/bash"), "Exact freshly created fixture identity required")
+        require(set(os.getgrouplist(USER, UID)) == {UID}, "Fixture already has supplementary groups")
+        before, policy = group_inventory(), admin_config()
+        require("sudo" in before and before["sudo"]["gid"] not in (0, UID)
+                and not any(USER in group["members"] for group in before.values()), "Fresh fixture must have no supplementary memberships")
+        receipt["phase"] = "append-only-sudo"
+        code, _raw = base().run_tool(output, "admin-capture-group-append",
+            ["/usr/bin/sudo", "-n", "/usr/sbin/usermod", "--append", "--groups", "sudo", USER], seconds=8)
+        require(code == 0, "Fixed fixture-only supplementary-group append failed")
+        after = group_inventory()
+        admin_group_delta(before, after)
+        account = pwd.getpwnam(USER)
+        require((account.pw_uid, account.pw_gid, account.pw_dir, account.pw_shell) == identity
+                and set(os.getgrouplist(USER, UID)) == {UID, before["sudo"]["gid"]},
+                "Fixture account or supplementary groups differ after append")
+        require(admin_config() == policy, "Stock admin mapping changed")
+        receipt.update(membershipVerified=True, sudoGid=before["sudo"]["gid"], otherMembershipsPreserved=True,
+            phase="membership-verified",
+            beforeMembershipSha256=hashlib.sha256(json.dumps(before, sort_keys=True).encode()).hexdigest(),
+            afterMembershipSha256=hashlib.sha256(json.dumps(after, sort_keys=True).encode()).hexdigest(), stockAdminMapping=policy)
+    except Exception as error:
+        receipt["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        raise
+    finally:
+        base().save_json(output / "polkit-admin-group-preflight.json", receipt)
+    return receipt
+
+
+def admin_identity_observation(observed, atspi):
+    """Retain actual names/roles only; never select an identity or infer one."""
+    require(observed["readOnly"] and observed["actionCount"] == 0 and not observed["authorization"], "Read-only native capture required")
+    selectors = {getattr(atspi.Role, key, -1) for key in ("COMBO_BOX", "MENU", "MENU_ITEM", "LIST", "LIST_ITEM", "RADIO_BUTTON")}
+    labels, selection, passwords = [], [], []
+    for row in observed["nodes"]:
+        if row["role"] == int(atspi.Role.PASSWORD_TEXT):
+            require(row["editableOrPasswordOmitted"] and "name" not in row and "text" not in row, "Password content must remain omitted")
+            passwords.append({key: row[key] for key in ("reference", "role", "showing", "enabled", "sensitive", "editableOrPasswordOmitted")})
+        elif row["role"] in selectors:
+            selection.append(row)
+        elif row["role"] == int(atspi.Role.LABEL) and row.get("name"):
+            labels.append(row)
+    return {"readOnly": True, "actionCount": 0, "identitySelected": False, "selectedIdentityVerified": False,
+            "labels": labels, "selectorNodes": selection, "passwordNodes": passwords, **FLAGS}
 
 
 def stock_policy_contract(tar_bytes):
@@ -570,6 +663,12 @@ def probe(env):
                     and b.file_record(script, 256 * 1024)["sha256"] == digest, "Root-installed fixture source differs")
         record["scriptBinding"] = binding
         record["files"] = verify_files(output)
+        if record["mode"] == "admin-capture":
+            import grp
+            admin = grp.getgrnam("sudo")
+            require(USER in admin.gr_mem and admin.gr_gid in os.getgroups(), "Fresh synthetic administrator not in actual session groups")
+            record["adminMembership"] = {"fixture": USER, "uid": UID, "sudoGid": admin.gr_gid,
+                                         "sessionGroupVerified": True, "stockAdminMapping": admin_config(), "passwordProvisioned": False}
         for name in ("home", "home/config", "home/data", "home/cache", "tmp"):
             (output / name).mkdir(mode=0o700)
         child_env = finite_environment(env, output)
@@ -633,6 +732,8 @@ def probe(env):
             break
         else:
             raise RuntimeError("Agent GTK dialog deadline; no password/input fallback")
+        if record["mode"] == "admin-capture":
+            record["adminIdentityObservation"] = admin_identity_observation(observed, Atspi)
         if record["mode"] == "cancel":
             def guard():
                 own_agent(agent, identity, parent, helper)
@@ -665,7 +766,7 @@ def probe(env):
         record["sessionTeardownRequired"] = True
         b.save_json(output / "polkit-report.json", record)
     require(record["dialogContractCaptured"] and "refusal" not in record
-            and (record["mode"] == "read-only" or record["cancelAccepted"]), "Native polkit capture refused; original evidence retained")
+            and (record["mode"] in ("read-only", "admin-capture") or record["cancelAccepted"]), "Native polkit capture refused; original evidence retained")
     return record
 
 
@@ -678,6 +779,9 @@ def main():
         print(json.dumps(source_contract()))
         return
     admission(os.environ, sys.platform, platform.machine())
+    if sys.argv[1:] == ["prepare-admin-capture"]:
+        print(json.dumps(prepare_admin_capture(os.environ, base().ordinary(os.environ["RUNNER_TEMP"]))))
+        return
     if sys.argv[1:] == ["secure-stock-policy"]:
         print(json.dumps(secure_stock_policy(base().ordinary(os.environ["RUNNER_TEMP"]))))
         return

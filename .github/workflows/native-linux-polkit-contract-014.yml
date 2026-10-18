@@ -1,14 +1,14 @@
-name: Native GNOME polkit contract (read-only or Cancel-only)
+name: Native GNOME polkit contract (capture or Cancel-only)
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Synthetic dialog capture only, or one Cancel press without authentication
+        description: Locked-account capture, one Cancel press, or locked synthetic-admin capture; never authentication
         type: choice
         required: true
         default: read-only
-        options: [read-only, cancel]
+        options: [read-only, cancel, admin-capture]
   push:
     branches: [validation/linux-polkit-contract-014]
     paths:
@@ -122,6 +122,9 @@ jobs:
               json.dump({'source': os.environ['GITHUB_SHA'], 'files': hashes}, stream)
           PY
           sudo install -o 0 -g 0 -m 0644 "$RUNNER_TEMP/polkit-script-binding.json" /opt/creator-polkit-fixture/source-binding.json
+          if test "$CREATOR_LINUX_POLKIT_MODE" = admin-capture; then
+            python3 -B scripts/native-linux-polkit-probe.py prepare-admin-capture
+          fi
       - name: Real PAM logind session and private GUI (explicit mode, never authentication)
         run: |
           set -euo pipefail
@@ -129,7 +132,7 @@ jobs:
           # or replace the system authority. The locked account receives no password.
           case "$CREATOR_LINUX_POLKIT_MODE" in
             read-only) ;;
-            cancel) test "$GITHUB_EVENT_NAME" = workflow_dispatch ;;
+            cancel|admin-capture) test "$GITHUB_EVENT_NAME" = workflow_dispatch ;;
             *) echo 'Unknown synthetic dialog mode' >&2; exit 1 ;;
           esac
           sudo systemd-run --wait --pipe --collect --unit=creator-polkit-fixture \
@@ -172,4 +175,5 @@ jobs:
             ${{ runner.temp }}/polkit-directory-preflight.json
             ${{ runner.temp }}/polkit-stock-policy-preflight.json
             ${{ runner.temp }}/polkit-script-binding.json
+            ${{ runner.temp }}/polkit-admin-group-preflight.json
             ${{ runner.temp }}/polkit-capture/*
