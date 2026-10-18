@@ -1,14 +1,14 @@
-name: Native GNOME polkit contract (capture or Cancel-only)
+name: Native GNOME polkit mechanism contract
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Locked-account capture, one Cancel press, or locked synthetic-admin capture; never authentication
+        description: Read-only capture, one Cancel, or explicit synthetic-admin authentication (never updater)
         type: choice
         required: true
         default: read-only
-        options: [read-only, cancel, admin-capture]
+        options: [read-only, cancel, admin-capture, authenticate]
   push:
     branches: [validation/linux-polkit-contract-014]
     paths:
@@ -28,7 +28,7 @@ jobs:
          (github.event_name == 'workflow_dispatch' &&
           ((inputs.mode || 'read-only') == 'read-only' || inputs.mode == 'cancel')))) ||
        (github.ref == 'refs/heads/validation/linux-polkit-admin-014' &&
-        github.event_name == 'workflow_dispatch' && inputs.mode == 'admin-capture'))
+        github.event_name == 'workflow_dispatch' && (inputs.mode == 'admin-capture' || inputs.mode == 'authenticate')))
     runs-on: ubuntu-22.04
     timeout-minutes: 8
     env:
@@ -53,7 +53,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends policykit-1-gnome=0.105-7ubuntu3 \
-            pkexec=0.105-33ubuntu0.2 polkitd=0.105-33ubuntu0.2 coreutils=8.32-4.1ubuntu1.4 \
+            pkexec=0.105-33ubuntu0.2 polkitd=0.105-33ubuntu0.2 coreutils=8.32-4.1ubuntu1.4 passwd=1:4.8.1-2ubuntu2.2 \
             python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core \
             libx11-6 libxres1 dbus-x11 xvfb xauth openbox libpam-systemd
           sudo systemctl start systemd-logind.service polkit.service
@@ -66,7 +66,8 @@ jobs:
             refs/heads/validation/linux-polkit-contract-014:push:read-only|\
             refs/heads/validation/linux-polkit-contract-014:workflow_dispatch:read-only|\
             refs/heads/validation/linux-polkit-contract-014:workflow_dispatch:cancel|\
-            refs/heads/validation/linux-polkit-admin-014:workflow_dispatch:admin-capture) ;;
+            refs/heads/validation/linux-polkit-admin-014:workflow_dispatch:admin-capture|\
+            refs/heads/validation/linux-polkit-admin-014:workflow_dispatch:authenticate) ;;
             *) echo 'Exact fixture branch/event/mode required' >&2; exit 1 ;;
           esac
           /usr/bin/python3 -B - <<'PY'
@@ -132,22 +133,35 @@ jobs:
               json.dump({'source': os.environ['GITHUB_SHA'], 'files': hashes}, stream)
           PY
           sudo install -o 0 -g 0 -m 0644 "$RUNNER_TEMP/polkit-script-binding.json" /opt/creator-polkit-fixture/source-binding.json
-          if test "$CREATOR_LINUX_POLKIT_MODE" = admin-capture; then
+          if test "$CREATOR_LINUX_POLKIT_MODE" = admin-capture || test "$CREATOR_LINUX_POLKIT_MODE" = authenticate; then
             python3 -B scripts/native-linux-polkit-probe.py prepare-admin-capture
           fi
-      - name: Real PAM logind session and private GUI (explicit mode, never authentication)
+      - name: Real PAM logind session and private GUI (explicit finite mechanism mode)
         run: |
           set -euo pipefail
           # PAMName=login supplies a real logind session. Do not fake XDG_SESSION_ID
-          # or replace the system authority. The locked account receives no password.
+          # or replace the system authority. Only explicit authenticate may provision
+          # a password, entirely inside the fixed root broker, never the shell/sudo stdin.
           case "$CREATOR_LINUX_POLKIT_MODE" in
             read-only) ;;
             cancel|admin-capture) test "$GITHUB_EVENT_NAME" = workflow_dispatch ;;
+            authenticate) test "$GITHUB_EVENT_NAME" = workflow_dispatch && test "$GITHUB_REF" = refs/heads/validation/linux-polkit-admin-014 ;;
             *) echo 'Unknown synthetic dialog mode' >&2; exit 1 ;;
           esac
+          if test "$CREATOR_LINUX_POLKIT_MODE" = authenticate; then
+            sudo -n /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+              GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux RUNNER_ARCH=X64 \
+              GITHUB_REPOSITORY=BOBWORKS-XR/CREATOR-HUB GITHUB_REPOSITORY_ID=1364807512 \
+              GITHUB_REF="$GITHUB_REF" GITHUB_SHA="$GITHUB_SHA" GITHUB_EVENT_NAME=workflow_dispatch \
+              CREATOR_LINUX_POLKIT_PROBE=1 CREATOR_LINUX_ROOT_PROBE=1 CREATOR_UNIX_WINDOW_TEST=1 \
+              CREATOR_LINUX_POLKIT_MODE=authenticate \
+              /usr/bin/python3 -B /opt/creator-polkit-fixture/scripts/native-linux-polkit-probe.py authenticate-session </dev/null
+            exit 0
+          fi
           sudo systemd-run --wait --pipe --collect --unit=creator-polkit-fixture \
             --uid=creator-polkit-fixture --property=PAMName=login --property=Type=exec \
             --property=WorkingDirectory=/opt/creator-polkit-fixture --property=RuntimeMaxSec=100 \
+            --property=LimitCORE=0 \
             --setenv=HOME=/var/lib/creator-polkit-fixture --setenv=USER=creator-polkit-fixture \
             --setenv=GITHUB_ACTIONS=true --setenv=RUNNER_ENVIRONMENT=github-hosted \
             --setenv=RUNNER_OS=Linux --setenv=RUNNER_ARCH=X64 \
@@ -173,6 +187,9 @@ jobs:
                 sudo cat "/opt/creator-polkit-fixture/result/$name" > "$RUNNER_TEMP/polkit-capture/$name"
               fi
             done
+          fi
+          if sudo test -f /opt/creator-polkit-fixture/authentication-provision.json; then
+            sudo cat /opt/creator-polkit-fixture/authentication-provision.json > "$RUNNER_TEMP/polkit-capture/authentication-provision.json"
           fi
       - uses: actions/upload-artifact@v4
         if: always()

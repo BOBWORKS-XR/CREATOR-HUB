@@ -55,6 +55,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(p.capture_mode(runner()), "read-only")
         p.admission(runner() | {"GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "cancel"}, "linux", "x86_64")
         p.admission(runner() | {"GITHUB_REF": p.ADMIN_BRANCH, "GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "admin-capture"}, "linux", "x86_64")
+        p.admission(runner() | {"GITHUB_REF": p.ADMIN_BRANCH, "GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "authenticate"}, "linux", "x86_64")
         for event, mode in (("push", "cancel"), ("workflow_dispatch", "authenticate"), ("workflow_dispatch", ""),
                             ("workflow_dispatch", "cancel; true"), ("push", "admin-capture")):
             with self.subTest(event=event, mode=mode), self.assertRaises(RuntimeError):
@@ -102,9 +103,11 @@ class ContractTests(unittest.TestCase):
         main_name = "polkit-gnome-0.105/src/main.c"
         dialog_name = "polkit-gnome-0.105/src/polkitgnomeauthenticationdialog.c"
         authenticator_name = "polkit-gnome-0.105/src/polkitgnomeauthenticator.c"
-        groups = [{main_name: main, dialog_name: dialog, authenticator_name: authenticator}, {"debian/patches/series": "\n".join(["04-autorestart.patch"] + [f"other-{i}" for i in range(5)]),
+        default = '+      if (passwd->pw_uid == getuid ())\n+          dialog->priv->selected_user = g_strdup (dialog->priv->users[n]);\n+  gtk_combo_box_set_active (GTK_COMBO_BOX (combo), selected_index);'
+        groups = [{main_name: main, dialog_name: dialog, authenticator_name: authenticator}, {"debian/patches/series": "\n".join([p.DEFAULT_USER_PATCH.removeprefix("debian/patches/"), "04-autorestart.patch"] + [f"other-{i}" for i in range(4)]),
+            p.DEFAULT_USER_PATCH: default,
             "debian/patches/04-autorestart.patch": "src/main.c\nregister_client_to_gnome_session();",
-            **{f"debian/patches/other-{i}": "other source change" for i in range(5)}}]
+            **{f"debian/patches/other-{i}": "other source change" for i in range(4)}}]
         archives = {}
         for i, group in enumerate(groups):
             stream = io.BytesIO()
@@ -118,11 +121,15 @@ class ContractTests(unittest.TestCase):
         pins = {name: (len(raw), hashlib.sha256(raw).hexdigest()) for name, raw in archives.items()}
         files = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in groups[0].items()}
         with mock.patch.dict(p.SOURCES, pins, clear=True), mock.patch.dict(p.SOURCE_FILES, files, clear=True), \
+                mock.patch.object(p, "DEFAULT_USER_PATCH_SHA", hashlib.sha256(default.encode()).hexdigest()), \
                 mock.patch.object(p.subprocess, "Popen") as spawn:
             result = p.source_contract(lambda name, _size: archives[name])
         spawn.assert_not_called()
         self.assertTrue(result["requiresRealLogindSession"])
         self.assertFalse(result["actualUpdaterAccepted"])
+        self.assertNotIn("multiIdentityInitialLabel", result["identitySelection"])
+        self.assertEqual(result["identitySelection"]["ubuntuDefault"], "current-user-if-administrator")
+        self.assertEqual(result["identitySelection"]["upstreamPlaceholderLabel"], "Select user...")
 
 
 class KernelTests(unittest.TestCase):
@@ -892,6 +899,439 @@ class CancelTests(unittest.TestCase):
         self.assertFalse(record["cancelAccepted"])
 
 
+class AuthenticateTests(unittest.TestCase):
+    def fixture(self):
+        f = CancelTests().fixture()
+        f.atspi.Role.COMBO_BOX, f.atspi.Role.MENU, f.atspi.Role.MENU_ITEM = 11, 33, 35
+        combo = fixtures.AxNode(21, 11, p.USER, parent=f.dialog)
+        menu = fixtures.AxNode(21, 33, parent=combo, states=(2, 3))
+        placeholder = fixtures.AxNode(21, 35, "Select user...", parent=menu, states=())
+        other = fixtures.AxNode(21, 35, "Ubuntu (packer)", parent=menu, states=(2, 3))
+        selected = fixtures.AxNode(21, 35, p.USER, parent=menu, states=(2, 3))
+        prompt = fixtures.AxNode(21, 29, "Password:", parent=f.dialog)
+        for node in (combo, menu, placeholder, other, selected, prompt):
+            node.get_child_count = lambda n=node: len(n.children)
+            node.get_child_at_index = lambda i, n=node: n.children[i]
+        selection = types.SimpleNamespace(get_n_selected_children=mock.Mock(return_value=1),
+                                         get_selected_child=mock.Mock(return_value=selected))
+        combo.get_selection_iface = mock.Mock(return_value=selection)
+        combo.get_action_iface = mock.Mock(side_effect=AssertionError("Identity input forbidden"))
+        for node in (combo, prompt, f.password):
+            node.get_component_iface = lambda: f.component((20, 100, 200, 30))
+        f.password.states.add(6)
+        editable = types.SimpleNamespace(set_text_contents=mock.Mock(return_value=True))
+        f.password.get_editable_text_iface = mock.Mock(return_value=editable)
+        f.authenticate.get_action_iface = mock.Mock(return_value=f.authenticate.action)
+        record = {"mode": "authenticate", "passwordWriteAttempts": 0, "authenticateActionAttempts": 0, **p.FLAGS}
+        secret = bytearray(b"a" * 64)  # Public unit-test sentinel, never a real credential.
+        profile = lambda: p.cancel_profile(f.agent, f.helper, f.atspi, f.refs, f.x11, f.native, f.geometry, authenticate=True)
+        return types.SimpleNamespace(**(vars(f) | {k: v for k, v in locals().items() if k not in ("self", "f")}))
+
+    def test_exact_selected_fixture_one_write_one_click_and_no_password_readback(self):
+        f = self.fixture()
+        with mock.patch.object(p, "windows", return_value=f.native):
+            p.authenticate_once(f.profile, mock.Mock(), f.record, f.secret)
+        f.editable.set_text_contents.assert_called_once_with("a" * 64)
+        f.authenticate.action.do_action.assert_called_once_with(0)
+        f.cancel.action.do_action.assert_not_called()
+        f.combo.get_action_iface.assert_not_called()
+        f.password.get_name.assert_not_called()
+        f.password.get_text_iface.assert_not_called()
+        self.assertTrue(f.record["authenticationProfile"]["selectedIdentityVerified"])
+        self.assertTrue(f.record["authenticationProfile"]["axToXidAssociationVerified"])
+        self.assertNotIn("a" * 64, json.dumps(f.record))
+        self.assertFalse(f.record["authenticationAccepted"])
+        for key in ("actualUpdaterAccepted", "signedUpdateAccepted", "restartAccepted", "releaseReady"):
+            self.assertFalse(f.record[key])
+
+    def test_password_fingerprint_identical_pre_post_write_without_content_or_count(self):
+        f = self.fixture()
+        f.password.get_character_count = mock.Mock(side_effect=AssertionError("Password character count read"))
+        f.password.get_text = mock.Mock(side_effect=AssertionError("Password content read"))
+        f.password.synthetic_character_count, f.password.synthetic_content = 0, ""
+        def write(value):
+            f.password.synthetic_character_count = len(value)
+            f.password.synthetic_content = value
+            return True
+        f.editable.set_text_contents.side_effect = write
+        with mock.patch.object(p, "windows", return_value=f.native):
+            _controls, before = f.profile()
+            p.authenticate_once(f.profile, mock.Mock(), f.record, f.secret)
+            _controls, after = f.profile()
+        self.assertEqual(f.password.synthetic_character_count, 64)
+        self.assertEqual(before, after)
+        password_row, = [row for row in after["graph"] if row["role"] == 40]
+        self.assertEqual(set(password_row), {"reference", "parent", "role", "name", "showing", "enabled", "sensitive", "defunct", "busy"})
+        self.assertIsNone(password_row["name"])
+        self.assertNotIn("a" * 64, json.dumps([before, after, f.record]))
+        for method in (f.password.get_name, f.password.get_text_iface, f.password.get_text, f.password.get_character_count):
+            method.assert_not_called()
+        self.assertEqual(after["selectedIdentity"], p.USER)
+        self.assertEqual(after["selectedReference"], [f.selected.app.bus_name, f.selected.path])
+        f.combo.get_action_iface.assert_not_called()
+
+    def test_foreign_selection_graph_frame_or_password_refuses_before_secret_write(self):
+        for change in ("selected-other", "selected-foreign", "selected-count", "selected-parent", "combo-name", "prompt",
+                       "password-role", "password-not-editable", "frame", "frame-none", "pid", "password-bounds"):
+            f = self.fixture()
+            if change == "selected-other":
+                f.selection.get_selected_child.return_value = f.other
+            elif change == "selected-foreign":
+                f.selected.pid = 99
+            elif change == "selected-count":
+                f.selection.get_n_selected_children.return_value = 2
+            elif change == "selected-parent":
+                f.selected.parent = f.dialog
+            elif change == "combo-name":
+                f.combo.name = "Ubuntu (packer)"
+            elif change == "prompt":
+                f.prompt.name = "Password for packer:"
+            elif change == "password-role":
+                f.password.role = 61
+            elif change == "password-not-editable":
+                f.password.states.remove(6)
+            elif change == "frame":
+                f.x11.frame_rectangle.return_value = (10, 21, 600, 300)
+            elif change == "frame-none":
+                f.x11.frame_rectangle.return_value = None
+            elif change == "pid":
+                f.authenticate.pid = 99
+            else:
+                f.password.get_component_iface = lambda: f.component((0, 0, 1, 1))
+            with self.subTest(change=change), mock.patch.object(p, "windows", return_value=f.native), self.assertRaises(RuntimeError):
+                p.authenticate_once(f.profile, mock.Mock(), f.record, f.secret)
+            f.editable.set_text_contents.assert_not_called()
+            f.authenticate.action.do_action.assert_not_called()
+            f.password.get_name.assert_not_called()
+            f.password.get_text_iface.assert_not_called()
+
+    def test_post_write_selection_frame_or_kernel_drift_blocks_authenticate(self):
+        for change in ("selection", "frame", "kernel-bus-session", "password-role"):
+            f = self.fixture()
+            def write(_value):
+                if change == "selection":
+                    f.selection.get_selected_child.return_value = f.other
+                elif change == "frame":
+                    f.x11.frame_rectangle.return_value = (11, 20, 600, 300)
+                elif change == "password-role":
+                    f.password.role = 61
+                    f.password.states.remove(6)
+                return True
+            f.editable.set_text_contents.side_effect = write
+            def guard():
+                if change == "kernel-bus-session" and f.record["passwordWriteAttempts"]:
+                    raise RuntimeError("changed identity")
+            with self.subTest(change=change), mock.patch.object(p, "windows", return_value=f.native), self.assertRaises(RuntimeError):
+                p.authenticate_once(f.profile, guard, f.record, f.secret)
+            f.editable.set_text_contents.assert_called_once()
+            f.authenticate.action.do_action.assert_not_called()
+            f.password.get_name.assert_not_called()
+            f.password.get_text_iface.assert_not_called()
+
+    def test_ambiguous_write_or_click_is_static_and_never_retried(self):
+        for where in ("write", "click"):
+            for failure in (False, RuntimeError("a" * 64)):
+                f = self.fixture()
+                action = f.editable.set_text_contents if where == "write" else f.authenticate.action.do_action
+                if isinstance(failure, Exception):
+                    action.side_effect = failure
+                else:
+                    action.return_value = failure
+                with self.subTest(where=where, failure=type(failure).__name__), mock.patch.object(p, "windows", return_value=f.native):
+                    for _ in range(2):
+                        with self.assertRaisesRegex(RuntimeError, "^Synthetic native authentication refused; no retry$"):
+                            p.authenticate_once(f.profile, mock.Mock(), f.record, f.secret)
+                f.editable.set_text_contents.assert_called_once()
+                self.assertEqual(f.authenticate.action.do_action.call_count, 0 if where == "write" else 1)
+                self.assertNotIn("a" * 64, json.dumps(f.record))
+
+    def test_readonly_cancel_admin_capture_or_reused_attempt_cannot_write(self):
+        for change in ({"mode": "read-only"}, {"mode": "cancel"}, {"mode": "admin-capture"},
+                       {"passwordWriteAttempts": 1}, {"authenticateActionAttempts": 1}):
+            profile = mock.Mock()
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                p.authenticate_once(profile, mock.Mock(), {"mode": "authenticate", **change}, bytearray(b"a" * 64))
+            profile.assert_not_called()
+
+    def test_unexpected_authenticate_action_contract_never_presses(self):
+        for count, name in ((0, "click"), (2, "click"), (1, "press")):
+            f = self.fixture()
+            f.authenticate.action.get_n_actions = lambda: count
+            f.authenticate.action.get_action_name = lambda _i: name
+            with self.subTest(count=count, name=name), mock.patch.object(p, "windows", return_value=f.native), self.assertRaises(RuntimeError):
+                p.authenticate_once(f.profile, mock.Mock(), f.record, f.secret)
+            f.authenticate.action.do_action.assert_not_called()
+            self.assertEqual(f.record["authenticateActionAttempts"], 0)
+
+    def test_completion_requires_exit_zero_and_complete_independent_dismissal(self):
+        for code, complete, absent, accepted in ((0, True, True, True), (0, False, True, False),
+                (0, True, False, False), (None, True, True, False), (126, True, True, False)):
+            record = {"mode": "authenticate", "authenticateActionAttempts": 1, "authenticateActionReturned": True, **p.FLAGS}
+            request = mock.Mock()
+            request.poll.return_value = code
+            def query(_x, _h, _target, out):
+                out.update(complete=complete, absent=absent)
+            with self.subTest(code=code, complete=complete, absent=absent), \
+                    mock.patch.object(p.time, "monotonic", side_effect=[0, 1, 11]), mock.patch.object(p.time, "sleep"), \
+                    mock.patch.object(p, "native_window_absence", side_effect=query):
+                if accepted:
+                    p.wait_authenticate(request, mock.Mock(), None, None, 77, record)
+                else:
+                    with self.assertRaises(RuntimeError):
+                        p.wait_authenticate(request, mock.Mock(), None, None, 77, record)
+            self.assertEqual(record["authenticationAccepted"], accepted)
+            self.assertFalse(record["actualUpdaterAccepted"])
+
+
+class SecretTransportTests(unittest.TestCase):
+    def env(self):
+        return runner() | {"GITHUB_REF": p.ADMIN_BRANCH, "GITHUB_EVENT_NAME": "workflow_dispatch", "CREATOR_LINUX_POLKIT_MODE": "authenticate"}
+
+    def test_independent_factory_password_binary_pins_are_exact(self):
+        self.assertEqual(p.CREDENTIAL_TOOLS, {
+            "/usr/sbin/chpasswd": (55464, "e0c190eb148040cc5f1e5dd6ec3b22b2592c3a71b89db67f019236fad7f6e92a", 0o755),
+            "/usr/bin/passwd": (59976, "82fb3e989f9f224f1b1b5687109fa4c31fc60572876cd7c3486ff107d451b6ee", 0o4755)})
+
+    def test_fixed_credential_tools_only_stdin_never_argv_env_output_or_error(self):
+        for operation in ("status", "provision", "lock"):
+            secret = bytearray(b"a" * 64) if operation == "provision" else None
+            result = types.SimpleNamespace(returncode=0, stdout=(p.USER + " L 10/18/2026 0 99999 7 -1\n").encode())
+            def run(argv, **options):
+                self.assertNotIn("a" * 64, json.dumps([argv, options["env"]]))
+                self.assertEqual(options["stderr"], subprocess.DEVNULL)
+                if operation == "provision":
+                    self.assertEqual(bytes(options["input"]), p.USER.encode() + b":" + secret + b"\n")
+                    self.assertNotIn("stdin", options)
+                else:
+                    self.assertEqual(options["stdin"], subprocess.DEVNULL)
+                    self.assertNotIn("input", options)
+                self.assertEqual(options["stdout"], subprocess.PIPE if operation == "status" else subprocess.DEVNULL)
+                return result
+            with self.subTest(operation=operation), mock.patch.object(p.os, "getuid", return_value=0, create=True), \
+                    mock.patch.object(p.os, "geteuid", return_value=0, create=True), mock.patch.object(p.subprocess, "run", autospec=True, side_effect=run) as child:
+                p.fixture_credential(operation, secret)
+            self.assertNotIn("sudo", child.call_args.args[0])
+            if operation == "provision":
+                self.assertEqual(set(child.call_args.kwargs["input"]), {0})
+
+    def test_credential_exceptions_never_retain_payload_in_message(self):
+        with mock.patch.object(p.os, "getuid", return_value=0, create=True), mock.patch.object(p.os, "geteuid", return_value=0, create=True), \
+                mock.patch.object(p.subprocess, "run", side_effect=RuntimeError("a" * 64)), \
+                self.assertRaisesRegex(RuntimeError, "^Synthetic credential operation refused$"):
+            p.fixture_credential("provision", bytearray(b"a" * 64))
+
+    def test_nonroot_or_unknown_operation_cannot_provision(self):
+        for uid, operation in ((p.UID, "provision"), (0, "other-user")):
+            with self.subTest(uid=uid, operation=operation), mock.patch.object(p.os, "getuid", return_value=uid, create=True), \
+                    mock.patch.object(p.os, "geteuid", return_value=uid, create=True), mock.patch.object(p.subprocess, "run") as child, self.assertRaises(RuntimeError):
+                p.fixture_credential(operation, bytearray(b"a" * 64))
+            child.assert_not_called()
+
+    def test_pipe_reader_bounded_fragmented_frame_and_no_files(self):
+        info = types.SimpleNamespace(st_mode=stat.S_IFIFO | 0o600, st_uid=0)
+        with mock.patch.object(p.os, "getuid", return_value=p.UID, create=True), mock.patch.object(p.os, "geteuid", return_value=p.UID, create=True), \
+                mock.patch.object(p.os, "fstat", return_value=info), mock.patch.object(p.os, "read", side_effect=[b"a" * 20, b"a" * 44 + b"\n", b""]) as read, \
+                mock.patch.object(p.os, "close") as close:
+            actual = p.read_synthetic_secret(self.env())
+        self.assertEqual(actual, bytearray(b"a" * 64))
+        self.assertEqual([c.args for c in read.call_args_list], [(0, 66), (0, 46), (0, 1)])
+        close.assert_called_once_with(0)
+
+    def test_reader_refuses_wrong_uid_mode_regular_file_or_foreign_pipe(self):
+        for change in ("uid", "mode", "file", "owner"):
+            info = types.SimpleNamespace(st_mode=stat.S_IFREG if change == "file" else stat.S_IFIFO, st_uid=p.UID if change == "owner" else 0)
+            env = self.env() | ({"CREATOR_LINUX_POLKIT_MODE": "admin-capture"} if change == "mode" else {})
+            with self.subTest(change=change), mock.patch.object(p.os, "getuid", return_value=0 if change == "uid" else p.UID, create=True), \
+                    mock.patch.object(p.os, "geteuid", return_value=p.UID, create=True), mock.patch.object(p.os, "fstat", return_value=info), \
+                    mock.patch.object(p.os, "read") as read, self.assertRaises(RuntimeError):
+                p.read_synthetic_secret(env)
+            read.assert_not_called()
+
+    def test_reader_rejects_overlong_invalid_or_truncated_secret_without_echo(self):
+        for frame in (b"a" * 66, b"a" * 63 + b"\n", b"z" * 64 + b"\n"):
+            with self.subTest(size=len(frame)), mock.patch.object(p.os, "getuid", return_value=p.UID, create=True), \
+                    mock.patch.object(p.os, "geteuid", return_value=p.UID, create=True), \
+                    mock.patch.object(p.os, "fstat", return_value=types.SimpleNamespace(st_mode=stat.S_IFIFO, st_uid=0)), \
+                    mock.patch.object(p.os, "read", side_effect=[frame, b""]), mock.patch.object(p.os, "close"), \
+                    self.assertRaisesRegex(RuntimeError, "^Synthetic stdin frame refused$"):
+                p.read_synthetic_secret(self.env())
+
+    def test_session_command_is_fixed_finite_secret_free_and_ignores_inherited_credentials(self):
+        env = self.env() | {"PASSWORD": "a" * 64, "GITHUB_TOKEN": "foreign", "LD_PRELOAD": "foreign"}
+        argv = p.authentication_session_command(env)
+        self.assertEqual(argv[0], "/usr/bin/systemd-run")
+        for item in ("--pipe", "--property=LimitCORE=0", "--property=PAMName=login", "--property=RuntimeMaxSec=100", "--uid=" + p.USER):
+            self.assertIn(item, argv)
+        self.assertIn("/usr/bin/openbox --sm-disable </dev/null >/dev/null 2>&1", argv[-1])
+        self.assertNotIn("a" * 64, json.dumps(argv))
+        self.assertNotIn("foreign", json.dumps(argv))
+        with self.assertRaises(RuntimeError):
+            p.authentication_session_command(runner())
+
+    def test_core_dump_limit_uses_real_resource_signature(self):
+        resource = types.SimpleNamespace(RLIMIT_CORE=4, setrlimit=mock.Mock(), getrlimit=mock.Mock(return_value=(0, 0)))
+        with mock.patch.dict(sys.modules, {"resource": resource}):
+            p.disable_core_dumps()
+        resource.setrlimit.assert_called_once_with(4, (0, 0))
+
+
+class RootBrokerTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def fixture(self):
+        env = SecretTransportTests().env()
+        account = types.SimpleNamespace(pw_uid=p.UID, pw_gid=p.UID, pw_dir="/var/lib/creator-polkit-fixture", pw_shell="/bin/bash")
+        root = mock.MagicMock()
+        root.__str__.return_value = "/opt/creator-polkit-fixture"
+        output = mock.MagicMock()
+        output.resolve.return_value = output
+        output.stat.return_value = types.SimpleNamespace(st_uid=p.UID, st_gid=p.UID, st_mode=stat.S_IFDIR | 0o700)
+        home = mock.Mock()
+        home.lstat.side_effect = FileNotFoundError()
+        output.__truediv__.return_value = home
+        root.__truediv__.side_effect = lambda name: output if name == "result" else Path("/fixed") / name
+        status = ["L", "P", "L"]
+        calls, receipts = [], []
+        def credential(operation, secret=None):
+            calls.append(operation)
+            if operation == "provision":
+                self.assertEqual(secret, bytearray(b"a" * 64))
+            if operation == "status":
+                return status.pop(0)
+        def session(argv, **options):
+            self.assertEqual(bytes(options["input"]), b"a" * 64 + b"\n")
+            self.assertEqual(options["stdout"], subprocess.DEVNULL)
+            self.assertEqual(options["stderr"], subprocess.DEVNULL)
+            self.assertNotIn("a" * 64, json.dumps([argv, options["env"]]))
+            self.assertEqual(options["timeout"], 115)
+            return types.SimpleNamespace(returncode=0)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(p, "BASE", root))
+            stack.enter_context(mock.patch.object(p, "admission", autospec=True))
+            core = stack.enter_context(mock.patch.object(p, "disable_core_dumps", autospec=True))
+            binding = stack.enter_context(mock.patch.object(p, "fixture_binding", autospec=True, return_value={"source": "a" * 40}))
+            stack.enter_context(mock.patch.object(p.os, "getuid", return_value=0, create=True))
+            stack.enter_context(mock.patch.object(p.os, "geteuid", return_value=0, create=True))
+            stack.enter_context(mock.patch.object(p.os, "umask", return_value=0o022))
+            incoming = stack.enter_context(mock.patch.object(p.os, "fstat", return_value=types.SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=259)))
+            stack.enter_context(mock.patch.object(p.os, "stat", return_value=types.SimpleNamespace(st_rdev=259)))
+            stack.enter_context(mock.patch.dict(sys.modules, {"pwd": types.SimpleNamespace(getpwnam=lambda _name: account),
+                "grp": types.SimpleNamespace(getgrnam=lambda _name: types.SimpleNamespace(gr_gid=27))}))
+            groups = stack.enter_context(mock.patch.object(p.os, "getgrouplist", return_value=[p.UID, 27], create=True))
+            policy = stack.enter_context(mock.patch.object(p, "admin_config", autospec=True, return_value={"sha256": p.ADMIN_CONFIG_PIN[1]}))
+            tools = stack.enter_context(mock.patch.object(p, "credential_tools", autospec=True, return_value={"pinned": True}))
+            fixed = stack.enter_context(mock.patch.object(p, "fixture_credential", autospec=True, side_effect=credential))
+            once = stack.enter_context(mock.patch.object(b, "write_new", autospec=True))
+            saved = stack.enter_context(mock.patch.object(b, "save_json", autospec=True, side_effect=lambda _path, data: receipts.append(copy.deepcopy(data))))
+            entropy = stack.enter_context(mock.patch.object(p.secrets, "token_hex", return_value="a" * 64))
+            command = stack.enter_context(mock.patch.object(p, "authentication_session_command", autospec=True, return_value=["/usr/bin/systemd-run", "--fixed-test-only"]))
+            launched = stack.enter_context(mock.patch.object(p.subprocess, "run", autospec=True, side_effect=session))
+            yield types.SimpleNamespace(**locals())
+
+    def test_fixed_root_broker_anonymous_payload_finally_relocks_and_retains_no_secret(self):
+        with self.fixture() as f:
+            result = p.authenticate_session(f.env)
+            f.core.assert_called_once()
+            f.entropy.assert_called_once_with(32)
+            self.assertEqual(f.calls, ["status", "provision", "status", "lock", "status"])
+            f.once.assert_called_once_with(Path("/fixed/authentication-once.json"), json.dumps({"source": "a" * 40, "uid": p.UID}).encode(), 0o600)
+            self.assertTrue(result["passwordProvisioned"])
+            self.assertTrue(result["fixtureRelocked"])
+            self.assertNotIn("a" * 64, json.dumps(f.receipts))
+            self.assertEqual(set(f.launched.call_args.kwargs["input"]), {0})
+            self.assertTrue(all(result[k] is False for k in p.FLAGS))
+            self.assertLess(f.fixed.mock_calls.index(mock.call("status")), f.fixed.mock_calls.index(mock.call("lock")))
+
+    def test_relock_failure_is_retained_statically_and_never_claims_success(self):
+        with self.fixture() as f:
+            original = f.fixed.side_effect
+            def refused(operation, secret=None):
+                if operation == "lock":
+                    raise RuntimeError("a" * 64)
+                return original(operation, secret)
+            f.fixed.side_effect = refused
+            with self.assertRaises(RuntimeError):
+                p.authenticate_session(f.env)
+            self.assertFalse(f.receipts[-1]["fixtureRelocked"])
+            self.assertEqual(f.receipts[-1]["refusal"]["phase"], "fixture-relock")
+            self.assertNotIn("a" * 64, json.dumps(f.receipts))
+
+    def test_provision_or_session_failure_still_relocks_once_with_static_receipt(self):
+        for where in ("provision", "session"):
+            with self.subTest(where=where), self.fixture() as f:
+                if where == "session":
+                    f.launched.side_effect = RuntimeError("a" * 64)
+                else:
+                    original = f.fixed.side_effect
+                    def failed(operation, secret=None):
+                        if operation == "provision":
+                            f.status[:] = ["L"]
+                            raise RuntimeError("a" * 64)
+                        return original(operation, secret)
+                    f.fixed.side_effect = failed
+                with self.assertRaises(RuntimeError):
+                    p.authenticate_session(f.env)
+                self.assertEqual(sum(c.args[0] == "lock" for c in f.fixed.call_args_list), 1)
+                self.assertTrue(f.receipts[-1]["fixtureRelocked"])
+                self.assertNotIn("a" * 64, json.dumps(f.receipts))
+                self.assertEqual(f.receipts[-1]["refusal"]["phase"], "credential-session")
+                if where == "provision":
+                    f.launched.assert_not_called()
+
+    def test_foreign_account_after_launch_is_not_locked_or_repaired(self):
+        with self.fixture() as f:
+            def changed(_argv, **_options):
+                f.account.pw_uid = 99
+                return types.SimpleNamespace(returncode=0)
+            f.launched.side_effect = changed
+            with self.assertRaises(RuntimeError):
+                p.authenticate_session(f.env)
+            self.assertNotIn("lock", f.calls)
+            self.assertFalse(f.receipts[-1]["fixtureRelocked"])
+            self.assertEqual(f.receipts[-1]["refusal"]["phase"], "fixture-relock")
+
+    def test_wrong_mode_stdin_identity_reused_fixture_or_core_refuses_before_entropy(self):
+        for change in ("mode", "stdin", "uid", "groups", "used", "core", "once"):
+            with self.subTest(change=change), self.fixture() as f:
+                if change == "mode":
+                    f.env["CREATOR_LINUX_POLKIT_MODE"] = "admin-capture"
+                elif change == "stdin":
+                    f.incoming.return_value = types.SimpleNamespace(st_mode=stat.S_IFIFO, st_rdev=259)
+                elif change == "uid":
+                    f.account.pw_uid = 99
+                elif change == "groups":
+                    f.groups.return_value = [p.UID, 27, 999]
+                elif change == "used":
+                    f.home.lstat.side_effect = None
+                elif change == "core":
+                    f.core.side_effect = RuntimeError("core limit refused")
+                else:
+                    f.once.side_effect = FileExistsError("already used")
+                with self.assertRaises((RuntimeError, FileExistsError)):
+                    p.authenticate_session(f.env)
+                f.entropy.assert_not_called()
+                f.launched.assert_not_called()
+                self.assertFalse(any(c.args[0] in ("provision", "lock") for c in f.fixed.call_args_list))
+
+    def test_credential_tool_provenance_uses_real_existing_helper_signatures(self):
+        targets = {}
+        for filename in p.CREDENTIAL_TOOLS:
+            target = mock.MagicMock()
+            target.__str__.return_value = filename
+            target.name = Path(filename).name
+            target.resolve.return_value = target
+            target.lstat.return_value = types.SimpleNamespace(st_uid=0, st_gid=0, st_nlink=1)
+            targets[filename] = target
+        def tool(_output, _label, command, allowed=(0,), timeout=15):
+            self.assertEqual(timeout, 8)
+            return (0, b"passwd\t1:4.8.1-2ubuntu2.2\tamd64\tinstalled\n") if "-W" in command else (0, ("passwd: " + command[-1] + "\n").encode())
+        with mock.patch.object(p, "Path", side_effect=lambda name: targets[name]), \
+                mock.patch.object(b, "pinned", autospec=True, return_value={"pinned": True}) as pinned, \
+                mock.patch.object(b, "run_tool", autospec=True, side_effect=tool) as command:
+            self.assertEqual(set(p.credential_tools(Path("/public-receipts"))), set(p.CREDENTIAL_TOOLS))
+        self.assertEqual(pinned.call_count, 2)
+        self.assertEqual(command.call_count, 4)
+
+
 class NativeDismissalTests(unittest.TestCase):
     def fixture(self, tree):
         c = b.load_helper().C
@@ -980,7 +1420,7 @@ class WorkflowTests(unittest.TestCase):
                     effective = mode or "read-only"
                     allowed = (ref == p.BRANCH and ((event == "push" and effective == "read-only")
                         or (event == "workflow_dispatch" and effective in ("read-only", "cancel")))) \
-                        or (ref == p.ADMIN_BRANCH and event == "workflow_dispatch" and effective == "admin-capture")
+                        or (ref == p.ADMIN_BRANCH and event == "workflow_dispatch" and effective in ("admin-capture", "authenticate"))
                     env = runner() | {"GITHUB_REF": ref, "GITHUB_EVENT_NAME": event}
                     if mode is not None:
                         env["CREATOR_LINUX_POLKIT_MODE"] = mode
@@ -1022,16 +1462,35 @@ class WorkflowTests(unittest.TestCase):
 
     def test_cancel_is_explicit_dispatch_choice_not_automatic_push_or_authentication(self):
         choice = self.workflow["on"]["workflow_dispatch"]["inputs"]["mode"]
-        self.assertEqual(choice, {"description": "Locked-account capture, one Cancel press, or locked synthetic-admin capture; never authentication",
-            "type": "choice", "required": True, "default": "read-only", "options": ["read-only", "cancel", "admin-capture"]})
+        self.assertEqual(choice, {"description": "Read-only capture, one Cancel, or explicit synthetic-admin authentication (never updater)",
+            "type": "choice", "required": True, "default": "read-only", "options": ["read-only", "cancel", "admin-capture", "authenticate"]})
         self.assertEqual(self.workflow["jobs"]["contract"]["env"]["CREATOR_LINUX_POLKIT_MODE"], "${{ inputs.mode || 'read-only' }}")
         text = WORKFLOW.read_text()
         self.assertIn('cancel|admin-capture) test "$GITHUB_EVENT_NAME" = workflow_dispatch', text)
         self.assertIn('--setenv=CREATOR_LINUX_POLKIT_MODE="$CREATOR_LINUX_POLKIT_MODE"', text)
 
+    def test_authenticate_uses_fixed_root_broker_with_empty_sudo_stdin_and_explicit_retention(self):
+        text = WORKFLOW.read_text()
+        self.assertIn('authenticate) test "$GITHUB_EVENT_NAME" = workflow_dispatch && test "$GITHUB_REF" = refs/heads/validation/linux-polkit-admin-014', text)
+        self.assertIn('authenticate-session </dev/null', text)
+        self.assertIn('sudo -n /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C', text)
+        self.assertIn('passwd=1:4.8.1-2ubuntu2.2', text)
+        self.assertIn('polkit-capture/authentication-provision.json', text)
+        self.assertIn('--property=LimitCORE=0', text)
+        for forbidden in ('sudo -S', 'set -x', 'PASSWORD=', '::add-mask::', 'tee ', 'env |'):
+            self.assertNotIn(forbidden, text)
+        source = (HERE / 'native-linux-polkit-probe.py').read_text()
+        self.assertIn('native_output = subprocess.DEVNULL if authenticating else subprocess.PIPE', source)
+        self.assertIn('agent_log = None if authenticating else b.Capture', source)
+        self.assertIn('request_log = None if authenticating else b.Capture', source)
+        self.assertIn('"phase": "native-authentication", "message": "Synthetic authentication refused; no retry"', source)
+        self.assertIn('if record["mode"] == "authenticate" else', source)
+        self.assertNotIn('print(secret', source)
+        self.assertNotIn('print(payload', source)
+
     def test_admin_membership_preparation_is_after_fresh_creation_and_only_for_admin_capture(self):
         text = WORKFLOW.read_text()
-        block = 'if test "$CREATOR_LINUX_POLKIT_MODE" = admin-capture; then\n            python3 -B scripts/native-linux-polkit-probe.py prepare-admin-capture\n          fi'
+        block = 'if test "$CREATOR_LINUX_POLKIT_MODE" = admin-capture || test "$CREATOR_LINUX_POLKIT_MODE" = authenticate; then\n            python3 -B scripts/native-linux-polkit-probe.py prepare-admin-capture\n          fi'
         self.assertEqual(text.count("prepare-admin-capture"), 1)
         self.assertIn(block, text)
         self.assertLess(text.index("Synthetic fixture identity already exists"), text.index("sudo useradd"))
@@ -1041,7 +1500,7 @@ class WorkflowTests(unittest.TestCase):
         for suffix in ("json", "stdout", "stderr"):
             self.assertIn("${{ runner.temp }}/admin-capture-freshness." + suffix, text)
         source = (HERE / "native-linux-polkit-probe.py").read_text()
-        admin_branch = source.split('if record["mode"] == "admin-capture":\n            record["adminIdentityObservation"]', 1)[1].split('if record["mode"] == "cancel":', 1)[0]
+        admin_branch = source.split('if record["mode"] == "admin-capture":\n            record["adminIdentityObservation"]', 1)[1].split('if record["mode"] in ("cancel", "authenticate"):', 1)[0]
         self.assertNotIn("cancel_once", admin_branch)
         self.assertNotIn(".do_action(", admin_branch)
         self.assertNotIn("pw_passwd", source)
@@ -1076,16 +1535,21 @@ class WorkflowTests(unittest.TestCase):
                 python_count += 1
         self.assertEqual(run_count, 8)
         self.assertEqual(python_count, 2)
+        command = p.authentication_session_command(SecretTransportTests().env())
+        checked = subprocess.run([str(bash), "-n"], input=command[-1].encode(), capture_output=True, timeout=10)
+        self.assertEqual(checked.returncode, 0, checked.stderr.decode(errors="replace"))
 
-    def test_source_never_authenticates_signals_agent_or_installs_product(self):
+    def test_source_has_only_explicit_authentication_no_agent_signals_or_product_install(self):
         source = (HERE / "native-linux-polkit-probe.py").read_text()
-        for forbidden in ("get_editable_text_iface", ".send_signal(", ".terminate(", ".kill(",
+        for forbidden in (".send_signal(", ".terminate(", ".kill(",
                           "os.kill(", "shell=True", "stdin.write", "input(", "getspnam", "open('/etc/shadow", "helper.perform(",
                           "WM_DELETE_WINDOW", "b.install(", "execute_script", "__TAURI_INTERNALS__"):
             self.assertFalse(forbidden in source, forbidden)
-        self.assertEqual(source.count(".do_action("), 1)
-        self.assertEqual(source.count("get_action_iface("), 1)
-        self.assertIn('if record["mode"] == "cancel":', source)
+        self.assertEqual(source.count(".do_action("), 2)
+        self.assertEqual(source.count("get_action_iface("), 2)
+        self.assertEqual(source.count("get_editable_text_iface("), 1)
+        self.assertEqual(source.count(".set_text_contents("), 1)
+        self.assertIn('if record["mode"] in ("cancel", "authenticate"):', source)
         self.assertIn('"original-gtk-contract.json"', source)
         self.assertIn('sensitive = role == atspi.Role.PASSWORD_TEXT', source)
         self.assertIn('"sessionTeardownRequired"] = True', source)

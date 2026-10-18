@@ -1,4 +1,4 @@
-"""Disposable GNOME polkit capture or one exact Cancel; no authentication/updater."""
+"""Disposable fixed GNOME polkit mechanism fixture; never a product updater."""
 import hashlib
 import importlib.util
 import io
@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import secrets
 import signal
 import stat
 import subprocess
@@ -76,6 +77,17 @@ SOURCE_FILES = {
     "polkit-gnome-0.105/src/polkitgnomeauthenticationdialog.c": "e26dd41f1e341b95bf1d477b1872e74846f7248dcb2361d22665392ff4a4fe89",
     "polkit-gnome-0.105/src/polkitgnomeauthenticator.c": "8580c8f317dbf8bdaf2237ae98c9fccae879274abdea68cce8478e6a19339bc5",
 }
+DEFAULT_USER_PATCH = "debian/patches/0001-Select-the-current-user-to-authenticate-with-by-defa.patch"
+DEFAULT_USER_PATCH_SHA = "b989f1c7e30f2f9f9ef03f1a06db708d83c4945ee242ca573e7d66b64bf7037f"
+# Independently extracted from Ubuntu passwd_4.8.1-2ubuntu2.2_amd64.deb,
+# SHA256 825a5756013fbb2217b244b2fd6bef7ed10d037f1d8abd6b25fc9ea1c42a7576.
+CREDENTIAL_TOOLS = {
+    "/usr/sbin/chpasswd": (55464, "e0c190eb148040cc5f1e5dd6ec3b22b2592c3a71b89db67f019236fad7f6e92a", 0o755),
+    "/usr/bin/passwd": (59976, "82fb3e989f9f224f1b1b5687109fa4c31fc60572876cd7c3486ff107d451b6ee", 0o4755),
+}
+PUBLIC_ENV = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
+              "GITHUB_REPOSITORY": "BOBWORKS-XR/CREATOR-HUB", "GITHUB_REPOSITORY_ID": "1364807512",
+              "CREATOR_LINUX_POLKIT_PROBE": "1", "CREATOR_LINUX_ROOT_PROBE": "1", "CREATOR_UNIX_WINDOW_TEST": "1"}
 FLAGS = {k: False for k in ("dialogInputAuthorized", "passwordRead", "authenticationAccepted", "cancelAccepted",
                            "actualUpdaterAccepted", "signedUpdateAccepted", "restartAccepted", "releaseReady")}
 _b = None
@@ -108,11 +120,11 @@ def admission(env, system, machine):
 
 def capture_mode(env):
     mode = env.get("CREATOR_LINUX_POLKIT_MODE", "read-only")
-    require(mode in ("read-only", "cancel", "admin-capture"), "Unknown finite polkit fixture mode")
+    require(mode in ("read-only", "cancel", "admin-capture", "authenticate"), "Unknown finite polkit fixture mode")
     ref, event = env.get("GITHUB_REF"), env.get("GITHUB_EVENT_NAME")
     require((ref == BRANCH and ((event == "push" and mode == "read-only")
                                or (event == "workflow_dispatch" and mode in ("read-only", "cancel"))))
-            or (ref == ADMIN_BRANCH and event == "workflow_dispatch" and mode == "admin-capture"),
+            or (ref == ADMIN_BRANCH and event == "workflow_dispatch" and mode in ("admin-capture", "authenticate")),
             "Exact fixture branch/event/mode combination required")
     return mode
 
@@ -160,9 +172,17 @@ def source_contract(fetch=None):
     patches = [selected["debian/patches/" + s.strip()] for s in series if s.strip() and not s.startswith("#")]
     require(len(patches) == 6 and sum("src/main.c" in patch for patch in patches) == 1
             and "register_client_to_gnome_session();" in selected["debian/patches/04-autorestart.patch"], "Ubuntu session patch set differs")
+    default = selected[DEFAULT_USER_PATCH]
+    require(series[0] == DEFAULT_USER_PATCH.removeprefix("debian/patches/")
+            and hashlib.sha256(default.encode()).hexdigest() == DEFAULT_USER_PATCH_SHA
+            and "+      if (passwd->pw_uid == getuid ())" in default
+            and "+          dialog->priv->selected_user = g_strdup (dialog->priv->users[n]);" in default
+            and "+  gtk_combo_box_set_active (GTK_COMBO_BOX (combo), selected_index);" in default,
+            "Pinned Ubuntu current-administrator default patch differs")
     return {"scope": "primary-source-contract-only", "archives": records, "sourceFiles": SOURCE_FILES,
             "requiresRealLogindSession": True, "dbusObjectPath": AGENT_PATH,
-            "identitySelection": {"multiIdentityInitialLabel": "Select user...", "singleIdentitySelectsOnlyUser": True,
+            "identitySelection": {"upstreamPlaceholderLabel": "Select user...", "ubuntuDefault": "current-user-if-administrator",
+                                  "ubuntuDefaultPatchSha256": DEFAULT_USER_PATCH_SHA, "singleIdentitySelectsOnlyUser": True,
                                   "ownPasswordLabel": "Password:", "otherPasswordLabel": "Password for %s:"}, **FLAGS}
 
 
@@ -199,7 +219,7 @@ def prepare_admin_capture(env, output):
                "fixture": USER, "uid": UID, "group": "sudo", "passwordProvisioned": False, "policyChanged": False,
                "membershipVerified": False, "phase": "fresh-identity-preflight", **FLAGS}
     try:
-        require(capture_mode(env) == "admin-capture" and os.getuid() == os.geteuid() and os.getuid() not in (0, UID),
+        require(capture_mode(env) in ("admin-capture", "authenticate") and os.getuid() == os.geteuid() and os.getuid() not in (0, UID),
                 "Only disposable provisioning runner may prepare manual admin capture")
         account = pwd.getpwnam(USER)
         identity = (account.pw_uid, account.pw_gid, account.pw_dir, account.pw_shell)
@@ -253,6 +273,175 @@ def admin_identity_observation(observed, atspi):
             labels.append(row)
     return {"readOnly": True, "actionCount": 0, "identitySelected": False, "selectedIdentityVerified": False,
             "labels": labels, "selectorNodes": selection, "passwordNodes": passwords, **FLAGS}
+
+
+def disable_core_dumps():
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    require(resource.getrlimit(resource.RLIMIT_CORE) == (0, 0), "Core dumps must be disabled")
+
+
+def fixture_binding(env):
+    b = base()
+    require(BASE.resolve(strict=True) == BASE and BASE.stat().st_uid == BASE.stat().st_gid == 0
+            and stat.S_IMODE(BASE.stat().st_mode) == 0o755, "Protected fixed fixture base required")
+    require(HERE == BASE / "scripts" and HERE.resolve(strict=True) == HERE and HERE.stat().st_uid == HERE.stat().st_gid == 0
+            and stat.S_IMODE(HERE.stat().st_mode) == 0o755, "Root-installed fixture source required")
+    binding_file = BASE / "source-binding.json"
+    require(binding_file.resolve(strict=True) == binding_file and binding_file.stat().st_uid == binding_file.stat().st_gid == 0
+            and stat.S_IMODE(binding_file.stat().st_mode) == 0o644, "Root-owned source binding required")
+    binding = b.unique_json(b.bounded_read(binding_file, 8192))
+    require(binding["source"] == env["GITHUB_SHA"] and set(binding["files"]) == {*HELPERS, Path(__file__).name}, "Exact fixture source binding required")
+    for name, digest in binding["files"].items():
+        script = HERE / name
+        require(script.resolve(strict=True) == script and script.stat().st_uid == script.stat().st_gid == 0
+                and stat.S_IMODE(script.stat().st_mode) == 0o644
+                and b.file_record(script, 256 * 1024)["sha256"] == digest, "Root-installed fixture source differs")
+    return binding
+
+
+def credential_tools(output):
+    b, result = base(), {}
+    for filename, (size, digest, mode) in CREDENTIAL_TOOLS.items():
+        target = Path(filename)
+        info = target.lstat()
+        require(target.resolve(strict=True) == target and info.st_uid == info.st_gid == 0 and info.st_nlink == 1,
+                "Exact stock credential-tool owner/path required")
+        result[filename] = b.pinned(target, (size, digest), mode)
+        _code, package = b.run_tool(output, "credential-package-" + target.name,
+            ["/usr/bin/dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n", "passwd"], timeout=8)
+        _code, owner = b.run_tool(output, "credential-owner-" + target.name, ["/usr/bin/dpkg-query", "-S", filename], timeout=8)
+        require(package == b"passwd\t1:4.8.1-2ubuntu2.2\tamd64\tinstalled\n"
+                and owner == ("passwd: " + filename + "\n").encode(), "Exact Ubuntu password-tool provenance required")
+    return result
+
+
+def fixture_credential(operation, secret=None):
+    """Only the fixed synthetic account, inside the admitted root broker."""
+    require(os.getuid() == os.geteuid() == 0, "Fixed root broker required")
+    commands = {"status": ["/usr/bin/passwd", "--status", USER], "provision": ["/usr/sbin/chpasswd"],
+                "lock": ["/usr/bin/passwd", "--lock", USER]}
+    require(operation in commands and (operation == "provision") == (secret is not None), "Fixed credential operation required")
+    payload = None
+    try:
+        options = {"stdin": subprocess.DEVNULL}
+        if operation == "provision":
+            require(type(secret) is bytearray and re.fullmatch(b"[0-9a-f]{64}", secret), "Fixed synthetic secret format required")
+            payload = bytearray(USER.encode() + b":" + secret + b"\n")
+            options = {"input": payload}
+        result = subprocess.run(commands[operation], cwd=BASE, env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            stdout=subprocess.PIPE if operation == "status" else subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True, timeout=8, **options)
+        require(result.returncode == 0, "Synthetic credential operation refused")
+        if operation == "status":
+            require(len(result.stdout) <= 256 and re.fullmatch(USER.encode() + rb" [LP] [0-9/]+ [0-9 -]+\n", result.stdout),
+                    "Exact synthetic account status required")
+            return result.stdout.split()[1].decode("ascii")
+    except Exception:
+        raise RuntimeError("Synthetic credential operation refused") from None
+    finally:
+        if payload is not None:
+            payload[:] = b"\0" * len(payload)
+
+
+def authentication_session_command(env):
+    require(capture_mode(env) == "authenticate", "Explicit manual authentication required")
+    values = PUBLIC_ENV | {k: env[k] for k in ("GITHUB_REF", "GITHUB_SHA", "GITHUB_EVENT_NAME")}
+    values.update(CREATOR_LINUX_POLKIT_MODE="authenticate", HOME="/var/lib/creator-polkit-fixture", USER=USER,
+                  GDK_BACKEND="x11", NO_AT_BRIDGE="0", LANG="C", LC_ALL="C")
+    return ["/usr/bin/systemd-run", "--wait", "--pipe", "--collect", "--quiet", "--unit=creator-polkit-fixture",
+            "--uid=" + USER, "--property=PAMName=login", "--property=Type=exec", "--property=LimitCORE=0",
+            "--property=WorkingDirectory=" + str(BASE), "--property=RuntimeMaxSec=100",
+            *("--setenv=" + k + "=" + v for k, v in values.items()),
+            "/usr/bin/dbus-run-session", "--", "/usr/bin/xvfb-run", "-a", "--server-args=-screen 0 1280x800x24",
+            "/bin/sh", "-eu", "-c", "/usr/bin/openbox --sm-disable </dev/null >/dev/null 2>&1 & manager=$!; "
+            "trap '/usr/bin/openbox --exit; wait \"$manager\"' EXIT; "
+            "/usr/bin/python3 -B /opt/creator-polkit-fixture/scripts/native-linux-polkit-probe.py probe"]
+
+
+def authenticate_session(env):
+    """No caller-selected account/program, secret argument, credential log or retry."""
+    admission(env, sys.platform, platform.machine())
+    require(capture_mode(env) == "authenticate" and os.getuid() == os.geteuid() == 0, "Explicit disposable root authentication broker required")
+    disable_core_dumps()
+    os.umask(0o077)
+    null = os.stat("/dev/null")
+    incoming = os.fstat(0)
+    require(stat.S_ISCHR(incoming.st_mode) and incoming.st_rdev == null.st_rdev, "Broker stdin must be /dev/null, never a sudo password channel")
+    binding = fixture_binding(env)
+    import grp
+    import pwd
+    account = pwd.getpwnam(USER)
+    identity = (account.pw_uid, account.pw_gid, account.pw_dir, account.pw_shell)
+    require(identity == (UID, UID, "/var/lib/creator-polkit-fixture", "/bin/bash")
+            and set(os.getgrouplist(USER, UID)) == {UID, grp.getgrnam("sudo").gr_gid}, "Exact fresh synthetic administrator required")
+    output = BASE / "result"
+    require(output.resolve(strict=True) == output and output.stat().st_uid == output.stat().st_gid == UID
+            and stat.S_IMODE(output.stat().st_mode) == 0o700, "Private fixture result required")
+    try:
+        (output / "home").lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise RuntimeError("Authentication fixture already used")
+    policy = admin_config()
+    tools = credential_tools(output)
+    require(fixture_credential("status") == "L", "Only a freshly locked fixture may be provisioned")
+    base().write_new(BASE / "authentication-once.json", json.dumps({"source": env["GITHUB_SHA"], "uid": UID}).encode(), 0o600)
+    record = {"scope": "synthetic-authentication-mechanism-only", "source": binding["source"], "uid": UID,
+              "passwordProvisioned": False, "fixtureRelocked": False, "credentialTools": tools, **FLAGS}
+    secret = payload = None
+    relock = False
+    try:
+        secret = bytearray(secrets.token_hex(32).encode("ascii"))
+        relock = True  # Even an ambiguous provisioning result must relock this fixture.
+        fixture_credential("provision", secret)
+        require(fixture_credential("status") == "P" and admin_config() == policy, "Synthetic provisioning status/policy differs")
+        record["passwordProvisioned"] = True
+        payload = bytearray(secret + b"\n")
+        result = subprocess.run(authentication_session_command(env), input=payload, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}, cwd=BASE, close_fds=True, timeout=115)
+        require(result.returncode == 0, "Synthetic native authentication session refused")
+        record["sessionExitedZero"] = True
+    except Exception:
+        record["refusal"] = {"phase": "credential-session", "message": "Synthetic authentication refused; no retry"}
+    finally:
+        for value in (secret, payload):
+            if value is not None:
+                value[:] = b"\0" * len(value)
+        if relock:
+            try:
+                current = pwd.getpwnam(USER)
+                require((current.pw_uid, current.pw_gid, current.pw_dir, current.pw_shell) == identity, "Fixture identity changed before relock")
+                fixture_credential("lock")
+                require(fixture_credential("status") == "L", "Synthetic fixture relock not confirmed")
+                record["fixtureRelocked"] = True
+            except Exception:
+                record["refusal"] = {"phase": "fixture-relock", "message": "Synthetic fixture relock refused; disposable teardown required"}
+        base().save_json(BASE / "authentication-provision.json", record)
+    require(record.get("sessionExitedZero") and record["fixtureRelocked"] and "refusal" not in record,
+            "Synthetic authentication broker refused; fixed receipt retained")
+    return record
+
+
+def read_synthetic_secret(env):
+    require(capture_mode(env) == "authenticate" and os.getuid() == os.geteuid() == UID, "Only the synthetic authentication probe may consume stdin")
+    info = os.fstat(0)
+    require(stat.S_ISFIFO(info.st_mode) and info.st_uid == 0, "Anonymous root-owned stdin pipe required")
+    value = bytearray()
+    try:
+        while len(value) <= 65:
+            part = os.read(0, 66 - len(value))
+            if not part:
+                break
+            value.extend(part)
+        require(re.fullmatch(b"[0-9a-f]{64}\n", value), "Fixed synthetic stdin frame required")
+        return bytearray(value[:-1])
+    except Exception:
+        raise RuntimeError("Synthetic stdin frame refused") from None
+    finally:
+        value[:] = b"\0" * len(value)
+        os.close(0)
 
 
 def stock_policy_contract(tar_bytes):
@@ -518,7 +707,7 @@ def raw_ax(agent, helper, atspi, refs):
             "axToXidAssociationVerified": False, **FLAGS}
 
 
-def cancel_profile(agent, helper, atspi, refs, x11, native, geometry):
+def cancel_profile(agent, helper, atspi, refs, x11, native, geometry, *, authenticate=False):
     """Exact native GNOME profile; never query a password name/text/action."""
     require(len(native) == 1 and native[0]["pid"] == agent["pid"] and native[0]["client"] > 0
             and native[0]["mapped"] and native[0]["title"] == "Authenticate", "Exact single owned native dialog required")
@@ -554,6 +743,12 @@ def cancel_profile(agent, helper, atspi, refs, x11, native, geometry):
                 "Cancel graph reverse parent differs")
         role, states = node.get_role(), node.get_state_set()
         password = role == atspi.Role.PASSWORD_TEXT
+        if authenticate:
+            protected = geometry.get("passwordReference")
+            require(list(ref) != protected or password, "Previously attributed password role changed; never read its name/text")
+            if password:
+                require(protected is None or list(ref) == protected, "Attributed password reference changed")
+                geometry["passwordReference"] = list(ref)
         require(password or not states.contains(atspi.StateType.EDITABLE), "Unexpected editable Cancel graph node")
         name = None if password else node.get_name()
         require(name is None if password else type(name) is str and len(name) <= 1024, "Cancel graph name exceeds bound")
@@ -572,7 +767,30 @@ def cancel_profile(agent, helper, atspi, refs, x11, native, geometry):
     passwords = [n for n, row in zip(nodes, graph) if row["role"] == int(atspi.Role.PASSWORD_TEXT)]
     require(len(labels) == len(passwords) == 1 and len(buttons) == 2
             and {row["name"] for _n, row in buttons} == {"Cancel", "Authenticate"}, "Exact question/buttons/password profile required")
-    for node in [dialog, *labels, *passwords, *(n for n, _row in buttons)]:
+    selected = None
+    extra_controls = []
+    if authenticate:
+        combos = [(n, row) for n, row in zip(nodes, graph) if row["role"] == int(atspi.Role.COMBO_BOX)]
+        prompts = [(n, row) for n, row in zip(nodes, graph) if row["role"] == int(atspi.Role.LABEL) and row["name"] == "Password:"]
+        items = [(n, row) for n, row in zip(nodes, graph) if row["role"] == int(atspi.Role.MENU_ITEM)]
+        require(len(combos) == len(prompts) == 1 and combos[0][1]["name"] == USER
+                and len(items) == 3 and {row["name"] for _n, row in items} == {"Select user...", "Ubuntu (packer)", USER},
+                "Exact synthetic administrator selector/password prompt required")
+        combo = combos[0][0]
+        selection = combo.get_selection_iface()
+        require(selection is not None and selection.get_n_selected_children() == 1, "Exactly one selected administrator required")
+        current = selection.get_selected_child(0)
+        require(current is not None, "Selected administrator unavailable")
+        current.clear_cache()
+        selected_ref = tuple(refs.identity(current, owner))
+        candidate, selected = next((n, row) for n, row in items if row["name"] == USER)
+        require(current.get_process_id() == agent["pid"] and current.get_role() == atspi.Role.MENU_ITEM
+                and current.get_name() == USER and selected_ref == tuple(selected["reference"])
+                and tuple(refs.identity(current.get_parent(), owner)) == tuple(selected["parent"])
+                and tuple(refs.identity(candidate, owner)) == selected_ref, "Only the exact fixture identity may be selected")
+        require(passwords[0].get_state_set().contains(atspi.StateType.EDITABLE), "Synthetic password entry must be editable")
+        extra_controls = [(combo, combos[0][1]), *prompts, (passwords[0], {"name": "password-entry"})]
+    for node in [dialog, *labels, *passwords, *(n for n, _row in buttons), *(n for n, _row in extra_controls)]:
         helper.ready(node, atspi)
     component = dialog.get_component_iface()
     require(component is not None, "Cancel dialog Component unavailable")
@@ -583,7 +801,7 @@ def cancel_profile(agent, helper, atspi, refs, x11, native, geometry):
     # not client bounds. Unknown geometry is retained and refuses input.
     require(all(type(v) is int for v in actual) and actual == frame, "Cancel AX/native frame differs")
     controls = {}
-    for node, row in buttons:
+    for node, row in [*buttons, *extra_controls]:
         component = node.get_component_iface()
         require(component is not None, "Cancel control Component unavailable")
         rect = component.get_extents(atspi.CoordType.SCREEN)
@@ -598,6 +816,9 @@ def cancel_profile(agent, helper, atspi, refs, x11, native, geometry):
             "Cancel native ownership/frame changed")
     receipt = {"graph": graph, "native": native, "frame": list(frame), "controls": controls,
                "application": list(root_ref), "axToXidAssociationVerified": True, "passwordRead": False}
+    if authenticate:
+        receipt.update(selectedIdentity=USER, selectedIdentityVerified=True, selectedReference=selected["reference"])
+        return (passwords[0], next(n for n, row in buttons if row["name"] == "Authenticate")), receipt
     return next(n for n, row in buttons if row["name"] == "Cancel"), receipt
 
 
@@ -619,6 +840,46 @@ def cancel_once(profile, guard, record):
     record.update(dialogInputAuthorized=True, authorizedControl="Cancel", cancelActionAttempts=1, actionMayHaveRun=True)
     require(interface.do_action(0), "Cancel action refused or uncertain; do not retry")
     record["cancelActionReturned"] = True
+
+
+def _authenticate_once(profile, guard, record, secret):
+    """Write once to the attributed entry, then exactly one native button press."""
+    require(record.get("mode") == "authenticate" and record.get("passwordWriteAttempts", 0) == 0
+            and record.get("authenticateActionAttempts", 0) == 0, "Unused manual authentication attempt required")
+    require(type(secret) is bytearray and re.fullmatch(b"[0-9a-f]{64}", secret), "Fixed synthetic password frame required")
+    guard()
+    _controls, before = profile()
+    record["authenticationProfile"] = before
+    guard()
+    (password, _button), current = profile()
+    require(current == before and current["selectedIdentityVerified"] and current["selectedIdentity"] == USER,
+            "Fresh authentication identity/graph/frame changed")
+    editable = password.get_editable_text_iface()
+    require(editable is not None, "Owned password EditableText unavailable")
+    guard()
+    record.update(dialogInputAuthorized=True, authorizedControl="synthetic password and Authenticate",
+                  passwordWriteAttempts=1, actionMayHaveRun=True)
+    require(editable.set_text_contents(secret.decode("ascii")), "Synthetic password write refused; no retry")
+    record["passwordWriteReturned"] = True
+    guard()
+    (_password, button), current = profile()
+    require(current == before, "Post-write authentication identity/graph/frame changed")
+    guard()
+    (_password, button), current = profile()
+    require(current == before, "Final authentication identity/graph/frame changed")
+    interface = button.get_action_iface()
+    require(interface is not None and interface.get_n_actions() == 1 and interface.get_action_name(0) == "click",
+            "Exactly one native Authenticate click required")
+    record["authenticateActionAttempts"] = 1
+    require(interface.do_action(0), "Authenticate refused or uncertain; no retry")
+    record["authenticateActionReturned"] = True
+
+
+def authenticate_once(profile, guard, record, secret):
+    try:
+        _authenticate_once(profile, guard, record, secret)
+    except Exception:
+        raise RuntimeError("Synthetic native authentication refused; no retry") from None
 
 
 def native_window_absence(x11, helper, target, observation):
@@ -670,6 +931,23 @@ def wait_cancel(request, request_log, guard, x11, helper, target, record):
     raise RuntimeError("Cancel completion deadline; no retry or force-close")
 
 
+def wait_authenticate(request, guard, x11, helper, target, record):
+    require(record.get("mode") == "authenticate" and record.get("authenticateActionAttempts") == 1
+            and record.get("authenticateActionReturned") is True, "One returned native Authenticate required")
+    deadline = time.monotonic() + 10
+    record["authenticationDismissal"] = {}
+    while time.monotonic() < deadline:
+        guard()
+        exit_code = request.poll()
+        require(exit_code is None or exit_code == 0, "Fixed pkexec authentication did not exit zero")
+        native_window_absence(x11, helper, target, record["authenticationDismissal"])
+        if exit_code == 0 and record["authenticationDismissal"]["complete"] and record["authenticationDismissal"]["absent"]:
+            record["authenticationAccepted"] = True
+            return
+        time.sleep(0.02)
+    raise RuntimeError("Authentication completion deadline; no retry or force-close")
+
+
 def probe(env):
     import gi
     gi.require_version("Atspi", "2.0")
@@ -685,25 +963,22 @@ def probe(env):
     record = {"scope": "synthetic-system-agent-attribution-only", "source": env["GITHUB_SHA"], "mode": capture_mode(env),
               "agentAttributed": False, "agentOperationObserved": False, "dialogContractCaptured": False,
               "cancelActionAttempts": 0, "actionMayHaveRun": False, **FLAGS}
-    agent = request = agent_log = request_log = x11 = axbus = None
+    agent = request = agent_log = request_log = x11 = axbus = secret = None
     try:
-        binding_file = BASE / "source-binding.json"
-        require(binding_file.stat().st_uid == 0 and stat.S_IMODE(binding_file.stat().st_mode) == 0o644, "Root-owned source binding required")
-        binding = b.unique_json(b.bounded_read(binding_file, 8192))
-        require(binding["source"] == env["GITHUB_SHA"] and set(binding["files"]) == {*HELPERS, Path(__file__).name}, "Exact fixture source binding required")
-        for name, digest in binding["files"].items():
-            script = HERE / name
-            require(script.resolve(strict=True) == script and script.stat().st_uid == 0
-                    and stat.S_IMODE(script.stat().st_mode) == 0o644
-                    and b.file_record(script, 256 * 1024)["sha256"] == digest, "Root-installed fixture source differs")
-        record["scriptBinding"] = binding
+        record["scriptBinding"] = fixture_binding(env)
         record["files"] = verify_files(output)
-        if record["mode"] == "admin-capture":
+        authenticating = record["mode"] == "authenticate"
+        if authenticating:
+            disable_core_dumps()
+            secret = read_synthetic_secret(env)
+            record.update(scope="synthetic-authentication-mechanism-only", credentialOutputSuppressed=True,
+                          passwordWriteAttempts=0, authenticateActionAttempts=0)
+        if record["mode"] in ("admin-capture", "authenticate"):
             import grp
             admin = grp.getgrnam("sudo")
             require(USER in admin.gr_mem and admin.gr_gid in os.getgroups(), "Fresh synthetic administrator not in actual session groups")
             record["adminMembership"] = {"fixture": USER, "uid": UID, "sudoGid": admin.gr_gid,
-                                         "sessionGroupVerified": True, "stockAdminMapping": admin_config(), "passwordProvisioned": False}
+                                         "sessionGroupVerified": True, "stockAdminMapping": admin_config(), "passwordProvisioned": authenticating}
         for name in ("home", "home/config", "home/data", "home/cache", "tmp"):
             (output / name).mkdir(mode=0o700)
         child_env = finite_environment(env, output)
@@ -712,8 +987,9 @@ def probe(env):
         system = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
         record["session"] = session(system, os.getpid(), GLib)
         record["parent"] = parent = b.native_process(os.getpid(), helper)
-        agent = subprocess.Popen([AGENT], env=child_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        agent_log = b.Capture(agent, output, "agent")
+        native_output = subprocess.DEVNULL if authenticating else subprocess.PIPE
+        agent = subprocess.Popen([AGENT], env=child_env, stdin=subprocess.DEVNULL, stdout=native_output, stderr=native_output)
+        agent_log = None if authenticating else b.Capture(agent, output, "agent")
         record["agent"] = identity = b.native_process(agent.pid, helper)
         own_agent(agent, identity, parent, helper)
         record["agentSession"] = session(system, agent.pid, GLib)
@@ -723,7 +999,10 @@ def probe(env):
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             own_agent(agent, identity, parent, helper)
-            agent_log.pump(0.02)
+            if agent_log is not None:
+                agent_log.pump(0.02)
+            else:
+                time.sleep(0.02)
             endpoint = agent_bus_identity(system, identity, GLib, record["agentBusObservation"])
             if endpoint is not None:
                 break
@@ -732,15 +1011,18 @@ def probe(env):
         record["systemBusAgent"] = endpoint
         x11 = helper.X11()
         require(not windows(agent.pid, helper, x11), "Agent already has a window before the fixed request")
-        request = subprocess.Popen(list(COMMAND), env=child_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        request_log = b.Capture(request, output, "pkexec")
+        request = subprocess.Popen(list(COMMAND), env=child_env, stdin=subprocess.DEVNULL, stdout=native_output, stderr=native_output)
+        request_log = None if authenticating else b.Capture(request, output, "pkexec")
         record["pkexec"] = {"pid": request.pid, "command": list(COMMAND), "requestedProgram": "/usr/bin/true"}
         refs, axbus = b.native_ax_references()
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             own_agent(agent, identity, parent, helper)
-            agent_log.pump(0.02)
-            request_log.pump()
+            if agent_log is not None:
+                agent_log.pump(0.02)
+                request_log.pump()
+            else:
+                time.sleep(0.02)
             require(request.poll() is None, "pkexec completed without a captured dialog; no authentication claimed")
             native = windows(agent.pid, helper, x11)
             require(len(native) <= 1, "Ambiguous agent native windows")
@@ -769,25 +1051,32 @@ def probe(env):
             raise RuntimeError("Agent GTK dialog deadline; no password/input fallback")
         if record["mode"] == "admin-capture":
             record["adminIdentityObservation"] = admin_identity_observation(observed, Atspi)
-        if record["mode"] == "cancel":
+        if record["mode"] in ("cancel", "authenticate"):
             def guard():
                 own_agent(agent, identity, parent, helper)
                 for pid, original in ((os.getpid(), record["session"]), (agent.pid, record["agentSession"])):
                     current = session(system, pid, GLib)
                     require(all(current[k] == original[k] for k in ("object", "Id", "User", "Leader")), "Cancel session changed")
-                require(agent_bus_identity(system, identity, GLib) == endpoint, "Cancel system-bus binding changed")
+                require(agent_bus_identity(system, identity, GLib) == endpoint, "Native action system-bus binding changed")
                 refs.recheck()
 
-            record["cancelGeometry"] = {}
+            geometry = record["authenticationGeometry" if authenticating else "cancelGeometry"] = {}
             def profile():
-                require(request.poll() is None, "Fixed request ended before Cancel")
-                return cancel_profile(identity, helper, Atspi, refs, x11, native, record["cancelGeometry"])
+                require(request.poll() is None, "Fixed request ended before native action")
+                return cancel_profile(identity, helper, Atspi, refs, x11, native, geometry, authenticate=authenticating)
 
-            cancel_once(profile, guard, record)
-            wait_cancel(request, request_log, guard, x11, helper, native[0]["window"], record)
+            if authenticating:
+                authenticate_once(profile, guard, record, secret)
+                wait_authenticate(request, guard, x11, helper, native[0]["window"], record)
+            else:
+                cancel_once(profile, guard, record)
+                wait_cancel(request, request_log, guard, x11, helper, native[0]["window"], record)
     except Exception as error:
-        record["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        record["refusal"] = ({"phase": "native-authentication", "message": "Synthetic authentication refused; no retry"}
+                             if record["mode"] == "authenticate" else {"type": type(error).__name__, "message": str(error)[:1000]})
     finally:
+        if secret is not None:
+            secret[:] = b"\0" * len(secret)
         for name, child, capture in (("agent", agent, agent_log), ("pkexec", request, request_log)):
             if capture is not None:
                 capture.pump()
@@ -801,7 +1090,8 @@ def probe(env):
         record["sessionTeardownRequired"] = True
         b.save_json(output / "polkit-report.json", record)
     require(record["dialogContractCaptured"] and "refusal" not in record
-            and (record["mode"] in ("read-only", "admin-capture") or record["cancelAccepted"]), "Native polkit capture refused; original evidence retained")
+            and (record["mode"] in ("read-only", "admin-capture") or record["cancelAccepted"] or record["authenticationAccepted"]),
+            "Native polkit capture refused; original evidence retained")
     return record
 
 
@@ -814,6 +1104,9 @@ def main():
         print(json.dumps(source_contract()))
         return
     admission(os.environ, sys.platform, platform.machine())
+    if sys.argv[1:] == ["authenticate-session"]:
+        print(json.dumps(authenticate_session(os.environ)))
+        return
     if sys.argv[1:] == ["prepare-admin-capture"]:
         print(json.dumps(prepare_admin_capture(os.environ, base().ordinary(os.environ["RUNNER_TEMP"]))))
         return
@@ -834,6 +1127,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        print(json.dumps({"error": type(error).__name__, "captureStopped": True, "inputOutcomeInRetainedReport": True,
-                          **{k: v for k, v in FLAGS.items() if k not in ("dialogInputAuthorized", "cancelAccepted")}}))
+        print(json.dumps({"error": "SyntheticAuthenticationRefused" if os.environ.get("CREATOR_LINUX_POLKIT_MODE") == "authenticate" else type(error).__name__,
+                          "captureStopped": True, "inputOutcomeInRetainedReport": True,
+                          **{k: v for k, v in FLAGS.items() if k not in ("dialogInputAuthorized", "cancelAccepted", "authenticationAccepted")}}))
         sys.exit(1)
