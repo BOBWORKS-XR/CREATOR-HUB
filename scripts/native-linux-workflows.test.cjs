@@ -69,8 +69,8 @@ test('installed direct-page checks use a pinned successful package and read-only
     "github.event_name == 'workflow_dispatch'", "github.event_name == 'push'"]) assert.ok(job.if.includes(guard));
   assert.equal(job.env.CREATOR_LINUX_INTEGRATED_PAGES, '1');
   const script = job.steps.find(step => step.uses === 'actions/github-script@v8').with.script;
-  for (const pin of ['39130359610', '12137857868', 'bbd0a5d58562a3d8af0c84e5360eef9d26803eef',
-    'c76c138b3297e347e834d43c1ac1a82eb883b41663df08ea44f008c5846e03e5',
+  for (const pin of ['39134487363', '12139109123', '5065fb1112b9e96978e40e64503fa979f559baae',
+    '71a2a4e42a1b1e2fe5e1e64f363f7d3c06444b03b5d2177b2e4565ad8a710c4c',
     "assert.equal(run.conclusion,'success')", 'crypto.createHash(\'sha256\')']) assert.ok(script.includes(pin));
   const commands = job.steps.filter(step => step.run).map(step => step.run).join('\n');
   assert.ok(commands.indexOf('linux-retirement-package-verify.py') < commands.indexOf('sudo dpkg --install'));
