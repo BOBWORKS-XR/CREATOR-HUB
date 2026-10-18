@@ -398,7 +398,7 @@ const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
         self.assertIn('report["first"]["normalCloseObserved"] is True', smoke)
         self.assertIn("validate_protocol_processes", smoke)
         self.assertIn("pass_fds=fds", smoke)
-        self.assertIn("select.select([fd]", smoke)
+        self.assertIn("finish_protocol_processes(child, pidfds", smoke)
         self.assertIn('os.getuid(), 0o500)', smoke)
         self.assertNotIn(".kill(", smoke)
         self.assertNotIn(".terminate(", smoke)
@@ -408,6 +408,27 @@ const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
         workflow = WORKFLOW.read_text()
         self.assertIn(M.SDK_LOCK_SHA, workflow)
         self.assertIn("npm ci --prefix modules/mcp --ignore-scripts --no-audit --no-fund", workflow)
+
+    def test_protocol_reaps_own_router_before_requiring_proc_absence(self):
+        child, pages, order = mock.Mock(), mock.Mock(), []
+        def reap(**kwargs):
+            self.assertEqual(kwargs, {"timeout": 0})
+            order.append("reaped-router")
+            return 0
+        child.wait.side_effect = reap
+        pages.wait.side_effect = lambda check, _: M.require(check(), "Exit not observed")
+        identities = {name: {"pid": pid} for name, pid in (("router", 101), ("supervisor", 102), ("node", 103))}
+        def exists(path):
+            self.assertIn("reaped-router", order)
+            order.append(str(path))
+            return False
+        with mock.patch.object(M.select, "select", side_effect=lambda fds, *_: (fds, [], [])), mock.patch.object(Path, "exists", exists):
+            result = M.finish_protocol_processes(child, {"router": 7, "supervisor": 8, "node": 9}, identities, pages)
+        self.assertEqual(result, {"routerExitCode": 0, "pidfdExitObserved": {"router": True, "supervisor": True, "node": True}})
+        self.assertEqual(order[0], "reaped-router")
+        child.wait.assert_called_once_with(timeout=0)
+        with mock.patch.object(M.select, "select", return_value=([], [], [])), self.assertRaises(RuntimeError):
+            M.finish_protocol_processes(child, {"router": 7}, identities, pages)
 
     def test_workflow_branch_permissions_producer_and_legacy_pins(self):
         import yaml

@@ -583,6 +583,18 @@ def validate_protocol_processes(peers, router_pid, router_path, router_sha, node
     return {"router": router, "supervisor": supervisor, "node": node}
 
 
+def finish_protocol_processes(child, pidfds, identities, pages):
+    observed = {"pidfdExitObserved": {}}
+    for name, fd in pidfds.items():
+        pages.wait(lambda: bool(select.select([fd], [], [], 0.02)[0]), 10)
+        observed["pidfdExitObserved"][name] = True
+        if name == "router":
+            observed["routerExitCode"] = child.wait(timeout=0)
+            require(observed["routerExitCode"] == 0, "Router did not return a successful Node exit")
+        require(not Path(f"/proc/{identities[name]['pid']}").exists(), "Owned router descendant was not reaped: " + name)
+    return observed
+
+
 def protocol_smoke(root, binding, pages, helper, native, report):
     require(report["first"]["normalCloseObserved"] is True, "Root must close normally before protocol smoke")
     router_path, server, _ = route_paths(root / "home", binding["runtime"])
@@ -639,11 +651,7 @@ def protocol_smoke(root, binding, pages, helper, native, report):
         receipt["sdk"] = pages.parse(raw)
         require(receipt["sdk"]["eofSent"] is True and receipt["sdk"]["serverStdoutEnded"] is True
                 and receipt["sdk"]["signalsRequested"] is False, "EOF-only SDK receipt missing")
-        for name, fd in pidfds.items():
-            pages.wait(lambda: bool(select.select([fd], [], [], 0.02)[0]), 10)
-            require(not Path(f"/proc/{receipt['processes'][name]['pid']}").exists(), "Owned router descendant was not reaped")
-        receipt["routerExitCode"] = child.wait(timeout=0)
-        require(receipt["routerExitCode"] == 0, "Router did not return a successful Node exit")
+        receipt.update(finish_protocol_processes(child, pidfds, receipt["processes"], pages))
         receipt.update(protocolSmoke=True, ownedRouterNodeExitObserved=True)
         report["protocolSmoke"] = True
     finally:
