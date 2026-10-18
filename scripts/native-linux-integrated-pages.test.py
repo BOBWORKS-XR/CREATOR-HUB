@@ -1,5 +1,6 @@
 """Portable, synthetic tests only: no GUI, driver, install or native libraries."""
 import copy
+import io
 import importlib.util
 import json
 from pathlib import Path
@@ -107,6 +108,15 @@ class PagesTests(unittest.TestCase):
         driver = self.driver(Response())
         driver.http.open.side_effect = TimeoutError("unknown click outcome")
         with self.assertRaises(TimeoutError):
+            driver.request("POST", "/session/one/element/two/click", {})
+        self.assertEqual(driver.http.open.call_count, 1)
+
+    def test_protocol_errors_retain_bounded_diagnostics_without_retrying(self):
+        driver = self.driver(Response())
+        body = b'{"value":{"error":"element click intercepted","message":"A dialog covers the row"}}'
+        driver.http.open.side_effect = urllib.error.HTTPError('http://127.0.0.1:4444/session/one', 400,
+                                                            'Bad Request', {}, io.BytesIO(body))
+        with self.assertRaisesRegex(RuntimeError, 'POST /session/one/element/two/click: HTTP 400: element click intercepted'):
             driver.request("POST", "/session/one/element/two/click", {})
         self.assertEqual(driver.http.open.call_count, 1)
 

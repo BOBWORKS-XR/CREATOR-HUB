@@ -128,11 +128,22 @@ class Driver:
         require(body is None or len(body) <= 16384, "Oversized WebDriver request")
         self.guard()
         request = urllib.request.Request("http://127.0.0.1:4444" + suffix, body, {"Content-Type": "application/json"}, method=method)
-        with self.http.open(request, timeout=15) as response:
-            require(response.status == 200, "Unexpected HTTP outcome")
-            length = response.headers.get("Content-Length")
-            require(length is None or (length.isdecimal() and int(length) <= limit), "Oversized response header")
-            raw = response.read(limit + 1)
+        try:
+            with self.http.open(request, timeout=15) as response:
+                require(response.status == 200, "Unexpected HTTP outcome")
+                length = response.headers.get("Content-Length")
+                require(length is None or (length.isdecimal() and int(length) <= limit), "Oversized response header")
+                raw = response.read(limit + 1)
+        except urllib.error.HTTPError as error:
+            raw = error.read(2049)
+            detail = "Protocol error body unavailable or oversized"
+            if len(raw) <= 2048:
+                try:
+                    value = parse(raw).get("value", {})
+                    detail = str(value.get("error", "unknown"))[:80] + ": " + str(value.get("message", ""))[:500]
+                except (ValueError, AttributeError, RuntimeError):
+                    pass
+            raise RuntimeError(f"WebDriver {method} {suffix}: HTTP {error.code}: {detail}") from None
         require(0 < len(raw) <= limit, "Oversized/empty WebDriver response")
         require(length is None or len(raw) == int(length), "Truncated WebDriver response")
         result = parse(raw)
@@ -336,6 +347,7 @@ def run(binding, root, report):
                 and started <= consent["acceptedAtMs"] <= time.time_ns() // 1000000, "Native terms record missing/differs")
         report["termsObserved"] = True
         for feature in ("mcp", "setup"):
+            report["phase"] = "open-" + feature
             if feature == "mcp":
                 d.click('#entry-mcp .app-row')
             else:
@@ -379,6 +391,18 @@ def run(binding, root, report):
         preserved(root / "home", binding["fixtures"], binding["config"], "read")
         pinned(HUB, hub, 0, 0o755)
         report["pagesObserved"] = True
+    except Exception:
+        if request is not None:
+            try:
+                d.guard()
+                report["openDialogs"] = [str(d.call("GET", "/element/" + element + "/text"))[:2048]
+                                         for element in d.elements("dialog[open]")]
+                physical = root / "physical-failure"
+                physical.mkdir(mode=0o700)
+                report["failureSurface"] = native.bitmap(request, physical, helper, x11)
+            except Exception as capture_error:
+                report["failureCaptureError"] = str(capture_error)[:500]
+        raise
     finally:
         if request is not None:
             try:
