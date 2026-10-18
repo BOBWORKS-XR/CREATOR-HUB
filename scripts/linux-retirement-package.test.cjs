@@ -318,3 +318,93 @@ test('modified assembly workflow parses with its default-false boolean and uncha
   if (parsed.stderr?.includes("No module named 'yaml'")) return t.skip('Optional local PyYAML is unavailable');
   assert.equal(parsed.status, 0, parsed.stderr || parsed.error?.message);
 });
+
+function assemblyYaml(t) {
+  const source = fs.readFileSync(path.join(repo, '.github/workflows/unix-managed-assembly.yml'), 'utf8');
+  const parsed = spawnSync(process.platform === 'win32' ? 'python' : 'python3', ['-B', '-c',
+    'import sys,yaml,json; print(json.dumps(yaml.load(sys.stdin.read(),Loader=yaml.BaseLoader)))'],
+  { input: source, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  if (parsed.stderr?.includes("No module named 'yaml'")) { t.skip('Optional local PyYAML is unavailable'); return null; }
+  assert.equal(parsed.status, 0, parsed.stderr || parsed.error?.message);
+  return JSON.parse(parsed.stdout);
+}
+
+function workflowBash(t, script, retirement, integrated) {
+  const bash = process.platform === 'win32' ? path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git/bin/bash.exe') : '/bin/bash';
+  if (!fs.existsSync(bash)) { t.skip('Native Bash is unavailable; do not substitute a WSL/native product run'); return null; }
+  return spawnSync(bash, ['--noprofile', '--norc', '-c', script], {
+    cwd: repo, windowsHide: true, encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, BASH_ENV: '', CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: retirement,
+      CREATOR_LINUX_INTEGRATED_CANDIDATE: integrated },
+  });
+}
+
+test('assembly profiles default off and conflict refusal precedes every signed input download', t => {
+  const workflow = assemblyYaml(t); if (!workflow) return;
+  const inputs = workflow.on.workflow_dispatch.inputs;
+  for (const name of ['linux_retirement_test_candidate', 'linux_integrated_candidate']) {
+    assert.equal(inputs[name].type, 'boolean');
+    assert.equal(inputs[name].default, 'false');
+    assert.equal(inputs[name].required, 'false');
+  }
+  assert.equal(inputs.signed_inputs.type, 'string');
+  assert.equal(inputs.signed_inputs.required, 'true');
+  assert.equal(workflow.permissions.contents, 'read');
+  const preflight = workflow.jobs['candidate-options'];
+  assert.equal(preflight['runs-on'], 'ubuntu-22.04');
+  assert.equal(preflight['timeout-minutes'], '5');
+  assert.equal(preflight.permissions, undefined);
+  assert.equal(preflight.steps.length, 1);
+  assert.equal(preflight.steps[0].uses, undefined);
+  assert.doesNotMatch(preflight.steps[0].run, /checkout|download|curl|wget|npm|cargo|github\.|gh release|dpkg/);
+  const stage = workflow.jobs['stage-input'];
+  assert.equal(stage.needs, 'candidate-options');
+  assert.equal(stage.if, '${{ !(inputs.linux_retirement_test_candidate && inputs.linux_integrated_candidate) }}');
+  assert.equal(stage.permissions.contents, 'write');
+  assert.equal(workflow.jobs.assembly.needs, 'stage-input');
+  for (const [retirement, integrated] of [['0', '0'], ['1', '0'], ['0', '1'], ['1', '1']]) {
+    const result = workflowBash(t, preflight.steps[0].run, retirement, integrated); if (!result) return;
+    assert.equal(result.status, retirement === '1' && integrated === '1' ? 64 : 0, result.stderr || result.error?.message);
+    assert.equal(result.stdout, '');
+  }
+});
+
+test('actual assembly Bash selects exactly one profile and the integrated builder supplies all Root features', t => {
+  const workflow = assemblyYaml(t); if (!workflow) return;
+  const assembly = workflow.jobs.assembly;
+  assert.equal(assembly.env.CREATOR_LINUX_INTEGRATED_CANDIDATE, "${{ inputs.linux_integrated_candidate && '1' || '0' }}");
+  const step = assembly.steps.find(item => item.id === 'package');
+  assert.equal(step.shell, 'bash');
+  // Exercise argument mapping only. Neither stub executes Python, npm, a build or a candidate payload.
+  const stubs = "python3() { printf '%s\\n' '/reviewed-runner'; }\nnpm() { printf '%s\\n' \"$@\"; }\n";
+  for (const [retirement, integrated, selected] of [['0', '0', {}], ['1', '0', { linuxRetirementCandidate: true }],
+    ['0', '1', { linuxIntegratedCandidate: true, integratedFeatures: true }]]) {
+    const result = workflowBash(t, stubs + step.run, retirement, integrated); if (!result) return;
+    assert.equal(result.status, 0, result.stderr || result.error?.message);
+    const args = result.stdout.trimEnd().split(/\r?\n/);
+    assert.deepEqual(args.slice(0, 4), ['run', 'build:unified', '--', 'ci-signed-unix-hub']);
+    const options = parseBuildOptions(args.slice(4));
+    assert.deepEqual(options, { installer: true, managed: true, experimentalUnix: true, experimentalWritable: true,
+      signedUnixInput: '/reviewed-runner/signed-unix-input', ...selected });
+    if (integrated === '1') {
+      assert.deepEqual(require('./build-unified.cjs').integrationArguments('linux', 'x86_64', options.integratedFeatures, true),
+        ['--features', 'integrated-features,experimental-flatpak-host,experimental-linux-migration']);
+    }
+  }
+  const refused = workflowBash(t, stubs + step.run, '1', '1'); if (!refused) return;
+  assert.equal(refused.status, 64, refused.stderr || refused.error?.message);
+  assert.equal(refused.stdout, '', 'No builder invocation when both profiles are selected');
+});
+
+test('pre-package tests keep optional MCP libraries off until the builder verifies and extracts signed payloads', t => {
+  const workflow = assemblyYaml(t); if (!workflow) return;
+  const steps = workflow.jobs.assembly.steps;
+  const packageIndex = steps.findIndex(step => step.id === 'package');
+  assert.ok(packageIndex > 0);
+  const earlier = steps.slice(0, packageIndex).map(step => step.run || '').join('\n');
+  assert.doesNotMatch(earlier, /release:launcher|--features[^\n]*(?:integrated-features|integrated-service|experimental-flatpak-host)/);
+  assert.match(earlier, /cargo test --release --locked --manifest-path src-tauri\/Cargo.toml\s+--target-dir artifacts\/unix-verifier-target/);
+  assert.doesNotMatch(steps[packageIndex].run, /npm(?:\s+--prefix\s+\S+)?\s+run\s+release:launcher|cp\s.*modules\/mcp\/release/);
+  const source = fs.readFileSync(path.join(repo, '.github/workflows/unix-managed-assembly.yml'), 'utf8');
+  assert.doesNotMatch(source, /gh release|dpkg --install|--draft=false|--latest|publish-hub-draft\.cjs/);
+});

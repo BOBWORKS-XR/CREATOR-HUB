@@ -13,10 +13,32 @@ on:
         type: boolean
         default: false
         required: false
+      linux_integrated_candidate:
+        description: Build the integrated Linux DEB candidate with native activation; no acceptance or publication
+        type: boolean
+        default: false
+        required: false
 permissions:
   contents: read
 jobs:
+  candidate-options:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    env:
+      CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: ${{ inputs.linux_retirement_test_candidate && '1' || '0' }}
+      CREATOR_LINUX_INTEGRATED_CANDIDATE: ${{ inputs.linux_integrated_candidate && '1' || '0' }}
+    steps:
+      - name: Refuse conflicting candidate profiles before any download
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 && "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then
+            echo '::error::Choose either the TEST ONLY retirement profile or the integrated candidate, not both.' >&2
+            exit 64
+          fi
   stage-input:
+    needs: candidate-options
+    if: ${{ !(inputs.linux_retirement_test_candidate && inputs.linux_integrated_candidate) }}
     # Draft assets need push permission. No checkout, dependency installation,
     # candidate decoding or application execution runs with this token.
     permissions:
@@ -69,6 +91,7 @@ jobs:
     env:
       CREATOR_UNIX_HANDOFF_SHA256: ${{ matrix.handoffSha256 }}
       CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: ${{ inputs.linux_retirement_test_candidate && '1' || '0' }}
+      CREATOR_LINUX_INTEGRATED_CANDIDATE: ${{ inputs.linux_integrated_candidate && '1' || '0' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -136,8 +159,15 @@ jobs:
         run: |
           set -euo pipefail
           temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 && "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then
+            echo '::error::Conflicting native DEB candidate profiles.' >&2
+            exit 64
+          fi
           extra=()
           if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 ]]; then extra+=(--linux-retirement-test-candidate); fi
+          if [[ "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then extra+=(--linux-integrated-candidate --integrated-features); fi
+          # Integrated runtime snapshot preparation belongs after the builder's trusted extraction.
+          # Do not regenerate release:launcher or enable optional-library tests before that trusted boundary.
           npm run build:unified -- ci-signed-unix-hub --installer --managed --experimental-unix --experimental-unix-writable --signed-unix-input "$temp/signed-unix-input" "${extra[@]}"
       - name: Bind the actual packaged Mac app, native version and primary assembly receipt
         if: runner.os == 'macOS'
