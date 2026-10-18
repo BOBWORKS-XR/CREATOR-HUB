@@ -219,6 +219,33 @@ def press_control(action, owner, atspi):
     return {"action": action, "actionCount": 1, "domId": CONTROLS[action][0], "ownership": owner.evidence(), **FALSE_GATES}
 
 
+def update_status(nodes, owner, atspi):
+    # Source index.html uses p[role=status], mapped to StatusBar by WebKit,
+    # not Paragraph. Read only this fixed status even when below the viewport;
+    # pressing still requires the separate visible/enabled source button.
+    # WebKit/webkitgtk-2.50.4 AccessibilityObjectAtspi.cpp::atspiRole.
+    matches = [n for n in nodes if n.get_attributes().get("id") == "hub-update-status"]
+    require(len(matches) == 1, "Exact unique updater status required")
+    node = matches[0]
+    owner.node(node)
+    attributes = node.get_attributes()
+    require(owner.renderer is not None and node.get_process_id() == owner.renderer["pid"]
+            and node.get_role() == atspi.Role.STATUS_BAR
+            and attributes.get("tag") == "p" and attributes.get("computed-role") == "status"
+            and attributes.get("toolkit") == "WebKitGTK", "Fixed source status differs")
+    states = node.get_state_set()
+    require(not states.contains(atspi.StateType.DEFUNCT), "Updater status is defunct")
+    interface = node.get_text_iface()
+    require(interface is not None, "Updater status text interface absent")
+    count = interface.get_character_count()
+    require(type(count) is int and 0 <= count <= 512, "Updater status exceeds bound")
+    text = interface.get_text(0, count)
+    require(type(text) is str and len(text) == count and len(text.encode("utf8")) <= 2048
+            and interface.get_character_count() == count, "Updater status text changed or oversized")
+    owner.recheck(full=True)
+    return {"text": text, "showing": states.contains(atspi.StateType.SHOWING), "readOnly": True}
+
+
 def capture_dialog(root, request, helper, x11, atspi, saved):
     c, b = components(), components().B
     deadline = time.monotonic() + 20
@@ -289,8 +316,8 @@ def worker(root, args):
                 selected_action = "open-confirmation" if action == "ready" else action
                 fixed_controls(nodes, selected_action, owner, Atspi)
                 if action in ("ready", "open-confirmation"):
-                    texts = [v for n in last["nodes"] if n["showing"] for v in (n["name"], n["text"]) if v]
-                    if not any(v in ("Version 0.1.15 is available.", "Version 0.1.15 is ready to install.") for v in texts):
+                    last["sourceUpdateStatus"] = update_status(nodes, owner, Atspi)
+                    if last["sourceUpdateStatus"]["text"] not in ("Version 0.1.15 is available.", "Version 0.1.15 is ready to install."):
                         raise NotReady("Signed15 UI status not observed yet")
                 if action == "ready":
                     b.save_json(root / "signed15-ui-ready.json", last)

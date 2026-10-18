@@ -331,6 +331,47 @@ class NativeControlTests(unittest.TestCase):
             p.press_control("check-updates", owner, f.atspi)
         f.button.action.do_action.assert_called_once()
 
+    def status_fixture(self):
+        f, owner = self.fixture("open-confirmation")
+        f.atspi.Role.STATUS_BAR = 54
+        status = fixtures.AxNode(43, 54, parent=f.web, states=(2, 3))
+        status.attrs = {"id": "hub-update-status", "tag": "p", "computed-role": "status", "toolkit": "WebKitGTK"}
+        status.get_attributes = lambda: status.attrs
+        status.body = "Version 0.1.15 is ready to install."
+        status.text = types.SimpleNamespace(get_character_count=lambda: len(status.body),
+                                          get_text=lambda start, end: status.body[start:end])
+        status.get_text_iface = lambda: status.text
+        return f, owner, status
+
+    def test_exact_source_status_read_is_not_paragraph_or_visible_input_fallback(self):
+        f, owner, status = self.status_fixture()
+        result = p.update_status(c.own_tree(f.window, owner, f.atspi), owner, f.atspi)
+        self.assertEqual(result, {"text": status.body, "showing": False, "readOnly": True})
+        f.button.action.do_action.assert_not_called()
+        self.assertEqual(status.role, 54)
+
+    def test_status_foreign_context_duplicate_role_oversize_and_changed_length_refuse(self):
+        for change in ("foreign", "duplicate", "role", "tag", "computed-role", "toolkit", "oversize", "changed", "defunct"):
+            f, owner, status = self.status_fixture()
+            nodes = c.own_tree(f.window, owner, f.atspi)
+            if change == "foreign":
+                status.pid = 99
+            elif change == "duplicate":
+                nodes.append(status)
+            elif change == "role":
+                status.role = 72
+            elif change in ("tag", "computed-role", "toolkit"):
+                status.attrs[change] = "other"
+            elif change == "oversize":
+                status.body = "x" * 513
+            elif change == "changed":
+                status.text.get_character_count = mock.Mock(side_effect=[len(status.body), len(status.body) + 1])
+            elif change == "defunct":
+                status.states.add(4)
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                p.update_status(nodes, owner, f.atspi)
+            f.button.action.do_action.assert_not_called()
+
 
 class ReadOnlyCaptureTests(unittest.TestCase):
     def fixture(self):
