@@ -2,9 +2,12 @@ import copy
 import hashlib
 import importlib.util
 import io
+import json
 import pathlib
+import subprocess
 import tarfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -40,6 +43,17 @@ def control(body=None):
     body = body if body is not None else b"Package: creator-hub\nVersion: 0.1.14\nArchitecture: amd64\nDescription: TEST ONLY - fixture\nDepends: policykit-1, libwebkit2gtk-4.1-0, libgtk-3-0\n"
     return [("control", body, tarfile.REGTYPE, 0o644, 0, 0),
             ("md5sums", b"fixture", tarfile.REGTYPE, 0o644, 0, 0)]
+
+
+def integrated_rows():
+    return rows() + [(name, b"", tarfile.DIRTYPE, 0o755, 0, 0) for name in sorted(v.SERVICE_PARENTS)] + [
+        (v.SERVICE, v.SERVICE_BYTES, tarfile.REGTYPE, 0o644, 0, 0)]
+
+
+def integrated_control(description=None):
+    text = v.INTEGRATED_DESCRIPTION if description is None else description
+    return control(("Package: creator-hub\nVersion: 0.1.14\nArchitecture: amd64\nDescription: " + text
+                    + "\nDepends: policykit-1, libwebkit2gtk-4.1-0, libgtk-3-0\n").encode())
 
 
 class PackageAudit(unittest.TestCase):
@@ -140,6 +154,90 @@ class PackageAudit(unittest.TestCase):
                 v.control(archive(control() + [(name, b"never-run", tarfile.REGTYPE, 0o755, 0, 0)]), "0.1.14")
         with self.assertRaises(ValueError):
             v.control(archive(control(base + b"Version: 0.1.14\n")), "0.1.14")
+
+    def test_integrated_description_matches_the_actual_template_exactly_without_changing_old_profile(self):
+        recipe = json.loads((ROOT / "packaging/linux/tauri-integrated-candidate.json").read_text())
+        self.assertEqual(v.INTEGRATED_DESCRIPTION, recipe["bundle"]["shortDescription"] + "\n " + recipe["bundle"]["longDescription"])
+        v.control(archive(integrated_control()), "0.1.14", v.INTEGRATED_PROFILE)
+        v.control(archive(control()), "0.1.14")
+        for text in ("Foreign Hub", "TEST ONLY - fixture", v.INTEGRATED_DESCRIPTION + " ",
+                     v.INTEGRATED_DESCRIPTION.replace("Creator Hub", "Creator Hub TEST ONLY")):
+            with self.subTest(description=text), self.assertRaises(ValueError):
+                v.control(archive(integrated_control(text)), "0.1.14", v.INTEGRATED_PROFILE)
+        with self.assertRaises(ValueError):
+            v.control(archive(control()), "0.1.14", v.INTEGRATED_PROFILE)
+        with self.assertRaises(ValueError):
+            v.control(archive(integrated_control()), "0.1.14")
+        for old, new in ((b"creator-hub", b"foreign"), (b"amd64", b"arm64"), (b"0.1.14", b"0.1.15"),
+                         (b"policykit-1, ", b""), (b"libgtk-3-0", b"")):
+            bad = integrated_control()[0][1].replace(old, new)
+            with self.subTest(change=new), self.assertRaises(ValueError):
+                v.control(archive(control(bad)), "0.1.14", v.INTEGRATED_PROFILE)
+
+    def test_integrated_control_never_admits_scripts_triggers_or_transaction_overrides(self):
+        for name in ("preinst", "postinst", "prerm", "postrm", "conffiles", "triggers"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                v.control(archive(integrated_control() + [(name, b"never executed", tarfile.REGTYPE, 0o755, 0, 0)]),
+                          "0.1.14", v.INTEGRATED_PROFILE)
+        for key in ("Pre-Depends", "Conflicts", "Breaks", "Replaces", "Conffiles", "Version"):
+            bad = integrated_control()[0][1] + f"{key}: foreign\n".encode()
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                v.control(archive(control(bad)), "0.1.14", v.INTEGRATED_PROFILE)
+
+    def test_integrated_data_requires_exact_service_in_addition_to_unchanged_helper_policy_checks(self):
+        result = v.data(archive(integrated_rows()), sha(HELPER), sha(POLICY), v.INTEGRATED_PROFILE)
+        self.assertEqual(set(result), {"/" + name for name in (v.HELPER, v.POLICY, v.SERVICE)})
+        self.assertEqual(v.SERVICE_BYTES, (ROOT / "native/flatpak-native-activation/com.creatorworks.hub.Host.service").read_bytes())
+        self.assertEqual(result["/" + v.SERVICE], {"sha256": sha(v.SERVICE_BYTES), "size": len(v.SERVICE_BYTES), "mode": 0o644, "uid": 0, "gid": 0})
+        for target in (v.HELPER, v.POLICY, v.SERVICE, *v.SERVICE_PARENTS):
+            with self.subTest(missing=target), self.assertRaises(ValueError):
+                v.data(archive([row for row in integrated_rows() if row[0] != target]), sha(HELPER), sha(POLICY), v.INTEGRATED_PROFILE)
+            for field, value in ((3, 0o777), (4, 1001), (5, 1001)):
+                modified = integrated_rows()
+                position = [row[0] for row in modified].index(target)
+                changed = list(modified[position]); changed[field] = value; modified[position] = tuple(changed)
+                with self.subTest(target=target, field=field), self.assertRaises(ValueError):
+                    v.data(archive(modified), sha(HELPER), sha(POLICY), v.INTEGRATED_PROFILE)
+        for target in (v.HELPER, v.POLICY, v.SERVICE):
+            modified = [(name, b"changed" if name == target else body, kind, mode, uid, gid)
+                        for name, body, kind, mode, uid, gid in integrated_rows()]
+            with self.subTest(bytes=target), self.assertRaises(ValueError):
+                v.data(archive(modified), sha(HELPER), sha(POLICY), v.INTEGRATED_PROFILE)
+        for name in ("usr/share/dbus-1/services/foreign.service", "usr/share/dbus-1/system.d/foreign.conf",
+                     "usr/share/polkit-1/actions/foreign.policy", "usr/libexec/foreign", "etc/dbus-1/foreign.conf"):
+            with self.subTest(extra=name), self.assertRaises(ValueError):
+                v.data(archive(integrated_rows() + [(name, b"foreign", tarfile.REGTYPE, 0o644, 0, 0)]),
+                       sha(HELPER), sha(POLICY), v.INTEGRATED_PROFILE)
+
+    def test_explicit_profile_reaches_both_control_and_data_without_changing_default_result_shape(self):
+        for profile, input_control, input_data in ((v.DEFAULT_PROFILE, control(), rows()),
+                                                   (v.INTEGRATED_PROFILE, integrated_control(), integrated_rows())):
+            def query(command, **kwargs):
+                self.assertEqual(command[0], "/usr/bin/dpkg-deb")
+                self.assertIn(command[1], ("--ctrl-tarfile", "--fsys-tarfile"))
+                kwargs["stdout"].write(archive(input_control if command[1] == "--ctrl-tarfile" else input_data).read())
+                return subprocess.CompletedProcess(command, 0, stderr=b"")
+            with mock.patch.object(v.subprocess, "run", side_effect=query) as called:
+                result = v.verify("not-installed.deb", sha(HELPER), sha(POLICY), "0.1.14", profile)
+            self.assertEqual(called.call_count, 2)
+            self.assertEqual(set(result), {"files", "profile"} if profile == v.INTEGRATED_PROFILE else {"files"})
+            if profile == v.INTEGRATED_PROFILE:
+                self.assertEqual(result["profile"], profile)
+        with mock.patch.object(v.subprocess, "run") as called:
+            with self.assertRaises(ValueError):
+                v.verify("not-installed.deb", sha(HELPER), sha(POLICY), "0.1.14", "foreign")
+            called.assert_not_called()
+
+    def test_combined_profile_is_compatible_with_production_activation_inspection_but_old_candidate_is_not(self):
+        spec = importlib.util.spec_from_file_location("activation_package", ROOT / "scripts/flatpak-native-helper-package.py")
+        activation = importlib.util.module_from_spec(spec); spec.loader.exec_module(activation)
+        activation.inspect_control(archive(integrated_control()), "0.1.14")
+        with self.assertRaises(ValueError):
+            activation.inspect_control(archive(control()), "0.1.14")
+        image = bytearray(64); image[:7] = b"\x7fELF\x02\x01\x01"; image[18:20] = b"\x3e\x00"
+        combined = integrated_rows() + [("usr/bin/creator-hub", bytes(image), tarfile.REGTYPE, 0o755, 0, 0)]
+        self.assertEqual(len(v.data(archive(combined), sha(HELPER), sha(POLICY), v.INTEGRATED_PROFILE)), 3)
+        self.assertEqual(set(activation.inspect_data(archive(combined), sha(image))), {v.SERVICE, "usr/bin/creator-hub"})
 
 
 if __name__ == "__main__":

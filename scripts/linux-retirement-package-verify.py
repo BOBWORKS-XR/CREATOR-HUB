@@ -14,11 +14,22 @@ POLICY = "usr/share/polkit-1/actions/com.creatorworks.hub.deb-retirement.policy"
 PARENTS = {"usr", "usr/libexec", "usr/share", "usr/share/polkit-1", "usr/share/polkit-1/actions"}
 ACTION = "com.creatorworks.hub.deb-retirement"
 LIMIT = 512 * 1024 * 1024
+DEFAULT_PROFILE = "retirement-acceptance"
+INTEGRATED_PROFILE = "integrated-candidate"
+INTEGRATED_DESCRIPTION = "Creator Hub\n Manage projects, connect AI tools to Unity and set up Creator SDK projects."
+SERVICE = "usr/share/dbus-1/services/com.creatorworks.hub.Host.service"
+SERVICE_BYTES = b"[D-BUS Service]\nName=com.creatorworks.hub.Host\nExec=/usr/bin/creator-hub --flatpak-activate\n"
+SERVICE_PARENTS = {"usr/share/dbus-1", "usr/share/dbus-1/services"}
 
 
 def require(ok, message):
     if not ok:
         raise ValueError(message)
+
+
+def profile_name(profile):
+    require(profile in (DEFAULT_PROFILE, INTEGRATED_PROFILE), "Unknown native DEB candidate profile")
+    return profile
 
 
 def policy(bytes_):
@@ -64,12 +75,19 @@ def members(stream):
             yield name, member, archive
 
 
-def data(stream, helper_hash, policy_hash):
+def data(stream, helper_hash, policy_hash, profile=DEFAULT_PROFILE):
+    profile_name(profile)
     expected = {HELPER: (helper_hash, 0o755), POLICY: (policy_hash, 0o644)}
+    required_parents = PARENTS
+    if profile == INTEGRATED_PROFILE:
+        expected[SERVICE] = (hashlib.sha256(SERVICE_BYTES).hexdigest(), 0o644)
+        required_parents = PARENTS | SERVICE_PARENTS
     found, parents = {}, set()
     for name, member, archive in members(stream):
         require(not name.startswith("etc/") and not name.endswith((".rules", ".pkla")), "System policy/config overrides refused")
-        if name in PARENTS:
+        if profile == INTEGRATED_PROFILE and name.startswith("usr/share/dbus-1/"):
+            require(name in required_parents or name == SERVICE, "Only the fixed session activation service admitted")
+        if name in required_parents:
             require(member.isdir() and member.uid == member.gid == 0 and member.mode == 0o755,
                     "Protected helper/policy ancestors must be root-owned mode 0755 directories")
             parents.add(name)
@@ -85,15 +103,18 @@ def data(stream, helper_hash, policy_hash):
         require(len(bytes_) == member.size and hashlib.sha256(bytes_).hexdigest() == digest, "Helper/policy bytes changed")
         if name == POLICY:
             policy(bytes_)
-        else:
+        elif name == HELPER:
             require(len(bytes_) >= 20 and bytes_[:6] == b"\x7fELF\x02\x01" and bytes_[18:20] == b"\x3e\x00",
                     "Native Linux x86_64 ELF helper required")
+        else:
+            require(bytes_ == SERVICE_BYTES, "Fixed native activation service bytes differ")
         found["/" + name] = {"sha256": digest, "size": len(bytes_), "mode": mode, "uid": 0, "gid": 0}
-    require(set(found) == {"/" + name for name in expected} and parents == PARENTS, "Incomplete helper/policy installation payload")
+    require(set(found) == {"/" + name for name in expected} and parents == required_parents, "Incomplete helper/policy/required service installation payload")
     return found
 
 
-def control(stream, version):
+def control(stream, version, profile=DEFAULT_PROFILE):
+    profile_name(profile)
     found = {}
     for name, member, archive in members(stream):
         require(name in ("control", "md5sums") and member.isfile() and member.uid == member.gid == 0,
@@ -104,14 +125,19 @@ def control(stream, version):
     fields = email.parser.Parser().parsestr(found["control"].decode("utf-8"))
     require(all(len(fields.get_all(key)) == 1 for key in fields.keys()), "Duplicate DEB control fields")
     require(fields["Package"] == "creator-hub" and fields["Architecture"] == "amd64"
-            and fields["Version"] == version and fields.get("Description", "").startswith("TEST ONLY - "), "Wrong test package identity")
+            and fields["Version"] == version, "Wrong native package identity")
+    if profile == INTEGRATED_PROFILE:
+        require(fields.get("Description", "") == INTEGRATED_DESCRIPTION, "Exact integrated product description required")
+    else:
+        require(fields.get("Description", "").startswith("TEST ONLY - "), "Wrong test package identity")
     require(not any(key in fields for key in ("Pre-Depends", "Conflicts", "Breaks", "Replaces", "Conffiles")),
             "Unexpected package transaction relationships")
     dependencies = {part.strip() for part in fields.get("Depends", "").split(",") if part.strip()}
     require({"policykit-1", "libwebkit2gtk-4.1-0", "libgtk-3-0"} <= dependencies, "Required native dependencies omitted")
 
 
-def verify(package, helper_hash, policy_hash, version):
+def verify(package, helper_hash, policy_hash, version, profile=DEFAULT_PROFILE):
+    profile_name(profile)
     require(all(re.fullmatch(r"[a-f0-9]{64}", digest) for digest in (helper_hash, policy_hash)), "Invalid expected digest")
     env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"}
     result = None
@@ -123,16 +149,19 @@ def verify(package, helper_hash, policy_hash, version):
             require(output.tell() <= LIMIT, "DEB tar output exceeds bound")
             output.seek(0)
             if argument == "--ctrl-tarfile":
-                control(output, version)
+                control(output, version, profile)
             else:
-                result = data(output, helper_hash, policy_hash)
-    return {"files": result}
+                result = data(output, helper_hash, policy_hash, profile)
+    return {"files": result, **({"profile": profile} if profile == INTEGRATED_PROFILE else {})}
 
 
 if __name__ == "__main__":
     try:
-        require(len(sys.argv) == 5, "Expected DEB, helper SHA256, policy SHA256 and version")
-        print(json.dumps(verify(*sys.argv[1:])))
+        arguments = sys.argv[1:]
+        require(len(arguments) == 4 or (len(arguments) == 6 and arguments[4] == "--profile"),
+                "Expected DEB, helper SHA256, policy SHA256 and version, optionally --profile integrated-candidate")
+        profile = profile_name(arguments[5]) if len(arguments) == 6 else DEFAULT_PROFILE
+        print(json.dumps(verify(*arguments[:4], profile=profile)))
     except (ValueError, OSError, tarfile.TarError, ET.ParseError, subprocess.SubprocessError) as error:
         print(str(error), file=sys.stderr)
         sys.exit(2)

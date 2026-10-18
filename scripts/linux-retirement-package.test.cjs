@@ -66,7 +66,7 @@ function nativeFixture() {
   const output = path.join(root, 'artifacts/unified/candidate');
   fs.mkdirSync(output, { recursive: true });
   fs.mkdirSync(path.join(root, 'packaging/linux'), { recursive: true });
-  for (const name of ['tauri-retirement-acceptance.json', path.posix.basename(packaging.POLICY)]) {
+  for (const name of ['tauri-retirement-acceptance.json', 'tauri-integrated-candidate.json', path.posix.basename(packaging.POLICY)]) {
     fs.copyFileSync(path.join(repo, 'packaging/linux', name), path.join(root, 'packaging/linux', name));
   }
   return { root, output, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
@@ -89,6 +89,47 @@ test('actual staged overlay parses to the fixed helper/policy destinations and e
   } finally { f.cleanup(); }
 });
 
+test('integrated candidate has exact normal product text and features without widening the helper/policy map', () => {
+  const f = nativeFixture();
+  try {
+    const resources = { '/staged/modules.tar.gz': 'modules.tar.gz' };
+    const file = packaging.writeOverlay(f.root, f.output, resources, { profile: 'integrated-candidate' });
+    const overlay = JSON.parse(fs.readFileSync(file));
+    assert.equal(path.basename(file), 'tauri-linux-integrated-candidate.json');
+    assert.deepEqual(overlay.build.features, [packaging.FEATURE, 'integrated-features', 'experimental-flatpak-host']);
+    assert.equal(overlay.bundle.shortDescription, 'Creator Hub');
+    assert.equal(overlay.bundle.longDescription, packaging.INTEGRATED_LONG);
+    assert.deepEqual(overlay.bundle.targets, ['deb']);
+    assert.deepEqual(overlay.bundle.resources, resources);
+    assert.deepEqual(overlay.bundle.linux.deb.depends, ['policykit-1']);
+    assert.deepEqual(Object.keys(overlay.bundle.linux.deb).sort(), ['depends', 'files']);
+    assert.deepEqual(Object.keys(overlay.bundle.linux.deb.files), [packaging.HELPER, packaging.POLICY]);
+    assert.equal(packaging.SERVICE_BYTES.toString(), fs.readFileSync(path.join(repo,
+      'native/flatpak-native-activation/com.creatorworks.hub.Host.service'), 'utf8'));
+    assert.ok(Object.values(packaging.FLAGS).every(value => value === false));
+    assert.throws(() => packaging.writeOverlay(f.root, f.output, resources, { profile: 'foreign' }), /Unknown/);
+  } finally { f.cleanup(); }
+});
+
+test('integrated template refuses foreign or TEST ONLY text, other features, control scripts and grants', () => {
+  for (const modify of [
+    recipe => { recipe.bundle.shortDescription = 'TEST ONLY - fixture'; },
+    recipe => { recipe.bundle.longDescription = 'Foreign description'; },
+    recipe => { recipe.build.features.push('foreign-feature'); },
+    recipe => { recipe.bundle.linux.deb.preInstallScript = '/tmp/preinst'; },
+    recipe => { recipe.bundle.linux.deb.files['/usr/share/polkit-1/actions/foreign.policy'] = 'foreign'; },
+  ]) {
+    const f = nativeFixture();
+    try {
+      const file = path.join(f.root, 'packaging/linux/tauri-integrated-candidate.json');
+      const recipe = JSON.parse(fs.readFileSync(file)); modify(recipe);
+      fs.writeFileSync(file, JSON.stringify(recipe));
+      assert.throws(() => packaging.writeOverlay(f.root, f.output, {}, { profile: 'integrated-candidate' }));
+      assert.equal(fs.existsSync(path.join(f.output, 'tauri-linux-integrated-candidate.json')), false);
+    } finally { f.cleanup(); }
+  }
+});
+
 test('native stage builds a fresh fixed helper, copies independent bytes and preserves all refusal flags', { skip: process.platform !== 'linux' }, () => {
   const f = nativeFixture();
   const calls = [];
@@ -106,6 +147,7 @@ test('native stage builds a fresh fixed helper, copies independent bytes and pre
       GITHUB_REPOSITORY_ID: '1364807512', GITHUB_SHA: 'a'.repeat(40) };
     const resources = { '/staged/modules.tar.gz': 'modules.tar.gz' };
     const result = packaging.stage(f.root, f.output, resources, env, execute);
+    assert.equal(result.profile, 'retirement-acceptance');
     const overlay = JSON.parse(fs.readFileSync(result.overlay));
     assert.deepEqual(overlay.bundle.resources, resources);
     assert.deepEqual(overlay.build.features, [packaging.FEATURE]);
@@ -115,11 +157,33 @@ test('native stage builds a fresh fixed helper, copies independent bytes and pre
     assert.equal(result.files[packaging.POLICY].mode, 0o644);
     assert.equal(fs.statSync(overlay.bundle.linux.deb.files[packaging.HELPER]).nlink, 1);
     const receipt = JSON.parse(fs.readFileSync(path.join(f.output, 'linux-retirement-candidate.json')));
+    assert.equal(Object.hasOwn(receipt, 'profile'), false, 'Old receipt shape remains unchanged');
     for (const [key, value] of Object.entries(packaging.FLAGS)) assert.equal(receipt[key], value);
     assert.equal(receipt.rootFeature, 'experimental-linux-migration');
     assert.equal(calls.length, 1);
     assert.throws(() => packaging.stage(f.root, f.output, resources, env, execute), /EEXIST/);
     assert.equal(calls.length, 1);
+  } finally { f.cleanup(); }
+});
+
+test('explicit sixth stage argument selects integrated profile without accepting native operation gates', { skip: process.platform !== 'linux' }, () => {
+  const f = nativeFixture();
+  try {
+    const execute = (command, args) => {
+      assert.equal(command, 'cargo');
+      const file = path.join(args[args.indexOf('--target-dir') + 1], 'x86_64-unknown-linux-gnu/release/creator-hub-linux-deb-retirement');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, Buffer.alloc(128, 1), { mode: 0o755 });
+    };
+    const env = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB',
+      GITHUB_REPOSITORY_ID: '1364807512', GITHUB_SHA: 'a'.repeat(40) };
+    const staged = packaging.stage(f.root, f.output, {}, env, execute, { profile: 'integrated-candidate' });
+    assert.equal(staged.profile, 'integrated-candidate');
+    assert.deepEqual(Object.keys(staged.files), [packaging.HELPER, packaging.POLICY]);
+    const receipt = JSON.parse(fs.readFileSync(path.join(f.output, 'linux-retirement-candidate.json')));
+    assert.equal(receipt.profile, staged.profile);
+    assert.equal(receipt.acceptanceOnly, true);
+    for (const key of Object.keys(packaging.FLAGS)) assert.equal(receipt[key], false);
   } finally { f.cleanup(); }
 });
 
@@ -147,6 +211,42 @@ test('package verifier binds archive bytes and numeric root metadata without cla
       ...files, [packaging.HELPER]: { ...files[packaging.HELPER], uid: 1001 },
     } })), /ownership, modes and bytes/);
     assert.throws(() => packaging.verifyDeb(root, root, { ...integrity, packages: [...integrity.packages, { format: 'rpm' }] }, { files }, execute));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('integrated verifier dispatch is explicit and requires the exact service as well as helper/policy bytes', () => {
+  const root = temp();
+  try {
+    fs.mkdirSync(path.join(root, 'src-tauri'));
+    fs.writeFileSync(path.join(root, 'src-tauri/tauri.conf.json'), JSON.stringify({ version: '0.1.14' }));
+    fs.mkdirSync(path.join(root, 'native-packages'));
+    const file = path.join(root, 'native-packages/fixture.deb'); fs.writeFileSync(file, 'candidate bytes');
+    const files = { [packaging.HELPER]: { sha256: 'a'.repeat(64), size: 128, mode: 0o755, uid: 0, gid: 0 },
+      [packaging.POLICY]: { sha256: 'b'.repeat(64), size: 889, mode: 0o644, uid: 0, gid: 0 } };
+    const service = { sha256: digest(packaging.SERVICE_BYTES), size: packaging.SERVICE_BYTES.length, mode: 0o644, uid: 0, gid: 0 };
+    const integrity = { integrityPassed: true, packages: [{ format: 'deb', path: 'native-packages/fixture.deb', sha256: digest('candidate bytes') }] };
+    const staged = { files, profile: 'integrated-candidate' };
+    const verified = { profile: staged.profile, files: { ...files, [packaging.SERVICE]: service } };
+    let calls = 0;
+    const execute = response => (command, args) => {
+      calls++; assert.equal(command, 'python3');
+      assert.deepEqual(args.slice(2), [file, files[packaging.HELPER].sha256, files[packaging.POLICY].sha256,
+        '0.1.14', '--profile', 'integrated-candidate']);
+      return JSON.stringify(response);
+    };
+    assert.throws(() => packaging.verifyDeb(root, root, integrity, { ...staged, profile: 'foreign' }, execute(verified)), /Unknown/);
+    assert.equal(calls, 0);
+    for (const response of [{ files: verified.files }, { ...verified, files },
+      { ...verified, files: { ...verified.files, [packaging.SERVICE]: { ...service, mode: 0o666 } } },
+      { ...verified, files: { ...verified.files, [packaging.HELPER]: { ...files[packaging.HELPER], sha256: 'c'.repeat(64) } } }]) {
+      assert.throws(() => packaging.verifyDeb(root, root, integrity, staged, execute(response)));
+    }
+    const receipt = packaging.verifyDeb(root, root, integrity, staged, execute(verified));
+    assert.equal(receipt.profile, staged.profile);
+    assert.equal(receipt.systemInstallationTested, false);
+    assert.equal(receipt.acceptanceOnly, true);
+    assert.deepEqual(receipt.files, verified.files);
+    for (const key of Object.keys(packaging.FLAGS)) assert.equal(receipt[key], false);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

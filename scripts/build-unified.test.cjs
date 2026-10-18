@@ -6,6 +6,62 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { relativeFile, moduleFiles, verifyStage, stageFileMode } = require('./build-unified.cjs');
 
+test('direct page packaging is explicit, Linux-only and cannot disguise writable features as a read-only candidate', () => {
+  const { integrationArguments, parseBuildOptions, build } = require('./build-unified.cjs');
+  assert.deepEqual(integrationArguments('windows', 'x86_64', false), []);
+  for (const [platform, arch] of [['windows', 'x86_64'], ['macos', 'aarch64'], ['linux', 'aarch64']]) {
+    assert.throws(() => integrationArguments(platform, arch, true), /Linux x86_64 only/);
+  }
+  assert.deepEqual(integrationArguments('linux', 'x86_64', true, true),
+    ['--features', 'integrated-features,experimental-flatpak-host,experimental-linux-migration']);
+  assert.deepEqual(parseBuildOptions(['--integrated-features']), { integratedFeatures: true });
+  assert.throws(() => parseBuildOptions(['--integrated-features', '--integrated-features']), /Duplicate/);
+  assert.throws(() => build('never-build', { integratedFeatures: true }, { platform: 'linux', arch: 'x86_64',
+    execute() { throw Error('Must refuse before execution'); } }), /managed writable Unix Hub candidate/);
+});
+
+test('direct candidates retain exact service bytes and existing helper file maps without claiming acceptance', () => {
+  const { stageIntegrationService } = require('./build-unified.cjs');
+  const activation = require('./flatpak-native-activation.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-direct-overlay-'));
+  try {
+    const overlay = path.join(dir, 'tauri.json');
+    const before = { bundle: { resources: { 'archive.dat': 'archive.dat' }, linux: { deb: {
+      depends: ['policykit-1'], files: { '/usr/libexec/existing-helper': 'existing-helper' },
+    } } }, build: { features: ['experimental-linux-migration'] } };
+    fs.writeFileSync(overlay, JSON.stringify(before));
+    stageIntegrationService(dir, overlay);
+    const after = JSON.parse(fs.readFileSync(overlay));
+    assert.deepEqual(after.bundle.resources, before.bundle.resources);
+    assert.deepEqual(after.build, before.build);
+    assert.deepEqual(after.bundle.linux.deb.depends, ['policykit-1']);
+    assert.equal(after.bundle.linux.deb.files['/usr/libexec/existing-helper'], 'existing-helper');
+    assert.deepEqual(fs.readFileSync(after.bundle.linux.deb.files[`/${activation.SERVICE}`]), activation.service());
+    const receipt = JSON.parse(fs.readFileSync(path.join(dir, 'direct-features-candidate.json')));
+    assert.equal(receipt.activationRunsOutsideSandbox, true);
+    for (const key of ['nativeGuiAccepted', 'migrationAccepted', 'signedUpdateAccepted', 'flatpakActivationAccepted', 'releaseReady']) assert.equal(receipt[key], false);
+    const bytes = fs.readFileSync(overlay);
+    assert.throws(() => stageIntegrationService(dir, overlay), /already mapped/);
+    assert.deepEqual(fs.readFileSync(overlay), bytes);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('integrated Linux DEB profile is explicit and refuses incompatible flags before signing or building', () => {
+  const { candidateProfile, parseBuildOptions, build } = require('./build-unified.cjs');
+  assert.deepEqual(parseBuildOptions(['--linux-integrated-candidate', '--integrated-features']),
+    { linuxIntegratedCandidate: true, integratedFeatures: true });
+  assert.equal(candidateProfile({}), 'retirement-acceptance');
+  assert.equal(candidateProfile({ linuxIntegratedCandidate: true, integratedFeatures: true }), 'integrated-candidate');
+  for (const options of [{ linuxIntegratedCandidate: true },
+    { linuxIntegratedCandidate: true, linuxRetirementCandidate: true, integratedFeatures: true }]) {
+    assert.throws(() => build('never-build', options, { platform: 'linux', arch: 'x86_64',
+      execute() { throw Error('Must refuse before execution'); } }), /requires --integrated-features/);
+  }
+  assert.throws(() => build('never-build', { linuxIntegratedCandidate: true, integratedFeatures: true,
+    managed: true, experimentalUnix: true, experimentalWritable: true }, { platform: 'linux', arch: 'x86_64',
+    execute() { throw Error('Must refuse before execution'); } }), /requires signed native Linux/);
+});
+
 test('Linux staged data and executables get canonical archive modes without changing other platform policy', () => {
   const writes = [];
   const chmod = (file, mode) => writes.push({ file, mode });

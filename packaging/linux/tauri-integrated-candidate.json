@@ -1,0 +1,19 @@
+{
+  "build": {
+    "features": ["experimental-linux-migration", "integrated-features", "experimental-flatpak-host"]
+  },
+  "bundle": {
+    "targets": ["deb"],
+    "shortDescription": "Creator Hub",
+    "longDescription": "Manage projects, connect AI tools to Unity and set up Creator SDK projects.",
+    "linux": {
+      "deb": {
+        "depends": ["policykit-1"],
+        "files": {
+          "/usr/libexec/creator-hub-deb-retirement-helper": "creator-hub-deb-retirement-helper",
+          "/usr/share/polkit-1/actions/com.creatorworks.hub.deb-retirement.policy": "com.creatorworks.hub.deb-retirement.policy"
+        }
+      }
+    }
+  }
+}

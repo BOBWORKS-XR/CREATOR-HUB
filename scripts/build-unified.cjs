@@ -11,6 +11,36 @@ function stageFileMode(file, platform, executable, chmod = fs.chmodSync) {
   if (platform === 'linux') chmod(file, executable ? 0o755 : 0o644);
   else if (platform === 'macos' && executable) chmod(file, 0o755);
 }
+function integrationArguments(platform, arch, enabled, retirement = false) {
+  if (!enabled) return [];
+  if (platform !== 'linux' || arch !== 'x86_64') throw Error('Direct feature candidate packaging is Linux x86_64 only. Existing Windows/Mac builds remain unchanged.');
+  return ['--features', ['integrated-features', 'experimental-flatpak-host',
+    ...(retirement ? ['experimental-linux-migration'] : [])].join(',')];
+}
+function candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures }) {
+  if (linuxIntegratedCandidate && (linuxRetirementCandidate || !integratedFeatures)) {
+    throw Error('--linux-integrated-candidate requires --integrated-features and cannot use the old retirement test profile.');
+  }
+  return linuxIntegratedCandidate ? 'integrated-candidate' : 'retirement-acceptance';
+}
+function stageIntegrationService(output, overlay) {
+  const activation = require('./flatpak-native-activation.cjs');
+  const config = JSON.parse(fs.readFileSync(overlay, 'utf8'));
+  const target = `/${activation.SERVICE}`;
+  const files = config.bundle?.linux?.deb?.files || {};
+  if (Object.hasOwn(files, target)) throw Error('Native activation service already mapped; existing bytes were not overwritten.');
+  const service = path.join(output, 'native-activation.service');
+  fs.writeFileSync(service, activation.service(), { flag: 'wx', mode: 0o644 });
+  config.bundle ??= {}; config.bundle.linux ??= {}; config.bundle.linux.deb ??= {};
+  config.bundle.linux.deb.files = { ...files, [target]: service };
+  fs.writeFileSync(overlay, JSON.stringify(config, null, 2));
+  fs.writeFileSync(path.join(output, 'direct-features-candidate.json'), JSON.stringify({
+    schemaVersion: 1, scope: 'linux-direct-features-candidate', activationRunsOutsideSandbox: true,
+    nativeService: { path: target, sha256: sha256(service) },
+    nativeGuiAccepted: false, migrationAccepted: false, signedUpdateAccepted: false,
+    flatpakActivationAccepted: false, releaseReady: false,
+  }, null, 2), { flag: 'wx', mode: 0o644 });
+}
 function relativeFile(name) {
   return typeof name === 'string' && /^[a-zA-Z0-9_./-]+$/.test(name)
     && !name.startsWith('/') && !name.split('/').some(part => ['', '.', '..'].includes(part));
@@ -53,18 +83,26 @@ function verifyStage(directory, manifest) {
   }
 }
 function build(label, { installer = false, managed = false, experimentalUnix = false, experimentalWritable = false,
-  prepareManagedUnix = false, signedUnixInput = null, linuxRetirementCandidate = false } = {}, context = {}) {
+  prepareManagedUnix = false, signedUnixInput = null, linuxRetirementCandidate = false,
+  linuxIntegratedCandidate = false, integratedFeatures = false } = {}, context = {}) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(label || '')) throw Error('Provide a unique, simple build name.');
   const root = context.root || repositoryRoot;
   const execute = context.execute || execFileSync;
   const environment = context.env || process.env;
   const platform = context.platform || { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
   const arch = context.arch || { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
-  require('./linux-retirement-package.cjs').checkOptions({ enabled: linuxRetirementCandidate, platform, arch,
+  candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures });
+  const retirementCandidate = linuxRetirementCandidate || linuxIntegratedCandidate;
+  const featureArgs = integrationArguments(platform, arch, integratedFeatures, retirementCandidate);
+  if (integratedFeatures && (!managed || !experimentalUnix || !experimentalWritable || prepareManagedUnix)) {
+    throw Error('Direct features require a managed writable Unix Hub candidate, not read-only or payload-only preparation.');
+  }
+  require('./linux-retirement-package.cjs').checkOptions({ enabled: retirementCandidate, platform, arch,
     installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput });
   const payload = require('./unix-managed-payload.cjs');
   payload.checkSplitOptions({ platform, installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput });
-  if (signedUnixInput) return buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCandidate }, context);
+  if (signedUnixInput) return buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCandidate,
+    linuxIntegratedCandidate, integratedFeatures }, context);
   const unix = require('./unix-package-payload.cjs');
   const plan = unix.nativePlan(platform, arch, { installer, experimentalUnix, experimentalWritable, managed });
   const nativeTargetArgs = plan.rustTarget ? ['--target', plan.rustTarget] : [];
@@ -174,12 +212,13 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   fs.writeFileSync(descriptor, JSON.stringify(manifest, null, 2));
   const overlay = path.join(output, 'tauri-unified.json');
   fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources } }, null, 2));
+  if (integratedFeatures) stageIntegrationService(output, overlay);
   const env = { ...buildEnv, CREATOR_BUILTIN_MANIFEST: descriptor,
     CREATOR_MCP_HOST_WRITABLE: plan.mcpMode === 'writable' ? '1' : '0', CREATOR_MCP_HOST_READONLY_EVENTS: '1',
     CARGO_TARGET_DIR: path.resolve(environment.CARGO_TARGET_DIR || (plan.experimentalUnix ? path.join(output, 'hub-target') : path.join(root, 'src-tauri/target'))) };
   const bundleDirectory = path.join(releaseDirectory(env.CARGO_TARGET_DIR), 'bundle');
   if (plan.experimentalUnix && installer && fs.existsSync(bundleDirectory)) throw Error('Unix packaging requires a fresh bundle directory; select a new CARGO_TARGET_DIR. Existing outputs are not removed.');
-  run([cli, 'build', ...nativeTargetArgs, ...(installer ? ['--bundles', plan.bundles.join(',')] : ['--no-bundle']), '--config', overlay, '--', '--locked'], root, env);
+  run([cli, 'build', ...featureArgs, ...nativeTargetArgs, ...(installer ? ['--bundles', plan.bundles.join(',')] : ['--no-bundle']), '--config', overlay, '--', '--locked'], root, env);
   fs.copyFileSync(path.join(releaseDirectory(env.CARGO_TARGET_DIR), `creator-hub${extension}`), path.join(output, `creator-hub${extension}`));
   if (installer && platform === 'windows') {
     const bundles = path.join(env.CARGO_TARGET_DIR, 'release/bundle/nsis');
@@ -202,12 +241,16 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   console.log(`Local unified candidate: ${output}. Not a release or migration acceptance.`);
   return output;
 }
-function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCandidate = false }, context = {}) {
+function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCandidate = false,
+  linuxIntegratedCandidate = false, integratedFeatures = false }, context = {}) {
   const root = context.root || repositoryRoot;
   const execute = context.execute || execFileSync;
   const environment = context.env || process.env;
   const platform = context.platform || { darwin: 'macos', linux: 'linux' }[process.platform];
   const arch = context.arch || { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
+  const profile = candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures });
+  const retirementCandidate = linuxRetirementCandidate || linuxIntegratedCandidate;
+  const featureArgs = integrationArguments(platform, arch, integratedFeatures, retirementCandidate);
   const output = path.join(root, 'artifacts', 'unified', label);
   const result = require('./assemble-unix-payload.cjs').assemble(signedUnixInput, output, platform, arch,
     { root, env: environment, execute });
@@ -238,13 +281,14 @@ function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCan
     resources[file] = archive.FILE;
   }
   writeAssemblyManifests(output, preWrapper, manifest);
-  const retirement = linuxRetirementCandidate
-    ? require('./linux-retirement-package.cjs').stage(root, output, resources, env, execute) : null;
+  const retirement = retirementCandidate
+    ? require('./linux-retirement-package.cjs').stage(root, output, resources, env, execute, { profile }) : null;
   const overlay = retirement ? retirement.overlay : path.join(output, 'tauri-unified.json');
   if (!retirement) fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources } }, null, 2), { flag: 'wx' });
+  if (integratedFeatures) stageIntegrationService(output, overlay);
   const bundles = retirement ? ['deb'] : plan.bundles;
   const cli = path.join(root, 'node_modules/@tauri-apps/cli/tauri.js');
-  execute(process.execPath, [cli, 'build', '--target', plan.rustTarget,
+  execute(process.execPath, [cli, 'build', ...featureArgs, '--target', plan.rustTarget,
     ...(installer ? ['--bundles', bundles.join(',')] : ['--no-bundle']), '--config', overlay, '--', '--locked'],
     { cwd: root, env, stdio: 'inherit', windowsHide: true });
   const release = path.join(env.CARGO_TARGET_DIR, plan.rustTarget, 'release');
@@ -253,7 +297,7 @@ function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCan
   if (installer) {
     const integrity = unix.validatePackages({ output, bundleDirectory: path.join(release, 'bundle'), manifest,
       productName: JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'))).productName,
-      rawHub: path.join(output, 'creator-hub'), archiveDecoder, mcpMode: 'writable', linuxRetirementCandidate });
+      rawHub: path.join(output, 'creator-hub'), archiveDecoder, mcpMode: 'writable', linuxRetirementCandidate: retirementCandidate });
     if (retirement) require('./linux-retirement-package.cjs').verifyDeb(root, output, integrity, retirement, execute);
   }
   fs.writeFileSync(path.join(output, 'signed-unix-assembly.json'), JSON.stringify({ schemaVersion: 1,
@@ -272,10 +316,11 @@ function writeAssemblyManifests(output, signedManifest, finalManifest) {
 }
 function parseBuildOptions(args) {
   const options = {};
-  const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix.';
+  const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix. --integrated-features and --linux-integrated-candidate are Linux candidate-only.';
   const flags = { '--installer': 'installer', '--managed': 'managed', '--experimental-unix': 'experimentalUnix',
     '--experimental-unix-writable': 'experimentalWritable', '--prepare-managed-unix': 'prepareManagedUnix',
-    '--linux-retirement-test-candidate': 'linuxRetirementCandidate' };
+    '--linux-retirement-test-candidate': 'linuxRetirementCandidate', '--integrated-features': 'integratedFeatures',
+    '--linux-integrated-candidate': 'linuxIntegratedCandidate' };
   const seen = new Set();
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
@@ -290,7 +335,7 @@ function parseBuildOptions(args) {
   }
   return options;
 }
-module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, build, parseBuildOptions, writeAssemblyManifests };
+module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, integrationArguments, candidateProfile, stageIntegrationService, build, parseBuildOptions, writeAssemblyManifests };
 if (require.main === module) {
   try {
     if (!process.argv[2]) throw Error('Provide one build name.');
