@@ -1977,6 +1977,17 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                 f.editor_label = add(117, "", f.requirements)
                 f.editor_label.get_text_iface.return_value = types.SimpleNamespace(
                     get_character_count=lambda: len("Unity 6000.3.21f1"), get_text=lambda *_: "Unity 6000.3.21f1")
+                f.paragraphs = []
+                for text in ("Will install: Android tools, Windows support and the URP template.",
+                             "Unity Hub or Unity CLI is required to manage the Editor and license.",
+                             "Unity Editor 6000.3.21f1 is not installed."):
+                    node = add(72, "", f.requirements)
+                    f.attributes[id(node)].update(tag="p", **{"computed-role": "paragraph"})
+                    node.source_text = text
+                    node.get_text_iface.return_value = types.SimpleNamespace(
+                        get_character_count=mock.Mock(side_effect=lambda node=node: len(node.source_text)),
+                        get_text=mock.Mock(side_effect=lambda *_args, node=node: node.source_text))
+                    f.paragraphs.append(node)
             if hasattr(f, "status"):
                 f.version_text = types.SimpleNamespace(
                     get_character_count=mock.Mock(side_effect=lambda: len(f.version.name)),
@@ -2090,8 +2101,7 @@ class FiniteSourceSequenceTests(unittest.TestCase):
         with self.fixture("requirements") as f:
             self.assertNotIn("requirements", p.SETUP_SEQUENCE_IDS)
             self.assertNotIn("id", f.attributes[id(f.requirements)])
-            # Anonymous/native Text projections keep their actual numeric role;
-            # no name, HTML tag or guessed role conversion supplies a row value.
+            # Optional row projections do not supply paragraph-state acceptance.
             f.attributes[id(f.requirement_label)] = {"toolkit": "WebKitGTK"}
             f.requirement_label.name = f.editor_label.name = ""
             result = p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
@@ -2099,8 +2109,11 @@ class FiniteSourceSequenceTests(unittest.TestCase):
             self.assertEqual(f.editor_label.role, 117)
             for walk in result["walks"]:
                 self.assertEqual(walk["sourceCounts"]["requirements-heading"], 1)
-                self.assertEqual([row["text"] for row in walk["requirementRows"]],
-                                 ["Unity Hub or Unity CLI", "Unity 6000.3.21f1"])
+                accepted = walk["requirementsAcceptance"]
+                self.assertEqual(accepted["scope"], "pinned-fresh-runner-source-paragraph-state")
+                self.assertFalse(accepted["independentlyCountedRpc"])
+                self.assertEqual([item["text"] for item in accepted["paragraphs"]], [node.source_text for node in f.paragraphs])
+                self.assertNotIn("requirementRows", walk)
                 self.assertIn("requirements-section", walk["sourcePaths"])
             captured = next(call.args[1] for call in f.save.call_args_list if call.args[0].name.endswith("-setup-text-interfaces.json"))
             self.assertTrue(all(walk["complete"] for walk in captured["walks"]))
@@ -2132,36 +2145,38 @@ class FiniteSourceSequenceTests(unittest.TestCase):
                     p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
                 f.target.action.do_action.assert_not_called()
 
-    def test_requirement_row_text_missing_bounds_drift_decoy_or_duplicate_cannot_authorize_refresh(self):
-        label = "Unity Hub or Unity CLI"
-        for change in ("missing", "oversize", "bool", "count-drift", "text-drift", "prefix", "decoy-name", "outside", "duplicate", "second-row"):
+    def test_pinned_paragraph_missing_bounds_drift_decoy_or_duplicate_cannot_authorize_refresh(self):
+        for change in ("missing", "oversize", "bool", "count-drift", "text-drift", "prefix", "decoy-name", "outside", "duplicate", "third-paragraph"):
             with self.subTest(change=change), self.fixture("requirements") as f:
-                interface = types.SimpleNamespace(get_character_count=mock.Mock(return_value=len(label)), get_text=mock.Mock(return_value=label))
-                f.requirement_label.get_text_iface.return_value = interface
-                if change == "missing": f.requirement_label.get_text_iface.return_value = None
+                node = f.paragraphs[0]
+                text = node.source_text
+                interface = types.SimpleNamespace(get_character_count=mock.Mock(return_value=len(text)), get_text=mock.Mock(return_value=text))
+                node.get_text_iface.return_value = interface
+                if change == "missing": node.get_text_iface.return_value = None
                 elif change == "oversize": interface.get_character_count.return_value = 2049
                 elif change == "bool": interface.get_character_count.return_value = True
-                elif change == "count-drift": interface.get_character_count.side_effect = [len(label), len(label) + 1]
-                elif change == "text-drift": interface.get_text.side_effect = [label, "x" * len(label)]
+                elif change == "count-drift": interface.get_character_count.side_effect = [len(text), len(text) + 1]
+                elif change == "text-drift": interface.get_text.side_effect = [text, "x" * len(text)]
                 elif change == "prefix":
-                    text = label + " is required to manage the Editor and license."
+                    text += " extra text"
                     interface.get_character_count.return_value, interface.get_text.return_value = len(text), text
                 elif change == "decoy-name":
-                    f.requirement_label.name = label
-                    interface.get_text.return_value = "x" * len(label)
+                    node.name = text
+                    interface.get_text.return_value = "x" * len(text)
                 elif change == "outside":
-                    f.requirements.children.remove(f.requirement_label)
-                    f.setup_doc.children.append(f.requirement_label)
-                    f.requirement_label.parent = f.setup_doc
+                    f.requirements.children.remove(node)
+                    f.setup_doc.children.append(node)
+                    node.parent = f.setup_doc
                 elif change == "duplicate":
-                    node = f.add(84, "", f.requirements)
-                    node.get_text_iface.return_value = interface
-                else: f.editor_label.get_text_iface.return_value = None
+                    duplicate = f.add(72, "", f.requirements)
+                    f.attributes[id(duplicate)].update(tag="p", **{"computed-role": "paragraph"})
+                    duplicate.get_text_iface.return_value = interface
+                else: f.paragraphs[2].get_text_iface.return_value = None
                 with self.assertRaises(RuntimeError):
                     p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
                 f.target.action.do_action.assert_not_called()
 
-    def test_requirements_text_projection_on_single_ancestor_chain_is_not_a_second_row(self):
+    def test_optional_row_text_projection_is_diagnostic_not_acceptance(self):
         with self.fixture("requirements") as f:
             parent = f.add(84, "", f.requirements)
             parent.get_text_iface.return_value = f.requirement_label.get_text_iface.return_value
@@ -2170,7 +2185,41 @@ class FiniteSourceSequenceTests(unittest.TestCase):
             f.requirement_label.parent = parent
             result = p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
             self.assertEqual(result["actionCount"], 1)
-            self.assertEqual(len(result["walks"][0]["requirementRows"]), 2)
+            self.assertFalse(result["walks"][0]["rowLabelTextDiagnostic"]["required"])
+            self.assertEqual(result["walks"][0]["rowLabelTextDiagnostic"]["exactTextMatches"]["Unity Hub or Unity CLI"], 2)
+            self.assertEqual(len(result["walks"][0]["requirementsAcceptance"]["paragraphs"]), 3)
+
+    def test_native_39117179349_missing_row_labels_still_accepts_only_exact_paragraph_state(self):
+        for phase in ("setup-ready", "requirements", "setup-checked"):
+            with self.subTest(phase=phase), self.fixture(phase) as f:
+                f.requirements.children.remove(f.requirement_label)
+                f.requirements.children.remove(f.editor_label)
+                result = p.source_sequence(Path("/fixture"), phase, f.owner, f.atspi)
+                self.assertEqual(result["actionCount"], int(phase == "requirements"))
+                self.assertEqual(len(result["walks"]), 2)
+                for walk in result["walks"]:
+                    self.assertEqual(walk["rowLabelTextDiagnostic"], {"required": False,
+                        "exactTextMatches": {"Unity Hub or Unity CLI": 0, "Unity 6000.3.21f1": 0}})
+                    self.assertEqual(len(walk["requirementsAcceptance"]["paragraphs"]), 3)
+                    self.assertFalse(walk["requirementsAcceptance"]["independentlyCountedRpc"])
+
+    def test_pinned_paragraph_exact_role_tag_producer_states_and_owner_are_not_normalized(self):
+        for change in ("role-73", "tag", "computed-role", "producer", "hidden", "invisible", "busy", "defunct", "editable", "foreign"):
+            with self.subTest(change=change), self.fixture("requirements") as f:
+                node = f.paragraphs[1]
+                if change == "role-73": node.role = 73
+                elif change == "tag": f.attributes[id(node)]["tag"] = "div"
+                elif change == "computed-role": f.attributes[id(node)]["computed-role"] = "generic"
+                elif change == "producer": f.attributes[id(node)]["toolkit"] = "other"
+                elif change == "hidden": node.states.remove(1)
+                elif change == "invisible": node.states.remove(8)
+                elif change == "busy": node.states.add(5)
+                elif change == "defunct": node.states.add(4)
+                elif change == "editable": node.states.add(10)
+                else: node.pid = 99
+                with self.assertRaises(RuntimeError):
+                    p.source_sequence(Path("/fixture"), "requirements", f.owner, f.atspi)
+                f.target.action.do_action.assert_not_called()
 
     def test_requirements_section_walk_drift_or_heading_geometry_refuses_before_input(self):
         for change in ("parent-drift", "geometry"):

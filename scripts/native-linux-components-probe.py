@@ -1109,18 +1109,36 @@ def setup_requirements_scope(nodes, paths, document, heading, owner, atspi):
     return section
 
 
-def setup_requirement_rows(values, paths, section, heading, observation):
+def setup_pinned_requirements_state(nodes, values, paths, section, heading, owner, atspi, observation):
     require(values.get(heading) == "Requirements", "Exact source Requirements heading Text missing")
-    # renderEnvironment always emits these first two labels, even without Unity.
-    labels = ("Unity Hub or Unity CLI", "Unity 6000.3.21f1")
-    observation["requirementRows"] = []
-    for label in labels:
-        matches = [ref for ref, text in values.items() if section in paths[ref] and text == label]
-        # The same Text may be projected on ancestors and a leaf; never accept
-        # two independent matching branches or a decoy outside this section.
-        leaves = [ref for ref in matches if not any(ref in paths[child] for child in matches)]
-        require(len(leaves) == 1, "Exact unique source requirement row Text missing or ambiguous")
-        observation["requirementRows"].append({"text": label, "reference": list(leaves[0])})
+    # Native 39117179349 exposes these source paragraphs, not the visible grid
+    # labels. This exact missing-tools state is only for the pinned fresh runner.
+    paragraphs = (
+        "Will install: Android tools, Windows support and the URP template.",
+        "Unity Hub or Unity CLI is required to manage the Editor and license.",
+        "Unity Editor 6000.3.21f1 is not installed.",
+    )
+    result = observation["requirementsAcceptance"] = {
+        "scope": "pinned-fresh-runner-source-paragraph-state", "independentlyCountedRpc": False, "paragraphs": []}
+    observation["rowLabelTextDiagnostic"] = {
+        "required": False, "exactTextMatches": {
+            label: sum(text == label and section in paths[ref] for ref, text in values.items())
+            for label in ("Unity Hub or Unity CLI", "Unity 6000.3.21f1")}}
+    for text in paragraphs:
+        matches = [ref for ref, value in values.items() if section in paths[ref] and value == text]
+        require(len(matches) == 1, "Exact unique pinned Setup paragraph Text missing or ambiguous")
+        ref, = matches
+        node = nodes[ref]
+        owner.node(node)
+        require(node.get_process_id() == owner.renderer["pid"] and node.get_role() == 72
+                and all(node.get_attributes().get(key) == value for key, value in
+                    {"tag": "p", "computed-role": "paragraph", "toolkit": "WebKitGTK"}.items()),
+                "Pinned Setup paragraph source contract differs")
+        states = node.get_state_set()
+        require(states.contains(atspi.StateType.VISIBLE) and states.contains(atspi.StateType.SHOWING)
+                and not any(states.contains(getattr(atspi.StateType, key)) for key in ("DEFUNCT", "BUSY", "EDITABLE")),
+                "Pinned Setup paragraph is not visible/ready")
+        result["paragraphs"].append({"text": text, "reference": list(ref)})
 
 
 def retain_setup_text(root, action, walks):
@@ -1215,7 +1233,7 @@ def source_sequence_walk(owner, atspi, action, observation, setup_diagnostics):
     if setup_read and "Loading approved recipe\u2026" in recipe_values:
         raise SourceNotReady("Bound Setup recipe is still loading")
     require(RECIPE in recipe_values, "Exact pinned Setup recipe is not ready")
-    setup_requirement_rows(values, paths, section, heading, observation)
+    setup_pinned_requirements_state(nodes, values, paths, section, heading, owner, atspi, observation)
     return rows, nodes, (frame, iframe, recipe, refresh, heading), refresh
 
 
