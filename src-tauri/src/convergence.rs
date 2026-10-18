@@ -406,7 +406,7 @@ fn recheck_durable_settings(plan: &Plan) -> Result<(), String> {
 
 fn can_retain(plan: &Plan) -> Result<(), String> {
     if !plan.retry_allowed {
-        return Err("The previous migration did not finish its workflow and backend exit checks. Keep original apps and review recovery before retrying.".into());
+        return Err("The previous migration did not finish its operation and completion checks. Keep original apps and review recovery before retrying.".into());
     }
     recheck(plan)?;
     if plan
@@ -550,7 +550,7 @@ pub async fn refresh_convergence(handle: tauri::AppHandle) -> Result<Report, Str
         let state = handle.state::<Convergence>();
         let mut saved = state.0.lock().map_err(|_| "Migration state is unavailable.")?;
         if saved.as_ref().is_some_and(|plan| !plan.retry_allowed) {
-            return Err("The previous migration has an uncertain workflow or backend exit. Review recovery before restarting the guide.".into());
+            return Err("The previous migration has an uncertain MCP operation outcome. Review recovery before restarting the guide.".into());
         }
         let fresh = inspect()?;
         let report = fresh.report.clone();
@@ -679,6 +679,103 @@ fn accepted_batch(value: &Value) -> Result<(), String> {
     }
 }
 
+enum MigrationMcp {
+    #[cfg(not(feature = "integrated-features"))]
+    Hosted(String),
+    #[cfg(feature = "integrated-features")]
+    Direct,
+}
+
+impl MigrationMcp {
+    fn start(
+        handle: &tauri::AppHandle,
+        hosting: &Hosting,
+        manager: &manager::Manager,
+    ) -> Result<Self, String> {
+        let _operation = manager.begin()?;
+        #[cfg(feature = "integrated-features")]
+        {
+            let _ = hosting;
+            crate::features::initialize_mcp(handle)?;
+            builtin::managed_route(handle)?
+                .ok_or("Verified managed MCP routing is unavailable. Old apps were kept.")?;
+            creator_works_mcp_launcher::service::bind_managed_route(handle)?;
+            Ok(Self::Direct)
+        }
+        #[cfg(not(feature = "integrated-features"))]
+        {
+            let candidate = builtin::hosting_candidate(handle, AppId::Mcp)?
+                .ok_or("Verified built-in MCP is unavailable. Old apps were kept.")?;
+            let result = hosting.start_verified(
+                handle,
+                AppId::Mcp,
+                &candidate.path,
+                &candidate.hash,
+                true,
+            )?;
+            if result["effectiveMode"] != "writable" {
+                return Err("MCP did not admit writable migration; old apps were kept.".into());
+            }
+            Ok(Self::Hosted(
+                result["session"]
+                    .as_str()
+                    .ok_or("MCP returned no migration session.")?
+                    .to_owned(),
+            ))
+        }
+    }
+
+    fn call(
+        &self,
+        handle: &tauri::AppHandle,
+        hosting: &Hosting,
+        manager: &manager::Manager,
+        command: &str,
+        args: Value,
+    ) -> Result<Value, String> {
+        match self {
+            #[cfg(feature = "integrated-features")]
+            Self::Direct => {
+                let _ = (hosting, manager);
+                crate::features::call_mcp(handle, command, args)
+            }
+            #[cfg(not(feature = "integrated-features"))]
+            Self::Hosted(session) => {
+                let _ = handle;
+                hosting.call(manager, session, command, args)
+            }
+        }
+    }
+
+    fn finish(
+        &self,
+        handle: &tauri::AppHandle,
+        hosting: &Hosting,
+        manager: &manager::Manager,
+    ) -> Result<manager::Operation, String> {
+        let operation = manager.begin()?;
+        match self {
+            #[cfg(feature = "integrated-features")]
+            Self::Direct => {
+                let _ = hosting;
+                if !crate::features::mcp_is_idle(handle)? {
+                    return Err(
+                        "MCP still has active work or an uncertain outcome. Old apps were kept."
+                            .into(),
+                    );
+                }
+                Ok(operation)
+            }
+            #[cfg(not(feature = "integrated-features"))]
+            Self::Hosted(session) => {
+                let _ = handle;
+                hosting.stop_owned_and_wait(session, std::time::Duration::from_secs(10))?;
+                Ok(operation)
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn migrate_convergence_connections(handle: tauri::AppHandle) -> Result<Report, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -697,46 +794,23 @@ pub async fn migrate_convergence_connections(handle: tauri::AppHandle) -> Result
         can_retain(plan)?;
         let hosting = handle.state::<Hosting>();
         let manager = handle.state::<manager::Manager>();
-        let session = {
-            let _operation = manager.begin()?;
-            let candidate = builtin::hosting_candidate(&handle, AppId::Mcp)?
-                .ok_or("Verified built-in MCP is unavailable. Old apps were kept.")?;
-            let result = hosting.start_verified(
-                &handle,
-                AppId::Mcp,
-                &candidate.path,
-                &candidate.hash,
-                true,
-            )?;
-            if result["effectiveMode"] != "writable" {
-                return Err("MCP did not admit writable migration; old apps were kept.".into());
-            }
-            result["session"]
-                .as_str()
-                .ok_or("MCP returned no migration session.")?
-                .to_owned()
-        };
+        let session = MigrationMcp::start(&handle, &hosting, &manager)?;
+        let call = |command: &str, args: Value| session.call(&handle, &hosting, &manager, command, args);
         // Own only this temporary backend. Do not close any restored/user view.
         plan.retry_allowed = false;
         let mut workflow_finished = false;
         let transfer = (|| {
-            let workflow = hosting.call(&manager, &session, "begin_ui_operation", json!({}))?;
+            let workflow = call("begin_ui_operation", json!({}))?;
             let operation = (|| {
-                require_product_settings_review(&hosting.call(
-                    &manager,
-                    &session,
+                require_product_settings_review(&call(
                     "product_settings_status",
                     json!({}),
                 )?)?;
-                require_no_recovery(&hosting.call(
-                    &manager,
-                    &session,
+                require_no_recovery(&call(
                     "pending_client_recovery",
                     json!({}),
                 )?)?;
-                let status = hosting.call(
-                    &manager,
-                    &session,
+                let status = call(
                     "get_onboarding_status",
                     json!({"unityProjectPath":null}),
                 )?;
@@ -750,21 +824,15 @@ pub async fn migrate_convergence_connections(handle: tauri::AppHandle) -> Result
                             .into(),
                     );
                 }
-                accepted_batch(&hosting.call(
-                    &manager,
-                    &session,
+                accepted_batch(&call(
                     "review_existing_client_connections",
                     json!({"clients":clients}),
                 )?)?;
-                require_no_recovery(&hosting.call(
-                    &manager,
-                    &session,
+                require_no_recovery(&call(
                     "pending_client_recovery",
                     json!({}),
                 )?)?;
-                require_product_settings_review(&hosting.call(
-                    &manager,
-                    &session,
+                require_product_settings_review(&call(
                     "product_settings_status",
                     json!({}),
                 )?)?;
@@ -773,13 +841,11 @@ pub async fn migrate_convergence_connections(handle: tauri::AppHandle) -> Result
                 let _router = store.router()?;
                 recheck_durable_settings(plan)?;
                 let transition =
-                    hosting.call(&manager, &session, "review_convergence_server", json!({}))?;
+                    call("review_convergence_server", json!({}))?;
                 refresh_reviewed_server_paths(plan, &roots()?, &runtime.server, &transition)?;
                 Ok::<_, String>(())
             })();
-            let finish = hosting.call(
-                &manager,
-                &session,
+            let finish = call(
                 "finish_ui_operation",
                 json!({"id":workflow}),
             );
@@ -788,20 +854,20 @@ pub async fn migrate_convergence_connections(handle: tauri::AppHandle) -> Result
             finish?;
             Ok::<_, String>(())
         })();
-        let close = manager.begin().and_then(|_operation| {
-            hosting.stop_owned_and_wait(&session, std::time::Duration::from_secs(10))
-        });
+        let close = session.finish(&handle, &hosting, &manager);
         // Cancel also records a returned outcome. Refresh only the owned journal
-        // after observed exit, never the user's project selection/options.
+        // after observed exit (legacy) or joined, idle internal work (direct),
+        // never the user's project selection/options.
         if workflow_finished && close.is_ok() {
             refresh_finished_outcome_journal(plan, &roots()?)?;
         }
         transfer?;
-        close?;
+        let completion_guard = close?;
         // Review is not live-client acceptance or permission to uninstall.
         recheck(plan)?;
         save_review_at(&record_path()?, &plan.stores)?;
         plan.report.stage = "connections-reviewed";
+        drop(completion_guard);
         plan.report.message = retirement_diagnostics(plan, &manager).unwrap_or_else(|reason|
             format!("Connections are reviewed; standalone cleanup paused: {reason}. Choose Check again to review a fresh plan."));
         Ok(plan.report.clone())
@@ -1067,6 +1133,35 @@ pub async fn retire_convergence_apps(handle: tauri::AppHandle) -> Result<Report,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_keeps_native_admission_until_durable_review_publication() {
+        let source = include_str!("convergence.rs");
+        let finish = source
+            .split("    fn finish(")
+            .nth(1)
+            .unwrap()
+            .split("#[tauri::command]")
+            .next()
+            .unwrap();
+        assert!(finish.contains("Result<manager::Operation, String>"));
+        assert!(finish.contains("Ok(operation)"));
+        let body = source
+            .split("pub async fn migrate_convergence_connections(")
+            .nth(1)
+            .unwrap()
+            .split("fn retirement_diagnostics(")
+            .next()
+            .unwrap();
+        let journal = body.find("refresh_finished_outcome_journal(plan").unwrap();
+        let guard = body.find("let completion_guard = close?").unwrap();
+        let publication = body
+            .find("save_review_at(&record_path()?, &plan.stores)?")
+            .unwrap();
+        let release = body.find("drop(completion_guard)").unwrap();
+        assert!(journal < guard && guard < publication && publication < release);
+        assert_eq!(body.matches("drop(completion_guard)").count(), 1);
+    }
 
     #[test]
     fn partial_retirement_requires_review_even_without_any_original_gui() {

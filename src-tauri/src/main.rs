@@ -5,11 +5,18 @@ mod catalog;
 mod community;
 mod community_project;
 mod convergence;
-#[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
-mod convergence_linux;
 #[allow(dead_code)]
 mod convergence_dependencies;
-#[cfg(all(target_os = "linux", any(feature = "experimental-flatpak-host", feature = "experimental-flatpak-ui")))]
+#[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+mod convergence_linux;
+mod features;
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "experimental-flatpak-host",
+        feature = "experimental-flatpak-ui"
+    )
+))]
 #[allow(dead_code)]
 mod flatpak_bootstrap;
 #[cfg(any(all(target_os = "linux", feature = "experimental-flatpak-host"), test))]
@@ -26,10 +33,6 @@ mod hosted_restore;
 mod installation_identity;
 mod installer_preflight;
 mod launch;
-#[cfg(any(target_os = "linux", test))]
-mod linux_update;
-#[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
-mod linux_retirement;
 #[cfg(any(windows, test))]
 #[allow(dead_code)]
 mod legacy_removal_windows;
@@ -42,6 +45,10 @@ mod legacy_shortcut_native_windows;
 #[cfg(windows)]
 #[allow(dead_code)]
 mod legacy_shortcuts_windows;
+#[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+mod linux_retirement;
+#[cfg(any(target_os = "linux", test))]
+mod linux_update;
 #[cfg(any(target_os = "macos", test))]
 mod mac_update;
 mod manager;
@@ -284,6 +291,7 @@ fn resource_url(resource: &str) -> Option<&'static str> {
         "hub-plan" => Some("https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/blob/master/docs/CREATOR-HUB-PLAN.md"),
         "github" => Some("https://github.com/BOBWORKS-XR/CREATOR-HUB"),
         "sdk-source" => Some("https://greenfield-registry.sdq.st/-/web/detail/com.sidequest.creator-sdk"),
+        "unity-cli-docs" => Some("https://docs.unity.com/en-us/unity-cli/unity-pipeline/unity-pipeline-package"),
         _ => None,
     }
 }
@@ -318,7 +326,7 @@ fn open_resource(resource: String) -> Result<(), String> {
 }
 
 fn shell_initialization(shell_key: &str) -> String {
-    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); Object.defineProperty(window, '__CREATOR_HUB_TERMS_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_PREFERENCES_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_CONVERGENCE_PROTOCOL__', {{value: {}}}); }}", shell_key, env!("CARGO_PKG_VERSION"), u8::from(builtin::enabled()))
+    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); Object.defineProperty(window, '__CREATOR_HUB_TERMS_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_PREFERENCES_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_CONVERGENCE_PROTOCOL__', {{value: {}}}); Object.defineProperty(window, '__CREATOR_HUB_FEATURE_PROTOCOL__', {{value: {}}}); }}", shell_key, env!("CARGO_PKG_VERSION"), u8::from(builtin::enabled()), u8::from(cfg!(feature = "integrated-features")))
 }
 
 #[cfg(target_os = "linux")]
@@ -358,6 +366,9 @@ fn main() {
     let commands: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
         usage_terms::usage_terms_status,
         usage_terms::accept_usage_terms,
+        features::feature_status,
+        features::feature_select,
+        features::feature_call,
         preferences::hub_preferences_status,
         preferences::set_hub_preference,
         convergence::convergence_status,
@@ -412,7 +423,19 @@ fn main() {
         .manage(community::Community::default())
         .manage(community_project::ProjectImports::default())
         .manage(self_update::SelfUpdate::default())
+        .manage(features::Features::default())
         .setup(|app| {
+            #[cfg(feature = "integrated-features")]
+            creator_project_setup::service::initialize(app.handle())
+                .map_err(std::io::Error::other)?;
+            #[cfg(all(target_os = "linux", feature = "experimental-flatpak-host", feature = "integrated-features"))]
+            {
+                let handle = app.handle().clone();
+                match flatpak_bootstrap::serve(move || launch::focus(&handle)) {
+                    Ok(service) => { app.manage(service); }
+                    Err(error) => eprintln!("Flatpak activation unavailable: {error}"),
+                }
+            }
             #[cfg(unix)]
             self_update::initialize(app.handle());
             #[cfg(not(unix))]
@@ -428,7 +451,9 @@ fn main() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if !window.state::<manager::Manager>().allow_close() {
                     api.prevent_close();
-                    let _ = window.emit("close-blocked", "An app operation is running. Cancel the download or finish the installer before closing Hub.");
+                    if !features::review_close(window.app_handle()) {
+                        let _ = window.emit("close-blocked", "A Hub operation is running. Wait for MCP or Project Setup to finish, or cancel the download before closing Hub.");
+                    }
                 }
             }
         })
@@ -449,7 +474,10 @@ fn main() {
         .expect("Creator Hub could not start")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if !app.state::<manager::Manager>().allow_close() { api.prevent_exit(); }
+                if !app.state::<manager::Manager>().allow_close() {
+                    api.prevent_exit();
+                    features::review_close(app);
+                }
                 else { app.state::<hosted::Hosting>().close_idle(); }
             }
         });

@@ -1,0 +1,60 @@
+name: Linux direct Hub feature libraries
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/linux-integrated-features]
+
+permissions:
+  contents: read
+
+jobs:
+  native-libraries:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-integrated-features' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.22.3
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            modules/mcp/launcher/src-tauri
+            modules/project-setup/src-tauri
+          key: linux-integrated-features
+      - name: Install native compilation dependencies only
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev build-essential
+      - name: Prepare the real MCP runtime hash inputs without signing or packaging
+        run: |
+          set -euo pipefail
+          npm ci --prefix modules/mcp
+          npm --prefix modules/mcp run release:launcher
+      - name: Compile the in-process Hub APIs and reject warnings
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --tests --features integrated-features,experimental-flatpak-host,experimental-linux-migration -- -D warnings
+          cargo clippy --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --lib --tests -- -D warnings
+          cargo clippy --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --lib --tests --features integrated-service -- -D warnings
+          cargo clippy --locked --manifest-path native/flatpak-native-activation/Cargo.toml --all-targets -- -D warnings
+      - name: Test guards, settings preservation and internal feature operations
+        run: |
+          set -euo pipefail
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --features integrated-features,experimental-flatpak-host,experimental-linux-migration -- --test-threads=1
+          cargo test --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --lib -- --test-threads=1
+          cargo test --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --lib --features integrated-service -- --test-threads=1
+          cargo test --locked --manifest-path native/flatpak-native-activation/Cargo.toml -- --test-threads=1

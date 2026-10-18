@@ -1,5 +1,7 @@
 //! One-shot, bounded recovery of idle hosted views across a Hub update.
-use crate::{catalog::AppId, hosted::Hosting, manager, platform};
+#[cfg(not(feature = "integrated-features"))]
+use crate::hosted::Hosting;
+use crate::{catalog::AppId, manager, platform};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -16,11 +18,25 @@ pub struct View {
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "is_false")]
     pub bundled: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub direct: bool,
 }
 fn is_false(value: &bool) -> bool {
     !value
 }
 
+#[cfg(any(test, not(feature = "integrated-features")))]
+fn require_hosted_view(view: &View) -> Result<(), String> {
+    if view.direct {
+        return Err(
+            "This saved page requires Hub's integrated features. No separate app was opened."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(any(test, not(feature = "integrated-features")))]
 fn restore_builtin(saved_builtin: bool, available: bool) -> Result<bool, String> {
     match (saved_builtin, available) {
         (_, true) => Ok(true),
@@ -67,6 +83,7 @@ fn validate(record: &Record, current: &str, time: u64) -> Result<(), String> {
         || record.views.len() > AppId::ALL.len()
         || record.views.iter().enumerate().any(|(i, v)| {
             !v.path.is_absolute()
+                || (v.direct && !v.bundled)
                 || record.views[..i]
                     .iter()
                     .any(|previous| previous.app == v.app)
@@ -167,33 +184,51 @@ pub async fn restore_hosted_app(
             .into_iter()
             .find(|view| view.app == app)
             .ok_or("This app has no pending update restoration.")?;
-        // Saved paths confer no authority. The current signed catalog selection
-        // must still identify the same executable before it can be reopened.
-        let builtin = crate::builtin::hosting_candidate(&handle, app)?;
-        // Convergence from an older Hub restores its section using the new
-        // built-in payload, not the standalone app recorded by the old build.
-        if restore_builtin(view.bundled, builtin.is_some())? {
-            let candidate = builtin.ok_or("The verified built-in module is unavailable.")?;
-            return handle.state::<Hosting>().start_verified(
-                &handle,
-                app,
-                &candidate.path,
-                &candidate.hash,
-                true,
-            );
+        #[cfg(feature = "integrated-features")]
+        {
+            // Restore navigation, never the old standalone executable or frame.
+            // The saved path remains data; only this build's verified payloads
+            // can supply MCP's runtime.
+            let _ = view;
+            if app == AppId::Mcp && crate::builtin::hosting_candidate(&handle, app)?.is_none() {
+                return Err(
+                    "MCP's verified runtime is unavailable. Its saved settings were kept.".into(),
+                );
+            }
+            Ok(serde_json::json!({"direct":true,"app":app}))
         }
-        let (path, release) = handle
-            .state::<manager::Manager>()
-            .hosted_candidate(app)?
-            .ok_or("The saved app is no longer a verified installed release.")?;
-        if !platform::same_path(&path, &view.path) {
-            return Err(
-                "The saved app path changed. Open it from Hub to confirm the new selection.".into(),
-            );
+        #[cfg(not(feature = "integrated-features"))]
+        {
+            require_hosted_view(&view)?;
+            // Saved paths confer no authority. The current signed catalog selection
+            // must still identify the same executable before it can be reopened.
+            let builtin = crate::builtin::hosting_candidate(&handle, app)?;
+            // Convergence from an older Hub restores its section using the new
+            // built-in payload, not the standalone app recorded by the old build.
+            if restore_builtin(view.bundled, builtin.is_some())? {
+                let candidate = builtin.ok_or("The verified built-in module is unavailable.")?;
+                return handle.state::<Hosting>().start_verified(
+                    &handle,
+                    app,
+                    &candidate.path,
+                    &candidate.hash,
+                    true,
+                );
+            }
+            let (path, release) = handle
+                .state::<manager::Manager>()
+                .hosted_candidate(app)?
+                .ok_or("The saved app is no longer a verified installed release.")?;
+            if !platform::same_path(&path, &view.path) {
+                return Err(
+                    "The saved app path changed. Open it from Hub to confirm the new selection."
+                        .into(),
+                );
+            }
+            handle
+                .state::<Hosting>()
+                .start(&handle, app, &path, &release.executable_sha256)
         }
-        handle
-            .state::<Hosting>()
-            .start(&handle, app, &path, &release.executable_sha256)
     })
     .await
     .map_err(|_| "Could not reopen the saved app view.")?
@@ -214,6 +249,22 @@ mod tests {
         assert_eq!(restore_builtin(false, false), Ok(false));
         assert!(restore_builtin(true, false).is_err());
     }
+
+    #[test]
+    fn direct_page_records_never_fall_back_to_a_separate_app() {
+        let mut record = record();
+        let legacy = serde_json::to_value(&record.views[0]).unwrap();
+        assert!(legacy.get("direct").is_none());
+        assert!(!serde_json::from_value::<View>(legacy).unwrap().direct);
+        record.views[0].direct = true;
+        assert!(validate(&record, "0.1.6", 101).is_err());
+        record.views[0].bundled = true;
+        validate(&record, "0.1.6", 101).unwrap();
+        assert!(require_hosted_view(&record.views[0]).is_err());
+        let wire = serde_json::to_value(&record.views[0]).unwrap();
+        assert_eq!(wire["direct"], true);
+        assert!(serde_json::from_value::<View>(wire).unwrap().direct);
+    }
     fn record() -> Record {
         Record {
             schema_version: 1,
@@ -224,6 +275,7 @@ mod tests {
                 app: AppId::Setup,
                 path: std::env::temp_dir().join("setup.exe"),
                 bundled: false,
+                direct: false,
             }],
         }
     }

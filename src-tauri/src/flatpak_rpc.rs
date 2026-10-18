@@ -8,6 +8,11 @@ use std::path::PathBuf;
 
 const MAX_REQUEST: usize = 64 * 1024;
 
+// Integrated pages belong to the native Hub window. The abandoned sandboxed-GUI
+// relay does not acquire new feature or settings authority.
+#[cfg(test)]
+const NATIVE_WINDOW_ONLY: &[&str] = &["feature_status", "feature_select", "feature_call"];
+
 pub(super) const EVENTS: &[&str] = &[
     "app-progress",
     "close-blocked",
@@ -323,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn every_active_shell_command_has_an_explicit_typed_route() {
+    fn every_shell_command_has_an_explicit_route_or_native_only_decision() {
         use serde_json::json;
         let fixtures = [
             ("usage_terms_status", json!({})),
@@ -397,6 +402,7 @@ mod tests {
             .filter(|s| !s.is_empty())
             .map(|s| s.rsplit("::").next().unwrap())
             .filter(|s| crate::plugins_retirement::command_error(s).is_none())
+            .filter(|s| !NATIVE_WINDOW_ONLY.contains(s))
             .collect::<Vec<_>>();
         let mut actual = fixtures.iter().map(|(name, _)| *name).collect::<Vec<_>>();
         expected.sort_unstable();
@@ -412,5 +418,10 @@ mod tests {
                 "{command} must preserve its typed arguments"
             );
         }
+        for command in NATIVE_WINDOW_ONLY {
+            let bytes = serde_json::to_vec(&json!({"command":command,"args":{}})).unwrap();
+            assert!(decode(&bytes).is_err(), "{command} is native-window-only");
+        }
+        assert!(decode(br#"{"command":"feature_call","args":{"feature":"mcp","command":"save_config","args":{}}}"#).is_err());
     }
 }

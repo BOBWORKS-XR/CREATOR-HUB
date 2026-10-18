@@ -33,6 +33,9 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "usage_terms_status",
             "accept_usage_terms",
+            "feature_status",
+            "feature_select",
+            "feature_call",
             "hub_preferences_status",
             "set_hub_preference",
             "convergence_status",

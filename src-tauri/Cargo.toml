@@ -11,6 +11,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 creator-hub-mcp-router = { path = "../native/mcp-router" }
+creator-project-setup = { path = "../modules/project-setup/src-tauri", default-features = false, optional = true }
+creator-works-mcp-launcher = { path = "../modules/mcp/launcher/src-tauri", default-features = false, features = ["integrated-service"], optional = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "=2.4.4"
@@ -44,6 +46,7 @@ custom-protocol = ["tauri/custom-protocol"]
 experimental-linux-migration = []
 experimental-flatpak-host = ["dep:gio"]
 experimental-flatpak-ui = ["dep:gio"]
+integrated-features = ["dep:creator-project-setup", "dep:creator-works-mcp-launcher"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gio = { version = "=0.18.4", optional = true }

@@ -529,7 +529,7 @@ impl Hosting {
             if session.connection.operation.lock().map_err(|_| "Hosted operation state unavailable.")?.busy() {
                 return Err(format!("{} is still working. Finish its work before updating Hub; no views were closed.", session.app.name()));
             }
-            Ok(crate::hosted_restore::View { app: session.app, path: session.path.clone(), bundled: session.bundled })
+            Ok(crate::hosted_restore::View { app: session.app, path: session.path.clone(), bundled: session.bundled, direct: false })
         }).collect()
     }
 
@@ -856,6 +856,7 @@ impl Hosting {
 
     // Used for an unrendered, coordinator-owned backend. Caller holds Manager's
     // lease; EOF is not a completed exit and must not race first-view startup.
+    #[cfg(any(test, not(feature = "integrated-features")))]
     pub(crate) fn stop_owned_and_wait(
         &self,
         session: &str,
@@ -916,6 +917,9 @@ pub async fn abort_hosted_app(handle: tauri::AppHandle, session: String) -> Resu
 
 #[tauri::command]
 pub async fn start_hosted_app(handle: tauri::AppHandle, app: AppId) -> Result<Value, String> {
+    if cfg!(feature = "integrated-features") {
+        return Err("MCP and Project Setup are Hub pages in this build, not hosted apps.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let manager = handle.state::<crate::manager::Manager>();
         let _operation = manager.begin()?;

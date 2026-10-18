@@ -49,7 +49,7 @@ pub fn enabled() -> bool {
     MANIFEST.trim() != "null"
 }
 pub fn reject_legacy_management() -> Result<(), String> {
-    if enabled() {
+    if enabled() || cfg!(feature = "integrated-features") {
         Err("MCP and Project Setup are built into this Hub. Update Hub, not a separate app.".into())
     } else {
         Ok(())
@@ -537,6 +537,13 @@ pub fn inventory(handle: &tauri::AppHandle) -> Result<Option<Snapshot>, String> 
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+    #[test]
+    fn direct_build_refuses_separate_app_management_even_without_a_payload_descriptor() {
+        assert_eq!(
+            reject_legacy_management().is_err(),
+            enabled() || cfg!(feature = "integrated-features")
+        );
+    }
     fn entry() -> Module {
         let executable = format!(
             "setup/creator-project-setup{}",

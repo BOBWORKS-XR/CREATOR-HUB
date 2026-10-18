@@ -388,7 +388,8 @@ pub async fn install_hub_update(
         let _operation = handle.state::<Manager>().begin()?;
         let release = selected(&handle, &version)?;
         let installed = installed_location(&handle)?;
-        let views = handle.state::<crate::hosted::Hosting>().update_views()?;
+        let mut views = handle.state::<crate::hosted::Hosting>().update_views()?;
+        views.extend(crate::features::update_views(&handle)?);
         let view_notice = view_notice(&views, restore_views);
         let approved = handle.dialog().message(format!("Update Creator Hub to {}?\n\nHub will close and reopen. Your projects, apps and settings will stay in place.{}", release.version, view_notice))
             .title("Update Creator Hub").buttons(MessageDialogButtons::OkCancelCustom("Update Hub".into(), "Not now".into())).blocking_show();
@@ -470,6 +471,7 @@ mod tests {
             app,
             path: std::env::temp_dir().join(app.exe()),
             bundled: true,
+            direct: false,
         });
         for restore in [false, true] {
             assert!(view_notice(&[], restore).is_empty());

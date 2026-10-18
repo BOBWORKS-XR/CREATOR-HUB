@@ -7,7 +7,8 @@ const { spawnSync } = require('node:child_process');
 const { yaml } = require('playwright-core/lib/utilsBundle');
 const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
 const workflows = ['native-linux-components-014.yml', 'linux-installed-candidate-014.yml',
-  'linux-outer-update-fixture-014.yml', 'flatpak-installed-host-launch-014.yml'];
+  'linux-outer-update-fixture-014.yml', 'flatpak-installed-host-launch-014.yml',
+  'linux-integrated-features.yml'];
 for (const name of workflows) test(`Linux preflight: ${name} YAML, Bash and embedded JS syntax`, () => {
   const body = fs.readFileSync(path.join(__dirname, '../.github/workflows', name), 'utf8');
   const workflow = yaml.parse(body, { uniqueKeys: true });
@@ -36,7 +37,25 @@ for (const name of workflows) test(`Linux preflight: ${name} YAML, Bash and embe
     }
   }
   assert.ok(shellCount >= 3, 'Every native workflow must actually have its run bodies parsed');
-  if (name !== 'flatpak-installed-host-launch-014.yml') assert.ok(jsCount >= 1);
+  if (!['flatpak-installed-host-launch-014.yml', 'linux-integrated-features.yml'].includes(name)) assert.ok(jsCount >= 1);
+});
+
+test('direct Hub libraries compile natively only after real payload preparation, without packaging or signing', () => {
+  const body = fs.readFileSync(path.join(__dirname, '../.github/workflows/linux-integrated-features.yml'), 'utf8');
+  const workflow = yaml.parse(body, { uniqueKeys: true });
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.deepEqual(workflow.on.push.branches, ['validation/linux-integrated-features']);
+  const job = workflow.jobs['native-libraries'];
+  assert.match(job.if, /github.repository_id == '1364807512'/);
+  assert.match(job.if, /github.ref == 'refs\/heads\/validation\/linux-integrated-features'/);
+  assert.match(job.if, /github.event_name == 'push' \|\| github.event_name == 'workflow_dispatch'/);
+  const commands = job.steps.filter(step => step.run).map(step => step.run).join('\n');
+  assert.ok(commands.indexOf('run release:launcher') < commands.indexOf('cargo clippy'));
+  assert.match(commands, /src-tauri\/Cargo.toml --tests --features integrated-features,experimental-flatpak-host,experimental-linux-migration -- -D warnings/);
+  assert.match(commands, /modules\/mcp\/launcher\/src-tauri\/Cargo.toml --lib --tests --features integrated-service/);
+  assert.match(commands, /cargo test --locked --manifest-path src-tauri\/Cargo.toml --features integrated-features/);
+  assert.doesNotMatch(commands, /--ignored|tauri build|gh release|--publish|signing|auth\.json|--privileged/);
+  assert.equal(job.steps.find(step => step.uses === 'actions/checkout@v6').with['persist-credentials'], false);
 });
 test('39106292475 runner-only polkit hardening is fixed, guarded and never relaxes app ownership checks', () => {
   const body = fs.readFileSync(path.join(__dirname, '../.github/workflows/native-linux-components-014.yml'), 'utf8');

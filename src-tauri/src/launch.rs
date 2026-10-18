@@ -16,6 +16,16 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<View, ()> 
     let arguments: Vec<_> = arguments.into_iter().take(4).collect();
     match arguments.as_slice() {
         [] => Ok(View::Hub),
+        [flag]
+            if flag == "--flatpak-activate"
+                && cfg!(all(
+                    target_os = "linux",
+                    feature = "experimental-flatpak-host",
+                    feature = "integrated-features"
+                )) =>
+        {
+            Ok(View::Hub)
+        }
         [flag, app] if flag == "--open-app" && app == "mcp" => Ok(View::Mcp),
         [flag, app] if flag == "--open-app" && app == "setup" => Ok(View::Setup),
         _ => Err(()),
@@ -50,11 +60,20 @@ pub fn activate(app: &tauri::AppHandle, arguments: Vec<String>) {
         // The persisted in-memory revision also covers requests arriving before UI listeners.
         let _ = app.emit_to("main", "hub-launch-view", request);
     }
+    let _ = focus(app);
+}
+
+pub fn focus(app: &tauri::AppHandle) -> bool {
+    if app.state::<crate::manager::Manager>().is_closing() {
+        return false;
+    }
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
+        let shown = window.show().is_ok();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        return shown;
     }
+    false
 }
 
 #[tauri::command]
@@ -102,5 +121,25 @@ mod tests {
         let hub = launch.update(View::Hub).unwrap();
         assert_eq!(hub.revision, 2);
         assert_eq!(launch.0.lock().unwrap().view, View::Hub);
+    }
+
+    #[test]
+    fn flatpak_activation_is_exact_and_requires_the_integrated_linux_host_build() {
+        assert_eq!(
+            parse([OsString::from("--flatpak-activate")]).is_ok(),
+            cfg!(all(
+                target_os = "linux",
+                feature = "experimental-flatpak-host",
+                feature = "integrated-features"
+            ))
+        );
+        for args in [
+            vec!["--flatpak-activate", "mcp"],
+            vec!["--flatpak-activate=/tmp/app"],
+            vec!["--flatpak-activate", "--install"],
+            vec!["--FLATPAK-ACTIVATE"],
+        ] {
+            assert!(parse(args.into_iter().map(OsString::from)).is_err());
+        }
     }
 }

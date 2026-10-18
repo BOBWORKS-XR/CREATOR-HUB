@@ -1,5 +1,6 @@
 //! Session activation only. This service cannot read settings, execute supplied
-//! commands or authorize a GUI. Core admits its owned GUI on a separate channel.
+//! commands or authorize settings access. Integrated Hub uses this only to show
+//! its existing native window; there is no sandbox-to-host command relay.
 use gio::glib::{variant::ToVariant, VariantTy};
 
 const NAME: &str = "com.creatorworks.hub.Host";

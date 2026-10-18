@@ -286,6 +286,9 @@ impl Manager {
     pub fn busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
     }
+    pub fn is_closing(&self) -> bool {
+        self.closing.lock().map(|closing| *closing).unwrap_or(true)
+    }
     pub fn allow_close(&self) -> bool {
         let Ok(mut closing) = self.closing.lock() else {
             return false;
