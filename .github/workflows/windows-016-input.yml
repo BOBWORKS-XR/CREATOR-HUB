@@ -56,11 +56,11 @@ jobs:
           MANIFEST_BYTES: ${{ inputs.manifest_bytes }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $rows = @(@{name='Creator.Hub_0.1.16_x64-setup.exe';id='656964817';bytes=37839600L;sha='7229cfcf919dc3a9e27a459fd482cbbe059fd54caa9ad379b2a75c8baa113a20'})
+          $rows = @(@{name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_f9f0e1e_x64-setup.exe';id='657373607';bytes=37980864L;sha='f0092e056f7b4245d10350b7954c3dbe5e5356f2e340143d0aefb80078672bc7'})
           $metadata = @(
-            @{name='creator-hub-windows-x86_64.json';id=$env:DESCRIPTOR_ID;bytes=$env:DESCRIPTOR_BYTES;sha=$env:DESCRIPTOR_SHA256;limit=32768}
-            @{name='creator-hub-windows-x86_64.json.minisig';id=$env:MINISIG_ID;bytes=$env:MINISIG_BYTES;sha=$env:MINISIG_SHA256;limit=4096}
-            @{name='latest.json';id=$env:MANIFEST_ID;bytes=$env:MANIFEST_BYTES;sha=$env:MANIFEST_SHA256;limit=32768}
+            @{name='creator-hub-windows-x86_64.json';sourceName='creator-hub-windows-x86_64-f9f0e1e.json';id=$env:DESCRIPTOR_ID;bytes=$env:DESCRIPTOR_BYTES;sha=$env:DESCRIPTOR_SHA256;limit=32768}
+            @{name='creator-hub-windows-x86_64.json.minisig';sourceName='creator-hub-windows-x86_64-f9f0e1e.json.minisig';id=$env:MINISIG_ID;bytes=$env:MINISIG_BYTES;sha=$env:MINISIG_SHA256;limit=4096}
+            @{name='latest.json';sourceName='latest-windows-f9f0e1e.json';id=$env:MANIFEST_ID;bytes=$env:MANIFEST_BYTES;sha=$env:MANIFEST_SHA256;limit=32768}
           )
           $supplied = @($metadata | ForEach-Object { $_.id; $_.bytes; $_.sha } | Where-Object { -not [string]::IsNullOrEmpty($_) })
           if ($supplied.Count -ne 0 -and $supplied.Count -ne 9) { throw 'Signed metadata must be an all-or-none independently pinned set.' }
@@ -82,7 +82,7 @@ jobs:
           if ($release.id -ne 411494394 -or $release.draft -ne $true -or $release.tag_name -cne 'v0.1.13-validation') { throw 'Exact private validation draft differs.' }
           foreach ($row in $rows) {
             $assets = @($release.assets | Where-Object { $_.id.ToString() -ceq $row.id })
-            if ($assets.Count -ne 1 -or $assets[0].name -cne $row.name -or $assets[0].state -cne 'uploaded' -or $assets[0].size -ne [long]$row.bytes -or $assets[0].digest -cne "sha256:$($row.sha)") { throw 'Exact private asset metadata differs.' }
+            if ($assets.Count -ne 1 -or $assets[0].name -cne $row.sourceName -or $assets[0].state -cne 'uploaded' -or $assets[0].size -ne [long]$row.bytes -or $assets[0].digest -cne "sha256:$($row.sha)") { throw 'Exact private asset metadata differs.' }
           }
           New-Item -ItemType Directory -Path $directory | Out-Null
           foreach ($row in $rows) {

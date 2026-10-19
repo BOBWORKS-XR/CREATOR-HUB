@@ -9,13 +9,13 @@ const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/wind
 const block = workflow.match(/        run: \|\r?\n([\s\S]*?)(?=\r?\n      - uses:)/);
 assert.ok(block, 'Expected one inline data-only staging block');
 const script = block[1].split(/\r?\n/).map(line => line.replace(/^          /, '')).join('\n');
-const hasPwsh = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { windowsHide: true }).status === 0;
-const installer = { id: 656964817, name: 'Creator.Hub_0.1.16_x64-setup.exe', size: 37839600,
-  state: 'uploaded', digest: 'sha256:7229cfcf919dc3a9e27a459fd482cbbe059fd54caa9ad379b2a75c8baa113a20' };
+const hasPwsh = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { windowsHide: true, timeout: 15000 }).status === 0;
+const installer = { id: 657373607, name: 'Creator.Hub_0.1.16_f9f0e1e_x64-setup.exe', output: 'Creator.Hub_0.1.16_x64-setup.exe', size: 37980864,
+  state: 'uploaded', digest: 'sha256:f0092e056f7b4245d10350b7954c3dbe5e5356f2e340143d0aefb80078672bc7' };
 const metadata = [
-  { id: 102, name: 'creator-hub-windows-x86_64.json', size: 512, state: 'uploaded', digest: `sha256:${'a'.repeat(64)}` },
-  { id: 103, name: 'creator-hub-windows-x86_64.json.minisig', size: 297, state: 'uploaded', digest: `sha256:${'b'.repeat(64)}` },
-  { id: 104, name: 'latest.json', size: 745, state: 'uploaded', digest: `sha256:${'c'.repeat(64)}` },
+  { id: 102, name: 'creator-hub-windows-x86_64-f9f0e1e.json', output: 'creator-hub-windows-x86_64.json', size: 512, state: 'uploaded', digest: `sha256:${'a'.repeat(64)}` },
+  { id: 103, name: 'creator-hub-windows-x86_64-f9f0e1e.json.minisig', output: 'creator-hub-windows-x86_64.json.minisig', size: 297, state: 'uploaded', digest: `sha256:${'b'.repeat(64)}` },
+  { id: 104, name: 'latest-windows-f9f0e1e.json', output: 'latest.json', size: 745, state: 'uploaded', digest: `sha256:${'c'.repeat(64)}` },
 ];
 function fixture(signed = false) {
   const env = { DESCRIPTOR_ID: '', DESCRIPTOR_BYTES: '', DESCRIPTOR_SHA256: '',
@@ -48,12 +48,12 @@ function Invoke-WebRequest { param($Method,$Uri,$Headers,$OutFile,$MaximumRedire
   $downloads.Add([IO.Path]::GetFileName($OutFile))
 }
 function Get-Item { param($LiteralPath)
-  $asset=@($fixture.release.assets | Where-Object name -CEQ ([IO.Path]::GetFileName($LiteralPath)))[0]
+  $asset=@($fixture.release.assets | Where-Object output -CEQ ([IO.Path]::GetFileName($LiteralPath)))[0]
   return @{Length=([long]$asset.size + [int]$fixture.badSize)}
 }
 function Get-FileHash { param($LiteralPath,$Algorithm)
   if($Algorithm -cne 'SHA256'){throw 'Unexpected hash algorithm'}
-  $asset=@($fixture.release.assets | Where-Object name -CEQ ([IO.Path]::GetFileName($LiteralPath)))[0]
+  $asset=@($fixture.release.assets | Where-Object output -CEQ ([IO.Path]::GetFileName($LiteralPath)))[0]
   return @{Hash=$(if($fixture.badHash){'D'*64}else{$asset.digest.Substring(7).ToUpperInvariant()})}
 }
 $passed=$false;$failure=$null
@@ -75,7 +75,9 @@ test('staging has one private GET-only data job, no checkout, dependency/code ex
   assert.match(workflow, /push:\s+branches: \[validation\/windows-016-input\]/);
   assert.equal((workflow.match(/^        type: string$/gm) || []).length, 9);
   assert.doesNotMatch(workflow, /installer_asset_id|INSTALLER_ID|required: true/);
-  assert.ok(script.includes("id='656964817';bytes=37839600L;sha='7229cfcf919dc3a9e27a459fd482cbbe059fd54caa9ad379b2a75c8baa113a20'"));
+  assert.ok(script.includes("id='657373607';bytes=37980864L;sha='f0092e056f7b4245d10350b7954c3dbe5e5356f2e340143d0aefb80078672bc7'"));
+  assert.ok(script.includes("sourceName='Creator.Hub_0.1.16_f9f0e1e_x64-setup.exe'"));
+  assert.ok(script.includes('$assets[0].name -cne $row.sourceName'));
   assert.match(workflow, /permissions:\s+contents: read/);
   assert.match(workflow, /stage:[\s\S]*permissions:\s+contents: write/);
   assert.match(workflow, /name: windows-016-acceptance-input/);
@@ -90,13 +92,13 @@ test('staging has one private GET-only data job, no checkout, dependency/code ex
 test('fresh stages exactly one pinned installer even when the private draft contains other assets', { skip: !hasPwsh }, () => {
   const result = run(fixture());
   assert.equal(result.passed, true, result.failure);
-  assert.deepEqual(result.downloads, [installer.name]); assert.equal(result.created, 1); assert.equal(result.gets.length, 1);
+  assert.deepEqual(result.downloads, [installer.output]); assert.equal(result.created, 1); assert.equal(result.gets.length, 1);
 });
 
 test('incoming stages only the fixed optional three files with independent hash and size pins', { skip: !hasPwsh }, () => {
   const result = run(fixture(true));
   assert.equal(result.passed, true, result.failure);
-  assert.deepEqual(result.downloads, [installer.name, ...metadata.map(asset => asset.name)]);
+  assert.deepEqual(result.downloads, [installer.output, ...metadata.map(asset => asset.output)]);
 });
 
 test('partial metadata, unsafe IDs, repeated IDs, invalid pins and size bounds refuse before HTTP or writes', { skip: !hasPwsh }, () => {
