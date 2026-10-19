@@ -185,9 +185,10 @@ The isolated portable deployment primitive passed 41 actual Linux tests and
 strict Clippy in run 39299443308. Its first workflow failed before any job because
 `runner.temp` is unavailable in job-level environment expressions. That original
 failure is retained; a regression now requires step-scoped runner paths. This
-library is not wired into Hub, Flatpak activation or the updater. Real complete
-AppDir inputs, memory/dependency measurements, Deck activation, signed update,
-restart and removal remain required.
+library was not wired into Hub at that checkpoint. The later default-off host
+and startup boundary is described below; full Flatpak/updater integration is
+still incomplete. Real complete AppDir inputs, memory/dependency measurements,
+Deck activation, signed update, restart and removal remain required.
 
 ## Windows Candidate Checkpoint
 
@@ -197,15 +198,49 @@ product source `f9f0e1e5cb27b3ae5178c8aac16429e83ba34593` (37,980,864 bytes).
 Its SHA-256 is
 `f0092e056f7b4245d10350b7954c3dbe5e5356f2e340143d0aefb80078672bc7`.
 Final NSIS extraction and production-key runtime/router metadata verification,
-including tamper refusal, passed. It is unsigned and has not been installed.
-`BUILD-EVIDENCE.json` is build evidence only; signed incoming update/restart,
-installed migration/retirement and complete Linux/Flatpak acceptance remain open.
+including tamper refusal, passed. The installer remains Windows-publisher unsigned;
+it has not replaced the user's installed app. `BUILD-EVIDENCE.json` retains its
+original build-time scope. Later disposable-runner results supplement it:
+
+- Fresh native install/direct MCP and Setup pages/settings preservation passed
+  run `39323383380`; real guarded public14 NSIS update passed `39322268458`.
+- Signed public14-to-direct16 update passed run `39326247460` at harness source
+  `a961629cf45d00482a42d11c5fef26f635538606`. Native Cancel preserved public14;
+  approval verified signed metadata/installer, exited the old app and restarted
+  the exact installed 16 executable. Registry/footer, direct pages, retained
+  settings and official-SDK managed-route reconnect checks passed. Temporary
+  system trust and WebView policy were restored.
+- This used controlled prepublication discovery, not public discovery or live
+  AI app/Unity acceptance. The transport served exactly five routes with zero
+  policy rejections. Four peer-reset events are retained separately; they are
+  not four rejected requests or proof of four distinct connections. Earlier
+  failed reports remain preserved; installer and signed metadata were not rebuilt.
+
+Installed migration/retirement, outgoing16 update and complete Linux/Flatpak
+acceptance remain open. No public 0.1.16 release or Mac work is authorized by
+these bounded receipts.
 Later ordinary-SDK fixture edits affect only test source; a normalized comparison
 confirms the Setup production code remains equivalent to this frozen build.
 Full clean CI `39313928050` at that product source passed, including Windows,
 Linux, built-in Windows modules, frontend/scripts and both runtime-router jobs;
 Mac was skipped. Native Linux library/helper runs also passed, but are not a
 complete Linux/Flatpak install/update/restart acceptance.
+
+The default-off portable Linux host/startup boundary passed native Linux CI
+`39323108126`. Its producer now requires an actual new feature-bound Root and
+binds the canonical AppDir host profile into its complete signed inventory;
+older Root images cannot be relabelled. Full portable installation/service,
+update/reactivation/removal and SteamOS/Flatpak acceptance remain unfinished.
+The Linux-only payload producer is rerunning from current source because the
+previous signed private-module input predates the Setup fixes; its equality
+guard is not bypassed. The public Windows build remains unchanged.
+
+Native Linux helper transaction run `39326460876` at `ea9f4d2` passed using the
+original MCP and Setup DEBs: both fixed retirements, retained live official-SDK
+transport and both reconnect aliases, repeat refusal and eleven settings
+sentinels preserved with exact bytes/identity/permissions/ownership. This is
+isolated mechanism evidence, not packaged 16 migration, real authentication,
+interruption recovery, Flatpak or release qualification.
 
 ### Objective Setup Audit
 
