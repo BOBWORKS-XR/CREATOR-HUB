@@ -1259,11 +1259,56 @@ class FreshUiTests(unittest.TestCase):
     def test_loading_or_wrong_version_never_calls_acceptance_or_performs_input(self):
         f = self.fixture()
         f.snapshot["nodes"][0]["name"] = "0.1.14"
-        with mock.patch.object(p.time, "monotonic", side_effect=[0, 0, 26]), self.assertRaisesRegex(RuntimeError, "deadline"):
+        with mock.patch.object(p, "scroll_successor_footer") as scroll, \
+                mock.patch.object(p.time, "monotonic", side_effect=[0, 0, 26]), self.assertRaisesRegex(RuntimeError, "deadline"):
             self.invoke(f)
+        scroll.assert_called_once_with(f.owner, f.helper, f.c, f.atspi)
         f.b.RootOwnership.assert_called_once()
         f.bus.close_sync.assert_called_once_with(None)
         f.c.press.assert_not_called()
+
+    def test_offscreen_version_scrolls_once_then_requires_visible_exact_version(self):
+        f = self.fixture()
+        hidden = {"nodes": [{"name": "0.1.15", "showing": False}]}
+        f.c.ui_snapshot.side_effect = [hidden, hidden, f.snapshot]
+        observation = {}
+        with mock.patch.object(p, "scroll_successor_footer", return_value={"scrollAttempts": 1}) as scroll:
+            self.invoke(f, observation)
+        scroll.assert_called_once_with(f.owner, f.helper, f.c, f.atspi)
+        self.assertTrue(observation["footerScrollAttempted"])
+
+    def test_footer_scroll_requires_two_owned_walks_one_stable_enabled_control_and_no_click(self):
+        f = self.fixture()
+        f.atspi.Role.PUSH_BUTTON, f.atspi.ScrollType = 43, types.SimpleNamespace(ANYWHERE=6)
+        footer = mock.Mock()
+        footer.get_role.return_value, footer.get_name.return_value = 43, "GitHub"
+        footer.get_state_set.return_value.contains.side_effect = lambda state: state in (2, 3)
+        footer.get_component_iface.return_value.scroll_to.return_value = True
+        f.c.own_tree.return_value = [footer]
+        result = p.scroll_successor_footer(f.owner, f.helper, f.c, f.atspi)
+        self.assertEqual(f.c.own_tree.call_count, 2)
+        self.assertEqual(result["linkActionCount"], 0)
+        footer.get_action_iface.assert_not_called()
+        footer.get_component_iface.return_value.scroll_to.assert_called_once_with(6)
+        for change in ("ambiguous", "changed", "disabled", "missing-interface", "refused"):
+            f.c.own_tree.reset_mock(side_effect=True)
+            f.c.own_tree.return_value = [footer]
+            f.refs.identity.reset_mock(side_effect=True)
+            f.refs.identity.return_value = [":1.8", "/footer"]
+            footer.get_state_set.return_value.contains.side_effect = lambda state: state in (2, 3)
+            component = mock.Mock()
+            component.scroll_to.return_value = change != "refused"
+            footer.get_component_iface.return_value = None if change == "missing-interface" else component
+            if change == "ambiguous":
+                f.c.own_tree.return_value = [footer, footer]
+            elif change == "changed":
+                f.refs.identity.side_effect = [[":1.8", "/footer"], [":1.8", "/other"]]
+            elif change == "disabled":
+                footer.get_state_set.return_value.contains.return_value = False
+                footer.get_state_set.return_value.contains.side_effect = None
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                p.scroll_successor_footer(f.owner, f.helper, f.c, f.atspi)
+            self.assertEqual(component.scroll_to.call_count, int(change == "refused"))
 
     def test_reopened_migration_offer_is_declined_once_in_new_owned_window(self):
         f = self.fixture()
@@ -1311,7 +1356,8 @@ class FreshUiTests(unittest.TestCase):
                       {"name": "0.1.15", "text": "", "showing": False}):
             f = self.fixture()
             f.snapshot["nodes"][0] = value
-            with mock.patch.object(p.time, "monotonic", side_effect=[0, 0, 26]), self.assertRaisesRegex(RuntimeError, "deadline"):
+            with mock.patch.object(p, "scroll_successor_footer"), \
+                    mock.patch.object(p.time, "monotonic", side_effect=[0, 0, 26]), self.assertRaisesRegex(RuntimeError, "deadline"):
                 self.invoke(f)
             f.c.press.assert_not_called()
 

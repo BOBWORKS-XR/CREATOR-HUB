@@ -624,6 +624,29 @@ def bind_component_frame(window, owner, atspi):
     return window
 
 
+def scroll_successor_footer(owner, helper, c, atspi):
+    # Scroll the source-bound footer control into view; never invoke its action.
+    # https://docs.gtk.org/atspi2/method.Component.scroll_to.html
+    selected = []
+    for _ in range(2):
+        nodes = c.own_tree(helper.select_window(owner.request, atspi), owner, atspi)
+        matches = [n for n in nodes if n.get_role() == atspi.Role.PUSH_BUTTON and n.get_name() == "GitHub"]
+        require(len(matches) == 1, "One owned successor footer control required")
+        node = matches[0]
+        state = node.get_state_set()
+        require(all(state.contains(getattr(atspi.StateType, k)) for k in ("ENABLED", "SENSITIVE"))
+                and not any(state.contains(getattr(atspi.StateType, k)) for k in ("BUSY", "DEFUNCT")),
+                "Successor footer control is not ready")
+        selected.append((node, owner.references.identity(node, owner)))
+    require(selected[0][1] == selected[1][1], "Successor footer control changed")
+    owner.recheck(full=True)
+    component = selected[1][0].get_component_iface()
+    require(component is not None, "Successor footer Component interface required")
+    require(component.scroll_to(atspi.ScrollType.ANYWHERE) is True, "Successor footer scroll refused; no retry")
+    owner.recheck(full=True)
+    return {"reference": selected[1][1], "scrollAttempts": 1, "linkActionCount": 0}
+
+
 def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, capture, system_file, observation=None):
     """New process/XRes owner and AX renderer. Never old14 workers."""
     refs, axbus = b.native_ax_references()
@@ -685,6 +708,9 @@ def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, captur
                     last["migrationSkip"] = c.press("skip-migration", owner, atspi)
                 continue
             if "0.1.15" not in c.shown_names(snapshot):
+                if not last.get("footerScrollAttempted"):
+                    last["footerScrollAttempted"] = True
+                    last["footerScroll"] = scroll_successor_footer(owner, helper, c, atspi)
                 continue
             require(owner.renderer is not None, "Fresh independently bound WebKit producer required")
             owner.recheck(full=True)
