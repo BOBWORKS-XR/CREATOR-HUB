@@ -139,7 +139,9 @@ jobs:
             assert.equal(root.tauri.app.windows[0].title,'Creator Hub - Development Preview');json('linux-root-source-binding.json',root);
             const target=await producer(t,false),{data:release}=await github.rest.repos.getRelease({...repo,release_id:411494394});
             assert.equal(release.id,411494394);assert.equal(release.tag_name,'v0.1.13-validation');assert.equal(release.draft,true);
-            assert.ok(release.assets.length<=32);target.draft={id:release.id,tag_name:release.tag_name,draft:release.draft};target.assets=[];
+            assert.ok(Array.isArray(release.assets)&&release.assets.length>0);
+            assert.ok(Buffer.byteLength(JSON.stringify(release),'utf8')<=262144,'Private draft metadata exceeds bounded response budget');
+            target.draft={id:release.id,tag_name:release.tag_name,draft:release.draft};target.assets=[];
             for(const [local,[id,size,sha,name]] of Object.entries(pins.metadata)) {
               assert.match(local,/^(creator-hub-linux-x86_64-deb\.json(?:\.minisig)?|latest\.json)$/);
               const matches=release.assets.filter(a=>a.id===id);assert.equal(matches.length,1);

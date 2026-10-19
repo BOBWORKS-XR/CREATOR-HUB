@@ -1030,6 +1030,19 @@ class WorkflowTests(unittest.TestCase):
         tests = next(i for i, command in enumerate(commands) if "native-linux-update-flow.test.py" in command)
         self.assertLess(commands.index(fetch), tests)
 
+    def test_private_draft_growth_is_byte_bounded_without_changing_exact_asset_pins(self):
+        script = next(step["with"]["script"] for step in self.workflow["jobs"]["stage-input"]["steps"]
+                      if step.get("uses", "").startswith("actions/github-script@"))
+        check = "assert.ok(Buffer.byteLength(JSON.stringify(release),'utf8')<=262144,'Private draft metadata exceeds bounded response budget');"
+        self.assertIn(check, script)
+        self.assertNotIn("release.assets.length<=32", script)
+        self.assertIn("assert.equal(a.id,id)", script)
+        self.assertIn("assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),sha)", script)
+        code = "const assert=require('node:assert/strict'); const check=release=>{" + check + "};"
+        code += "check({assets:Array.from({length:35},(_,id)=>({id}))});"
+        code += "assert.throws(()=>check({assets:[{data:'x'.repeat(262144)}]}));"
+        subprocess.run([shutil.which("node") or "node", "-e", code], cwd=ROOT, check=True, capture_output=True, timeout=15)
+
     def test_complete_frozen_checkout_and_stage_bindings(self):
         text = WORKFLOW.read_text()
         self.assertEqual(text.count("ref: " + p.FROZEN_SOURCE), 2)
