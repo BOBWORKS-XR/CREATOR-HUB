@@ -26,7 +26,7 @@ function api(route) {
 }
 function collect(expected, preparedFile, request = api) {
   assert.ok(Object.hasOwn(TARGETS, expected.target), 'Unknown target');
-  assert.equal(expected.version, '0.1.14');
+  assert.ok(expected.version === '0.1.14' || expected.version === '0.1.16' && expected.target === 'linux', 'Only finite native payload targets are admitted');
   assert.match(expected.sourceCommit, /^[a-f0-9]{40}$/);
   assert.match(expected.zipSha256, /^[a-f0-9]{64}$/);
   for (const value of [expected.runId, expected.runAttempt, expected.artifactId]) assert.ok(Number.isSafeInteger(value) && value > 0);

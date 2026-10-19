@@ -31,6 +31,21 @@ test('fresh attempt-scoped public API collection remains unsigned and cannot pro
   assert.equal(response.releaseReady, false);
 });
 
+test('new Linux16 collection retains the fresh API and source binding rather than accepting a relabelled14 result', t => {
+  const { file, value } = inputs(t);
+  value.expected.version = value.prepared.hubVersion = '0.1.16';
+  value.run.head_branch = 'validation/unix-payload-016';
+  fs.writeFileSync(file, JSON.stringify(value.prepared, null, 2));
+  const request = route => route.startsWith('actions/runs/101/attempts/') ? { jobs: value.jobs, total_count: 1 }
+    : route === 'actions/runs/101' ? value.run : route === 'actions/artifacts/202' ? value.artifact : value.commit;
+  assert.equal(collect(value.expected, file, request).verified.version, '0.1.16');
+  value.run.head_branch = 'validation/unix-payload-014';
+  assert.throws(() => collect(value.expected, file, request));
+  for (const target of ['macos-intel', 'macos-arm64']) {
+    assert.throws(() => collect({ ...value.expected, target }, file, () => assert.fail('No API call')));
+  }
+});
+
 test('malformed independent pins refuse before filesystem or API use', t => {
   const { file, value } = inputs(t);
   for (const change of [{ target: 'constructor' }, { runId: '101/path' }, { artifactId: 0 }, { runAttempt: NaN },
