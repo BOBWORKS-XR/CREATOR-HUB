@@ -1,4 +1,10 @@
 (() => {
+  if (window.CreatorNativeSupport?.active) {
+    window.CreatorUsageTerms.requireAcceptance()
+      .then(() => window.CreatorNativeSupport.run())
+      .catch(reason => window.CreatorNativeSupport.error(reason));
+    return;
+  }
   const tools = Object.freeze({
     mcp: {
       title: 'Creator Works MCP', letter: 'M', summary: 'Connect AI assistants to Unity with scene, prefab, component and asset tools.',

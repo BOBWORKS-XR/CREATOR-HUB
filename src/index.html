@@ -26,6 +26,23 @@
     <span id="platform-status" class="preview-status">Desktop</span>
   </header>
   <main>
+    <section id="native-support-page" class="hidden" aria-labelledby="native-support-title">
+      <h2 id="native-support-title" tabindex="-1">Native Hub support</h2>
+      <p>Use Creator Hub with Unity and your AI apps outside the Flatpak sandbox.</p>
+      <ul>
+        <li>Install the verified Hub helper for this Linux account.</li>
+        <li>Keep existing MCP settings, Project Setup settings and Unity projects where they are.</li>
+        <li>After setup, close this window and reopen Creator Hub from Flatpak.</li>
+      </ul>
+      <p id="native-support-status" role="status" aria-live="polite">Checking native support...</p>
+      <p id="native-support-error" class="error" role="alert" hidden></p>
+      <div class="native-support-actions">
+        <button id="native-support-install" class="primary-button" type="button" disabled><span class="icon icon-download" aria-hidden="true"></span>Install native support</button>
+        <button id="native-support-recover" class="secondary-button" type="button" hidden><span class="icon icon-refresh" aria-hidden="true"></span>Review interrupted setup</button>
+        <button id="native-support-check" class="text-button" type="button" disabled><span class="icon icon-refresh" aria-hidden="true"></span>Check again</button>
+        <button id="native-support-cancel" class="text-button" type="button" hidden>Cancel download</button>
+      </div>
+    </section>
     <div id="inventory-error" class="inventory-error hidden" role="alert"><p id="inventory-error-message"></p><button id="retry-inventory" class="text-button" type="button"><span class="icon icon-refresh" aria-hidden="true"></span>Retry app discovery</button></div>
     <div id="unified-home-updater" class="hidden"><details id="update-settings"><summary>Update settings</summary></details></div>
     <nav id="hub-pages" class="hub-pages" aria-label="Hub pages">
@@ -159,6 +176,7 @@
   <script src="convergence.js"></script>
   <script src="help.js"></script>
   <script src="feature-pages.js"></script>
+  <script src="native-support.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

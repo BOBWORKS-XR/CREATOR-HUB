@@ -137,6 +137,15 @@ button.app-row:hover { background: #181d21; }
 @media (max-width: 480px) { .detected-copy { align-items: flex-start; flex-direction: column; } }
 .hub-update { margin-top: 18px; padding-top: 12px; border-top: 1px solid #293137; }
 .hub-update p { overflow-wrap: anywhere; }
+.native-support-mode #suite-shell, .native-support-mode #suite-dismiss,
+.native-support-mode footer .footer-links,
+.native-support-mode main > :not(#native-support-page) { display: none !important; }
+#native-support-page { max-width: 660px; margin: 20px auto; }
+#native-support-page [hidden] { display: none !important; }
+#native-support-page h2 { font-size: 20px; }
+#native-support-page p, #native-support-page li { line-height: 1.6; overflow-wrap: anywhere; }
+#native-support-page ul { padding-left: 20px; }
+.native-support-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 20px; }
 .integrated-home #unified-home-updater { margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .integrated-home .hub-update { margin-top: 0; padding-top: 0; border-top: 0; }
 .integrated-home .hub-update .page-heading { flex-wrap: wrap; gap: 8px 16px; }
