@@ -602,8 +602,17 @@ def fresh_ax_applications(atspi, helper, pid):
     return applications, observed_pids
 
 
+def recheck_agent_endpoint(bus, p, glib, expected):
+    # Once bound, inspect only this agent and authority; unrelated callers may exit.
+    authority = p.bus_identity(bus, "org.freedesktop.PolicyKit1", glib)
+    require(authority == expected["authority"] and authority["uid"] == 0, "System authority changed")
+    actual = p.bus_identity(bus, expected["owner"], glib)
+    require(actual == {k: expected[k] for k in ("owner", "pid", "uid")}, "Agent authority/bus binding changed")
+    require(p.bus_identity(bus, "org.freedesktop.PolicyKit1", glib) == authority, "System authority changed")
+
+
 def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, capture, system_file, observation=None):
-    """New process, new XID, new AX bus aliases/renderer. Never old14 workers."""
+    """New process/XRes owner and AX renderer. Never old14 workers."""
     refs, axbus = b.native_ax_references()
     last = observation if observation is not None else {}
     snapshot = None
@@ -821,7 +830,7 @@ def native_capture(root, env):
             current_root = b.native_process(child.pid, helper, full=False)
             require(child.poll() is None and all(identity.get(k) == v for k, v in current_root.items()), "Root14 changed before DPKG capture")
             p.own_agent(agent, agent_identity, parent, helper)
-            require(p.agent_bus_identity(system, agent_identity, GLib) == endpoint, "Agent authority/bus binding changed")
+            recheck_agent_endpoint(system, p, GLib, endpoint)
             for pid in (os.getpid(), agent.pid, child.pid):
                 current = p.session(system, pid, GLib)
                 require(all(current[k] == report["session"][k] for k in ("object", "Id", "User", "Leader")), "Root/agent/session mismatch")
@@ -859,7 +868,7 @@ def native_capture(root, env):
         require(report["dpkgAuthorizationCaptured"], "Actual Root authorization dialog deadline; no fallback/no input")
         def agent_guard():
             p.own_agent(agent, agent_identity, parent, helper)
-            require(p.agent_bus_identity(system, agent_identity, GLib) == endpoint, "Agent authority/bus changed")
+            recheck_agent_endpoint(system, p, GLib, endpoint)
             for pid in (os.getpid(), agent.pid):
                 current = p.session(system, pid, GLib)
                 require(all(current[k] == report["session"][k] for k in ("object", "Id", "User", "Leader")), "Authentication session changed")

@@ -961,6 +961,29 @@ class CompletionTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 p.runtime_identity(process, expected, b, None)
 
+    def test_bound_agent_recheck_never_enumerates_unrelated_disappearing_names(self):
+        authority = {"owner": ":1.7", "pid": 7, "uid": 0}
+        agent = {"owner": ":1.8", "pid": 21, "uid": p.UID}
+        expected = agent | {"authority": authority, "objectPath": "/synthetic/agent"}
+        polkit = mock.Mock()
+        polkit.bus_identity.side_effect = lambda _bus, name, _glib: {
+            "org.freedesktop.PolicyKit1": authority, ":1.8": agent}[name]
+        p.recheck_agent_endpoint("system-bus", polkit, None, expected)
+        polkit.agent_bus_identity.assert_not_called()
+        self.assertEqual(polkit.bus_identity.call_count, 3)
+        for changed in ({"owner": ":1.9"}, {"pid": 22}, {"uid": 0}):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                polkit.bus_identity.side_effect = [authority, agent | changed]
+                p.recheck_agent_endpoint("system-bus", polkit, None, expected)
+        for first, last in ((authority | {"uid": p.UID}, authority),
+                            (authority, authority | {"pid": 8})):
+            with self.subTest(first=first, last=last), self.assertRaises(RuntimeError):
+                polkit.bus_identity.side_effect = [first, agent, last]
+                p.recheck_agent_endpoint("system-bus", polkit, None, expected)
+        polkit.bus_identity.side_effect = RuntimeError("bound agent disappeared")
+        with self.assertRaisesRegex(RuntimeError, "bound agent disappeared"):
+            p.recheck_agent_endpoint("system-bus", polkit, None, expected)
+
     def test_dismissal_uses_complete_tree_and_refuses_replacement_dialog(self):
         polkit, native = mock.Mock(), [{"window": 77, "pid": 21}]
         def complete(_x, _h, _target, observation):
