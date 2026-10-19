@@ -1,0 +1,22 @@
+[package]
+name = "creator-hub-linux-portable-deployment"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+flate2 = "=1.1.10"
+fs2 = "=0.4.3"
+minisign-verify = "=0.2.5"
+semver = "=1.0.28"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+tar = { version = "=0.4.46", default-features = false }
+tempfile = "=3.27.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.190"
+
+[workspace]

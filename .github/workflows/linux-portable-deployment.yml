@@ -1,0 +1,39 @@
+name: Linux portable deployment primitives
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/linux-portable-deployment]
+    paths:
+      - native/linux-portable-deployment/**
+      - .github/workflows/linux-portable-deployment.yml
+
+permissions:
+  contents: read
+
+jobs:
+  primitives:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-portable-deployment' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/linux-portable-deployment-target
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: clippy,rustfmt
+      - name: Verify formatting and reject warnings in this isolated crate only
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path native/linux-portable-deployment/Cargo.toml --check
+          cargo clippy --locked --manifest-path native/linux-portable-deployment/Cargo.toml --all-targets -- -D warnings
+      - name: Test signed inventory, native filesystem guards and transaction recovery
+        run: |
+          set -euo pipefail
+          cargo test --locked --manifest-path native/linux-portable-deployment/Cargo.toml -- --test-threads=1
