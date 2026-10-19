@@ -3,7 +3,6 @@ use crate::settings_backup as storage;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(windows)]
 use std::io;
 use std::{
     fs::{self, File, OpenOptions},
@@ -194,7 +193,7 @@ fn canonical_target(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute()
         || path
             .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
+            .any(|c| matches!(c, std::path::Component::ParentDir) || c.as_os_str() == "..")
     {
         return Err("Migration requires absolute, unambiguous existing file paths.".into());
     }
@@ -208,6 +207,54 @@ fn canonical_target(path: &Path) -> Result<PathBuf, String> {
         return Err("Network settings migration is not supported.".into());
     }
     Ok(canonical)
+}
+
+fn canonical_scope_target_with(
+    path: &Path,
+    resolve: impl Fn(&Path) -> io::Result<PathBuf>,
+) -> Result<PathBuf, String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir) || c.as_os_str() == "..")
+    {
+        return Err("Recovery scope requires absolute, unambiguous paths.".into());
+    }
+    storage::reject_links(path)?;
+    let canonical = match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return Err("Recovery scope target must be a regular file.".into());
+            }
+            // Match prepare's whole-file resolution. Windows can redirect a
+            // file without redirecting its parent directory (MSIX app data).
+            let canonical = resolve(path).map_err(|_| "Cannot resolve recovery scope target.")?;
+            if !canonical.is_file() {
+                return Err("Recovery scope target must be a regular file.".into());
+            }
+            canonical
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // Missing leaves remain classifiable; never create a target or use
+            // the journal itself to choose an alternate destination.
+            resolve(path.parent().ok_or("Recovery scope path has no parent.")?)
+                .map_err(|_| "Recovery scope parent is unavailable.")?
+                .join(
+                    path.file_name()
+                        .ok_or("Recovery scope path has no filename.")?,
+                )
+        }
+        Err(_) => return Err("Cannot inspect recovery scope target.".into()),
+    };
+    #[cfg(windows)]
+    if canonical.to_string_lossy().starts_with(r"\\?\UNC\") {
+        return Err("Network settings migration is not supported.".into());
+    }
+    Ok(canonical)
+}
+
+fn canonical_scope_target(path: &Path) -> Result<PathBuf, String> {
+    canonical_scope_target_with(path, |path| fs::canonicalize(path))
 }
 
 impl Transaction {
@@ -355,13 +402,7 @@ impl Transaction {
         }
         let expected: Vec<_> = expected_paths
             .iter()
-            .map(|path| {
-                storage::reject_links(path)?;
-                // Canonical parent also handles missing targets without trusting journal paths.
-                let parent = fs::canonicalize(path.parent().ok_or("Scope path has no parent.")?)
-                    .map_err(|_| "Recovery scope parent is unavailable.")?;
-                Ok(parent.join(path.file_name().ok_or("Scope path has no filename.")?))
-            })
+            .map(|path| canonical_scope_target(path))
             .collect::<Result<_, String>>()?;
         if expected.len() != pending.files.len()
             || pending
@@ -406,14 +447,7 @@ impl Transaction {
             if !parent.exists() {
                 continue;
             }
-            let parent =
-                fs::canonicalize(parent).map_err(|_| "Cannot check the recovery scope.")?;
-            allowed.push(
-                parent.join(
-                    path.file_name()
-                        .ok_or("Recovery scope path has no filename.")?,
-                ),
-            );
+            allowed.push(canonical_scope_target(path)?);
         }
         let mut selected = Vec::new();
         for entry in pending.files {

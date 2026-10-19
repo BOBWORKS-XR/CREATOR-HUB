@@ -166,6 +166,34 @@ against malicious ancestor replacement.
 
 ## Verification
 
+### Existing File Resolution On Windows
+
+Recovery authorization resolves each independently discovered existing settings
+file as a whole, matching preparation. A Windows app-data provider can redirect
+an individual file without redirecting its parent directory. Canonicalizing only
+the parent and adding the filename would incorrectly reject that valid journal.
+Only a missing leaf uses parent-plus-filename resolution, for inspection without
+recreating the file. Resolution failures do not fall back to another destination.
+
+Journal paths never supply authorization. Exact-scope and allowlisted-subset
+checks, regular-file requirements, link/junction and network refusal, and literal
+parent-traversal refusal remain enforced. Reading an existing journal does not
+rewrite, delete, replay or acknowledge its evidence.
+
+The Windows opt-in probe inspects actual product settings without changing their
+bytes. It requires an existing recovery lock file and prints only bounded paths,
+counts and status, never settings contents:
+
+```powershell
+$env:CREATOR_MCP_READONLY_RECOVERY_PROBE = 'read-only'
+cargo test --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --features integrated-service --lib hosted_commands::product_settings::tests::windows_readonly_recovery_probe -- --ignored --exact --nocapture
+Remove-Item Env:CREATOR_MCP_READONLY_RECOVERY_PROBE
+```
+
+This proves read-only recovery inspection only, not client reconnection or a
+complete migration/update acceptance run. Keep before/after hashes of the full
+product-recovery evidence tree when validating the native app.
+
 Run from the confirmed `BOBWORKS-XR/CREATOR-HUB` fork checkout on
 `feature/unified-creator-hub`:
 

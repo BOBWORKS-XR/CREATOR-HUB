@@ -64,6 +64,93 @@ impl Fixture {
 }
 
 #[test]
+fn recovery_scope_resolves_the_existing_file_not_its_unredirected_parent() {
+    let f = Fixture::new(1);
+    let redirected_parent = f.root.join("virtualized-roaming");
+    fs::create_dir(&redirected_parent).unwrap();
+    let redirected = redirected_parent.join(f.paths[0].file_name().unwrap());
+    fs::hard_link(&f.paths[0], &redirected).unwrap();
+    let resolved = canonical_scope_target_with(&f.paths[0], |path| {
+        if path == f.paths[0] {
+            Ok(redirected.clone())
+        } else {
+            assert_eq!(path, f.root);
+            Ok(f.root.clone())
+        }
+    })
+    .unwrap();
+    assert_eq!(resolved, redirected);
+    assert_eq!(resolved, canonical_target(&redirected).unwrap());
+    assert_ne!(
+        resolved,
+        fs::canonicalize(f.paths[0].parent().unwrap())
+            .unwrap()
+            .join(f.paths[0].file_name().unwrap())
+    );
+    assert_eq!(fs::read(&resolved).unwrap(), Fixture::before(0));
+    f.originals();
+    assert!(!f.journal.exists());
+}
+
+#[test]
+fn recovery_scope_missing_leaf_resolves_only_the_parent_without_creation() {
+    let f = Fixture::new(0);
+    let missing = f.root.join("missing.json");
+    let redirected_parent = f.root.join("resolved-parent");
+    fs::create_dir(&redirected_parent).unwrap();
+    let resolved = canonical_scope_target_with(&missing, |path| {
+        assert_eq!(path, f.root);
+        Ok(redirected_parent.clone())
+    })
+    .unwrap();
+    assert_eq!(resolved, redirected_parent.join("missing.json"));
+    assert_eq!(canonical_scope_target(&missing).unwrap(), missing);
+    assert!(!missing.exists());
+    assert!(!resolved.exists());
+    let absent_parent = f.root.join("absent-parent");
+    assert!(canonical_scope_target(&absent_parent.join("missing.json")).is_err());
+    assert!(!absent_parent.exists());
+    assert!(!f.journal.exists());
+}
+
+#[test]
+fn recovery_scope_rejects_directories_and_traversal_before_resolution() {
+    let f = Fixture::new(1);
+    // PathBuf::push normalizes verbatim Windows paths; preserve literal traversal.
+    let mut traversal = f.root.as_os_str().to_os_string();
+    traversal.push(std::path::MAIN_SEPARATOR.to_string());
+    traversal.push("..");
+    traversal.push(std::path::MAIN_SEPARATOR.to_string());
+    traversal.push("outside.json");
+    for path in [
+        f.root.clone(),
+        PathBuf::from(traversal),
+        PathBuf::from("relative.json"),
+    ] {
+        assert!(canonical_target(&path).is_err());
+        assert!(canonical_scope_target_with(&path, |_| {
+            panic!("Invalid scope must be refused before resolving a destination")
+        })
+        .is_err());
+    }
+    assert!(canonical_scope_target_with(&f.paths[0], |_| Ok(f.root.clone())).is_err());
+    f.originals();
+    assert!(!f.journal.exists());
+}
+
+#[test]
+fn recovery_scope_existing_resolution_failure_does_not_fall_back_to_parent() {
+    let f = Fixture::new(1);
+    assert!(canonical_scope_target_with(&f.paths[0], |path| {
+        assert_eq!(path, f.paths[0]);
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    })
+    .is_err());
+    f.originals();
+    assert!(!f.journal.exists());
+}
+
+#[test]
 fn declined_resume_is_read_only_and_inspection_is_scoped() {
     let f = Fixture::new(2);
     let t = f.prepare();
@@ -89,14 +176,51 @@ fn central_recovery_accepts_only_a_subset_of_independently_allowlisted_paths() {
     allowed.push(f.root.join("not-selected.json"));
     allowed.push(f.root.join("absent-client/settings.json"));
     assert!(Transaction::open_allowlisted(&transaction.directory, &allowed).is_ok());
+    assert!(Transaction::open(&transaction.directory, &allowed[..3]).is_err());
     assert!(Transaction::open_allowlisted(&transaction.directory, &f.paths[..1]).is_err());
+    assert!(Transaction::open_allowlisted(
+        &transaction.directory,
+        &[f.paths[0].clone(), f.paths[0].clone()]
+    )
+    .is_err());
+    let foreign = f.root.join("foreign.json");
+    fs::write(&foreign, Fixture::before(1)).unwrap();
+    assert!(Transaction::open_allowlisted(
+        &transaction.directory,
+        &[f.paths[0].clone(), foreign.clone()]
+    )
+    .is_err());
     assert!(
-        Transaction::open_allowlisted(&transaction.directory, &[f.root.join("foreign.json")])
+        Transaction::open_allowlisted(&transaction.directory, std::slice::from_ref(&foreign))
             .is_err()
     );
     assert!(Transaction::open_allowlisted(&transaction.directory, &[]).is_err());
+    assert_eq!(fs::read(&foreign).unwrap(), Fixture::before(1));
     f.originals();
+    f.images(&transaction);
     assert!(!transaction.evidence(0, "intent").exists());
+}
+
+#[test]
+fn missing_scope_leaf_remains_inspectable_by_both_recovery_entry_points() {
+    let f = Fixture::new(1);
+    let transaction = f.prepare();
+    let pending_path = transaction.directory.join("pending.json");
+    let pending = fs::read(&pending_path).unwrap();
+    fs::remove_file(&f.paths[0]).unwrap();
+    for opened in [
+        Transaction::open(&transaction.directory, &f.paths).unwrap(),
+        Transaction::open_allowlisted(&transaction.directory, &f.paths).unwrap(),
+    ] {
+        let report = opened.inspect().unwrap();
+        assert_eq!(report.files[0].status, Status::ExternalChange);
+        assert!(!report.completed);
+        assert!(!f.paths[0].exists());
+    }
+    assert_eq!(fs::read(&pending_path).unwrap(), pending);
+    assert!(!transaction.evidence(0, "intent").exists());
+    assert!(!transaction.directory.join("completed.json").exists());
+    f.images(&transaction);
 }
 
 #[test]

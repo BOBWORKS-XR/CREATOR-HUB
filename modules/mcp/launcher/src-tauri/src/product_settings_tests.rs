@@ -1077,6 +1077,135 @@ fn existing_shared_paths_and_read_precedence_are_not_migrated() {
 }
 
 #[test]
+fn product_recovery_inspection_keeps_a_missing_leaf_absent() {
+    let fixture = Fixture::new();
+    fixture.legacy();
+    let transaction = pending_review_save(&fixture, &fixture.paths.current);
+    let journal = transaction.inspect().unwrap().journal;
+    let pending = fs::read(journal.join("pending.json")).unwrap();
+    fs::remove_file(&fixture.paths.current).unwrap();
+    let before = inventory(&fixture.paths).unwrap();
+    let report = inspect_paths(&fixture.paths).unwrap();
+    assert_eq!(report.status, Status::LegacyOnly);
+    assert_eq!(report.recovery.len(), 1);
+    assert_eq!(report.recovery[0].files.len(), 1);
+    assert_eq!(
+        report.recovery[0].files[0].status,
+        recovery::Status::ExternalChange
+    );
+    assert!(!report.recovery[0].completed);
+    assert!(report.backups.is_empty());
+    assert!(!fixture.paths.current.exists());
+    assert_eq!(inventory(&fixture.paths).unwrap(), before);
+    assert_eq!(fs::read(journal.join("pending.json")).unwrap(), pending);
+    assert!(!journal.join("0.intent.json").exists());
+    assert!(!journal.join("completed.json").exists());
+    assert_eq!(
+        fs::read(&report.recovery[0].files[0].before_image).unwrap(),
+        after()
+    );
+}
+
+#[test]
+fn product_recovery_refuses_a_foreign_journal_even_with_identical_settings_bytes() {
+    let fixture = Fixture::new();
+    fixture.legacy();
+    fs::write(&fixture.paths.current, after()).unwrap();
+    let foreign = fixture.root.path().join("foreign.json");
+    let transaction = pending_review_save(&fixture, &foreign);
+    let journal = transaction.inspect().unwrap().journal;
+    let pending = fs::read(journal.join("pending.json")).unwrap();
+    let before = inventory(&fixture.paths).unwrap();
+    let error = inspect_paths(&fixture.paths).err().unwrap();
+    assert_eq!(
+        error,
+        "Recovery journal includes an unapproved settings path."
+    );
+    assert_eq!(inventory(&fixture.paths).unwrap(), before);
+    assert_eq!(fs::read(&foreign).unwrap(), after());
+    assert_eq!(fs::read(journal.join("pending.json")).unwrap(), pending);
+    assert!(!journal.join("0.intent.json").exists());
+    assert!(!journal.join("completed.json").exists());
+    assert_eq!(
+        transaction.inspect().unwrap().files[0].status,
+        recovery::Status::Ready
+    );
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "Live read-only probe; requires CREATOR_MCP_READONLY_RECOVERY_PROBE=read-only"]
+fn windows_readonly_recovery_probe() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+    assert!(
+        std::env::var("CREATOR_MCP_READONLY_RECOVERY_PROBE").as_deref() == Ok("read-only"),
+        "Live read-only probe requires CREATOR_MCP_READONLY_RECOVERY_PROBE=read-only"
+    );
+    let base = dirs::config_dir().expect("Read-only probe status=config-directory-unavailable");
+    let paths =
+        Paths::new(&base).unwrap_or_else(|_| panic!("Read-only probe status=config-paths-refused"));
+    // Inspection opens hub.lock with create(true); pin an existing file without
+    // delete sharing so inspection cannot create or replace that lock.
+    let lock_path = paths.journal.join("hub.lock");
+    storage::reject_links(&lock_path)
+        .unwrap_or_else(|_| panic!("Read-only probe status=journal-lock-path-refused"));
+    let existing_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&lock_path)
+        .unwrap_or_else(|_| panic!("Read-only probe status=existing-journal-lock-required"));
+    assert!(
+        existing_lock
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file()),
+        "Read-only probe status=journal-lock-not-file"
+    );
+    let before = inventory(&paths)
+        .unwrap_or_else(|_| panic!("Read-only probe status=before-snapshot-failed"));
+    let inspected = inspect_paths(&paths);
+    let after = inventory(&paths)
+        .unwrap_or_else(|_| panic!("Read-only probe status=after-snapshot-failed"));
+    let unchanged = before == after;
+    eprintln!(
+        "readonly-recovery-probe inspection_ok={} settings_unchanged={} current_bytes={} legacy_bytes={}",
+        inspected.is_ok(),
+        unchanged,
+        before.current.as_ref().map_or(0, Vec::len),
+        before.legacy.as_ref().map_or(0, Vec::len)
+    );
+    fn bounded(path: PathBuf) -> String {
+        path.to_string_lossy().chars().take(1024).collect()
+    }
+    for (label, path) in [("current", &paths.current), ("legacy", &paths.legacy)] {
+        let canonical_file = fs::canonicalize(path).ok().map(bounded);
+        let canonical_parent_leaf = fs::canonicalize(path.parent().unwrap())
+            .ok()
+            .map(|parent| parent.join(path.file_name().unwrap()))
+            .map(bounded);
+        eprintln!(
+            "readonly-recovery-probe {label} canonical_file={canonical_file:?} canonical_parent_leaf={canonical_parent_leaf:?}"
+        );
+    }
+    // Equality diagnostics must never include either settings document.
+    assert!(unchanged, "Read-only probe status=settings-changed");
+    let report = inspected.unwrap_or_else(|_| panic!("Read-only probe status=inspection-failed"));
+    eprintln!(
+        "readonly-recovery-probe status={:?} recovery={} files={} completed={} backups={}",
+        report.status,
+        report.recovery.len(),
+        report
+            .recovery
+            .iter()
+            .map(|item| item.files.len())
+            .sum::<usize>(),
+        report.recovery.iter().filter(|item| item.completed).count(),
+        report.backups.len()
+    );
+}
+
+#[test]
 fn conflict_backup_preserves_both_originals_unknown_fields_and_survives_reinspection() {
     let fixture = Fixture::new();
     let legacy = fixture.legacy();
