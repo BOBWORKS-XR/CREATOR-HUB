@@ -418,6 +418,184 @@ test('actual Unix GIO inventory refuses links and records independently checked 
   fs.unlinkSync(file); put(root, 'target', elf()); fs.symlinkSync('../../../../../target', file);
   assert.throws(() => p.inventory(root, true), /GIO runtime/);
 });
+const COPYRIGHT_NAME = 'usr/share/doc/libbz2-1.0/copyright';
+const SCHEMA_NAME = `${p.SCHEMA_DIRECTORY}/org.gnome.desktop.a11y.interface.gschema.xml`;
+// Exact, small data fixtures from retained image 39335641660; no executable fixture.
+const COPYRIGHT = Buffer.from([
+  'Rm9ybWF0OiBodHRwczovL3d3dy5kZWJpYW4ub3JnL2RvYy9wYWNrYWdpbmctbWFudWFscy9jb3B5cmlnaHQtZm9ybWF0LzEuMC8KVXBzdHJlYW0t',
+  'TmFtZTogYnppcDIKU291cmNlOiBodHRwOi8vd3d3LmJ6aXAub3JnLwoKRmlsZXM6ICoKQ29weXJpZ2h0OiAxOTk2LTIwMTAgSnVsaWFuIFIgU2V3',
+  'YXJkIDxqc2V3YXJkQGJ6aXAub3JnPgpMaWNlbnNlOiBCU0QtdmFyaWFudAogUmVkaXN0cmlidXRpb24gYW5kIHVzZSBpbiBzb3VyY2UgYW5kIGJp',
+  'bmFyeSBmb3Jtcywgd2l0aCBvciB3aXRob3V0CiBtb2RpZmljYXRpb24sIGFyZSBwZXJtaXR0ZWQgcHJvdmlkZWQgdGhhdCB0aGUgZm9sbG93aW5n',
+  'IGNvbmRpdGlvbnMKIGFyZSBtZXQ6CiAuCiAxLiBSZWRpc3RyaWJ1dGlvbnMgb2Ygc291cmNlIGNvZGUgbXVzdCByZXRhaW4gdGhlIGFib3ZlIGNv',
+  'cHlyaWdodAogICAgbm90aWNlLCB0aGlzIGxpc3Qgb2YgY29uZGl0aW9ucyBhbmQgdGhlIGZvbGxvd2luZyBkaXNjbGFpbWVyLgogLgogMi4gVGhl',
+  'IG9yaWdpbiBvZiB0aGlzIHNvZnR3YXJlIG11c3Qgbm90IGJlIG1pc3JlcHJlc2VudGVkOyB5b3UgbXVzdAogICAgbm90IGNsYWltIHRoYXQgeW91',
+  'IHdyb3RlIHRoZSBvcmlnaW5hbCBzb2Z0d2FyZS4gIElmIHlvdSB1c2UgdGhpcwogICAgc29mdHdhcmUgaW4gYSBwcm9kdWN0LCBhbiBhY2tub3ds',
+  'ZWRnbWVudCBpbiB0aGUgcHJvZHVjdAogICAgZG9jdW1lbnRhdGlvbiB3b3VsZCBiZSBhcHByZWNpYXRlZCBidXQgaXMgbm90IHJlcXVpcmVkLgog',
+  'LgogMy4gQWx0ZXJlZCBzb3VyY2UgdmVyc2lvbnMgbXVzdCBiZSBwbGFpbmx5IG1hcmtlZCBhcyBzdWNoLCBhbmQgbXVzdAogICAgbm90IGJlIG1p',
+  'c3JlcHJlc2VudGVkIGFzIGJlaW5nIHRoZSBvcmlnaW5hbCBzb2Z0d2FyZS4KIC4KIDQuIFRoZSBuYW1lIG9mIHRoZSBhdXRob3IgbWF5IG5vdCBi',
+  'ZSB1c2VkIHRvIGVuZG9yc2Ugb3IgcHJvbW90ZQogICAgcHJvZHVjdHMgZGVyaXZlZCBmcm9tIHRoaXMgc29mdHdhcmUgd2l0aG91dCBzcGVjaWZp',
+  'YyBwcmlvciB3cml0dGVuCiAgICBwZXJtaXNzaW9uLgogLgogVEhJUyBTT0ZUV0FSRSBJUyBQUk9WSURFRCBCWSBUSEUgQVVUSE9SIGBgQVMgSVMn',
+  'JyBBTkQgQU5ZIEVYUFJFU1MKIE9SIElNUExJRUQgV0FSUkFOVElFUywgSU5DTFVESU5HLCBCVVQgTk9UIExJTUlURUQgVE8sIFRIRSBJTVBMSUVE',
+  'CiBXQVJSQU5USUVTIE9GIE1FUkNIQU5UQUJJTElUWSBBTkQgRklUTkVTUyBGT1IgQSBQQVJUSUNVTEFSIFBVUlBPU0UKIEFSRSBESVNDTEFJTUVE',
+  'LiAgSU4gTk8gRVZFTlQgU0hBTEwgVEhFIEFVVEhPUiBCRSBMSUFCTEUgRk9SIEFOWQogRElSRUNULCBJTkRJUkVDVCwgSU5DSURFTlRBTCwgU1BF',
+  'Q0lBTCwgRVhFTVBMQVJZLCBPUiBDT05TRVFVRU5USUFMCiBEQU1BR0VTIChJTkNMVURJTkcsIEJVVCBOT1QgTElNSVRFRCBUTywgUFJPQ1VSRU1F',
+  'TlQgT0YgU1VCU1RJVFVURQogR09PRFMgT1IgU0VSVklDRVM7IExPU1MgT0YgVVNFLCBEQVRBLCBPUiBQUk9GSVRTOyBPUiBCVVNJTkVTUwogSU5U',
+  'RVJSVVBUSU9OKSBIT1dFVkVSIENBVVNFRCBBTkQgT04gQU5ZIFRIRU9SWSBPRiBMSUFCSUxJVFksCiBXSEVUSEVSIElOIENPTlRSQUNULCBTVFJJ',
+  'Q1QgTElBQklMSVRZLCBPUiBUT1JUIChJTkNMVURJTkcKIE5FR0xJR0VOQ0UgT1IgT1RIRVJXSVNFKSBBUklTSU5HIElOIEFOWSBXQVkgT1VUIE9G',
+  'IFRIRSBVU0UgT0YgVEhJUwogU09GVFdBUkUsIEVWRU4gSUYgQURWSVNFRCBPRiBUSEUgUE9TU0lCSUxJVFkgT0YgU1VDSCBEQU1BR0UuCgpGaWxl',
+  'czogZGViaWFuLyoKQ29weXJpZ2h0OiAyMDE4IE5pY29sYXMgQm91bGVuZ3VleiA8bmljb2xhcy5ib3VsZW5ndWV6QGZyZWUuZnI+CgkgICAyMDEy',
+  'LTIwMTUgU2FudGlhZ28gUnVhbm8gUmluY8OzbiA8c2FudGlhZ29AZGViaWFuLm9yZz4KICAgICAgICAgICAyMDE0ICAgICAgQ2Fub25pY2FsIEx0',
+  'ZC4KICAgICAgICAgICAyMDA0LTIwMTEgQW5pYmFsIE1vbnNhbHZlIFNhbGF6YXIgPGFuaWJhbEBkZWJpYW4ub3JnPgogICAgICAgICAgIDE5OTkt',
+  'MjAwMiBQaGlsaXBwZSBUcm9pbiA8cGhpbEBmaWZpLm9yZz4KICAgICAgICAgICAxOTk3LTE5OTkgQW50aG9ueSBGb2sgPGZva2FAZGViaWFuLm9y',
+  'Zz4KTGljZW5zZTogR1BMLTIKIFRoZSBmdWxsIHRleHQgb2YgdGhlIEdOVSBHZW5lcmFsIFB1YmxpYyBMaWNlbnNlIHZlcnNpb24gMgogY2FuIGJl',
+  'IGZvdW5kIGluIC91c3Ivc2hhcmUvY29tbW9uLWxpY2Vuc2VzL0dQTC0yLgo=',
+].join(''), 'base64');
+const SCHEMA_XML = Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="gsettings-desktop-schemas">
+  <schema id="org.gnome.desktop.a11y.interface" path="/org/gnome/desktop/a11y/interface/">
+    <key name="high-contrast" type="b">
+      <default>false</default>
+      <summary>High contrast</summary>
+      <description>
+        Whether to use the high contrast style.
+      </description>
+    </key>
+  </schema>
+</schemalist>
+`);
+function gvdb() {
+  const b = Buffer.alloc(69);
+  b.writeUInt32LE(1918981703, 0); b.writeUInt32LE(1953390953, 4);
+  b.writeUInt32LE(24, 16); b.writeUInt32LE(60, 20); b.writeUInt32LE(1, 28);
+  b.writeUInt32LE(0xffffffff, 40); b.writeUInt32LE(60, 44); b.writeUInt16LE(1, 48); b[50] = 118;
+  b.writeUInt32LE(64, 52); b.writeUInt32LE(69, 56); b[60] = 107;
+  b.set(Buffer.from([104, 105, 0, 0, 115]), 64); return b;
+}
+test('finite metadata paths/pins do not grant a writable-data exception to aliases, extras or runtime', () => {
+  assert.equal(Object.keys(p.METADATA_PINS).length, 54);
+  assert.deepEqual(p.record(COPYRIGHT), p.METADATA_PINS[COPYRIGHT_NAME]);
+  assert.deepEqual(p.record(SCHEMA_XML), p.METADATA_PINS[SCHEMA_NAME]);
+  assert.equal(p.metadataRole(COPYRIGHT_NAME), 'copyright'); assert.equal(p.metadataRole(SCHEMA_NAME), 'schema-data');
+  for (const n of ['usr/bin/creator-hub', 'usr/lib/a.so']) assert.equal(p.metadataRole(n), null);
+  for (const n of [`${p.SCHEMA_DIRECTORY}/unknown.gschema.xml`, `${p.SCHEMA_DIRECTORY}/sub/gschemas.compiled`,
+    'usr/share/doc/unreviewed/copyright', SCHEMA_NAME.toUpperCase(), COPYRIGHT_NAME.toUpperCase(), p.SCHEMA_DIRECTORY.toUpperCase()]) assert.throws(() => p.metadataRole(n));
+  assert.equal(p.transportMode(COPYRIGHT_NAME, { kind: 'file', mode: 0o777 }), 0o644);
+  assert.equal(p.transportMode(p.COMPILED_SCHEMA, { kind: 'file', mode: 0o666 }), 0o644);
+  assert.equal(p.transportMode(p.SCHEMA_DIRECTORY, { kind: 'directory', mode: 0o777 }), 0o755);
+});
+test('only exact inspected data/type/source modes can normalize and canonical mode remains 0644', () => {
+  for (const [name, bytes] of [[COPYRIGHT_NAME, COPYRIGHT], [SCHEMA_NAME, SCHEMA_XML]]) {
+    const entry = { kind: 'file', ...p.record(bytes), mode: 0o777 };
+    p.validateMetadata(name, entry, bytes, true);
+    p.validateMetadata(name, { ...entry, mode: 0o644 }, bytes);
+    for (const mode of [0o777, 0o666, 0o664, 0o755, 0o4644]) assert.throws(() => p.validateMetadata(name, { ...entry, mode }, bytes));
+    for (const mode of [0o666, 0o755, 0o4777, 0o1777]) assert.throws(() => p.validateMetadata(name, { ...entry, mode }, bytes, true));
+    for (const kind of ['directory', 'symlink', 'fifo']) assert.throws(() => p.validateMetadata(name, { ...entry, kind }, bytes, true));
+    for (const bad of [elf(), Buffer.alloc(p.DATA_LIMIT + 1), Buffer.from('Copyright: not the inspected notice\n')])
+      assert.throws(() => p.validateMetadata(name, { ...entry, ...p.record(bad) }, bad, true));
+    const changed = Buffer.from(bytes); changed[changed.length - 2] ^= 1;
+    assert.throws(() => p.validateMetadata(name, entry, changed, true));
+  }
+  p.validateMetadata(p.COMPILED_SCHEMA, { kind: 'file', ...p.METADATA_PINS[p.COMPILED_SCHEMA], mode: 0o666 }, undefined, true);
+  assert.throws(() => p.validateMetadata(p.COMPILED_SCHEMA, { kind: 'file', ...p.METADATA_PINS[p.COMPILED_SCHEMA], mode: 0o777 }, undefined, true));
+  p.validateMetadata(p.SCHEMA_DIRECTORY, { kind: 'directory', mode: 0o777 }, undefined, true);
+  assert.throws(() => p.validateMetadata(p.SCHEMA_DIRECTORY, { kind: 'directory', mode: 0o777 }));
+});
+test('metadata classification rejects renamed binaries, invalid UTF8, entities and malformed XML/DTD/overrides', () => {
+  for (const [name, bytes] of [[COPYRIGHT_NAME, elf()], [SCHEMA_NAME, Buffer.from([255])], [SCHEMA_NAME, Buffer.from('<schemalist>')],
+    [SCHEMA_NAME, Buffer.from('<!DOCTYPE schemalist SYSTEM "file:///etc/passwd"><schemalist></schemalist>')],
+    [`${p.SCHEMA_DIRECTORY}/gschema.dtd`, Buffer.from('<!ENTITY external SYSTEM "file:///etc/passwd">')],
+    [`${p.SCHEMA_DIRECTORY}/10_gsettings-desktop-schemas.gschema.override`, Buffer.from('#!/bin/sh\n')]])
+    assert.throws(() => p.validateMetadataFormat(name, bytes));
+  p.validateMetadataFormat(SCHEMA_NAME, SCHEMA_XML);
+  p.validateMetadataFormat(SCHEMA_NAME, Buffer.concat([SCHEMA_XML, Buffer.from('<!-- generated data ends here -->\n')]));
+});
+test('GVDB checks the real header, tables, parents, lists and aligned in-file variant ranges', () => {
+  assert.deepEqual(p.gvdbVariants(gvdb()), [[64, 69]]);
+  for (const change of [b => b[0] ^= 1, b => b.writeUInt32LE(1, 8), b => b.writeUInt32LE(1, 12),
+    b => b.writeUInt32LE(25, 16), b => b.writeUInt32LE(9999, 20), b => b.writeUInt32LE(9999, 28),
+    b => b.writeUInt32LE(2, 32), b => b.writeUInt32LE(0, 40), b => b.writeUInt32LE(100, 44),
+    b => b[50] = 33, b => b[51] = 1, b => b.writeUInt32LE(65, 52), b => b.writeUInt32LE(100, 56),
+    b => { b[50] = 72; b.writeUInt32LE(24, 52); b.writeUInt32LE(60, 56); },
+    b => { b[50] = 76; b.writeUInt32LE(68, 56); b.writeUInt32LE(999, 64); }]) {
+    const b = gvdb(); change(b); assert.throws(() => p.gvdbVariants(b));
+  }
+  for (const b of [Buffer.alloc(0), Buffer.alloc(23), Buffer.alloc(p.DATA_LIMIT + 1)]) assert.throws(() => p.gvdbVariants(b));
+});
+test('compiled schemas use existing GLib untrusted normal-form validation with bounded stdin, not settings access', () => {
+  let calls = 0;
+  assert.deepEqual(p.validateCompiledSchema(gvdb(), (command, args, options) => {
+    calls++; assert.equal(command, 'python3'); assert.deepEqual(args, ['-B', '-c', p.GVDB_VARIANTS]);
+    assert.equal(options.timeout, 30000); assert.equal(options.maxBuffer, 4096);
+    const input = JSON.parse(options.input); assert.deepEqual(Buffer.from(input.bytes, 'base64'), gvdb());
+    assert.deepEqual(input.variants, [[64, 69]]); return '{"normalVariants":1}';
+  }), { normalVariants: 1 });
+  assert.equal(calls, 1);
+  assert.throws(() => p.validateCompiledSchema(gvdb(), () => '{"normalVariants":0}'));
+  assert.throws(() => p.validateCompiledSchema(gvdb(), () => { throw Error('GLib unavailable'); }), /GLib unavailable/);
+  execFileSync(PYTHON, ['-B', '-c', 'import ast,sys; ast.parse(sys.stdin.read())'], { input: p.GVDB_VARIANTS });
+  assert.match(p.GVDB_VARIANTS, /end-start,False,None,None/);
+  assert.doesNotMatch(p.GVDB_VARIANTS, /GSettings|g_settings|open\(|write\(/);
+});
+test('actual Linux GLib accepts normal variants and rejects malformed serialized string data', t => {
+  if (process.platform !== 'linux') return t.skip('System libglib GVariant parser requires actual Linux');
+  assert.deepEqual(p.validateCompiledSchema(gvdb(), pythonRun), { normalVariants: 1 });
+  const bad = gvdb(); bad[64] = 255;
+  assert.throws(() => p.validateCompiledSchema(bad, pythonRun));
+});
+test('actual Unix normalization preserves original data/modes/inodes and hashes while canonical TAR is strict', async t => {
+  if (process.platform === 'win32') return t.skip('Real source 0777, copied 0644 and schema directory modes require Unix');
+  const root = temp(t), tree = path.join(root, 'source'), out = path.join(root, 'transport'); fs.mkdirSync(tree);
+  put(tree, COPYRIGHT_NAME, COPYRIGHT, 0o777); put(tree, SCHEMA_NAME, SCHEMA_XML, 0o777);
+  fs.chmodSync(path.join(tree, p.SCHEMA_DIRECTORY), 0o777);
+  const before = p.inventory(tree, true), evidence = p.metadataEvidence(tree);
+  assert.throws(() => p.inventory(tree), /writable/);
+  const copied = p.flatten(tree, out);
+  assert.deepEqual(p.inventory(tree, true), before); assert.deepEqual(p.metadataEvidence(tree), evidence);
+  for (const [name, bytes] of [[COPYRIGHT_NAME, COPYRIGHT], [SCHEMA_NAME, SCHEMA_XML]]) {
+    assert.equal(before.entries[name].mode, 0o777); assert.equal(copied.flattened.entries[name].mode, 0o644);
+    assert.deepEqual(fs.readFileSync(path.join(out, name)), bytes);
+    assert.deepEqual(p.record(bytes), { size: copied.flattened.entries[name].size, sha256: copied.flattened.entries[name].sha256 });
+  }
+  assert.equal(fs.statSync(path.join(tree, p.SCHEMA_DIRECTORY)).mode & 0o777, 0o777);
+  assert.equal(fs.statSync(path.join(out, p.SCHEMA_DIRECTORY)).mode & 0o777, 0o755);
+  p.validateInventory(copied.flattened);
+  const tar = path.join(root, 'data.tar.gz'), binding = await p.packTar(out, tar, copied.flattened);
+  execFileSync(PYTHON, ['-B', '-c', VERIFY_TAR, tar], { input: JSON.stringify({ archive: binding, entries: copied.flattened.entries }) });
+  fs.chmodSync(path.join(out, COPYRIGHT_NAME), 0o777); assert.throws(() => p.inventory(out), /writable/);
+});
+test('actual Unix metadata aliases, hardlinks, special files, privilege bits and writable runtime refuse', t => {
+  if (process.platform === 'win32') return t.skip('Requires real Unix symlinks, FIFO and mode semantics');
+  const root = temp(t), file = put(root, SCHEMA_NAME, SCHEMA_XML, 0o777);
+  fs.chmodSync(file, 0o4777); assert.throws(() => p.inventory(root, true), /Privileged/); fs.unlinkSync(file);
+  put(root, 'target', SCHEMA_XML); fs.symlinkSync('../../../target', file);
+  assert.throws(() => p.inventory(root, true), /aliases/); fs.unlinkSync(file);
+  fs.linkSync(path.join(root, 'target'), file); assert.throws(() => p.inventory(root, true), /single-link/); fs.unlinkSync(file);
+  execFileSync('mkfifo', [file]); assert.throws(() => p.inventory(root, true), /single-link/); fs.unlinkSync(file);
+  put(root, SCHEMA_NAME, SCHEMA_XML, 0o777);
+  fs.symlinkSync(SCHEMA_NAME, path.join(root, 'alias')); assert.throws(() => p.inventory(root, true), /aliased/); fs.unlinkSync(path.join(root, 'alias'));
+  const runtime = put(root, 'usr/lib/runtime.so', elf());
+  for (const mode of [0o666, 0o664, 0o777, 0o775]) { fs.chmodSync(runtime, mode); assert.throws(() => p.inventory(root, true), /writable/); }
+  fs.chmodSync(runtime, 0o644);
+  put(root, 'usr/share/doc/unreviewed/copyright', COPYRIGHT, 0o777); assert.throws(() => p.inventory(root, true), /Unreviewed copyright/);
+});
+test('metadata evidence is bounded fixed-path stats/hash only and rejects oversize/redirected probes before reading', t => {
+  const root = temp(t), file = put(root, SCHEMA_NAME, SCHEMA_XML), original = fs.readFileSync(file);
+  assert.throws(() => p.metadataRead(file, { ...fs.lstatSync(file), nlink: 2 }), /changed before opening/);
+  const evidence = p.metadataEvidence(root);
+  assert.deepEqual(Object.keys(evidence), p.METADATA_PROBES); assert.ok(Buffer.byteLength(JSON.stringify(evidence)) <= 8192);
+  assert.equal(evidence[SCHEMA_NAME].sha256, p.record(SCHEMA_XML).sha256);
+  assert.equal(evidence[SCHEMA_NAME].ino, fs.statSync(file).ino); assert.equal(evidence[SCHEMA_NAME].mode, fs.statSync(file).mode & 0o7777);
+  assert.doesNotMatch(JSON.stringify(evidence), /<schema|High contrast/); assert.deepEqual(fs.readFileSync(file), original);
+  fs.truncateSync(file, p.DATA_LIMIT + 1); assert.throws(() => p.metadataRead(file), /Bounded/);
+  assert.match(p.metadataEvidence(root)[SCHEMA_NAME].refused, /Bounded/);
+  const source = fs.readFileSync(path.join(__dirname, 'linux-016-portable-package.cjs'), 'utf8');
+  assert.match(source, /packagingProcessUmask: process\.umask\(\)/);
+  assert.match(source, /compiledSchemaModeCause: 'unknown;/);
+  assert.ok(source.indexOf('hostBeforeBundle: metadataEvidence') < source.indexOf('run(process.execPath, bundleArgs('));
+  assert.ok(source.indexOf('compiledSchemaFormat = validateCompiledSchema') < source.indexOf('transformation = flatten('));
+  assert.ok(source.indexOf('originalAfterCopy: metadataEvidence') < source.indexOf('const tarBinding = await packTar('));
+});
 test('first rejected entry keeps bounded path/stat/prefix evidence without changing the rejected file', t => {
   const root = temp(t), file = put(root, 'pkexec', Buffer.alloc(4096, 97));
   const before = fs.readFileSync(file), stat = fs.lstatSync(file);
@@ -441,6 +619,7 @@ test('exact built AppImage is retained before inventory and is not overwritten o
   assert.ok(text.indexOf('receipt.appImage = retainAppImage(') < text.indexOf('const inv = inventory(appdir, true)'));
   assert.ok(text.indexOf('receipt.appImage = retainAppImage(') < text.indexOf('receipt.upstreamPackagingTools ='));
   assert.match(text, /receipt\.inventoryEvidence = error\.inventoryEvidence/);
+  assert.match(text, /if \(error\.inventoryEvidence\) console\.error\(JSON\.stringify\(error\.inventoryEvidence\)\)/);
   const refusal = workflow().jobs.package.steps.find(step => step.if === 'failure()' && step.uses === 'actions/upload-artifact@v4');
   assert.equal(refusal.with['compression-level'], 0);
   assert.ok(refusal.with.path.includes('${{ runner.temp }}/linux-016-portable-output/Creator Hub_0.1.16_amd64.AppImage'));
@@ -449,7 +628,7 @@ test('flatten preserves originals, expands only internal file links and normaliz
   if (process.platform === 'win32') return t.skip('Unix symlink and mode evidence belongs to the Linux workflow');
   const root = temp(t), tree = path.join(root, 'AppDir'); fs.mkdirSync(tree, { mode: 0o755 });
   put(tree, 'usr/bin/creator-hub', elf(), 0o755); put(tree, 'usr/lib/a.so.1', 'library', 0o644);
-  put(tree, 'AppRun', '#!/bin/sh\n', 0o770); fs.symlinkSync('a.so.1', path.join(tree, 'usr/lib/a.so'));
+  put(tree, 'AppRun', '#!/bin/sh\n', 0o750); fs.symlinkSync('a.so.1', path.join(tree, 'usr/lib/a.so'));
   fs.symlinkSync('usr/lib/a.so', path.join(tree, '.DirIcon'));
   const before = p.inventory(tree, true), out = path.join(root, 'flat'), result = p.flatten(tree, out);
   assert.deepEqual(p.inventory(tree, true), before); assert.equal(fs.lstatSync(path.join(tree, '.DirIcon')).isSymbolicLink(), true);

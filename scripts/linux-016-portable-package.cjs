@@ -325,6 +325,223 @@ const TYPELIB_MAGIC = Buffer.from('GOBJ\nMETADATA\r\n\x1a', 'binary');
 const GIO_DIRECTORY = 'usr/lib/x86_64-linux-gnu/gio/modules';
 const GIO_TLS = `${GIO_DIRECTORY}/libgiognutls.so`;
 const GIO_PATHS = new Set([GIO_DIRECTORY, GIO_TLS]);
+const SCHEMA_DIRECTORY = 'usr/share/glib-2.0/schemas';
+const COMPILED_SCHEMA = `${SCHEMA_DIRECTORY}/gschemas.compiled`;
+const DATA_LIMIT = 128 * 1024;
+// Finite data bytes inspected in retained AppImage 39335641660, SHA256
+// abbc25bf439bce656a38a445fa349da93d62a25e754cc82d5967fda9f1f47cf5.
+// No new package/schema name or changed upstream data is silently admitted.
+const METADATA_PINS = Object.freeze(Object.fromEntries([
+  ['usr/share/doc/libbz2-1.0/copyright', 2228, '832ed535ff3c3d025a8d2348eb1b697b89addcf2eaadbc17650262040b9145e2'],
+  ['usr/share/doc/libcap2/copyright', 4631, 'a906104348c333a96d63c3573e6eb9c2cc3b410d045f3ad512dcafa4b3e4cff3'],
+  ['usr/share/doc/libdbus-1-3/copyright', 19464, '151007a06fd9409b5fd1d743ce5749a1bbd94def4caee0e2bedf33318058a1a9'],
+  ['usr/share/doc/libgdk-pixbuf-2.0-0/copyright', 5480, '4509ce25586e99da55525a8e27f1410bb7c3cb4647b9e1f586545110adc23a3c'],
+  ['usr/share/doc/libgdk-pixbuf-2.0-dev/copyright', 5480, '4509ce25586e99da55525a8e27f1410bb7c3cb4647b9e1f586545110adc23a3c'],
+  ['usr/share/doc/libglib2.0-0/copyright', 4119, '607a2dbcf41b82733bc93345da5470995a7f80515774fbabc4689158fae956c2'],
+  ['usr/share/doc/libglib2.0-dev/copyright', 4119, '607a2dbcf41b82733bc93345da5470995a7f80515774fbabc4689158fae956c2'],
+  ['usr/share/doc/libkeyutils1/copyright', 2104, '6ab5c541723d8211cab7ebc1643d53aa51c4863c1c838e4625d797ece9472ee8'],
+  ['usr/share/doc/liblzma5/copyright', 15465, 'a2dc8fac0f496e1c58aff67018cf0c6b88336316afa5642f9335b71642e28aa8'],
+  ['usr/share/doc/libpango-1.0-0/copyright', 53108, 'c0aef71da2cfce299d16c584cdde7c862c10996ee97f919dc91631bd9e7d0bc5'],
+  ['usr/share/doc/libpango1.0-dev/copyright', 53108, 'c0aef71da2cfce299d16c584cdde7c862c10996ee97f919dc91631bd9e7d0bc5'],
+  ['usr/share/doc/libpangocairo-1.0-0/copyright', 53108, 'c0aef71da2cfce299d16c584cdde7c862c10996ee97f919dc91631bd9e7d0bc5'],
+  ['usr/share/doc/libpangoft2-1.0-0/copyright', 53108, 'c0aef71da2cfce299d16c584cdde7c862c10996ee97f919dc91631bd9e7d0bc5'],
+  ['usr/share/doc/libpcre3/copyright', 2765, 'ac9276490d2fa167442ae1aae33926514ad10c8886baa40046c5e367fccc5938'],
+  ['usr/share/doc/librsvg2-2/copyright', 40400, '1d46e8e95ca3cbc91ed729b342e8ea80981e2ae649ccd1bd880b8d2877f4a293'],
+  ['usr/share/doc/librsvg2-dev/copyright', 40400, '1d46e8e95ca3cbc91ed729b342e8ea80981e2ae649ccd1bd880b8d2877f4a293'],
+  ['usr/share/doc/libselinux1/copyright', 3131, '641806738b0c6a3d03168c2649e6b94205198bb66cd557e6bae3a20b71c9bb0b'],
+  [`${SCHEMA_DIRECTORY}/10_gsettings-desktop-schemas.gschema.override`, 342, '7aec3161e0146744b3bfd09b5f78180aa90002703935b5b3e938b2f9ac3c2dbb'],
+  [`${SCHEMA_DIRECTORY}/gschema.dtd`, 2916, '1a6f092697940a50adbd88891cc04f9aa506e35d11734906e779beeda713452e'],
+  [COMPILED_SCHEMA, 38626, '0681c221db5357f13deb99687f4091a2ebcff056b6d878b944846a85ecd7e935'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.a11y.applications.gschema.xml`, 845, '6e67c6d900b0e698681454948dc6a11904edc1059af69d83ae8ff1c69abfe4ca'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.a11y.gschema.xml`, 828, 'f471028deedc07708638c7ea056ed1c6eb6632b987905321085288e836f337a8'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.a11y.interface.gschema.xml`, 422, '500f8f2deda68673d0148e96c670a5073fcdd9653af9bd68eafd483a2d042d51'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.a11y.keyboard.gschema.xml`, 4897, '429b25000a947e1b03724546e88b0f3dd6d3bac42addaec36d6cf81062c89cbb'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.a11y.magnifier.gschema.xml`, 9380, '0316beb1020bf0e1594c1578d4ee17044d8d4f04a58e788631b054503f07e0a0'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.a11y.mouse.gschema.xml`, 2907, '2409903ede1c85e899ff6576bc9711b9016704ee0434c22287d34d7e8c888c36'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.app-folders.gschema.xml`, 1841, 'f6a6be999af5d5ed29079432182af7708adefc0a2c7beeb7418254487ee4b772'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.background.gschema.xml`, 2612, '13f2de7840224b1c165bbdaa199dfe711f87de1d2bc8df9b1d73c64f96999ed1'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.calendar.gschema.xml`, 427, 'd153ebb1fbf3b72396be332c3402366420819c94248a4b96c4df77bb1a49ec3e'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.datetime.gschema.xml`, 439, 'db8f91d8966e24570844f4f0e52b6d5e4d0212cb398c71509f5f3cab6b39d292'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.default-applications.gschema.xml`, 3092, 'ba0b55abfbf2a6d300d3a222e4005fd4e965629ed7787ab8e08f1b7f65c4083d'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.enums.xml`, 6564, 'c33bef4f89b67716e5137a5d386008cb26ba347fe9a2f8a361c9f982ed37be3c'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.input-sources.gschema.xml`, 2549, 'b280a6620302845fec19a590fb8526dc5cc153d4f418dc363b9fad74a51316c0'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.interface.gschema.xml`, 12476, '3504b4e2f01a374ce17aef6cfcecc08f8ed2228783dc432dad3b0cf5b5470291'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.lockdown.gschema.xml`, 3454, '7d977d0932a4062ce5ddfce7cb8548092cc52fc7cb1d3b2825ae4599ca69e07c'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.media-handling.gschema.xml`, 2605, 'f4e22d9e928314d423702444e2393e0243dd54f52eed3c3f59dbe0c0db50c1d5'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.notifications.gschema.xml`, 2838, 'b7e983b5fa4cedccba7e6494c89de0997274986cdc69377a51589d97ac07acb4'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.peripherals.gschema.xml`, 13636, 'a75b066c4c77c097e4225db277b3aac28aeb8ce639b29d4edd96bbef1ae8da69'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.privacy.gschema.xml`, 4907, '304f26f2030d538f0e7ab1a8bae486e2b5e5879bc55c618e8931dc822284abd5'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.screensaver.gschema.xml`, 6191, 'd6b5f96c421da95378d3424a379fa9d507f98e6daca18eac4dfc8b16fb59bcdf'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.search-providers.gschema.xml`, 1907, '9efd368948d891c550bef426430a4c60cda5632a2859fd7da5c4595edd89c81d'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.session.gschema.xml`, 668, '462b3b4fe456aecd72a584e533566a0beccfeb9e7b6184f8bc410c4147a3ef7a'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.sound.gschema.xml`, 1055, 'ff7dcae2b2b3d6109bf4d75511f0ce1538e39b0593bfcd33f35f12653c62be92'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.thumbnail-cache.gschema.xml`, 600, '20246fc5002a989287eb7e5e351cfd79245df63d0978b879882ff3d534b8f9fb'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.thumbnailers.gschema.xml`, 866, '899bfc15c310051674714addc541824556a1e6d65b32cb715cba18662dc6ea02'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.wm.keybindings.gschema.xml`, 13631, '58036d83de3758f5080c80c8f4b4c13faf8d011da6d21bb7d5766d70a7d515ed'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.desktop.wm.preferences.gschema.xml`, 12908, '197e14e54d24a7d407ef8376e4267a40aaa3e83c1411ba956b6e27756eeb100e'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.system.locale.gschema.xml`, 448, '5b1e65629a77dcd201f4d86932ad62c0c41ec61fb117f151966d13e69411e2dc'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.system.location.gschema.xml`, 1159, '3fe90ebe8c851340249a1febe741b777c65b49a823201ead02f341be861060ed'],
+  [`${SCHEMA_DIRECTORY}/org.gnome.system.proxy.gschema.xml`, 6347, 'ccf9767c5a47f23743c0a2c5e61622e5a06d1dfbcdc2642c10c6021e4d34997b'],
+  [`${SCHEMA_DIRECTORY}/org.gtk.Settings.ColorChooser.gschema.xml`, 931, 'e476913ef61e6719ff56c2e4c5b8b276af3020bfb0d007263c2a241835730882'],
+  [`${SCHEMA_DIRECTORY}/org.gtk.Settings.Debug.gschema.xml`, 833, 'de0685fdc2f6e890e32445a79aa938e5566b8dd406dd71d6c6a66c69e3f941e3'],
+  [`${SCHEMA_DIRECTORY}/org.gtk.Settings.EmojiChooser.gschema.xml`, 623, '22aba28a5a78745d87eeded88f1b86f7ddea24b1b90771151ef494c660a1b591'],
+  [`${SCHEMA_DIRECTORY}/org.gtk.Settings.FileChooser.gschema.xml`, 6212, 'c7089f41d22b3854c05fe4996ff271949b40148a40b9c6f0ae0349792dc94b77'],
+].map(([name, size, sha256]) => [name, Object.freeze({ size, sha256 })])));
+function metadataRole(name) {
+  if (name === SCHEMA_DIRECTORY) return 'schema-directory';
+  if (Object.hasOwn(METADATA_PINS, name)) return name.startsWith('usr/share/doc/') ? 'copyright' : 'schema-data';
+  assert.ok(name.toLowerCase() !== SCHEMA_DIRECTORY && !Object.keys(METADATA_PINS).some(n => n.toLowerCase() === name.toLowerCase()), 'Metadata case alias refused');
+  assert.ok(!/^usr\/share\/doc\/[^/]+\/copyright$/i.test(name), 'Unreviewed copyright data path');
+  assert.ok(!name.toLowerCase().startsWith(`${SCHEMA_DIRECTORY}/`.toLowerCase()), 'Unreviewed schema data path');
+  return null;
+}
+// GVDB v0, not a guessed GVariant magic prefix. Pointer/table layout comes from:
+// https://github.com/GNOME/gvdb/blob/c6f2359cc1d00f16e0a0e2527fa0bc1882b8b5ab/gvdb/gvdb-format.h
+// and gvdb-reader.c. Inner variants are additionally checked by GLib below.
+function gvdbVariants(bytes) {
+  assert.ok(Buffer.isBuffer(bytes) && bytes.length >= 24 && bytes.length <= DATA_LIMIT, 'Bounded GVDB data required');
+  assert.equal(bytes.readUInt32LE(0), 1918981703, 'GVDB signature differs');
+  assert.equal(bytes.readUInt32LE(4), 1953390953, 'GVDB signature differs');
+  assert.equal(bytes.readUInt32LE(8), 0, 'Only GVDB version zero is reviewed');
+  assert.equal(bytes.readUInt32LE(12), 0, 'Unreviewed GVDB options');
+  const variants = [], tables = new Set(); let items = 0;
+  function pointer(at, alignment) {
+    const start = bytes.readUInt32LE(at), end = bytes.readUInt32LE(at + 4);
+    assert.ok(start >= 24 && start <= end && end <= bytes.length && start % alignment === 0, 'Invalid GVDB pointer');
+    return [start, end];
+  }
+  function table(at, depth) {
+    const [start, end] = pointer(at, 4), identity = `${start}:${end}`;
+    assert.ok(depth <= 32 && !tables.has(identity) && end - start >= 8, 'Cyclic/invalid GVDB table'); tables.add(identity);
+    const bloom = bytes.readUInt32LE(start) & 0x7ffffff, buckets = bytes.readUInt32LE(start + 4);
+    const bucketAt = start + 8 + bloom * 4, itemAt = bucketAt + buckets * 4;
+    assert.ok(buckets > 0 && itemAt <= end && (end - itemAt) % 24 === 0, 'Invalid GVDB hash table');
+    const count = (end - itemAt) / 24; items += count;
+    assert.ok(count > 0 && items <= LIMITS.entries, 'GVDB item bound exceeded');
+    let prior = 0;
+    for (let i = 0; i < buckets; i++) {
+      const bucket = bytes.readUInt32LE(bucketAt + i * 4);
+      assert.ok(bucket >= prior && bucket <= count, 'Invalid GVDB bucket'); prior = bucket;
+    }
+    const parents = [];
+    for (let i = 0; i < count; i++) {
+      const item = itemAt + i * 24, parent = bytes.readUInt32LE(item + 4);
+      const key = bytes.readUInt32LE(item + 8), size = bytes.readUInt16LE(item + 12), type = bytes[item + 14];
+      assert.ok(parent === 0xffffffff || parent < count && parent !== i, 'Invalid GVDB parent'); parents.push(parent);
+      assert.ok(key >= 24 && key + size <= bytes.length && bytes[item + 15] === 0, 'Invalid GVDB key');
+      if (type === 72) table(item + 16, depth + 1); // H: nested table
+      else {
+        assert.ok(type === 76 || type === 118, 'Unreviewed GVDB item type'); // L or v
+        const [a, b] = pointer(item + 16, type === 118 ? 8 : 4);
+        if (type === 118) { assert.ok(b > a, 'Empty GVDB variant'); variants.push([a, b]); }
+        else {
+          assert.equal((b - a) % 4, 0, 'Invalid GVDB child list');
+          for (let child = a; child < b; child += 4) assert.ok(bytes.readUInt32LE(child) < count, 'Invalid GVDB child index');
+        }
+      }
+    }
+    for (let i = 0; i < count; i++) {
+      const seen = new Set(); let parent = i;
+      while (parent !== 0xffffffff) {
+        assert.ok(!seen.has(parent) && seen.size <= 32, 'Cyclic/deep GVDB parent'); seen.add(parent); parent = parents[parent];
+      }
+    }
+  }
+  table(16, 0); assert.ok(variants.length > 0, 'Compiled schema has no variants'); return variants;
+}
+const GVDB_VARIANTS = String.raw`
+import base64,ctypes,json,sys
+p=json.load(sys.stdin); data=base64.b64decode(p['bytes'],validate=True)
+assert 24 <= len(data) <= 131072 and 0 < len(p['variants']) <= 8192
+g=ctypes.CDLL('libglib-2.0.so.0')
+g.g_variant_type_new.argtypes=[ctypes.c_char_p]; g.g_variant_type_new.restype=ctypes.c_void_p
+g.g_variant_type_free.argtypes=[ctypes.c_void_p]
+g.g_variant_new_from_data.argtypes=[ctypes.c_void_p,ctypes.c_void_p,ctypes.c_size_t,ctypes.c_int,ctypes.c_void_p,ctypes.c_void_p]
+g.g_variant_new_from_data.restype=ctypes.c_void_p
+g.g_variant_ref_sink.argtypes=[ctypes.c_void_p]; g.g_variant_ref_sink.restype=ctypes.c_void_p
+g.g_variant_is_normal_form.argtypes=[ctypes.c_void_p]; g.g_variant_is_normal_form.restype=ctypes.c_int
+g.g_variant_unref.argtypes=[ctypes.c_void_p]
+kind=g.g_variant_type_new(b'v'); assert kind
+try:
+    for start,end in p['variants']:
+        assert 24 <= start < end <= len(data) and start%8 == 0
+        held=ctypes.create_string_buffer(data[start:end])
+        v=g.g_variant_new_from_data(kind,held,end-start,False,None,None); assert v
+        g.g_variant_ref_sink(v)
+        try: assert g.g_variant_is_normal_form(v), 'Non-normal GVariant data'
+        finally: g.g_variant_unref(v)
+finally: g.g_variant_type_free(kind)
+print(json.dumps({'normalVariants':len(p['variants'])}))
+`;
+function validateCompiledSchema(bytes, run) {
+  const variants = gvdbVariants(bytes);
+  const result = JSON.parse(String(run('python3', ['-B', '-c', GVDB_VARIANTS], {
+    input: JSON.stringify({ bytes: bytes.toString('base64'), variants }), timeout: 30000, maxBuffer: 4096 })));
+  assert.deepEqual(result, { normalVariants: variants.length }); return result;
+}
+function validateMetadataFormat(name, bytes) {
+  assert.ok(Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= DATA_LIMIT, 'Bounded metadata data required');
+  if (name === COMPILED_SCHEMA) { gvdbVariants(bytes); return; }
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  assert.ok(!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text), 'Non-text metadata refused');
+  if (name.startsWith('usr/share/doc/')) assert.match(text, /copyright/i, 'Copyright notice required');
+  else if (name.endsWith('.xml')) {
+    const withoutComments = text.replace(/<!--[\s\S]*?-->/g, '');
+    assert.ok(!/<!DOCTYPE|<!ENTITY/i.test(text) && /<schemalist(?:\s|>)/.test(withoutComments)
+      && /<\/schemalist>\s*$/.test(withoutComments), 'Schema XML data required');
+  } else if (name.endsWith('.dtd')) assert.ok(text.startsWith('<!ELEMENT schemalist ') && !/SYSTEM|PUBLIC|<!ENTITY/.test(text), 'Fixed local schema DTD required');
+  else assert.ok(name.endsWith('.gschema.override') && /^\[org\.gnome\./.test(text), 'Fixed schema override data required');
+}
+function validateMetadata(name, entry, bytes, source = false) {
+  const role = metadataRole(name); if (!role) return;
+  if (role === 'schema-directory') {
+    assert.ok(entry.kind === 'directory' && (entry.mode === 0o755 || source && entry.mode === 0o777), 'Schema directory mode/type refused'); return;
+  }
+  const mode = name === COMPILED_SCHEMA ? 0o666 : 0o777;
+  assert.ok(entry.kind === 'file' && (entry.mode === 0o644 || source && entry.mode === mode), 'Metadata mode/type refused');
+  assert.deepEqual({ size: entry.size, sha256: entry.sha256 }, METADATA_PINS[name], 'Metadata bytes differ from inspected source');
+  if (bytes !== undefined) {
+    validateMetadataFormat(name, bytes);
+    assert.deepEqual(record(bytes), METADATA_PINS[name], 'Metadata changed during inspection');
+  }
+}
+const sameMetadataStat = (a, b) => ['dev', 'ino', 'mode', 'size', 'nlink', 'uid', 'gid', 'mtimeMs', 'ctimeMs'].every(n => a[n] === b[n]);
+function metadataRead(file, expected) {
+  const finite = require('./flatpak-package.cjs'), before = finite.ordinary(file);
+  assert.ok(before.isFile() && before.nlink === 1 && before.size > 0 && before.size <= DATA_LIMIT, 'Bounded single-link metadata file required');
+  if (expected) assert.ok(sameMetadataStat(before, expected), 'Metadata changed before opening');
+  const same = actual => sameMetadataStat(actual, before);
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+  try {
+    assert.ok(same(fs.fstatSync(fd)), 'Metadata changed before read');
+    const bytes = Buffer.alloc(before.size + 1); let length = 0, count;
+    while (length < bytes.length && (count = fs.readSync(fd, bytes, length, bytes.length - length, null)) > 0) length += count;
+    assert.ok(length === before.size && same(fs.fstatSync(fd)) && same(finite.ordinary(file)), 'Metadata changed during read');
+    return bytes.subarray(0, length);
+  } finally { fs.closeSync(fd); }
+}
+const METADATA_PROBES = Object.freeze(['usr/share/doc/libbz2-1.0/copyright', SCHEMA_DIRECTORY,
+  `${SCHEMA_DIRECTORY}/10_gsettings-desktop-schemas.gschema.override`, `${SCHEMA_DIRECTORY}/gschema.dtd`,
+  `${SCHEMA_DIRECTORY}/org.gnome.desktop.a11y.interface.gschema.xml`, COMPILED_SCHEMA]);
+function metadataEvidence(root) {
+  const finite = require('./flatpak-package.cjs');
+  const result = Object.fromEntries(METADATA_PROBES.map(name => {
+    try {
+      const file = path.join(root, name), s = finite.ordinary(file);
+      const entry = { kind: s.isFile() ? 'file' : s.isDirectory() ? 'directory' : 'special', mode: s.mode & 0o7777,
+        size: s.size, dev: s.dev, ino: s.ino, nlink: s.nlink, uid: s.uid, gid: s.gid };
+      if (s.isFile()) Object.assign(entry, record(metadataRead(file, s)));
+      else assert.ok(s.isDirectory(), 'Special metadata probe refused');
+      const after = finite.ordinary(file);
+      assert.ok(sameMetadataStat(s, after), 'Metadata probe changed');
+      return [name, entry];
+    } catch (error) { return [name, { refused: String(error.message).slice(0, 256) }]; }
+  }));
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 8192, 'Metadata probe evidence exceeds bound'); return result;
+}
+function transportMode(name, entry) {
+  return entry.kind === 'directory' ? 0o755 : metadataRole(name) ? 0o644 : entry.mode & 0o111 ? 0o755 : 0o644;
+}
 function prohibited(name) {
   return /(?:^|\/)(?:modules|polkit-1|dbus-1|systemd|DEBIAN)(?:\/|$)/i.test(name) && !GIO_PATHS.has(name)
     || /creator-hub-deb-retirement-helper|com\.creatorworks\.hub\.Host\.service|com\.creatorworks\.hub\.retire|(?:^|\/)pkexec$|\.policy$/i.test(name)
@@ -409,7 +626,9 @@ function inventory(root, allowLinks = false) {
         s = fs.lstatSync(file);
         assert.ok(relative(rel) && !prohibited(rel) && !folded.has(rel.toLowerCase()), `Noncanonical/prohibited AppDir entry: ${rel}`);
         folded.add(rel.toLowerCase()); assert.ok(folded.size <= LIMITS.entries, `AppDir has at least ${folded.size} entries; bound ${LIMITS.entries}; coordinate with Parent`);
-        assert.ok(!(s.mode & 0o7000) && (s.isSymbolicLink() || !(s.mode & 0o002)), 'Privileged/world-writable AppDir mode refused');
+        const role = metadataRole(rel);
+        assert.ok(!(s.mode & 0o7000) && (s.isSymbolicLink() || !(s.mode & 0o022) || allowLinks && role), 'Privileged/group/world-writable AppDir mode refused');
+        if (role) assert.ok(!s.isSymbolicLink(), 'Metadata aliases refused');
         if (GTK_METADATA_PATHS.has(rel)) assert.ok(s.isFile() && !s.isSymbolicLink(), 'GObject typelib exception cannot be a directory or link');
         if (GIO_PATHS.has(rel)) assert.ok(!s.isSymbolicLink(), 'GIO runtime exception cannot be a link');
         if (s.isSymbolicLink()) {
@@ -417,11 +636,19 @@ function inventory(root, allowLinks = false) {
           const link = fs.readlinkSync(file), resolved = internalTarget(root, file);
           const target = path.relative(root, resolved).split(path.sep).join('/');
           // Directory links, loops, external targets and multi-link files are refused, never recursively followed.
-          const r = fileRecord(resolved); assert.ok(!(r.mode & 0o7002), 'Unsafe symlink target mode');
+          assert.ok(!metadataRole(target), 'Metadata cannot be aliased by a runtime link');
+          const r = fileRecord(resolved); assert.ok(!(r.mode & 0o7022), 'Unsafe symlink target mode');
           entries[rel] = r; links[rel] = { link, resolved: target, ...r };
         } else if (s.isDirectory()) {
-          entries[rel] = { kind: 'directory', mode: s.mode & 0o7777 }; visit(file, `${rel}/`);
+          entries[rel] = { kind: 'directory', mode: s.mode & 0o7777 };
+          if (role) validateMetadata(rel, entries[rel], undefined, allowLinks);
+          visit(file, `${rel}/`);
+        } else if (role) {
+          const bytes = metadataRead(file, s);
+          entries[rel] = { kind: 'file', ...record(bytes), mode: s.mode & 0o7777 };
+          validateMetadata(rel, entries[rel], bytes, allowLinks);
         } else entries[rel] = fileRecord(file);
+        if (role) validateMetadata(rel, entries[rel], undefined, allowLinks);
         validateGtkMetadata(rel, entries[rel], GTK_METADATA_PATHS.has(rel) ? read(file) : undefined);
         validateGioRuntime(rel, entries[rel], rel === GIO_TLS ? read(file) : undefined);
         if (entries[rel].kind === 'file') total += entries[rel].size;
@@ -444,7 +671,7 @@ function flatten(root, destination) {
   const before = inventory(root, true); finite.ordinary(path.dirname(destination));
   fs.mkdirSync(destination, { mode: 0o755 }); fs.chmodSync(destination, 0o755);
   for (const [name, entry] of Object.entries(before.entries)) {
-    const output = path.join(destination, name), mode = entry.kind === 'directory' || entry.mode & 0o111 ? 0o755 : 0o644;
+    const output = path.join(destination, name), mode = transportMode(name, entry);
     if (entry.kind === 'directory') fs.mkdirSync(output, { mode });
     else {
       const source = before.links[name] ? internalTarget(root, path.join(root, name)) : path.join(root, name);
@@ -455,8 +682,7 @@ function flatten(root, destination) {
   assert.deepEqual(inventory(root, true), before, 'Original AppDir changed while flattening');
   const after = inventory(destination);
   assert.deepEqual(Object.keys(after.entries), Object.keys(before.entries));
-  for (const [n, e] of Object.entries(before.entries)) assert.deepEqual(after.entries[n], { ...e,
-    mode: e.kind === 'directory' || e.mode & 0o111 ? 0o755 : 0o644 });
+  for (const [n, e] of Object.entries(before.entries)) assert.deepEqual(after.entries[n], { ...e, mode: transportMode(n, e) });
   return { original: before, flattened: after };
 }
 function dependencies(root, files, run, { includeHub = false } = {}) {
@@ -615,6 +841,7 @@ function validateInventory(inv) {
     }
     validateGtkMetadata(name, entry);
     validateGioRuntime(name, entry);
+    validateMetadata(name, entry);
   }
   assert.ok(total <= LIMITS.total && total === inv.unpackedSize, 'Inventory total bound differs');
 }
@@ -669,7 +896,11 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
   const run = (command, args, options = {}) => execute(command, args, { env: child, ...options });
   const receipt = { schemaVersion: 1, scope: 'unsigned-linux-016-portable-packaging-only', producer: binding,
     packagingSource: env.GITHUB_SHA, rootRecompiled: false, privatePayloadChanged: false, payloadResigned: false,
-    applicationLaunched: false, updateAcceptanceTested: false, hermetic: false, upstreamToolsPinned: false, ...flags() };
+    applicationLaunched: false, updateAcceptanceTested: false, hermetic: false, upstreamToolsPinned: false,
+    metadataNormalization: { scope: 'copied-transport-only', packagingProcessUmask: process.umask(),
+      sourceModesChanged: false, sourceBytesChanged: false, compiledSchemaModeCause: 'unknown; generated 0666 alone does not prove an umask cause',
+      inspectedAppImage: { size: 143112696, sha256: 'abbc25bf439bce656a38a445fa349da93d62a25e754cc82d5967fda9f1f47cf5' },
+      hostBeforeBundle: metadataEvidence(path.parse(root).root) }, ...flags() };
   try {
     const input = path.join(output, 'original-input'), receipts = path.join(output, 'original-receipts');
     stageZip(path.join(inputRoot, 'assembly.zip'), input, Object.fromEntries(INPUTS.map(n => [n, p.files[n]])), mainAllowed(), run);
@@ -701,7 +932,11 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     }));
     // Inspect the AppDir Tauri just produced. No archive-controlled extraction and no AppImage execution.
     const appdir = path.join(bundles, 'Creator Hub.AppDir'), retained = path.join(output, 'Creator Hub.original.AppDir');
+    receipt.metadataNormalization.hostAfterBundle = metadataEvidence(path.parse(root).root);
+    receipt.metadataNormalization.originalBeforeCopy = metadataEvidence(appdir);
     const inv = inventory(appdir, true);
+    for (const name of [SCHEMA_DIRECTORY, ...Object.keys(METADATA_PINS)]) assert.ok(Object.hasOwn(inv.entries, name), `Missing inspected metadata: ${name}`);
+    receipt.metadataNormalization.compiledSchemaFormat = validateCompiledSchema(metadataRead(path.join(appdir, COMPILED_SCHEMA)), run);
     fs.cpSync(appdir, retained, { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false });
     assert.deepEqual(inventory(retained, true), inv);
     const packaged = path.join(appdir, 'usr/bin/creator-hub'), bytes = read(packaged);
@@ -711,6 +946,11 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     archive.verify(path.join(appdir, 'usr/lib/Creator Hub/modules.tar.gz'), baseline.manifest, decoder, (command, args, opts) => run(command, args, opts));
     receipt.rootTransform = 'exactly one __TAURI_BUNDLE_TYPE_VAR_UNK -> APP marker; all other Root bytes identical';
     const transport = path.join(output, 'Creator Hub.AppDir'), transformation = flatten(appdir, transport);
+    Object.assign(receipt.metadataNormalization, { originalAfterCopy: metadataEvidence(appdir), retainedOriginal: metadataEvidence(retained),
+      transport: metadataEvidence(transport), copiedData: Object.fromEntries(Object.keys(METADATA_PINS).map(name => [name, {
+        ...METADATA_PINS[name], originalMode: inv.entries[name].mode, transportMode: transformation.flattened.entries[name].mode }])) });
+    assert.deepEqual(receipt.metadataNormalization.originalAfterCopy, receipt.metadataNormalization.originalBeforeCopy, 'Metadata source changed during normalization');
+    assert.ok(Buffer.byteLength(JSON.stringify(receipt.metadataNormalization)) <= 64 * 1024, 'Metadata receipt exceeds bound');
     // Tauri copies custom usr/ files only. Keep the original AppImage unchanged;
     // bind this root-level record into the canonical transport instead.
     const profile = hostProfile(baseline.bytes['creator-hub'], bytes, baseline.portableHostBuild, p);
@@ -767,10 +1007,15 @@ function fetchInputs(output, env = process.env) {
 module.exports = { VERSION, TARGET, FEATURES, HOST_PROFILE, LIMITS, WORKFLOW, BRANCH, INPUTS, RECEIPTS, get MAIN_ALLOWED() { return mainAllowed(); }, RECEIPT_ALLOWED,
   record, flags, validatePins, admission, preflight, verifyProducer, verifyPrivateProof, collect, ZIP_STAGE, stageZip, validateReceipts,
   relative, prohibited, validateGtkMetadata, validateGioRuntime, retainAppImage, internalTarget, inventory, flatten, dependencies, primaryAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
-  hostProfile, verifyHostProfileInventory, attachHostProfile };
+  hostProfile, verifyHostProfileInventory, attachHostProfile, SCHEMA_DIRECTORY, COMPILED_SCHEMA, METADATA_PINS, METADATA_PROBES, DATA_LIMIT,
+  metadataRole, gvdbVariants, GVDB_VARIANTS, validateCompiledSchema, validateMetadataFormat, validateMetadata, metadataRead, metadataEvidence, transportMode };
 if (require.main === module) (async () => {
   const [mode, ...args] = process.argv.slice(2);
   if (mode === 'preflight') { assert.equal(args.length, 0); preflight(); console.log(JSON.stringify({ preflightPassed: true, releaseReady: false })); }
   else if (mode === 'fetch') { assert.equal(args.length, 1); fetchInputs(...args); }
   else { assert.equal(mode, 'package'); assert.equal(args.length, 4); await produce(...args); }
-})().catch(error => { console.error(String(error.message).slice(0, 2000)); process.exitCode = 1; });
+})().catch(error => {
+  console.error(String(error.message).slice(0, 2000));
+  if (error.inventoryEvidence) console.error(JSON.stringify(error.inventoryEvidence));
+  process.exitCode = 1;
+});
