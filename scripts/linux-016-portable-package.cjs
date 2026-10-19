@@ -314,9 +314,53 @@ function relative(name) {
         && !['CON', 'PRN', 'AUX', 'NUL'].includes(stem) && !/^(COM|LPT)[0-9]$/.test(stem);
     });
 }
+// Ubuntu's gir1.2-polkit-1.0 ships these two read-only metadata files. The GTK
+// deployment plugin maps its typelib directory to AppDir/usr/lib/girepository-1.0.
+// https://packages.ubuntu.com/jammy/amd64/gir1.2-polkit-1.0/filelist
+const GTK_METADATA_PATHS = new Set(['usr/lib/girepository-1.0/Polkit-1.0.typelib',
+  'usr/lib/girepository-1.0/PolkitAgent-1.0.typelib']);
+const TYPELIB_MAGIC = Buffer.from('GOBJ\nMETADATA\r\n\x1a', 'binary');
 function prohibited(name) {
   return /(?:^|\/)(?:modules|polkit-1|dbus-1|systemd|DEBIAN)(?:\/|$)/i.test(name)
-    || /creator-hub-deb-retirement-helper|com\.creatorworks\.hub\.Host\.service|com\.creatorworks\.hub\.retire|polkit|(?:^|\/)pkexec$|\.policy$/i.test(name);
+    || /creator-hub-deb-retirement-helper|com\.creatorworks\.hub\.Host\.service|com\.creatorworks\.hub\.retire|(?:^|\/)pkexec$|\.policy$/i.test(name)
+    || /polkit/i.test(name) && !GTK_METADATA_PATHS.has(name);
+}
+function validateGtkMetadata(name, entry, bytes) {
+  if (!GTK_METADATA_PATHS.has(name)) return;
+  assert.ok(entry.kind === 'file' && entry.mode === 0o644 && entry.size >= TYPELIB_MAGIC.length,
+    'GObject typelib exception requires regular non-executable mode 0644 data');
+  if (bytes !== undefined) {
+    assert.ok(Buffer.isBuffer(bytes) && bytes.length === entry.size && bytes.subarray(0, TYPELIB_MAGIC.length).equals(TYPELIB_MAGIC),
+      'GObject typelib bytes required, not a renamed executable or policy');
+    assert.deepEqual(record(bytes), { size: entry.size, sha256: entry.sha256 }, 'GObject typelib changed during inspection');
+  }
+}
+function rejectedEntry(file, name, s, error) {
+  const result = { path: name.slice(0, 512), pathTruncated: name.length > 512, reason: String(error.message).slice(0, 512) };
+  if (!s) return result;
+  result.stat = { kind: s.isSymbolicLink() ? 'symlink' : s.isFile() ? 'file' : s.isDirectory() ? 'directory' : 'special',
+    mode: s.mode & 0o7777, size: s.size, nlink: s.nlink, uid: s.uid, gid: s.gid };
+  // A bounded diagnostic prefix is not a content hash or permission to load the
+  // rejected entry. Never follow a link or read through an unapproved hardlink.
+  if (s.isFile() && !s.isSymbolicLink() && s.nlink === 1) {
+    let fd;
+    try {
+      fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      const same = actual => ['dev', 'ino', 'size', 'mode', 'nlink', 'mtimeMs', 'ctimeMs'].every(n => actual[n] === s[n]);
+      assert.ok(same(fs.fstatSync(fd)), 'Rejected entry changed before diagnostic read');
+      const prefix = Buffer.alloc(64), count = fs.readSync(fd, prefix, 0, prefix.length, 0), bytes = prefix.subarray(0, count);
+      assert.ok(same(fs.fstatSync(fd)), 'Rejected entry changed during diagnostic read');
+      result.prefix = { ...record(bytes), hex: bytes.toString('hex'), scope: 'first-at-most-64-bytes-only' };
+    } catch (reason) { result.prefixError = String(reason.message).slice(0, 256); }
+    finally { if (fd !== undefined) fs.closeSync(fd); }
+  }
+  return result;
+}
+function retainAppImage(source, destination) {
+  const expected = record(read(source, LIMITS.archive));
+  fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+  assert.deepEqual(record(read(destination, LIMITS.archive)), expected, 'Retained original AppImage bytes differ');
+  return expected;
 }
 function fileRecord(file) {
   const s = fs.lstatSync(file);
@@ -341,23 +385,35 @@ function inventory(root, allowLinks = false) {
   const entries = {}, links = {}, folded = new Set(); let total = 0;
   function visit(directory, prefix = '') {
     for (const name of fs.readdirSync(directory).sort()) {
-      const rel = prefix + name, file = path.join(directory, name), s = fs.lstatSync(file);
-      assert.ok(relative(rel) && !prohibited(rel) && !folded.has(rel.toLowerCase()), `Noncanonical/prohibited AppDir entry: ${rel}`);
-      folded.add(rel.toLowerCase()); assert.ok(folded.size <= LIMITS.entries, `AppDir has at least ${folded.size} entries; bound ${LIMITS.entries}; coordinate with Parent`);
-      assert.ok(!(s.mode & 0o7000) && (s.isSymbolicLink() || !(s.mode & 0o002)), 'Privileged/world-writable AppDir mode refused');
-      if (s.isSymbolicLink()) {
-        assert.ok(allowLinks, 'Transport AppDir cannot contain links');
-        const link = fs.readlinkSync(file), resolved = internalTarget(root, file);
-        const target = path.relative(root, resolved).split(path.sep).join('/');
-        // Directory links, loops, external targets and multi-link files are refused, never recursively followed.
-        const r = fileRecord(resolved); assert.ok(!(r.mode & 0o7002), 'Unsafe symlink target mode');
-        entries[rel] = r; links[rel] = { link, resolved: target, ...r };
-      } else if (s.isDirectory()) {
-        entries[rel] = { kind: 'directory', mode: s.mode & 0o7777 }; visit(file, `${rel}/`);
-      } else entries[rel] = fileRecord(file);
-      if (entries[rel].kind === 'file') total += entries[rel].size;
-      assert.ok(total <= LIMITS.total, `Flattened AppDir has at least ${total} file bytes; bound ${LIMITS.total}; coordinate with Parent`);
-      if (!allowLinks) assert.ok(entries[rel].mode === 0o755 || entries[rel].kind === 'file' && entries[rel].mode === 0o644, 'Noncanonical transport mode');
+      const rel = prefix + name, file = path.join(directory, name); let s;
+      try {
+        s = fs.lstatSync(file);
+        assert.ok(relative(rel) && !prohibited(rel) && !folded.has(rel.toLowerCase()), `Noncanonical/prohibited AppDir entry: ${rel}`);
+        folded.add(rel.toLowerCase()); assert.ok(folded.size <= LIMITS.entries, `AppDir has at least ${folded.size} entries; bound ${LIMITS.entries}; coordinate with Parent`);
+        assert.ok(!(s.mode & 0o7000) && (s.isSymbolicLink() || !(s.mode & 0o002)), 'Privileged/world-writable AppDir mode refused');
+        if (GTK_METADATA_PATHS.has(rel)) assert.ok(s.isFile() && !s.isSymbolicLink(), 'GObject typelib exception cannot be a directory or link');
+        if (s.isSymbolicLink()) {
+          assert.ok(allowLinks, 'Transport AppDir cannot contain links');
+          const link = fs.readlinkSync(file), resolved = internalTarget(root, file);
+          const target = path.relative(root, resolved).split(path.sep).join('/');
+          // Directory links, loops, external targets and multi-link files are refused, never recursively followed.
+          const r = fileRecord(resolved); assert.ok(!(r.mode & 0o7002), 'Unsafe symlink target mode');
+          entries[rel] = r; links[rel] = { link, resolved: target, ...r };
+        } else if (s.isDirectory()) {
+          entries[rel] = { kind: 'directory', mode: s.mode & 0o7777 }; visit(file, `${rel}/`);
+        } else entries[rel] = fileRecord(file);
+        validateGtkMetadata(rel, entries[rel], GTK_METADATA_PATHS.has(rel) ? read(file) : undefined);
+        if (entries[rel].kind === 'file') total += entries[rel].size;
+        assert.ok(total <= LIMITS.total, `Flattened AppDir has at least ${total} file bytes; bound ${LIMITS.total}; coordinate with Parent`);
+        if (!allowLinks) assert.ok(entries[rel].mode === 0o755 || entries[rel].kind === 'file' && entries[rel].mode === 0o644, 'Noncanonical transport mode');
+      } catch (error) {
+        if (!error.inventoryEvidence) {
+          error.inventoryEvidence = { complete: false, visitedEntries: folded.size, observedFileBytes: total,
+            rejectedEntry: rejectedEntry(file, rel, s, error) };
+          assert.ok(Buffer.byteLength(JSON.stringify(error.inventoryEvidence)) <= 8192, 'Rejected entry diagnostic exceeds bound');
+        }
+        throw error;
+      }
     }
   }
   visit(root); return { entries, links, unpackedSize: total };
@@ -533,6 +589,7 @@ function validateInventory(inv) {
       assert.ok(Number.isSafeInteger(entry.size) && entry.size >= 0 && entry.size <= LIMITS.file, 'Inventory file bound exceeded');
       assert.ok([0o644, 0o755].includes(entry.mode), 'Ordinary file mode required'); total += entry.size;
     }
+    validateGtkMetadata(name, entry);
   }
   assert.ok(total <= LIMITS.total && total === inv.unpackedSize, 'Inventory total bound differs');
 }
@@ -605,6 +662,11 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     receipt.cliInputs = Object.fromEntries(['package-lock.json', 'node_modules/@tauri-apps/cli/tauri.js',
       'node_modules/@tauri-apps/cli-linux-x64-gnu/cli.linux-x64-gnu.node'].map(n => [n, record(read(path.join(root, n)))]));
     run(process.execPath, bundleArgs(root, overlayFile), { stdio: 'inherit', timeout: 900000 });
+    // Preserve the exact unsigned image before any post-bundle audit can refuse.
+    const bundles = path.join(release, 'bundle/appimage'), imageName = `Creator Hub_${VERSION}_amd64.AppImage`;
+    assert.deepEqual(fs.readdirSync(bundles).filter(n => n.endsWith('.AppImage')), [imageName]);
+    const image = path.join(output, imageName);
+    receipt.appImage = retainAppImage(path.join(bundles, imageName), image);
     exact(binary, p.files['creator-hub']);
     receipt.upstreamPackagingTools = toolInventory(path.join(child.XDG_CACHE_HOME, 'tauri'));
     receipt.upstreamToolSource = 'https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy.rs';
@@ -612,10 +674,6 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     receipt.systemPackagingTools = Object.fromEntries(['/usr/bin/patchelf', '/usr/bin/readelf', '/usr/bin/file'].map(n => {
       const resolved = fs.realpathSync(n); return [n, { resolved, ...record(read(resolved)) }];
     }));
-    const bundles = path.join(release, 'bundle/appimage'), imageName = `Creator Hub_${VERSION}_amd64.AppImage`;
-    assert.deepEqual(fs.readdirSync(bundles).filter(n => n.endsWith('.AppImage')), [imageName]);
-    const image = path.join(output, imageName); fs.copyFileSync(path.join(bundles, imageName), image, fs.constants.COPYFILE_EXCL);
-    receipt.appImage = record(read(image, LIMITS.archive));
     // Inspect the AppDir Tauri just produced. No archive-controlled extraction and no AppImage execution.
     const appdir = path.join(bundles, 'Creator Hub.AppDir'), retained = path.join(output, 'Creator Hub.original.AppDir');
     const inv = inventory(appdir, true);
@@ -661,6 +719,7 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
   } catch (error) {
     receipt.packagingCompleted = false; receipt.error = String(error.message).slice(0, 2000);
     if (error.dependencyEvidence) receipt.dependencies = error.dependencyEvidence;
+    if (error.inventoryEvidence) receipt.inventoryEvidence = error.inventoryEvidence;
     write(path.join(output, 'package-refusal.json'), receipt); throw error;
   }
 }
@@ -682,7 +741,7 @@ function fetchInputs(output, env = process.env) {
 }
 module.exports = { VERSION, TARGET, FEATURES, HOST_PROFILE, LIMITS, WORKFLOW, BRANCH, INPUTS, RECEIPTS, get MAIN_ALLOWED() { return mainAllowed(); }, RECEIPT_ALLOWED,
   record, flags, validatePins, admission, preflight, verifyProducer, verifyPrivateProof, collect, ZIP_STAGE, stageZip, validateReceipts,
-  relative, prohibited, internalTarget, inventory, flatten, dependencies, primaryAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
+  relative, prohibited, validateGtkMetadata, retainAppImage, internalTarget, inventory, flatten, dependencies, primaryAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
   hostProfile, verifyHostProfileInventory, attachHostProfile };
 if (require.main === module) (async () => {
   const [mode, ...args] = process.argv.slice(2);

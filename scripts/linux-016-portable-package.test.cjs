@@ -351,6 +351,71 @@ test('inventory rejects extras with special meaning, case aliases and hardlinks'
   for (const n of ['usr/lib/Creator Hub/modules/x', 'usr/share/polkit-1/actions/x', 'usr/share/dbus-1/services/x',
     'usr/bin/creator-hub-deb-retirement-helper', 'usr/share/x.policy']) assert.ok(p.prohibited(n));
 });
+const TYPELIB = Buffer.from('GOBJ\nMETADATA\r\n\x1a', 'binary');
+const POLKIT_TYPELIBS = ['usr/lib/girepository-1.0/Polkit-1.0.typelib', 'usr/lib/girepository-1.0/PolkitAgent-1.0.typelib'];
+test('39331187141 typelib refusal distinguishes exact GTK metadata paths from privilege-bearing entries', () => {
+  for (const name of POLKIT_TYPELIBS) assert.equal(p.prohibited(name), false, name);
+  for (const name of ['usr/share/polkit-1', 'usr/share/polkit-1/actions/Polkit-1.0.typelib',
+    'usr/share/dbus-1/services/x', 'usr/lib/systemd/x', 'usr/bin/pkexec', 'usr/libexec/polkit-agent-helper-1',
+    'usr/bin/creator-hub-deb-retirement-helper', 'usr/share/x.policy', 'usr/lib/girepository-1.0/Polkit-1.0.typelib.policy',
+    'usr/lib/girepository-1.0/polkit-1.0.typelib', 'usr/lib/girepository-1.0/PolkitUnknown-1.0.typelib',
+    'usr/bin/Polkit-1.0.typelib', 'usr/lib/libpolkit-unreviewed.so.0']) assert.equal(p.prohibited(name), true, name);
+});
+test('typelib exception requires regular non-executable data, exact mode and GObject metadata magic', () => {
+  const good = { kind: 'file', ...p.record(TYPELIB), mode: 0o644 };
+  for (const name of POLKIT_TYPELIBS) p.validateGtkMetadata(name, good, TYPELIB);
+  for (const changed of [{ ...good, kind: 'directory' }, { ...good, kind: 'symlink' }, { ...good, mode: 0o755 },
+    { ...good, mode: 0o664 }, { ...good, mode: 0o4644 }, { ...good, size: 0 }])
+    assert.throws(() => p.validateGtkMetadata(POLKIT_TYPELIBS[0], changed, TYPELIB));
+  assert.throws(() => p.validateGtkMetadata(POLKIT_TYPELIBS[0], { ...good, ...p.record(elf()) }, elf()), /typelib/);
+  assert.throws(() => p.validateGtkMetadata(POLKIT_TYPELIBS[0], good, Buffer.alloc(TYPELIB.length)), /typelib/);
+  const entry = { usr: { kind: 'directory', mode: 0o755 }, 'usr/lib': { kind: 'directory', mode: 0o755 },
+    'usr/lib/girepository-1.0': { kind: 'directory', mode: 0o755 }, [POLKIT_TYPELIBS[0]]: good };
+  p.validateInventory({ entries: entry, links: {}, unpackedSize: TYPELIB.length });
+  for (const mode of [0o755, 0o664, 0o4644]) {
+    const changed = structuredClone(entry); changed[POLKIT_TYPELIBS[0]].mode = mode;
+    assert.throws(() => p.validateInventory({ entries: changed, links: {}, unpackedSize: TYPELIB.length }));
+  }
+});
+test('actual Unix inventory checks typelib bytes and rejects links or executables under the allowed metadata name', t => {
+  if (process.platform === 'win32') return t.skip('Actual Unix mode/link checks run in the native Linux packaging preflight');
+  const root = temp(t), file = put(root, POLKIT_TYPELIBS[0], TYPELIB);
+  assert.equal(p.inventory(root, true).entries[POLKIT_TYPELIBS[0]].mode, 0o644);
+  fs.chmodSync(file, 0o755); assert.throws(() => p.inventory(root, true), error => {
+    assert.match(error.message, /typelib/);
+    assert.equal(error.inventoryEvidence.rejectedEntry.path, POLKIT_TYPELIBS[0]); return true;
+  });
+  fs.chmodSync(file, 0o644); fs.writeFileSync(file, elf()); assert.throws(() => p.inventory(root, true), /typelib/);
+  fs.unlinkSync(file); put(root, 'target', TYPELIB); fs.symlinkSync('../../target', file);
+  assert.throws(() => p.inventory(root, true), /typelib/);
+});
+test('first rejected entry keeps bounded path/stat/prefix evidence without changing the rejected file', t => {
+  const root = temp(t), file = put(root, 'pkexec', Buffer.alloc(4096, 97));
+  const before = fs.readFileSync(file), stat = fs.lstatSync(file);
+  let error; try { p.inventory(root, true); } catch (value) { error = value; }
+  assert.ok(error); const evidence = error.inventoryEvidence;
+  assert.equal(evidence.complete, false); assert.equal(evidence.rejectedEntry.path, 'pkexec');
+  assert.equal(evidence.rejectedEntry.stat.kind, 'file'); assert.equal(evidence.rejectedEntry.stat.mode, stat.mode & 0o7777);
+  assert.equal(evidence.rejectedEntry.prefix.size, 64);
+  assert.equal(evidence.rejectedEntry.prefix.sha256, p.record(before.subarray(0, 64)).sha256);
+  assert.equal(evidence.rejectedEntry.prefix.hex, before.subarray(0, 64).toString('hex'));
+  assert.ok(Buffer.byteLength(JSON.stringify(evidence)) <= 8192);
+  assert.deepEqual(fs.readFileSync(file), before);
+});
+test('exact built AppImage is retained before inventory and is not overwritten or changed on refusal', t => {
+  const root = temp(t), source = put(root, 'built.AppImage', Buffer.concat([elf(), Buffer.from('exact unchanged fixture')]));
+  const output = path.join(root, 'Creator Hub_0.1.16_amd64.AppImage'), before = fs.readFileSync(source);
+  assert.deepEqual(p.retainAppImage(source, output), p.record(before));
+  assert.deepEqual(fs.readFileSync(source), before); assert.deepEqual(fs.readFileSync(output), before);
+  assert.throws(() => p.retainAppImage(source, output)); assert.deepEqual(fs.readFileSync(output), before);
+  const text = fs.readFileSync(path.join(__dirname, 'linux-016-portable-package.cjs'), 'utf8');
+  assert.ok(text.indexOf('receipt.appImage = retainAppImage(') < text.indexOf('const inv = inventory(appdir, true)'));
+  assert.ok(text.indexOf('receipt.appImage = retainAppImage(') < text.indexOf('receipt.upstreamPackagingTools ='));
+  assert.match(text, /receipt\.inventoryEvidence = error\.inventoryEvidence/);
+  const refusal = workflow().jobs.package.steps.find(step => step.if === 'failure()' && step.uses === 'actions/upload-artifact@v4');
+  assert.equal(refusal.with['compression-level'], 0);
+  assert.ok(refusal.with.path.includes('${{ runner.temp }}/linux-016-portable-output/Creator Hub_0.1.16_amd64.AppImage'));
+});
 test('flatten preserves originals, expands only internal file links and normalizes only the copy modes', t => {
   if (process.platform === 'win32') return t.skip('Unix symlink and mode evidence belongs to the Linux workflow');
   const root = temp(t), tree = path.join(root, 'AppDir'); fs.mkdirSync(tree, { mode: 0o755 });

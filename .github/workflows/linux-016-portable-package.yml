@@ -106,8 +106,10 @@ jobs:
           name: linux-016-portable-refusal-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
           if-no-files-found: warn
+          compression-level: 0
           path: |
             ${{ runner.temp }}/linux-016-portable-input/input-binding.json
             ${{ runner.temp }}/linux-016-portable-output/package-refusal.json
+            ${{ runner.temp }}/linux-016-portable-output/Creator Hub_0.1.16_amd64.AppImage
             ${{ runner.temp }}/linux-016-portable-output/appdir-original-inventory.json
             ${{ runner.temp }}/linux-016-portable-output/appdir-flattened-inventory.json
