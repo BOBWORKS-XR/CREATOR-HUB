@@ -160,6 +160,7 @@ for (const width of [1100, 390, 320]) test(`MCP saved projects show selected sta
   await expect(rows).toHaveCount(3);
   await expect(rows.nth(0).getByRole('button', { name: 'Select Current for MCP', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(rows.nth(0)).toHaveAttribute('data-selected', 'true');
+  await expect(field(page, 'mcp', 'discovered')).toHaveValue('/projects/Current');
   await expect(rows.nth(0)).toContainText('Selected for MCP');
   for (const [index, label] of ['Bridge current', 'Bridge update available', 'Bridge not installed'].entries()) {
     await expect(rows.nth(index)).toContainText(label);
@@ -169,6 +170,7 @@ for (const width of [1100, 390, 320]) test(`MCP saved projects show selected sta
   await expect(rows.nth(1)).toHaveAttribute('data-selected', 'true');
   await expect(rows.nth(0)).toHaveAttribute('data-selected', 'false');
   await expect(field(page, 'mcp', 'project')).toHaveValue('/projects/Old bridge');
+  await expect(field(page, 'mcp', 'discovered')).toHaveValue('/projects/Old bridge');
   const saved = await page.evaluate(() => window.savedConfig);
   expect(saved.channels).toEqual(channels);
   expect(saved.active_channel_id).toBe('1');
@@ -178,7 +180,7 @@ for (const width of [1100, 390, 320]) test(`MCP saved projects show selected sta
   for (const row of await rows.all()) {
     expect(await row.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   }
-  await page.screenshot({ path: testInfo.outputPath('mcp-project-selection.png'), fullPage: true });
+  await field(page, 'mcp', 'projects').screenshot({ path: testInfo.outputPath('mcp-project-selection.png') });
 });
 
 test('a failed bridge check is not shown as a missing or current bridge and is not retried automatically', async ({ page }) => {

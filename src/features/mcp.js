@@ -66,6 +66,10 @@ export function mount(root, api) {
   const projectChecks = new Map();
   const clientUi = new Map();
   const active = () => config?.channels?.find(channel => channel.id === config.active_channel_id);
+  function syncProjectPicker() {
+    const path = $('project').value;
+    $('discovered').value = [...$('discovered').options].some(option => option.value === path) ? path : '';
+  }
   const selectedClients = () => clients.filter(([id]) => clientUi.get(id).checkbox.checked);
   const run = async (action, label) => { const result = await page.run(action, label); controls(); return result; };
   function productVisibility() {
@@ -184,6 +188,7 @@ export function mount(root, api) {
   }
   async function check() {
     const project = $('project').value;
+    syncProjectPicker();
     clearFeedback('Check the Unity connection before changing local feedback.');
     const result = await page.call('get_onboarding_status', { unityProjectPath: project || null });
     if (project !== $('project').value) return;
@@ -261,7 +266,11 @@ export function mount(root, api) {
     if (!Array.isArray(discovered)) throw new Error('Project discovery returned an invalid list.');
     if (!$('project').value) $('project').value = active()?.unity_project_path || discovered[0]?.path || '';
     const placeholder = node('option', 'Choose a project'); placeholder.value = '';
-    $('discovered').replaceChildren(placeholder, ...discovered.map(item => { const option = node('option', item.name); option.value = item.path; return option; }));
+    const known = new Map();
+    for (const item of [...config.channels.map(channel => ({ name: channel.name, path: channel.unity_project_path })), ...discovered]) {
+      if (!known.has(item.path)) known.set(item.path, item);
+    }
+    $('discovered').replaceChildren(placeholder, ...[...known.values()].map(item => { const option = node('option', item.name); option.value = item.path; return option; }));
     $('server').value = config.mcp_server_path || '';
     const groups = config.tool_groups || 'core';
     if (![...$('groups').options].some(option => option.value === groups)) { const option = node('option', `Current: ${groups}`); option.value = groups; $('groups').append(option); }
@@ -292,7 +301,7 @@ export function mount(root, api) {
       await page.call(`remove_${commandId}_mcp_config`); await check();
     }, `Disconnecting ${label}`));
   }
-  page.on($('project'), 'input', () => { onboarding = null; clearFeedback('Project changed. Check the Unity connection to load its local feedback preferences.'); });
+  page.on($('project'), 'input', () => { syncProjectPicker(); onboarding = null; clearFeedback('Project changed. Check the Unity connection to load its local feedback preferences.'); });
   page.on($('feedback-enabled'), 'change', () => { if (!$('feedback-enabled').checked) $('feedback-usage').checked = false; controls(); });
   page.on($('feedback-check'), 'click', () => run(() => readFeedback(), 'Checking project feedback'));
   page.on($('feedback-save'), 'click', async () => {
