@@ -1627,6 +1627,9 @@ fn retire_linux_batch(
     })
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "integrated-features", feature = "linux-production-migration")))]
+const LINUX_PRODUCTION_RETIREMENT_CONSENT: &str = "Only exact MCP 2.7.7 and Project Setup 0.3.7 DEBs are eligible. Linux requests administrator authentication separately for each app after settings and connections transfer. Cancelling a later system prompt does not undo earlier cleanup or the completed transfer. Unknown outcomes require review, never automatic retry. All nine old MCP Node/server/license/bridge files stay at their existing paths. Setup keeps one fixed non-executable retirement notice.\n\nContinuing also accepts the unknown custom-GUI integration risk: custom integrations requiring an old app window or its desktop registration may stop working and are not converted. Cancel if you need those integrations.";
+
 #[tauri::command]
 pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String> {
     #[cfg(not(feature = "integrated-features"))]
@@ -1685,9 +1688,13 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             let review_key = prompt_review_key(&plan.stores, &plan.report.legacy_apps, retirement_pending()?)?;
             let summary = format!("{} missing project(s); {} known standalone app location(s). Custom launchers that need an old GUI or its registration are not converted.",
                 import.as_ref().map_or(0, |proposal| proposal.added), plan.report.legacy_apps.len());
-            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration", not(feature = "linux-production-migration")))]
             let summary = if originals.is_some() {
                 format!("{summary}\n\nLinux development test only: only exact MCP 2.7.7 and Project Setup 0.3.7 DEBs are eligible. Linux requests administrator authentication separately for each app after settings and connections transfer. Cancelling a later system prompt does not undo earlier cleanup or the completed transfer. Unknown outcomes require review, never automatic retry. All nine old MCP Node/server/license/bridge files stay at their existing paths. Setup keeps one fixed non-executable retirement notice.\n\nContinuing also accepts the unknown custom-GUI integration risk: custom integrations requiring an old app window or its desktop registration may stop working and are not converted. Cancel if you need those integrations. These TEST ONLY packages are not release acceptance.")
+            } else { summary };
+            #[cfg(all(target_os = "linux", feature = "linux-production-migration"))]
+            let summary = if originals.is_some() {
+                format!("{summary}\n\n{LINUX_PRODUCTION_RETIREMENT_CONSENT}")
             } else { summary };
             let Some(approved) = review.approve(&handle, &summary)? else {
                 cancelled = true;
@@ -1999,6 +2006,45 @@ pub async fn retire_convergence_apps(handle: tauri::AppHandle) -> Result<Report,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_production_consent_keeps_retirement_disclosures_without_test_only_claims() {
+        let body = LINUX_PRODUCTION_RETIREMENT_CONSENT;
+        for required in [
+            "Only exact MCP 2.7.7 and Project Setup 0.3.7 DEBs are eligible.",
+            "administrator authentication separately for each app after settings and connections transfer",
+            "Cancelling a later system prompt does not undo earlier cleanup or the completed transfer.",
+            "Unknown outcomes require review, never automatic retry.",
+            "All nine old MCP Node/server/license/bridge files stay at their existing paths.",
+            "Setup keeps one fixed non-executable retirement notice.",
+            "custom integrations requiring an old app window or its desktop registration may stop working and are not converted.",
+            "Cancel if you need those integrations.",
+        ] {
+            assert!(body.contains(required), "missing consent disclosure: {required}");
+        }
+        for forbidden in ["TEST ONLY", "development", "release acceptance", "release ready"] {
+            assert!(!body.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn linux_native_consent_text_is_selected_only_by_the_production_cfg() {
+        let source = include_str!("convergence.rs");
+        let body = source.split("pub async fn move_to_hub(").nth(1).unwrap()
+            .split("fn cleanup_failure(").next().unwrap();
+        let development = body.find("#[cfg(all(target_os = \"linux\", feature = \"experimental-linux-migration\", not(feature = \"linux-production-migration\")))]").unwrap();
+        let production = body.find("#[cfg(all(target_os = \"linux\", feature = \"linux-production-migration\"))]").unwrap();
+        let approval = body.find("review.approve(&handle, &summary)").unwrap();
+        assert!(development < production && production < approval);
+        assert!(body[development..production].contains("Linux development test only:"));
+        assert!(body[development..production].contains("These TEST ONLY packages are not release acceptance."));
+        let selected = &body[production..approval];
+        assert!(selected.contains("if originals.is_some()"));
+        assert!(selected.contains("{LINUX_PRODUCTION_RETIREMENT_CONSENT}"));
+        assert!(selected.contains("else { summary }"));
+        assert!(!selected.contains("TEST ONLY"));
+        assert!(!selected.contains("development"));
+    }
 
     #[test]
     fn batch_phase_journal_is_durable_and_never_replays_or_overwrites_unknown_records() {
