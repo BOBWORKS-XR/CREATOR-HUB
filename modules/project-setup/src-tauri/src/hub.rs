@@ -109,6 +109,45 @@ fn verified(path: &Path, binary: &Binary) -> bool {
 }
 
 pub(crate) fn prepare_helper(progress: &impl Fn(&str)) -> Result<PathBuf, String> {
+    prepare_helper_with_policy(progress, false)
+}
+
+pub(crate) fn prepare_missing_project_helper(progress: &impl Fn(&str)) -> Result<PathBuf, String> {
+    prepare_helper_with_policy(progress, true)
+}
+
+fn cached_helper(path: &Path, binary: &Binary, missing_only: bool) -> Result<bool, String> {
+    if verified(path, binary) {
+        return Ok(true);
+    }
+    if missing_only {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(
+                "An existing Unity helper could not be verified. It was not replaced or executed."
+                    .into(),
+            ),
+        }
+    }
+    Ok(false)
+}
+
+fn publish_helper(staged: &Path, destination: &Path, missing_only: bool) -> Result<(), String> {
+    if missing_only {
+        // Create-only publication also preserves files appearing during download.
+        fs::hard_link(staged, destination).map_err(|e| format!("Unity helper cache changed or could not be published. No existing helper was replaced: {e}"))
+    } else {
+        if destination.exists() {
+            fs::remove_file(destination).map_err(|e| e.to_string())?;
+        }
+        fs::rename(staged, destination).map_err(|e| e.to_string())
+    }
+}
+
+fn prepare_helper_with_policy(
+    progress: &impl Fn(&str),
+    missing_only: bool,
+) -> Result<PathBuf, String> {
     let release: Release =
         serde_json::from_str(include_str!("unity-cli-release.json")).map_err(|e| e.to_string())?;
     let binary = release
@@ -121,7 +160,7 @@ pub(crate) fn prepare_helper(progress: &impl Fn(&str)) -> Result<PathBuf, String
         .join(&release.version);
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let destination = folder.join(if cfg!(windows) { "unity.exe" } else { "unity" });
-    if !verified(&destination, binary) {
+    if !cached_helper(&destination, binary, missing_only)? {
         progress("Downloading the verified official Unity helper (about 21 MB).");
         let client = reqwest::blocking::Client::builder()
             .https_only(true)
@@ -161,11 +200,7 @@ pub(crate) fn prepare_helper(progress: &impl Fn(&str)) -> Result<PathBuf, String
                 fs::set_permissions(&staged, fs::Permissions::from_mode(0o700))
                     .map_err(|e| e.to_string())?;
             }
-            // An invalid cached helper is never executed or treated as an installed CLI.
-            if destination.exists() {
-                fs::remove_file(&destination).map_err(|e| e.to_string())?;
-            }
-            fs::rename(&staged, &destination).map_err(|e| e.to_string())
+            publish_helper(&staged, &destination, missing_only)
         })();
         let _ = fs::remove_file(staged);
         result?;
@@ -357,6 +392,41 @@ mod tests {
             size: 5,
         };
         assert!(!verified(&path, &binary));
+    }
+    #[test]
+    fn missing_only_registry_helper_preserves_an_existing_invalid_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unity.exe");
+        let binary = Binary {
+            filename: "unity.exe".into(),
+            sha256: sha256(b"approved"),
+            size: 8,
+        };
+        assert!(!cached_helper(&path, &binary, true).unwrap());
+        fs::write(&path, b"existing").unwrap();
+        assert!(cached_helper(&path, &binary, true).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"existing");
+        assert!(
+            !cached_helper(&path, &binary, false).unwrap(),
+            "Existing explicit Setup repair contract is unchanged"
+        );
+        fs::write(&path, b"approved").unwrap();
+        assert!(cached_helper(&path, &binary, true).unwrap());
+    }
+    #[test]
+    fn missing_only_publication_never_clobbers_a_helper_appearing_during_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("approved.part");
+        let destination = dir.path().join("unity.exe");
+        fs::write(&staged, b"approved download").unwrap();
+        fs::write(&destination, b"existing bad helper").unwrap();
+        assert!(publish_helper(&staged, &destination, true).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"existing bad helper");
+        assert_eq!(fs::read(&staged).unwrap(), b"approved download");
+        fs::remove_file(&destination).unwrap();
+        publish_helper(&staged, &destination, true).unwrap();
+        fs::remove_file(&staged).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"approved download");
     }
     #[test]
     fn registry_readback_must_match_the_exact_existing_project() {

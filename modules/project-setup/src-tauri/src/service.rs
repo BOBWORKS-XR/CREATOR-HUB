@@ -4,6 +4,13 @@ use tauri::{Emitter, Manager};
 
 pub struct DirectEvents;
 
+/// Call only after native approval, on Hub's blocking operation worker.
+/// This caches a registry helper, not AI CLI consent or a Pipeline installation.
+pub fn prepare_project_helper() -> Result<std::path::PathBuf, String> {
+    let _operation = crate::lifecycle::LIFECYCLE.command()?;
+    crate::hub::prepare_missing_project_helper(&|_| {})
+}
+
 pub fn initialize(app: &tauri::AppHandle) -> Result<(), String> {
     if app.manage(DirectEvents) {
         Ok(())

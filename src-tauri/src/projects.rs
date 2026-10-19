@@ -17,6 +17,9 @@ const MAX_JSON: u64 = 2 * 1024 * 1024;
 const MAX_PROJECTS: usize = 200;
 const CREATOR: &str = "com.sidequest.creator-sdk";
 const BANTER: &str = "com.sidequest.banter";
+const HELPER_RELATIVE: &str = "CreatorProjectSetup/tools/unity-cli/1.0.0-beta.9/unity.exe";
+const HELPER_BYTES: u64 = 20_835_248;
+const HELPER_SHA256: &str = "325c5f4d0a241121034e0c066b3d6169ef776cd33b73b1489d5c151440c77876";
 
 #[derive(Default)]
 pub struct Projects(Mutex<Vec<Project>>);
@@ -32,8 +35,18 @@ pub struct Project {
     unity_version: String,
     source: String,
     added: bool,
+    selected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bridge: Option<Bridge>,
     issue: Option<String>,
     modified_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Bridge {
+    installed: bool,
+    current: bool,
 }
 
 #[derive(Serialize)]
@@ -225,6 +238,8 @@ fn inspect(path: &Path, source: &str, added: bool) -> Project {
         unity_version: String::new(),
         source: source.into(),
         added,
+        selected: false,
+        bridge: None,
         issue: None,
         modified_at_ms: None,
     };
@@ -257,16 +272,63 @@ fn inspect(path: &Path, source: &str, added: bool) -> Project {
     result
 }
 
-// Only the known, hash-pinned helper already cached by Project Setup is used.
-// Discovery never downloads a CLI, edits Hub's database, or runs a PATH executable.
-fn cli(args: &[&str]) -> Result<Value, String> {
-    if !cfg!(all(windows, target_arch = "x86_64")) {
-        return Err("Current Unity Hub discovery is not yet supported on this platform.".into());
+#[cfg(any(test, feature = "integrated-features"))]
+fn prepare_missing_helper(
+    path: &Path,
+    approve: impl FnOnce() -> bool,
+    prepare: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<(), String> {
+    crate::platform::reject_links(path)?;
+    if !path
+        .try_exists()
+        .map_err(|_| "Cannot inspect Unity helper cache.")?
+    {
+        if !approve() {
+            return Err("Unity registry helper download was declined. No helper, AI configuration or project files were changed.".into());
+        }
+        crate::platform::reject_links(path)?;
+        // The native dialog may remain open while another operation fills the cache.
+        if !path
+            .try_exists()
+            .map_err(|_| "Cannot inspect Unity helper cache.")?
+            && prepare()? != path
+        {
+            return Err("Prepared Unity helper is outside the approved cache location.".into());
+        }
     }
-    let path = dirs::data_local_dir()
+    crate::platform::reject_links(path)
+}
+
+fn project_helper_path() -> Result<PathBuf, String> {
+    Ok(dirs::data_local_dir()
         .ok_or("Local app data unavailable.")?
-        .join("CreatorProjectSetup/tools/unity-cli/1.0.0-beta.9/unity.exe");
-    crate::platform::reject_links(&path)?;
+        .join(HELPER_RELATIVE))
+}
+
+#[cfg(feature = "integrated-features")]
+fn prepare_helper_for_open(handle: &tauri::AppHandle) -> Result<(), String> {
+    if !cfg!(all(windows, target_arch = "x86_64")) {
+        return Ok(());
+    }
+    use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
+    // Same pinned executable as Setup; this approval does not enable its separate
+    // experimental AI integration, write client settings, or install Unity Pipeline.
+    prepare_missing_helper(
+        &project_helper_path()?,
+        || {
+            handle.dialog()
+            .message("Download Unity's verified registry helper to find installed Editors and projects?\n\nUnity CLI 1.0.0-beta.9, 20,835,248 bytes, from public-cdn.cloud.unity3d.com. Its fixed size and SHA-256 are checked before use. It is cached once and used here only for read-only Unity Hub registry lookups.\n\nThis does not enable the optional experimental AI Unity CLI integration, change AI-client configuration, install Unity Hub, an Editor or Unity Pipeline, or write project files. That AI integration remains a separate consent decision.\n\nDownload the helper and continue opening this project?")
+            .title("Download verified Unity registry helper")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom("Download helper".into(), "Not now".into()))
+            .blocking_show()
+        },
+        creator_project_setup::service::prepare_project_helper,
+    )
+}
+
+fn pin_helper(path: &Path, expected_bytes: u64, expected_sha256: &str) -> Result<File, String> {
+    crate::platform::reject_links(path)?;
     let mut options = File::options();
     options.read(true);
     #[cfg(windows)]
@@ -274,22 +336,37 @@ fn cli(args: &[&str]) -> Result<Value, String> {
         use std::os::windows::fs::OpenOptionsExt;
         options.share_mode(1);
     }
-    let mut pin = options.open(&path).map_err(|_| "Current Unity Hub discovery needs the verified Unity helper from Project Setup. Add a project folder manually in the meantime.")?;
+    let mut pin = options.open(path).map_err(|_| {
+        if cfg!(feature = "integrated-features") {
+            "The verified Unity registry helper is not cached. Open a listed project to review its one-time download. No project files were changed."
+        } else {
+            "The verified Unity registry helper is not cached. Prepare it in Project Setup, then refresh Projects. No project files were changed."
+        }
+    })?;
     if pin
         .metadata()
         .map_err(|_| "Cannot inspect Unity helper.")?
         .len()
-        != 20_835_248
+        != expected_bytes
     {
         return Err("Unity helper differs from the approved version; it was not executed.".into());
     }
     let mut digest = Sha256::new();
     std::io::copy(&mut pin, &mut digest).map_err(|_| "Cannot verify Unity helper.")?;
-    if format!("{:x}", digest.finalize())
-        != "325c5f4d0a241121034e0c066b3d6169ef776cd33b73b1489d5c151440c77876"
-    {
+    if format!("{:x}", digest.finalize()) != expected_sha256 {
         return Err("Unity helper failed integrity verification; it was not executed.".into());
     }
+    Ok(pin)
+}
+
+// Inventory is cache-only: no download, consent dialog or optional AI setup.
+// The deny-write/delete handle remains held during registry-only execution.
+fn cli(args: &[&str]) -> Result<Value, String> {
+    if !cfg!(all(windows, target_arch = "x86_64")) {
+        return Err("Current Unity Hub discovery is not yet supported on this platform.".into());
+    }
+    let path = project_helper_path()?;
+    let _pin = pin_helper(&path, HELPER_BYTES, HELPER_SHA256)?;
     let mut child = crate::platform::command(&path)
         .args(args)
         .args(["--json", "--non-interactive", "--no-banner", "--no-pager"])
@@ -345,6 +422,46 @@ fn entries(value: &Value) -> Vec<&Value> {
         Value::Object(values) => values.values().take(MAX_PROJECTS + 1).collect(),
         _ => Vec::new(),
     }
+}
+
+fn selected_project(config: &Path) -> Result<Option<String>, String> {
+    let current = config.join("creator-works-mcp/launcher-config.json");
+    let path = match fs::symlink_metadata(&current) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            config.join("banter-mcp/launcher-config.json")
+        }
+        _ => current,
+    };
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        _ => {}
+    }
+    let value = json(&path)?;
+    let channels = value["channels"]
+        .as_array()
+        .ok_or("MCP project list is invalid.")?;
+    if channels.len() > 256 {
+        return Err("MCP project list exceeds the existing 256-channel limit.".into());
+    }
+    let active = match value.get("active_channel_id") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(id)) if !id.is_empty() => id,
+        _ => return Err("MCP active project ID is invalid.".into()),
+    };
+    let matches: Vec<_> = channels
+        .iter()
+        .filter(|channel| channel["id"] == *active)
+        .collect();
+    if matches.len() != 1 {
+        return Err("MCP active project ID does not identify one saved project.".into());
+    }
+    let path = matches[0]["unity_project_path"]
+        .as_str()
+        .ok_or("MCP active project path is invalid.")?;
+    if path.len() > 4096 || !local_path(Path::new(path)) {
+        return Err("MCP active project path must be an absolute local folder.".into());
+    }
+    Ok(Some(key(Path::new(path))))
 }
 
 fn discover(config: &Path, saved_file: &Path, current_hub: Result<Value, String>) -> Snapshot {
@@ -431,17 +548,99 @@ fn discover(config: &Path, saved_file: &Path, current_hub: Result<Value, String>
         );
     }
     let mut projects: Vec<_> = projects.into_values().collect();
+    match selected_project(config) {
+        Ok(selected) => {
+            for project in &mut projects {
+                project.selected = selected.as_deref() == Some(&project.id);
+            }
+        }
+        Err(error) => warnings.push(format!("MCP active project could not be read: {error}")),
+    }
     projects.sort_by_key(|p| p.name.to_lowercase());
     collect_modified_dates(&mut projects);
     Snapshot { projects, warnings }
 }
 
+#[cfg(any(test, feature = "integrated-features"))]
+fn collect_bridges(
+    projects: &mut [Project],
+    fetch: impl FnOnce(&[PathBuf]) -> Result<Vec<Value>, String>,
+) -> Result<(), String> {
+    for project in projects.iter_mut() {
+        project.bridge = None;
+    }
+    if projects.len() > MAX_PROJECTS {
+        return Err("Project bridge inventory exceeds 200 entries.".into());
+    }
+    let mut indices = Vec::new();
+    let mut paths = Vec::new();
+    for (index, project) in projects.iter().enumerate() {
+        if project.issue.is_some() {
+            continue;
+        }
+        let path = Path::new(&project.path);
+        if !local_path(path) || project.path.len() > 4096 || key(path) != project.id {
+            return Err(
+                "Project path identity changed. Refresh Projects before checking its bridge."
+                    .into(),
+            );
+        }
+        crate::platform::reject_links(path)?;
+        indices.push(index);
+        paths.push(path.to_owned());
+    }
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let values = fetch(&paths)?;
+    if values.len() != paths.len() {
+        return Err("MCP returned an incomplete project bridge inventory.".into());
+    }
+    // Validate the whole batch before publishing any badge, never a partial result.
+    let bridges = values
+        .into_iter()
+        .map(|value| {
+            let bridge: Bridge = serde_json::from_value(value)
+                .map_err(|_| "MCP returned an invalid project bridge status.")?;
+            if bridge.current && !bridge.installed {
+                return Err("MCP returned an inconsistent project bridge status.");
+            }
+            Ok(bridge)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, bridge) in indices.into_iter().zip(bridges) {
+        projects[index].bridge = Some(bridge);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "integrated-features")]
+fn read_project_bridges(handle: &tauri::AppHandle, projects: &mut [Project]) -> Result<(), String> {
+    collect_bridges(projects, |paths| {
+        let candidate = crate::builtin::hosting_candidate(handle, crate::catalog::AppId::Mcp)?
+            .ok_or("This Hub has no verified built-in MCP resources for bridge status.")?;
+        let server_root = candidate
+            .path
+            .parent()
+            .ok_or("Invalid built-in MCP resource location.")?
+            .join("server");
+        creator_works_mcp_launcher::service::project_bridge_statuses(server_root, paths)
+    })
+}
+
 fn refresh(handle: &tauri::AppHandle) -> Result<Snapshot, String> {
-    let result = discover(
+    #[allow(unused_mut)]
+    let mut result = discover(
         &dirs::config_dir().ok_or("Config directory unavailable.")?,
         &saved_path()?,
         cli(&["projects", "list"]),
     );
+    #[cfg(feature = "integrated-features")]
+    if let Err(error) = read_project_bridges(handle, &mut result.projects) {
+        result.warnings.push(format!(
+            "Unity bridge status could not be verified: {error}"
+        ));
+    }
     *handle
         .state::<Projects>()
         .0
@@ -549,7 +748,7 @@ fn editor_from(value: &Value, version: &str) -> Option<PathBuf> {
         })
 }
 
-fn open_command(project: &Project, editor: &Path) -> Result<std::process::Command, String> {
+fn check_open_project(project: &Project) -> Result<(), String> {
     let root = Path::new(&project.path);
     let fresh = inspect(root, &project.source, project.added);
     if let Some(issue) = fresh.issue {
@@ -563,10 +762,15 @@ fn open_command(project: &Project, editor: &Path) -> Result<std::process::Comman
     if root.join("Temp/UnityLockfile").exists() {
         return Err("Unity has a lock file for this project. Use the existing Editor or check it in Unity Hub; no lock was removed.".into());
     }
+    Ok(())
+}
+
+fn open_command(project: &Project, editor: &Path) -> Result<std::process::Command, String> {
+    check_open_project(project)?;
     let mut command = crate::platform::command(editor);
     command
         .arg("-projectPath")
-        .arg(root)
+        .arg(&project.path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -578,6 +782,9 @@ pub async fn open_unity_project(handle: tauri::AppHandle, id: String) -> Result<
     tauri::async_runtime::spawn_blocking(move || {
         let manager = handle.state::<crate::manager::Manager>(); let _guard = manager.begin()?;
         let project = known(&handle, &id)?;
+        check_open_project(&project)?;
+        #[cfg(feature = "integrated-features")]
+        prepare_helper_for_open(&handle)?;
         let editor = editor_from(&cli(&["editors", "--installed"] )?, &project.unity_version)
             .ok_or_else(|| format!("Unity {} is not available. Install this exact version in Unity Hub, then retry. No project upgrade was attempted.", project.unity_version))?;
         open_command(&project, &editor)?.spawn().map_err(|_| "Unity could not be started.")?;
@@ -604,6 +811,492 @@ mod tests {
             json!({"dependencies": deps}).to_string(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn helper_identity_matches_integrated_setups_pinned_manifest() {
+        let release: Value = serde_json::from_str(include_str!(
+            "../../modules/project-setup/src-tauri/src/unity-cli-release.json"
+        ))
+        .unwrap();
+        assert!(HELPER_RELATIVE.contains(release["version"].as_str().unwrap()));
+        assert_eq!(release["binaries"]["win32-x64"]["size"], HELPER_BYTES);
+        assert_eq!(release["binaries"]["win32-x64"]["sha256"], HELPER_SHA256);
+    }
+
+    #[test]
+    fn missing_helper_uses_internal_preparation_but_existing_files_are_never_replaced() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("unity.exe");
+        prepare_missing_helper(
+            &path,
+            || true,
+            || {
+                fs::write(&path, b"fixture").unwrap();
+                Ok(path.clone())
+            },
+        )
+        .unwrap();
+        prepare_missing_helper(
+            &path,
+            || panic!("Cached helper needs no download approval"),
+            || panic!("Existing helpers must be verified, not replaced"),
+        )
+        .unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"fixture"));
+        let pin = pin_helper(&path, 7, &digest).unwrap();
+        #[cfg(windows)]
+        assert!(
+            fs::write(&path, b"changed").is_err(),
+            "Verified image must remain deny-write locked"
+        );
+        drop(pin);
+        fs::write(&path, b"changed").unwrap();
+        assert!(pin_helper(&path, 7, &digest)
+            .unwrap_err()
+            .contains("integrity"));
+        assert!(pin_helper(&path, 8, &digest)
+            .unwrap_err()
+            .contains("approved version"));
+        assert_eq!(fs::read(&path).unwrap(), b"changed");
+    }
+
+    #[test]
+    fn helper_preparation_failure_or_unexpected_path_never_authorizes_a_helper() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("unity.exe");
+        assert_eq!(
+            prepare_missing_helper(&path, || true, || Err("offline".into())).unwrap_err(),
+            "offline"
+        );
+        assert!(
+            prepare_missing_helper(&path, || true, || Ok(root.path().join("other.exe")))
+                .unwrap_err()
+                .contains("approved cache")
+        );
+        assert!(!path.exists());
+        assert!(pin_helper(&path, HELPER_BYTES, HELPER_SHA256).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn helper_junction_is_refused_before_preparation_and_after_it() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("unity.exe"), b"fixture").unwrap();
+        let link = root.path().join("linked");
+        let junction = || {
+            assert!(std::process::Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(&link)
+                .arg(&real)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        let path = link.join("unity.exe");
+        junction();
+        assert!(prepare_missing_helper(
+            &path,
+            || panic!("Linked cache cannot be approved"),
+            || panic!("Linked cache cannot be prepared")
+        )
+        .is_err());
+        assert!(pin_helper(&path, 7, &format!("{:x}", Sha256::digest(b"fixture"))).is_err());
+        fs::remove_dir(&link).unwrap();
+        assert!(prepare_missing_helper(
+            &path,
+            || true,
+            || {
+                junction();
+                Ok(path.clone())
+            }
+        )
+        .is_err());
+        fs::remove_dir(&link).unwrap();
+        assert_eq!(fs::read(real.join("unity.exe")).unwrap(), b"fixture");
+    }
+
+    #[test]
+    fn missing_helper_download_requires_approval_and_rechecks_the_cache_afterwards() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("unity.exe");
+        let error = prepare_missing_helper(&path, || false, || panic!("Decline cannot download"))
+            .unwrap_err();
+        assert!(error.contains("declined"));
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        prepare_missing_helper(
+            &path,
+            || {
+                fs::write(&path, b"unverified existing helper").unwrap();
+                true
+            },
+            || panic!("A helper appearing during consent must not be replaced"),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"unverified existing helper");
+        assert!(pin_helper(&path, HELPER_BYTES, HELPER_SHA256).is_err());
+    }
+
+    #[test]
+    fn background_registry_lookup_never_prepares_or_enables_optional_ai_cli() {
+        let source = include_str!("projects.rs");
+        let cli_body = source
+            .split("fn cli(args:")
+            .nth(1)
+            .unwrap()
+            .split("fn entries(")
+            .next()
+            .unwrap();
+        assert!(cli_body.contains("pin_helper(&path, HELPER_BYTES, HELPER_SHA256)"));
+        for forbidden in [
+            "prepare_helper_for_open",
+            "prepare_project_helper",
+            "prepare_missing_helper",
+            ".dialog()",
+            "reqwest",
+        ] {
+            assert!(
+                !cli_body.contains(forbidden),
+                "Background registry lookup contains {forbidden}"
+            );
+        }
+        let open_body = source
+            .split("pub async fn open_unity_project(")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(
+            open_body.find("check_open_project").unwrap()
+                < open_body.find("prepare_helper_for_open").unwrap()
+        );
+        assert!(
+            open_body.find("prepare_helper_for_open").unwrap()
+                < open_body.find("cli(&[\"editors\"").unwrap()
+        );
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        for forbidden in [
+            "unity_cli_enabled",
+            "unity_cli_consent_version",
+            "configureUnityCli",
+            "mcp configure",
+            "com.unity.pipeline",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "Project discovery must not configure {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_inventory_batches_known_valid_paths_and_preserves_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        fixture(&first, json!({}));
+        fixture(&second, json!({}));
+        let mut rows = vec![
+            inspect(&first, "saved", true),
+            inspect(&second, "Unity Hub", false),
+            inspect(&root.path().join("unavailable"), "saved", true),
+        ];
+        rows[0].selected = true;
+        collect_bridges(&mut rows, |paths| {
+            assert_eq!(paths, &[first.clone(), second.clone()]);
+            Ok(vec![
+                json!({"installed":true,"current":true}),
+                json!({"installed":true,"current":false}),
+            ])
+        })
+        .unwrap();
+        let value = serde_json::to_value(&rows).unwrap();
+        assert_eq!(value[0]["bridge"], json!({"installed":true,"current":true}));
+        assert_eq!(
+            value[1]["bridge"],
+            json!({"installed":true,"current":false})
+        );
+        assert_eq!(value[0]["selected"], true);
+        assert_eq!(value[1]["selected"], false);
+        assert!(value[2].get("bridge").is_none());
+        assert_eq!(
+            fs::read_to_string(first.join("ProjectSettings/ProjectVersion.txt")).unwrap(),
+            "m_EditorVersion: 6000.3.21f1\n"
+        );
+    }
+
+    #[test]
+    fn bridge_shape_length_and_resource_failures_leave_the_entire_batch_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), json!({}));
+        let project = inspect(root.path(), "saved", true);
+        for values in [
+            vec![],
+            vec![json!({"installed":false,"current":false}); 3],
+            vec![json!({"installed":true,"current":true}), Value::Null],
+            vec![
+                json!({"installed":true,"current":true}),
+                json!({"installed":false,"current":true}),
+            ],
+            vec![
+                json!({"installed":true,"current":true}),
+                json!({"installed":false}),
+            ],
+            vec![
+                json!({"installed":true,"current":true}),
+                json!({"installed":"false","current":false}),
+            ],
+            vec![
+                json!({"installed":true,"current":true}),
+                json!({"installed":false,"current":false,"path":"foreign"}),
+            ],
+        ] {
+            let mut rows = vec![project.clone(), project.clone()];
+            rows[0].selected = true;
+            for row in &mut rows {
+                row.bridge = Some(Bridge {
+                    installed: true,
+                    current: true,
+                });
+            }
+            assert!(collect_bridges(&mut rows, |_| Ok(values)).is_err());
+            assert!(rows.iter().all(|row| row.bridge.is_none()));
+            assert!(rows[0].selected);
+        }
+        let mut rows = vec![project];
+        rows[0].bridge = Some(Bridge {
+            installed: true,
+            current: true,
+        });
+        assert_eq!(
+            collect_bridges(&mut rows, |_| Err("Payload verification failed".into())).unwrap_err(),
+            "Payload verification failed"
+        );
+        assert!(rows[0].bridge.is_none());
+        collect_bridges(&mut rows, |_| {
+            Ok(vec![json!({"installed":false,"current":false})])
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&rows[0]).unwrap()["bridge"],
+            json!({"installed":false,"current":false})
+        );
+    }
+
+    #[test]
+    fn bridge_lookup_refuses_unknown_identity_network_relative_and_traversal_paths() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), json!({}));
+        let project = inspect(root.path(), "saved", true);
+        let mut foreign = project.clone();
+        foreign.id = "not-the-known-project".into();
+        assert!(collect_bridges(&mut [foreign], |_| panic!(
+            "Unknown identity cannot query MCP"
+        ))
+        .is_err());
+        for path in [
+            PathBuf::from("relative/project"),
+            PathBuf::from("//server/share/project"),
+            root.path().join("../project"),
+        ] {
+            let mut row = project.clone();
+            row.path = path.to_string_lossy().into_owned();
+            row.id = key(&path);
+            assert!(
+                collect_bridges(&mut [row], |_| panic!("Untrusted path cannot query MCP")).is_err()
+            );
+        }
+        let mut rows = vec![project; MAX_PROJECTS + 1];
+        assert!(collect_bridges(&mut rows, |_| panic!(
+            "Oversized inventory cannot query MCP"
+        ))
+        .is_err());
+        collect_bridges(&mut [], |_| {
+            panic!("Empty inventories do not verify or initialize MCP")
+        })
+        .unwrap();
+        let mut invalid = [inspect(&root.path().join("unavailable"), "saved", true)];
+        collect_bridges(&mut invalid, |_| {
+            panic!("Unavailable projects cannot query MCP")
+        })
+        .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bridge_lookup_refuses_a_known_project_path_replaced_by_a_junction() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        fixture(&project, json!({}));
+        let mut row = inspect(&project, "saved", true);
+        let moved = root.path().join("moved");
+        fs::rename(&project, &moved).unwrap();
+        assert!(std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&project)
+            .arg(&moved)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(collect_bridges(std::slice::from_mut(&mut row), |_| panic!(
+            "Replaced project path cannot query MCP"
+        ))
+        .is_err());
+        assert!(row.bridge.is_none());
+        fs::remove_dir(&project).unwrap();
+        assert!(moved.join("Packages/manifest.json").is_file());
+    }
+
+    #[test]
+    fn home_bridge_inventory_uses_only_the_verified_native_batch_api() {
+        let source = include_str!("projects.rs");
+        let body = source
+            .split("fn read_project_bridges(")
+            .nth(1)
+            .unwrap()
+            .split("fn refresh(")
+            .next()
+            .unwrap();
+        assert!(body.contains("crate::builtin::hosting_candidate"));
+        assert!(body.contains(
+            "creator_works_mcp_launcher::service::project_bridge_statuses(server_root, paths)"
+        ));
+        assert!(body.contains(".join(\"server\")"));
+        for forbidden in [
+            "features::call_mcp",
+            "initialize_mcp",
+            "service::initialize",
+            "managed_route",
+            "extension_status_bytes",
+            "read_verified",
+            "sha256",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "Home bridge inventory cannot use {forbidden}"
+            );
+        }
+        let refresh = source
+            .split("fn refresh(")
+            .nth(1)
+            .unwrap()
+            .split("pub fn community_paths(")
+            .next()
+            .unwrap();
+        assert!(
+            refresh.find("read_project_bridges").unwrap()
+                < refresh.find("result.projects.clone()").unwrap()
+        );
+    }
+
+    fn selection(path: &Path, project: &Path, active: Value) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            json!({"channels": [{"id":"chosen", "unity_project_path":project}],
+            "active_channel_id":active, "unknown":"keep"})
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn selected_project_uses_current_id_and_only_falls_back_when_current_is_absent() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        fixture(&first, json!({}));
+        fixture(&second, json!({}));
+        let current = root.path().join("creator-works-mcp/launcher-config.json");
+        let legacy = root.path().join("banter-mcp/launcher-config.json");
+        selection(&legacy, &second, json!("chosen"));
+        assert_eq!(selected_project(root.path()).unwrap(), Some(key(&second)));
+        selection(&current, &first, json!("chosen"));
+        let original = fs::read(&current).unwrap();
+        let result = discover(
+            root.path(),
+            &root.path().join("saved.json"),
+            Ok(json!({"data":[]})),
+        );
+        assert_eq!(result.projects.iter().filter(|p| p.selected).count(), 1);
+        assert!(
+            result
+                .projects
+                .iter()
+                .find(|p| p.id == key(&first))
+                .unwrap()
+                .selected
+        );
+        assert!(
+            !result
+                .projects
+                .iter()
+                .find(|p| p.id == key(&second))
+                .unwrap()
+                .selected
+        );
+        assert_eq!(fs::read(&current).unwrap(), original);
+        let row = serde_json::to_value(&result.projects[0]).unwrap();
+        assert!(row["selected"].is_boolean());
+        assert!(
+            row.get("bridge").is_none(),
+            "Unavailable bridge status must not be guessed"
+        );
+        selection(&current, &first, Value::Null);
+        assert_eq!(selected_project(root.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn invalid_or_unreadable_current_selection_never_resurrects_legacy_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("creator-works-mcp/launcher-config.json");
+        let legacy = root.path().join("banter-mcp/launcher-config.json");
+        selection(&legacy, root.path(), json!("chosen"));
+        fs::create_dir_all(current.parent().unwrap()).unwrap();
+        for invalid in [
+            "{",
+            "null",
+            r#"{"channels":{},"active_channel_id":"chosen"}"#,
+            r#"{"channels":[],"active_channel_id":true}"#,
+            r#"{"channels":[],"active_channel_id":"missing"}"#,
+        ] {
+            fs::write(&current, invalid).unwrap();
+            assert!(selected_project(root.path()).is_err());
+            let result = discover(
+                root.path(),
+                &root.path().join("saved.json"),
+                Ok(json!({"data":[]})),
+            );
+            assert!(result.projects.iter().all(|p| !p.selected));
+            assert_eq!(fs::read_to_string(&current).unwrap(), invalid);
+        }
+        fs::remove_file(&current).unwrap();
+        fs::create_dir(&current).unwrap();
+        assert!(selected_project(root.path()).is_err());
+    }
+
+    #[test]
+    fn active_selection_requires_one_exact_channel_and_a_local_path() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("creator-works-mcp/launcher-config.json");
+        for active in [json!("CHOSEN"), json!(""), json!(false)] {
+            selection(&current, root.path(), active);
+            assert!(selected_project(root.path()).is_err());
+        }
+        selection(&current, Path::new("relative/project"), json!("chosen"));
+        assert!(selected_project(root.path()).is_err());
+        selection(&current, root.path(), json!("chosen"));
+        let mut value: Value = serde_json::from_slice(&fs::read(&current).unwrap()).unwrap();
+        let duplicate = value["channels"][0].clone();
+        value["channels"].as_array_mut().unwrap().push(duplicate);
+        fs::write(&current, value.to_string()).unwrap();
+        assert!(selected_project(root.path()).is_err());
     }
 
     fn set_modified(path: &Path, seconds: u64) {
