@@ -988,6 +988,15 @@ class FreshUiTests(unittest.TestCase):
         f.bus.close_sync.assert_called_once_with(None)
 
 
+class ProtectedSourceTests(unittest.TestCase):
+    def test_unsafe_ancestor_reports_exact_public_fixture_path_and_metadata(self):
+        target = Path("/opt")
+        info = types.SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o777)
+        with mock.patch.object(Path, "lstat", return_value=info), mock.patch.object(Path, "is_symlink", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, r"Root-protected fixture source/ancestor required: .*opt; uid=0; gid=0; mode=0777"):
+                p.protected(target, True)
+
+
 class WorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1029,6 +1038,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(commands.count(fetch), 1)
         tests = next(i for i, command in enumerate(commands) if "native-linux-update-flow.test.py" in command)
         self.assertLess(commands.index(fetch), tests)
+        self.assertIn("stat --format='%n uid=%u gid=%g mode=%a' / /opt", commands[tests])
 
     def test_private_draft_growth_is_byte_bounded_without_changing_exact_asset_pins(self):
         script = next(step["with"]["script"] for step in self.workflow["jobs"]["stage-input"]["steps"]

@@ -50,6 +50,7 @@ jobs:
           npm ci --ignore-scripts
           python3 -B scripts/native-linux-update-flow.test.py
           python3 -B scripts/native-linux-update-flow.py checkpoint
+          stat --format='%n uid=%u gid=%g mode=%a' / /opt
 
   stage-input:
     needs: preflight

@@ -919,7 +919,7 @@ def protected(path, directory=False):
     for target in (path, *path.parents):
         info = target.lstat()
         require(not target.is_symlink() and info.st_uid == info.st_gid == 0 and not info.st_mode & 0o7022,
-                "Root-protected fixture source/ancestor required")
+                f"Root-protected fixture source/ancestor required: {target}; uid={info.st_uid}; gid={info.st_gid}; mode={stat.S_IMODE(info.st_mode):04o}")
     info = path.stat()
     require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode), "Fixture source type differs")
 
