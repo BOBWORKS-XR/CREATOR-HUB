@@ -203,7 +203,7 @@ function assemble(input, output, platform, arch, context = {}) {
     run('/usr/bin/codesign', ['--verify', '--strict', path.join(output, 'modules', name)]);
   }
   recheck();
-  return { manifest, source: handoff.source, handoffSha256: accepted.handoffSha256, nativeGuiAccepted: false, releaseReady: false };
+  return { manifest, version: accepted.version, source: handoff.source, handoffSha256: accepted.handoffSha256, nativeGuiAccepted: false, releaseReady: false };
 }
 
 module.exports = { admission, inventory, validateHandoff, verificationTools, verifyPrivateSource, assemble, INPUTS, TRANSFER, ROUTING, WORKFLOW };

@@ -6,6 +6,29 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { relativeFile, moduleFiles, verifyStage, stageFileMode } = require('./build-unified.cjs');
 
+test('signed assembly receipts use the admitted version and actual 016 Cargo features without changing frozen14 shape', () => {
+  const { signedAssemblyReceipt, integrationArguments } = require('./build-unified.cjs');
+  const result = { version: '0.1.16', source: { sourceCommit: 'a'.repeat(40) }, handoffSha256: 'b'.repeat(64) };
+  const args = integrationArguments('linux', 'x86_64', true, true);
+  const receipt = signedAssemblyReceipt(result, 'linux', 'x86_64', 'c'.repeat(40), args);
+  assert.equal(receipt.hubVersion, '0.1.16');
+  assert.deepEqual(receipt.compiledFeatures, args[1].split(','));
+  assert.deepEqual(receipt.privateSource, result.source);
+  for (const key of ['privateModulesRecompiled', 'privateModulesResigned', 'nativeGuiAccepted', 'releaseReady']) assert.equal(receipt[key], false);
+  for (const features of [[], ['--features', 'integrated-features'], ['--features', args[1] + ',unreviewed']]) {
+    assert.throws(() => signedAssemblyReceipt(result, 'linux', 'x86_64', 'c'.repeat(40), features), /actual integrated Cargo/);
+  }
+  for (const target of [['macos', 'aarch64'], ['linux', 'aarch64']]) assert.throws(() => signedAssemblyReceipt(result, ...target, 'c'.repeat(40), args), /admitted version and platform/);
+  assert.throws(() => signedAssemblyReceipt({ ...result, version: '0.1.17' }, 'linux', 'x86_64', 'c'.repeat(40), args), /admitted version/);
+  const frozen = signedAssemblyReceipt({ ...result, version: '0.1.14' }, 'linux', 'x86_64', 'c'.repeat(40), []);
+  assert.equal(frozen.hubVersion, '0.1.14');
+  assert.equal(Object.hasOwn(frozen, 'compiledFeatures'), false);
+  const source = fs.readFileSync(path.join(__dirname, 'assemble-unix-payload.cjs'), 'utf8');
+  assert.match(source, /return \{ manifest, version: accepted\.version, source: handoff\.source/);
+  const builder = fs.readFileSync(path.join(__dirname, 'build-unified.cjs'), 'utf8');
+  assert.match(builder, /signedAssemblyReceipt\(result, platform, arch, environment\.GITHUB_SHA, featureArgs\)/);
+});
+
 test('direct page packaging is explicit, platform-specific and cannot disguise writable features as a read-only candidate', () => {
   const { integrationArguments, parseBuildOptions, build } = require('./build-unified.cjs');
   assert.deepEqual(integrationArguments('windows', 'x86_64', false), []);

@@ -296,6 +296,22 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   console.log(`Local unified candidate: ${output}. Not a release or migration acceptance.`);
   return output;
 }
+function signedAssemblyReceipt(result, platform, arch, commit, featureArgs) {
+  if (result.version !== '0.1.14' && !(result.version === '0.1.16' && platform === 'linux' && arch === 'x86_64')) {
+    throw Error('Signed assembly receipt requires its independently admitted version and platform.');
+  }
+  let compiledFeatures;
+  if (result.version === '0.1.16') {
+    const actual = ['--features', 'integrated-features,experimental-flatpak-host,experimental-linux-migration'];
+    if (JSON.stringify(featureArgs) !== JSON.stringify(actual)) throw Error('Linux 0.1.16 receipt requires the actual integrated Cargo feature arguments.');
+    compiledFeatures = featureArgs[1].split(',');
+  }
+  return { schemaVersion: 1, product: 'com.creatorworks.hub.unix-signed-assembly', platform, arch,
+    hubVersion: result.version, assemblyCommit: commit, privateSource: result.source, handoffSha256: result.handoffSha256,
+    ...(compiledFeatures ? { compiledFeatures } : {}),
+    mcpMode: 'writable', privateModulesRecompiled: false, privateModulesResigned: false,
+    nativeGuiAccepted: false, releaseReady: false };
+}
 function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCandidate = false,
   linuxIntegratedCandidate = false, integratedFeatures = false }, context = {}) {
   const root = context.root || repositoryRoot;
@@ -356,11 +372,8 @@ function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCan
       rawHub: path.join(output, 'creator-hub'), archiveDecoder, mcpMode: 'writable', linuxRetirementCandidate: retirementCandidate });
     if (retirement) require('./linux-retirement-package.cjs').verifyDeb(root, output, integrity, retirement, execute);
   }
-  fs.writeFileSync(path.join(output, 'signed-unix-assembly.json'), JSON.stringify({ schemaVersion: 1,
-    product: 'com.creatorworks.hub.unix-signed-assembly', platform, arch, hubVersion: '0.1.14',
-    assemblyCommit: environment.GITHUB_SHA, privateSource: result.source, handoffSha256: result.handoffSha256,
-    mcpMode: 'writable', privateModulesRecompiled: false, privateModulesResigned: false,
-    nativeGuiAccepted: false, releaseReady: false }, null, 2), { flag: 'wx' });
+  fs.writeFileSync(path.join(output, 'signed-unix-assembly.json'), JSON.stringify(
+    signedAssemblyReceipt(result, platform, arch, environment.GITHUB_SHA, featureArgs), null, 2), { flag: 'wx' });
   console.log(`Signed native Unix candidate: ${output}. Not migration or release acceptance.`);
   return output;
 }
@@ -391,7 +404,7 @@ function parseBuildOptions(args) {
   }
   return options;
 }
-module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, integrationArguments, integrationEnvironment, stageIntegratedMcpResources, candidateProfile, stageIntegrationService, stageWindowsIntegration, build, parseBuildOptions, writeAssemblyManifests };
+module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, integrationArguments, integrationEnvironment, stageIntegratedMcpResources, candidateProfile, stageIntegrationService, stageWindowsIntegration, build, parseBuildOptions, writeAssemblyManifests, signedAssemblyReceipt };
 if (require.main === module) {
   try {
     if (!process.argv[2]) throw Error('Provide one build name.');
