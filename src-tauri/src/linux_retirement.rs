@@ -76,6 +76,10 @@ fn capture(mut reader: impl Read) -> std::io::Result<Capture> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(
+    test,
+    not(all(target_os = "linux", feature = "linux-production-migration"))
+))]
 struct Inspection {
     status: String,
     baseline_matches: bool,
@@ -98,6 +102,10 @@ fn inspect_response(target: Target, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
+#[cfg(any(
+    test,
+    not(all(target_os = "linux", feature = "linux-production-migration"))
+))]
 fn inspect_development_response(target: Target, bytes: &[u8]) -> Result<(), String> {
     if target == Target::Setup {
         return setup_inspection_response(bytes, false);
@@ -123,6 +131,10 @@ fn inspect_development_response(target: Target, bytes: &[u8]) -> Result<(), Stri
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(
+    test,
+    not(all(target_os = "linux", feature = "linux-production-migration"))
+))]
 struct RetainedInspection {
     status: String,
     product: String,
@@ -152,6 +164,10 @@ fn retained_response(target: Target, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
+#[cfg(any(
+    test,
+    not(all(target_os = "linux", feature = "linux-production-migration"))
+))]
 fn retained_development_response(target: Target, bytes: &[u8]) -> Result<(), String> {
     if target == Target::Setup {
         return setup_inspection_response(bytes, true);
@@ -182,6 +198,10 @@ fn retained_development_response(target: Target, bytes: &[u8]) -> Result<(), Str
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(
+    test,
+    not(all(target_os = "linux", feature = "linux-production-migration"))
+))]
 struct Completion {
     status: String,
     experimental_transaction_compiled: bool,
@@ -201,6 +221,10 @@ struct Completion {
 // MCP protocol as a Setup result (or vice versa).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(
+    test,
+    not(all(target_os = "linux", feature = "linux-production-migration"))
+))]
 struct SetupInspection {
     status: String,
     product: String,
@@ -219,6 +243,10 @@ struct SetupInspection {
     omitted_files_verified: u32,
 }
 
+#[cfg(any(
+    test,
+    not(all(target_os = "linux", feature = "linux-production-migration"))
+))]
 fn setup_inspection_response(bytes: &[u8], retained: bool) -> Result<(), String> {
     let value: SetupInspection = serde_json::from_slice(bytes)
         .map_err(|_| "The Linux helper returned an unknown Setup inspection protocol.")?;
@@ -260,6 +288,10 @@ fn setup_inspection_response(bytes: &[u8], retained: bool) -> Result<(), String>
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(
+    test,
+    not(all(target_os = "linux", feature = "linux-production-migration"))
+))]
 struct SetupCompletion {
     status: String,
     product: String,
@@ -277,6 +309,10 @@ struct SetupCompletion {
     retry_policy: String,
 }
 
+#[cfg(any(
+    test,
+    not(all(target_os = "linux", feature = "linux-production-migration"))
+))]
 fn setup_development_completion_response(bytes: &[u8]) -> Result<Outcome, String> {
     let value: SetupCompletion = serde_json::from_slice(bytes).map_err(|_| {
         "The Setup cleanup result is unknown. Keep recovery records; do not retry automatically."
@@ -322,6 +358,10 @@ fn retire_response(target: Target, code: Option<i32>, output: &Capture) -> Resul
     }
 }
 
+#[cfg(any(
+    test,
+    not(all(target_os = "linux", feature = "linux-production-migration"))
+))]
 fn retire_development_response(
     target: Target,
     code: Option<i32>,
