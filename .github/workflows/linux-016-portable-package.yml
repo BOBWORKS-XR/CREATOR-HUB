@@ -1,0 +1,113 @@
+name: Unsigned Linux 016 portable packaging (not acceptance)
+
+on:
+  push:
+    branches: [validation/linux-016-portable-package]
+  workflow_dispatch:
+    inputs:
+      assembly_pins:
+        description: Independent JSON sourceCommit/tree, runId/Attempt, jobId, workflowId, artifactId+artifact size/SHA, receiptsArtifactId+receiptsArtifact size/SHA, handoffSha256, files pins; schemaVersion 1. No defaults.
+        type: string
+        required: true
+      private_input:
+        description: JSON expected (original unix-payload-binding pins, Linux 0.1.16 only), prepared metadata, independent original jobId and artifactSize. Fresh APIs and original ZIP verified; no keys/signatures created.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/linux-016-portable-package'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.22.3
+      - name: Refuse invalid unpinned inputs before apt, npm or native toolchain work
+        shell: bash
+        env:
+          ASSEMBLY_PINS: ${{ inputs.assembly_pins }}
+          PRIVATE_INPUT: ${{ inputs.private_input }}
+        run: |
+          set -euo pipefail
+          node scripts/linux-016-portable-package.cjs preflight
+      - name: Install packaging and parser prerequisites on this disposable runner only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev \
+            build-essential file patchelf python3-yaml
+      - name: Install only lockfile-pinned packaging dependencies without npm hooks
+        run: npm ci --ignore-scripts
+      - name: Parse JS, embedded Python, YAML and Bash and test all admission and archive contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check scripts/linux-016-portable-package.cjs
+          node --check scripts/linux-016-portable-package.test.cjs
+          node --test scripts/linux-016-portable-package.test.cjs scripts/module-archive.test.cjs \
+            scripts/unix-package-payload.test.cjs scripts/unix-payload-binding.test.cjs \
+            scripts/download-unix-payload-zip.test.cjs
+      - name: Bind and download only the independently reviewed successful 16 producer artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSEMBLY_PINS: ${{ inputs.assembly_pins }}
+          PRIVATE_INPUT: ${{ inputs.private_input }}
+        run: |
+          set -euo pipefail
+          node scripts/linux-016-portable-package.cjs fetch "$RUNNER_TEMP/linux-016-portable-input"
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Compile only the existing bounded archive verifier, not Root or private modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --manifest-path native/module-archive/Cargo.toml \
+            --target-dir "$RUNNER_TEMP/linux-016-module-verifier"
+      - name: Bundle original Root bytes with Tauri 2.11.4 and generate unsigned bounded AppDir transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/linux-016-portable-package.cjs package "$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/linux-016-portable-input" "$RUNNER_TEMP/linux-016-portable-output" \
+            "$RUNNER_TEMP/linux-016-module-verifier/release/creator-hub-module-archive"
+      # Do not upload the loose AppDirs: upload-artifact changes Unix modes and link semantics.
+      # The retained AppImage, original inventory and canonical TAR preserve distinct evidence.
+      - name: Retain unsigned packaging outputs and exact-byte evidence only
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-016-portable-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/linux-016-portable-output/creator-hub-linux-x86_64-0.1.16.appdir.tar.gz
+            ${{ runner.temp }}/linux-016-portable-output/portable-manifest.unsigned.json
+            ${{ runner.temp }}/linux-016-portable-output/Creator Hub_0.1.16_amd64.AppImage
+            ${{ runner.temp }}/linux-016-portable-output/appdir-original-inventory.json
+            ${{ runner.temp }}/linux-016-portable-output/appdir-flattened-inventory.json
+            ${{ runner.temp }}/linux-016-portable-output/package-receipt.json
+      - name: Retain bounded diagnostic receipts after a refusal, never claim runtime acceptance
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-016-portable-refusal-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/linux-016-portable-input/input-binding.json
+            ${{ runner.temp }}/linux-016-portable-output/package-refusal.json
+            ${{ runner.temp }}/linux-016-portable-output/appdir-original-inventory.json
+            ${{ runner.temp }}/linux-016-portable-output/appdir-flattened-inventory.json
