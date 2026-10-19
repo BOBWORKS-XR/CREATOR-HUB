@@ -189,9 +189,15 @@ def single_instance_owner(bus, polkit, glib, record):
     return identity
 
 
+def observed_package_state(root, b, label):
+    _code, output = b.run_tool(root, label, ["/usr/bin/dpkg-query", "-W", "-f=" + b.STATE_FORMAT, "creator-hub"])
+    require(type(output) is bytes and 0 < len(output) <= 256, "Bounded package-state observation required")
+    return output.decode("ascii")
+
+
 def installed15(root, b):
     """Read-only phase15 prerequisite, never an installation or acceptance flag."""
-    state = b.installed_state(root, "installed15-state")
+    state = observed_package_state(root, b, "installed15-state")
     require(state == "creator-hub\t0.1.15\tamd64\tinstalled\n", "Actual installed15 package state required")
     protected(Path(EXE))
     image = b.pinned(Path(EXE), (Phase15().length, Phase15().digest), 0o755)
@@ -208,9 +214,49 @@ def restart_candidate_diagnostic(pid):
         return {"pid": pid, "kernelStatUnavailable": True}
 
 
-def wait_successor(old_child, old, baseline, b, helper, capture, timeout=35, observation=None):
+def capture_old_children(old, b, helper):
+    records = {}
+    for pid in sorted(direct_children(old["pid"])):
+        try:
+            if b.process_uids(pid) != old["uids"]:
+                continue
+            value = b.native_process(pid, helper)
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        require(value["pid"] == pid and value["parentPid"] == old["pid"] and value["uids"] == old["uids"]
+                and int(value["startTime"]) >= int(old["startTime"]) and value["executable"] != EXE
+                and re.fullmatch(r"[a-f0-9]{64}", value.get("kernelImageSha256", "")), "Exact old non-Hub child identity required")
+        records[pid] = value
+    require(b.native_process(old["pid"], helper) == old, "Old Root changed during child inventory")
+    return records
+
+
+def recorded_old_zombie(pid, records, old, b, helper):
+    value = records.get(pid)
+    if value is None:
+        return None
+    require(value["pid"] == pid and value["parentPid"] == old["pid"] and value["uids"] == old["uids"]
+            and value["executable"] != EXE and re.fullmatch(r"[a-f0-9]{64}", value.get("kernelImageSha256", "")),
+            "Only measured old non-Hub children may be classified")
+    def snapshot():
+        raw = helper.Proc().stat(pid)
+        require(raw.startswith(str(pid) + " (") and len(raw) <= 4096, "Exact bounded child kernel record required")
+        fields = raw[raw.rfind(")") + 2:].split()
+        require(len(fields) >= 20, "Incomplete child kernel record")
+        return fields[0], fields[1], fields[19], b.process_uids(pid)
+    first = snapshot()
+    if first[0] != "Z":
+        return None
+    require(first == ("Z", str(os.getpid()), value["startTime"], old["uids"]) and snapshot() == first,
+            "Old zombie PID/start/parent/UID changed; no skip")
+    return {"pid": pid, "startTime": value["startTime"], "previousParentPid": old["pid"],
+            "parentPid": os.getpid(), "executableBeforeUpdate": value["executable"],
+            "kernelImageSha256BeforeUpdate": value["kernelImageSha256"], "state": "Z", "reaped": False}
+
+
+def wait_successor(old_child, old, baseline, b, helper, capture, timeout=35, observation=None, old_children=None):
     """Observe only; never spawn a replacement or signal any Root/renderer."""
-    deadline, replacement = time.monotonic() + timeout, None
+    deadline, replacement, old_zombies = time.monotonic() + timeout, None, set()
     while time.monotonic() < deadline:
         capture.pump(0.02)
         # Popen alone reaps old14. Do not waitpid(-1), consume agents or renderers.
@@ -219,6 +265,12 @@ def wait_successor(old_child, old, baseline, b, helper, capture, timeout=35, obs
         require(old_child.returncode == 0, "Old Root did not exit normally for automatic restart")
         for pid in sorted(direct_children(os.getpid()) - baseline - {old["pid"]}):
             try:
+                zombie = recorded_old_zombie(pid, old_children or {}, old, b, helper)
+                if zombie is not None:
+                    if observation is not None and pid not in old_zombies:
+                        observation.setdefault("measuredOldZombies", []).append(zombie)
+                    old_zombies.add(pid)
+                    continue
                 record = b.native_process(pid, helper)
             except (FileNotFoundError, ProcessLookupError):
                 continue
@@ -759,6 +811,8 @@ def native_capture(root, env):
             # The exclusive marker precedes any potentially successful action;
             # even an ambiguous return makes this fresh session non-retryable.
             b.save_json(root / "system-input-attempt.json", {"mode": selected_mode, "outcome": "unknown-no-retry", "source": env["GITHUB_SHA"]})
+            old_children = capture_old_children(identity, b, helper) if selected_mode == "approve" else {}
+            report["oldChildrenBeforeUpdate"] = list(old_children.values())
             perform_system_input(selected_mode, p, profile, input_guard, report["systemInput"], secret)
             report["capturedQuestionProvenAsDpkg"] = True
             wipe(secret)
@@ -766,7 +820,8 @@ def native_capture(root, env):
         if selected_mode == "approve":
             report["phase"] = "observe-automatic-restart"
             report["restartObservation"] = {}
-            replacement = wait_successor(child, identity, baseline, b, helper, root_output, observation=report["restartObservation"])
+            replacement = wait_successor(child, identity, baseline, b, helper, root_output,
+                observation=report["restartObservation"], old_children=old_children)
             report["root15"] = replacement
             report["automaticRestartObserved"] = True
             report["installed15"] = installed15(root, b)
@@ -804,7 +859,7 @@ def native_capture(root, env):
         report["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
         if selected_mode == "approve" and report.get("confirmationAccepted"):
             try:
-                report["installedPackageOnRefusal"] = b.installed_state(root, "installed-on-refusal")
+                report["installedPackageOnRefusal"] = observed_package_state(root, b, "installed-on-refusal")
                 report["installedImageOnRefusal"] = b.file_record(Path(EXE), 128 * 1024 * 1024, 0o755)
             except Exception as observation_error:
                 report["installationObservationRefusal"] = {"type": type(observation_error).__name__, "message": str(observation_error)[:1000]}

@@ -155,6 +155,15 @@ class FrozenTests(unittest.TestCase):
             self.assertNotIn("CREATOR_LINUX_COMPONENTS_PROBE", root_environment)
             self.assertEqual(worker_environment, root_environment | {"CREATOR_LINUX_COMPONENTS_PROBE": "1"})
 
+    def test_phase15_observation_does_not_change_the_frozen_phase14_package_guard(self):
+        with mock.patch.object(p, "frozen_directory", return_value=self.directory), mock.patch.object(p, "_dependencies", None):
+            _d, baseline, _components, _polkit = p.dependencies()
+            state = b"creator-hub\t0.1.15\tamd64\tinstalled\n"
+            with mock.patch.object(baseline, "run_tool", return_value=(0, state)):
+                with self.assertRaisesRegex(RuntimeError, "Native dpkg package state differs"):
+                    baseline.installed_state(Path("/fixture"), "old-guard")
+                self.assertEqual(p.observed_package_state(Path("/fixture"), baseline, "target-query"), state.decode("ascii"))
+
 
 class PhaseTests(unittest.TestCase):
     def test_exact_phase14_and15_different_size_and_hash(self):
@@ -198,17 +207,87 @@ class PhaseTests(unittest.TestCase):
                 p.single_instance_owner("session-bus", polkit, "glib", record())
 
     def test_installed15_requires_package_root_image_and_clean_dpkg_verify(self):
-        b = types.SimpleNamespace(installed_state=mock.Mock(return_value="creator-hub\t0.1.15\tamd64\tinstalled\n"),
-            pinned=mock.Mock(return_value={"sha256": p.Phase15().digest}), run_tool=mock.Mock(return_value=(0,b"")))
+        state = b"creator-hub\t0.1.15\tamd64\tinstalled\n"
+        b = types.SimpleNamespace(STATE_FORMAT="exact-frozen-format", installed_state=mock.Mock(),
+            pinned=mock.Mock(return_value={"sha256": p.Phase15().digest}), run_tool=mock.Mock(side_effect=[(0, state), (0, b"")]))
         with mock.patch.object(p, "protected") as protected:
             result = p.installed15(Path("/fixture"), b)
         protected.assert_called_once_with(Path(p.EXE))
         self.assertTrue(result["dpkgVerifyPassed"])
         self.assertFalse(result["signedUpdateAccepted"])
+        b.installed_state.assert_not_called()
+        self.assertEqual(b.run_tool.call_args_list[0].args[2], ["/usr/bin/dpkg-query", "-W", "-f=exact-frozen-format", "creator-hub"])
         b.pinned.assert_called_once_with(Path(p.EXE), (22048768, p.Phase15().digest), 0o755)
-        b.run_tool.return_value = (0, b"changed package member")
+        b.run_tool.side_effect = [(0, state), (0, b"changed package member")]
         with mock.patch.object(p, "protected"), self.assertRaises(RuntimeError):
             p.installed15(Path("/fixture"), b)
+
+    def test_target_phase_refuses_old_partial_or_wrong_architecture_package(self):
+        for state in (b"creator-hub\t0.1.14\tamd64\tinstalled\n", b"creator-hub\t0.1.15\tamd64\tunpacked\n",
+                      b"creator-hub\t0.1.15\tarm64\tinstalled\n", b"", b"x"*257):
+            b = types.SimpleNamespace(STATE_FORMAT="frozen-format", run_tool=mock.Mock(return_value=(0, state)), pinned=mock.Mock())
+            with self.subTest(state=state[:60]), self.assertRaises(RuntimeError):
+                p.installed15(Path("/fixture"), b)
+            b.pinned.assert_not_called()
+
+
+class OldChildTests(unittest.TestCase):
+    def fixture(self):
+        old = record(pid=41, start="100")
+        child = record(pid=44, supervisor=41, start="101") | {"executable": "/usr/lib/test/WebKitNetworkProcess", "kernelImageSha256": "c"*64}
+        return old, child
+
+    def stat_line(self, state="Z", parent=40, start="101"):
+        fields = [state, str(parent)] + ["0"]*18
+        fields[19] = start
+        return "44 (WebKitNetworkPr) " + " ".join(fields)
+
+    def test_inventory_records_only_actual_same_uid_old_children_and_rechecks_root(self):
+        old, child = self.fixture()
+        b = types.SimpleNamespace(process_uids=mock.Mock(side_effect=lambda pid: old["uids"] if pid == 44 else [0]*4),
+            native_process=mock.Mock(side_effect=lambda pid, _helper: child if pid == 44 else old))
+        with mock.patch.object(p, "direct_children", return_value={44, 45}):
+            self.assertEqual(p.capture_old_children(old, b, "helper"), {44: child})
+        self.assertEqual([call.args[0] for call in b.native_process.call_args_list], [44, 41])
+
+    def test_inventory_refuses_hub_child_changed_parent_uid_start_or_hash(self):
+        old, child = self.fixture()
+        for change in ({"executable": p.EXE}, {"parentPid": 99}, {"uids": [0]*4}, {"startTime": "99"}, {"kernelImageSha256": "unknown"}):
+            b = types.SimpleNamespace(process_uids=mock.Mock(return_value=old["uids"]), native_process=mock.Mock(return_value=child | change))
+            with self.subTest(change=change), mock.patch.object(p, "direct_children", return_value={44}), self.assertRaises(RuntimeError):
+                p.capture_old_children(old, b, mock.Mock())
+
+    def test_only_measured_old_zombie_with_same_start_uid_and_adopted_parent_is_classified(self):
+        old, child = self.fixture()
+        helper = mock.Mock()
+        helper.Proc.return_value.stat.return_value = self.stat_line()
+        b = types.SimpleNamespace(process_uids=mock.Mock(return_value=old["uids"]))
+        with mock.patch.object(p.os, "getpid", return_value=40):
+            result = p.recorded_old_zombie(44, {44: child}, old, b, helper)
+        self.assertEqual(result["pid"], 44)
+        self.assertEqual(result["kernelImageSha256BeforeUpdate"], "c"*64)
+        self.assertFalse(result["reaped"])
+        self.assertEqual(helper.Proc.return_value.stat.call_count, 2)
+
+    def test_unknown_or_live_children_are_not_zombie_exemptions(self):
+        old, child = self.fixture()
+        helper, b = mock.Mock(), mock.Mock()
+        self.assertIsNone(p.recorded_old_zombie(44, {}, old, b, helper))
+        helper.Proc.assert_not_called()
+        helper.Proc.return_value.stat.return_value = self.stat_line(state="R")
+        self.assertIsNone(p.recorded_old_zombie(44, {44: child}, old, b, helper))
+
+    def test_pid_reuse_foreign_parent_uid_or_changed_second_snapshot_refuses(self):
+        old, child = self.fixture()
+        for lines, uids in (([self.stat_line(start="102")]*2, old["uids"]),
+                            ([self.stat_line(parent=99)]*2, old["uids"]),
+                            ([self.stat_line()]*2, [0]*4),
+                            ([self.stat_line(), self.stat_line(state="R")], old["uids"])):
+            helper = mock.Mock()
+            helper.Proc.return_value.stat.side_effect = lines
+            b = types.SimpleNamespace(process_uids=mock.Mock(return_value=uids))
+            with mock.patch.object(p.os, "getpid", return_value=40), self.assertRaises(RuntimeError):
+                p.recorded_old_zombie(44, {44: child}, old, b, helper)
 
 
 class RestartObserverTests(unittest.TestCase):
@@ -246,6 +325,20 @@ class RestartObserverTests(unittest.TestCase):
                 mock.patch.object(p.subprocess, "Popen") as spawn:
             result = p.wait_successor(child, old, {30}, b, mock.Mock(), capture)
         self.assertEqual(result, new)
+        spawn.assert_not_called()
+
+    def test_measured_old_zombie_does_not_replace_or_weaken_new_root_identity(self):
+        child, old, new, b, capture = self.fixture()
+        new["pid"] = 45
+        observation = {}
+        zombie = {"pid": 44, "state": "Z", "reaped": False}
+        with mock.patch.object(p.os, "getpid", return_value=40), mock.patch.object(p, "direct_children", return_value={44, 45}), \
+                mock.patch.object(p, "recorded_old_zombie", side_effect=lambda pid, *_args: zombie if pid == 44 else None), \
+                mock.patch.object(p.subprocess, "Popen") as spawn:
+            result = p.wait_successor(child, old, set(), b, mock.Mock(), capture, observation=observation, old_children={44: {}})
+        self.assertEqual(result, new)
+        self.assertEqual(observation, {"measuredOldZombies": [zombie]})
+        self.assertEqual([call.args[0] for call in b.native_process.call_args_list], [45, 45])
         spawn.assert_not_called()
 
     def test_old_failure_refuses_without_successor_or_fallback(self):
