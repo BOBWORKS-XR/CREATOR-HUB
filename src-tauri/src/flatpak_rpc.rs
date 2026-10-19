@@ -19,6 +19,9 @@ const NATIVE_WINDOW_ONLY: &[&str] = &[
     "inspect_convergence_outcome",
     "hub_update_recovery_status",
     "review_retained_hub_update",
+    "native_support_status",
+    "install_native_support",
+    "review_native_support_recovery",
 ];
 
 pub(super) const EVENTS: &[&str] = &[

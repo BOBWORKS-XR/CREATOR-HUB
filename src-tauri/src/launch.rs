@@ -11,11 +11,20 @@ pub enum View {
     Setup,
 }
 
-// Launch arguments navigate only. They never select an executable or approve a mutation.
+// Launch roles never select an executable or approve a mutation.
+pub fn native_support_requested(arguments: impl IntoIterator<Item = OsString>) -> bool {
+    let arguments: Vec<_> = arguments.into_iter().take(2).collect();
+    cfg!(all(
+        target_os = "linux",
+        feature = "experimental-linux-portable-update"
+    )) && matches!(arguments.as_slice(), [flag] if flag == "--install-native-support")
+}
+
 pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<View, ()> {
     let arguments: Vec<_> = arguments.into_iter().take(4).collect();
     match arguments.as_slice() {
         [] => Ok(View::Hub),
+        [flag] if native_support_requested([flag.clone()]) => Ok(View::Hub),
         [flag]
             if flag == "--flatpak-activate"
                 && cfg!(all(
@@ -140,6 +149,28 @@ mod tests {
             vec!["--FLATPAK-ACTIVATE"],
         ] {
             assert!(parse(args.into_iter().map(OsString::from)).is_err());
+        }
+    }
+
+    #[test]
+    fn native_support_role_requires_the_exact_single_flag_and_linux_update_feature() {
+        let arguments = [OsString::from("--install-native-support")];
+        let supported = cfg!(all(
+            target_os = "linux",
+            feature = "experimental-linux-portable-update"
+        ));
+        assert_eq!(native_support_requested(arguments.clone()), supported);
+        assert_eq!(parse(arguments).is_ok(), supported);
+        for args in [
+            vec![],
+            vec!["--install-native-support", "--open-app", "mcp"],
+            vec!["--install-native-support", "--install-native-support"],
+            vec!["--install-native-support=/tmp/store"],
+            vec!["--INSTALL-NATIVE-SUPPORT"],
+        ] {
+            assert!(!native_support_requested(
+                args.into_iter().map(OsString::from)
+            ));
         }
     }
 }

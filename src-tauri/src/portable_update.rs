@@ -1,142 +1,36 @@
-//! Separate, default-off portable discovery and signed download preparation.
-//! Native package updaters and their restart targets are not portable fallbacks.
+//! Default-off portable updater policy and reviewed restart orchestration.
+//! Shared package identity does not relax strictly-newer/coordinator admission.
+use crate::portable_package::{
+    self as package, cache_root, regular, signed_descriptor, stable,
+    SignedDescriptor as Descriptor, VerifiedDownload,
+};
 use crate::{catalog, manager, platform, self_update};
 use creator_hub_linux_portable_deployment::{
-    self as deployment, Entry, Expected, HostSession, RestartChoice, RestartDisposition,
-    RestartReady, RestartReview, RestartStageOutcome, RootRestart, StagedRestart, Store,
-    VerifiedPackage,
+    self as deployment, Expected, HostSession, RestartChoice, RestartDisposition, RestartReady,
+    RestartReview, RestartStageOutcome, RootRestart, StagedRestart, Store,
 };
-use minisign_verify::{PublicKey, Signature};
-use semver::Version;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Serialize;
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    fs,
     path::{Path, PathBuf},
     sync::{atomic::Ordering, Mutex},
 };
 use tauri::{Emitter, Manager as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
-pub(crate) const DESCRIPTOR_NAME: &str = "creator-hub-linux-x86_64-portable.json";
-const REPO: &str = "CREATOR-HUB";
-const PACKAGE: &str = "portable-appdir";
 const REOPEN: &str = "Portable updates need the registered Hub helper. Close Hub and reopen it through the helper; your settings and current generation were kept.";
 const UNCERTAIN: &str = "Portable restart coordination could not be confirmed. Hub has retained its operation lock and has not reported an installed update. Keep Hub open; the coordinator state needs review before a normal close or another update.";
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Asset {
-    asset_name: String,
-    byte_length: u64,
-    sha256: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Descriptor {
-    schema_version: u32,
-    app_id: String,
-    version: String,
-    platform: String,
-    architecture: String,
-    package_type: String,
-    manifest: Asset,
-    archive: Asset,
-    executable_sha256: String,
-    restart_protocol: u32,
-    min_hub_version: String,
-}
-
-fn stable(value: &str) -> Result<Version, String> {
-    let parsed = Version::parse(value).map_err(|_| "Invalid portable version.")?;
-    if value.len() > 64
-        || parsed.to_string() != value
-        || !parsed.pre.is_empty()
-        || !parsed.build.is_empty()
-    {
-        return Err("Canonical stable portable version required.".into());
-    }
-    Ok(parsed)
-}
-
 impl Descriptor {
-    fn validate(&self) -> Result<Version, String> {
-        let version = stable(&self.version)?;
-        let minimum = stable(&self.min_hub_version)?;
-        if self.schema_version != 1
-            || self.app_id != "creator-hub"
-            || self.platform != "linux"
-            || self.architecture != "x86_64"
-            || self.package_type != PACKAGE
-            || self.restart_protocol != 1
-            || minimum > version
-            || !catalog::hash_valid(&self.executable_sha256)
-        {
-            return Err("Incompatible portable release descriptor.".into());
-        }
-        for (asset, name, maximum) in [
-            (
-                &self.manifest,
-                format!(
-                    "creator-hub-linux-x86_64-{}.portable-manifest.json",
-                    self.version
-                ),
-                deployment::MAX_MANIFEST as u64,
-            ),
-            (
-                &self.archive,
-                format!("creator-hub-linux-x86_64-{}.appdir.tar.gz", self.version),
-                deployment::MAX_ARCHIVE,
-            ),
-        ] {
-            if asset.asset_name != name
-                || asset.byte_length == 0
-                || asset.byte_length > maximum
-                || !catalog::hash_valid(&asset.sha256)
-            {
-                return Err("Invalid portable artifact binding.".into());
-            }
-        }
-        Ok(version)
-    }
-
     fn installable(&self) -> Result<(), String> {
         if self.validate()? <= stable(env!("CARGO_PKG_VERSION"))? {
             return Err("Hub is already using this version or a newer one.".into());
         }
-        if stable(&self.min_hub_version)? > stable(env!("CARGO_PKG_VERSION"))? {
+        if stable(self.min_hub_version())? > stable(env!("CARGO_PKG_VERSION"))? {
             return Err("This portable update needs an intermediate Hub version first.".into());
         }
         Ok(())
     }
-}
-
-fn signature(bytes: &[u8], sig: &[u8], maximum: usize) -> Result<(), String> {
-    if bytes.is_empty()
-        || bytes.len() > maximum
-        || sig.is_empty()
-        || sig.len() > deployment::MAX_SIGNATURE
-    {
-        return Err("Portable signed metadata exceeds its bound.".into());
-    }
-    let key = PublicKey::decode(include_str!("catalog-key.pub"))
-        .map_err(|_| "Invalid compiled portable update key.")?;
-    let sig =
-        Signature::decode(std::str::from_utf8(sig).map_err(|_| "Invalid signature encoding.")?)
-            .map_err(|_| "Invalid portable signature.")?;
-    key.verify(bytes, &sig, false)
-        .map_err(|_| "Portable signature verification failed.".into())
-}
-
-fn signed_descriptor(bytes: &[u8], sig: &[u8]) -> Result<Descriptor, String> {
-    signature(bytes, sig, catalog::MAX_METADATA as usize)?;
-    let descriptor: Descriptor = serde_json::from_slice(bytes)
-        .map_err(|_| "Invalid or ambiguous signed portable descriptor.")?;
-    descriptor.validate()?;
-    Ok(descriptor)
 }
 
 #[derive(Default)]
@@ -275,15 +169,6 @@ pub(crate) fn handles(handle: &tauri::AppHandle) -> bool {
         .unwrap_or(true)
 }
 
-fn cache_root() -> Result<PathBuf, String> {
-    let path = dirs::data_local_dir()
-        .ok_or("Local app data is unavailable.")?
-        .join("CreatorHub")
-        .join("hub-portable-updates");
-    platform::reject_links(&path)?;
-    Ok(path)
-}
-
 fn records() -> Result<PathBuf, String> {
     let dir = manager::child_dir("hub-portable-updates")?.join("records");
     platform::reject_links(&dir)?;
@@ -291,114 +176,14 @@ fn records() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn regular(path: &Path, maximum: u64) -> Result<Vec<u8>, String> {
-    platform::reject_links(path)?;
-    let named = fs::symlink_metadata(path).map_err(|_| "Portable download is unavailable.")?;
-    if !named.is_file() || named.nlink() != 1 || named.len() == 0 || named.len() > maximum {
-        return Err("Bounded ordinary portable download required.".into());
-    }
-    let same = |a: &fs::Metadata, b: &fs::Metadata| {
-        (
-            a.dev(),
-            a.ino(),
-            a.len(),
-            a.mode(),
-            a.nlink(),
-            a.uid(),
-            a.mtime(),
-            a.mtime_nsec(),
-            a.ctime(),
-            a.ctime_nsec(),
-        ) == (
-            b.dev(),
-            b.ino(),
-            b.len(),
-            b.mode(),
-            b.nlink(),
-            b.uid(),
-            b.mtime(),
-            b.mtime_nsec(),
-            b.ctime(),
-            b.ctime_nsec(),
-        )
-    };
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|_| "Cannot open portable download.")?;
-    let before = file
-        .metadata()
-        .map_err(|_| "Cannot inspect portable download.")?;
-    if !same(&named, &before) {
-        return Err("Portable download changed during open.".into());
-    }
-    let mut bytes = Vec::new();
-    (&mut file)
-        .take(maximum + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read portable download.")?;
-    let after = file
-        .metadata()
-        .map_err(|_| "Cannot recheck portable download.")?;
-    platform::reject_links(path)?;
-    let current = fs::symlink_metadata(path).map_err(|_| "Portable download pathname changed.")?;
-    if bytes.len() as u64 != before.len() || !same(&before, &after) || !same(&before, &current) {
-        return Err("Portable download changed while reading.".into());
-    }
-    Ok(bytes)
-}
-
-fn bound(bytes: &[u8], asset: &Asset) -> Result<(), String> {
-    if bytes.len() as u64 != asset.byte_length
-        || format!("{:x}", Sha256::digest(bytes)) != asset.sha256
-    {
-        return Err("Portable download differs from the signed descriptor.".into());
-    }
-    Ok(())
-}
-
-struct VerifiedDownload {
-    release: Descriptor,
-    package: VerifiedPackage,
-}
-
 fn verify_download(release: &Descriptor, directory: &Path) -> Result<VerifiedDownload, String> {
     release.installable()?;
-    let manifest = regular(
-        &directory.join("manifest.json"),
-        deployment::MAX_MANIFEST as u64,
-    )?;
-    bound(&manifest, &release.manifest)?;
-    let sig = regular(
-        &directory.join("manifest.minisig"),
-        deployment::MAX_SIGNATURE as u64,
-    )?;
-    // The existing signed manifest is archive authority. No detached archive
-    // signature or alternate Tauri latest.json protocol is introduced.
-    let package = deployment::verify(
-        &manifest,
-        &sig,
-        &directory.join("archive.tar.gz"),
-        &Expected::linux_x86_64(&release.version).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    let m = package.manifest();
-    if m.archive.size != release.archive.byte_length
-        || m.archive.sha256 != release.archive.sha256
-        || !matches!(m.entries.get(deployment::ENTRYPOINT), Some(Entry::File { sha256, .. }) if sha256 == &release.executable_sha256)
-    {
-        return Err("Portable descriptor differs from its signed package.".into());
-    }
-    Ok(VerifiedDownload {
-        release: release.clone(),
-        package,
-    })
+    package::verify_download(release, directory)
 }
 
 fn downloaded(release: &Descriptor) -> bool {
     cache_root()
-        .is_ok_and(|dir| verify_download(release, &dir.join(&release.manifest.sha256)).is_ok())
+        .is_ok_and(|dir| verify_download(release, &dir.join(release.manifest_sha256())).is_ok())
 }
 
 pub(crate) fn check(handle: &tauri::AppHandle, online: bool) -> Result<self_update::State, String> {
@@ -412,10 +197,10 @@ pub(crate) fn check(handle: &tauri::AppHandle, online: bool) -> Result<self_upda
         match result {
             Ok(Some((tag, bytes, sig))) => {
                 let release = signed_descriptor(&bytes, &sig)?;
-                if release.version != tag.to_string() {
+                if release.version() != tag.to_string() {
                     return Err("Portable tag and signed version differ.".into());
                 }
-                let file = dir.join(format!("{}.json", release.version));
+                let file = dir.join(format!("{}.json", release.version()));
                 if file.exists() {
                     if regular(&file, catalog::MAX_METADATA)? != bytes {
                         warning = Some("Portable metadata changed after publication. Keeping the previously verified record.".into());
@@ -456,7 +241,7 @@ pub(crate) fn check(handle: &tauri::AppHandle, online: bool) -> Result<self_upda
     }
     let release = releases
         .into_iter()
-        .max_by_key(|r| stable(&r.version).unwrap());
+        .max_by_key(|r| stable(r.version()).unwrap());
     let state = handle.state::<PortableUpdate>();
     let mut runtime = state
         .0
@@ -464,7 +249,7 @@ pub(crate) fn check(handle: &tauri::AppHandle, online: bool) -> Result<self_upda
         .map_err(|_| "Portable updater state is unavailable.")?;
     let result = self_update::State {
         current_version: env!("CARGO_PKG_VERSION"),
-        available_version: release.as_ref().map(|r| r.version.clone()),
+        available_version: release.as_ref().map(|r| r.version().to_owned()),
         downloaded: release.as_ref().is_some_and(downloaded),
         install_blocked: runtime
             .unsupported
@@ -492,148 +277,27 @@ fn selected(handle: &tauri::AppHandle, expected: &str) -> Result<Descriptor, Str
         .release
         .clone()
         .ok_or("Check for a portable Hub update first.")?;
-    if release.version != expected {
+    if release.version() != expected {
         return Err("The portable update changed. Check again.".into());
     }
     release.installable()?;
     Ok(release)
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|_| "Cannot exclusively save portable metadata.")?;
-    file.write_all(bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|_| "Cannot finish portable metadata.".into())
-}
-
 pub(crate) fn download(handle: &tauri::AppHandle, version: &str) -> Result<String, String> {
-    let _operation = handle.state::<manager::Manager>().begin()?;
+    let operation = handle.state::<manager::Manager>().begin()?;
     let release = selected(handle, version)?;
-    prepare_download(handle, &release)?;
+    prepare_download(handle, &release, &operation)?;
     Ok("Portable update verified and downloaded. Nothing was installed.".into())
 }
 
-/// Shared by explicit downloads and direct install. Cache preparation is not
-/// Store staging or approval: declining later keeps generations/settings intact.
 fn prepare_download(
     handle: &tauri::AppHandle,
     release: &Descriptor,
+    operation: &manager::Operation,
 ) -> Result<VerifiedDownload, String> {
-    let destination = cache_root()?.join(&release.manifest.sha256);
-    platform::reject_links(&destination)?;
-    cached_or_fetch(
-        &destination,
-        |directory| verify_download(release, directory),
-        || fetch_download(handle, release, &destination),
-    )
-}
-
-fn cached_or_fetch<T>(
-    destination: &Path,
-    verify: impl FnOnce(&Path) -> Result<T, String>,
-    fetch: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    if destination
-        .try_exists()
-        .map_err(|_| "Cannot inspect portable download cache.")?
-    {
-        // Never replace a corrupt/unreviewed cache by treating failure as absence.
-        verify(destination)
-    } else {
-        fetch()
-    }
-}
-
-fn fetch_download(
-    handle: &tauri::AppHandle,
-    release: &Descriptor,
-    destination: &Path,
-) -> Result<VerifiedDownload, String> {
-    let root = manager::child_dir("hub-portable-updates")?;
-    let cancel = handle.state::<manager::Manager>();
-    if cancel.cancellation().load(Ordering::SeqCst) {
-        return Err("Portable download cancelled.".into());
-    }
-    let _ = handle.emit(
-        "app-progress",
-        self_update::Progress {
-            message: format!(
-                "Preparing verified portable Creator Hub {}",
-                release.version
-            ),
-            received: 0,
-            total: release.archive.byte_length,
-            cancellable: true,
-        },
-    );
-    let client = catalog::client()?;
-    let url = catalog::release_url(REPO, &release.version, &release.manifest.asset_name);
-    let manifest = catalog::fetch_small(&client, &url, release.manifest.byte_length)?;
-    bound(&manifest, &release.manifest)?;
-    let sig = catalog::fetch_small(
-        &client,
-        &format!("{url}.minisig"),
-        deployment::MAX_SIGNATURE as u64,
-    )?;
-    signature(&manifest, &sig, deployment::MAX_MANIFEST)?;
-    if cancel.cancellation().load(Ordering::SeqCst) {
-        return Err("Portable download cancelled.".into());
-    }
-    if fs2::available_space(&root).map_err(|_| "Cannot check portable download space.")?
-        < release.archive.byte_length.saturating_mul(4) + deployment::MAX_TOTAL
-    {
-        return Err("Not enough space for the portable download.".into());
-    }
-    let temporary = tempfile::Builder::new()
-        .prefix("portable-download-")
-        .tempdir_in(&root)
-        .map_err(|_| "Cannot prepare private portable download cache.")?;
-    write_new(&temporary.path().join("manifest.json"), &manifest)?;
-    write_new(&temporary.path().join("manifest.minisig"), &sig)?;
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(temporary.path().join("archive.tar.gz"))
-        .map_err(|_| "Cannot save portable archive.")?;
-    let sync = file
-        .try_clone()
-        .map_err(|_| "Cannot hold portable download.")?;
-    manager::download_portable_binding(
-        &catalog::release_url(REPO, &release.version, &release.archive.asset_name),
-        release.archive.byte_length,
-        &release.archive.sha256,
-        file,
-        cancel.cancellation(),
-        |received| {
-            let _ = handle.emit(
-                "app-progress",
-                self_update::Progress {
-                    message: format!("Downloading portable Creator Hub {}", release.version),
-                    received,
-                    total: release.archive.byte_length,
-                    cancellable: true,
-                },
-            );
-        },
-    )?;
-    sync.sync_all()
-        .map_err(|_| "Cannot finish portable archive.")?;
-    let verified = verify_download(release, temporary.path())?;
-    if cancel.cancellation().load(Ordering::SeqCst) {
-        return Err("Portable download cancelled.".into());
-    }
-    fs::rename(temporary.path(), destination)
-        .map_err(|_| "Cannot publish verified portable download cache.")?;
-    File::open(&root)
-        .and_then(|dir| dir.sync_all())
-        .map_err(|_| "Cannot persist portable download cache.")?;
-    Ok(verified)
+    release.installable()?;
+    package::prepare_download(handle, release, operation)
 }
 
 fn retain_uncertain(
@@ -791,7 +455,11 @@ impl InstallFlow for NativeInstall<'_> {
     type Ready = RestartReady;
 
     fn prepare_download(&mut self) -> Result<Self::Verified, String> {
-        prepare_download(self.handle, &self.release)
+        prepare_download(
+            self.handle,
+            &self.release,
+            self.operation.as_ref().ok_or(UNCERTAIN)?,
+        )
     }
     fn review(&mut self, package: &Self::Verified) -> Result<Self::Review, String> {
         let session = HostSession::capture().map_err(|e| e.to_string())?;
@@ -802,7 +470,7 @@ impl InstallFlow for NativeInstall<'_> {
             )
             .map_err(|e| e.to_string())?;
         let review = store
-            .review_restart(&session, &package.package)
+            .review_restart(&session, package.package())
             .map_err(|e| e.to_string())?;
         Ok(ReviewedInstall {
             store,
@@ -841,7 +509,7 @@ impl InstallFlow for NativeInstall<'_> {
         );
         Ok(self.handle.dialog().message(format!(
             "Update portable Creator Hub from {} to {}?\n\nThe signed download has been verified. Hub will close normally; its registered helper will then select and open the new generation. Your old generations, settings, projects and MCP connections will stay in place. Cancelling keeps the current selection unchanged.{}",
-            reviewed.review.before().version, self.release.version, notice))
+            reviewed.review.before().version, self.release.version(), notice))
             .title("Update Creator Hub")
             .buttons(MessageDialogButtons::OkCancelCustom("Update Hub".into(), "Not now".into()))
             .blocking_show())
@@ -860,7 +528,7 @@ impl InstallFlow for NativeInstall<'_> {
         };
         match reviewed
             .store
-            .stage_restart(&reviewed.review, &package.package, choice, || {
+            .stage_restart(&reviewed.review, package.package(), choice, || {
                 manager.cancellation().load(Ordering::SeqCst)
             })
             .map_err(|e| e.to_string())?
@@ -888,7 +556,7 @@ impl InstallFlow for NativeInstall<'_> {
         if self.restore_views && !reviewed.views.is_empty() {
             self.handle
                 .state::<crate::hosted_restore::Restore>()
-                .remember(reviewed.views.clone(), &package.release.version)?;
+                .remember(reviewed.views.clone(), package.descriptor().version())?;
         }
         Ok(())
     }
@@ -1329,143 +997,24 @@ mod tests {
     }
 
     #[test]
-    fn cache_probe_uses_existing_verified_bytes_and_never_replaces_invalid_cache() {
-        use std::cell::Cell;
-        let dir = tempfile::tempdir().unwrap();
-        let cache = dir.path().join("cache");
-        let fetched = Cell::new(false);
-        assert_eq!(
-            cached_or_fetch(
-                &cache,
-                |_| Err("must not verify absent cache".into()),
-                || {
-                    fetched.set(true);
-                    Ok(7)
-                }
-            ),
-            Ok(7)
+    fn strictly_newer_update_policy_is_not_weakened_by_shared_identity() {
+        let current = stable(env!("CARGO_PKG_VERSION")).unwrap();
+        let older = semver::Version::new(
+            current.major,
+            current.minor,
+            current.patch.checked_sub(1).unwrap(),
         );
-        assert!(fetched.get());
-        fs::create_dir(&cache).unwrap();
-        fs::write(cache.join("sentinel"), b"kept").unwrap();
-        let before = fs::read(cache.join("sentinel")).unwrap();
-        fetched.set(false);
-        let invalid: Result<(), String> = cached_or_fetch(
-            &cache,
-            |_| Err("invalid signed cache".into()),
-            || {
-                fetched.set(true);
-                Ok(())
-            },
-        );
-        assert_eq!(invalid, Err("invalid signed cache".into()));
-        assert!(!fetched.get());
-        assert_eq!(fs::read(cache.join("sentinel")).unwrap(), before);
-        assert_eq!(
-            cached_or_fetch(
-                &cache,
-                |_| Ok(9),
-                || Err("must not fetch verified cache".into())
-            ),
-            Ok(9)
-        );
-    }
-
-    fn descriptor() -> Descriptor {
-        Descriptor {
-            schema_version: 1,
-            app_id: "creator-hub".into(),
-            version: "0.1.17".into(),
-            platform: "linux".into(),
-            architecture: "x86_64".into(),
-            package_type: PACKAGE.into(),
-            manifest: Asset {
-                asset_name: "creator-hub-linux-x86_64-0.1.17.portable-manifest.json".into(),
-                byte_length: 1,
-                sha256: "a".repeat(64),
-            },
-            archive: Asset {
-                asset_name: "creator-hub-linux-x86_64-0.1.17.appdir.tar.gz".into(),
-                byte_length: 1,
-                sha256: "b".repeat(64),
-            },
-            executable_sha256: "c".repeat(64),
-            restart_protocol: 1,
-            min_hub_version: "0.1.16".into(),
+        let newer = semver::Version::new(current.major, current.minor, current.patch + 1);
+        for version in [&older, &current, &newer] {
+            let descriptor = package::test_descriptor(&version.to_string(), "0.0.0");
+            assert!(descriptor.validate().is_ok());
+            assert_eq!(descriptor.installable().is_ok(), *version > current);
         }
-    }
-
-    #[test]
-    fn stable_portable_profile_is_not_a_native_format_fallback() {
-        descriptor().validate().unwrap();
-        for version in ["0.1.17-beta.1", "0.1.17+local", "v0.1.17", "../0.1.17"] {
-            assert!(stable(version).is_err());
-        }
-        for field in [
-            "architecture",
-            "platform",
-            "packageType",
-            "version",
-            "restartProtocol",
-        ] {
-            let mut raw = serde_json::to_value(descriptor()).unwrap();
-            raw[field] = if field == "restartProtocol" {
-                serde_json::json!(0)
-            } else {
-                serde_json::json!("other")
-            };
-            assert!(serde_json::from_value::<Descriptor>(raw)
-                .unwrap()
-                .validate()
-                .is_err());
-        }
-        let mut release = descriptor();
-        release.archive.asset_name = "other.deb".into();
-        assert!(release.validate().is_err());
-        assert!(signature(b"{}", b"unsigned", catalog::MAX_METADATA as usize).is_err());
-        assert!(signed_descriptor(b"{}", b"unsigned").is_err());
-    }
-
-    #[test]
-    fn hashes_sizes_minimum_and_schema_are_independently_bounded() {
-        let mut release = descriptor();
-        release.min_hub_version = "0.1.18".into();
-        assert!(release.validate().is_err());
-        release = descriptor();
-        release.manifest.byte_length = deployment::MAX_MANIFEST as u64 + 1;
-        assert!(release.validate().is_err());
-        release = descriptor();
-        release.archive.byte_length = deployment::MAX_ARCHIVE + 1;
-        assert!(release.validate().is_err());
-        release = descriptor();
-        release.archive.sha256 = "A".repeat(64);
-        assert!(release.validate().is_err());
-        let mut raw = serde_json::to_value(descriptor()).unwrap();
-        raw["archiveSignature"] = serde_json::json!("unneeded");
-        assert!(serde_json::from_value::<Descriptor>(raw).is_err());
-    }
-
-    #[test]
-    fn read_only_download_verification_refuses_links_special_files_and_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("data");
-        fs::write(&path, b"a").unwrap();
-        assert_eq!(regular(&path, 1).unwrap(), b"a");
-        assert!(regular(dir.path(), 4096).is_err());
-        assert!(regular(&path, 0).is_err());
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&path, &link).unwrap();
-        assert!(regular(&link, 1).is_err());
-        let hard = dir.path().join("hard");
-        fs::hard_link(&path, hard).unwrap();
-        assert!(regular(&path, 1).is_err());
-        let asset = Asset {
-            asset_name: "unused".into(),
-            byte_length: 1,
-            sha256: format!("{:x}", Sha256::digest(b"a")),
-        };
-        bound(b"a", &asset).unwrap();
-        assert!(bound(b"b", &asset).is_err());
-        assert!(bound(b"aa", &asset).is_err());
+        let incompatible = package::test_descriptor(&newer.to_string(), &newer.to_string());
+        assert!(incompatible.validate().is_ok());
+        assert!(incompatible
+            .installable()
+            .unwrap_err()
+            .contains("intermediate Hub version"));
     }
 }

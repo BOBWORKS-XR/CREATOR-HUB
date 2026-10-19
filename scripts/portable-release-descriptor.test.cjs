@@ -137,7 +137,8 @@ test('real redirected ancestors and hard-linked inputs are refused', () => {
 });
 
 test('Root portable schema matches the independently prepared envelope', () => {
-  const rust = fs.readFileSync(path.join(__dirname, '../src-tauri/src/portable_update.rs'), 'utf8');
+  const rust = fs.readFileSync(path.join(__dirname, '../src-tauri/src/portable_package.rs'), 'utf8');
+  const catalog = fs.readFileSync(path.join(__dirname, '../src-tauri/src/catalog.rs'), 'utf8');
   const fields = name => {
     const body = rust.match(new RegExp(`struct ${name} \\{([\\s\\S]*?)\\n\\}`))[1];
     return [...body.matchAll(/^\s+([a-z_0-9]+):/gm)].map(m => m[1].replace(/_([a-z])/g, (_, c) => c.toUpperCase())).sort();
@@ -145,11 +146,39 @@ test('Root portable schema matches the independently prepared envelope', () => {
   const f = fixture(), d = api.descriptor(f.manifest, pin(f.archive), f.receipt);
   assert.deepEqual(fields('Descriptor'), Object.keys(d).sort());
   assert.deepEqual(fields('Asset'), Object.keys(d.manifest).sort());
-  assert.match(rust, new RegExp(`DESCRIPTOR_NAME: &str = "${api.NAME.replaceAll('.', '\\.')}"`));
+  assert.match(rust, /use crate::catalog::PORTABLE_DESCRIPTOR_NAME as DESCRIPTOR_NAME/);
+  assert.match(catalog, new RegExp(`PORTABLE_DESCRIPTOR_NAME: &str = "${api.NAME.replaceAll('.', '\\.')}"`));
   assert.match(rust, /const PACKAGE: &str = "portable-appdir"/);
   assert.match(rust, /deny_unknown_fields/);
   assert.match(rust, /deployment::verify\(/, 'Archive authority is the existing native signed manifest verifier');
   assert.doesNotMatch(rust, /updater_builder|latest\.json"|request_restart|\.activate\(/);
+});
+
+test('shared package authority is opaque and exact-current bootstrap does not inherit updater admission', () => {
+  const shared = fs.readFileSync(path.join(__dirname, '../src-tauri/src/portable_package.rs'), 'utf8');
+  const root = fs.readFileSync(path.join(__dirname, '../src-tauri/src/main.rs'), 'utf8');
+  const updater = fs.readFileSync(path.join(__dirname, '../src-tauri/src/portable_update.rs'), 'utf8');
+  assert.match(root, /#\[cfg\(all\(target_os = "linux", feature = "experimental-linux-portable-update"\)\)\]\s+mod portable_package;/);
+  assert.match(shared, /pub\(crate\) struct SignedDescriptor\(Descriptor\);/);
+  assert.match(shared, /pub\(crate\) struct VerifiedDownload \{\s+release: SignedDescriptor,\s+package: VerifiedPackage,\s+\}/);
+  assert.doesNotMatch(shared, /impl(?:<'[^>]+>)? Deserialize[^\n]* (?:SignedDescriptor|VerifiedDownload)/);
+  assert.match(shared, /include_str!\("catalog-key\.pub"\)/);
+  const current = shared.slice(shared.indexOf('pub(crate) fn fetch_current_descriptor('), shared.indexOf('pub(crate) fn cache_root('));
+  assert.match(current, /stable\(env!\("CARGO_PKG_VERSION"\)\)/);
+  assert.match(current, /catalog::release_url\(REPO, &current\.to_string\(\), DESCRIPTOR_NAME\)/);
+  assert.match(current, /signed_descriptor\(&bytes, &signature\)\?/);
+  assert.match(current, /descriptor\.validate\(\)\? != stable\(env!\("CARGO_PKG_VERSION"\)\)\?/);
+  assert.match(current, /operation: &manager::Operation/);
+  assert.match(current, /prepare_download\(handle, &descriptor, operation\)/);
+  assert.doesNotMatch(shared, /\.begin\(|\bStore::|\bRootRestart\b|selected\(|installable\(|discover_portable\(|\.exit\(|request_restart/);
+  assert.match(updater, /release\.installable\(\)\?;\s+package::verify_download\(release, directory\)/);
+  assert.match(updater, /release\.installable\(\)\?;\s+package::prepare_download\(handle, release, operation\)/);
+  const selected = updater.slice(updater.indexOf('fn selected('), updater.indexOf('pub(crate) fn download('));
+  assert.match(selected, /runtime\.unsupported/);
+  assert.match(selected, /runtime\.restart\.is_none\(\)/);
+  assert.match(selected, /release\.installable\(\)\?/);
+  assert.match(updater, /self\.validate\(\)\? <= stable\(env!\("CARGO_PKG_VERSION"\)\)\?/);
+  assert.match(updater, /stable\(self\.min_hub_version\(\)\)\? > stable\(env!\("CARGO_PKG_VERSION"\)\)\?/);
 });
 
 test('portable routing is default-off, precedes native selection and requires the concrete coordinator feature', () => {
@@ -176,7 +205,7 @@ test('portable routing is default-off, precedes native selection and requires th
   // This assertion only binds that tested orchestration to the native command.
   assert.match(install, /run_install\(&mut flow\)/);
   assert.match(install, /impl InstallFlow for NativeInstall/);
-  assert.match(install, /prepare_download\(self.handle, &self.release\)/);
+  assert.match(install, /prepare_download\(\s*self.handle,\s*&self.release,\s*self.operation.as_ref\(\).ok_or\(UNCERTAIN\)\?,?\s*\)/);
   assert.match(install, /\.review_restart\(/);
   assert.match(install, /\.blocking_show\(\)/);
   assert.match(install, /\.stage_restart\(/);
@@ -187,6 +216,38 @@ test('portable routing is default-off, precedes native selection and requires th
   assert.doesNotMatch(install, /installed successfully|update complete/i);
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-assembly.yml'), 'utf8');
   assert.doesNotMatch(workflow, /experimental-linux-portable-update/);
+});
+
+test('native bootstrap is a guarded process role without service startup or a sandbox command route', () => {
+  const root = fs.readFileSync(path.join(__dirname, '../src-tauri/src/main.rs'), 'utf8');
+  const backend = fs.readFileSync(path.join(__dirname, '../src-tauri/src/native_support.rs'), 'utf8');
+  const launch = fs.readFileSync(path.join(__dirname, '../src-tauri/src/launch.rs'), 'utf8');
+  const rpc = fs.readFileSync(path.join(__dirname, '../src-tauri/src/flatpak_rpc.rs'), 'utf8');
+  const commands = ['native_support_status', 'install_native_support', 'review_native_support_recovery'];
+  for (const name of commands) {
+    assert.ok(root.includes(`native_support::${name},`));
+    assert.ok(rpc.slice(rpc.indexOf('const NATIVE_WINDOW_ONLY:'), rpc.indexOf('pub(super) const EVENTS:')).includes(`"${name}"`));
+    assert.doesNotMatch(rpc.slice(rpc.indexOf('pub(super) enum Invocation'), rpc.indexOf('pub(super) fn decode(')), new RegExp(name.split('_').map(s => s[0].toUpperCase() + s.slice(1)).join('')));
+  }
+  assert.match(launch, /matches!\(arguments.as_slice\(\), \[flag\] if flag == "--install-native-support"\)/);
+  const startup = root.slice(root.indexOf('fn main()'), root.indexOf('let mut random'));
+  assert.ok(startup.indexOf('linux_portable_host::admit_startup()') < startup.indexOf('launch::native_support_requested('));
+  assert.doesNotMatch(startup.slice(0, startup.indexOf('linux_portable_host::admit_startup()')), /if !bootstrap/);
+  const setup = root.slice(root.indexOf('.setup(move |app|'), root.indexOf('.plugin(tauri_plugin_updater'));
+  assert.ok(setup.indexOf('if !bootstrap {') < setup.indexOf('flatpak_bootstrap::serve('));
+  assert.ok(setup.indexOf('if !bootstrap {') < setup.indexOf('self_update::initialize('));
+  const handler = root.slice(root.indexOf('.invoke_handler(move |invoke|'), root.indexOf('.build(tauri::generate_context!())'));
+  assert.ok(handler.indexOf('x-creator-shell-key') < handler.indexOf('native_support::command_allowed('));
+  assert.ok(handler.indexOf('native_support::command_allowed(') < handler.indexOf('commands(invoke)'));
+  const status = backend.slice(backend.indexOf('pub(super) fn status('), backend.indexOf('pub(super) fn install('));
+  assert.doesNotMatch(status, /\.begin\(|fetch_current\(|catalog::|Store::open|child_dir\(|create_dir|record\(/);
+  assert.match(backend, /portable_package::fetch_current\(self.handle, self.operation\)/);
+  assert.match(backend, /ReviewedBootstrapChoice::Cancel/);
+  assert.match(backend, /BootstrapRecoveryChoice::Keep/);
+  assert.match(backend, /InstallChoice::InstallReviewed/);
+  assert.match(backend, /RegistrationChoice::ApplyReviewed/);
+  assert.match(backend, /lease\.selection\(\)\.generation != package\.package\(\)\.generation\(\)/);
+  assert.doesNotMatch(backend, /request_restart|authorize_exit|\.spawn\(|\.exit\(|\.activate\(|acknowledge_recovery\(|recover_registration\(/);
 });
 
 test('unknown exit intent retains abort authority and normal-exit transfer blocks new work atomically', () => {
