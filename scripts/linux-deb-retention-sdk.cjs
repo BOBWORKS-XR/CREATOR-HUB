@@ -23,8 +23,10 @@ function admission(env, platform, arch) {
 }
 
 async function exercise({ connect, snapshot, upgrade, verifySettings }, report) {
-  const live = await connect('node', 'already-live');
+  let live, failure;
+  let failed = false;
   try {
+    live = await connect('node', 'already-live');
     report.liveBefore = await live.check();
     report.before = await snapshot('before');
     report.reconnectBefore = {};
@@ -51,18 +53,42 @@ async function exercise({ connect, snapshot, upgrade, verifySettings }, report) 
       const before = report.before.files[name];
       for (const key of ['bytes', 'sha256', 'md5', 'mode', 'uid', 'gid', 'owner']) assert.equal(file[key], before[key], name);
     }
-    report.runtimeRetentionAccepted = true;
-    report.packageGuiRetirementAccepted = true;
-  } finally { await live.close(); }
+  } catch (error) { failed = true; failure = error; }
+  try { if (live) await live.close(); }
+  catch (error) {
+    report.closeError = String(error?.stack || error);
+    if (!failed) { failed = true; failure = error; }
+  }
+  try {
+    report.settingsAfter = verifySettings();
+    report.settingsSentinelsPreserved = true;
+  } catch (error) {
+    report.settingsSentinelsPreserved = false;
+    report.settingsError = String(error?.stack || error);
+    if (!failed) { failed = true; failure = error; }
+  }
+  if (failed) throw failure;
+  report.runtimeRetentionAccepted = true;
+  report.packageGuiRetirementAccepted = true;
 }
 
 function seedSettings(root) {
   const home = path.join(root, 'home'), config = path.join(home, '.config'), data = path.join(home, '.local/share');
+  const channel = { id: 'retention-project', name: 'Retention fixture', unity_project_path: path.join(home, 'project'), scene_path: null, enabled: true };
+  const launcher = { channels: [channel], active_channel_id: channel.id, mcp_server_path: `${SERVER}/creator-works-mcp.mjs`,
+    auto_start: false, enable_custom_scripts: false, allow_all_tests: false, tool_groups: 'read', automatic_update_checks: false };
   const files = {
-    '.config/creator-works-mcp/launcher-config.json': JSON.stringify({ channels: [], mcpServerPath: `${SERVER}/creator-works-mcp.mjs`, sentinel: 'mcp-current-retain-exact' }),
-    '.config/banter-mcp/launcher-config.json': '{"channels":[],"sentinel":"legacy-retain-exact"}\n',
+    '.config/creator-works-mcp/launcher-config.json': JSON.stringify({ ...launcher, sentinel: 'mcp-current-retain-exact' }),
+    '.config/banter-mcp/launcher-config.json': JSON.stringify({ ...launcher, auto_start: true, sentinel: 'legacy-retain-exact' }) + '\n',
+    '.config/creator-works-mcp/hosted-operation-outcomes.json': '{"revision":1,"records":[]}\n',
     '.config/creator-works-mcp/launcher-settings.json': '{"sentinel":"options-retain-exact"}\n',
+    '.local/share/CreatorProjectSetup/editor-roots.json': '["/opt/retention-fixture/Unity/Editor"]\n',
     '.local/share/CreatorProjectSetup/preferences.json': '{"sentinel":"setup-retain-exact"}\n',
+    // Correct current-schema fields plus an intentionally unsupported future
+    // field: retirement-only byte preservation, not valid GUI preference acceptance.
+    '.local/share/CreatorHub/preferences/hub-preferences.json': JSON.stringify({ schemaVersion: 1,
+      preview: true, autoDownload: false, restoreHostedViews: true,
+      unknownRetentionField: { keep: 'hub-real-store-retain-exact' } }) + '\n',
     '.config/creator-hub/preferences.json': '{"sentinel":"hub-retain-exact"}\n',
     '.codex/config.toml': `# untouched representative client\n[mcp_servers.retained]\ncommand = "${SERVER}/runtime/node"\nargs = ["${SERVER}/creator-works-mcp.mjs"]\n`,
     'project/retention-sentinel.txt': 'project-retain-exact\n',
@@ -72,16 +98,23 @@ function seedSettings(root) {
   for (const [relative, content] of Object.entries(files)) {
     const target = path.join(home, relative); fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, content, { flag: 'wx', mode: 0o600 });
-    baseline[relative] = { bytes: Buffer.byteLength(content), sha256: sha(content) };
+    baseline[relative] = fingerprint(target);
+  }
+  function fingerprint(target) {
+    assert.equal(fs.realpathSync(target), target);
+    const before = fs.lstatSync(target, { bigint: true });
+    assert.ok(before.isFile() && before.nlink === 1n);
+    const bytes = fs.readFileSync(target);
+    const after = fs.lstatSync(target, { bigint: true });
+    for (const key of ['dev', 'ino', 'size', 'mode', 'uid', 'gid', 'nlink', 'mtimeNs', 'ctimeNs']) assert.equal(after[key], before[key], key);
+    return { bytes: bytes.length, sha256: sha(bytes), device: String(before.dev), inode: String(before.ino),
+      mode: Number(before.mode & 0o7777n), uid: Number(before.uid), gid: Number(before.gid) };
   }
   function verify() {
     const observed = {};
     for (const [relative, before] of Object.entries(baseline)) {
-      const target = path.join(home, relative), bytes = fs.readFileSync(target);
-      assert.equal(fs.realpathSync(target), target);
-      assert.ok(fs.lstatSync(target).isFile() && fs.lstatSync(target).nlink === 1);
-      assert.equal(bytes.length, before.bytes); assert.equal(sha(bytes), before.sha256);
-      observed[relative] = { bytes: bytes.length, sha256: sha(bytes) };
+      observed[relative] = fingerprint(path.join(home, relative));
+      assert.deepEqual(observed[relative], before, relative);
     }
     return observed;
   }
@@ -143,7 +176,6 @@ async function run() {
       };
     }
     await exercise({ connect, snapshot: native, upgrade: () => native('upgrade'), verifySettings: settings.verify }, report);
-    report.settingsAfter = settings.verify(); report.settingsSentinelsPreserved = true;
     report.passed = true;
   } catch (error) { report.error = String(error.stack || error); process.exitCode = 1; }
   finally {

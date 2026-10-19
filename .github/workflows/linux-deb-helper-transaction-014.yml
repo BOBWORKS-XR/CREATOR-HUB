@@ -14,6 +14,7 @@ on:
       - scripts/linux-setup-helper-transaction.test.py
       - scripts/linux-deb-retention-probe.py
       - scripts/linux-deb-retention-sdk.cjs
+      - scripts/linux-deb-retention-sdk.test.cjs
       - modules/mcp/package.json
       - modules/mcp/package-lock.json
 permissions:
@@ -86,12 +87,14 @@ jobs:
       - name: Pure syntax and regression preflight as fixture before original package download
         run: |
           test "$(id -u)" = 1001
-          python3 -B -c "import ast,pathlib; [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in ['scripts/linux-deb-helper-transaction-probe.py','scripts/linux-deb-helper-transaction.test.py']]"
+          python3 -B -c "import ast,pathlib; [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in ['scripts/linux-deb-helper-transaction-probe.py','scripts/linux-deb-helper-transaction.test.py','scripts/linux-setup-helper-transaction-probe.py','scripts/linux-setup-helper-transaction.test.py']]"
           node --check scripts/linux-deb-helper-transaction-sdk.cjs
           node --check scripts/linux-deb-helper-transaction-sdk.test.cjs
+          node --check scripts/linux-deb-retention-sdk.cjs
+          node --check scripts/linux-deb-retention-sdk.test.cjs
           python3 -B scripts/linux-deb-helper-transaction.test.py
           python3 -B scripts/linux-setup-helper-transaction.test.py
-          node --test scripts/linux-deb-helper-transaction-sdk.test.cjs
+          node --test scripts/linux-deb-helper-transaction-sdk.test.cjs scripts/linux-deb-retention-sdk.test.cjs
       - name: Record pinned container image and actual dpkg toolchain and environment identity
         run: python3 -B scripts/linux-deb-helper-transaction-probe.py container-identity
       - name: Capture fixed parent lstat and installed dpkg version without privilege before Cargo

@@ -74,7 +74,9 @@ test('live SDK and both aliases surround both fixed transactions, then marker-on
   assert.ok(events.indexOf('setup-retire-once') > at);
   assert.ok(events.indexOf('setup-retire-once') < events.indexOf('check:already-live:after'));
   assert.ok(events.indexOf('setup-repeat') > events.indexOf('setup-snapshot:after'));
-  assert.equal(events.at(-1), 'close:already-live');
+  assert.equal(events.at(-2), 'close:already-live');
+  assert.equal(events.at(-1), 'settings');
+  assert.equal(report.settingsSentinelsPreserved, true);
   assert.equal(report.helperMechanismAccepted, true);
   assert.equal(report.setupHelperMechanismAccepted, true);
   assert.deepEqual(report.productionGates, FALSE_GATES);
@@ -89,7 +91,9 @@ test('failures never retry, earn acceptance, or run marker test before all postc
     assert.equal(report.helperMechanismAccepted, false);
     assert.notEqual(report.setupHelperMechanismAccepted, true);
     assert.deepEqual(report.productionGates, FALSE_GATES);
-    assert.equal(events.at(-1), 'close:already-live');
+    assert.equal(events.at(-2), 'close:already-live');
+    assert.equal(events.at(-1), 'settings');
+    assert.equal(report.settingsSentinelsPreserved, true);
     assert.ok(events.filter(e => e === 'retire-once').length <= 1);
     if (!['repeat', 'close', 'setup-repeat'].includes(failure)) assert.ok(!events.includes('repeat-marker-negative-test'));
     if (failure === 'before-node.exe') assert.ok(!events.includes('retire-once'));
@@ -125,4 +129,52 @@ test('failed SDK connection, invalid PID or post-connect identity capture closes
       assert.ok(!events.includes('close'));
     }
   }
+});
+
+test('refused transactions still record settings preservation and keep the original failure', async () => {
+  for (const phase of ['retire', 'setup-retire']) {
+    for (const damaged of [false, true]) {
+      const { deps, events } = fixture(phase);
+      const original = new Error(`${phase} refused without retry`);
+      let attempted = false;
+      const fail = async () => { attempted = true; events.push('original-refusal'); throw original; };
+      if (phase === 'retire') deps.retire = fail;
+      else deps.setup.retire = fail;
+      deps.verifySettings = () => {
+        events.push('settings');
+        if (attempted && damaged) throw new Error('Settings changed after refusal');
+        return { sentinel: 'same' };
+      };
+      const report = { helperMechanismAccepted: false, productionGates: { ...FALSE_GATES } };
+      await assert.rejects(exercise(deps, report), error => error === original);
+      assert.equal(report.settingsSentinelsPreserved, !damaged);
+      assert.ok(events.lastIndexOf('settings') > events.indexOf('original-refusal'));
+      assert.equal(events.filter(event => event === 'original-refusal').length, 1);
+      assert.equal(events.filter(event => event === 'close:already-live').length, 1);
+      if (damaged) assert.match(report.settingsError, /Settings changed after refusal/);
+      else assert.deepEqual(report.settingsAfter, { sentinel: 'same' });
+      assert.equal(report.helperMechanismAccepted, false);
+      assert.notEqual(report.setupHelperMechanismAccepted, true);
+      assert.deepEqual(report.productionGates, FALSE_GATES);
+    }
+  }
+});
+
+test('final settings failure prevents both helper acceptances after otherwise verified transactions', async () => {
+  const { deps, events } = fixture();
+  const original = new Error('Final settings check failed');
+  let checks = 0;
+  deps.verifySettings = () => {
+    events.push('settings');
+    if (++checks === 4) throw original;
+    return { sentinel: 'same' };
+  };
+  const report = { helperMechanismAccepted: false, productionGates: { ...FALSE_GATES } };
+  await assert.rejects(exercise(deps, report), error => error === original);
+  assert.equal(report.settingsSentinelsPreserved, false);
+  assert.match(report.settingsError, /Final settings check failed/);
+  assert.equal(report.helperMechanismAccepted, false);
+  assert.notEqual(report.setupHelperMechanismAccepted, true);
+  assert.equal(events.filter(event => event === 'retire-once').length, 1);
+  assert.equal(events.filter(event => event === 'setup-retire-once').length, 1);
 });

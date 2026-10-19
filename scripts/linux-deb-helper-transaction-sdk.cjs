@@ -45,8 +45,10 @@ async function connectAndIdentify(client, transport, identify) {
 }
 
 async function exercise({ connect, snapshot, retire, repeat, setup, verifySettings }, report) {
-  const live = await connect('node', 'already-live');
+  let live, failure;
+  let failed = false;
   try {
+    live = await connect('node', 'already-live');
     report.liveBefore = await live.check();
     report.before = await snapshot('before');
     report.setupBefore = await setup.snapshot('before');
@@ -78,8 +80,23 @@ async function exercise({ connect, snapshot, retire, repeat, setup, verifySettin
     // Negative repeat only after verified success; never retry a failed/interrupted call.
     report.repeatRefusal = await repeat();
     report.setupRepeatRefusal = await setup.repeat();
+  } catch (error) { failed = true; failure = error; }
+  try { if (live) await live.close(); }
+  catch (error) {
+    report.closeError = String(error?.stack || error);
+    if (!failed) { failed = true; failure = error; }
+  }
+  // Preserve the original refusal while independently recording settings after
+  // every outcome, including an SDK/transaction/close failure. Never retry it.
+  try {
     report.settingsAfter = verifySettings();
-  } finally { await live.close(); }
+    report.settingsSentinelsPreserved = true;
+  } catch (error) {
+    report.settingsSentinelsPreserved = false;
+    report.settingsError = String(error?.stack || error);
+    if (!failed) { failed = true; failure = error; }
+  }
+  if (failed) throw failure;
   report.helperMechanismAccepted = true;
   report.setupHelperMechanismAccepted = true;
 }

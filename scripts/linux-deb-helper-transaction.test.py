@@ -592,7 +592,8 @@ class TransactionTests(unittest.TestCase):
             "scripts/linux-deb-helper-transaction.test.py", "scripts/linux-deb-helper-transaction-sdk.cjs",
             "scripts/linux-deb-helper-transaction-sdk.test.cjs", "scripts/linux-setup-helper-transaction-probe.py",
             "scripts/linux-setup-helper-transaction.test.py", "scripts/linux-deb-retention-probe.py",
-            "scripts/linux-deb-retention-sdk.cjs", "modules/mcp/package.json", "modules/mcp/package-lock.json"])
+            "scripts/linux-deb-retention-sdk.cjs", "scripts/linux-deb-retention-sdk.test.cjs",
+            "modules/mcp/package.json", "modules/mcp/package-lock.json"])
         self.assertEqual(workflow.count("runs-on:"), 1)
         self.assertIn("runs-on: ubuntu-22.04", workflow)
         self.assertEqual(workflow.count(p.CONTAINER_IMAGE), 2)
@@ -615,6 +616,14 @@ class TransactionTests(unittest.TestCase):
         self.assertIn("run-id: '38642404016'", workflow)
         self.assertLess(workflow.index("transaction.test.py"), workflow.index("actions/download-artifact"))
         self.assertLess(workflow.index("transaction-sdk.test.cjs"), workflow.index("npm ci"))
+        preflight = workflow.split("      - name: Pure syntax and regression preflight", 1)[1].split("      - name:", 1)[0]
+        for script in ("linux-deb-helper-transaction-probe.py", "linux-deb-helper-transaction.test.py",
+                       "linux-setup-helper-transaction-probe.py", "linux-setup-helper-transaction.test.py"):
+            self.assertIn("'scripts/" + script + "'", preflight)
+        for script in ("linux-deb-helper-transaction-sdk.cjs", "linux-deb-helper-transaction-sdk.test.cjs",
+                       "linux-deb-retention-sdk.cjs", "linux-deb-retention-sdk.test.cjs"):
+            self.assertIn("node --check scripts/" + script, preflight)
+        self.assertIn("node --test scripts/linux-deb-helper-transaction-sdk.test.cjs scripts/linux-deb-retention-sdk.test.cjs", preflight)
         metadata_gate = workflow.index("host_metadata_read_only_preflight")
         self.assertLess(metadata_gate, workflow.index("actions/download-artifact"))
         self.assertLess(metadata_gate, workflow.index("npm ci"))
