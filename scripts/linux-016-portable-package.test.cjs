@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const { execFileSync } = require('node:child_process');
+const { yaml } = require('playwright-core/lib/utilsBundle');
 const p = require('./linux-016-portable-package.cjs');
 const finite = require('./flatpak-package.cjs');
 const modules = require('./module-archive.cjs');
@@ -509,11 +510,16 @@ test('upstream tool inventory records effective bytes without inventing pins or 
   for (const n of names) put(root, n, 'tool');
   assert.deepEqual(Object.keys(p.toolInventory(root)), names); put(root, 'unreviewed-tool', 'x'); assert.throws(() => p.toolInventory(root));
 });
-function workflow() {
-  return JSON.parse(execFileSync(PYTHON, ['-B', '-c',
-    'import json,sys,yaml; print(json.dumps(yaml.load(open(sys.argv[1],encoding="utf-8"),Loader=yaml.BaseLoader)))',
-    path.join(ROOT, p.WORKFLOW)], { encoding: 'utf8' }));
+function workflow(source = fs.readFileSync(path.join(ROOT, p.WORKFLOW), 'utf8')) {
+  return yaml.parse(source, { uniqueKeys: true });
 }
+test('workflow parsing retains typed scalars and rejects duplicate YAML keys', () => {
+  const parsed = workflow();
+  assert.equal(parsed.on.workflow_dispatch.inputs.assembly_pins.required, true);
+  assert.equal(parsed.jobs.package['timeout-minutes'], 35);
+  assert.equal(parsed.jobs.package.steps[0].with['persist-credentials'], false);
+  assert.throws(() => workflow('jobs:\n  package: {}\n  package: {}\n'), /unique|same key/i);
+});
 // Bounded checker for this workflow profile, using GitHub's context-availability table:
 // https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability
 function expressionContexts(parsed) {
@@ -558,7 +564,7 @@ test('JS, embedded Python and the real workflow YAML/Bash parse before dispatch;
   assert.match(parsed.jobs.package.if, /github\.event_name == 'workflow_dispatch'/);
   assert.deepEqual(parsed.permissions, { contents: 'read', actions: 'read' }); assert.deepEqual(Object.keys(parsed.jobs), ['package']);
   assert.equal(parsed.jobs.package['runs-on'], 'ubuntu-22.04');
-  for (const v of Object.values(parsed.on.workflow_dispatch.inputs)) { assert.equal(v.required, 'true'); assert.equal(v.default, undefined); }
+  for (const v of Object.values(parsed.on.workflow_dispatch.inputs)) { assert.equal(v.required, true); assert.equal(v.type, 'string'); assert.equal(v.default, undefined); }
   for (const step of parsed.jobs.package.steps) if (step.run) {
     execFileSync(BASH, ['-n'], { input: step.run, stdio: ['pipe', 'pipe', 'pipe'] });
     assert.doesNotMatch(step.run, /gh\s+(?:workflow\s+run|release)|git\s+(?:push|commit)|dpkg\s+-i|flatpak\s+install|cargo\s+(?:run|test)|build:unified|tauri\s+build/);
