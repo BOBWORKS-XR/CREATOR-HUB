@@ -10,9 +10,9 @@ using UnityEngine;
 // Opt-in acceptance fixture only. No Creator SDK types or preference writes.
 public static class UnityPlainUrpSeed
 {
-    private const string Target = "E:/UnityTest/CreatorSetupSdkAddAudit-20261019";
+    private const string Target = "E:/UnityTest/CreatorSetupSdkAddOrdinary-20261019";
     private const string ExpectedEditor = "@@EDITOR_VERSION@@";
-    private const string ExpectedSdk = "@@CREATOR_SDK_VERSION@@";
+    private static string ExpectedBefore => Environment.GetEnvironmentVariable("CREATOR_SETUP_REAL_SDK_CACHE_EXPECTED_BEFORE");
     private const string SdkPreference = "Banter_GeneratedVSNodesVersion";
     private static string StatusFolder => Path.Combine(Target, ".creator-project-setup");
 
@@ -35,7 +35,9 @@ public static class UnityPlainUrpSeed
         var project = Directory.GetParent(Application.dataPath).FullName.Replace('\\', '/');
         if (!Application.isBatchMode || !string.Equals(project, Target, StringComparison.OrdinalIgnoreCase)
             || Environment.GetEnvironmentVariable("CREATOR_SETUP_REAL_SDK_ADD_AUDIT") != Target
-            || Environment.GetEnvironmentVariable("CREATOR_SETUP_REAL_SDK_ADD_GUARDS_REVIEWED") != "yes")
+            || Environment.GetEnvironmentVariable("CREATOR_SETUP_REAL_SDK_ADD_GUARDS_REVIEWED") != "yes"
+            || Environment.GetEnvironmentVariable("CREATOR_SETUP_REAL_SDK_CACHE_RESTORE_APPROVED") != "yes"
+            || string.IsNullOrEmpty(ExpectedBefore))
             throw new InvalidOperationException("This seed only runs in the explicitly approved, newly created audit fixture.");
     }
 
@@ -65,9 +67,9 @@ public static class UnityPlainUrpSeed
                 throw new InvalidOperationException("Unreviewed Unity Editor.");
             if (UnityEditor.PackageManager.PackageInfo.FindForPackageName("com.sidequest.creator-sdk") != null)
                 throw new InvalidOperationException("The seed must run before Creator SDK is installed.");
-            // A different value would let the SDK initializer write machine-wide prefs on import.
-            if (EditorPrefs.GetString(SdkPreference) != ExpectedSdk)
-                throw new InvalidOperationException("Global SDK version is not already the expected version. Refusing SDK import; no preferences were changed.");
+            // The external wrapper owns the raw before-image and exact restoration after SDK import.
+            if (EditorPrefs.GetString(SdkPreference) != ExpectedBefore)
+                throw new InvalidOperationException("SDK cache marker differs from the approved before snapshot. Refusing SDK import; the seed did not change it.");
             VSUsageUtility.isVisualScriptingUsed = true;
             var config = BoltCore.Configuration;
             if (!config.typeOptions.Contains(typeof(StringBuilder)))
@@ -108,7 +110,7 @@ public static class UnityPlainUrpSeed
                 result.creatorNodeCount = rows.Count(row => row.unitType != null && row.unitType.StartsWith("BS.", StringComparison.Ordinal));
             }
             result.success = !result.creatorSdkInstalled && result.stringBuilderSelected
-                && result.nodeCount > 0 && result.creatorNodeCount == 0 && result.sdkGlobalVersion == ExpectedSdk;
+                && result.nodeCount > 0 && result.creatorNodeCount == 0 && result.sdkGlobalVersion == ExpectedBefore;
             File.WriteAllText(Path.Combine(StatusFolder, "plain-urp-seed.json"), JsonUtility.ToJson(result, true));
             EditorApplication.Exit(result.success ? 0 : 2);
         }

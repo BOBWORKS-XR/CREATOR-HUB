@@ -191,6 +191,22 @@ restart and removal remain required.
 
 ## Windows Candidate Checkpoint
 
+The current local Setup-audit installer is
+`artifacts/unified/windows-016-setup-repair-20261019/installer.exe`, built from
+product source `f9f0e1e5cb27b3ae5178c8aac16429e83ba34593` (37,980,864 bytes).
+Its SHA-256 is
+`f0092e056f7b4245d10350b7954c3dbe5e5356f2e340143d0aefb80078672bc7`.
+Final NSIS extraction and production-key runtime/router metadata verification,
+including tamper refusal, passed. It is unsigned and has not been installed.
+`BUILD-EVIDENCE.json` is build evidence only; signed incoming update/restart,
+installed migration/retirement and complete Linux/Flatpak acceptance remain open.
+Later ordinary-SDK fixture edits affect only test source; a normalized comparison
+confirms the Setup production code remains equivalent to this frozen build.
+Full clean CI `39313928050` at that product source passed, including Windows,
+Linux, built-in Windows modules, frontend/scripts and both runtime-router jobs;
+Mac was skipped. Native Linux library/helper runs also passed, but are not a
+complete Linux/Flatpak install/update/restart acceptance.
+
 ### Objective Setup Audit
 
 The user requested an objective program audit without further teammate captures.
@@ -226,10 +242,23 @@ because that symbol enables SDK-internal GraphEdit code requiring a modified
 Visual Scripting runtime (`GraphPaused` and `BanterStubsAllowed`). Its failures,
 fixture and source snapshot are retained, but this is an invalid harness, not
 proof of a normal SDK defect. The controlled path is removed rather than
-patching the SDK or pinning another package to accommodate it. Ordinary SDK
-import/configuration/reopen acceptance is still unpassed. It requires an exact,
-approved backup/restoration of the SDK-wide cache marker; no artificial cache
-value may be installed to make the test pass.
+patching the SDK or pinning another package to accommodate it.
+
+The subsequent approved ordinary SDK run passed in 198.82 seconds on Unity
+6000.3.21f1 with the pinned recipe. It started with an SDK-free URP project,
+an existing node database and a custom `System.Text.StringBuilder` selection.
+First SDK addition, configuration, reopened validation and a second
+validation-only operation passed. Independent verification checked 31 exact
+backup files from each operation, five protected authored/settings files,
+the custom selection and removal of the owned temporary files/operation lock.
+The external wrapper backed up and read back the original single SDK cache
+value before launch, allowed the ordinary SDK initializer to update it, then
+restored and verified the exact original binary bytes. No artificial cache
+value or SDK-internal define was used. Its 17 mocked guard/wrapper tests passed,
+including refusal without a write, incomplete snapshot handling and rejection
+of zero selected tests. This accepts the supported disposable project scenario;
+it does not reproduce the teammate's unseen project or qualify a packaged
+install/update, arbitrary pipeline conversion or Linux/Flatpak operation.
 
 The failed compilation did provide separately verified failure-preservation
 evidence: 31 original backup files and five protected content/settings files
@@ -258,15 +287,15 @@ problem; no PC settings or source guards were changed to hide it. That repeat
 must not be reported as passed. None of these results qualifies a new installed candidate, signed
 update/restart or complete Linux/Flatpak flow.
 
-The newer local installer at
+The earlier pre-audit local installer at
 `artifacts/unified/windows-016-projects-migration-20261019` contains source
 35d99c9, not this Setup audit batch. Its installer SHA-256 is
 `22bc9ac8965babf7c26d5578c69207642d165219c5565941a7b685d6e3e14112`;
 packaged executable SHA-256 is
 `51fb46ec7cd26d39f608db4e77615bebf9e450a7ba693ca84620b1a4134d0701`.
 Extraction and production-key runtime/router signature plus tamper checks passed.
-It was not installed or launched, and a new candidate is required after the
-Setup changes. The older installer below is retained historical evidence only.
+It was not installed or launched and is superseded by the Setup-audit candidate
+above. The older installer below is retained historical evidence only.
 
 The local 0.1.16 direct-feature candidate built successfully at
 `artifacts/unified/windows-016-20261019`. Installer extraction verified the raw

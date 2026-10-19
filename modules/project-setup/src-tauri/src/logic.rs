@@ -1408,9 +1408,17 @@ mod tests {
             let review = body
                 .find("env::var(\"CREATOR_SETUP_REAL_SDK_ADD_GUARDS_REVIEWED\")")
                 .unwrap();
+            let restore_approval = body
+                .find("env::var(\"CREATOR_SETUP_REAL_SDK_CACHE_RESTORE_APPROVED\")")
+                .unwrap();
+            let expected_before = body
+                .find("env::var(\"CREATOR_SETUP_REAL_SDK_CACHE_EXPECTED_BEFORE\")")
+                .unwrap();
             let create = body.find("fs::create_dir(target)").unwrap();
             let launch = body.find("run_unity(").unwrap();
             assert!(opt_in < create && review < create && create < launch);
+            assert!(restore_approval < create && expected_before < create);
+            assert!(body.contains("E:/UnityTest/CreatorSetupSdkAddOrdinary-20261019"));
             assert!(body.contains("fs::symlink_metadata(target)"));
             assert!(body.contains("ErrorKind::NotFound"));
             for forbidden in [
@@ -1434,13 +1442,25 @@ mod tests {
             "typeof(BS.",
             "EditorPrefs.Set",
             "EditorPrefs.Delete",
+            "PlayerSettings.SetScriptingDefineSymbols",
         ] {
             assert!(
                 !seed.contains(forbidden),
                 "Forbidden seed action: {forbidden}"
             );
         }
-        assert!(seed.contains("EditorPrefs.GetString(SdkPreference) != ExpectedSdk"));
+        let before_check = seed
+            .find("EditorPrefs.GetString(SdkPreference) != ExpectedBefore")
+            .unwrap();
+        assert!(
+            before_check
+                < seed
+                    .find("VSUsageUtility.isVisualScriptingUsed = true")
+                    .unwrap()
+        );
+        assert!(seed.contains("Environment.GetEnvironmentVariable(\"CREATOR_SETUP_REAL_SDK_CACHE_RESTORE_APPROVED\") != \"yes\""));
+        assert!(seed.contains("CREATOR_SETUP_REAL_SDK_CACHE_EXPECTED_BEFORE"));
+        assert!(seed.contains("E:/UnityTest/CreatorSetupSdkAddOrdinary-20261019"));
         assert!(seed.contains("#if GREENFIELD_PROJECT"));
         assert!(seed.contains("typeof(StringBuilder)"));
         assert!(seed.contains("UnitBase.Rebuild()"));
@@ -1454,7 +1474,7 @@ mod tests {
         use std::collections::BTreeMap;
         use std::os::windows::fs::MetadataExt;
 
-        const TARGET: &str = "E:/UnityTest/CreatorSetupSdkAddAudit-20261019";
+        const TARGET: &str = "E:/UnityTest/CreatorSetupSdkAddOrdinary-20261019";
         const TEMPLATE_HASH: &str =
             "b78fb4cd033d264b842f7f8b10c3e613f0dfc9a825c03cd7e91919521d8ae27e";
         const DATABASE: &str =
@@ -1522,6 +1542,16 @@ mod tests {
         assert_eq!(
             env::var("CREATOR_SETUP_REAL_SDK_ADD_GUARDS_REVIEWED").as_deref(),
             Ok("yes")
+        );
+        assert_eq!(
+            env::var("CREATOR_SETUP_REAL_SDK_CACHE_RESTORE_APPROVED").as_deref(),
+            Ok("yes")
+        );
+        let expected_before = env::var("CREATOR_SETUP_REAL_SDK_CACHE_EXPECTED_BEFORE")
+            .expect("The external wrapper must freshly snapshot and decode the SDK cache marker");
+        assert!(
+            !expected_before.is_empty(),
+            "The approved before value must be present"
         );
         assert_eq!(
             env::var("ProgramFiles").unwrap().replace('\\', "/"),
@@ -1601,7 +1631,6 @@ mod tests {
             &mut seed_file,
             include_str!("../../tests/UnityPlainUrpSeed.cs")
                 .replace("@@EDITOR_VERSION@@", EDITOR_VERSION)
-                .replace("@@CREATOR_SDK_VERSION@@", CREATOR_SDK_VERSION)
                 .as_bytes(),
         )
         .unwrap();
@@ -1632,7 +1661,7 @@ mod tests {
             serde_json::from_slice(&fs::read(status.join("plain-urp-seed.json")).unwrap()).unwrap();
         assert_eq!(seeded["success"], true, "{seeded}");
         assert_eq!(seeded["creatorSdkInstalled"], false);
-        assert_eq!(seeded["sdkGlobalVersion"], CREATOR_SDK_VERSION);
+        assert_eq!(seeded["sdkGlobalVersion"], expected_before);
         assert!(seeded["nodeCount"].as_u64().unwrap() > 0);
         assert_eq!(seeded["creatorNodeCount"], 0);
         assert!(target.join(DATABASE).is_file());
@@ -1739,13 +1768,23 @@ mod tests {
                 "Protected after validation: {relative}"
             );
         }
-        for line in fs::read_to_string(status.join("sdk-pref-observations.jsonl"))
-            .unwrap()
-            .lines()
-        {
-            let observation: Value = serde_json::from_str(line).unwrap();
-            assert_eq!(observation["sdkGlobalVersion"], CREATOR_SDK_VERSION);
+        let observations: Vec<Value> =
+            fs::read_to_string(status.join("sdk-pref-observations.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+        for observation in &observations {
+            let marker = observation["sdkGlobalVersion"].as_str().unwrap();
+            assert!(
+                marker == expected_before || marker == CREATOR_SDK_VERSION,
+                "Unexpected SDK cache marker"
+            );
         }
+        assert_eq!(
+            observations.last().unwrap()["sdkGlobalVersion"],
+            CREATOR_SDK_VERSION
+        );
         assert!(!target
             .join(".creator-project-setup/operation.lock")
             .exists());
@@ -1762,14 +1801,16 @@ mod tests {
                 "validationOnlyReport": validated.report_path,
                 "exactBackupsVerified": true,
                 "protectedFilesVerified": protected,
-                "sdkPreferenceScenario": "already matches; harness never writes global EditorPrefs",
+                "sdkCacheExpectedBefore": expected_before,
+                "sdkPreferenceScenario": "ordinary SDK startup may update the named marker; external wrapper owns its exact backup and restoration",
+                "cacheRestorationVerified": false,
                 "unityHubRegistrationRequested": false,
                 "releaseAcceptance": false
             }))
             .unwrap(),
         )
         .unwrap();
-        println!("Real first-SDK-add acceptance passed; fixture and evidence retained at {TARGET}");
+        println!("Project SDK-add checks passed; external wrapper must verify cache restoration. Fixture retained at {TARGET}");
     }
 
     #[test]
