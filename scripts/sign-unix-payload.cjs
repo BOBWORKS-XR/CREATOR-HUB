@@ -98,7 +98,7 @@ function compactProof(proof) {
 function signPayload(inputs, services = {}) {
   const root = services.root || ROOT, execute = services.execute || execFileSync;
   const approved = services.signer || routing;
-  assert.equal(services.platform || process.platform, 'win32', 'This local acquisition path requires Windows PowerShell');
+  assert.equal(services.platform || process.platform, 'win32', 'This local acquisition path requires Windows');
   const { pins, zip, prepared, output, transferExe, verifierExe } = inputs;
   for (const file of [pins, zip, prepared, output, transferExe, verifierExe]) absolute(file);
   const artifacts = path.join(root, 'artifacts');
@@ -108,7 +108,7 @@ function signPayload(inputs, services = {}) {
   assert.ok(!pins.startsWith(path.dirname(prepared) + path.sep), 'Independent pins cannot come from extracted candidate input');
   assert.equal(transferExe, path.join(root, 'native/unix-transfer/target/release/creator-hub-unix-transfer.exe'), 'Use the fixed reviewed cargo-built transfer tool');
   assert.equal(verifierExe, path.join(root, 'src-tauri/target/release/examples/verify-package-input.exe'), 'Use the fixed reviewed production-key verifier');
-  const extractor = path.join(root, 'scripts/extract-unix-transfer.ps1');
+  const extractor = path.join(root, 'scripts/extract-unix-transfer.py');
   // Cargo's fixed executable outputs are hard-linked to deps on this host.
   // This exception never applies to candidate inputs, metadata, or the extractor.
   const tools = [transferExe, verifierExe, extractor].map(file => [file,
@@ -128,8 +128,7 @@ function signPayload(inputs, services = {}) {
     for (const [file, record, cargoTool] of tools) unchanged(file, record, cargoTool);
     return String(result).trim();
   }
-  const extraction = JSON.parse(run('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', extractor,
-    '-ZipPath', zip, '-ExpectedSha256', pin.zipSha256, '-ExpectedBytes', String(pin.zipBytes), '-OutputDirectory', acquired]));
+  const extraction = JSON.parse(run('python', ['-B', extractor, zip, pin.zipSha256, String(pin.zipBytes), acquired]));
   assert.deepEqual(extraction, { downloadedZipVerified: true, transferContentsVerified: false, releaseReady: false });
   inventory(acquired, TRANSFER);
   const transferFiles = Object.fromEntries(TRANSFER.map(name => [name, capture(path.join(acquired, name), name === 'modules.tar.gz' ? 256 * 1024 * 1024 : META)]));

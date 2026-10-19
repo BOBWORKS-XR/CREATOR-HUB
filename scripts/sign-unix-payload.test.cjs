@@ -46,7 +46,7 @@ function fixture(t, target = 'linux', fault = '') {
     output: path.join(artifacts, 'signed'),
     transferExe: put(path.join(owned, 'native/unix-transfer/target/release/creator-hub-unix-transfer.exe'), 'Synthetic trusted tool; never executed'),
     verifierExe: put(path.join(owned, 'src-tauri/target/release/examples/verify-package-input.exe'), 'Synthetic trusted verifier; never executed') };
-  put(path.join(owned, 'scripts/extract-unix-transfer.ps1'), 'Synthetic fixed extractor; never executed');
+  put(path.join(owned, 'scripts/extract-unix-transfer.py'), 'Synthetic fixed extractor; never executed');
   const calls = [], requests = []; let keys = 0, signatures = 0;
   const key = path.join(owned, 'never-created-private-placeholder.key');
   const request = route => {
@@ -72,14 +72,18 @@ function fixture(t, target = 'linux', fault = '') {
   };
   const execute = (command, args) => {
     calls.push({ command, args: [...args] });
-    if (command === 'powershell.exe') {
-      assert.deepEqual(args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-File']);
-      assert.equal(args[3], path.join(owned, 'scripts/extract-unix-transfer.ps1'));
-      const destination = args[args.indexOf('-OutputDirectory') + 1]; fs.mkdirSync(destination);
+    if (command === 'python') {
+      assert.equal(args[0], '-B');
+      assert.equal(args[1], path.join(owned, 'scripts/extract-unix-transfer.py'));
+      assert.deepEqual(args.slice(2, 5), [inputs.zip, proof.expected.zipSha256, String(proof.artifact.size_in_bytes)]);
+      if (fault === 'extractor-failure') throw Error('Mock Python extractor refused input');
+      const destination = args[5]; fs.mkdirSync(destination);
       put(path.join(destination, 'modules.tar.gz'), tar);
       put(path.join(destination, 'prepared-unix.json'), fault === 'receipt' ? Buffer.from('{}') : preparedBytes);
       put(path.join(destination, 'transfer-binding.json'), transferBinding);
       if (fault === 'tool-drift') fs.appendFileSync(inputs.verifierExe, 'tampered');
+      if (fault === 'extractor-drift') fs.appendFileSync(args[1], 'tampered');
+      if (fault === 'extractor-result') return JSON.stringify({ downloadedZipVerified: true, transferContentsVerified: true, releaseReady: false });
       return JSON.stringify({ downloadedZipVerified: true, transferContentsVerified: false, releaseReady: false });
     }
     if (command === inputs.transferExe) {
@@ -150,7 +154,7 @@ for (const target of ['linux', 'macos-intel', 'macos-arm64']) test(`mocked local
   assert.deepEqual(f.count(), { keys: 1, signatures: 3 });
 });
 
-for (const fault of ['receipt', 'tar', 'raw', 'manifest', 'runtime', 'tool-drift']) test(`${fault} failure precedes any key selection or signing`, t => {
+for (const fault of ['receipt', 'tar', 'raw', 'manifest', 'runtime', 'tool-drift', 'extractor-failure', 'extractor-drift', 'extractor-result']) test(`${fault} failure precedes any key selection or signing`, t => {
   const f = fixture(t, 'linux', fault);
   assert.throws(() => signPayload(f.inputs, f.services));
   assert.deepEqual(f.count(), { keys: 0, signatures: 0 }); assert.equal(fs.existsSync(f.key), false);
@@ -161,6 +165,29 @@ test('fresh failed API proof refuses before ZIP extraction or key selection', t 
   const f = fixture(t); f.proof.run.conclusion = 'failure';
   assert.throws(() => signPayload(f.inputs, f.services));
   assert.deepEqual(f.count(), { keys: 0, signatures: 0 }); assert.deepEqual(f.calls, []);
+});
+test('local acquisition invokes the fixed Python extractor directly without any shell', t => {
+  const f = fixture(t), execute = f.services.execute;
+  f.services.execute = (command, args, options) => {
+    assert.doesNotMatch(command, /(?:powershell|pwsh|cmd\.exe|bash|sh\.exe)/i, 'ZIP acquisition must not depend on a shell');
+    return execute(command, args, options);
+  };
+  signPayload(f.inputs, f.services);
+  const first = f.calls[0];
+  assert.equal(first.command, 'python');
+  assert.equal(first.args.length, 6);
+  assert.deepEqual(first.args.slice(0, 5), ['-B', path.join(f.services.root, 'scripts/extract-unix-transfer.py'),
+    f.inputs.zip, f.proof.expected.zipSha256, String(f.proof.artifact.size_in_bytes)]);
+  assert.equal(path.basename(first.args[5]), 'transfer');
+  assert.match(path.basename(path.dirname(first.args[5])), /^unix-sign-work-/);
+});
+test('actual stdlib three-file extractor passes its filesystem and CLI regressions without PowerShell', () => {
+  const result = spawnSync(process.platform === 'win32' ? 'python' : 'python3',
+    ['-B', path.join(__dirname, 'extract-unix-transfer.test.py')],
+    { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stderr, /Ran 21 tests/);
 });
 for (const fault of ['source-tree', 'run-attempt', 'ambiguous-job']) test(`${fault} API proof refuses before any native process or key selection`, t => {
   const f = fixture(t);
