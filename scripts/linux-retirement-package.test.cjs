@@ -329,13 +329,16 @@ function assemblyYaml(t) {
   return JSON.parse(parsed.stdout);
 }
 
-function workflowBash(t, script, retirement, integrated) {
+function workflowBash(t, script, retirement, integrated, overrides = {}) {
   const bash = process.platform === 'win32' ? path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git/bin/bash.exe') : '/bin/bash';
   if (!fs.existsSync(bash)) { t.skip('Native Bash is unavailable; do not substitute a WSL/native product run'); return null; }
   return spawnSync(bash, ['--noprofile', '--norc', '-c', script], {
     cwd: repo, windowsHide: true, encoding: 'utf8', timeout: 15000,
-    env: { ...process.env, BASH_ENV: '', CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: retirement,
-      CREATOR_LINUX_INTEGRATED_CANDIDATE: integrated },
+    env: { ...process.env, BASH_ENV: '', GITHUB_REF: 'refs/heads/validation/unix-assembly-014',
+      GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512',
+      GITHUB_EVENT_NAME: 'workflow_dispatch', SIGNED_INPUTS: '',
+      CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: retirement,
+      CREATOR_LINUX_INTEGRATED_CANDIDATE: integrated, ...overrides },
   });
 }
 
@@ -366,6 +369,26 @@ test('assembly profiles default off and conflict refusal precedes every signed i
     const result = workflowBash(t, preflight.steps[0].run, retirement, integrated); if (!result) return;
     assert.equal(result.status, retirement === '1' && integrated === '1' ? 64 : 0, result.stderr || result.error?.message);
     assert.equal(result.stdout, '');
+  }
+});
+
+test('016 assembly preflight is separately exercised and cannot inherit a historical test profile', t => {
+  const workflow = assemblyYaml(t); if (!workflow) return;
+  const script = workflow.jobs['candidate-options'].steps[0].run;
+  const scope = { GITHUB_REF: 'refs/heads/validation/linux-integrated-candidate-016',
+    SIGNED_INPUTS: JSON.stringify([{ target: 'linux', os: 'ubuntu-22.04' }]) };
+  const accepted = workflowBash(t, script, '0', '1', scope); if (!accepted) return;
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(accepted.stdout, '');
+  for (const change of [
+    { GITHUB_EVENT_NAME: 'pull_request' }, { GITHUB_REPOSITORY_ID: '1' },
+    { GITHUB_REPOSITORY: 'other/repository' }, { CREATOR_LINUX_INTEGRATED_CANDIDATE: '0' },
+    { SIGNED_INPUTS: '[]' }, { SIGNED_INPUTS: '[{"target":"macos-arm64","os":"macos-15"}]' },
+    { SIGNED_INPUTS: '[{"target":"linux","os":"ubuntu-22.04"},{"target":"linux","os":"ubuntu-22.04"}]' },
+  ]) {
+    const refused = workflowBash(t, script, '0', '1', { ...scope, ...change });
+    assert.notEqual(refused.status, 0, JSON.stringify(change));
+    assert.equal(refused.stdout, '');
   }
 });
 
