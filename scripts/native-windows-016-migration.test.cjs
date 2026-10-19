@@ -234,9 +234,35 @@ test('native command is finite, quotes image paths, and rechecks native ownershi
   assert.throws(() => driver.dialogCommand(123, 'relative.exe', selected));
   assert.throws(() => driver.dialogCommand(123, 'C:\\owned.exe', { ...selected, name: 'Run arbitrary action' }));
   assert.throws(() => driver.dialogCommand(123, 'C:\\owned.exe', { ...selected, id: 9999 }));
+  assert.throws(() => driver.dialogCommand(123, 'C:\\owned.exe', { ...selected, title: 'Some other dialog' }));
 });
 
-const PARSE_SUCCESS = 'Parsed three native programs; none executed';
+test('unsigned legacy connections require an exact separate path-bound review, not generic modal approval', () => {
+  const f = driver.fixture({ LOCALAPPDATA: 'C:\\Local', APPDATA: 'C:\\Roaming', USERPROFILE: 'C:\\Home' }, 'C:\\fixture', path.win32);
+  const content = driver.connectionReview(f, 'C:\\verified\\router.exe');
+  const windows = [{ class: '#32770', title: 'Review unverified MCP connections', handle: 1234, controls: [
+    { id: 'ContentText', name: content, processId: 123 },
+    { id: 'CommandButton_1000', name: 'Move reviewed connections', processId: 123 },
+  ] }];
+  const selected = driver.assertConnectionDialog(windows, 123, content);
+  const command = driver.dialogCommand(123, 'C:\\owned.exe', selected);
+  assert.ok(command.includes("$expectedTitle='Review unverified MCP connections'"));
+  assert.ok(command.includes('$texts[0].Current.Name -cne $expectedContent'));
+  assert.ok(command.includes('$texts[0].Current.ProcessId -ne $targetPid'));
+  assert.throws(() => driver.assertDialog(windows, 123, true));
+  for (const change of [
+    value => { value[0].title = 'Move to Hub'; },
+    value => { value[0].controls[0].name = content.replace('verified', 'untrusted'); },
+    value => { value[0].controls[0].processId = 456; },
+    value => { value[0].controls.push(value[0].controls[0]); },
+    value => { value[0].controls[1].name = 'Yes'; },
+    value => { value[0].controls[1].id = 'CommandButton_9999'; },
+    value => { value.push(value[0]); },
+  ]) { const altered = clone(windows); change(altered); assert.throws(() => driver.assertConnectionDialog(altered, 123, content)); }
+  assert.throws(() => driver.dialogCommand(123, 'C:\\owned.exe', { ...selected, content: undefined }));
+});
+
+const PARSE_SUCCESS = 'Parsed native programs; none executed';
 const PARSE_ERROR = 'CREATOR_MIGRATION_PARSE_ERROR';
 function parserResult(result, env = process.env) {
   const diagnostics = (result.stdout || '') + (result.stderr || '');
@@ -277,7 +303,9 @@ test('syntax errors, other process failures and missing confirmation never becom
 
 test('parse every embedded native PowerShell program without executing it', { skip: process.platform !== 'win32' }, t => {
   const programs = [driver.REGISTRATIONS, driver.PROCESSES,
-    driver.dialogCommand(123, 'C:\\owned.exe', driver.assertDialog(snapshot(), 123, true))];
+    driver.dialogCommand(123, 'C:\\owned.exe', driver.assertDialog(snapshot(), 123, true)),
+    driver.dialogCommand(123, 'C:\\owned.exe', { title: 'Review unverified MCP connections',
+      name: 'Move reviewed connections', id: 1000, handle: 1234, content: "Reviewed fixture's paths\nand options" })];
   const payload = Buffer.from(JSON.stringify(programs), 'utf8').toString('base64');
   const parser = `$ErrorActionPreference='Stop';try{$programs=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payload}'))|ConvertFrom-Json;foreach($source in $programs){$tokens=$null;$errors=$null;[void][Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors);if($errors.Count){throw (($errors|ForEach-Object Message)-join ';')}};'${PARSE_SUCCESS}'}catch{[Console]::Error.WriteLine('${PARSE_ERROR}: '+[string]$_);exit 1}`;
   const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(parser, 'utf16le').toString('base64')],
@@ -364,4 +392,14 @@ test('data-only driver keeps provenance and fixed installer admission before all
   assert.match(main, /inspectActiveRoute\(process\.env\.LOCALAPPDATA, manifest\)/);
   assert.match(source, /pinnedRead\(path\.join\(directory, 'creator-hub\.exe'\), TARGET\.exe\)/);
   assert.match(source, /activeFile, 2048\), activeBytes/);
+});
+
+test('captured legacy exception is reviewed once before completion; clients and settings are checked before approval', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-windows-016-migration.cjs'), 'utf8');
+  assert.equal([...source.matchAll(/await connectionDecision\(\)/g)].length, 1);
+  assert.ok(source.indexOf('await nativeDecision(true)') < source.indexOf('await connectionDecision()'));
+  const review = source.slice(source.indexOf('const connectionDecision = async'), source.indexOf('const launch = async'));
+  for (const check of ['assertConnectionDialog', 'inspectActiveRoute', 'verifyBackups(f.stores)', 'No client changes before explicit exception approval',
+    'Project import precedes the client review', 'ps(dialogCommand']) assert.ok(review.includes(check), check);
+  assert.ok(review.indexOf('No client changes before explicit exception approval') < review.indexOf('ps(dialogCommand'));
 });

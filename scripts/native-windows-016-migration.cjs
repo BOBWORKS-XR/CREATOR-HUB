@@ -232,7 +232,25 @@ function assertDialog(windows, pid, approve) {
   const controls = dialog.controls.filter(item => item.name === name);
   assert.equal(controls.length, 1); assert.equal(controls[0].processId, pid);
   assert.equal(controls[0].id, approve ? 'CommandButton_1000' : 'CommandButton_1001');
-  return { name, id: approve ? 1000 : 1001, handle: dialog.handle };
+  return { title: dialog.title, name, id: approve ? 1000 : 1001, handle: dialog.handle };
+}
+
+function connectionReview(f, router) {
+  return 'These existing connections could not be publisher-verified:\n\n'
+    + ['Codex', 'Claude Code', 'Claude Desktop'].map(name => `${name}\nCommand: ${f.oldNode}\nServer: ${f.oldServer}\nProject kept: ${f.projectA}`).join('\n\n')
+    + `\n\nMove them to the verified Hub router at ${router}? Names and ownership markers are not proof. Continue only for your Creator Works connections. Exact backups, client options and other servers are kept. Cancel stops migration before changing any of these clients.`;
+}
+
+function assertConnectionDialog(windows, pid, content) {
+  const dialogs = windows.filter(item => item.class === '#32770');
+  assert.equal(dialogs.length, 1, 'Exactly one owned connection exception review required');
+  const dialog = dialogs[0]; assert.equal(dialog.title, 'Review unverified MCP connections');
+  assert.ok(Number.isSafeInteger(dialog.handle) && dialog.handle > 0);
+  const texts = dialog.controls.filter(item => item.id === 'ContentText');
+  assert.equal(texts.length, 1); assert.equal(texts[0].processId, pid); assert.equal(texts[0].name, content);
+  const buttons = dialog.controls.filter(item => item.name === 'Move reviewed connections');
+  assert.equal(buttons.length, 1); assert.equal(buttons[0].processId, pid); assert.equal(buttons[0].id, 'CommandButton_1000');
+  return { title: dialog.title, name: 'Move reviewed connections', id: 1000, handle: dialog.handle, content };
 }
 
 // The shared native-window helper predates this single-review task dialog.
@@ -258,8 +276,12 @@ $h=[IntPtr]$dialogHandle; [uint32]$owner=0
 [void][Migration016Dialog]::GetWindowThreadProcessId($h,[ref]$owner)
 $name=[Text.StringBuilder]::new(256); [void][Migration016Dialog]::GetWindowText($h,$name,256)
 $class=[Text.StringBuilder]::new(256); [void][Migration016Dialog]::GetClassName($h,$class,256)
-if($owner -ne $targetPid -or $name.ToString() -cne 'Move to Hub' -or $class.ToString() -cne '#32770' -or -not [Migration016Dialog]::IsWindowVisible($h)) { throw 'Owned dialog changed' }
+if($owner -ne $targetPid -or $name.ToString() -cne $expectedTitle -or $class.ToString() -cne '#32770' -or -not [Migration016Dialog]::IsWindowVisible($h)) { throw 'Owned dialog changed' }
 $w=[Windows.Automation.AutomationElement]::FromHandle($h)
+if($expectedContent) {
+ $texts=$w.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::AutomationIdProperty,'ContentText'))
+ if($texts.Count -ne 1 -or $texts[0].Current.ProcessId -ne $targetPid -or $texts[0].Current.Name -cne $expectedContent) { throw 'Reviewed connection details changed' }
+}
 $matches=$w.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,$buttonName))
 if($matches.Count -ne 1) { throw 'Ambiguous native approval' }
 $b=$matches[0]
@@ -270,10 +292,13 @@ if(-not [Migration016Dialog]::PostMessage($h,0x466,[IntPtr]$buttonId,[IntPtr]::Z
 
 function dialogCommand(pid, executable, selected) {
   assert.ok(Number.isSafeInteger(pid) && pid > 0); assert.ok(Number.isSafeInteger(selected.handle) && selected.handle > 0);
-  assert.ok((selected.id === 1000 && selected.name === 'Move to Hub') || (selected.id === 1001 && selected.name === 'Not now'));
+  const guide = selected.title === 'Move to Hub' && ((selected.id === 1000 && selected.name === 'Move to Hub') || (selected.id === 1001 && selected.name === 'Not now'));
+  const connection = selected.title === 'Review unverified MCP connections' && selected.id === 1000 && selected.name === 'Move reviewed connections';
+  assert.ok(guide || connection, 'Only fixed guide/connection decisions are admitted');
+  if (connection) assert.ok(typeof selected.content === 'string' && selected.content.length > 0 && selected.content.length <= 8192);
   assert.ok(path.win32.isAbsolute(executable) && !/[\0\r\n]/.test(executable));
   const quote = text => `'${text.replaceAll("'", "''")}'`;
-  return `$targetPid=${pid};$expectedExecutable=${quote(executable)};$dialogHandle=${selected.handle};$buttonId=${selected.id};$buttonName=${quote(selected.name)};\n${DIALOG_ACTION}`;
+  return `$targetPid=${pid};$expectedExecutable=${quote(executable)};$dialogHandle=${selected.handle};$buttonId=${selected.id};$buttonName=${quote(selected.name)};$expectedTitle=${quote(selected.title)};$expectedContent=${quote(connection ? selected.content : '')};\n${DIALOG_ACTION}`;
 }
 
 function reportTemplate(testSource) {
@@ -404,6 +429,23 @@ async function main(args = process.argv.slice(2)) {
     // Only readiness is retried. Native decisions and page clicks are not replayed.
     ps(dialogCommand(child.pid, hub, selected));
   };
+  const connectionDecision = async () => {
+    const { managedLocations } = require('./native-managed-target.cjs');
+    const router = managedLocations(process.env.LOCALAPPDATA).command;
+    const content = connectionReview(f, router);
+    const selected = await retry(() => assertConnectionDialog(JSON.parse(native('snapshot')), child.pid, content));
+    const active = inspectActiveRoute(process.env.LOCALAPPDATA, manifest);
+    assert.ok(active.payload);
+    const imported = { ...f.current, channels: [...f.current.channels, f.missingChannel] };
+    for (const item of f.stores.slice(0, 2)) assert.deepEqual(JSON.parse(read(item.path)), imported,
+      'Project import precedes the client review; the saved server must still be the old one');
+    verifyBackups(f.stores); retained();
+    for (const item of f.clients) assert.deepEqual(read(item.path), item.bytes, 'No client changes before explicit exception approval');
+    assert.equal(hubHash(), TARGET.exe);
+    report.connectionExceptionDecisions = [{ ...selected, pid: child.pid, executableSha256: hubHash() }];
+    // One explicit approval of captured known fixture paths, not generic modal dismissal.
+    ps(dialogCommand(child.pid, hub, selected));
+  };
   const launch = async () => {
     assert.equal(hubHash(), TARGET.exe); assert.deepEqual(processes(), []);
     child = spawn(hub, [], { env: { ...environment,
@@ -519,6 +561,7 @@ async function main(args = process.argv.slice(2)) {
     };
     observer = setInterval(sample, 20);
     await page.locator('#convergence-move').click(); await nativeDecision(true);
+    await connectionDecision();
     await page.locator('#convergence-title').filter({ hasText: /^Move complete$/ }).waitFor({ timeout: 180000 });
     sample(); clearInterval(observer); observer = null;
     if (observationError) throw observationError;
@@ -603,5 +646,5 @@ async function main(args = process.argv.slice(2)) {
 
 module.exports = { TARGET, CONTEXT, admission, parseArgs, inside, hash, backupFile, fixture, verifyMerged, verifyClient,
   installerPath, validateProvenance, RESOURCE_PINS, MCP_FILES, INPUT_FILES, resourcePlan, moduleGeneration, verifyActiveReceipt,
-  inspectInstalledResources, inspectActiveRoute, assertDialog, dialogCommand, DIALOG_ACTION, REGISTRATIONS, PROCESSES, reportTemplate, main };
+  inspectInstalledResources, inspectActiveRoute, assertDialog, connectionReview, assertConnectionDialog, dialogCommand, DIALOG_ACTION, REGISTRATIONS, PROCESSES, reportTemplate, main };
 if (require.main === module) main().catch(error => { console.error(String(error.stack || error)); process.exitCode = 1; });
