@@ -19,7 +19,6 @@
   let inventory = null;
   let inventoryError = '';
   let hubUpdate = null;
-  let retainedUpdate = null;
   let busy = false;
   let launchRevision = -1;
   const preferenceControls = [['preview-channel', 'preview', 'preview'],
@@ -32,7 +31,6 @@
   const byId = id => document.getElementById(id);
   const invoke = (command, args) => window.CreatorHubNative.invoke(command, args);
   const directFeatures = window.CreatorHubNative.integratedFeatures === true;
-  const updateRecovery = window.CreatorHubNative.updateRecovery === true;
   let directReady = false;
   if (directFeatures) {
     current = 'projects';
@@ -317,8 +315,6 @@
       : hubUpdate.warning ? 'Could not check for a Hub update.' : `You are using Hub ${hubUpdate.currentVersion}. No newer update was found.`;
     byId('hub-update-warning').textContent = hubUpdate?.installBlocked || hubUpdate?.warning || '';
     byId('hub-update-warning').classList.toggle('hidden', !byId('hub-update-warning').textContent);
-    byId('hub-update-review').classList.toggle('hidden', !updateRecovery || retainedUpdate?.retained !== true);
-    byId('hub-update-review').disabled = busy;
     for (const app of inventory?.apps || []) {
       const update = byId(`update-${app.app}`), reason = byId(`update-reason-${app.app}`);
       const available = Boolean(!directFeatures && app.installed && app.updateAvailable);
@@ -495,17 +491,7 @@
       hubUpdate = result;
       hubChecked = true;
     } catch (reason) { hubUpdate = { warning: String(reason) }; }
-    finally {
-      if (updateRecovery) {
-        try { acceptRecovery(await invoke('hub_update_recovery_status')); }
-        catch (reason) {
-          if (retainedUpdate?.retained) {
-            hubUpdate = { ...hubUpdate, installBlocked: retainedUpdate.message || String(reason) };
-          }
-        }
-      }
-      busy = false; renderState();
-    }
+    finally { busy = false; renderState(); }
     if (!directFeatures && check && succeeded && automaticDownloads() && inventory?.supported) {
       for (const app of [...inventory.apps]) {
         if (!automaticDownloads()) break;
@@ -538,28 +524,6 @@
       if (command === 'install_hub_update') await restoreHostedViews();
       window.CreatorHosted.updating(false);
       busy = false; await refresh(false);
-    }
-  }
-
-  function acceptRecovery(result) {
-    if (!result || typeof result.retained !== 'boolean'
-      || (result.message !== null && typeof result.message !== 'string')) throw Error('Retained update state is unavailable.');
-    retainedUpdate = result;
-    if (result.retained || result.message) {
-      hubUpdate = { ...hubUpdate, installBlocked: result.message || 'Review the retained update before closing Hub.' };
-    }
-  }
-
-  async function reviewRetainedUpdate() {
-    if (!updateRecovery || retainedUpdate?.retained !== true || busy) return;
-    busy = true; renderState(); error.classList.add('hidden');
-    try {
-      acceptRecovery(await invoke('review_retained_hub_update'));
-      setProgress({ message: retainedUpdate.message || 'No retained update needs review.', total: 0, cancellable: false });
-    } catch (reason) {
-      error.textContent = String(reason); error.classList.remove('hidden');
-    } finally {
-      busy = false; renderState();
     }
   }
 
@@ -694,7 +658,6 @@
     }
   });
   byId('hub-update-button').addEventListener('click', () => hubAction('install_hub_update'));
-  byId('hub-update-review').addEventListener('click', reviewRetainedUpdate);
   window.addEventListener('creator-feature-state', () => {
     if (directFeatures) {
       renderState();
@@ -747,18 +710,6 @@
     renderState();
   }
   window.CreatorUsageTerms.requireAcceptance().then(async () => {
-    if (updateRecovery) {
-      try {
-        acceptRecovery(await invoke('hub_update_recovery_status'));
-        // A renderer reload must not hide recovery behind Manager-backed
-        // migration or restoration. Reopening through the helper resumes startup.
-        if (retainedUpdate.retained) { renderState(); return; }
-      } catch (reason) {
-        error.textContent = `Retained update state could not be read: ${String(reason)}. Use Check for updates to review it again.`;
-        error.classList.remove('hidden');
-        renderState(); return;
-      }
-    }
     await loadPreferences();
     await window.CreatorConvergence?.run();
     await start();

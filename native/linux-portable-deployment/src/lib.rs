@@ -1,5 +1,5 @@
 //! Signed AppDir verification, explicit private-store transactions and guarded
-//! native activation and reviewed user registration. No network or settings migration.
+//! native activation. No network, service registration or settings migration.
 mod archive;
 mod filesystem;
 mod store;
@@ -8,14 +8,6 @@ pub use store::host::{
     HostSession, InstallChoice, InstallOutcome, InstallReview, LaunchLease, HOST_MARKER,
     HOST_PROFILE,
 };
-pub use store::registration::{
-    RegistrationChoice, RegistrationOutcome, RegistrationRecovery, RegistrationRecoveryChoice,
-    RegistrationReview, SELECTOR_ENTRYPOINT,
-};
-#[cfg(feature = "experimental-restart")]
-pub use store::restart::{RestartChoice, RestartReview, RestartStageOutcome, StagedRestart};
-#[cfg(all(feature = "experimental-restart", target_os = "linux"))]
-pub use store::restart::{RestartDisposition, RestartReady, RootRestart, SupervisionOutcome};
 pub use store::{Activation, Recovery, RecoveryState, Selection, SelectionSnapshot, Store};
 
 use minisign_verify::{PublicKey, Signature};

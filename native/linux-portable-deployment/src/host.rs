@@ -370,7 +370,7 @@ struct HostProfile {
     executable_sha256: String,
 }
 
-pub(super) fn host_profile(manifest: &Manifest, bytes: &[u8]) -> Result<()> {
+fn host_profile(manifest: &Manifest, bytes: &[u8]) -> Result<()> {
     require(
         !bytes.is_empty() && bytes.len() <= 4096,
         "Bounded signed host profile is required",
@@ -394,7 +394,7 @@ pub(super) fn host_profile(manifest: &Manifest, bytes: &[u8]) -> Result<()> {
     )
 }
 
-pub(super) fn require_runner(manifest: &Manifest) -> Result<()> {
+fn require_runner(manifest: &Manifest) -> Result<()> {
     require(
         matches!(
             manifest.entries.get(RUNNER),
@@ -496,7 +496,7 @@ impl LaunchLease {
     }
 }
 
-pub(super) fn same_file(left: &File, right: &File) -> Result<bool> {
+fn same_file(left: &File, right: &File) -> Result<bool> {
     let a = left
         .metadata()
         .map_err(|_| refused("Cannot recheck held executable"))?;

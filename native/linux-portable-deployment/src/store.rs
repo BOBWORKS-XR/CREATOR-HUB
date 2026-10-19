@@ -16,11 +16,6 @@ const RECORD_LIMIT: u64 = 16384;
 
 #[path = "host.rs"]
 pub(crate) mod host;
-#[path = "registration.rs"]
-pub(crate) mod registration;
-#[cfg(feature = "experimental-restart")]
-#[path = "restart.rs"]
-pub(crate) mod restart;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -502,14 +497,6 @@ fn retain(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn atomic_new_record(path: &Path, bytes: &[u8]) -> Result<()> {
-    atomic_new_record_with_directory_flush(path, bytes, &disk::sync_dir)
-}
-
-fn atomic_new_record_with_directory_flush(
-    path: &Path,
-    bytes: &[u8],
-    flush_parent: &dyn Fn(&Path) -> Result<()>,
-) -> Result<()> {
     disk::unlinked(path)?;
     let parent = path
         .parent()
@@ -527,12 +514,7 @@ fn atomic_new_record_with_directory_flush(
     staged
         .persist_noclobber(path)
         .map_err(|_| refused("Cannot publish new record; existing record kept"))?;
-    // The name is already published: a failed directory flush is not a refusal
-    // with unchanged state, even when no later transaction step has run.
-    flush_parent(parent).map_err(|_| Error {
-        kind: ErrorKind::OutcomeUnknown,
-        message: "Record was published but its directory flush failed; review retained evidence before retrying",
-    })
+    disk::sync_dir(parent)
 }
 
 fn remove_pending(root: &Path, expected: &[u8]) -> Result<()> {

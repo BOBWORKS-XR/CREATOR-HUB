@@ -28,13 +28,6 @@ pub struct SelfUpdate(
 
 #[cfg(unix)]
 pub fn initialize(handle: &tauri::AppHandle) {
-    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
-    {
-        crate::portable_update::initialize(handle);
-        if crate::portable_update::handles(handle) {
-            return;
-        }
-    }
     let identity = raw_installed_location(handle).and_then(|target| {
         let exe = tauri::utils::platform::current_exe()
             .map_err(|_| "Cannot check the running Hub image.")?;
@@ -48,19 +41,19 @@ pub fn initialize(handle: &tauri::AppHandle) {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct State {
-    pub(super) current_version: &'static str,
-    pub(super) available_version: Option<String>,
-    pub(super) downloaded: bool,
-    pub(super) install_blocked: Option<String>,
-    pub(super) warning: Option<String>,
+    current_version: &'static str,
+    available_version: Option<String>,
+    downloaded: bool,
+    install_blocked: Option<String>,
+    warning: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
-pub(super) struct Progress {
-    pub(super) message: String,
-    pub(super) received: u64,
-    pub(super) total: u64,
-    pub(super) cancellable: bool,
+struct Progress {
+    message: String,
+    received: u64,
+    total: u64,
+    cancellable: bool,
 }
 
 fn current() -> Version {
@@ -241,10 +234,6 @@ fn selected(handle: &tauri::AppHandle, expected: &str) -> Result<Release, String
 }
 
 fn check(handle: &tauri::AppHandle, online: bool, preview: bool) -> Result<State, String> {
-    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
-    if crate::portable_update::handles(handle) {
-        return crate::portable_update::check(handle, online);
-    }
     let _operation = handle.state::<Manager>().begin()?;
     let target = Target::native()?;
     let dir = manager::child_dir("hub-updates")?;
@@ -364,48 +353,6 @@ fn download(handle: &tauri::AppHandle, release: &Release) -> Result<PathBuf, Str
 }
 
 #[tauri::command]
-pub async fn hub_update_recovery_status(
-    handle: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
-    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
-    {
-        tauri::async_runtime::spawn_blocking(move || {
-            serde_json::to_value(crate::portable_update::recovery_status(&handle)?)
-                .map_err(|_| "Cannot read retained update state.".into())
-        })
-        .await
-        .map_err(|_| "Retained update status worker stopped.")?
-    }
-    #[cfg(not(all(target_os = "linux", feature = "experimental-linux-portable-update")))]
-    {
-        let _ = handle;
-        Err("Portable update recovery is not enabled in this build.".into())
-    }
-}
-
-#[tauri::command]
-pub async fn review_retained_hub_update(
-    handle: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
-    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
-    {
-        tauri::async_runtime::spawn_blocking(move || {
-            serde_json::to_value(crate::portable_update::review_retained(&handle)?)
-                .map_err(|_| "Cannot report retained update review.".into())
-        })
-        .await
-        .map_err(|_| {
-            "Retained update review worker stopped. Recheck its state before closing Hub."
-        })?
-    }
-    #[cfg(not(all(target_os = "linux", feature = "experimental-linux-portable-update")))]
-    {
-        let _ = handle;
-        Err("Portable update recovery is not enabled in this build.".into())
-    }
-}
-
-#[tauri::command]
 pub async fn hub_update_status(
     handle: tauri::AppHandle,
     online: bool,
@@ -422,10 +369,6 @@ pub async fn download_hub_update(
     version: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
-        if crate::portable_update::handles(&handle) {
-            return crate::portable_update::download(&handle, &version);
-        }
         let _operation = handle.state::<Manager>().begin()?;
         let release = selected(&handle, &version)?;
         download(&handle, &release)?;
@@ -442,10 +385,6 @@ pub async fn install_hub_update(
     restore_views: bool,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
-        if crate::portable_update::handles(&handle) {
-            return crate::portable_update::install(&handle, &version, restore_views);
-        }
         let _operation = handle.state::<Manager>().begin()?;
         let release = selected(&handle, &version)?;
         let installed = installed_location(&handle)?;

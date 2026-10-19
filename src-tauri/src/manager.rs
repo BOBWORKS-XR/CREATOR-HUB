@@ -305,24 +305,6 @@ impl Manager {
     pub(crate) fn cancellation(&self) -> &AtomicBool {
         &self.cancel
     }
-    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
-    pub(crate) fn close_for_portable_restart(&self, operation: &Operation) -> Result<(), String> {
-        let mut closing = self
-            .closing
-            .lock()
-            .map_err(|_| "Hub lifecycle state is unavailable.")?;
-        if *closing || !Arc::ptr_eq(&operation.busy, &self.busy) || !self.busy() {
-            return Err("The portable update no longer owns Hub's operation lease.".into());
-        }
-        if self.cancel.load(Ordering::SeqCst) {
-            return Err("Portable update cancelled before closing Hub.".into());
-        }
-        // Transfer the existing lease into closing without a begin/close gap.
-        // The caller retains the file lock until it requests ordinary exit zero.
-        *closing = true;
-        self.busy.store(false, Ordering::SeqCst);
-        Ok(())
-    }
     pub fn begin(&self) -> Result<Operation, String> {
         let closing = self
             .closing
@@ -894,24 +876,6 @@ pub(crate) fn download_stream_url(
     cancel: &AtomicBool,
     progress: impl Fn(u64),
 ) -> Result<(), String> {
-    download_binding(
-        url,
-        release.byte_length,
-        &release.sha256,
-        target,
-        cancel,
-        progress,
-    )
-}
-
-fn download_binding(
-    url: &str,
-    size: u64,
-    sha256: &str,
-    target: impl Write,
-    cancel: &AtomicBool,
-    progress: impl Fn(u64),
-) -> Result<(), String> {
     tauri::async_runtime::block_on(async {
         progress(0);
         let client = catalog::streaming_client()?;
@@ -920,10 +884,13 @@ fn download_binding(
             .await?
             .and_then(|r| r.error_for_status())
             .map_err(|_| "The download failed. Check your connection and try again.")?;
-        if response.content_length().is_some_and(|n| n != size) {
+        if response
+            .content_length()
+            .is_some_and(|n| n != release.byte_length)
+        {
             return Err("The download size differs from the trusted release.".into());
         }
-        let mut sink = VerifiedSink::new(target, size, sha256);
+        let mut sink = VerifiedSink::new(target, release.byte_length, &release.sha256);
         let mut last = Instant::now();
         loop {
             let bytes = cancellable(response.chunk(), cancel)
@@ -942,27 +909,9 @@ fn download_binding(
             return Err("Download cancelled.".into());
         }
         sink.finish()?;
-        progress(size);
+        progress(release.byte_length);
         Ok(())
     })
-}
-
-#[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
-pub(crate) fn download_portable_binding(
-    url: &str,
-    size: u64,
-    sha256: &str,
-    target: impl Write,
-    cancel: &AtomicBool,
-    progress: impl Fn(u64),
-) -> Result<(), String> {
-    if size == 0
-        || size > creator_hub_linux_portable_deployment::MAX_ARCHIVE
-        || !catalog::hash_valid(sha256)
-    {
-        return Err("Invalid portable archive binding.".into());
-    }
-    download_binding(url, size, sha256, target, cancel, progress)
 }
 
 #[cfg(test)]
@@ -1038,37 +987,6 @@ mod tests {
         assert!(!manager.allow_close());
         manager.busy.store(false, Ordering::SeqCst);
         assert!(manager.allow_close());
-    }
-    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
-    #[test]
-    fn portable_restart_transfers_only_its_owned_lease_into_closing() {
-        let manager = Manager::default();
-        let operation = manager.fixture_operation(tempfile::tempfile().unwrap());
-        assert!(!manager.allow_close());
-        manager.close_for_portable_restart(&operation).unwrap();
-        assert!(manager.is_closing());
-        assert!(!manager.busy());
-        assert!(manager.allow_close());
-        assert!(manager.begin().is_err());
-        drop(operation);
-        assert!(manager.begin().is_err());
-    }
-    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
-    #[test]
-    fn portable_restart_refuses_foreign_or_cancelled_leases_without_allowing_close() {
-        let manager = Manager::default();
-        let operation = manager.fixture_operation(tempfile::tempfile().unwrap());
-        let other = Manager::default();
-        let foreign = other.fixture_operation(tempfile::tempfile().unwrap());
-        assert!(manager.close_for_portable_restart(&foreign).is_err());
-        assert!(!manager.is_closing());
-        assert!(manager.busy());
-        manager.cancel();
-        assert!(manager.close_for_portable_restart(&operation).is_err());
-        assert!(!manager.is_closing());
-        assert!(!manager.allow_close());
-        drop(operation);
-        drop(foreign);
     }
     #[test]
     #[ignore = "Explicit network-only acceptance: downloads pinned official installers but never executes them"]

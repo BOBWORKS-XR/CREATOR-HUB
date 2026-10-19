@@ -13,7 +13,6 @@
     preferencesPersistence: window.__CREATOR_HUB_PREFERENCES_PROTOCOL__ === 1,
     convergencePersistence: window.__CREATOR_HUB_CONVERGENCE_PROTOCOL__ === 1,
     integratedFeatures: window.__CREATOR_HUB_FEATURE_PROTOCOL__ === 1,
-    updateRecovery: window.__CREATOR_HUB_UPDATE_RECOVERY_PROTOCOL__ === 1,
     invoke: (command, args = {}) => {
       const run = () => invoke(command, args, key ? { headers: { 'x-creator-shell-key': key } } : undefined);
       if (!discovery.has(command) && !(command === 'hosted_app_call' && hostedReads.has(args.command))) return run();
