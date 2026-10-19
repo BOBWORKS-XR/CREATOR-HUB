@@ -190,7 +190,17 @@ function singleHost(request) {
     index % 2 === 0 && value.toLowerCase() === 'host').length === 1;
 }
 
-function newState() { return { requests: 0, bytes: 0, rejected: 0, served: new Map(), rejections: new Map(), rejectionOverflow: 0 }; }
+function newState() { return { requests: 0, bytes: 0, rejected: 0, served: new Map(), rejections: new Map(), rejectionOverflow: 0,
+  connectionResetEvents: 0, connectionResets: new Map() }; }
+
+function recordTransportError(state, kind, error) {
+  if (error?.code !== 'ECONNRESET') { recordRejection(state, kind, error?.code); return; }
+  // A peer disconnect is not a rejected request. These are events, not unique sockets.
+  assert.ok(['tls-error', 'inner-client-error', 'outer-client-error'].includes(kind));
+  state.connectionResetEvents++;
+  if (state.connectionResets.has(kind)) state.connectionResets.get(kind).count++;
+  else state.connectionResets.set(kind, { kind, code: 'ECONNRESET', count: 1 });
+}
 
 function recordRejection(state, kind, errorCode) {
   assert.match(kind, /^[a-z0-9-]{1,48}$/);
@@ -247,7 +257,8 @@ function labReport(contract, state) {
       labDiscovery: true, publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false, releaseReady: false },
     baseline: contract.baseline, targetVersion: contract.targetVersion,
     requests: [...state.served.values()], rejectedRequestCount: state.rejected,
-    rejectionSummary: [...state.rejections.values()], rejectionOverflow: state.rejectionOverflow };
+    rejectionSummary: [...state.rejections.values()], rejectionOverflow: state.rejectionOverflow,
+    connectionResetEventCount: state.connectionResetEvents, connectionResetSummary: [...state.connectionResets.values()] };
 }
 
 async function startLabProxy(contract, tlsOptions, env = process.env, transport = { http, tls }) {
@@ -266,7 +277,11 @@ async function startLabProxy(contract, tlsOptions, env = process.env, transport 
     recordRejection(state, kind, code); socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   }
   for (const server of [inner, outer]) {
-    server.on('clientError', (error, socket) => reject(socket, 400, server === inner ? 'inner-client-error' : 'outer-client-error', error.code));
+    server.on('clientError', (error, socket) => {
+      const kind = server === inner ? 'inner-client-error' : 'outer-client-error';
+      if (error.code === 'ECONNRESET') { recordTransportError(state, kind, error); socket.destroy(); }
+      else reject(socket, 400, kind, error.code);
+    });
     server.on('upgrade', (_req, socket) => reject(socket, 400, 'http-upgrade'));
     server.on('checkContinue', (_req, res) => { recordRejection(state, 'expect-continue'); res.writeHead(400, { Connection: 'close' }); res.end(); });
     server.on('checkExpectation', (_req, res) => { recordRejection(state, 'expectation'); res.writeHead(400, { Connection: 'close' }); res.end(); });
@@ -290,7 +305,7 @@ async function startLabProxy(contract, tlsOptions, env = process.env, transport 
         if (name !== host) callback(Error('Rejected SNI')); else callback(null, context);
       } });
     sockets.add(secure); secure.once('close', () => sockets.delete(secure));
-    secure.on('error', error => { recordRejection(state, 'tls-error', error.code); secure.destroy(); });
+    secure.on('error', error => { recordTransportError(state, 'tls-error', error); secure.destroy(); });
     secure.setTimeout(LIMITS.idleMs, () => secure.destroy());
     const deadline = setTimeout(() => secure.destroy(), 10000);
     secure.once('close', () => clearTimeout(deadline));

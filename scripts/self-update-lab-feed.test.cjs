@@ -9,15 +9,15 @@ const { spawnSync } = require('node:child_process');
 const lab = require('./self-update-lab-feed.cjs');
 test('refusal diagnostics stay bounded and retain counts without request or secret content', () => {
   const state = lab.newState();
-  lab.recordRejection(state, 'tls-error', 'ECONNRESET');
-  lab.recordRejection(state, 'tls-error', 'ECONNRESET');
+  lab.recordRejection(state, 'tls-error', 'ERR_SSL_WRONG_VERSION_NUMBER');
+  lab.recordRejection(state, 'tls-error', 'ERR_SSL_WRONG_VERSION_NUMBER');
   lab.recordRejection(state, 'tls-error', 'not a safe code /private?token=secret');
   for (let index = 0; index < 20; index++) lab.recordRejection(state, `http-${400 + index}`);
   const report = lab.labReport(lab.createContract(input()), state);
   assert.equal(report.rejectedRequestCount, 23);
   assert.equal(report.rejectionSummary.length, 16);
   assert.equal(report.rejectionSummary.reduce((sum, value) => sum + value.count, 0) + report.rejectionOverflow, 23);
-  assert.deepEqual(report.rejectionSummary[0], { kind: 'tls-error', code: 'ECONNRESET', count: 2 });
+  assert.deepEqual(report.rejectionSummary[0], { kind: 'tls-error', code: 'ERR_SSL_WRONG_VERSION_NUMBER', count: 2 });
   assert.equal(report.rejectionSummary[1].code, null);
   assert.doesNotMatch(JSON.stringify(report), /private|token=secret|not a safe code/);
 });
@@ -479,6 +479,53 @@ test('malformed HTTP, upgrades, nested CONNECT and untunneled GET never become l
   const res = { writeHead: status => { res.status = status; }, end() {} };
   outer.emit('request', {}, res); assert.equal(res.status, 405);
   assert.ok(!JSON.stringify(proxy.report()).includes('SECRET-PARSER-CONTENT'));
+  assert.equal(proxy.report().rejectedRequestCount, 10);
+  assert.equal(proxy.report().connectionResetEventCount, 0);
+});
+
+test('peer resets are bounded transport event diagnostics, not rejected requests or HTTP responses', async t => {
+  const { outer, inner, secured, Socket, proxy } = await mockProxy(t);
+  const socket = new Socket(); outer.emit('connection', socket);
+  outer.emit('connect', { url: 'api.github.com:443', headers: { host: 'api.github.com:443' },
+    rawHeaders: ['Host', 'api.github.com:443'] }, socket, Buffer.alloc(0));
+  const secure = secured[0]; secure.servername = 'api.github.com'; secure.emit('secure');
+  secure.emit('error', Object.assign(Error('PRIVATE TRANSPORT DETAIL'), { code: 'ECONNRESET' }));
+  inner.emit('clientError', Object.assign(Error('PRIVATE TRANSPORT DETAIL'), { code: 'ECONNRESET' }), secure);
+  assert.ok(secure.destroyed); assert.deepEqual(secure.writes, []);
+  for (let index = 0; index < 20; index++) {
+    const reset = new Socket();
+    outer.emit('clientError', Object.assign(Error('PRIVATE TRANSPORT DETAIL'), { code: 'ECONNRESET' }), reset);
+    assert.ok(reset.destroyed); assert.deepEqual(reset.writes, []);
+  }
+  const report = proxy.report();
+  assert.equal(report.rejectedRequestCount, 0);
+  assert.deepEqual(report.rejectionSummary, []);
+  assert.equal(report.connectionResetEventCount, 22);
+  assert.deepEqual(report.connectionResetSummary, [
+    { kind: 'tls-error', code: 'ECONNRESET', count: 1 },
+    { kind: 'inner-client-error', code: 'ECONNRESET', count: 1 },
+    { kind: 'outer-client-error', code: 'ECONNRESET', count: 20 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(report), /PRIVATE TRANSPORT DETAIL/);
+  assert.equal(report.requests.length, 0);
+});
+
+test('non-reset TLS and HTTP failures still fail request policy accounting', async t => {
+  const { outer, inner, secured, Socket, proxy } = await mockProxy(t);
+  const socket = new Socket(); outer.emit('connection', socket);
+  outer.emit('connect', { url: 'api.github.com:443', headers: { host: 'api.github.com:443' },
+    rawHeaders: ['Host', 'api.github.com:443'] }, socket, Buffer.alloc(0));
+  secured[0].emit('error', Object.assign(Error('SECRET TLS DETAIL'), { code: 'ERR_SSL_WRONG_VERSION_NUMBER' }));
+  for (const server of [inner, outer]) {
+    for (const code of ['HPE_INVALID_METHOD', 'ECONNABORTED', undefined]) {
+      const malformed = new Socket(); server.emit('clientError', { code }, malformed);
+      assert.ok(malformed.destroyed); assert.match(malformed.writes[0], /400 Rejected/);
+    }
+  }
+  const report = proxy.report();
+  assert.equal(report.rejectedRequestCount, 7);
+  assert.equal(report.connectionResetEventCount, 0);
+  assert.doesNotMatch(JSON.stringify(report), /SECRET TLS DETAIL/);
 });
 
 test('duplicate or absent Host headers refused even when a parser keeps the first value', async t => {

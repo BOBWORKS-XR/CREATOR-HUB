@@ -293,7 +293,8 @@ async function main() {
     await proxy.close();
     const report = proxy.report();
     console.log(JSON.stringify({ kind: 'lab-feed-stopped', servedRouteCount: report.requests.length, rejectedRequestCount: report.rejectedRequestCount,
-      rejectionSummary: report.rejectionSummary, rejectionOverflow: report.rejectionOverflow }));
+      rejectionSummary: report.rejectionSummary, rejectionOverflow: report.rejectionOverflow,
+      connectionResetEventCount: report.connectionResetEventCount, connectionResetSummary: report.connectionResetSummary }));
   } finally {
     input.fill(0); if (pfx) pfx.fill(0);
     if (control) { control.pfx = ''; control.passphrase = ''; }
@@ -525,6 +526,8 @@ try {
     servedRouteCount=$(if ($feedResult) { $feedResult.servedRouteCount } else { $null });
     rejectedRequestCount=$(if ($feedResult) { $feedResult.rejectedRequestCount } else { $null });
     rejectionSummary=$(if ($feedResult) { @($feedResult.rejectionSummary) } else { @() });
-    rejectionOverflow=$(if ($feedResult) { $feedResult.rejectionOverflow } else { $null })} | ConvertTo-Json -Depth 4 -Compress
+    rejectionOverflow=$(if ($feedResult) { $feedResult.rejectionOverflow } else { $null });
+    connectionResetEventCount=$(if ($feedResult) { $feedResult.connectionResetEventCount } else { $null });
+    connectionResetSummary=$(if ($feedResult) { @($feedResult.connectionResetSummary) } else { @() })} | ConvertTo-Json -Depth 4 -Compress
 if ($failed -or -not $cleanupVerified) { exit 1 }
 exit 0
