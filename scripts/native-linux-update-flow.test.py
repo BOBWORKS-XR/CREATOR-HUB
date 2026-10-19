@@ -1157,8 +1157,10 @@ class FreshUiTests(unittest.TestCase):
         b = types.SimpleNamespace(TITLE="Creator Hub", native_ax_references=mock.Mock(return_value=(refs, bus)),
             native_process=mock.Mock(return_value=value), RootOwnership=mock.Mock(return_value=owner), snapshot_owned=mock.Mock(return_value=snapshot))
         c = types.SimpleNamespace(owned_windows=mock.Mock(return_value=[{"window": 88, "mapped": True, "title": "Creator Hub"}]),
-            shown_names=lambda snapshot: [n["name"] for n in snapshot["nodes"] if n["showing"]],
-            press=mock.Mock(return_value={"action": "skip-migration", "actionCount": 1}))
+            shown_names=lambda snapshot: [value for n in snapshot["nodes"] if n["showing"]
+                                         for value in (n["name"], n.get("text", "")) if value],
+            press=mock.Mock(return_value={"action": "skip-migration", "actionCount": 1}),
+            own_tree=mock.Mock(return_value=[frame]), ui_snapshot=mock.Mock(return_value=snapshot))
         polkit = types.SimpleNamespace(dbus_call=mock.Mock(return_value=[True]), bus_identity=mock.Mock(return_value={"pid": 42, "uid": 21314}))
         return types.SimpleNamespace(**locals())
 
@@ -1176,6 +1178,9 @@ class FreshUiTests(unittest.TestCase):
         self.assertIs(owner, f.owner)
         self.assertIs(bus, f.bus)
         f.bus.close_sync.assert_not_called()
+        f.b.snapshot_owned.assert_not_called()
+        self.assertIs(f.c.own_tree.call_args.args[1], f.owner)
+        self.assertIs(f.c.ui_snapshot.call_args.args[1], f.owner)
 
     def test_reused_xid_requires_independently_bound_new_process_and_renderer(self):
         f = self.fixture()
@@ -1219,7 +1224,7 @@ class FreshUiTests(unittest.TestCase):
     def test_reopened_migration_offer_is_declined_once_in_new_owned_window(self):
         f = self.fixture()
         offer = {"nodes": [{"name": "Move to unified Creator Hub", "showing": True}]}
-        f.b.snapshot_owned.side_effect = [offer, f.snapshot]
+        f.c.ui_snapshot.side_effect = [offer, f.snapshot]
         observation = {}
         request, _owner, _bus, snapshot = self.invoke(f, observation)
         self.assertEqual(request.pid, 42)
@@ -1230,14 +1235,14 @@ class FreshUiTests(unittest.TestCase):
 
     def test_unchanged_migration_offer_cannot_cause_repeat_clicks(self):
         f = self.fixture()
-        f.b.snapshot_owned.return_value = {"nodes": [{"name": "Move to unified Creator Hub", "showing": True}]}
+        f.c.ui_snapshot.return_value = {"nodes": [{"name": "Move to unified Creator Hub", "showing": True}]}
         with mock.patch.object(p.time, "monotonic", side_effect=[0, 0, 1, 26]), self.assertRaisesRegex(RuntimeError, "deadline"):
             self.invoke(f, {})
         f.c.press.assert_called_once_with("skip-migration", f.owner, f.atspi)
 
     def test_uncertain_migration_decline_is_not_retried_or_accepted(self):
         f = self.fixture()
-        f.b.snapshot_owned.return_value = {"nodes": [{"name": "Move to unified Creator Hub", "showing": True}]}
+        f.c.ui_snapshot.return_value = {"nodes": [{"name": "Move to unified Creator Hub", "showing": True}]}
         f.c.press.side_effect = RuntimeError("Uncertain press")
         observation = {}
         with self.assertRaisesRegex(RuntimeError, "Uncertain press"):
@@ -1245,6 +1250,26 @@ class FreshUiTests(unittest.TestCase):
         self.assertTrue(observation["migrationSkipAttempted"])
         self.assertNotIn("migrationSkip", observation)
         self.assertEqual(f.c.press.call_count, 1)
+
+    def test_current_walker_foreign_parent_refusal_cannot_be_ignored(self):
+        f = self.fixture()
+        f.c.own_tree.side_effect = RuntimeError("Parent outside owned frame")
+        with self.assertRaisesRegex(RuntimeError, "Parent outside owned frame"):
+            self.invoke(f, {})
+        f.c.ui_snapshot.assert_not_called()
+        f.c.press.assert_not_called()
+
+    def test_visible_version_text_is_exact_not_a_substring_or_hidden_value(self):
+        f = self.fixture()
+        f.snapshot["nodes"][0] = {"name": "", "text": "0.1.15", "showing": True}
+        self.invoke(f)
+        for value in ({"name": "", "text": "Using 0.1.15", "showing": True},
+                      {"name": "0.1.15", "text": "", "showing": False}):
+            f = self.fixture()
+            f.snapshot["nodes"][0] = value
+            with mock.patch.object(p.time, "monotonic", side_effect=[0, 0, 26]), self.assertRaisesRegex(RuntimeError, "deadline"):
+                self.invoke(f)
+            f.c.press.assert_not_called()
 
 
 class ProtectedSourceTests(unittest.TestCase):

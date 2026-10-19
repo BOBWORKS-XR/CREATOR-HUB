@@ -651,16 +651,17 @@ def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, captur
             if not all(state.contains(getattr(atspi.StateType, s)) for s in ("SHOWING", "ENABLED", "SENSITIVE")) or any(
                     state.contains(getattr(atspi.StateType, s)) for s in ("DEFUNCT", "BUSY")):
                 continue
-            snapshot = b.snapshot_owned(request, helper, atspi, owner)
+            nodes = c.own_tree(helper.select_window(request, atspi), owner, atspi)
+            snapshot = c.ui_snapshot(nodes, owner, atspi)
             last.update(stage="visible-version", versionNodes=[n for n in snapshot["nodes"]
-                if isinstance(n.get("name"), str) and "0.1." in n["name"]])
+                if any(isinstance(n.get(key), str) and "0.1." in n[key] for key in ("name", "text"))])
             if "Move to unified Creator Hub" in c.shown_names(snapshot):
                 last["stage"] = "migration-offer"
                 if not last.get("migrationSkipAttempted"):
                     last["migrationSkipAttempted"] = True
                     last["migrationSkip"] = c.press("skip-migration", owner, atspi)
                 continue
-            if not any(n["name"] == "0.1.15" and n["showing"] for n in snapshot["nodes"]):
+            if "0.1.15" not in c.shown_names(snapshot):
                 continue
             require(owner.renderer is not None, "Fresh independently bound WebKit producer required")
             owner.recheck(full=True)
