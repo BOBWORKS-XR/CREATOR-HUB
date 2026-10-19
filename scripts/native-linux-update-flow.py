@@ -647,7 +647,7 @@ def scroll_successor_footer(owner, helper, c, atspi):
     return {"reference": selected[1][1], "scrollAttempts": 1, "linkActionCount": 0}
 
 
-def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, capture, system_file, observation=None):
+def successor_ui(record, old_xid, b, c, d, p, helper, x11, atspi, bus, glib, capture, system_file, observation=None):
     """New process/XRes owner and AX renderer. Never old14 workers."""
     refs, axbus = b.native_ax_references()
     last = observation if observation is not None else {}
@@ -707,7 +707,9 @@ def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, captur
                     last["migrationSkipAttempted"] = True
                     last["migrationSkip"] = c.press("skip-migration", owner, atspi)
                 continue
-            if "0.1.15" not in c.shown_names(snapshot):
+            version_status = d.update_status(nodes, owner, atspi)
+            last["versionStatus"] = version_status
+            if version_status["showing"] is not True or version_status["text"] != "You are using Hub 0.1.15. No newer update was found.":
                 if not last.get("footerScrollAttempted"):
                     last["footerScrollAttempted"] = True
                     last["footerScroll"] = scroll_successor_footer(owner, helper, c, atspi)
@@ -947,7 +949,7 @@ def native_capture(root, env):
             report["automaticRestartObserved"] = True
             report["installed15"] = installed15(root, b)
             report["phase15Readiness"] = {}
-            request15, owner15, successor_bus, ui15 = successor_ui(replacement, xid, b, c, p, helper, x11, Atspi,
+            request15, owner15, successor_bus, ui15 = successor_ui(replacement, xid, b, c, d, p, helper, x11, Atspi,
                 session_bus, GLib, root_output, report["systemWebKit"]["file"], observation=report["phase15Readiness"])
             b.save_json(root / "phase15-ui.json", ui15)
             report["fresh15UiVerified"] = True

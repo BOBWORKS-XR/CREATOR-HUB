@@ -1189,11 +1189,13 @@ class FreshUiTests(unittest.TestCase):
             press=mock.Mock(return_value={"action": "skip-migration", "actionCount": 1}),
             own_tree=mock.Mock(return_value=[frame]), ui_snapshot=mock.Mock(return_value=snapshot),
             text_interface_observation=mock.Mock(return_value={"readOnly": True, "verified": False}))
+        status = {"text": "You are using Hub 0.1.15. No newer update was found.", "showing": True, "readOnly": True}
+        discovery = types.SimpleNamespace(update_status=mock.Mock(return_value=status))
         polkit = types.SimpleNamespace(dbus_call=mock.Mock(return_value=[True]), bus_identity=mock.Mock(return_value={"pid": 42, "uid": 21314}))
         return types.SimpleNamespace(**locals())
 
     def invoke(self, f, observation=None):
-        return p.successor_ui(f.value, 77, f.b, f.c, f.polkit, f.helper, None, f.atspi, "session-bus", None, mock.Mock(),
+        return p.successor_ui(f.value, 77, f.b, f.c, f.discovery, f.polkit, f.helper, None, f.atspi, "session-bus", None, mock.Mock(),
                               {"system": "pin"}, observation=observation)
 
     def test_fresh_phase15_binds_new_pid_xid_ax_aliases_and_renderer(self):
@@ -1211,6 +1213,7 @@ class FreshUiTests(unittest.TestCase):
         self.assertIs(f.c.ui_snapshot.call_args.args[1], f.owner)
         self.assertEqual(f.refs.window, [":1.8", "/frame"])
         f.c.text_interface_observation.assert_not_called()
+        f.discovery.update_status.assert_called_once_with([f.frame], f.owner, f.atspi)
 
     def test_first_component_walk_binds_once_and_refuses_replacement_or_foreign_frame(self):
         f = self.fixture()
@@ -1261,6 +1264,7 @@ class FreshUiTests(unittest.TestCase):
     def test_loading_or_wrong_version_never_calls_acceptance_or_performs_input(self):
         f = self.fixture()
         f.snapshot["nodes"][0]["name"] = "0.1.14"
+        f.status["text"] = "You are using Hub 0.1.14. No newer update was found."
         with mock.patch.object(p, "scroll_successor_footer") as scroll, \
                 mock.patch.object(p.time, "monotonic", side_effect=[0, 0, 26]), self.assertRaisesRegex(RuntimeError, "deadline"):
             self.invoke(f)
@@ -1273,6 +1277,7 @@ class FreshUiTests(unittest.TestCase):
         f = self.fixture()
         f.c.ui_snapshot.side_effect = [f.snapshot, RuntimeError("Original UI refusal")]
         f.snapshot["nodes"][0]["showing"] = False
+        f.status["showing"] = False
         f.c.text_interface_observation.side_effect = RuntimeError("Diagnostic read refused")
         observation = {}
         with mock.patch.object(p, "scroll_successor_footer"), self.assertRaisesRegex(RuntimeError, "Original UI refusal"):
@@ -1281,10 +1286,11 @@ class FreshUiTests(unittest.TestCase):
         self.assertEqual(observation["textObservationRefusal"]["message"], "Diagnostic read refused")
         f.bus.close_sync.assert_called_once_with(None)
 
-    def test_offscreen_version_scrolls_once_then_requires_visible_exact_version(self):
+    def test_offscreen_status_scrolls_once_then_requires_visible_exact_status(self):
         f = self.fixture()
         hidden = {"nodes": [{"name": "0.1.15", "showing": False}]}
         f.c.ui_snapshot.side_effect = [hidden, hidden, f.snapshot]
+        f.discovery.update_status.side_effect = [f.status | {"showing": False}, f.status | {"showing": False}, f.status]
         observation = {}
         with mock.patch.object(p, "scroll_successor_footer", return_value={"scrollAttempts": 1}) as scroll:
             self.invoke(f, observation)
@@ -1362,14 +1368,16 @@ class FreshUiTests(unittest.TestCase):
         f.c.ui_snapshot.assert_not_called()
         f.c.press.assert_not_called()
 
-    def test_visible_version_text_is_exact_not_a_substring_or_hidden_value(self):
+    def test_visible_status_is_source_bound_exact_not_an_unrelated_version_or_hidden_value(self):
         f = self.fixture()
-        f.snapshot["nodes"][0] = {"name": "", "text": "0.1.15", "showing": True}
+        f.snapshot["nodes"] = []  # The generic text reader omits p[role=status].
         self.invoke(f)
-        for value in ({"name": "", "text": "Using 0.1.15", "showing": True},
-                      {"name": "0.1.15", "text": "", "showing": False}):
+        for value in ({"text": "Using 0.1.15", "showing": True},
+                      {"text": "0.1.15", "showing": True},
+                      {"text": f.status["text"] + " extra", "showing": True},
+                      {"text": f.status["text"], "showing": False}):
             f = self.fixture()
-            f.snapshot["nodes"][0] = value
+            f.discovery.update_status.return_value = value
             with mock.patch.object(p, "scroll_successor_footer"), \
                     mock.patch.object(p.time, "monotonic", side_effect=[0, 0, 26]), self.assertRaisesRegex(RuntimeError, "deadline"):
                 self.invoke(f)
