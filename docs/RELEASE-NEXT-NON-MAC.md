@@ -58,6 +58,12 @@ Clean Windows CI also caught an unused lifecycle idle query in its isolated
 native fixture. The fixture now checks active-workflow and completed-work idle
 states; strict release Clippy passes without suppressing the warning.
 
+The public Windows baseline registry now includes 0.1.14's published installer
+and executable hashes, verified against the release API and descriptor. Newer
+targets select 0.1.14; historical 0.1.12 transport and 0.1.14-to-test-only-0.1.15
+contracts retain their original explicit scopes. This does not supply the new
+candidate's signed-update acceptance.
+
 ## Linux Harness Diagnosis
 
 Run 39139434211 failed before approving the Hub update: its generic bitmap helper
@@ -67,6 +73,14 @@ This establishes a harness error, not a product crash. Modal-specific capture,
 bounded authentication-window capture and original-error retention now pass
 38 pure regression tests. Native repetition is still required; the existing
 capture-only workflow does not approve system authentication or install updates.
+
+The separate frozen-input full-flow controller now admits system Cancel and one
+synthetic approval on disposable GitHub Linux runners. Its 72 pure tests and
+workflow/script parse checks pass. Scoped acceptance requires actual package and
+executable replacement, product-initiated restart, fresh UI ownership, unchanged
+settings/selection and unrelated synthetic runtime, and normal close. Native
+execution remains required; its private 0.1.15 fixture cannot qualify or publish
+the new source candidate.
 
 Flatpak run 39138975316 stopped at AT-SPI/launcher PID provenance before disclosure
 input. Corrected bus-peer/namespace observations pass 35 pure regressions, but
