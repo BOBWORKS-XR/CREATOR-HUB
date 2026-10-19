@@ -1,5 +1,7 @@
 (() => {
   let active;
+  let resumeButton;
+  const REMINDER = 'creator-hub.convergence-reminder-v1';
   const stages = new Set(['review', 'backed-up', 'connections-reviewed', 'complete']);
 
   function report(value) {
@@ -10,16 +12,29 @@
       || !text(value.message, 8192) || !Array.isArray(value.legacyApps) || value.legacyApps.length > 8
       || !value.legacyApps.every(app => app && text(app.name, 512) && text(app.path))
       || (value.retirementAvailable !== undefined && typeof value.retirementAvailable !== 'boolean')
+      || (value.reviewKey != null && (typeof value.reviewKey !== 'string' || !/^[a-f0-9]{64}$/.test(value.reviewKey)))
       || (value.stage === 'complete' && (value.required || value.retirementAvailable === true || value.legacyApps.length))) {
       throw new Error('The native migration report could not be verified. Existing apps are kept.');
     }
     return { enabled: value.enabled, required: value.required, stage: value.stage,
       settings: [...value.settings], backups: [...value.backups], message: value.message,
+      reviewKey: value.reviewKey || null,
       retirementAvailable: value.retirementAvailable === true,
       legacyApps: value.legacyApps.map(app => ({ name: app.name, path: app.path })) };
   }
 
-  function run() {
+  function reminderMatches(key) {
+    if (!key) return false;
+    try {
+      const raw = window.localStorage.getItem(REMINDER);
+      if (!raw || raw.length > 256) return false;
+      const saved = JSON.parse(raw);
+      return saved?.schemaVersion === 1 && saved.reviewKey === key
+        && Object.keys(saved).sort().join(',') === 'reviewKey,schemaVersion';
+    } catch { return false; }
+  }
+
+  function run(manual = false) {
     if (active) return active;
     const native = window.CreatorHubNative;
     if (native?.convergencePersistence !== true || typeof native.invoke !== 'function') return Promise.resolve();
@@ -32,6 +47,20 @@
       try { current = report(await native.invoke('convergence_status')); }
       catch (reason) { initialError = reason; }
       if (!initialError && (!current.enabled || !current.required)) {
+        if (resumeButton) resumeButton.hidden = true;
+        active = undefined; resolve(); return;
+      }
+      const reopen = document.querySelector('#convergence-reopen');
+      if (reopen) {
+        reopen.hidden = false;
+        if (resumeButton !== reopen) {
+          resumeButton = reopen;
+          reopen.addEventListener('click', () => {
+            void run(true).catch(() => { reopen.title = 'Migration review could not open. Restart Hub to try again.'; });
+          });
+        }
+      }
+      if (!manual && !initialError && reopen && reminderMatches(current.reviewKey)) {
         active = undefined; resolve(); return;
       }
       const ids = ['dialog', 'title', 'summary', 'details', 'error', 'prepare', 'connections', 'retire', 'refresh', 'later'];
@@ -40,7 +69,7 @@
       const { dialog, title, summary, details, error, prepare, connections, retire, refresh, later } = elements;
       const locked = [...document.body.children].filter(node => node !== dialog && !node.inert);
       const previousFocus = document.activeElement;
-      let busy = false, ended = false;
+      let busy = false, ended = false, reminderSaveFailed = false;
       prepare.textContent = 'Back up and continue';
       connections.textContent = 'Move existing connections';
       later.textContent = 'Keep existing apps for now';
@@ -77,7 +106,8 @@
         connections.disabled = busy || !writable || stage !== 'backed-up';
         retire.disabled = busy || !writable || stage !== 'connections-reviewed' || !current?.retirementAvailable;
         refresh.disabled = busy;
-        later.textContent = stage === 'complete' ? 'Continue in Hub' : 'Continue for now';
+        later.textContent = stage === 'complete' ? 'Continue in Hub'
+          : reminderSaveFailed ? 'Continue without saving reminder' : 'Continue for now';
         later.disabled = busy;
         dialog.setAttribute('aria-busy', String(busy));
       }
@@ -95,6 +125,17 @@
       function laterClick(event) {
         event.preventDefault();
         if (ended || busy || later.disabled || !dialog.open) return;
+        if (current?.stage !== 'complete' && current?.reviewKey && reopen && !reminderSaveFailed) {
+          try {
+            window.localStorage.setItem(REMINDER, JSON.stringify({ schemaVersion: 1, reviewKey: current.reviewKey }));
+            if (!reminderMatches(current.reviewKey)) throw new Error('Reminder readback failed');
+          } catch {
+            reminderSaveFailed = true;
+            showError('Your reminder choice could not be saved. Migration is still pending; the guide may appear again next time. Your settings were not changed.');
+            render(); return;
+          }
+        }
+        if (current?.stage === 'complete' && reopen) reopen.hidden = true;
         ended = true; dialog.close(); release();
         if (previousFocus?.isConnected && !previousFocus.inert) previousFocus.focus({ preventScroll: true });
         resolve();

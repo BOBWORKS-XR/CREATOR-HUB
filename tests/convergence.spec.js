@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
-async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false } = {}) {
-  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement }) => {
+async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false, reviewKey = 'a'.repeat(64) } = {}) {
+  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey }) => {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     localStorage.setItem('creator-hub.auto-download', 'false');
     window.__CREATOR_HUB_CONVERGENCE_PROTOCOL__ = 1;
@@ -10,6 +10,7 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
       enabled: true, required, stage: 'review', settings: ['MCP project selection and options'],
       legacyApps: required ? [{ name: 'Creator Works MCP', path: 'C:/fixture-only/Creator Works MCP/launcher.exe' }] : [],
       backups: [], retirementAvailable: false, message: 'Your saved projects and settings stay where they are.',
+      reviewKey,
     };
     window.__TAURI__ = {
       event: { listen: async () => () => {} },
@@ -43,9 +44,34 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
         return null;
       } },
     };
-  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement });
+  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey });
   await page.goto('http://127.0.0.1:4188');
 }
+
+for (const width of [1100, 390]) test(`deferred migration survives reload and can be reopened at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 844 });
+  await load(page);
+  await page.locator('#convergence-later').click();
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => window.calls.some(call => call.command === 'app_inventory'))).toBe(true);
+  await expect(page.locator('#convergence-dialog')).not.toBeVisible();
+  await expect(page.locator('#convergence-reopen')).toBeVisible();
+  await page.locator('#convergence-reopen').click();
+  await expect(page.locator('#convergence-dialog')).toBeVisible();
+  expect(await page.evaluate(() => window.calls.some(call => /prepare_convergence|migrate_convergence|retire_convergence/.test(call.command)))).toBe(false);
+  await page.screenshot({ path: testInfo.outputPath('deferred-migration-review.png') });
+  await page.locator('#convergence-later').click();
+  await page.screenshot({ path: testInfo.outputPath('migration-resume-footer.png'), fullPage: true });
+});
+
+test('changed migration identity reopens the prompt instead of treating deferral as approval', async ({ page }) => {
+  await load(page);
+  await page.locator('#convergence-later').click();
+  await page.evaluate(() => localStorage.setItem('creator-hub.convergence-reminder-v1', JSON.stringify({ schemaVersion: 1, reviewKey: 'b'.repeat(64) })));
+  await page.reload();
+  await expect(page.locator('#convergence-dialog')).toBeVisible();
+  expect(await page.evaluate(() => window.calls.map(call => call.command))).toEqual(['convergence_status']);
+});
 
 for (const width of [1100, 390]) test(`explicit cleanup and completion stay readable at ${width}px`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: 844 });

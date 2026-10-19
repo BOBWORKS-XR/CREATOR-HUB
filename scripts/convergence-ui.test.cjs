@@ -9,7 +9,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 const report = (changes = {}) => ({ enabled: true, required: true, stage: 'review', settings: ['creator-works-mcp/launcher-config.json'],
   legacyApps: [{ name: 'Creator Works MCP', path: 'C:\\Disposable\\MCP\\launcher.exe' }], backups: [], retirementAvailable: false, message: 'Review the existing installation.', ...changes });
 
-function fixture(handler = () => report(), capability = true) {
+function fixture(handler = () => report(), capability = true, storage = new Map()) {
   class Element {
     constructor() { this.listeners = new Map(); this.children = []; this.hidden = false; this.disabled = false; this.inert = false;
       this.open = false; this.textContent = ''; this.attributes = {}; this.isConnected = true; this.shown = 0; this.closed = 0; }
@@ -24,7 +24,7 @@ function fixture(handler = () => report(), capability = true) {
     close() { this.open = false; this.closed++; }
     focus() { document.activeElement = this; }
   }
-  const elements = Object.fromEntries(['dialog', 'title', 'summary', 'details', 'error', 'prepare', 'connections', 'retire', 'refresh', 'later'].map(id => [id, new Element()]));
+  const elements = Object.fromEntries(['dialog', 'title', 'summary', 'details', 'error', 'prepare', 'connections', 'retire', 'refresh', 'later', 'reopen'].map(id => [id, new Element()]));
   const main = new Element(), alreadyLocked = new Element(), focus = new Element(); alreadyLocked.inert = true;
   const calls = []; let lookups = 0;
   const document = { body: { children: [main, elements.dialog, alreadyLocked] }, activeElement: focus,
@@ -36,7 +36,9 @@ function fixture(handler = () => report(), capability = true) {
     calls.push(command); return handler(command);
   } };
   if (capability !== undefined) native.convergencePersistence = capability;
-  const window = { CreatorHubNative: native };
+  const window = { CreatorHubNative: native, localStorage: {
+    getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value),
+  } };
   vm.runInNewContext(source, { window, document });
   return { window, native, document, elements, main, alreadyLocked, focus, calls, lookups: () => lookups,
     click: id => elements[id].dispatch('click') };
@@ -44,6 +46,52 @@ function fixture(handler = () => report(), capability = true) {
 
 test('loading the controller performs no reads, mutations or modal work', () => {
   const f = fixture(); assert.deepEqual(f.calls, []); assert.equal(f.lookups(), 0); assert.equal(f.elements.dialog.shown, 0);
+});
+
+test('Continue for now persists only this native review and keeps a manual resume action', async () => {
+  const storage = new Map(), key = 'a'.repeat(64);
+  const first = fixture(() => report({ reviewKey: key }), true, storage);
+  const done = first.window.CreatorConvergence.run(); await tick(); first.click('later'); await done;
+  assert.equal(storage.size, 1);
+  const next = fixture(() => report({ reviewKey: key }), true, storage);
+  await next.window.CreatorConvergence.run();
+  assert.equal(next.elements.dialog.shown, 0); assert.equal(next.elements.reopen.hidden, false);
+  assert.deepEqual(next.calls, ['convergence_status']);
+  next.click('reopen'); await tick();
+  assert.equal(next.elements.dialog.shown, 1); assert.equal(next.elements.prepare.disabled, false);
+  assert.deepEqual(next.calls, ['convergence_status', 'convergence_status']);
+  next.click('later');
+});
+
+test('changed native state or unavailable resume control cannot suppress a migration review', async () => {
+  const storage = new Map([['creator-hub.convergence-reminder-v1', JSON.stringify({schemaVersion: 1, reviewKey: 'a'.repeat(64)})]]);
+  for (const missingResume of [false, true]) {
+    const f = fixture(() => report({ reviewKey: (missingResume ? 'a' : 'b').repeat(64) }), true, storage);
+    if (missingResume) delete f.elements.reopen;
+    const done = f.window.CreatorConvergence.run(); await tick();
+    assert.equal(f.elements.dialog.shown, 1); f.click('later'); await done;
+  }
+});
+
+test('malformed reminders and older native reports never imply migration approval', async () => {
+  for (const raw of ['no JSON', 'x'.repeat(257), JSON.stringify({schemaVersion: 2, reviewKey: 'a'.repeat(64)}),
+    JSON.stringify({schemaVersion: 1, reviewKey: 'a'.repeat(64), approved: true})]) {
+    const storage = new Map([['creator-hub.convergence-reminder-v1', raw]]);
+    const f = fixture(() => report({ reviewKey: 'a'.repeat(64) }), true, storage);
+    const done = f.window.CreatorConvergence.run(); await tick();
+    assert.equal(f.elements.dialog.shown, 1); f.click('later'); await done;
+    assert.deepEqual(f.calls, ['convergence_status']);
+  }
+});
+
+test('failed reminder persistence warns and allows an explicit continue without saving', async () => {
+  const f = fixture(() => report({ reviewKey: 'a'.repeat(64) }));
+  f.window.localStorage.setItem = () => { throw new Error('Full storage'); };
+  const done = f.window.CreatorConvergence.run(); await tick(); f.click('later');
+  assert.equal(f.elements.dialog.open, true); assert.match(f.elements.error.textContent, /could not be saved/);
+  assert.match(f.elements.later.textContent, /without saving/);
+  f.click('later'); await done; assert.equal(f.elements.dialog.open, false);
+  assert.deepEqual(f.calls, ['convergence_status']);
 });
 test('missing/false/unknown capability never inspects DOM or invokes native commands', async () => {
   for (const value of [undefined, false, 1, 'true']) {

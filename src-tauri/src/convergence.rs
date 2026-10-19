@@ -31,6 +31,7 @@ pub struct Report {
     backups: Vec<PathBuf>,
     retirement_available: bool,
     message: String,
+    review_key: Option<String>,
 }
 
 struct Plan {
@@ -185,6 +186,7 @@ fn inspect() -> Result<Plan, String> {
     // Validate even when legacy apps exist; do not short-circuit a newer policy.
     let already_reviewed = reviewed_snapshots_at(&record_path()?, &snapshots)?;
     let pending_retirement = retirement_pending()?;
+    let review_key = prompt_review_key(&snapshots, &legacy_apps, pending_retirement)?;
     let already_using_hub = legacy_apps.is_empty()
         && !pending_retirement
         && snapshots[0].bytes().is_some()
@@ -213,6 +215,7 @@ fn inspect() -> Result<Plan, String> {
             legacy_apps,
             backups: vec![],
             retirement_available: false,
+            review_key: Some(review_key),
             message: if pending_retirement {
                 "An earlier standalone-app cleanup was interrupted. Review fresh backups and connections before resuming; no saved operation is replayed."
             } else if already_using_hub {
@@ -222,6 +225,35 @@ fn inspect() -> Result<Plan, String> {
             }.into(),
         },
     })
+}
+
+fn prompt_review_key(
+    snapshots: &[stores::Snapshot],
+    apps: &[LegacyApp],
+    pending: bool,
+) -> Result<String, String> {
+    // A reminder preference is not migration approval. Completed operation
+    // history does not invalidate it, but new uncertain outcomes must do so.
+    let images: Vec<_> = snapshots
+        .iter()
+        .map(|saved| {
+            let relevant =
+                saved.store() != stores::Store::McpHostedOutcomes || saved.needs_outcome_review();
+            (
+                label(saved.store()),
+                relevant
+                    .then(|| {
+                        saved
+                            .bytes()
+                            .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+                    })
+                    .flatten(),
+            )
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&(POLICY, pending, images, apps))
+        .map_err(|_| "Cannot identify the migration reminder; existing data were kept.")?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn settings_need_review(snapshots: &[stores::Snapshot]) -> bool {
@@ -1210,6 +1242,7 @@ mod tests {
                 backups: vec![],
                 retirement_available: false,
                 message: String::new(),
+                review_key: None,
             },
         };
         (temp, roots, plan)
@@ -1309,6 +1342,37 @@ mod tests {
         fs::write(path, serde_json::to_vec(&json!({"revision":1,"records":[{
             "session":"a".repeat(64),"id":1,"command":"review_existing_client_connections","outcome":outcome
         }]})).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn reminder_key_changes_for_settings_apps_cleanup_and_uncertain_outcomes_only() {
+        let (_temp, base, mut plan) = fixture_plan();
+        let key = prompt_review_key(&plan.stores, &[], false).unwrap();
+        assert_eq!(key.len(), 64);
+        assert_eq!(key, prompt_review_key(&plan.stores, &[], false).unwrap());
+        write_outcome(&base, "returned-ok");
+        plan.stores[2] =
+            stores::Snapshot::inspect(stores::Store::McpHostedOutcomes, &base).unwrap();
+        assert_eq!(key, prompt_review_key(&plan.stores, &[], false).unwrap());
+        write_outcome(&base, "accepted");
+        plan.stores[2] =
+            stores::Snapshot::inspect(stores::Store::McpHostedOutcomes, &base).unwrap();
+        assert_ne!(key, prompt_review_key(&plan.stores, &[], false).unwrap());
+        write_outcome(&base, "returned-ok");
+        plan.stores[2] =
+            stores::Snapshot::inspect(stores::Store::McpHostedOutcomes, &base).unwrap();
+        assert_ne!(key, prompt_review_key(&plan.stores, &[], true).unwrap());
+        let app = LegacyApp {
+            name: "Creator Works MCP".into(),
+            path: base.local_data.join("launcher.exe"),
+        };
+        assert_ne!(key, prompt_review_key(&plan.stores, &[app], false).unwrap());
+        let legacy = stores::Store::McpLegacy.path(&base).unwrap();
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, br#"{"channels":[],"auto_start":true}"#).unwrap();
+        plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &base).unwrap();
+        assert_ne!(key, prompt_review_key(&plan.stores, &[], false).unwrap());
+        assert!(can_retain(&plan).unwrap_err().contains("settings differ"));
     }
 
     #[test]
