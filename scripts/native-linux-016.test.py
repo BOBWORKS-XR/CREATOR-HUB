@@ -146,6 +146,49 @@ class Driver:
 
 
 class Pure016(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "Real Unix owner/mode/link and FIFO guards execute in native Linux preflight")
+    def test_page_journal_refuses_links_fifo_and_oversize_before_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory); file = home / P.JOURNAL; file.parent.mkdir(parents=True)
+            target = home / "target"; target.write_bytes(b"{}"); target.chmod(0o644)
+            for kind in ("symlink", "fifo", "oversize"):
+                if kind == "symlink":
+                    file.symlink_to(target)
+                elif kind == "fifo":
+                    os.mkfifo(file)
+                else:
+                    with file.open("wb") as output:
+                        output.truncate(65537)
+                    file.chmod(0o644)
+                with self.subTest(kind=kind), patch.object(P.os, "open", side_effect=AssertionError("Must refuse before open")), \
+                        self.assertRaises(RuntimeError):
+                    P.page_journal(home, {"revision": 1, "records": []})
+                file.unlink()
+
+    def test_page_journal_allows_only_exact_successful_reads_and_preserves_earlier_records(self):
+        def append(previous, session):
+            return {"revision": 1, "records": previous["records"] + [
+                {"session": session, "id": operation, "command": command, "outcome": "returned-ok"}
+                for command, operation in (("load_config", 3), ("discover_unity_projects", 4))]}
+        empty = {"revision": 1, "records": []}; first = append(empty, "a" * 64); second = append(first, "b" * 64)
+        P.validate_page_journal(first, empty); P.validate_page_journal(second, first)
+        for mutation in (lambda v: v.update(revision=True), lambda v: v.update(extra=True),
+                         lambda v: v["records"][0].update(command="save_config"),
+                         lambda v: v["records"][0].update(id=True),
+                         lambda v: v["records"][0].update(outcome="accepted"),
+                         lambda v: v["records"][0].update(outcome="returned-error"),
+                         lambda v: v["records"][0].update(extra=True),
+                         lambda v: v["records"][1].update(session="b" * 64),
+                         lambda v: v["records"].append(v["records"][0])):
+            bad = copy.deepcopy(first); mutation(bad)
+            with self.assertRaises(RuntimeError):
+                P.validate_page_journal(bad, empty)
+        changed = copy.deepcopy(second); changed["records"][0]["outcome"] = "returned-error"
+        with self.assertRaisesRegex(RuntimeError, "Earlier outcome"):
+            P.validate_page_journal(changed, first)
+        with self.assertRaisesRegex(RuntimeError, "session"):
+            P.validate_page_journal(append(first, "a" * 64), first)
+
     def test_preservation_failure_retains_exact_changed_fixture_identity_and_text(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory); file = home / "synthetic.json"

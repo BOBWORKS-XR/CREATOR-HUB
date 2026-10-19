@@ -15,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 HUB = "/usr/bin/creator-hub"
 TITLE = "Creator Hub - Development Preview"
 LOG_LIMIT = 262144  # Same finite bound as the reused native Capture primitive.
+JOURNAL = "config/creator-works-mcp/hosted-operation-outcomes.json"
 FLAGS = dict.fromkeys(("directPagesObserved", "guideDeferralAccepted", "manualReopenObserved", "migrationAccepted", "nativeMigrationCancellationAccepted",
                       "standaloneRetirementAccepted", "signedUpdateAccepted", "automaticRestartAccepted", "flatpakAccepted", "releaseReady"), False)
 
@@ -152,6 +153,46 @@ def preserved(home, before, evidence=None):
     for name in ("data/CreatorHub/convergence/review-v1.json", "data/CreatorHub/client-migrations-v1", "config/creator-works-mcp/.creator-hub-product-settings"):
         require(not (home / name).exists(), "Cancellation unexpectedly advanced migration")
     return after
+
+
+def validate_page_journal(value, previous):
+    require(type(value) is dict and set(value) == {"revision", "records"} and type(value["revision"]) is int
+            and value["revision"] == 1 and type(value["records"]) is list,
+            "Invalid read-operation journal")
+    old = previous["records"]
+    require(value["records"][:-2] == old and len(value["records"]) == len(old) + 2 <= 32,
+            "Earlier outcome records changed or unexpected operation count")
+    tail = value["records"][-2:]
+    for row, command, operation in zip(tail, ("load_config", "discover_unity_projects"), (3, 4)):
+        require(type(row) is dict and set(row) == {"session", "id", "command", "outcome"}
+                and type(row["session"]) is str and re.fullmatch(r"[a-f0-9]{64}", row["session"])
+                and type(row["id"]) is int and row["id"] == operation
+                and row["command"] == command and row["outcome"] == "returned-ok",
+                "Only exact successful page-read operations may append to the journal")
+    require(tail[0]["session"] == tail[1]["session"] and not any(row["session"] == tail[0]["session"] for row in old),
+            "Read-operation journal session was reused or changed")
+
+
+def page_journal(home, previous):
+    file = home / JOURNAL
+    require(file.resolve() == file, "Redirected read-operation journal")
+    named = file.lstat()
+    require(stat.S_ISREG(named.st_mode) and named.st_nlink == 1 and 0 < named.st_size <= 65536
+            and stat.S_IMODE(named.st_mode) == 0o644 and named.st_uid == os.getuid() and named.st_gid == os.getgid(),
+            "Bounded regular owned read-operation journal required before open")
+    fields = ("st_dev", "st_ino", "st_size", "st_mode", "st_nlink", "st_uid", "st_gid", "st_mtime_ns", "st_ctime_ns")
+    stamp = lambda value: tuple(getattr(value, key) for key in fields)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    with os.fdopen(os.open(file, flags), "rb") as source:
+        require(stamp(os.fstat(source.fileno())) == stamp(named), "Read-operation journal changed before read")
+        raw = source.read(65537)
+        require(stamp(os.fstat(source.fileno())) == stamp(named), "Read-operation journal changed during read")
+    require(stamp(file.lstat()) == stamp(named) and len(raw) == named.st_size,
+            "Read-operation journal pathname or bytes changed")
+    record = {"size": len(raw), "sha256": S.digest(raw), "dev": named.st_dev, "ino": named.st_ino,
+              "mode": stat.S_IMODE(named.st_mode), "uid": named.st_uid, "gid": named.st_gid}
+    value = S.parse(raw); validate_page_journal(value, previous)
+    return {"file": record, "data": value, "scope": "exact two successful page-read outcome records, not preference changes"}
 
 
 def installed(stage, binding):
@@ -422,13 +463,22 @@ def main():
               "assembly": binding["profile"]["assembly"], "migrationApprovalImplemented": False}
     try:
         first = root / "first"; first.mkdir(mode=0o700); report["first"] = session(first, home, binding)
+        expected = before
+        if binding["profile"]["mode"] == "pages":
+            prior = {"revision": 1, "records": []}
+            require(before[JOURNAL]["sha256"] == S.digest(json.dumps(prior).encode()), "Original outcome fixture differs")
+            report["firstReadJournal"] = page_journal(home, prior)
+            expected = {**before, JOURNAL: report["firstReadJournal"]["file"]}
         report["protectedAfterFirst"] = {}
-        preserved(home, before, report["protectedAfterFirst"]); installed(stage, binding)
+        preserved(home, expected, report["protectedAfterFirst"]); installed(stage, binding)
         second = root / "reopened"; second.mkdir(mode=0o700); report["reopened"] = session(second, home, binding, True)
         require(report["first"]["root"]["pid"] != report["reopened"]["root"]["pid"], "Reopen did not create a new Hub")
         require(report["first"]["consent"] == report["reopened"]["consent"], "Terms did not persist unchanged across manual reopen")
+        if binding["profile"]["mode"] == "pages":
+            report["reopenedReadJournal"] = page_journal(home, report["firstReadJournal"]["data"])
+            expected = {**before, JOURNAL: report["reopenedReadJournal"]["file"]}
         report["protectedAfterReopen"] = {}
-        preserved(home, before, report["protectedAfterReopen"]); installed(stage, binding)
+        preserved(home, expected, report["protectedAfterReopen"]); installed(stage, binding)
         report["manualReopenObserved"] = True
         report["guideDeferralAccepted"] = True
         report["directPagesObserved"] = binding["profile"]["mode"] == "pages"
