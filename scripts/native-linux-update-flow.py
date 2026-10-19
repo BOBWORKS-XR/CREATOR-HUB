@@ -611,6 +611,19 @@ def recheck_agent_endpoint(bus, p, glib, expected):
     require(p.bus_identity(bus, "org.freedesktop.PolicyKit1", glib) == authority, "System authority changed")
 
 
+def bind_component_frame(window, owner, atspi):
+    request = owner.request
+    require(window.get_process_id() == request.pid and window.get_role() == atspi.Role.FRAME
+            and window.get_name() == request.title, "Foreign phase15 AX frame refused")
+    owner.recheck(full=True)
+    reference = owner.references.identity(window, owner)
+    if owner.references.window is None:
+        owner.references.window = reference
+    require(reference == owner.references.window, "Phase15 AX frame wire identity changed")
+    owner.recheck(full=True)
+    return window
+
+
 def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, capture, system_file, observation=None):
     """New process/XRes owner and AX renderer. Never old14 workers."""
     refs, axbus = b.native_ax_references()
@@ -660,7 +673,8 @@ def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, captur
             if not all(state.contains(getattr(atspi.StateType, s)) for s in ("SHOWING", "ENABLED", "SENSITIVE")) or any(
                     state.contains(getattr(atspi.StateType, s)) for s in ("DEFUNCT", "BUSY")):
                 continue
-            nodes = c.own_tree(helper.select_window(request, atspi), owner, atspi)
+            window = bind_component_frame(helper.select_window(request, atspi), owner, atspi)
+            nodes = c.own_tree(window, owner, atspi)
             snapshot = c.ui_snapshot(nodes, owner, atspi)
             last.update(stage="visible-version", versionNodes=[n for n in snapshot["nodes"]
                 if any(isinstance(n.get(key), str) and "0.1." in n[key] for key in ("name", "text"))])

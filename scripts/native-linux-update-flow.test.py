@@ -1164,7 +1164,9 @@ class FreshUiTests(unittest.TestCase):
     def fixture(self):
         value = record(p.Phase15())
         refs, bus, frame = mock.Mock(), mock.Mock(), mock.Mock()
+        refs.window, refs.identity.return_value = None, [":1.8", "/frame"]
         frame.get_role.return_value, frame.get_name.return_value = 23, "Creator Hub"
+        frame.get_process_id.return_value = value["pid"]
         frame.get_state_set.return_value.contains.side_effect = lambda state: state in (1, 2, 3)
         app, desktop = mock.Mock(), mock.Mock()
         app.get_process_id.return_value = value["pid"]
@@ -1173,9 +1175,11 @@ class FreshUiTests(unittest.TestCase):
         helper.bound_window.return_value = {"pid": 42, "client": 9, "mapped": True, "title": "Creator Hub"}
         helper.Request.side_effect = lambda _a, pid, start, exe, sha, window, title, role: types.SimpleNamespace(
             pid=pid, start=start, executable=exe, sha256=sha, window=window, title=title, role=role)
+        helper.select_window.return_value = frame
         atspi = types.SimpleNamespace(Role=types.SimpleNamespace(FRAME=23), get_desktop=lambda _i: desktop,
             StateType=types.SimpleNamespace(SHOWING=1, ENABLED=2, SENSITIVE=3, DEFUNCT=4, BUSY=5))
-        owner = types.SimpleNamespace(renderer={"pid": 43}, recheck=mock.Mock())
+        owner = types.SimpleNamespace(renderer={"pid": 43}, recheck=mock.Mock(), references=refs,
+                                     request=types.SimpleNamespace(pid=value["pid"], title="Creator Hub"))
         snapshot = {"nodes": [{"name": "0.1.15", "showing": True}]}
         b = types.SimpleNamespace(TITLE="Creator Hub", native_ax_references=mock.Mock(return_value=(refs, bus)),
             native_process=mock.Mock(return_value=value), RootOwnership=mock.Mock(return_value=owner), snapshot_owned=mock.Mock(return_value=snapshot))
@@ -1204,6 +1208,23 @@ class FreshUiTests(unittest.TestCase):
         f.b.snapshot_owned.assert_not_called()
         self.assertIs(f.c.own_tree.call_args.args[1], f.owner)
         self.assertIs(f.c.ui_snapshot.call_args.args[1], f.owner)
+        self.assertEqual(f.refs.window, [":1.8", "/frame"])
+
+    def test_first_component_walk_binds_once_and_refuses_replacement_or_foreign_frame(self):
+        f = self.fixture()
+        self.assertIs(p.bind_component_frame(f.frame, f.owner, f.atspi), f.frame)
+        self.assertEqual(f.refs.window, f.refs.identity.return_value)
+        p.bind_component_frame(f.frame, f.owner, f.atspi)
+        f.refs.identity.return_value = [":1.9", "/other-frame"]
+        with self.assertRaisesRegex(RuntimeError, "wire identity changed"):
+            p.bind_component_frame(f.frame, f.owner, f.atspi)
+        for field, value in (("get_process_id", 99), ("get_role", 43), ("get_name", "Other")):
+            f = self.fixture()
+            getattr(f.frame, field).return_value = value
+            with self.subTest(field=field), self.assertRaisesRegex(RuntimeError, "Foreign"):
+                p.bind_component_frame(f.frame, f.owner, f.atspi)
+            f.refs.identity.assert_not_called()
+            self.assertIsNone(f.refs.window)
 
     def test_reused_xid_requires_independently_bound_new_process_and_renderer(self):
         f = self.fixture()
