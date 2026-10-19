@@ -1464,7 +1464,11 @@ fn retain_after_close(
 
 #[cfg(any(
     all(windows, feature = "integrated-features"),
-    all(target_os = "linux", feature = "experimental-linux-migration", feature = "integrated-features"),
+    all(
+        target_os = "linux",
+        feature = "experimental-linux-migration",
+        feature = "integrated-features"
+    ),
     test,
 ))]
 fn track_cleanup_evidence<T>(
@@ -1557,20 +1561,39 @@ fn retire_batch_apps(
     )
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-linux-migration", feature = "integrated-features"))]
+#[cfg(all(
+    target_os = "linux",
+    feature = "experimental-linux-migration",
+    feature = "integrated-features"
+))]
 fn linux_originals(plan: &Plan) -> Result<Option<crate::convergence_linux::Originals>, String> {
     if retirement_pending()? {
-        return Err("An earlier Linux cleanup needs explicit outcome review. No transaction was replayed.".into());
+        return Err(
+            "An earlier Linux cleanup needs explicit outcome review. No transaction was replayed."
+                .into(),
+        );
     }
     if plan.report.legacy_apps.is_empty() {
         require_no_retirement(plan, &legacy_apps()?)?;
         return Ok(None);
     }
-    let paths = plan.report.legacy_apps.iter().map(|app| app.path.clone()).collect::<Vec<_>>();
+    let paths = plan
+        .report
+        .legacy_apps
+        .iter()
+        .map(|app| app.path.clone())
+        .collect::<Vec<_>>();
     crate::convergence_linux::Originals::inspect(&paths).map(Some)
 }
 
-#[cfg(any(all(target_os = "linux", feature = "experimental-linux-migration", feature = "integrated-features"), test))]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        feature = "experimental-linux-migration",
+        feature = "integrated-features"
+    ),
+    test
+))]
 fn track_linux_cleanup<T>(
     attempted: &std::cell::Cell<bool>,
     inspect: impl FnMut() -> Result<bool, String>,
@@ -1582,7 +1605,11 @@ fn track_linux_cleanup<T>(
     result
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-linux-migration", feature = "integrated-features"))]
+#[cfg(all(
+    target_os = "linux",
+    feature = "experimental-linux-migration",
+    feature = "integrated-features"
+))]
 fn retire_linux_batch(
     plan: &mut Plan,
     native: Option<&crate::convergence_linux::Plan>,
@@ -1594,7 +1621,9 @@ fn retire_linux_batch(
         let store = creator_hub_mcp_router::Store::installed()?;
         let preflight = || {
             can_retain(plan)?;
-            if store.resolve()?.generation != generation || store.router()?.command.as_path() != router {
+            if store.resolve()?.generation != generation
+                || store.router()?.command.as_path() != router
+            {
                 return Err("The signed MCP route changed during Linux migration. Cleanup stopped; retained files were kept.".into());
             }
             Ok(())
@@ -1617,7 +1646,9 @@ fn retire_linux_batch(
             require_no_retirement(plan, &legacy_apps()?)?;
         }
         if retirement_pending()? {
-            return Err("Linux cleanup still has a pending outcome. No transaction was replayed.".into());
+            return Err(
+                "Linux cleanup still has a pending outcome. No transaction was replayed.".into(),
+            );
         }
         plan.report.stage = "complete";
         plan.report.required = false;
@@ -1627,7 +1658,14 @@ fn retire_linux_batch(
     })
 }
 
-#[cfg(any(test, all(target_os = "linux", feature = "integrated-features", feature = "linux-production-migration")))]
+#[cfg(any(
+    test,
+    all(
+        target_os = "linux",
+        feature = "integrated-features",
+        feature = "linux-production-migration"
+    )
+))]
 const LINUX_PRODUCTION_RETIREMENT_CONSENT: &str = "Only exact MCP 2.7.7 and Project Setup 0.3.7 DEBs are eligible. Linux requests administrator authentication separately for each app after settings and connections transfer. Cancelling a later system prompt does not undo earlier cleanup or the completed transfer. Unknown outcomes require review, never automatic retry. All nine old MCP Node/server/license/bridge files stay at their existing paths. Setup keeps one fixed non-executable retirement notice.\n\nContinuing also accepts the unknown custom-GUI integration risk: custom integrations requiring an old app window or its desktop registration may stop working and are not converted. Cancel if you need those integrations.";
 
 #[tauri::command]
@@ -2022,7 +2060,12 @@ mod tests {
         ] {
             assert!(body.contains(required), "missing consent disclosure: {required}");
         }
-        for forbidden in ["TEST ONLY", "development", "release acceptance", "release ready"] {
+        for forbidden in [
+            "TEST ONLY",
+            "development",
+            "release acceptance",
+            "release ready",
+        ] {
             assert!(!body.contains(forbidden));
         }
     }
@@ -2030,14 +2073,22 @@ mod tests {
     #[test]
     fn linux_native_consent_text_is_selected_only_by_the_production_cfg() {
         let source = include_str!("convergence.rs");
-        let body = source.split("pub async fn move_to_hub(").nth(1).unwrap()
-            .split("fn cleanup_failure(").next().unwrap();
+        let body = source
+            .split("pub async fn move_to_hub(")
+            .nth(1)
+            .unwrap()
+            .split("fn cleanup_failure(")
+            .next()
+            .unwrap();
         let development = body.find("#[cfg(all(target_os = \"linux\", feature = \"experimental-linux-migration\", not(feature = \"linux-production-migration\")))]").unwrap();
-        let production = body.find("#[cfg(all(target_os = \"linux\", feature = \"linux-production-migration\"))]").unwrap();
+        let production = body
+            .find("#[cfg(all(target_os = \"linux\", feature = \"linux-production-migration\"))]")
+            .unwrap();
         let approval = body.find("review.approve(&handle, &summary)").unwrap();
         assert!(development < production && production < approval);
         assert!(body[development..production].contains("Linux development test only:"));
-        assert!(body[development..production].contains("These TEST ONLY packages are not release acceptance."));
+        assert!(body[development..production]
+            .contains("These TEST ONLY packages are not release acceptance."));
         let selected = &body[production..approval];
         assert!(selected.contains("if originals.is_some()"));
         assert!(selected.contains("{LINUX_PRODUCTION_RETIREMENT_CONSENT}"));
@@ -2349,8 +2400,13 @@ mod tests {
 
     #[test]
     fn linux_single_action_prepares_originals_before_the_only_guide_approval() {
-        let body = include_str!("convergence.rs").split("pub async fn move_to_hub(").nth(1).unwrap()
-            .split("fn cleanup_failure(").next().unwrap();
+        let body = include_str!("convergence.rs")
+            .split("pub async fn move_to_hub(")
+            .nth(1)
+            .unwrap()
+            .split("fn cleanup_failure(")
+            .next()
+            .unwrap();
         let originals = body.find("let originals = linux_originals(plan)?").unwrap();
         let approval = body.find("review.approve(&handle").unwrap();
         let cancelled = body.find("cancelled = true;").unwrap();
@@ -2365,18 +2421,37 @@ mod tests {
         assert!(body.contains("These TEST ONLY packages are not release acceptance"));
         assert!(body.contains("#[cfg(all(target_os = \"linux\", not(feature = \"experimental-linux-migration\")))]\n            require_no_retirement"));
         let native = include_str!("convergence_linux.rs");
-        let originals = native.split("impl Originals {").nth(1).unwrap().split("pub struct Plan").next().unwrap();
+        let originals = native
+            .split("impl Originals {")
+            .nth(1)
+            .unwrap()
+            .split("pub struct Plan")
+            .next()
+            .unwrap();
         assert!(originals.contains("linux_retirement::Plan::inspect(target)?"));
         assert!(originals.contains("helper.recheck_baseline()?"));
-        for write in ["save(", "retire_after_native_review", "atomic_write", "prepare_router"] {
-            assert!(!originals.contains(write), "initial read-only plan: {write}");
+        for write in [
+            "save(",
+            "retire_after_native_review",
+            "atomic_write",
+            "prepare_router",
+        ] {
+            assert!(
+                !originals.contains(write),
+                "initial read-only plan: {write}"
+            );
         }
     }
 
     #[test]
     fn linux_renewal_is_after_the_known_transfer_and_never_replaces_original_helper_plans() {
-        let body = include_str!("convergence.rs").split("pub async fn move_to_hub(").nth(1).unwrap()
-            .split("fn cleanup_failure(").next().unwrap();
+        let body = include_str!("convergence.rs")
+            .split("pub async fn move_to_hub(")
+            .nth(1)
+            .unwrap()
+            .split("fn cleanup_failure(")
+            .next()
+            .unwrap();
         let bind = body.find("originals.bind(&linux_router.command)").unwrap();
         let boundary = body.find("native.begin_connection_transfer()").unwrap();
         let apply = body.find("service::apply_convergence(").unwrap();
@@ -2384,20 +2459,51 @@ mod tests {
         let idle = body.find("if !idle").unwrap();
         let renewal = body.find("transfer.complete()?").unwrap();
         let cleanup = body.find("retire_linux_batch(plan").unwrap();
-        assert!(bind < boundary && boundary < apply && apply < finish && finish < idle && idle < renewal && renewal < cleanup);
+        assert!(
+            bind < boundary
+                && boundary < apply
+                && apply < finish
+                && finish < idle
+                && idle < renewal
+                && renewal < cleanup
+        );
         assert!(body[..renewal].contains("refresh_reviewed_server_paths(plan"));
         assert!(body[..renewal].contains("refresh_finished_outcome_journal(plan"));
         let native = include_str!("convergence_linux.rs");
-        let renew = native.split("impl ConnectionTransfer<'_>").nth(1).unwrap().split("impl Plan").next().unwrap();
+        let renew = native
+            .split("impl ConnectionTransfer<'_>")
+            .nth(1)
+            .unwrap()
+            .split("impl Plan")
+            .next()
+            .unwrap();
         assert!(renew.contains("plan.recheck_native_with(&[])"));
         assert!(renew.contains("app.dependencies = dependencies"));
-        for replaced in ["linux_retirement::Plan::inspect", "app.helper =", "plan.installations ="] {
-            assert!(!renew.contains(replaced), "original identity must stay bound: {replaced}");
+        for replaced in [
+            "linux_retirement::Plan::inspect",
+            "app.helper =",
+            "plan.installations =",
+        ] {
+            assert!(
+                !renew.contains(replaced),
+                "original identity must stay bound: {replaced}"
+            );
         }
-        let cleanup = include_str!("convergence.rs").split("fn retire_linux_batch(").nth(1).unwrap()
-            .split("pub async fn move_to_hub(").next().unwrap();
-        for guard in ["can_retain(plan)?", "store.resolve()?.generation != generation", "store.router()?.command.as_path() != router",
-            "retire_after_native_review_batch(preflight, || attempted.set(true))", "native.complete_review()?", "retirement_pending()?"] {
+        let cleanup = include_str!("convergence.rs")
+            .split("fn retire_linux_batch(")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn move_to_hub(")
+            .next()
+            .unwrap();
+        for guard in [
+            "can_retain(plan)?",
+            "store.resolve()?.generation != generation",
+            "store.router()?.command.as_path() != router",
+            "retire_after_native_review_batch(preflight, || attempted.set(true))",
+            "native.complete_review()?",
+            "retirement_pending()?",
+        ] {
             assert!(cleanup.contains(guard), "Linux batch guard: {guard}");
         }
         assert!(!cleanup.contains(".blocking_show()"));
@@ -2405,48 +2511,87 @@ mod tests {
 
     #[test]
     fn linux_cancelled_or_unknown_cleanup_blocks_batch_replay_and_keeps_backups() {
-        for outcome in ["first-system-cancel", "later-system-cancel", "unknown-helper-outcome"] {
+        for outcome in [
+            "first-system-cancel",
+            "later-system-cancel",
+            "unknown-helper-outcome",
+        ] {
             let (temp, base, mut plan) = fixture_plan();
             retain_after_close(&mut plan, &base, None, || Ok(())).unwrap();
             plan.report.stage = "connections-reviewed";
-            let before: Vec<_> = plan.stores.iter().map(|snapshot| snapshot.bytes().map(Vec::from)).collect();
+            let before: Vec<_> = plan
+                .stores
+                .iter()
+                .map(|snapshot| snapshot.bytes().map(Vec::from))
+                .collect();
             cleanup_failure(&mut plan, true);
             assert!(!plan.retry_allowed, "{outcome}");
             assert!(can_prepare(&plan).is_err(), "{outcome}");
             let path = temp.path().join("move-v1.json");
-            record_batch_at(&path, &BatchRecord { policy: POLICY, phase: "cleanup".into(), outcome: "stopped".into(),
-                review_key: "a".repeat(64), retry_blocked: !plan.retry_allowed }).unwrap();
+            record_batch_at(
+                &path,
+                &BatchRecord {
+                    policy: POLICY,
+                    phase: "cleanup".into(),
+                    outcome: "stopped".into(),
+                    review_key: "a".repeat(64),
+                    retry_blocked: !plan.retry_allowed,
+                },
+            )
+            .unwrap();
             assert!(batch_needs_review(&read_batch_at(&path).unwrap().unwrap()));
             assert!(!plan.retained_images.is_empty());
             for (snapshot, expected) in plan.stores.iter().zip(&before) {
                 snapshot.recheck().unwrap();
                 assert_eq!(snapshot.bytes(), expected.as_deref());
             }
-            for backup in &plan.retained_images { backup.recheck().unwrap(); }
+            for backup in &plan.retained_images {
+                backup.recheck().unwrap();
+            }
         }
     }
 
     #[test]
     fn linux_new_or_unreadable_cleanup_evidence_never_reopens_batch_retry() {
-        for evidence in [Ok(false), Ok(true), Err("unknown cleanup record".to_owned())] {
+        for evidence in [
+            Ok(false),
+            Ok(true),
+            Err("unknown cleanup record".to_owned()),
+        ] {
             let (temp, _base, mut plan) = fixture_plan();
             let attempted = std::cell::Cell::new(false);
             let unknown = evidence.is_err();
             let expected = evidence.as_ref().copied().unwrap_or(true);
             let router_opened = std::cell::Cell::new(false);
-            let result = track_linux_cleanup(&attempted, || evidence.clone(), || {
-                router_opened.set(true);
-                Err::<(), String>("router store admission refused".into())
-            });
+            let result = track_linux_cleanup(
+                &attempted,
+                || evidence.clone(),
+                || {
+                    router_opened.set(true);
+                    Err::<(), String>("router store admission refused".into())
+                },
+            );
             assert!(result.is_err());
             assert_eq!(router_opened.get(), !unknown);
             assert_eq!(attempted.get(), expected);
             cleanup_failure(&mut plan, attempted.get());
             assert_eq!(plan.retry_allowed, !expected);
             let path = temp.path().join("move-v1.json");
-            record_batch_at(&path, &BatchRecord { policy: POLICY, phase: "cleanup".into(), outcome: "stopped".into(),
-                review_key: "a".repeat(64), retry_blocked: !plan.retry_allowed }).unwrap();
-            assert_eq!(batch_needs_review(&read_batch_at(&path).unwrap().unwrap()), expected);
+            record_batch_at(
+                &path,
+                &BatchRecord {
+                    policy: POLICY,
+                    phase: "cleanup".into(),
+                    outcome: "stopped".into(),
+                    review_key: "a".repeat(64),
+                    retry_blocked: !plan.retry_allowed,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                batch_needs_review(&read_batch_at(&path).unwrap().unwrap()),
+                expected
+            );
         }
         let attempted = std::cell::Cell::new(true);
         track_linux_cleanup(&attempted, || Ok(false), || Ok(())).unwrap();
@@ -2460,48 +2605,80 @@ mod tests {
             let attempted = std::cell::Cell::new(false);
             let diagnostic_entered = std::cell::Cell::new(false);
             let observations = std::cell::Cell::new(0);
-            let result = track_linux_cleanup(&attempted, || {
-                observations.set(observations.get() + 1);
-                if diagnostic_entered.get() && unreadable {
-                    Err("cleanup record became unreadable".into())
-                } else {
-                    Ok(diagnostic_entered.get())
-                }
-            }, || {
-                diagnostic_entered.set(true);
-                Err::<(), String>("router diagnostic refused before any helper call".into())
-            });
-            assert_eq!(result.unwrap_err(), "router diagnostic refused before any helper call");
+            let result = track_linux_cleanup(
+                &attempted,
+                || {
+                    observations.set(observations.get() + 1);
+                    if diagnostic_entered.get() && unreadable {
+                        Err("cleanup record became unreadable".into())
+                    } else {
+                        Ok(diagnostic_entered.get())
+                    }
+                },
+                || {
+                    diagnostic_entered.set(true);
+                    Err::<(), String>("router diagnostic refused before any helper call".into())
+                },
+            );
+            assert_eq!(
+                result.unwrap_err(),
+                "router diagnostic refused before any helper call"
+            );
             assert_eq!(observations.get(), 2);
             assert!(attempted.get());
             cleanup_failure(&mut plan, attempted.get());
             assert!(can_prepare(&plan).is_err());
             let path = temp.path().join("move-v1.json");
-            record_batch_at(&path, &BatchRecord { policy: POLICY, phase: "cleanup".into(), outcome: "stopped".into(),
-                review_key: "a".repeat(64), retry_blocked: !plan.retry_allowed }).unwrap();
+            record_batch_at(
+                &path,
+                &BatchRecord {
+                    policy: POLICY,
+                    phase: "cleanup".into(),
+                    outcome: "stopped".into(),
+                    review_key: "a".repeat(64),
+                    retry_blocked: !plan.retry_allowed,
+                },
+            )
+            .unwrap();
             assert!(batch_needs_review(&read_batch_at(&path).unwrap().unwrap()));
         }
         // Preserve the exact helper-attempt callback even if both journal reads
         // happen to report no pending entry. Absence cannot clear observed work.
         let attempted = std::cell::Cell::new(false);
-        assert!(track_linux_cleanup(&attempted, || Ok(false), || {
-            attempted.set(true);
-            Err::<(), String>("helper outcome unknown".into())
-        }).is_err());
+        assert!(track_linux_cleanup(
+            &attempted,
+            || Ok(false),
+            || {
+                attempted.set(true);
+                Err::<(), String>("helper outcome unknown".into())
+            }
+        )
+        .is_err());
         assert!(attempted.get());
     }
 
     #[test]
     fn linux_cleanup_latch_covers_router_admission_and_refusal_tail() {
         let source = include_str!("convergence.rs");
-        let body = source.split("fn retire_linux_batch(").nth(1).unwrap()
-            .split("pub async fn move_to_hub(").next().unwrap();
-        let latch = body.find("track_linux_cleanup(attempted, retirement_pending, || {")
+        let body = source
+            .split("fn retire_linux_batch(")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn move_to_hub(")
+            .next()
+            .unwrap();
+        let latch = body
+            .find("track_linux_cleanup(attempted, retirement_pending, || {")
             .expect("Linux cleanup evidence must surround all admission, not just preflight");
         let router = body.find("Store::installed()?").unwrap();
         assert!(latch < router);
-        let adapter = source.split("fn track_linux_cleanup<").nth(1).unwrap()
-            .split("fn retire_linux_batch(").next().unwrap();
+        let adapter = source
+            .split("fn track_linux_cleanup<")
+            .nth(1)
+            .unwrap()
+            .split("fn retire_linux_batch(")
+            .next()
+            .unwrap();
         assert!(adapter.contains("track_cleanup_evidence("));
         assert!(adapter.contains("attempted.set(attempted.get() || started)"));
     }

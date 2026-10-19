@@ -33,6 +33,9 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "usage_terms_status",
             "accept_usage_terms",
+            "native_support_status",
+            "install_native_support",
+            "review_native_support_recovery",
             "feature_status",
             "feature_select",
             "feature_call",
@@ -64,6 +67,8 @@ fn main() {
             "hub_update_status",
             "download_hub_update",
             "install_hub_update",
+            "hub_update_recovery_status",
+            "review_retained_hub_update",
             "pending_hosted_restore",
             "restore_hosted_app",
             "complete_hosted_restore",

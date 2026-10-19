@@ -432,12 +432,7 @@ pub(crate) fn discover_portable(
     let items: Vec<GithubRelease> = serde_json::from_slice(&fetch_small(client, url, 256 * 1024)?)
         .map_err(|_| "GitHub returned invalid release metadata.")?;
     // The portable verifier currently accepts canonical stable packages only.
-    let versions = candidate_versions_for(
-        items,
-        false,
-        baseline,
-        PORTABLE_DESCRIPTOR_NAME,
-    );
+    let versions = candidate_versions_for(items, false, baseline, PORTABLE_DESCRIPTOR_NAME);
     let Some(version) = versions.into_iter().next() else {
         return Ok(None);
     };

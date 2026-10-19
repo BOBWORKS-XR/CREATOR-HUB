@@ -55,6 +55,8 @@ test('native terms and preference commands have exact trusted-main-window grants
   for (const [module, commands] of [
     ['usage_terms', ['usage_terms_status', 'accept_usage_terms']],
     ['preferences', ['hub_preferences_status', 'set_hub_preference']],
+    ['native_support', ['native_support_status', 'install_native_support', 'review_native_support_recovery']],
+    ['self_update', ['hub_update_recovery_status', 'review_retained_hub_update']],
     ['convergence', ['convergence_status', 'refresh_convergence', 'prepare_convergence', 'migrate_convergence_connections', 'retire_convergence_apps', 'move_to_hub', 'inspect_convergence_outcome']],
   ]) {
     for (const command of commands) {
@@ -67,7 +69,8 @@ test('native terms and preference commands have exact trusted-main-window grants
   assert.ok(main.includes('Hub commands are available only to its trusted shell.'));
   const transport = fs.readFileSync(path.join(root, 'src', 'flatpak_rpc.rs'), 'utf8');
   const nativeOnly = registry(transport, /NATIVE_WINDOW_ONLY: &\[&str\] = &\[([\s\S]*?)\];/, /^"[a-z_]+"$/);
-  for (const command of ['move_to_hub', 'inspect_convergence_outcome']) {
+  for (const command of ['move_to_hub', 'inspect_convergence_outcome', 'native_support_status',
+    'install_native_support', 'review_native_support_recovery', 'hub_update_recovery_status', 'review_retained_hub_update']) {
     assert.ok(nativeOnly.includes(command), `${command} must not be exported through the sandbox command bridge`);
   }
 });
