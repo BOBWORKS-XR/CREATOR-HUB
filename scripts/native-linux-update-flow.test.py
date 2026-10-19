@@ -466,6 +466,34 @@ class RestartObserverTests(unittest.TestCase):
         wait.assert_called_once_with(42, 1)
 
 
+class FreshUIReadTests(unittest.TestCase):
+    def test_desktop_and_application_caches_are_refreshed_after_process_replacement(self):
+        old = mock.Mock()
+        old.get_process_id.return_value = 41
+        new = mock.Mock()
+        new.get_process_id.return_value = 41
+        new.clear_cache.side_effect = lambda: setattr(new.get_process_id, "return_value", 42)
+        desktop = types.SimpleNamespace(nodes=[old])
+        desktop.clear_cache = mock.Mock(side_effect=lambda: setattr(desktop, "nodes", [new]))
+        atspi = types.SimpleNamespace(get_desktop=mock.Mock(return_value=desktop))
+        helper = types.SimpleNamespace(children=mock.Mock(side_effect=lambda node, _limit: node.nodes))
+        self.assertEqual(p.fresh_ax_applications(atspi, helper, 42), ([new], [42]))
+        desktop.clear_cache.assert_called_once_with()
+        new.clear_cache.assert_called_once_with()
+        helper.children.assert_called_once_with(desktop, 128)
+
+    def test_foreign_or_disappeared_application_is_not_adopted(self):
+        foreign = mock.Mock()
+        foreign.get_process_id.return_value = 43
+        desktop, atspi = mock.Mock(), mock.Mock()
+        atspi.get_desktop.return_value = desktop
+        helper = types.SimpleNamespace(children=mock.Mock(return_value=[foreign]))
+        self.assertEqual(p.fresh_ax_applications(atspi, helper, 42), ([], [43]))
+        helper.children.return_value = [None]
+        with self.assertRaises(RuntimeError):
+            p.fresh_ax_applications(atspi, helper, 42)
+
+
 class ConfirmationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1115,14 +1143,14 @@ class FreshUiTests(unittest.TestCase):
         refs, bus, frame = mock.Mock(), mock.Mock(), mock.Mock()
         frame.get_role.return_value, frame.get_name.return_value = 23, "Creator Hub"
         frame.get_state_set.return_value.contains.side_effect = lambda state: state in (1, 2, 3)
-        app = mock.Mock()
+        app, desktop = mock.Mock(), mock.Mock()
         app.get_process_id.return_value = value["pid"]
         helper = mock.Mock()
-        helper.children.side_effect = lambda node, _bound: [app] if node == "desktop" else [frame]
+        helper.children.side_effect = lambda node, _bound: [app] if node is desktop else [frame]
         helper.bound_window.return_value = {"pid": 42, "client": 9, "mapped": True, "title": "Creator Hub"}
         helper.Request.side_effect = lambda _a, pid, start, exe, sha, window, title, role: types.SimpleNamespace(
             pid=pid, start=start, executable=exe, sha256=sha, window=window, title=title, role=role)
-        atspi = types.SimpleNamespace(Role=types.SimpleNamespace(FRAME=23), get_desktop=lambda _i: "desktop",
+        atspi = types.SimpleNamespace(Role=types.SimpleNamespace(FRAME=23), get_desktop=lambda _i: desktop,
             StateType=types.SimpleNamespace(SHOWING=1, ENABLED=2, SENSITIVE=3, DEFUNCT=4, BUSY=5))
         owner = types.SimpleNamespace(renderer={"pid": 43}, recheck=mock.Mock())
         snapshot = {"nodes": [{"name": "0.1.15", "showing": True}]}

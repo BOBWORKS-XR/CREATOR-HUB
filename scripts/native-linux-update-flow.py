@@ -588,9 +588,25 @@ def runtime_identity(process, expected, b, helper):
             "survived": True, "scope": "synthetic-unrelated-node-not-real-AI-client"}
 
 
-def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, capture, system_file):
+def fresh_ax_applications(atspi, helper, pid):
+    desktop = atspi.get_desktop(0)
+    desktop.clear_cache()
+    applications, observed_pids = [], []
+    for app in helper.children(desktop, 128):
+        require(app is not None, "Accessibility application disappeared")
+        app.clear_cache()
+        observed_pid = app.get_process_id()
+        observed_pids.append(observed_pid)
+        if observed_pid == pid:
+            applications.append(app)
+    return applications, observed_pids
+
+
+def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, capture, system_file, observation=None):
     """New process, new XID, new AX bus aliases/renderer. Never old14 workers."""
     refs, axbus = b.native_ax_references()
+    last = observation if observation is not None else {}
+    snapshot = None
     try:
         end, owner, request = time.monotonic()+25, None, None
         while time.monotonic() < end:
@@ -598,10 +614,12 @@ def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, captur
             require(b.native_process(record["pid"], helper) == record, "Phase15 changed during UI readiness")
             present = p.dbus_call(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
                 "NameHasOwner", "(s)", ("com.creatorworks.hub.SingleInstance",), "(b)", glib)[0]
+            windows = [w for w in c.owned_windows(record["pid"], x11) if w["mapped"]]
+            last.update(stage="single-instance", expectedBusNamePresent=present, mappedWindows=windows)
             if not present:
                 continue
             single_instance_owner(bus, p, glib, record)
-            windows = [w for w in c.owned_windows(record["pid"], x11) if w["mapped"]]
+            last["stage"] = "native-window"
             require(len(windows) <= 1, "Ambiguous phase15 windows")
             if not windows:
                 continue
@@ -611,17 +629,28 @@ def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, captur
                 request = helper.Request("snapshot", record["pid"], record["startTime"], EXE, Phase15().digest, native["window"], b.TITLE, "FRAME")
                 owner = b.RootOwnership(request, helper, x11, record, helper.bound_window(request, x11), system_file, references=refs)
             require(native["window"] == request.window, "Phase15 window replacement refused")
-            apps = [a for a in helper.children(atspi.get_desktop(0), 128) if a.get_process_id() == record["pid"]]
+            apps, observed_pids = fresh_ax_applications(atspi, helper, record["pid"])
+            last.update(stage="accessibility", desktopApplicationPids=observed_pids, matchingApplications=len(apps))
             require(len(apps) <= 1, "Ambiguous phase15 AX applications")
-            frames = [] if not apps else [n for n in helper.children(apps[0], 32) if n.get_role() == atspi.Role.FRAME and n.get_name() == b.TITLE]
+            if apps:
+                apps[0].clear_cache()
+            frames = []
+            for node in ([] if not apps else helper.children(apps[0], 32)):
+                node.clear_cache()
+                if node.get_role() == atspi.Role.FRAME and node.get_name() == b.TITLE:
+                    frames.append(node)
+            last["matchingFrames"] = len(frames)
             require(len(frames) <= 1, "Ambiguous phase15 AX frames")
             if not frames:
                 continue
+            frames[0].clear_cache()
             state = frames[0].get_state_set()
             if not all(state.contains(getattr(atspi.StateType, s)) for s in ("SHOWING", "ENABLED", "SENSITIVE")) or any(
                     state.contains(getattr(atspi.StateType, s)) for s in ("DEFUNCT", "BUSY")):
                 continue
             snapshot = b.snapshot_owned(request, helper, atspi, owner)
+            last.update(stage="visible-version", versionNodes=[n for n in snapshot["nodes"]
+                if isinstance(n.get("name"), str) and "0.1." in n["name"]])
             if not any(n["name"] == "0.1.15" and n["showing"] for n in snapshot["nodes"]):
                 continue
             require(owner.renderer is not None, "Fresh independently bound WebKit producer required")
@@ -629,7 +658,11 @@ def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, captur
             return request, owner, axbus, snapshot
         raise RuntimeError("Fresh phase15 UI/version deadline; no manual relaunch or outcome adoption")
     except Exception:
-        axbus.close_sync(None)
+        last["snapshot"] = snapshot
+        try:
+            axbus.close_sync(None)
+        except Exception as error:
+            last["cleanupRefusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
         raise
 
 
@@ -849,8 +882,9 @@ def native_capture(root, env):
             report["root15"] = replacement
             report["automaticRestartObserved"] = True
             report["installed15"] = installed15(root, b)
+            report["phase15Readiness"] = {}
             request15, owner15, successor_bus, ui15 = successor_ui(replacement, xid, b, c, p, helper, x11, Atspi,
-                session_bus, GLib, root_output, report["systemWebKit"]["file"])
+                session_bus, GLib, root_output, report["systemWebKit"]["file"], observation=report["phase15Readiness"])
             b.save_json(root / "phase15-ui.json", ui15)
             report["fresh15UiVerified"] = True
             require(preservation(root, b) == before, "Settings/client/project sentinel changed across installation/restart")
