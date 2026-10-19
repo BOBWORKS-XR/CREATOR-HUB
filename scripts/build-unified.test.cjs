@@ -6,11 +6,13 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { relativeFile, moduleFiles, verifyStage, stageFileMode } = require('./build-unified.cjs');
 
-test('direct page packaging is explicit, Linux-only and cannot disguise writable features as a read-only candidate', () => {
+test('direct page packaging is explicit, platform-specific and cannot disguise writable features as a read-only candidate', () => {
   const { integrationArguments, parseBuildOptions, build } = require('./build-unified.cjs');
   assert.deepEqual(integrationArguments('windows', 'x86_64', false), []);
-  for (const [platform, arch] of [['windows', 'x86_64'], ['macos', 'aarch64'], ['linux', 'aarch64']]) {
-    assert.throws(() => integrationArguments(platform, arch, true), /Linux x86_64 only/);
+  assert.deepEqual(integrationArguments('windows', 'x86_64', true), ['--features', 'integrated-features']);
+  assert.throws(() => integrationArguments('windows', 'x86_64', true, true), /Linux retirement flags/);
+  for (const [platform, arch] of [['windows', 'aarch64'], ['macos', 'aarch64'], ['linux', 'aarch64']]) {
+    assert.throws(() => integrationArguments(platform, arch, true), /Windows or Linux x86_64/);
   }
   assert.deepEqual(integrationArguments('linux', 'x86_64', true, true),
     ['--features', 'integrated-features,experimental-flatpak-host,experimental-linux-migration']);
@@ -18,6 +20,35 @@ test('direct page packaging is explicit, Linux-only and cannot disguise writable
   assert.throws(() => parseBuildOptions(['--integrated-features', '--integrated-features']), /Duplicate/);
   assert.throws(() => build('never-build', { integratedFeatures: true }, { platform: 'linux', arch: 'x86_64',
     execute() { throw Error('Must refuse before execution'); } }), /managed writable Unix Hub candidate/);
+});
+
+test('direct Windows options refuse Unix profiles and unmanaged payloads before any tooling runs', () => {
+  const { build } = require('./build-unified.cjs');
+  for (const options of [{}, { managed: true, experimentalUnix: true },
+    { managed: true, experimentalWritable: true }, { managed: true, prepareManagedUnix: true },
+    { managed: true, signedUnixInput: 'untrusted' }]) {
+    assert.throws(() => build('never-build', { integratedFeatures: true, ...options }, {
+      platform: 'windows', arch: 'x86_64', execute() { throw Error('Must refuse before execution'); },
+    }), /Direct Windows features require/);
+  }
+});
+
+test('direct Windows receipt claims only the implementation mode and never Linux helper or acceptance', () => {
+  const { stageWindowsIntegration } = require('./build-unified.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-windows-direct-'));
+  try {
+    stageWindowsIntegration(dir);
+    assert.deepEqual(fs.readdirSync(dir), ['direct-features-candidate.json']);
+    const bytes = fs.readFileSync(path.join(dir, 'direct-features-candidate.json'));
+    const receipt = JSON.parse(bytes);
+    assert.equal(receipt.scope, 'windows-direct-features-candidate');
+    assert.deepEqual(receipt.internalServices, ['mcp', 'setup']);
+    assert.equal(receipt.legacyLaunchersRetainedAsResources, true);
+    assert.equal(receipt.activationRunsOutsideSandbox, undefined);
+    for (const key of ['nativeGuiAccepted', 'migrationAccepted', 'signedUpdateAccepted', 'releaseReady']) assert.equal(receipt[key], false);
+    assert.throws(() => stageWindowsIntegration(dir), /EEXIST/);
+    assert.deepEqual(fs.readFileSync(path.join(dir, 'direct-features-candidate.json')), bytes);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('direct candidates retain exact service bytes and existing helper file maps without claiming acceptance', () => {

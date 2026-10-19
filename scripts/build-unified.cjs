@@ -13,9 +13,17 @@ function stageFileMode(file, platform, executable, chmod = fs.chmodSync) {
 }
 function integrationArguments(platform, arch, enabled, retirement = false) {
   if (!enabled) return [];
-  if (platform !== 'linux' || arch !== 'x86_64') throw Error('Direct feature candidate packaging is Linux x86_64 only. Existing Windows/Mac builds remain unchanged.');
+  if (platform === 'windows' && arch === 'x86_64' && !retirement) return ['--features', 'integrated-features'];
+  if (platform !== 'linux' || arch !== 'x86_64') throw Error('Direct feature candidates require Windows or Linux x86_64. Linux retirement flags cannot be used on Windows.');
   return ['--features', ['integrated-features', 'experimental-flatpak-host',
     ...(retirement ? ['experimental-linux-migration'] : [])].join(',')];
+}
+function stageWindowsIntegration(output) {
+  fs.writeFileSync(path.join(output, 'direct-features-candidate.json'), JSON.stringify({
+    schemaVersion: 1, scope: 'windows-direct-features-candidate',
+    internalServices: ['mcp', 'setup'], legacyLaunchersRetainedAsResources: true,
+    nativeGuiAccepted: false, migrationAccepted: false, signedUpdateAccepted: false, releaseReady: false,
+  }, null, 2), { flag: 'wx' });
 }
 function candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures }) {
   if (linuxIntegratedCandidate && (linuxRetirementCandidate || !integratedFeatures)) {
@@ -132,7 +140,10 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures });
   const retirementCandidate = linuxRetirementCandidate || linuxIntegratedCandidate;
   const featureArgs = integrationArguments(platform, arch, integratedFeatures, retirementCandidate);
-  if (integratedFeatures && (!managed || !experimentalUnix || !experimentalWritable || prepareManagedUnix)) {
+  if (integratedFeatures && platform === 'windows' && (!managed || experimentalUnix || experimentalWritable || prepareManagedUnix || signedUnixInput)) {
+    throw Error('Direct Windows features require a managed Hub candidate without Unix-only options.');
+  }
+  if (integratedFeatures && platform !== 'windows' && (!managed || !experimentalUnix || !experimentalWritable || prepareManagedUnix)) {
     throw Error('Direct features require a managed writable Unix Hub candidate, not read-only or payload-only preparation.');
   }
   require('./linux-retirement-package.cjs').checkOptions({ enabled: retirementCandidate, platform, arch,
@@ -250,7 +261,10 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   fs.writeFileSync(descriptor, JSON.stringify(manifest, null, 2));
   const overlay = path.join(output, 'tauri-unified.json');
   fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources } }, null, 2));
-  if (integratedFeatures) stageIntegrationService(output, overlay);
+  if (integratedFeatures) {
+    if (platform === 'windows') stageWindowsIntegration(output);
+    else stageIntegrationService(output, overlay);
+  }
   const env = { ...integrationEnvironment(buildEnv, output, integratedFeatures), CREATOR_BUILTIN_MANIFEST: descriptor,
     CREATOR_MCP_HOST_WRITABLE: plan.mcpMode === 'writable' ? '1' : '0', CREATOR_MCP_HOST_READONLY_EVENTS: '1',
     CARGO_TARGET_DIR: path.resolve(environment.CARGO_TARGET_DIR || (plan.experimentalUnix ? path.join(output, 'hub-target') : path.join(root, 'src-tauri/target'))) };
@@ -355,7 +369,7 @@ function writeAssemblyManifests(output, signedManifest, finalManifest) {
 }
 function parseBuildOptions(args) {
   const options = {};
-  const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix. --integrated-features and --linux-integrated-candidate are Linux candidate-only.';
+  const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix. --integrated-features is Windows/Linux candidate-only; --linux-integrated-candidate is Linux-only.';
   const flags = { '--installer': 'installer', '--managed': 'managed', '--experimental-unix': 'experimentalUnix',
     '--experimental-unix-writable': 'experimentalWritable', '--prepare-managed-unix': 'prepareManagedUnix',
     '--linux-retirement-test-candidate': 'linuxRetirementCandidate', '--integrated-features': 'integratedFeatures',
@@ -374,7 +388,7 @@ function parseBuildOptions(args) {
   }
   return options;
 }
-module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, integrationArguments, integrationEnvironment, stageIntegratedMcpResources, candidateProfile, stageIntegrationService, build, parseBuildOptions, writeAssemblyManifests };
+module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, integrationArguments, integrationEnvironment, stageIntegratedMcpResources, candidateProfile, stageIntegrationService, stageWindowsIntegration, build, parseBuildOptions, writeAssemblyManifests };
 if (require.main === module) {
   try {
     if (!process.argv[2]) throw Error('Provide one build name.');

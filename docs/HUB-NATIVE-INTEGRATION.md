@@ -45,6 +45,16 @@ started. `src/features/` contains scoped pages under the existing Hub shell.
 Legacy app-opening commands refuse in this mode, including development builds
 without a bundled descriptor. Existing Windows builds do not enable the feature.
 
+2026-10-19 Windows local continuation: direct-feature compilation,407 Root
+native tests,287 MCP internal-service tests and102 browser tests pass on Windows.
+The builder now accepts explicit `--managed --integrated-features` for Windows
+x86_64 candidates, without Linux activation/retirement flags or any acceptance
+claim. Legacy/default builds remain unchanged. A local candidate can bind its
+internal service to the already verified frozen runtime payload; existing
+launcher resources remain for descriptor compatibility but are not executed by
+direct page navigation. Installed native page/process/preservation checks remain
+required before describing this as an accepted Windows integrated build.
+
 Setup retains its existing creation, installation and repair handlers. MCP uses
 an explicit, thread-bound integration scope, retained writer locks, exact
 before-images and operation/recovery journals. Its service-only settings review
