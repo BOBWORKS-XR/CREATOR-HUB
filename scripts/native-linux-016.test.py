@@ -146,6 +146,20 @@ class Driver:
 
 
 class Pure016(unittest.TestCase):
+    def test_preservation_failure_retains_exact_changed_fixture_identity_and_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory); file = home / "synthetic.json"
+            file.write_text('{"kept":1}', encoding="utf-8")
+            before = {"synthetic.json": P.fingerprint(file)}
+            file.write_text('{"kept":2}', encoding="utf-8")
+            evidence = {}
+            with self.assertRaisesRegex(RuntimeError, "changed: synthetic.json"):
+                P.preserved(home, before, evidence)
+            self.assertEqual(evidence["changed"], ["synthetic.json"])
+            self.assertEqual(evidence["files"]["synthetic.json"], P.fingerprint(file))
+            self.assertEqual(evidence["changedSyntheticText"]["synthetic.json"], '{"kept":2}')
+            self.assertEqual(file.read_text(encoding="utf-8"), '{"kept":2}')
+
     def test_dynamic_single_visible_waits_for_presence_not_strict_element_read(self):
         d = Driver(); calls = []
         def absent(selector):

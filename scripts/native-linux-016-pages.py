@@ -126,9 +126,26 @@ def fixtures(root, mode):
     return {name: fingerprint(home / name) for name in values}
 
 
-def preserved(home, before):
+def preserved(home, before, evidence=None):
     after = {name: fingerprint(home / name) for name in before}
-    require(after == before, "Protected settings/client/project changed")
+    changed = [name for name in before if after[name] != before[name]]
+    if evidence is not None:
+        evidence.update(files=after, changed=changed)
+        # These are the fixed synthetic fixtures in this lane's disposable HOME,
+        # not the runner account or real user settings. Retain mismatches before
+        # raising so an identity-only change is distinguishable from data loss.
+        evidence["changedSyntheticText"] = {}
+        for name in changed:
+            if after[name]["size"] <= 16384:
+                try:
+                    with (home / name).open("rb") as source:
+                        raw = source.read(16385)
+                    require(len(raw) == after[name]["size"] and S.digest(raw) == after[name]["sha256"],
+                            "Synthetic mismatch changed during diagnostic read")
+                    evidence["changedSyntheticText"][name] = raw.decode("utf-8")
+                except Exception as error:
+                    evidence.setdefault("mismatchCaptureErrors", {})[name] = str(error)[:700]
+    require(not changed, "Protected settings/client/project changed: " + ", ".join(changed))
     # Not now must not start a settings backup, routing migration or retirement.
     for directory in (home / "config", home / "data"):
         require(not list(directory.rglob("*.bak")), "Cancellation unexpectedly created a settings backup")
@@ -405,11 +422,13 @@ def main():
               "assembly": binding["profile"]["assembly"], "migrationApprovalImplemented": False}
     try:
         first = root / "first"; first.mkdir(mode=0o700); report["first"] = session(first, home, binding)
-        report["protectedAfterFirst"] = preserved(home, before); installed(stage, binding)
+        report["protectedAfterFirst"] = {}
+        preserved(home, before, report["protectedAfterFirst"]); installed(stage, binding)
         second = root / "reopened"; second.mkdir(mode=0o700); report["reopened"] = session(second, home, binding, True)
         require(report["first"]["root"]["pid"] != report["reopened"]["root"]["pid"], "Reopen did not create a new Hub")
         require(report["first"]["consent"] == report["reopened"]["consent"], "Terms did not persist unchanged across manual reopen")
-        report["protectedAfterReopen"] = preserved(home, before); installed(stage, binding)
+        report["protectedAfterReopen"] = {}
+        preserved(home, before, report["protectedAfterReopen"]); installed(stage, binding)
         report["manualReopenObserved"] = True
         report["guideDeferralAccepted"] = True
         report["directPagesObserved"] = binding["profile"]["mode"] == "pages"
