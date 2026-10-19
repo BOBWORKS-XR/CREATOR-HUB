@@ -39,6 +39,12 @@ Native preflight also checks these captured boundaries:
 - Keep historical transport baselines explicit when the public registry advances.
   New Windows targets after 0.1.14 use its published pins; the historical public12
   and B05-to-private15 labs retain their original scope and cannot qualify 0.1.16.
+- After an update, bind the new kernel process and XRes owner, not numerical XID
+  uniqueness. Start a new accessibility reference scope, bind its canonical frame
+  before component walks, and keep semantic parents within that owned frame.
+- Once the stock authentication agent is bound, recheck its exact unique bus
+  owner/PID/UID and root authority. Do not enumerate unrelated transient bus
+  callers while observing dismissal. A lost bound agent still refuses.
 - Preserve unrelated dpkg diversions/statoverrides. The experimental helper's
   target-scoped parser and protected-parent snapshot are implemented but not
   natively accepted. Run the unprivileged metadata gate before packages or
@@ -47,9 +53,12 @@ Native preflight also checks these captured boundaries:
 
 ## Still Open
 
-- Linux privileged update authentication/cancellation and exact installed restart
-  are not accepted. See [the source audit](LINUX-UPDATE-AUDIT-014.md). A small
-  sealed-input mechanism fixture is not user-authentication or signed-update proof.
+- Linux native system cancellation passed on frozen package 0.1.14. Synthetic
+  approval installed the exact signed private 0.1.15 package and automatically
+  restarted it; complete UI/preservation/normal-close acceptance is still open.
+  These bounded older-package results do not accept final 0.1.16 or Flatpak.
+  See [the current release gates](RELEASE-NEXT-NON-MAC.md) and the historical
+  [source audit](LINUX-UPDATE-AUDIT-014.md).
 - Linux legacy retirement helper is nondefault experimental source, not enabled
   production migration. Setup and other package formats need their own contracts.
 - Flatpak package/GUI/stdio fixtures do not prove access to existing host settings,

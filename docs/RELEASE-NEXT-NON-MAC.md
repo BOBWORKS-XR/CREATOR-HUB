@@ -82,12 +82,33 @@ bounded authentication-window capture and original-error retention now pass
 capture-only workflow does not approve system authentication or install updates.
 
 The separate frozen-input full-flow controller now admits system Cancel and one
-synthetic approval on disposable GitHub Linux runners. Its 77 pure tests and
+synthetic approval on disposable GitHub Linux runners. Its 101 pure tests and
 workflow/script parse checks pass. Scoped acceptance requires actual package and
 executable replacement, product-initiated restart, fresh UI ownership, unchanged
 settings/selection and unrelated synthetic runtime, and normal close. Native
-execution remains required; its private 0.1.15 fixture cannot qualify or publish
+complete-flow acceptance remains required; its private 0.1.15 fixture cannot qualify or publish
 the new source candidate.
+
+Capture run 39259885862 and native system-Cancel run 39260331976 passed their
+finite scopes. Cancel retained the original package, live Hub, settings, selected
+project and unrelated synthetic runtime. Approval runs, including 39272042921,
+verified the exact private 0.1.15 package/ELF, clean `dpkg --verify`, original
+Hub exit zero and a genuinely automatic new Hub process. They have not yet
+passed the remaining visible-version, preservation and normal-close obligations.
+
+Post-restart harness corrections retain the exact process/hash/UID/parent,
+D-Bus, XRes and renderer checks. X11 may reuse an old numerical window ID; the
+new process must independently own it. Accessibility reads use the established
+same-frame semantic-parent walker, with an initial canonical frame binding.
+The already-bound authentication-agent endpoint is rechecked directly instead
+of enumerating unrelated system-bus connections that may close after approval.
+Dead processes are never admitted as Hub and no manual restart substitutes for
+the application's automatic restart. Original failure reports are retained.
+
+Full source CI 39259888960 and direct Linux library checks 39260921684 passed
+at source 69cb13a; macOS was skipped. Subsequent controller-only corrections
+reuse the immutable signed product inputs rather than rebuilding those apps.
+None of these older-package results qualifies a final 0.1.16 installer.
 
 Run 39257702384 passed preflight and signed input staging but stopped in the
 fixture broker before Hub launch. Read-only diagnostic run 39258494136 confirmed
