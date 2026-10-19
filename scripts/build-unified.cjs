@@ -31,7 +31,7 @@ function candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, 
   }
   return linuxIntegratedCandidate ? 'integrated-candidate' : 'retirement-acceptance';
 }
-function integrationEnvironment(environment, output, enabled) {
+function integrationEnvironment(environment, output, enabled, hostPlatform = process.platform) {
   if (!enabled) return environment;
   const variable = 'CREATOR_HUB_INTEGRATED_MCP_PAYLOAD';
   if (Object.hasOwn(environment, variable)) throw Error('Integrated payload inputs must come from the verified assembly, not inherited environment.');
@@ -40,7 +40,10 @@ function integrationEnvironment(environment, output, enabled) {
     if (!path.isAbsolute(directory) || fs.realpathSync(directory) !== directory
       || !fs.lstatSync(directory).isDirectory()) throw Error('Verified integrated MCP payload directory is redirected or missing.');
   }
-  return { ...environment, [variable]: payload };
+  // Dependency build scripts inherit the same Tauri resource map and target
+  // directory. Concurrent copies can lock those shared files on Windows.
+  return { ...environment, [variable]: payload,
+    ...(hostPlatform === 'win32' ? { CARGO_BUILD_JOBS: '1' } : {}) };
 }
 function stageIntegratedMcpResources(root, output, manifest) {
   if (manifest.platform !== 'linux' || manifest.arch !== 'x86_64') throw Error('Integrated resource staging requires the verified Linux x86_64 payload.');

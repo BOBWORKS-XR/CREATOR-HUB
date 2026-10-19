@@ -101,8 +101,12 @@ test('internal MCP compile snapshots use the already verified staged payload, ne
   try {
     const payload = path.join(dir, 'modules', 'mcp', 'server');
     fs.mkdirSync(payload, { recursive: true });
-    assert.deepEqual(integrationEnvironment(environment, dir, true),
+    assert.deepEqual(integrationEnvironment(environment, dir, true, 'linux'),
       { KEEP: 'original', CREATOR_HUB_INTEGRATED_MCP_PAYLOAD: payload });
+    assert.deepEqual(integrationEnvironment({ ...environment, CARGO_BUILD_JOBS: '8' }, dir, true, 'win32'),
+      { KEEP: 'original', CARGO_BUILD_JOBS: '1', CREATOR_HUB_INTEGRATED_MCP_PAYLOAD: payload });
+    assert.deepEqual(integrationEnvironment({ ...environment, CARGO_BUILD_JOBS: '8' }, dir, true, 'linux'),
+      { KEEP: 'original', CARGO_BUILD_JOBS: '8', CREATOR_HUB_INTEGRATED_MCP_PAYLOAD: payload });
     assert.deepEqual(environment, { KEEP: 'original' });
     assert.throws(() => integrationEnvironment({ CREATOR_HUB_INTEGRATED_MCP_PAYLOAD: payload }, dir, true), /inherited environment/);
     fs.rmdirSync(payload);
