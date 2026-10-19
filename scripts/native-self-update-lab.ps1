@@ -1,6 +1,6 @@
 # VM-only transport lifecycle, not an update acceptance receipt. Requires pwsh 7.
 param([string]$ContractPath = '', [string]$BaselineInstallerPath = '', [int]$TimeoutSeconds = 300, [switch]$CleanupWatch,
-    [ValidateSet('public-stable','unified-outgoing-14-15')][string]$Scenario = 'public-stable')
+    [ValidateSet('public-stable','unified-outgoing-14-15')][string]$Scenario = 'public-stable', [switch]$Incoming016)
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows') {
     [Console]::Error.WriteLine('Lab lifecycle refused: disposable GitHub-hosted Windows runner required.')
     exit 1
@@ -334,14 +334,19 @@ $trustOwned = $false; $failed = $false; $cleanupVerified = $true; $systemTlsVeri
 $driverExitCode = $null; $feedResult = $null; $rootThumbprint = $null; $leafThumbprint = $null
 $phase = 'timeout'; $failureDetails = $null
 $script:processIdentityFailure = $null
-$actualScope = if ($Scenario -ceq 'public-stable') { 'unmodified-public-0.1.12-lab-only' }
+$actualScope = if ($Incoming016) { 'exact-public14-to-direct16-lab-only' }
+    elseif ($Scenario -ceq 'public-stable') { 'unmodified-public-0.1.12-lab-only' }
     else { 'accepted-unmodified-B05-0.1.14-to-outer-only-0.1.15-fixture-lab-only' }
 try {
     Set-LabPhase 'timeout'
+    if ($Incoming016 -and $Scenario -cne 'public-stable') { throw 'Incoming16 cannot be combined with a historical scenario.' }
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 480) { throw 'Driver timeout must be 1..480 seconds.' }
     # The exact five-route proxy cannot bootstrap either baseline. Stage reviewed bytes beforehand.
     Set-LabPhase 'baseline'
-    if ($Scenario -ceq 'public-stable') {
+    if ($Incoming016) {
+        if (Test-Path Env:CREATOR_HOSTED_UPDATE_FIXTURE) { throw 'Incoming16 baseline fixture refused.' }
+        $BaselineInstallerPath = Resolve-UnifiedOutgoingLabBaseline $BaselineInstallerPath
+    } elseif ($Scenario -ceq 'public-stable') {
         $BaselineInstallerPath = Resolve-LabBaseline $BaselineInstallerPath
     } else {
         if (Test-Path Env:CREATOR_HOSTED_UPDATE_FIXTURE) { throw 'Outgoing baseline version masquerade refused.' }
@@ -350,7 +355,9 @@ try {
     Set-LabPhase 'contract'
     $ContractPath = Resolve-LabFile $ContractPath
     Set-LabPhase 'feed-path'
-    if ($Scenario -ceq 'public-stable') {
+    if ($Incoming016) {
+        $feedPath = Resolve-LabFile (Join-Path $PSScriptRoot 'windows-incoming-016.cjs')
+    } elseif ($Scenario -ceq 'public-stable') {
         $feedPath = Resolve-LabFile (Join-Path $PSScriptRoot 'self-update-lab-feed.cjs')
     } else {
         $feedPath = Resolve-LabFile (Join-Path $PSScriptRoot 'native-unified-outgoing-target.cjs')

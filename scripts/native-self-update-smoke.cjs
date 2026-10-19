@@ -24,8 +24,9 @@ const from = selectBaseline(to.version);
 assert.match(to.installer || '', /^[a-f0-9]{64}$/, 'Supply the exact published target installer SHA-256');
 assert.match(to.exe || '', /^[a-f0-9]{64}$/, 'Supply the exact packaged target executable SHA-256');
 const fixture = process.env.CREATOR_HOSTED_UPDATE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.CREATOR_HOSTED_UPDATE_FIXTURE, 'utf8')) : null;
+const labTarget = directTarget ? require('./windows-incoming-016.cjs') : require('./self-update-lab-target.cjs');
 const lab = process.env.CREATOR_SELF_UPDATE_LAB_CONFIG
-  ? require('./self-update-lab-target.cjs').selectLab(process.env.CREATOR_SELF_UPDATE_LAB_CONFIG, to, fixture)
+  ? labTarget.selectLab(process.env.CREATOR_SELF_UPDATE_LAB_CONFIG, to, fixture)
   : null;
 if (fixture) {
   assert.equal(fixture.testOnly, true);
@@ -220,7 +221,7 @@ async function startUnrelatedRuntime() {
   await retry(() => { assert.match(output, /ready/); assert.equal(unrelatedRuntime.exitCode, null); });
 }
 (async () => {
-  report.feed = lab ? require('./self-update-lab-target.cjs').discoveryScope(lab) : await checkLive(to.version);
+  report.feed = lab ? labTarget.discoveryScope(lab) : await checkLive(to.version);
   assertPreviousStable(report.feed.previousStable, from);
   const installer = fixture ? fixture.installerPath : lab ? process.env.CREATOR_SELF_UPDATE_LAB_BASELINE : path.join(out, `Creator-Hub-${from.version}-Windows-setup.exe`);
   if (lab) assert.ok(typeof installer === 'string' && path.isAbsolute(installer), 'Pre-download the pinned public baseline before enabling the lab proxy');
@@ -230,7 +231,7 @@ async function startUnrelatedRuntime() {
   const setup = spawn(installer, ['/S', '/NS'], { windowsHide: true, stdio: 'ignore' });
   await retry(() => assert.equal(setup.exitCode, 0), 120);
   assert.equal(hash(hub), from.exe);
-  if (lab) require('./self-update-lab-target.cjs').checkBaseline(lab, installer, hub);
+  if (lab) labTarget.checkBaseline(lab, installer, hub);
   if (fixture) await installCompanions();
   else if (directTarget) await startUnrelatedRuntime();
   const sentinel = path.join(path.dirname(hub), 'ci-self-update-sentinel.txt');

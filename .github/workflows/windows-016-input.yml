@@ -1,0 +1,105 @@
+name: Stage exact Windows 016 data from private validation draft
+on:
+  push:
+    branches: [validation/windows-016-input]
+  workflow_dispatch:
+    inputs:
+      descriptor_asset_id:
+        type: string
+        required: false
+      descriptor_sha256:
+        type: string
+        required: false
+      descriptor_bytes:
+        type: string
+        required: false
+      minisig_asset_id:
+        type: string
+        required: false
+      minisig_sha256:
+        type: string
+        required: false
+      minisig_bytes:
+        type: string
+        required: false
+      manifest_asset_id:
+        type: string
+        required: false
+      manifest_sha256:
+        type: string
+        required: false
+      manifest_bytes:
+        type: string
+        required: false
+permissions:
+  contents: read
+jobs:
+  stage:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB'
+    permissions:
+      contents: write # Required only to GET the existing private draft; no release writes.
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: GET and hash only the fixed reviewed data files
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DESCRIPTOR_ID: ${{ inputs.descriptor_asset_id }}
+          DESCRIPTOR_SHA256: ${{ inputs.descriptor_sha256 }}
+          DESCRIPTOR_BYTES: ${{ inputs.descriptor_bytes }}
+          MINISIG_ID: ${{ inputs.minisig_asset_id }}
+          MINISIG_SHA256: ${{ inputs.minisig_sha256 }}
+          MINISIG_BYTES: ${{ inputs.minisig_bytes }}
+          MANIFEST_ID: ${{ inputs.manifest_asset_id }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+          MANIFEST_BYTES: ${{ inputs.manifest_bytes }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rows = @(@{name='Creator.Hub_0.1.16_x64-setup.exe';id='656964817';bytes=37839600L;sha='7229cfcf919dc3a9e27a459fd482cbbe059fd54caa9ad379b2a75c8baa113a20'})
+          $metadata = @(
+            @{name='creator-hub-windows-x86_64.json';id=$env:DESCRIPTOR_ID;bytes=$env:DESCRIPTOR_BYTES;sha=$env:DESCRIPTOR_SHA256;limit=32768}
+            @{name='creator-hub-windows-x86_64.json.minisig';id=$env:MINISIG_ID;bytes=$env:MINISIG_BYTES;sha=$env:MINISIG_SHA256;limit=4096}
+            @{name='latest.json';id=$env:MANIFEST_ID;bytes=$env:MANIFEST_BYTES;sha=$env:MANIFEST_SHA256;limit=32768}
+          )
+          $supplied = @($metadata | ForEach-Object { $_.id; $_.bytes; $_.sha } | Where-Object { -not [string]::IsNullOrEmpty($_) })
+          if ($supplied.Count -ne 0 -and $supplied.Count -ne 9) { throw 'Signed metadata must be an all-or-none independently pinned set.' }
+          if ($supplied.Count -eq 9) {
+            foreach ($row in $metadata) {
+              if ($row.bytes -cnotmatch '^[1-9][0-9]{0,4}$' -or [long]$row.bytes -gt $row.limit -or $row.sha -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid independent metadata byte/hash pin.' }
+            }
+            $rows += $metadata
+          }
+          foreach ($row in $rows) {
+            if ($row.id -cnotmatch '^[1-9][0-9]{0,19}$') { throw 'A positive fixed asset ID is required.' }
+          }
+          if (@($rows.id | Sort-Object -Unique).Count -ne $rows.Count) { throw 'Asset IDs must be distinct.' }
+          $directory = Join-Path $PWD 'windows-016-input'
+          if (Test-Path -LiteralPath $directory) { throw 'Staging directory already exists; no clobber.' }
+          $metadataHeaders = @{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2026-03-10'}
+          $downloadHeaders = @{Authorization="Bearer $env:GH_TOKEN";Accept='application/octet-stream';'X-GitHub-Api-Version'='2026-03-10'}
+          $release = Invoke-RestMethod -Method Get -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/411494394' -Headers $metadataHeaders -TimeoutSec 30
+          if ($release.id -ne 411494394 -or $release.draft -ne $true -or $release.tag_name -cne 'v0.1.13-validation') { throw 'Exact private validation draft differs.' }
+          foreach ($row in $rows) {
+            $assets = @($release.assets | Where-Object { $_.id.ToString() -ceq $row.id })
+            if ($assets.Count -ne 1 -or $assets[0].name -cne $row.name -or $assets[0].state -cne 'uploaded' -or $assets[0].size -ne [long]$row.bytes -or $assets[0].digest -cne "sha256:$($row.sha)") { throw 'Exact private asset metadata differs.' }
+          }
+          New-Item -ItemType Directory -Path $directory | Out-Null
+          foreach ($row in $rows) {
+            $file = Join-Path $directory $row.name
+            if (Test-Path -LiteralPath $file) { throw 'Staged file already exists; no clobber.' }
+            Invoke-WebRequest -Method Get -Uri "https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/$($row.id)" -Headers $downloadHeaders -OutFile $file -MaximumRedirection 5 -TimeoutSec 180
+            if ((Get-Item -LiteralPath $file).Length -ne [long]$row.bytes -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $row.sha) { throw 'Downloaded byte/hash pin differs.' }
+          }
+          Write-Output "Staged $($rows.Count) reviewed data files; no native, signing or publication acceptance."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-016-acceptance-input
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            windows-016-input/Creator.Hub_0.1.16_x64-setup.exe
+            windows-016-input/creator-hub-windows-x86_64.json
+            windows-016-input/creator-hub-windows-x86_64.json.minisig
+            windows-016-input/latest.json

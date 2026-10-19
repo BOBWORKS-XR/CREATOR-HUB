@@ -144,6 +144,13 @@ function createUnifiedOutgoingContract(input) {
     descriptor: { assetName: 'Creator_Hub_0.1.15_x64-acceptance-only-setup.exe', minHubVersion: '0.1.14' } });
 }
 
+function createIncoming016Contract(input) {
+  const incoming = require('./windows-incoming-016.cjs');
+  incoming.validateInput(input);
+  return validatedContract(input, incoming.BASELINE, { descriptor: { assetName: incoming.TARGET.asset },
+    actualScope: { kind: incoming.KIND, labDiscovery: true, publicDiscovery: false, migrationAccepted: false, releaseReady: false } });
+}
+
 function readBounded(file, max) {
   assert.ok(path.isAbsolute(file), 'Input paths must be absolute');
   for (let entry = path.resolve(file); ; entry = path.dirname(entry)) {
@@ -347,7 +354,7 @@ async function main() {
 }
 
 module.exports = { DESCRIPTOR, FEED_PATH, LIMITS, UNIFIED_OUTGOING_BASELINE, assertRunner, baselineFor, createContract,
-  createUnifiedOutgoingContract, loadContract, readBounded, assertBaselineBytes, assertUnifiedOutgoingBaselineBytes,
+  createUnifiedOutgoingContract, createIncoming016Contract, loadContract, readBounded, assertBaselineBytes, assertUnifiedOutgoingBaselineBytes,
   connectHost, newState, requestHandler, labReport, startLabProxy };
 if (require.main === module) main().catch(() => {
   // Do not serialize TLS control input, parser errors, headers or candidate contents.

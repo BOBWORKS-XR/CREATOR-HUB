@@ -1,0 +1,128 @@
+name: Windows exact 016 fresh or public14 incoming (not release)
+on:
+  push:
+    branches: [validation/windows-incoming-016]
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [fresh, incoming]
+        default: fresh
+      artifact_run:
+        description: Completed run containing the reviewed data-only windows-016-acceptance-input artifact
+        type: string
+        required: true
+      artifact_id:
+        type: string
+        required: true
+      archive_sha256:
+        description: Independently reviewed GitHub artifact archive digest
+        type: string
+        required: true
+      signed_pins:
+        description: Incoming only, JSON with descriptor/descriptorSignature/installer/manifest/executable SHA256 pins
+        type: string
+        required: false
+permissions:
+  contents: read
+  actions: read
+jobs:
+  acceptance:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Bind the immutable data artifact before extraction or native execution
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_RUN: ${{ inputs.artifact_run }}
+          INPUT_ARTIFACT: ${{ inputs.artifact_id }}
+          INPUT_SHA256: ${{ inputs.archive_sha256 }}
+        run: |
+          if ($env:INPUT_RUN -cnotmatch '^[1-9][0-9]{0,19}$' -or $env:INPUT_ARTIFACT -cnotmatch '^[1-9][0-9]{0,19}$' -or $env:INPUT_SHA256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid immutable input identity.' }
+          $artifact = gh api "repos/BOBWORKS-XR/CREATOR-HUB/actions/artifacts/$env:INPUT_ARTIFACT" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Artifact metadata unavailable.' }
+          if ($artifact.id.ToString() -cne $env:INPUT_ARTIFACT -or $artifact.name -cne 'windows-016-acceptance-input' -or $artifact.expired -ne $false -or $artifact.size_in_bytes -lt 1 -or $artifact.size_in_bytes -gt 64MB -or $artifact.digest -cne "sha256:$env:INPUT_SHA256" -or $artifact.workflow_run.id.ToString() -cne $env:INPUT_RUN) { throw 'Reviewed artifact identity differs.' }
+          $run = gh api "repos/BOBWORKS-XR/CREATOR-HUB/actions/runs/$env:INPUT_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or $run.repository.full_name -cne 'BOBWORKS-XR/CREATOR-HUB' -or $run.head_repository.full_name -cne 'BOBWORKS-XR/CREATOR-HUB') { throw 'Artifact must belong to a completed same-repository run.' }
+          New-Item -ItemType Directory -Path artifacts/incoming-016 | Out-Null
+          @{artifactId=$artifact.id;runId=$run.id;artifactSource=$run.head_sha;archiveSha256=$env:INPUT_SHA256;harnessSource=$env:GITHUB_SHA} | ConvertTo-Json | Set-Content artifacts/incoming-016/input-binding.json -Encoding utf8NoBOM
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ inputs.artifact_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.artifact_run }}
+          path: artifacts/incoming-016/candidate
+          merge-multiple: true
+      - name: Refuse extra input files and validate the exact candidate/optional signed contract
+        shell: pwsh
+        env:
+          MODE: ${{ inputs.mode }}
+          SIGNED_PINS: ${{ inputs.signed_pins }}
+        run: |
+          $directory = (Get-Item -LiteralPath (Join-Path $PWD artifacts/incoming-016/candidate)).FullName
+          $allowed = @('Creator.Hub_0.1.16_x64-setup.exe','creator-hub-windows-x86_64.json','creator-hub-windows-x86_64.json.minisig','latest.json')
+          foreach ($file in Get-ChildItem -LiteralPath $directory -Recurse -Force) {
+            if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint -or $file.PSIsContainer -or $file.Name -cnotin $allowed -or $file.DirectoryName -cne $directory) { throw 'Only the flat reviewed data-file set is admitted.' }
+          }
+          node scripts/windows-incoming-016.cjs $env:MODE $directory $env:SIGNED_PINS
+          if ($LASTEXITCODE -ne 0) { throw 'Exact 016 input contract refused; no native work started.' }
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - name: Focused refusal/transport/direct-feature regressions before any native operation
+        run: node --test scripts/windows-incoming-016.test.cjs scripts/native-self-update-direct.test.cjs scripts/self-update-lab-feed.test.cjs scripts/native-self-update-lab.test.cjs scripts/native-unified-outgoing-target.test.cjs
+      - name: Parse native lifecycle before execution
+        shell: pwsh
+        run: |
+          $tokens=$null; $errors=$null
+          [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD scripts/native-self-update-lab.ps1),[ref]$tokens,[ref]$errors)
+          if ($errors.Count) { throw 'Native lifecycle parse failed.' }
+          node --check scripts/native-windows-016-fresh.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Fresh16 parse failed.' }
+      - name: Exact fresh installer/direct-page/settings preservation acceptance
+        if: inputs.mode == 'fresh'
+        run: node scripts/native-windows-016-fresh.cjs "${{ github.workspace }}/artifacts/incoming-016/candidate/Creator.Hub_0.1.16_x64-setup.exe"
+      - name: Stage the unmodified public14 installer before trust/proxy setup
+        if: inputs.mode == 'incoming'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri 'https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.14/Creator.Hub_0.1.14_x64-setup.exe' -OutFile artifacts/incoming-016/public14.exe -TimeoutSec 180
+          if ((Get-FileHash artifacts/incoming-016/public14.exe).Hash.ToLowerInvariant() -cne '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157') { throw 'Exact public14 installer differs.' }
+      - name: Native public14 cancellation/signed update/automatic restart into direct16
+        if: inputs.mode == 'incoming'
+        shell: pwsh
+        run: |
+          ./scripts/native-self-update-lab.ps1 -Incoming016 -ContractPath (Join-Path $PWD artifacts/incoming-016/candidate/incoming-016-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/incoming-016/public14.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/incoming-016/lifecycle.jsonl
+          if ($LASTEXITCODE -ne 0) { throw 'Incoming16 native lifecycle failed.' }
+          $result = Get-Content artifacts/incoming-016/lifecycle.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object kind -CEQ 'lab-lifecycle-result'
+          if (@($result).Count -ne 1 -or $result.lifecycleSucceeded -ne $true -or $result.cleanupVerified -ne $true -or $result.systemTlsVerified -ne $true -or $result.actualScope -cne 'exact-public14-to-direct16-lab-only' -or $result.servedRouteCount -ne 5 -or $result.rejectedRequestCount -ne 0) { throw 'Incoming16 transport/cleanup/route evidence incomplete.' }
+      - name: Require the independent exact native receipt without asserting release readiness
+        shell: pwsh
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          $filter = if ($env:MODE -ceq 'fresh') { 'fresh-016-report.json' } else { 'self-update-report.json' }
+          $reports = @(Get-ChildItem -LiteralPath artifacts -Recurse -File -Filter $filter)
+          if ($reports.Count -ne 1) { throw 'Expected one native acceptance receipt.' }
+          node -e "const f=require('fs');require('./scripts/windows-incoming-016.cjs').checkReceipt(JSON.parse(f.readFileSync(process.argv[1],'utf8')),process.argv[2])" $reports[0].FullName $env:MODE
+          if ($LASTEXITCODE -ne 0) { throw 'Native receipt refused.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-016-${{ inputs.mode }}-evidence-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/incoming-016/input-binding.json
+            artifacts/incoming-016/lifecycle.jsonl
+            artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.png
+            artifacts/native-016-fresh-*/*.json
+            artifacts/native-016-fresh-*/*.png
