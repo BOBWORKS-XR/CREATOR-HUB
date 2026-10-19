@@ -88,7 +88,7 @@ namespace CreatorWorks
                     if (!config.assemblyOptions.Contains(new LooseAssemblyName(name))) config.assemblyOptions.Add(new LooseAssemblyName(name));
                 foreach (var type in VsNodeGeneration.typeAllowList)
                     if (!config.typeOptions.Contains(type)) config.typeOptions.Add(type);
-                config.Save();
+                foreach (var setting in config.projectSettings) setting.Save();
                 config.SaveProjectSettingsAsset(true);
                 Codebase.UpdateSettings();
                 // Unity schedules settings serialization on delayCall, even with immediately=true.

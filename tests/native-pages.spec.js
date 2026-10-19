@@ -11,6 +11,9 @@ async function open(page, options = {}) {
     window.calls = []; window.events = {}; window.pending = {};
     window.failNext = options.fail || null;
     const recipe = { editorVersion: '6000.3.21f1', creatorSdkVersion: '4.0.14', urpVersion: '17.3.0', inputSystemVersion: '1.20.0' };
+    const readyEnvironment = { platform: options.linux ? 'linux' : 'windows', ready: true, hubInstalled: true, hubVersion: '3.21.1', hubAutoRegistration: true,
+      recipe, editors: [{ exactRecipe: true, androidPlayer: true, androidSdk: true, androidNdk: true, openJdk: true, windowsStandalone: true, urpTemplate: 'urp.tgz' }], blockers: [], suggestedProjectParent: '/projects' };
+    window.setupEnvironment = options.setupMissingRequirements ? { ...readyEnvironment, ready: false, editors: [], blockers: ['Editor is missing'] } : structuredClone(readyEnvironment);
     const channel = { id: 'one', name: 'Creator project', unity_project_path: '/projects/Creator', enabled: true };
     const profile = { profile: 'creator', label: 'Creator SDK 4.0.14', packages: [] };
     const config = { channels: options.channels || [channel], active_channel_id: options.activeChannel || 'one', mcp_server_path: '/private/server.mjs',
@@ -59,8 +62,9 @@ async function open(page, options = {}) {
         if (window.failNext === name) { window.failNext = null; throw new Error('Fixture failure: ' + name); }
         if (window.hold === name) await new Promise(resolve => { window.pending[name] = resolve; });
         switch (name) {
-          case 'probe_environment': return { platform: options.linux ? 'linux' : 'windows', ready: true, hubInstalled: true, hubVersion: '3.21.1', hubAutoRegistration: true,
-            recipe, editors: [{ exactRecipe: true, androidPlayer: true, androidSdk: true, androidNdk: true, openJdk: true, windowsStandalone: true, urpTemplate: 'urp.tgz' }], blockers: [], suggestedProjectParent: '/projects' };
+          case 'probe_environment':
+            if (window.incompleteNextProbe) { window.incompleteNextProbe = false; return { ready: true }; }
+            return structuredClone(window.setupEnvironment);
           case 'pick_parent_folder': return '/projects/chosen';
           case 'open_official_url':
             if (feature !== 'setup' || Object.keys(fields).join() !== 'url' || ![
@@ -69,9 +73,16 @@ async function open(page, options = {}) {
               'https://openjdk.org/legal/gplv2+ce.html',
             ].includes(fields.url)) throw new Error('Unexpected Setup licence URL request');
             return null;
-          case 'create_project': return { success: true, projectPath: '/projects/Space', message: 'Validated project', hub: { registered: true, refreshPending: true, message: 'Registered in Unity Hub' } };
-          case 'inspect_project': return { projectPath: fields.path, fingerprint: 'reviewed-fingerprint', canRepair: true, canValidate: true,
-            findings: [{ title: 'Visual Scripting', detail: options.hostile ? '<img src=x onerror=alert(1)>' : 'Initialization needs repair', status: 'repair' }], proposedChanges: ['Initialize node database'] };
+          case 'create_project':
+            if (options.setupInstallBeforeCreate) window.setupEnvironment = structuredClone(readyEnvironment);
+            if (options.setupProbeFailure) window.failNext = 'probe_environment';
+            if (options.setupProbeIncomplete) window.incompleteNextProbe = true;
+            if (options.setupCreateOutcome === 'licensing-refusal') throw new Error('Unity licence activation is required. Installed requirements were kept; no project was created.');
+            if (options.setupCreateOutcome === 'installation-cancelled') throw new Error('Installation cancelled. Nothing was installed.');
+            if (options.setupCreateOutcome === 'validation-failure') return { success: false, projectPath: '/projects/Space', message: 'Unity validation reported failures.', logPath: '/reports/create.log' };
+            return { success: true, projectPath: '/projects/Space', message: 'Validated project', hub: { registered: true, refreshPending: true, message: 'Registered in Unity Hub' } };
+          case 'inspect_project': return { projectPath: fields.path, fingerprint: 'reviewed-fingerprint', canRepair: fields.path !== options.blockedProject, canValidate: fields.path !== options.blockedProject,
+            findings: [{ title: 'Visual Scripting', detail: fields.path === options.blockedProject ? 'Close this project and inspect again.' : options.hostile ? '<img src=x onerror=alert(1)>' : 'Initialization needs repair', status: fields.path === options.blockedProject ? 'blocked' : 'repair' }], proposedChanges: ['Initialize node database'] };
           case 'run_existing_project': return { success: true, projectPath: fields.request.projectPath, message: 'Validation passed', backupPath: '/backups/settings', reportPath: '/reports/validation.json' };
           case 'open_project': case 'launch_hub': case 'register_project': return { registered: true, message: 'Registered' };
           case 'restart_hub': return true;
@@ -413,6 +424,108 @@ test('Setup creates once with exact DTO, consumes only scoped progress and compl
   await expect(field(page, 'setup', 'restart')).toBeVisible();
 });
 
+for (const outcome of ['success', 'licensing-refusal', 'validation-failure', 'installation-cancelled']) test(`Setup regression: refreshes requirements once after ${outcome} without replay or draft loss`, async ({ page }) => {
+  await open(page, { setupMissingRequirements: true, setupInstallBeforeCreate: outcome !== 'installation-cancelled', setupCreateOutcome: outcome });
+  await show(page, 'mcp'); await show(page, 'setup');
+  await expect(field(page, 'setup', 'requirements')).toContainText('Missing');
+  await field(page, 'setup', 'name').fill('Retain this draft'); await field(page, 'setup', 'parent').fill('/keep/parent');
+  await page.evaluate(() => { window.hold = 'create_project'; }); await field(page, 'setup', 'create').click();
+  await page.waitForFunction(() => pending.create_project);
+  await page.evaluate(() => { window.hold = 'probe_environment'; pending.create_project(); });
+  await expect.poll(async () => (await commands(page, 'probe_environment')).length).toBe(2);
+  await page.waitForFunction(() => pending.probe_environment);
+  await expect(field(page, 'setup', 'controls')).toHaveAttribute('disabled', '');
+  await expect(field(page, 'setup', 'refresh')).toBeDisabled();
+  await field(page, 'setup', 'create').dispatchEvent('click');
+  expect((await commands(page, 'create_project')).length).toBe(1);
+  await page.evaluate(() => { window.hold = null; pending.probe_environment(); });
+  await expect(field(page, 'setup', 'controls')).not.toHaveAttribute('disabled');
+  await expect(field(page, 'setup', 'refresh')).toBeEnabled();
+  expect((await commands(page, 'probe_environment')).length).toBe(2);
+  expect((await commands(page, 'create_project'))[0].args.args).toEqual({ request: { projectName: 'Retain this draft', parentDirectory: '/keep/parent' } });
+  await expect(field(page, 'setup', 'name')).toHaveValue('Retain this draft'); await expect(field(page, 'setup', 'parent')).toHaveValue('/keep/parent');
+  if (outcome === 'installation-cancelled') await expect(field(page, 'setup', 'requirements')).toContainText('Missing');
+  else await expect(field(page, 'setup', 'requirements')).not.toContainText('Missing');
+  if (outcome === 'success') {
+    await expect(field(page, 'setup', 'error')).toBeHidden(); await expect(field(page, 'setup', 'status')).toHaveText('Ready');
+    await expect(field(page, 'setup', 'open')).toBeVisible();
+  } else {
+    const message = outcome === 'licensing-refusal' ? 'Unity licence activation is required' : outcome === 'validation-failure' ? 'Unity validation reported failures' : 'Installation cancelled';
+    await expect(field(page, 'setup', 'error')).toContainText(message); await expect(field(page, 'setup', 'status')).toHaveText('Needs attention');
+    await expect(field(page, 'setup', 'open')).toBeHidden();
+    if (outcome === 'validation-failure') await expect(field(page, 'setup', 'created')).toContainText('Log: /reports/create.log');
+    await show(page, 'mcp'); await show(page, 'setup');
+    await expect(field(page, 'setup', 'error')).toContainText(message);
+  }
+  expect((await commands(page, 'create_project')).length).toBe(1); expect((await commands(page, 'probe_environment')).length).toBe(2);
+});
+
+for (const creationFails of [false, true]) for (const incomplete of [false, true]) test(`Setup regression: exposes refresh ${incomplete ? 'incomplete DTO' : 'failure'} without masking creation ${creationFails ? 'failure' : 'success'}`, async ({ page }) => {
+  await open(page, { setupMissingRequirements: true, setupInstallBeforeCreate: true,
+    setupCreateOutcome: creationFails ? 'licensing-refusal' : 'success', setupProbeFailure: !incomplete, setupProbeIncomplete: incomplete });
+  await show(page, 'setup');
+  await field(page, 'setup', 'name').fill('Keep draft'); await field(page, 'setup', 'parent').fill('/keep/path');
+  await field(page, 'setup', 'create').click();
+  await expect(field(page, 'setup', 'error')).toContainText('Requirements could not be refreshed');
+  await expect(field(page, 'setup', 'error')).toContainText('may be out of date');
+  await expect(field(page, 'setup', 'error')).toContainText(incomplete ? 'Requirements response is incomplete' : 'Fixture failure: probe_environment');
+  if (creationFails) await expect(field(page, 'setup', 'error')).toContainText('Unity licence activation is required');
+  else await expect(field(page, 'setup', 'created')).toContainText('Validated project');
+  await expect(field(page, 'setup', 'status')).toHaveText('Needs attention');
+  await expect(field(page, 'setup', 'activity')).toBeHidden();
+  await expect(field(page, 'setup', 'open'))[creationFails ? 'toBeHidden' : 'toBeVisible']();
+  await expect(field(page, 'setup', 'name')).toHaveValue('Keep draft'); await expect(field(page, 'setup', 'parent')).toHaveValue('/keep/path');
+  expect((await commands(page, 'create_project')).length).toBe(1); expect((await commands(page, 'probe_environment')).length).toBe(2);
+  await field(page, 'setup', 'refresh').click();
+  await expect(field(page, 'setup', 'error')).toBeHidden(); await expect(field(page, 'setup', 'requirements')).not.toContainText('Missing');
+  expect((await commands(page, 'probe_environment')).length).toBe(3); expect((await commands(page, 'create_project')).length).toBe(1);
+});
+
+test('Setup regression: invalid local creation draft does not request creation or follow-up probe', async ({ page }) => {
+  await open(page); await show(page, 'setup'); await field(page, 'setup', 'name').fill('');
+  await field(page, 'setup', 'create').click(); await expect(field(page, 'setup', 'error')).toContainText('Enter a project name and folder');
+  expect((await commands(page, 'create_project')).length).toBe(0); expect((await commands(page, 'probe_environment')).length).toBe(1);
+});
+
+for (const next of ['create', 'repair', 'validate']) test(`Setup regression: starts ${next} with fresh activity before the first scoped event`, async ({ page }) => {
+  await open(page, { setupCreateOutcome: 'licensing-refusal' }); await show(page, 'mcp'); await show(page, 'setup');
+  await page.evaluate(() => { window.hold = 'create_project'; }); await field(page, 'setup', 'create').click();
+  await page.waitForFunction(() => pending.create_project);
+  await page.evaluate(() => {
+    emitFeature('setup', 'requirements-progress', { stage: 'Previous download', detail: 'Previous download detail', percent: 35, transfer: { downloadedBytes: 350, totalBytes: 1000, bytesPerSecond: 25 } });
+  });
+  await expect(field(page, 'setup', 'progress')).toHaveAttribute('value', '35');
+  await page.evaluate(() => { window.hold = null; pending.create_project(); });
+  await expect(field(page, 'setup', 'status')).toHaveText('Needs attention');
+  if (next !== 'create') {
+    await field(page, 'setup', 'existing-tab').click(); await field(page, 'setup', 'existing-path').fill('/projects/next');
+    await field(page, 'setup', 'inspect').click(); await field(page, 'setup', 'approval').check();
+  }
+  const command = next === 'create' ? 'create_project' : 'run_existing_project';
+  await page.evaluate(command => { window.hold = command; delete window.pending[command]; }, command);
+  await field(page, 'setup', next).click(); await page.waitForFunction(command => pending[command], command);
+  await expect(field(page, 'setup', 'activity')).toBeVisible();
+  await expect(field(page, 'setup', 'stage')).toHaveText(next === 'create' ? 'Creating project' : next === 'repair' ? 'Repairing project' : 'Validating project');
+  await expect(field(page, 'setup', 'detail')).toHaveText(next === 'create' ? 'Checking project path and Unity requirements.' : 'Preparing the settings backup.');
+  await expect(field(page, 'setup', 'progress')).not.toHaveAttribute('value'); await expect(field(page, 'setup', 'transfer')).toBeEmpty();
+  await page.evaluate(next => {
+    emitFeature('mcp', 'existing-progress', { detail: 'Foreign feature' });
+    emitFeature('setup', next === 'create' ? 'existing-progress' : 'requirements-progress', { stage: 'Wrong operation', detail: 'Wrong operation', percent: 90 });
+  }, next);
+  await expect(field(page, 'setup', 'detail')).not.toHaveText(/Foreign feature|Wrong operation/);
+  await page.evaluate(next => emitFeature('setup', next === 'create' ? 'setup-progress' : 'existing-progress', { step: 1, detail: 'Current operation progress' }), next);
+  await expect(field(page, 'setup', 'detail')).toHaveText('Current operation progress');
+  await show(page, 'mcp'); await page.evaluate(command => { window.hold = null; pending[command](); }, command); await show(page, 'setup');
+  await expect(field(page, 'setup', 'activity')).toBeHidden();
+  if (next === 'create') await expect(field(page, 'setup', 'status')).toHaveText('Needs attention');
+  else {
+    await expect(field(page, 'setup', 'existing-result')).toContainText('Validation passed');
+    await expect(field(page, 'setup', 'approval')).not.toBeChecked(); await expect(field(page, 'setup', next)).toBeDisabled();
+    expect((await commands(page, 'run_existing_project'))[0].args.args.request).toEqual({ projectPath: '/projects/next', fingerprint: 'reviewed-fingerprint', repair: next === 'repair', approved: true });
+  }
+  expect((await commands(page, command)).length).toBe(next === 'create' ? 2 : 1);
+});
+
 test('Setup licence buttons use only exact pinned service URLs and preserve form/settings state', async ({ page }) => {
   await open(page); await show(page, 'setup');
   await field(page, 'setup', 'name').fill('Retain project name'); await field(page, 'setup', 'parent').fill('/keep/folder');
@@ -478,6 +591,32 @@ test('inspection is read-only; repairs require approval and reuse exact reviewed
   expect((await commands(page, 'run_existing_project'))[0].args.args).toEqual({ request: { projectPath: '/projects/review', fingerprint: 'reviewed-fingerprint', repair: true, approved: true } });
   await field(page, 'setup', 'inspect').click(); await field(page, 'setup', 'approval').check();
   await field(page, 'setup', 'existing-path').fill('/different'); await expect(field(page, 'setup', 'repair')).toBeDisabled();
+});
+
+for (const reset of ['path edit', 'folder picker', 'reinspection']) test(`Setup regression: clears prior report paths on ${reset}`, async ({ page }) => {
+  const next = reset === 'path edit' ? '/projects/Blocked' : '/projects/chosen';
+  await open(page, { blockedProject: next }); await show(page, 'setup'); await field(page, 'setup', 'existing-tab').click();
+  await field(page, 'setup', 'existing-path').fill('/projects/First'); await field(page, 'setup', 'inspect').click();
+  await field(page, 'setup', 'approval').check(); await field(page, 'setup', 'repair').click();
+  await expect(field(page, 'setup', 'existing-result')).toContainText('Report: /reports/validation.json');
+  await expect(field(page, 'setup', 'status')).toHaveText('Ready');
+  if (reset === 'path edit') await field(page, 'setup', 'existing-path').fill(next);
+  else if (reset === 'folder picker') {
+    await field(page, 'setup', 'existing-browse').click(); await expect(field(page, 'setup', 'existing-path')).toHaveValue(next);
+  } else {
+    await page.evaluate(() => { window.hold = 'inspect_project'; }); await field(page, 'setup', 'inspect').click();
+    await page.waitForFunction(() => pending.inspect_project);
+  }
+  await expect(field(page, 'setup', 'existing-result')).toBeEmpty();
+  await expect(field(page, 'setup', 'open-existing')).toBeHidden(); await expect(field(page, 'setup', 'approval')).not.toBeChecked();
+  await expect(field(page, 'setup', 'repair')).toBeDisabled();
+  if (reset === 'reinspection') await page.evaluate(() => { window.hold = null; pending.inspect_project(); });
+  else {
+    await field(page, 'setup', 'inspect').click(); await expect(field(page, 'setup', 'findings')).toContainText('Close this project');
+    await expect(field(page, 'setup', 'repair')).toBeDisabled(); await expect(field(page, 'setup', 'validate')).toBeDisabled();
+  }
+  await expect(field(page, 'setup', 'existing-result')).toBeEmpty();
+  expect((await commands(page, 'run_existing_project')).length).toBe(1);
 });
 
 test('first-run guide has no connection writes; saving skip failure remains recoverable', async ({ page }) => {

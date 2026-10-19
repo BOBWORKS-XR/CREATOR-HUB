@@ -191,6 +191,83 @@ restart and removal remain required.
 
 ## Windows Candidate Checkpoint
 
+### Objective Setup Audit
+
+The user requested an objective program audit without further teammate captures.
+The exact teammate failure remains unknown, but this audit reproduced independent
+defects in the supported existing-URP, first-SDK-add flow:
+
+- Existing Visual Scripting settings/database could skip Creator node setup when
+  adding the SDK. First-time SDK addition now invokes the existing
+  selection-preserving configuration and subsequent reopen validation.
+- An orphan validator `.meta` was not protected, and a manifest edit after the
+  backup/progress boundary could be overwritten. Inspection now refuses unknown
+  temporary targets; publication rechecks the reviewed manifest through a held
+  file, and cleanup checks owned file identities and exact bytes. Changed files
+  remain for review. Unix locks are advisory, not a global compare-and-swap or
+  power-loss transaction.
+- The direct Setup page retained old result/report paths after changing project,
+  old installation requirements after a failed creation, and stale transfer
+  progress at the start of repair. These states are reset/refreshed without
+  replaying creation or masking its original error.
+
+Focused repair tests passed 26 cases (4 ignored), plus both explicitly selected
+pre-Unity write-boundary regressions. Strict Clippy passed, including integrated
+Hub's full target set. Integrated Hub passed 443 tests (14 ignored). The
+direct-page file passed all 83 browser tests. These are source checks, not a real Editor result.
+A new opt-in fixture tests plain URP plus existing custom Visual Scripting
+selections, first SDK addition, exact backups, protected content and a second
+validation-only run. The first ordinary run safely stopped in its seed before
+SDK import: this machine's SDK-wide node-cache marker was 3.2.17, not 4.0.14.
+Its guard deliberately refused changing that global marker. The exact original
+failure and fixture are retained; it is not a successful repair or evidence of
+a product failure. A separate `GREENFIELD_PROJECT` experiment failed compilation
+because that symbol enables SDK-internal GraphEdit code requiring a modified
+Visual Scripting runtime (`GraphPaused` and `BanterStubsAllowed`). Its failures,
+fixture and source snapshot are retained, but this is an invalid harness, not
+proof of a normal SDK defect. The controlled path is removed rather than
+patching the SDK or pinning another package to accommodate it. Ordinary SDK
+import/configuration/reopen acceptance is still unpassed. It requires an exact,
+approved backup/restoration of the SDK-wide cache marker; no artificial cache
+value may be installed to make the test pass.
+
+The failed compilation did provide separately verified failure-preservation
+evidence: 31 original backup files and five protected content/settings files
+matched their pre-operation hashes. The custom Visual Scripting selection stayed
+present, all three owned temporary files were removed, the operation lock was
+released, and observations retained the original named SDK cache value. This
+qualifies that failure path only, not SDK installation or successful validation.
+The restored ordinary-probe logic suite passed 16 tests (2 ignored), with strict
+Clippy, formatting, LF/CRLF guard coverage and seed compilation passing.
+
+The pinned Visual Scripting implementation also proves `config.Save()` writes
+editor preferences as well as project settings. Both setup script and test seed
+now save only project metadata before their existing asset serialization.
+The new regression failed before this change and passed afterward; both C#
+scripts compiled against pinned assemblies. Preference loss was not observed
+or claimed. Unity/package-version, registry and render-pipeline compatibility
+refusals remain unchanged. Setup does not convert existing materials.
+
+Both source CI39306306556 at be8104e and native Linux direct-feature
+CI39307534439 at 939aa80 passed. The bounded Windows script suite passed 1,016
+tests (140 skipped) before this Setup batch. Original failed/timeout reports are
+retained. A subsequent full script rerun timed out at ten minutes after native
+PowerShell-dependent fixture failures. An independent immediate-exit PowerShell
+control also timed out with no output. This supports a local startup/environment
+problem; no PC settings or source guards were changed to hide it. That repeat
+must not be reported as passed. None of these results qualifies a new installed candidate, signed
+update/restart or complete Linux/Flatpak flow.
+
+The newer local installer at
+`artifacts/unified/windows-016-projects-migration-20261019` contains source
+35d99c9, not this Setup audit batch. Its installer SHA-256 is
+`22bc9ac8965babf7c26d5578c69207642d165219c5565941a7b685d6e3e14112`;
+packaged executable SHA-256 is
+`51fb46ec7cd26d39f608db4e77615bebf9e450a7ba693ca84620b1a4134d0701`.
+Extraction and production-key runtime/router signature plus tamper checks passed.
+It was not installed or launched, and a new candidate is required after the
+Setup changes. The older installer below is retained historical evidence only.
+
 The local 0.1.16 direct-feature candidate built successfully at
 `artifacts/unified/windows-016-20261019`. Installer extraction verified the raw
 and packaged Hub executable using the documented Tauri bundle-marker change;

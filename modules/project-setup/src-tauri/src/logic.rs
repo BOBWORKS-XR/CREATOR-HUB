@@ -1257,6 +1257,35 @@ mod tests {
     }
 
     #[test]
+    fn validator_and_seed_save_only_project_metadata() {
+        for (name, script, finish) in [
+            ("validator", validation_script(), "FinishConfiguration"),
+            (
+                "seed",
+                include_str!("../../tests/UnityPlainUrpSeed.cs").to_owned(),
+                "Finish",
+            ),
+        ] {
+            let metadata_save = script
+                .find("foreach (var setting in config.projectSettings) setting.Save();")
+                .unwrap_or_else(|| panic!("{name} must save only project metadata"));
+            let persist = script
+                .find("config.SaveProjectSettingsAsset(true);")
+                .unwrap();
+            let delayed_finish = script
+                .find(&format!("EditorApplication.delayCall += {finish};"))
+                .unwrap();
+            assert!(
+                metadata_save < persist && persist < delayed_finish,
+                "{name}"
+            );
+            for forbidden in ["config.Save()", "EditorPrefs.Set", "EditorPrefs.Delete"] {
+                assert!(!script.contains(forbidden), "{name} contains {forbidden}");
+            }
+        }
+    }
+
+    #[test]
     fn requirements_snapshot_is_native_only_and_preserves_failed_checks() {
         let report = EnvironmentReport {
             platform: "windows".into(),
@@ -1361,6 +1390,386 @@ mod tests {
         assert_eq!(value["scopedRegistries"][0]["url"], REGISTRY_URL);
         assert!(!packages.join("packages-lock.json").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sdk_add_audit_stays_opt_in_and_sdk_free() {
+        let source = include_str!("logic.rs").replace("\r\n", "\n");
+        for input in [source.clone(), source.replace('\n', "\r\n")] {
+            let source = input.replace("\r\n", "\n");
+            let (before, body) = source
+                .split_once("\n    fn unity_existing_urp_first_sdk_add_audit() {")
+                .unwrap();
+            assert!(before.ends_with("    #[ignore = \"Real Unity acceptance probe; requires exact target opt-in and reviewed preservation guards. Never resumes or removes its fixture.\"]"));
+            let body = body.split("\n    #[test]").next().unwrap();
+            let opt_in = body
+                .find("env::var(\"CREATOR_SETUP_REAL_SDK_ADD_AUDIT\")")
+                .unwrap();
+            let review = body
+                .find("env::var(\"CREATOR_SETUP_REAL_SDK_ADD_GUARDS_REVIEWED\")")
+                .unwrap();
+            let create = body.find("fs::create_dir(target)").unwrap();
+            let launch = body.find("run_unity(").unwrap();
+            assert!(opt_in < create && review < create && create < launch);
+            assert!(body.contains("fs::symlink_metadata(target)"));
+            assert!(body.contains("ErrorKind::NotFound"));
+            for forbidden in [
+                "create_project(",
+                "register_project(",
+                "launch_hub(",
+                "bootstrap::ensure(",
+                "bootstrap::licence_ready(",
+                "env::set_var(",
+                "remove_dir_all(",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "Forbidden audit action: {forbidden}"
+                );
+            }
+        }
+        let seed = include_str!("../../tests/UnityPlainUrpSeed.cs");
+        for forbidden in [
+            "using BS.",
+            "typeof(BS.",
+            "EditorPrefs.Set",
+            "EditorPrefs.Delete",
+        ] {
+            assert!(
+                !seed.contains(forbidden),
+                "Forbidden seed action: {forbidden}"
+            );
+        }
+        assert!(seed.contains("EditorPrefs.GetString(SdkPreference) != ExpectedSdk"));
+        assert!(seed.contains("#if GREENFIELD_PROJECT"));
+        assert!(seed.contains("typeof(StringBuilder)"));
+        assert!(seed.contains("UnitBase.Rebuild()"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "Real Unity acceptance probe; requires exact target opt-in and reviewed preservation guards. Never resumes or removes its fixture."]
+    fn unity_existing_urp_first_sdk_add_audit() {
+        use sha2::{Digest, Sha256};
+        use std::collections::BTreeMap;
+        use std::os::windows::fs::MetadataExt;
+
+        const TARGET: &str = "E:/UnityTest/CreatorSetupSdkAddAudit-20261019";
+        const TEMPLATE_HASH: &str =
+            "b78fb4cd033d264b842f7f8b10c3e613f0dfc9a825c03cd7e91919521d8ae27e";
+        const DATABASE: &str =
+            "Assets/Unity.VisualScripting.Generated/VisualScripting.Flow/UnitOptions.db";
+
+        fn hash(path: &Path) -> String {
+            let mut file = File::open(path).unwrap();
+            let mut digest = Sha256::new();
+            let mut buffer = [0; 32768];
+            loop {
+                let count = file.read(&mut buffer).unwrap();
+                if count == 0 {
+                    return format!("{:x}", digest.finalize());
+                }
+                digest.update(&buffer[..count]);
+            }
+        }
+
+        fn snapshot(root: &Path, relative: &Path, files: &mut BTreeMap<String, String>) {
+            let path = root.join(relative);
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            assert_eq!(metadata.file_attributes() & 0x400, 0, "Linked audit path");
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    let entry = entry.unwrap();
+                    snapshot(root, &relative.join(entry.file_name()), files);
+                }
+            } else {
+                assert!(metadata.is_file(), "Special audit file");
+                files.insert(relative.to_string_lossy().replace('\\', "/"), hash(&path));
+            }
+        }
+
+        fn backed_up_files(root: &Path) -> BTreeMap<String, String> {
+            let mut files = BTreeMap::new();
+            for relative in [
+                "Packages/manifest.json",
+                "Packages/packages-lock.json",
+                "ProjectSettings",
+                "Assets/Unity.VisualScripting.Generated",
+                "Assets/Unity.VisualScripting.Generated.meta",
+            ] {
+                snapshot(root, Path::new(relative), &mut files);
+            }
+            files
+        }
+
+        fn assert_backup(target: &Path, backup: &str, before: &BTreeMap<String, String>) {
+            let backup = fs::canonicalize(backup).unwrap();
+            let allowed = fs::canonicalize(target.join(".creator-project-setup/backups")).unwrap();
+            assert!(backup.starts_with(allowed));
+            for (relative, expected) in before {
+                assert_eq!(
+                    &hash(&backup.join(relative)),
+                    expected,
+                    "Backup: {relative}"
+                );
+            }
+        }
+
+        assert_eq!(
+            env::var("CREATOR_SETUP_REAL_SDK_ADD_AUDIT").as_deref(),
+            Ok(TARGET)
+        );
+        assert_eq!(
+            env::var("CREATOR_SETUP_REAL_SDK_ADD_GUARDS_REVIEWED").as_deref(),
+            Ok("yes")
+        );
+        assert_eq!(
+            env::var("ProgramFiles").unwrap().replace('\\', "/"),
+            "C:/Program Files"
+        );
+        let _exclusive = crate::bootstrap::OPERATION.try_lock().unwrap();
+        let target = Path::new(TARGET);
+        let parent = target.parent().unwrap();
+        assert_eq!(
+            fs::symlink_metadata(parent).unwrap().file_attributes() & 0x400,
+            0
+        );
+        assert!(
+            matches!(
+                fs::symlink_metadata(target),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            ),
+            "The audit never resumes, overwrites or deletes an existing fixture"
+        );
+        let environment = probe_environment();
+        assert!(environment.ready, "{:?}", environment.blockers);
+        let editor = environment
+            .editors
+            .iter()
+            .find(|editor| editor.ready)
+            .unwrap();
+        let template = Path::new(editor.urp_template.as_ref().unwrap());
+        assert_eq!(
+            hash(template),
+            TEMPLATE_HASH,
+            "Unreviewed official template"
+        );
+        assert_eq!(fs::metadata(template).unwrap().len(), 23_121_063);
+
+        fs::create_dir(target)
+            .expect("Exclusive creation only; preserve the folder on every failure");
+        extract_project_template(template, target).unwrap();
+        fs::write(
+            target.join("ProjectSettings/ProjectVersion.txt"),
+            format!("m_EditorVersion: {EDITOR_VERSION}\nm_EditorVersionWithRevision: {EDITOR_VERSION} ({EDITOR_CHANGESET})\n"),
+        ).unwrap();
+        let manifest_path = target.join("Packages/manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let dependencies = manifest["dependencies"].as_object_mut().unwrap();
+        assert!(!dependencies.contains_key("com.sidequest.creator-sdk"));
+        dependencies.insert(
+            "com.unity.render-pipelines.universal".into(),
+            json!(URP_VERSION),
+        );
+        dependencies.insert("com.unity.inputsystem".into(), json!(INPUT_SYSTEM_VERSION));
+        dependencies.insert("com.unity.visualscripting".into(), json!("1.9.1"));
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let template_lock = target.join("Packages/packages-lock.json");
+        if template_lock.exists() {
+            fs::remove_file(template_lock).unwrap();
+        }
+        let status = target.join(".creator-project-setup");
+        fs::create_dir(&status).unwrap();
+        fs::write(
+            status.join("audit-environment.json"),
+            serde_json::to_vec_pretty(&environment).unwrap(),
+        )
+        .unwrap();
+        let seed = target.join("Assets/Editor/UnityPlainUrpSeed.cs");
+        fs::create_dir_all(seed.parent().unwrap()).unwrap();
+        let mut seed_file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&seed)
+            .unwrap();
+        std::io::Write::write_all(
+            &mut seed_file,
+            include_str!("../../tests/UnityPlainUrpSeed.cs")
+                .replace("@@EDITOR_VERSION@@", EDITOR_VERSION)
+                .replace("@@CREATOR_SDK_VERSION@@", CREATOR_SDK_VERSION)
+                .as_bytes(),
+        )
+        .unwrap();
+        seed_file.sync_all().unwrap();
+        drop(seed_file);
+        let marker = target.join("Assets/AuthoredSdkAddAudit.txt");
+        let mut marker_file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+            .unwrap();
+        std::io::Write::write_all(
+            &mut marker_file,
+            b"Preserve this manually authored SDK-add audit content.\n",
+        )
+        .unwrap();
+        drop(marker_file);
+        run_unity(
+            &editor.executable,
+            target,
+            "UnityPlainUrpSeed.Seed",
+            &status.join("plain-urp-seed.log"),
+            3,
+            &|event| println!("seed {}: {}", event.step, event.detail),
+        )
+        .unwrap();
+        let seeded: Value =
+            serde_json::from_slice(&fs::read(status.join("plain-urp-seed.json")).unwrap()).unwrap();
+        assert_eq!(seeded["success"], true, "{seeded}");
+        assert_eq!(seeded["creatorSdkInstalled"], false);
+        assert_eq!(seeded["sdkGlobalVersion"], CREATOR_SDK_VERSION);
+        assert!(seeded["nodeCount"].as_u64().unwrap() > 0);
+        assert_eq!(seeded["creatorNodeCount"], 0);
+        assert!(target.join(DATABASE).is_file());
+        assert!(
+            fs::read_to_string(target.join("ProjectSettings/VisualScriptingSettings.asset"))
+                .unwrap()
+                .contains("System.Text.StringBuilder"),
+            "The custom selection must be persisted before repair"
+        );
+
+        let before = backed_up_files(target);
+        let mut protected = BTreeMap::new();
+        for relative in [
+            "Assets/AuthoredSdkAddAudit.txt",
+            "Assets/Scenes/SampleScene.unity",
+            "ProjectSettings/GraphicsSettings.asset",
+            "ProjectSettings/QualitySettings.asset",
+            "ProjectSettings/ProjectSettings.asset",
+        ] {
+            snapshot(target, Path::new(relative), &mut protected);
+        }
+        let inspection = crate::repair::inspect(target).unwrap();
+        fs::write(status.join("audit-before.json"), serde_json::to_vec_pretty(&json!({"inspection": inspection, "backedUpFiles": before, "protectedFiles": protected, "seed": seeded})).unwrap()).unwrap();
+        assert!(
+            inspection.can_repair && !inspection.can_validate,
+            "{:?}",
+            inspection.findings
+        );
+        assert!(inspection
+            .proposed_changes
+            .iter()
+            .any(|change| change.starts_with("Initialize Creator Visual Scripting")));
+        let result = crate::repair::run(
+            crate::repair::ExistingRequest {
+                project_path: TARGET.into(),
+                fingerprint: inspection.fingerprint,
+                repair: true,
+                approved: true,
+            },
+            |event| println!("repair {}: {}", event.step, event.detail),
+        )
+        .unwrap();
+        fs::write(
+            status.join("audit-first-repair.json"),
+            serde_json::to_vec_pretty(&result).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            result.success,
+            "First repair must succeed: {}",
+            result.message
+        );
+        let validation = result.validation.as_ref().unwrap();
+        assert!(validation["creatorNodeCount"].as_u64().unwrap() > 0);
+        assert_eq!(validation["preservedVisualScriptingSelections"], true);
+        assert_backup(target, &result.backup_path, &before);
+        for (relative, expected) in &protected {
+            assert_eq!(
+                &hash(&target.join(relative)),
+                expected,
+                "Protected: {relative}"
+            );
+        }
+        let after = crate::repair::inspect(target).unwrap();
+        assert!(
+            after.can_validate && !after.can_repair,
+            "{:?}",
+            after.findings
+        );
+        let before_validation = backed_up_files(target);
+        fs::write(
+            status.join("audit-before-validation.json"),
+            serde_json::to_vec_pretty(
+                &json!({"inspection": after, "backedUpFiles": before_validation}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let validated = crate::repair::run(
+            crate::repair::ExistingRequest {
+                project_path: TARGET.into(),
+                fingerprint: after.fingerprint,
+                repair: false,
+                approved: true,
+            },
+            |event| println!("validate {}: {}", event.step, event.detail),
+        )
+        .unwrap();
+        fs::write(
+            status.join("audit-validation-only.json"),
+            serde_json::to_vec_pretty(&validated).unwrap(),
+        )
+        .unwrap();
+        assert!(validated.success, "{}", validated.message);
+        assert_eq!(
+            validated.validation.as_ref().unwrap()["preservedVisualScriptingSelections"],
+            true
+        );
+        assert_backup(target, &validated.backup_path, &before_validation);
+        for (relative, expected) in &protected {
+            assert_eq!(
+                &hash(&target.join(relative)),
+                expected,
+                "Protected after validation: {relative}"
+            );
+        }
+        for line in fs::read_to_string(status.join("sdk-pref-observations.jsonl"))
+            .unwrap()
+            .lines()
+        {
+            let observation: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(observation["sdkGlobalVersion"], CREATOR_SDK_VERSION);
+        }
+        assert!(!target
+            .join(".creator-project-setup/operation.lock")
+            .exists());
+        assert!(!target
+            .join("Assets/Editor/CreatorProjectSetupValidator.cs")
+            .exists());
+        fs::write(
+            status.join("audit-acceptance.json"),
+            serde_json::to_vec_pretty(&json!({
+                "success": true,
+                "projectPath": TARGET,
+                "templateSha256": TEMPLATE_HASH,
+                "firstRepairReport": result.report_path,
+                "validationOnlyReport": validated.report_path,
+                "exactBackupsVerified": true,
+                "protectedFilesVerified": protected,
+                "sdkPreferenceScenario": "already matches; harness never writes global EditorPrefs",
+                "unityHubRegistrationRequested": false,
+                "releaseAcceptance": false
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        println!("Real first-SDK-add acceptance passed; fixture and evidence retained at {TARGET}");
     }
 
     #[test]

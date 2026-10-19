@@ -91,7 +91,13 @@ export function mount(root, api) {
     controls();
   }
   function showHub(value) { hub = value; $('hub-result').textContent = value?.message || ''; controls(); }
-  function clearInspection() { inspection = null; completed = null; $('approval').checked = false; $('findings').replaceChildren(); $('changes').replaceChildren(); controls(); }
+  function clearInspection() { inspection = null; completed = null; $('approval').checked = false; $('findings').replaceChildren(); $('changes').replaceChildren(); $('existing-result').replaceChildren(); controls(); }
+  function startActivity(kind, label, detail) {
+    operation = kind; stage = 0;
+    $('stage').textContent = label; $('detail').textContent = detail;
+    $('progress').removeAttribute('value'); $('transfer').textContent = '';
+    $('activity').hidden = false;
+  }
   function setMode(mode) {
     if (page.busy()) return;
     for (const name of ['new', 'existing']) {
@@ -117,13 +123,22 @@ export function mount(root, api) {
   for (const [name, url] of Object.entries(licenceUrls)) page.on($(`licence-${name}`), 'click', () => run(() => page.call('open_official_url', { url }), 'Opening licence terms'));
   page.on($('create'), 'click', () => run(async () => {
     if (created || !environment || !$('name').value.trim() || !$('parent').value.trim()) throw new Error('Enter a project name and folder.');
-    operation = 'create'; stage = 0; $('activity').hidden = false; $('created').replaceChildren();
+    startActivity('create', 'Creating project', 'Checking project path and Unity requirements.'); $('created').replaceChildren();
+    let creationError;
     try {
       const value = await page.call('create_project', { request: { projectName: $('name').value, parentDirectory: $('parent').value } });
       lines($('created'), [value.message, value.projectPath, value.logPath ? `Log: ${value.logPath}` : null]);
       if (!value.success) throw new Error(value.message || 'Project validation failed. Review the local log before retrying.');
       created = value.projectPath; showHub(value.hub);
-    } finally { operation = null; $('activity').hidden = true; }
+    } catch (error) { creationError = error; throw error; }
+    finally {
+      operation = null; $('activity').hidden = true;
+      try { renderEnvironment(await page.call('probe_environment')); }
+      catch (error) {
+        const issue = `Requirements could not be refreshed. Last checked requirements may be out of date. ${text(error)}`;
+        throw new Error([creationError?.message || text(creationError), issue].filter(Boolean).join('\n'));
+      }
+    }
   }, 'Creating project'));
   page.on($('open'), 'click', () => run(() => page.call('open_project', { path: created }), 'Opening project'));
   page.on($('another'), 'click', () => { if (page.busy()) return; created = null; hub = null; $('created').replaceChildren(); $('hub-result').textContent = ''; controls(); $('name').focus(); });
@@ -144,7 +159,7 @@ export function mount(root, api) {
     return run(async () => {
       if (!inspection || !$('approval').checked || !(repair ? inspection.canRepair : inspection.canValidate)) throw new Error('Inspect and approve the reviewed changes first.');
       const reviewed = inspection;
-      operation = 'existing'; $('activity').hidden = false;
+      startActivity('existing', repair ? 'Repairing project' : 'Validating project', 'Preparing the settings backup.');
       try {
         const result = await page.call('run_existing_project', { request: { projectPath: reviewed.projectPath, fingerprint: reviewed.fingerprint, repair, approved: true } });
         lines($('existing-result'), [result.message, result.backupPath ? `Backup: ${result.backupPath}` : null, result.reportPath ? `Report: ${result.reportPath}` : null]);
