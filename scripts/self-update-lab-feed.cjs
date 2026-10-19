@@ -190,7 +190,18 @@ function singleHost(request) {
     index % 2 === 0 && value.toLowerCase() === 'host').length === 1;
 }
 
-function newState() { return { requests: 0, bytes: 0, rejected: 0, served: new Map() }; }
+function newState() { return { requests: 0, bytes: 0, rejected: 0, served: new Map(), rejections: new Map(), rejectionOverflow: 0 }; }
+
+function recordRejection(state, kind, errorCode) {
+  assert.match(kind, /^[a-z0-9-]{1,48}$/);
+  // Public diagnostic identifiers only; never record URLs, headers or TLS control.
+  const code = typeof errorCode === 'string' && /^[A-Z0-9_]{1,64}$/.test(errorCode) ? errorCode : null;
+  const key = JSON.stringify([kind, code]);
+  state.rejected++;
+  if (state.rejections.has(key)) state.rejections.get(key).count++;
+  else if (state.rejections.size < 16) state.rejections.set(key, { kind, code, count: 1 });
+  else state.rejectionOverflow++;
+}
 
 function resolveRequest(contract, tunnelHost, request, state) {
   const routes = contracts.get(contract);
@@ -216,7 +227,7 @@ function requestHandler(contract, state) {
   return (req, res) => {
     const result = resolveRequest(contract, req.socket.labHost, req, state);
     if (result.status !== 200) {
-      state.rejected++; res.writeHead(result.status, { Connection: 'close', 'Content-Length': '0' }); res.end(); return;
+      recordRejection(state, `http-${result.status}`); res.writeHead(result.status, { Connection: 'close', 'Content-Length': '0' }); res.end(); return;
     }
     const route = result.route;
     res.writeHead(200, { 'Content-Type': route.type, 'Content-Length': String(route.bytes.length),
@@ -235,7 +246,8 @@ function labReport(contract, state) {
     actualScope: contract.actualScope || { kind: 'public-stable', baseline: 'unmodified-public-0.1.12',
       labDiscovery: true, publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false, releaseReady: false },
     baseline: contract.baseline, targetVersion: contract.targetVersion,
-    requests: [...state.served.values()], rejectedRequestCount: state.rejected };
+    requests: [...state.served.values()], rejectedRequestCount: state.rejected,
+    rejectionSummary: [...state.rejections.values()], rejectionOverflow: state.rejectionOverflow };
 }
 
 async function startLabProxy(contract, tlsOptions, env = process.env, transport = { http, tls }) {
@@ -248,18 +260,18 @@ async function startLabProxy(contract, tlsOptions, env = process.env, transport 
   const options = { maxHeaderSize: LIMITS.headers, headersTimeout: 10000, requestTimeout: 30000 };
   const inner = transport.http.createServer(options, requestHandler(contract, state));
   const outer = transport.http.createServer(options, (_req, res) => {
-    state.rejected++; res.writeHead(405, { Connection: 'close', 'Content-Length': '0' }); res.end();
+    recordRejection(state, 'outer-http-405'); res.writeHead(405, { Connection: 'close', 'Content-Length': '0' }); res.end();
   });
-  function reject(socket, status = 400) {
-    state.rejected++; socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  function reject(socket, status = 400, kind = 'connection', code) {
+    recordRejection(state, kind, code); socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   }
   for (const server of [inner, outer]) {
-    server.on('clientError', (_error, socket) => reject(socket));
-    server.on('upgrade', (_req, socket) => reject(socket));
-    server.on('checkContinue', (_req, res) => { state.rejected++; res.writeHead(400, { Connection: 'close' }); res.end(); });
-    server.on('checkExpectation', (_req, res) => { state.rejected++; res.writeHead(400, { Connection: 'close' }); res.end(); });
+    server.on('clientError', (error, socket) => reject(socket, 400, server === inner ? 'inner-client-error' : 'outer-client-error', error.code));
+    server.on('upgrade', (_req, socket) => reject(socket, 400, 'http-upgrade'));
+    server.on('checkContinue', (_req, res) => { recordRejection(state, 'expect-continue'); res.writeHead(400, { Connection: 'close' }); res.end(); });
+    server.on('checkExpectation', (_req, res) => { recordRejection(state, 'expectation'); res.writeHead(400, { Connection: 'close' }); res.end(); });
   }
-  inner.on('connect', (_req, socket) => reject(socket));
+  inner.on('connect', (_req, socket) => reject(socket, 400, 'inner-connect'));
   outer.on('connection', socket => {
     if (socket.remoteAddress !== '127.0.0.1' || sockets.size >= LIMITS.connections) { socket.destroy(); return; }
     sockets.add(socket); socket.once('close', () => sockets.delete(socket));
@@ -269,7 +281,7 @@ async function startLabProxy(contract, tlsOptions, env = process.env, transport 
     const host = connectHost(req.url);
     if (!host || head.length || !singleHost(req) || ![req.url, host].includes(req.headers.host) ||
       ['authorization', 'proxy-authorization', 'cookie', 'content-length', 'transfer-encoding'].some(key => Object.hasOwn(req.headers, key))) {
-      reject(socket); return;
+      reject(socket, 400, 'connect-policy'); return;
     }
     socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
     // Terminate locally on this socket. No DNS lookup, upstream connection or relay.
@@ -278,13 +290,13 @@ async function startLabProxy(contract, tlsOptions, env = process.env, transport 
         if (name !== host) callback(Error('Rejected SNI')); else callback(null, context);
       } });
     sockets.add(secure); secure.once('close', () => sockets.delete(secure));
-    secure.on('error', () => { state.rejected++; secure.destroy(); });
+    secure.on('error', error => { recordRejection(state, 'tls-error', error.code); secure.destroy(); });
     secure.setTimeout(LIMITS.idleMs, () => secure.destroy());
     const deadline = setTimeout(() => secure.destroy(), 10000);
     secure.once('close', () => clearTimeout(deadline));
     secure.once('secure', () => {
       clearTimeout(deadline);
-      if (secure.servername !== host) { secure.destroy(); state.rejected++; return; }
+      if (secure.servername !== host) { secure.destroy(); recordRejection(state, 'tls-sni'); return; }
       secure.disableRenegotiation(); secure.labHost = host;
       inner.emit('connection', secure);
     });
@@ -333,7 +345,7 @@ async function main() {
 
 module.exports = { DESCRIPTOR, FEED_PATH, LIMITS, UNIFIED_OUTGOING_BASELINE, assertRunner, baselineFor, createContract,
   createUnifiedOutgoingContract, createIncoming016Contract, loadContract, readBounded, assertBaselineBytes, assertUnifiedOutgoingBaselineBytes,
-  connectHost, newState, requestHandler, labReport, startLabProxy };
+  connectHost, newState, recordRejection, requestHandler, labReport, startLabProxy };
 if (require.main === module) main().catch(() => {
   // Do not serialize TLS control input, parser errors, headers or candidate contents.
   console.error('Lab feed refused or failed; no native/public acceptance established.'); process.exitCode = 1;
