@@ -35,6 +35,7 @@ concurrency:
 
 jobs:
   candidate:
+    if: ${{ false }} # Superseded hosted-app packaging is held; use direct integration candidates.
     strategy:
       fail-fast: false
       matrix:

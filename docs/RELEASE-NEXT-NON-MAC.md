@@ -47,10 +47,19 @@ not approval of untested packages or a publication receipt.
 Run 39139434211 failed before approving the Hub update: its generic bitmap helper
 refused the legitimate main window plus update confirmation, both owned by the
 same Hub PID. Later broker cleanup masked this as Owned process is not live.
-This establishes a harness error, not a product crash. Current modal-specific
-capture/original-error retention changes still need pure regressions and native
-repetition. Authentication-window capture is a separate source-review risk.
+This establishes a harness error, not a product crash. Modal-specific capture,
+bounded authentication-window capture and original-error retention now pass
+38 pure regression tests. Native repetition is still required; the existing
+capture-only workflow does not approve system authentication or install updates.
 
 Flatpak run 39138975316 stopped at AT-SPI/launcher PID provenance before disclosure
-input. That is not accepted activation, and it does not resolve the separate
-missing SteamOS host dependency/packaging implementation.
+input. Corrected bus-peer/namespace observations pass 35 pure regressions, but
+are not accepted activation and do not resolve the separate missing SteamOS
+host dependency/packaging implementation.
+
+The first source CI run after Plugins removal exposed two prerequisite gaps:
+the Unix writer fixture did not include the real integration-context module,
+and the frontend job had not built the refusal-only helper needed by its Node
+tests. Both have explicit source/workflow regressions. Superseded hosted-app
+Unix packaging is disabled while direct integration is required; Linux source
+checks remain active and Mac jobs remain disabled.

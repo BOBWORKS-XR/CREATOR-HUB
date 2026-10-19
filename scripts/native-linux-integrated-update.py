@@ -436,6 +436,136 @@ def gtk_contract(rows, frame, atspi):
                 and x + width <= frame[0] + frame[2] and y + height <= frame[1] + frame[3], 'GTK control outside native frame')
 
 
+def confirmation_pair(owner, main, dialog, helper, native, x11, polkit):
+    require(native.native_process(owner['pid'], helper) == owner and owner['executable'] == HUB
+            and owner['kernelImageSha256'] == ELF14[1] and owner['uids'] == [UID] * 4, 'Confirmation kernel Root differs')
+    require(main['window'] != dialog['window'] and main['pid'] == dialog['pid'] == owner['pid']
+            and main['client'] == dialog['client'] > 0 and main['title'] == pages().TITLE and dialog['title'] == TITLE,
+            'Exact same-Root/client confirmation pair required')
+    require(polkit.windows(owner['pid'], helper, x11) == [main, dialog]
+            and set(native.client_ids(x11)) == {main['window'], dialog['window']}, 'Extra/foreign/reordered confirmation window')
+    frames, bindings = [], []
+    for window, role in ((main, 'FRAME'), (dialog, 'ALERT')):
+        frame = x11.frame_rectangle(window['window'])
+        request = helper.Request('snapshot', owner['pid'], owner['startTime'], HUB, ELF14[1], window['window'], window['title'], role,
+                                 **({'gtk_message_info_frame': frame} if role == 'ALERT' else {}))
+        binding = helper.bound_window(request, x11)
+        require(binding == {k: v for k, v in window.items() if k != 'window'}, 'Confirmation XRes identity differs')
+        frames.append(list(frame)); bindings.append(binding)
+    return {'windows': [main, dialog], 'frames': frames, 'xres': bindings}
+
+
+def authentication_pair(owner, main, agent, dialog, helper, native, x11, polkit):
+    require(native.native_process(owner['pid'], helper) == owner and owner['executable'] == HUB
+            and owner['kernelImageSha256'] == ELF14[1] and owner['uids'] == [UID] * 4, 'Authentication Root differs')
+    require(agent['pid'] != owner['pid'] and native.native_process(agent['pid'], helper) == agent
+            and agent['executable'] == polkit.AGENT and agent['kernelImageSha256'] == polkit.FILES[polkit.AGENT][3]
+            and agent['uids'] == [UID] * 4, 'Authentication agent differs')
+    require(main['window'] != dialog['window'] and main['pid'] == owner['pid'] and dialog['pid'] == agent['pid']
+            and main['client'] > 0 and dialog['client'] > 0 and main['client'] != dialog['client']
+            and main['title'] == pages().TITLE and dialog['title'] == 'Authenticate', 'Exact Root/agent dialog pair required')
+    require(polkit.windows(owner['pid'], helper, x11) == [main] and polkit.windows(agent['pid'], helper, x11) == [dialog]
+            and set(native.client_ids(x11)) == {main['window'], dialog['window']}, 'Extra/foreign authentication window')
+    frames, bindings = [], []
+    for process, window, role in ((owner, main, 'FRAME'), (agent, dialog, 'DIALOG')):
+        frame = x11.frame_rectangle(window['window'])
+        request = helper.Request('snapshot', process['pid'], process['startTime'], process['executable'], process['kernelImageSha256'],
+                                 window['window'], window['title'], role)
+        binding = helper.bound_window(request, x11)
+        require(binding == {k: v for k, v in window.items() if k != 'window'}, 'Authentication XRes identity differs')
+        frames.append(list(frame)); bindings.append(binding)
+    return {'windows': [main, dialog], 'frames': frames, 'xres': bindings}
+
+
+def dialog_unobscured(request, frame, helper, x11):
+    """Only a previously bound dialog frame; the generic singleton helper stays unchanged."""
+    import ctypes as C
+    x = x11.x; root = x.XDefaultRootWindow(x11.display)
+    x.XQueryTree.argtypes = [C.c_void_p, C.c_ulong, C.POINTER(C.c_ulong), C.POINTER(C.c_ulong),
+                            C.POINTER(C.POINTER(C.c_ulong)), C.POINTER(C.c_uint)]
+    x.XQueryTree.restype = C.c_int
+    screen = helper.WindowAttributes()
+    require(x.XGetWindowAttributes(x11.display, root, C.byref(screen)), 'Dialog screen geometry unavailable')
+    x11.sync()
+    require(len(frame) == 4 and all(type(v) is int for v in frame) and frame[0] >= 0 and frame[1] >= 0
+            and frame[2] > 0 and frame[3] > 0 and frame[0] + frame[2] <= screen.width
+            and frame[1] + frame[3] <= screen.height, 'Dialog frame is not wholly on-screen')
+    def tree(xid):
+        r, parent, count, children = C.c_ulong(), C.c_ulong(), C.c_uint(), C.POINTER(C.c_ulong)()
+        try:
+            require(x.XQueryTree(x11.display, xid, C.byref(r), C.byref(parent), C.byref(children), C.byref(count)), 'Confirmation X tree unavailable')
+            x11.sync(); require(r.value == root and count.value <= 256, 'Confirmation X tree bound')
+            return parent.value, list(children[:count.value]) if children else []
+        finally:
+            if children: x.XFree(children)
+    ancestor = request.window
+    for _ in range(8):
+        parent, _ = tree(ancestor)
+        if parent == root: break
+        require(parent > 0, 'Confirmation WM ancestor absent')
+        ancestor = parent
+    else:
+        raise RuntimeError('Confirmation WM ancestry bound')
+    _, stack = tree(root)
+    require(stack.count(ancestor) == 1, 'Confirmation WM frame absent/ambiguous')
+    for xid in stack[stack.index(ancestor) + 1:]:
+        attrs = helper.WindowAttributes()
+        require(x.XGetWindowAttributes(x11.display, xid, C.byref(attrs)), 'Confirmation occluder geometry unavailable')
+        x11.sync()
+        if attrs.map_state == 2 and attrs.class_ == 1:
+            require(not (frame[0] < attrs.x + attrs.width + attrs.border and attrs.x - attrs.border < frame[0] + frame[2]
+                         and frame[1] < attrs.y + attrs.height + attrs.border and attrs.y - attrs.border < frame[1] + frame[3]),
+                    'Mapped drawable obscures exact confirmation frame')
+
+
+def dialog_frame_pixels(frame, native):
+    import gi
+    gi.require_version('Gdk', '3.0')
+    from gi.repository import Gdk
+    require(len(frame) == 4 and all(type(v) is int for v in frame) and frame[0] >= 0 and frame[1] >= 0
+            and 0 < frame[2] <= 1920 and 0 < frame[3] <= 1080 and frame[2] * frame[3] <= native.MAX_IMAGE,
+            'Confirmation pixel frame bound')
+    window = Gdk.get_default_root_window()
+    require(window is not None and window.get_scale_factor() == 1, 'Exact unscaled X root drawable required')
+    pixbuf = Gdk.pixbuf_get_from_window(window, *frame)
+    require(pixbuf is not None and pixbuf.get_width() == frame[2] and pixbuf.get_height() == frame[3]
+            and pixbuf.get_bits_per_sample() == 8, 'Confirmation frame copy failed')
+    metrics = native.pixel_metrics(pixbuf.get_pixels(), pixbuf.get_width(), pixbuf.get_height(), pixbuf.get_rowstride(), pixbuf.get_n_channels())
+    ok, data = pixbuf.save_to_bufferv('png', [], [])
+    require(ok and 0 < len(data) <= 16 * 1024 * 1024 and bytes(data[:8]) == b'\x89PNG\r\n\x1a\n', 'Confirmation PNG encoding bound')
+    return bytes(data), metrics
+
+
+def confirmation_bitmap(root, request, owner, main, first, helper, native, x11, polkit):
+    expected = first['pair']; frame = first['frame']; dialog = first['native']
+    require((request.pid, request.start, request.executable, request.sha256, request.window, request.title, request.role)
+            == (owner['pid'], owner['startTime'], HUB, ELF14[1], dialog['window'], TITLE, 'ALERT'), 'Confirmation capture request differs')
+    require(confirmation_pair(owner, main, dialog, helper, native, x11, polkit) == expected, 'Confirmation pair changed before pixels')
+    dialog_unobscured(request, frame, helper, x11)
+    data, metrics = dialog_frame_pixels(frame, native)
+    require(confirmation_pair(owner, main, dialog, helper, native, x11, polkit) == expected, 'Confirmation pair changed during pixels')
+    dialog_unobscured(request, frame, helper, x11)
+    native.write_new(root / 'root-window.png', data)
+    return {'diagnosticOnly': True, 'windowOnly': True, 'knownFrameOnly': True, 'xid': request.window, 'rectangle': frame,
+            'pair': expected, **metrics, 'image': native.file_record(root / 'root-window.png', 16 * 1024 * 1024)}
+
+
+def authentication_bitmap(root, request, owner, main, agent, first, helper, native, x11, polkit):
+    expected = first['pair']; frame = first['frame']; dialog = first['native']
+    require((request.pid, request.start, request.executable, request.sha256, request.window, request.title, request.role)
+            == (agent['pid'], agent['startTime'], polkit.AGENT, agent['kernelImageSha256'], dialog['window'], 'Authenticate', 'DIALOG'),
+            'Authentication capture request differs')
+    require(authentication_pair(owner, main, agent, dialog, helper, native, x11, polkit) == expected, 'Authentication pair changed before pixels')
+    dialog_unobscured(request, frame, helper, x11)
+    data, metrics = dialog_frame_pixels(frame, native)
+    require(authentication_pair(owner, main, agent, dialog, helper, native, x11, polkit) == expected, 'Authentication pair changed during pixels')
+    dialog_unobscured(request, frame, helper, x11)
+    native.write_new(root / 'root-window.png', data)
+    return {'diagnosticOnly': True, 'readOnly': True, 'authorization': False, 'actionCount': 0, 'windowOnly': True,
+            'knownFrameOnly': True, 'xid': request.window, 'rectangle': frame, 'pair': expected, **metrics,
+            'image': native.file_record(root / 'root-window.png', 16 * 1024 * 1024)}
+
+
 def capture_root_dialog(root, owner, helper, native, x11, atspi, polkit, main_window, *, approve):
     require(type(approve) is bool, 'Explicit finite confirmation mode required')
     refs, bus = native.native_ax_references()
@@ -450,7 +580,9 @@ def capture_root_dialog(root, owner, helper, native, x11, atspi, polkit, main_wi
             last['nativeWindows'] = windows
             require(len(dialogs) == 1 and len(windows) == 2 and main_window in windows
                     and main_window['window'] != dialogs[0]['window'], 'One original Root frame and one updater dialog required')
-            info = dialogs[0]; frame = x11.frame_rectangle(info['window'])
+            info = dialogs[0]
+            pair = confirmation_pair(owner, main_window, info, helper, native, x11, polkit)
+            frame = tuple(pair['frames'][1])
             last.update(native=info, frame=list(frame))
             request = helper.Request('snapshot', owner['pid'], owner['startTime'], HUB, ELF14[1], info['window'], TITLE, 'ALERT', gtk_message_info_frame=frame)
             require(helper.bound_window(request, x11) == {k: v for k, v in info.items() if k != 'window'}, 'GTK XRes differs')
@@ -484,11 +616,12 @@ def capture_root_dialog(root, owner, helper, native, x11, atspi, polkit, main_wi
             gtk_contract(rows, frame, atspi); refs.recheck()
             require(native.native_process(owner['pid'], helper) == owner and polkit.windows(owner['pid'], helper, x11) == windows
                     and x11.frame_rectangle(info['window']) == frame, 'GTK capture changed')
-            return {'native': info, 'frame': list(frame), 'rows': rows, 'root': owner, 'aliases': dict(refs.aliases)}, targets
+            require(confirmation_pair(owner, main_window, info, helper, native, x11, polkit) == pair, 'Confirmation pair changed during AX read')
+            return {'native': info, 'frame': list(frame), 'pair': pair, 'rows': rows, 'root': owner, 'aliases': dict(refs.aliases)}, targets
         first, _ = snapshot()
         proof = evidence(root / 'root-confirmation.json', {'readOnly': True, 'authorization': False, **first})
         surface_dir = root / 'physical-root-confirmation'; surface_dir.mkdir(mode=0o700)
-        surface = native.bitmap(request, surface_dir, helper, x11)
+        surface = confirmation_bitmap(surface_dir, request, owner, main_window, first, helper, native, x11, polkit)
         second, targets = snapshot()
         require(first == second, 'Two complete native GTK observations differ')
         result = {'capture': proof, 'surface': surface, 'actionCount': 0, 'questionSourceChecked': True}
@@ -497,6 +630,7 @@ def capture_root_dialog(root, owner, helper, native, x11, atspi, polkit, main_wi
             action = target.get_action_iface()
             require(action is not None and action.get_n_actions() == 1 and action.get_action_name(0) == 'click', 'One GTK click action required')
             require(native.native_process(owner['pid'], helper) == owner and helper.bound_window(request, x11) == {k: v for k, v in first['native'].items() if k != 'window'}, 'GTK owner changed before press')
+            require(confirmation_pair(owner, main_window, first['native'], helper, native, x11, polkit) == first['pair'], 'Confirmation pair changed before press')
             refs.recheck()
             result['actionAttemptCount'] = 1
             returned = None
@@ -668,13 +802,17 @@ def session(env):
             kernel = p.parse(protected(proof).read_bytes())
             require(kernel['root'] == owned and kernel['stdinSha256'] == PINS['installer'] and kernel['seals'] == 15, 'Original pending DPKG proof differs')
             require(windows == polkit.windows(agent.pid, helper, x11) and polkit.agent_bus_identity(system, agent_id, GLib) == endpoint, 'Authentication graph/window changed')
+            pair = authentication_pair(owned, window, agent_id, windows[0], helper, native, x11, polkit)
+            auth_capture = {'native': windows[0], 'frame': pair['frames'][1], 'pair': pair}
+            report['authenticationCapture'] = evidence(root / 'authentication-original.json', {'readOnly': True, 'authorization': False,
+                'actionCount': 0, 'agent': agent_id, 'systemBus': endpoint, 'native': windows,
+                'frame': auth_capture['frame'], 'pair': pair, 'ax': graph, 'kernelDpkgRequest': kernel}, 131072)
+            report['authenticationAxCaptured'] = True
             surface_dir = root / 'physical-authentication'; surface_dir.mkdir(mode=0o700)
             auth_request = helper.Request('snapshot', agent_id['pid'], agent_id['startTime'], polkit.AGENT, agent_id['kernelImageSha256'],
                                           windows[0]['window'], windows[0]['title'], 'DIALOG')
-            surface = native.bitmap(auth_request, surface_dir, helper, x11)
-            report['authenticationCapture'] = evidence(root / 'authentication-original.json', {'readOnly': True, 'authorization': False,
-                'actionCount': 0, 'agent': agent_id, 'systemBus': endpoint, 'native': windows,
-                'frame': list(x11.frame_rectangle(windows[0]['window'])), 'surface': surface, 'ax': graph, 'kernelDpkgRequest': kernel}, 131072)
+            surface = authentication_bitmap(surface_dir, auth_request, owned, window, agent_id, auth_capture, helper, native, x11, polkit)
+            report['authenticationSurface'] = surface
             report['authenticationDialogCaptured'] = True
             report['axToXidAssociationVerified'] = False
             break
@@ -717,6 +855,28 @@ def session(env):
             raise RuntimeError('Guarded transport proof/shutdown failed; capture report retained')
 
 
+def original_session_failure(root):
+    file = root / 'report.json'
+    try:
+        info = file.lstat()
+    except FileNotFoundError:
+        return None
+    require(file.resolve(strict=True) == file and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            and info.st_uid == UID and 0 <= info.st_size <= 262144, 'Owned bounded original session report required')
+    raw = file.read_bytes()
+    require(len(raw) <= 262144, 'Original session report size bound')
+    try:
+        value = pages().parse(raw)
+    except ValueError:
+        return None  # Exclusive evidence write may still be incomplete.
+    if 'error' not in value:
+        return None
+    error, phase = value['error'], value.get('phase')
+    require(type(error) is dict and set(error) == {'type', 'message'} and type(phase) is str and len(phase) <= 128
+            and all(type(error[k]) is str and len(error[k]) <= 1000 for k in ('type', 'message')), 'Original session error shape differs')
+    return {'phase': phase, 'error': error}
+
+
 def broker(env):
     require(os.getuid() == os.geteuid() == 0, 'Fixed root read-only observer required')
     binding(env)
@@ -727,21 +887,55 @@ def broker(env):
     child = subprocess.Popen(session_command(env), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              env={'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C'})
     capture = native.Capture(child, root, 'session')
-    proof = None
+    proof = None; observer_error = None
+    report = {**FALSE_GATES, 'pendingDpkgObserved': False, 'passwordProvisioned': False,
+              'credentialActionCount': 0, 'disposableTeardownRequired': True}
     try:
         deadline = time.monotonic() + 260
         while child.poll() is None and time.monotonic() < deadline:
             capture.pump(0.05)
+            if child.poll() is not None or original_session_failure(root) is not None:
+                break  # Never probe a Root after the session has failed or exited.
             if proof is None:
-                proof = pending_request(root, helper, native, polkit)
+                try:
+                    proof = pending_request(root, helper, native, polkit)
+                except Exception as error:
+                    observer_error = error
+                    break  # Retain the observation failure; do not retry a dead Root.
                 if proof is not None:
                     evidence(BASE / 'pending-dpkg.json', proof); os.chmod(BASE / 'pending-dpkg.json', 0o644)
+        while child.poll() is None and time.monotonic() < deadline:
+            capture.pump(0.05)
+        original = original_session_failure(root)
+        if observer_error is not None:
+            report['observerError'] = {'type': type(observer_error).__name__, 'message': str(observer_error)[:1000]}
+        if original is not None:
+            report['originalSessionFailure'] = original
+            raise RuntimeError('Original capture session failed at ' + original['phase'] + ': '
+                               + original['error']['type'] + ': ' + original['error']['message']) from observer_error
+        if observer_error is not None:
+            raise observer_error
         require(child.poll() == 0 and proof is not None, 'One original capture session did not complete; no retry')
         locked_account()
+    except Exception as error:
+        report['error'] = {'type': type(error).__name__, 'message': str(error)[:2000]}
+        raise
     finally:
-        capture.pump(); capture.close()
-        evidence(BASE / 'broker-report.json', {**FALSE_GATES, 'sessionExit': child.poll(), 'pendingDpkgObserved': proof is not None,
-                 'passwordProvisioned': False, 'credentialActionCount': 0, 'disposableTeardownRequired': True})
+        original = sys.exc_info()[1]
+        report.update(sessionExit=child.poll(), pendingDpkgObserved=proof is not None)
+        for finish in (capture.pump, capture.close):
+            try:
+                finish()
+            except Exception as error:
+                report.setdefault('cleanupError', {'type': type(error).__name__, 'message': str(error)[:500]})
+        try:
+            evidence(BASE / 'broker-report.json', report)
+        except Exception:
+            if original is None:
+                raise
+            print('Broker diagnostic save failed; original session failure retained', file=sys.stderr, flush=True)
+        if original is None and report.get('cleanupError'):
+            raise RuntimeError('Broker capture cleanup failed; original result retained')
 
 
 def main():

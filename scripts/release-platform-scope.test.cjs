@@ -33,6 +33,10 @@ test('Windows-only publication preserves active Linux development CI', () => {
   disabled('ci.yml', 'hub-macos');
 });
 
+test('superseded hosted-app Unix packaging cannot start while direct integration is required', () => {
+  assert.match(workflow('unified-unix-candidate.yml'), /  candidate:\r?\n    if: \$\{\{ false \}\} # Superseded hosted-app packaging is held/);
+});
+
 test('native Linux payload and helper workflows cannot select a Mac runner', () => {
   for (const name of ['unix-managed-payload.yml', 'unified-unix-candidate.yml', 'native-gui-helpers.yml']) {
     const source = workflow(name);

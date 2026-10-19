@@ -53,6 +53,14 @@ test('default stays closed and experimental installer has only the fixed handoff
   assert.match(code, /private\.join\(new_stage_name\(\)\?\)/);
 });
 
+test('frontend CI builds the default helper before running its CLI assertions', () => {
+  const ci = fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8').split('  frontend:')[1].split('  hub-windows:')[0];
+  const build = ci.indexOf('cargo build --locked --manifest-path native/linux-deb-retirement/Cargo.toml --no-default-features');
+  assert.ok(build >= 0);
+  assert.ok(build < ci.indexOf('npm run test:scripts'));
+  assert.match(ci, /workspaces: native\/linux-deb-retirement/);
+});
+
 test('built CLI refuses retirement and every arbitrary path/unsupported action', () => {
   const binary = path.join(crate, 'target/debug', `creator-hub-linux-deb-retirement${process.platform === 'win32' ? '.exe' : ''}`);
   assert.ok(fs.existsSync(binary), 'Run cargo build --locked for this crate first');

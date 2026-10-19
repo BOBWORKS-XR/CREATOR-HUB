@@ -396,11 +396,209 @@ class ActivationTests(unittest.TestCase):
         worker = source[source.index('def gtk_worker'):source.index('def exercise')]
         self.assertLess(worker.index('check()\n'), worker.index('native.native_ax_references()'))
         self.assertIn('stable_pair(native, helper, context, root, phase)', worker)
-        self.assertIn('reported_pid in (ids[0], ids[-1])', worker)
+        self.assertIn('reported_pid == peer["pid"]', worker)
+        self.assertIn('if app.get_process_id() in peers:', worker)
         self.assertLess(worker.index('report["lastAxReference"]'), worker.index('require(peer["pid"] in peers'))
         self.assertIn('report["kernelNamespacePids"] = ids', worker)
         self.assertIn('peer["pid"] in peers and peer["uid"] == os.getuid()', worker)
         self.assertEqual(worker.count('action.do_action(0)'), 1)
+
+    def gtk_peer_case(self, peer=None, reported_pid=8859, replace_owner_at=None, replaced_image=False,
+                      capture_only=False, changed_window=False):
+        controller, caller = 8752, 1001
+        records = {pid: {'pid': pid, 'startTime': str(pid), 'parentPid': parent, 'uids': [caller] * 4,
+            'executable': executable, 'image': {'st_ino': str(pid), 'st_size': '100'},
+            'kernelImageSha256': 'a' * 64} for pid, parent, executable in (
+                (8844, controller, M.BWRAP), (8859, 8844, M.PROXY),
+                (8862, 8844, '/app/bin/creator-hub-flatpak-activate'))}
+        context = {'controller': controller, 'cli': records[8844], 'launcher': records[8862],
+            'proxies': [records[8859]], 'window': 7,
+            'xres': {'pid': 8862, 'mapped': True, 'title': 'Creator Hub'}, 'action': 'Cancel'}
+        peer = peer or {'owner': ':1.42', 'pid': reported_pid, 'uid': caller}
+        resolutions, clicks, saves = [], [], []
+        text = M.disclosure()
+        state = SimpleNamespace(contains=lambda _: True)
+        action = SimpleNamespace(get_n_actions=lambda: 1, get_action_name=lambda _: 'click',
+            do_action=lambda _: clicks.append('Cancel') or True)
+        rectangle = SimpleNamespace(x=10, y=20, width=400, height=240)
+
+        def node(index, role, name):
+            return SimpleNamespace(app=SimpleNamespace(bus_name='org.example.Owned'),
+                path=f'/org/a11y/accessible/{index}', get_process_id=lambda: reported_pid,
+                get_role=lambda: role, get_role_name=lambda: role, get_name=lambda: name,
+                clear_cache=lambda: None, get_state_set=lambda: state, get_action_iface=lambda: action,
+                get_component_iface=lambda: SimpleNamespace(get_extents=lambda _: rectangle))
+
+        application = node('root', 'application', 'creator-hub-flatpak-activate')
+        foreign = node('foreign', 'application', 'creator-hub')
+        foreign.get_process_id = lambda: 8768
+        foreign.app.bus_name = 'org.example.Foreign'
+        nodes = [node(index, item['role'], item['name']) for index, item in enumerate(tree())]
+        desktop = object()
+        def children(parent, bound):
+            result = [foreign, application] if parent is desktop else [nodes[0]] if parent is application else nodes[1:] if parent is nodes[0] else []
+            self.assertLessEqual(len(result), bound)
+            return result
+
+        def resolve(name):
+            self.assertEqual(name, 'org.example.Owned')
+            resolutions.append(name)
+            result = copy.deepcopy(peer)
+            if replace_owner_at is not None and len(resolutions) >= replace_owner_at:
+                result['owner'] = ':1.43'
+            return result
+
+        def native_process(pid, helper, full=False):
+            result = copy.deepcopy(records[pid])
+            if replaced_image and pid == 8859:
+                result['image']['st_ino'] = 'replaced'
+            if not full:
+                result.pop('kernelImageSha256')
+            return result
+
+        x11 = SimpleNamespace(inspect=lambda _: {**context['xres'], **({'pid': 9999} if changed_window else {})},
+            frame_rectangle=lambda _: (10, 20, 400, 240), dispose=lambda: None)
+        native = SimpleNamespace(native_process=native_process,
+            native_ax_references=lambda: (SimpleNamespace(resolve=resolve), SimpleNamespace(close_sync=lambda _: None)))
+        helper = SimpleNamespace(X11=lambda: x11, children=children)
+        atspi = SimpleNamespace(init=lambda: None, set_timeout=lambda *args: None, get_desktop=lambda _: desktop,
+            Role=SimpleNamespace(ALERT='alert'), StateType=SimpleNamespace(SHOWING=1, ENABLED=2),
+            CoordType=SimpleNamespace(SCREEN=0))
+        modules = {'gi': SimpleNamespace(require_version=lambda *args: None), 'gi.repository': SimpleNamespace(Atspi=atspi)}
+        def read(path):
+            if str(path).replace('\\', '/') == '/proc/8862/status':
+                return b'Name:\tcreator-hub\nNSpid:\t8862\t2\n'
+            self.assertEqual(path.name, 'cancel-context.json')
+            return json.dumps(context).encode()
+
+        with patch.dict(sys.modules, modules), patch.object(M.P, 'helpers', return_value=(helper, native)), \
+                patch.object(M.P, 'subtree', return_value={pid: {k: v for k, v in record.items() if k != 'kernelImageSha256'}
+                    for pid, record in records.items()}), patch.object(M.P, 'save', side_effect=lambda path, value: saves.append(copy.deepcopy(value))), \
+                patch.object(Path, 'read_bytes', autospec=True, side_effect=read), \
+                patch.object(M.os, 'getppid', return_value=controller), patch.object(M.os, 'getuid', return_value=caller, create=True), \
+                patch.object(M, 'AX_IDENTITY_CAPTURE_ONLY', capture_only), patch.object(M, 'capture_ax_peers') as capture:
+            capture.return_value = {'diagnosticOnly': True, 'inputPermitted': False}
+            try:
+                M.gtk_worker(Path('/owned/fixture'), 'cancel')
+            except RuntimeError:
+                pass
+        self.assertEqual(len(saves), 1)
+        if not changed_window:
+            self.assertEqual(saves[0]['kernelNamespacePids'], [8862, 2])
+        self.assertTrue(all(saves[0][key] is False for key in M.GATES))
+        return saves[0], clicks, resolutions
+
+    def test_owned_ax_proxy_uses_bus_pid_not_launcher_namespace_pid(self):
+        report, clicks, resolutions = self.gtk_peer_case()
+        self.assertNotIn('error', report)
+        self.assertEqual(clicks, ['Cancel'])
+        self.assertTrue(report['actionAttempted'] and report['actionReturned'])
+        self.assertGreater(len(resolutions), 2)
+        self.assertEqual(report['lastAxReference']['peer'], {'owner': ':1.42', 'pid': 8859, 'uid': 1001})
+
+    def test_owned_launcher_ax_peer_still_requires_exact_host_bus_pid(self):
+        report, clicks, _ = self.gtk_peer_case(reported_pid=8862)
+        self.assertNotIn('error', report)
+        self.assertEqual(clicks, ['Cancel'])
+
+    def test_foreign_ax_peer_uid_or_unbound_namespace_pid_cannot_authorize_input(self):
+        owner_error = 'GTK AX owner is not the kernel-bound launcher/proxy'
+        selection_error = 'Exact native GTK disclosure missing/ambiguous'
+        variants = [(dict(peer={'owner': ':1.42', 'pid': 9999, 'uid': 1001}), owner_error),
+                    (dict(peer={'owner': ':1.42', 'pid': 8859, 'uid': 1002}), owner_error),
+                    (dict(peer={'owner': ':1.42', 'pid': 8862, 'uid': 1001}), owner_error),
+                    (dict(reported_pid=2), selection_error), (dict(reported_pid=9999), selection_error)]
+        for changed, error in variants:
+            with self.subTest(changed=changed):
+                report, clicks, _ = self.gtk_peer_case(**changed)
+                self.assertEqual(report['error'], error)
+                self.assertEqual(clicks, [])
+                self.assertFalse(report['actionAttempted'] or report['actionReturned'])
+
+    def test_replaced_ax_owner_image_or_native_window_refuses_before_input(self):
+        variants = [(dict(replace_owner_at=2), 'GTK AX owner changed'),
+                    (dict(replace_owner_at=9), 'GTK alias changed before input'),
+                    (dict(replaced_image=True), 'Owned process identity changed'),
+                    (dict(changed_window=True), 'GTK native window changed')]
+        for changed, error in variants:
+            with self.subTest(changed=changed):
+                report, clicks, _ = self.gtk_peer_case(**changed)
+                self.assertEqual(report['error'], error)
+                self.assertEqual(clicks, [])
+                self.assertFalse(report['actionAttempted'] or report['actionReturned'])
+
+    def test_read_only_capture_remains_default_and_never_attempts_input(self):
+        self.assertTrue(M.AX_IDENTITY_CAPTURE_ONLY)
+        report, clicks, resolutions = self.gtk_peer_case(capture_only=True)
+        self.assertEqual(clicks, [])
+        self.assertEqual(resolutions, [])
+        self.assertIn('no GTK input permitted', report['error'])
+        self.assertFalse(report['actionAttempted'] or report['actionReturned'])
+
+    def ax_capture_case(self, foreign_bus_uid=False, foreign_kernel_uid=False, replace_owner=False, replace_process=False):
+        caller, controller = 1001, 8752
+        records = {pid: {'pid': pid, 'startTime': str(pid), 'parentPid': parent, 'uids': [caller] * 4,
+            'executable': executable, 'image': {'st_size': '100', 'st_ino': str(pid)},
+            'kernelImageSha256': 'a' * 64} for pid, parent, executable in (
+                (controller, 1, '/usr/bin/python3'), (8844, controller, M.BWRAP), (8859, 8844, M.PROXY))}
+        peer_pid = 9999 if foreign_kernel_uid else 8859
+        app = SimpleNamespace(app=SimpleNamespace(bus_name='org.example.Owned'),
+            path='/org/a11y/accessible/root', get_process_id=lambda: peer_pid)
+        resolutions, reads = [], []
+        def resolve(name):
+            resolutions.append(name)
+            return {'owner': ':1.43' if replace_owner and len(resolutions) > 1 else ':1.42',
+                    'pid': peer_pid, 'uid': 1002 if foreign_bus_uid else caller}
+
+        def native_process(pid, helper, full=True):
+            reads.append(pid)
+            result = copy.deepcopy(records[pid])
+            if replace_process and pid == 8859 and reads.count(pid) >= 4:
+                result['startTime'] = 'replaced'
+            if not full:
+                result.pop('kernelImageSha256')
+            return result
+
+        native = SimpleNamespace(native_process=native_process,
+            process_uids=lambda pid: [1002 if pid == 9999 else caller] * 4)
+        subtree = {pid: {k: v for k, v in record.items() if k != 'kernelImageSha256'}
+            for pid, record in records.items() if pid != controller}
+        with patch.object(M.P, 'subtree', return_value=subtree):
+            report = M.capture_ax_peers([app], SimpleNamespace(resolve=resolve), native, None,
+                records[8844], controller, caller)
+        self.assertTrue(report['diagnosticOnly'])
+        self.assertFalse(report['inputPermitted'])
+        self.assertTrue(all(report[key] is False for key in M.GATES))
+        return report, reads
+
+    def test_read_only_capture_records_owned_proxy_peer_and_controller_ancestry(self):
+        report, _ = self.ax_capture_case()
+        app = report['applications'][0]
+        self.assertTrue(app['associationObserved'])
+        self.assertNotIn('error', app)
+        self.assertEqual(app['reportedPid'], app['kernelPeer']['pid'])
+        self.assertEqual([peer['pid'] for peer in app['ancestry']['chain']], [8859, 8844, 8752])
+        self.assertEqual(app['ancestry']['boundary'], {'pid': 8752, 'reason': 'owned-controller'})
+        self.assertEqual([peer['pid'] for peer in report['ownedCliSubtree']], [8844, 8859])
+        self.assertEqual(report['hashBytesRead'], 300)
+
+    def test_read_only_capture_refuses_foreign_bus_and_kernel_uids(self):
+        for changed in (dict(foreign_bus_uid=True), dict(foreign_kernel_uid=True)):
+            with self.subTest(changed=changed):
+                report, reads = self.ax_capture_case(**changed)
+                app = report['applications'][0]
+                self.assertNotIn('associationObserved', app)
+                self.assertNotIn('kernelPeer', app)
+                self.assertIn('error', app)
+                self.assertNotIn(9999, reads)
+
+    def test_read_only_capture_refuses_replaced_owner_and_same_pid_process(self):
+        for changed in (dict(replace_owner=True), dict(replace_process=True)):
+            with self.subTest(changed=changed):
+                report, _ = self.ax_capture_case(**changed)
+                app = report['applications'][0]
+                self.assertNotIn('associationObserved', app)
+                self.assertIn('changed', app['error'])
 
     def bootstrap_fixture(self):
         image = {'st_dev': '1', 'st_ino': '200', 'st_size': '100', 'st_mode': str(stat.S_IFREG | 0o755),

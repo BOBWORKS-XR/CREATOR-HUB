@@ -36,6 +36,10 @@ SOURCE = "5065fb1112b9e96978e40e64503fa979f559baae"
 SERVICE = Path("/usr/share/dbus-1/services/com.creatorworks.hub.Host.service")
 PROXY = "/usr/libexec/flatpak-dbus-proxy"
 BWRAP = "/usr/libexec/flatpak-bwrap"
+AX_IDENTITY_CAPTURE_ONLY = True
+AX_SOURCE = "https://github.com/GNOME/at-spi2-core/blob/AT_SPI2_CORE_2_44_0/atspi/atspi-accessible.c#L1680"
+PROXY_SOURCE = "https://github.com/flatpak/flatpak/blob/1.18.4/common/flatpak-run-dbus.c"
+PROXY_COMMIT = "72b40c8f6d9d585cfbdb249690724f740d207087"
 SERVICE_BYTES = b"[D-BUS Service]\nName=com.creatorworks.hub.Host\nExec=/usr/bin/creator-hub --flatpak-activate\n"
 GATES = {key: False for key in ("releaseReady", "flatpakAccepted", "migrationAccepted", "signedUpdateAccepted", "restartAccepted",
                               "publisherSignatureAccepted", "nativeAuthenticationAccepted", "steamDeckAccepted", "finalCandidateQualified")}
@@ -218,6 +222,109 @@ class CliBootstrap:
         return copy.deepcopy(after)
 
 
+def proxy_provenance(native):
+    original = Path(PROXY)
+    link = original.lstat()
+    target = original.resolve(strict=True)
+    require(len(str(target)) <= 4096 and link.st_uid == link.st_gid == 0
+            and (stat.S_ISREG(link.st_mode) or stat.S_ISLNK(link.st_mode)), "Fixed proxy path is not a root-owned file/alias")
+    for parent in dict.fromkeys((*original.parents, *target.parents)):
+        value = parent.lstat()
+        require(parent.resolve(strict=True) == parent and stat.S_ISDIR(value.st_mode) and value.st_uid == value.st_gid == 0
+                and not value.st_mode & 0o022, "Fixed proxy ancestor is not protected")
+    image = native.image_identity(str(target))
+    file = P.record(target, 16 * 1024 * 1024)
+    require((file["uid"], file["gid"], file["mode"]) == (0, 0, 0o755), "Fixed proxy target owner/mode differs")
+    with target.open("rb") as stream:
+        header = stream.read(256)
+    require(native.image_identity(str(target)) == image and original.resolve(strict=True) == target
+            and P.stamp(original.lstat()) == P.stamp(link), "Fixed proxy path/target changed during capture")
+    return {"path": PROXY, "canonicalTarget": str(target), "pathKind": "symlink" if stat.S_ISLNK(link.st_mode) else "regular",
+            "pathStat": {key: str(getattr(link, key)) for key in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")},
+            "image": image, "file": file, "fileKind": "elf" if header.startswith(b"\x7fELF") else "script" if header.startswith(b"#!") else "other",
+            "headerHex": header[:16].hex(), "interpreterLine": header.split(b"\n", 1)[0][:128].decode("ascii", "backslashreplace") if header.startswith(b"#!") else None,
+            "diagnosticOnly": True, **GATES}
+
+
+def ax_reference(node):
+    name, pathname = node.app.bus_name, node.path
+    require(type(name) is str and len(name) <= 255 and re.fullmatch(r"(?::[0-9]+\.[0-9]+|org\.[A-Za-z0-9_.-]+)", name)
+            and type(pathname) is str and re.fullmatch(r"/org/a11y/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+", pathname)
+            and len(pathname) <= 256, "Invalid GTK AX wire reference")
+    return name, pathname
+
+
+def capture_ax_peers(apps, references, native, helper, cli, controller, caller):
+    require(len(apps) <= 8, "Read-only AX application inventory exceeds bound")
+    result = {"applications": [], "ownedCliSubtree": [], "diagnosticOnly": True, "inputPermitted": False,
+              "source": {"atspiGetProcessId": AX_SOURCE, "flatpakProxy": PROXY_SOURCE, "proxySourceCommit": PROXY_COMMIT}, **GATES}
+    cache, remaining, deadline = {}, 128 * 1024 * 1024, time.monotonic() + 15
+    def snapshot(pid):
+        nonlocal remaining
+        require(type(pid) is int and pid > 1 and time.monotonic() < deadline, "Invalid peer PID or capture deadline")
+        require(native.process_uids(pid) == [caller] * 4, "Foreign kernel peer UID refused before image read")
+        observed = native.native_process(pid, helper, False)
+        require(observed["uids"] == [caller] * 4, "Kernel peer UID changed")
+        if pid in cache:
+            require(observed == {key: val for key, val in cache[pid].items() if key != "kernelImageSha256"}, "Captured peer identity changed")
+            return cache[pid]
+        size = int(observed["image"]["st_size"])
+        require(len(cache) < 32 and 0 < size <= 64 * 1024 * 1024 and size <= remaining, "Read-only kernel image inventory/byte bound")
+        remaining -= size
+        full = native.native_process(pid, helper)
+        require({key: val for key, val in full.items() if key != "kernelImageSha256"} == observed
+                and re.fullmatch(r"[a-f0-9]{64}", full["kernelImageSha256"])
+                and len(json.dumps(full, ensure_ascii=True)) <= 8192, "Read-only kernel image changed or exceeds record bound")
+        cache[pid] = full
+        return full
+    def ancestry(pid):
+        chain, seen = [], set()
+        for _ in range(8):
+            require(pid not in seen and time.monotonic() < deadline, "Read-only ancestry cycle/deadline")
+            seen.add(pid)
+            uids = native.process_uids(pid)
+            if pid <= 1 or uids != [caller] * 4:
+                return {"chain": chain, "boundary": {"pid": pid, "uids": uids, "reason": "system-or-other-uid"}}
+            record = snapshot(pid); chain.append(record)
+            if pid == controller:
+                return {"chain": chain, "boundary": {"pid": pid, "reason": "owned-controller"}}
+            pid = record["parentPid"]
+        return {"chain": chain, "boundary": {"pid": pid, "reason": "depth-bound"}}
+    for app in apps:
+        entry = {}
+        result["applications"].append(entry)
+        try:
+            require(time.monotonic() < deadline, "Read-only AX capture deadline")
+            name, pathname = ax_reference(app)
+            entry.update(name=name, path=pathname, reportedPid=app.get_process_id())
+            peer = references.resolve(name); entry["ownerBefore"] = peer
+            require(re.fullmatch(r":[0-9]+\.[0-9]+", peer["owner"]) and peer["uid"] == caller
+                    and type(peer["pid"]) is int and peer["pid"] > 1, "Unique same-user AX peer required before kernel read")
+            require(entry["reportedPid"] == peer["pid"], "AT-SPI PID differs from resolved bus peer")
+            entry["kernelPeer"] = snapshot(peer["pid"])
+            entry["ancestry"] = ancestry(peer["pid"])
+            after = references.resolve(name); entry["ownerAfter"] = after
+            require(after == peer and references.resolve(peer["owner"]) == peer, "AX unique owner/PID/UID changed during capture")
+            snapshot(peer["pid"])
+            entry["associationObserved"] = True
+        except Exception as error:
+            entry["error"] = str(error)[:240]
+    try:
+        tree = P.subtree(cli["pid"], helper, native)
+        require(len(tree) <= 16, "Read-only owned CLI subtree exceeds bound")
+        stable(native, helper, cli)
+        for pid in tree:
+            record = snapshot(pid)
+            require({key: val for key, val in record.items() if key != "kernelImageSha256"} == tree[pid], "Owned CLI subtree changed during capture")
+            result["ownedCliSubtree"].append(record)
+        stable(native, helper, cli)
+    except Exception as error:
+        result["subtreeError"] = str(error)[:240]
+    result["hashBytesRead"] = 128 * 1024 * 1024 - remaining
+    require(len(json.dumps(result, ensure_ascii=True).encode()) <= 131072, "Read-only AX capture exceeds output bound")
+    return result
+
+
 def owner(bus, name=NAME):
     from gi.repository import Gio, GLib
     def query(method, target, signature):
@@ -261,14 +368,12 @@ def gtk_worker(root, phase):
         peers = {v["pid"]: v for v in [launcher, *proxies]}
         aliases = {}
         def wire(node):
-            name, pathname = node.app.bus_name, node.path
-            require(type(name) is str and len(name) <= 255 and re.fullmatch(r"(?::[0-9]+\.[0-9]+|org\.[A-Za-z0-9_.-]+)", name)
-                    and type(pathname) is str and re.fullmatch(r"/org/a11y/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+", pathname) and len(pathname) <= 256, "Invalid GTK AX wire reference")
+            name, pathname = ax_reference(node)
             peer = references.resolve(name)
             reported_pid = node.get_process_id()
             report["lastAxReference"] = {"name": name, "path": pathname, "reportedPid": reported_pid,
                 "peer": {key: peer[key] for key in ("owner", "pid", "uid")}}
-            require(peer["pid"] in peers and peer["uid"] == os.getuid() and reported_pid in (ids[0], ids[-1]), "GTK AX owner is not the kernel-bound launcher/proxy")
+            require(peer["pid"] in peers and peer["uid"] == os.getuid() and reported_pid == peer["pid"], "GTK AX owner is not the kernel-bound launcher/proxy")
             stable(native, helper, peers[peer["pid"]])
             require(name not in aliases or aliases[name] == peer, "GTK AX owner changed")
             aliases[name] = peer
@@ -276,9 +381,13 @@ def gtk_worker(root, phase):
             return peer["owner"], pathname
         apps = helper.children(Atspi.get_desktop(0), 32)
         report["applications"] = [{"pid": a.get_process_id(), "role": a.get_role_name(), "name": (a.get_name() or "")[:128]} for a in apps]
+        if AX_IDENTITY_CAPTURE_ONLY:
+            report["readOnlyCapture"] = capture_ax_peers(apps, references, native, helper, cli, context["controller"], os.getuid())
+            raise RuntimeError("Read-only AX identity capture complete; no GTK input permitted")
         matches = []
         for app in apps:
-            if app.get_process_id() in (ids[0], ids[-1]):
+            # libatspi reports the AX bus peer, which may be the owned Flatpak proxy.
+            if app.get_process_id() in peers:
                 wire(app)
                 matches.extend(n for n in helper.children(app, 4) if n.get_role() == Atspi.Role.ALERT)
         require(len(matches) == 1, "Exact native GTK disclosure missing/ambiguous")
@@ -388,6 +497,10 @@ def exercise(root):
         consent = P.parse(terms.read_bytes())
         require(consent["schemaVersion"] == 1 and consent["policyVersion"] == P.POLICY and type(consent["acceptedAtMs"]) is int and consent["acceptedAtMs"] > 0, "Native terms not recorded")
         terms_before = P.record(terms)
+        P.save(root / "proxy-provenance.json", proxy_provenance(native))
+        report["axPackageVersions"] = command("ax-package-versions", ["/usr/bin/dpkg-query", "-W", "-f=${binary:Package}\t${Version}\n",
+            "gir1.2-atspi-2.0", "libatspi2.0-0"])
+        require(len(report["axPackageVersions"]) <= 1024, "AX package version inventory exceeds bound")
         proxy_image = P.record(PROXY)
         require(proxy_image["uid"] == proxy_image["gid"] == 0 and proxy_image["mode"] == 0o755, "OS proxy is not protected")
         report.update(warmRoot=warm, warmWindow=window, launcher=binding, settingsBefore=snapshot_fixtures(root))

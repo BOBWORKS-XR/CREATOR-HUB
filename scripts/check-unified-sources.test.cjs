@@ -47,3 +47,11 @@ test('source CI uses module interfaces without fetching separate repositories', 
   assert.match(ci, /modules\/mcp\/launcher\/src/);
   assert.doesNotMatch(ci, /repository: BOBWORKS-XR\/CREATOR-(?:PROJECT-SETUP|WORKS-UNITY-MCP)/);
 });
+
+test('headless Unix writer fixtures compile the actual integration context', () => {
+  const fixture = fs.readFileSync(path.join(root, 'native/mcp-router/tests/hosted-boundary/src/lib.rs'), 'utf8');
+  const config = fs.readFileSync(path.join(root, 'native/mcp-router/tests/hosted-boundary/Cargo.toml'), 'utf8');
+  assert.match(fixture, /#\[path = "[^"\n]*modules\/mcp\/launcher\/src-tauri\/src\/integration_context.rs"\]\s*mod integration_context;/);
+  assert.match(config, /\[features\]\s*integrated-service = \[\]/);
+  assert.doesNotMatch(fixture, /fn protected_writers\(/);
+});

@@ -1,6 +1,7 @@
 """Portable synthetic contracts only. No app, installer, credentials or sockets."""
 import ast
 import copy
+import ctypes as C
 import hashlib
 import importlib.util
 import json
@@ -253,8 +254,8 @@ class Contracts(unittest.TestCase):
         with self.assertRaises(RuntimeError): self.archive([('input', b'abc', stat.S_IFREG), ('input', b'abc', stat.S_IFREG)])
 
     def gtk(self):
-        update = Node('/update', ROLE.PUSH_BUTTON, 'Update Hub')
-        cancel = Node('/cancel', ROLE.PUSH_BUTTON, 'Not now', rect=(270, 350, 80, 25))
+        update = Node('/update', ROLE.PUSH_BUTTON, 'Update Hub', rect=(340, 540, 80, 25))
+        cancel = Node('/cancel', ROLE.PUSH_BUTTON, 'Not now', rect=(450, 540, 80, 25))
         tree = Node('/alert', ROLE.ALERT, 'Information', [Node('/title', ROLE.LABEL, M.TITLE), Node('/question', ROLE.LABEL, M.QUESTION), update, cancel])
         owner = {'pid': 222, 'startTime': '123', 'executable': M.HUB, 'uids': [M.UID] * 4, 'kernelImageSha256': M.ELF14[1]}
         frame = {'window': 101, 'pid': 222, 'title': 'Creator Hub - Development Preview', 'client': 50, 'mapped': True}
@@ -262,27 +263,40 @@ class Contracts(unittest.TestCase):
         refs = Mock(); refs.aliases = {':1.2': {'pid': 222, 'uid': M.UID, 'owner': ':1.2'}}
         refs.identity.side_effect = lambda node, _: [':1.2', node.path]
         native = Mock(); native.native_process.return_value = owner; native.native_ax_references.return_value = (refs, Mock())
-        native.bitmap.return_value = {'diagnosticOnly': True, 'nonblank': True}
-        helper = Mock(); helper.Request.return_value = Mock(); helper.bound_window.return_value = {k: v for k, v in dialog.items() if k != 'window'}
+        native.client_ids.return_value = [101, 102]
+        native.file_record.return_value = {'size': 12, 'sha256': 'a' * 64}
+        bindings = {101: frame, 102: dialog}
+        helper = Mock()
+        helper.Request.side_effect = lambda action, pid, start, executable, sha256, window, title, role, **kwargs: SimpleNamespace(
+            action=action, pid=pid, start=start, executable=executable, sha256=sha256, window=window, title=title, role=role, **kwargs)
+        helper.bound_window.side_effect = lambda request, _: {k: v for k, v in bindings[request.window].items() if k != 'window'}
         helper.select_window.return_value = tree
         def children(node, limit):
             M.require(len(node.kids) <= limit, 'Child bound')
             return list(node.kids)
         helper.fresh_close_children.side_effect = children
-        x11 = Mock(); x11.frame_rectangle.return_value = (100, 100, 400, 300)
+        frames = {101: (170, 110, 942, 605), 102: (325, 420, 631, 184)}
+        x11 = Mock(); x11.frame_rectangle.side_effect = lambda xid: frames[xid]
         polkit = Mock(); polkit.windows.return_value = [frame, dialog]
-        return SimpleNamespace(update=update, cancel=cancel, tree=tree, owner=owner, helper=helper, native=native, x11=x11, polkit=polkit, refs=refs, main=frame)
+        pixels = Mock(return_value=(b'\x89PNG\r\n\x1a\nfixture', {'nonblank': True}))
+        return SimpleNamespace(update=update, cancel=cancel, tree=tree, owner=owner, helper=helper, native=native,
+                               x11=x11, polkit=polkit, refs=refs, main=frame, dialog=dialog, frames=frames,
+                               bindings=bindings, pixels=pixels, visibility=Mock())
 
     def capture(self, f, *, approve=True, file=None):
         if file is None:
             directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup); file = Path(directory.name)
-        return M.capture_root_dialog(file, f.owner, f.helper, f.native, f.x11, AT, f.polkit, f.main, approve=approve)
+        with patch.object(M, 'dialog_unobscured', f.visibility), patch.object(M, 'dialog_frame_pixels', f.pixels):
+            return M.capture_root_dialog(file, f.owner, f.helper, f.native, f.x11, AT, f.polkit, f.main, approve=approve)
 
     def test_two_complete_source_bound_root_snapshots_precede_exactly_one_press(self):
         f = self.gtk(); result = self.capture(f)
         self.assertEqual(result['actionCount'], 1); self.assertTrue(result['questionSourceChecked'])
         f.update.action.do_action.assert_called_once_with(0); f.cancel.action.do_action.assert_not_called()
         self.assertEqual(f.helper.select_window.call_count, 2)
+        self.assertEqual(result['surface']['pair']['windows'], [f.main, f.dialog])
+        self.assertEqual(result['surface']['rectangle'], [325, 420, 631, 184])
+        f.native.bitmap.assert_not_called(); f.pixels.assert_called_once_with([325, 420, 631, 184], f.native)
         f = self.gtk(); self.assertEqual(self.capture(f, approve=False)['actionCount'], 0)
         f.update.action.do_action.assert_not_called()
 
@@ -299,7 +313,12 @@ class Contracts(unittest.TestCase):
             f.update.action.do_action.assert_not_called()
 
     def test_changed_frame_graph_bus_or_evidence_never_authorizes_a_press(self):
-        f = self.gtk(); f.x11.frame_rectangle.side_effect = [(100, 100, 400, 300), (100, 100, 400, 300), (101, 100, 400, 300), (101, 100, 400, 300)]
+        f = self.gtk()
+        def changed_frame(*_):
+            if f.helper.select_window.call_count == 2:
+                f.frames[102] = (326, 420, 631, 184)
+            return f.tree
+        f.helper.select_window.side_effect = changed_frame
         with self.assertRaises(RuntimeError): self.capture(f)
         f.update.action.do_action.assert_not_called()
         f = self.gtk(); f.refs.recheck.side_effect = RuntimeError('bus changed')
@@ -324,6 +343,233 @@ class Contracts(unittest.TestCase):
             f = self.gtk(); f.update.action.get_action_name.return_value = name; f.update.action.get_n_actions.return_value = count
             with self.assertRaises(RuntimeError): self.capture(f)
             f.update.action.do_action.assert_not_called()
+
+    def test_owned_main_modal_pair_binds_both_xres_windows_and_frames(self):
+        f = self.gtk()
+        pair = M.confirmation_pair(f.owner, f.main, f.dialog, f.helper, f.native, f.x11, f.polkit)
+        self.assertEqual(pair['windows'], [f.main, f.dialog])
+        self.assertEqual(pair['frames'], [list(f.frames[101]), list(f.frames[102])])
+        self.assertEqual([call.args[0].window for call in f.helper.bound_window.call_args_list], [101, 102])
+        self.assertEqual([call.args[0].pid for call in f.helper.bound_window.call_args_list], [222, 222])
+
+    def test_foreign_extra_replaced_and_reordered_modal_windows_refuse_before_pixels_or_input(self):
+        changes = [lambda f: f.native.client_ids.configure_mock(return_value=[101, 102, 999]),
+                   lambda f: f.polkit.windows.configure_mock(return_value=[f.dialog, f.main]),
+                   lambda f: f.polkit.windows.configure_mock(return_value=[f.main, {**f.dialog, 'window': 999}]),
+                   lambda f: f.dialog.update(pid=333), lambda f: f.dialog.update(client=51),
+                   lambda f: f.native.native_process.configure_mock(return_value={**f.owner, 'startTime': '124'}),
+                   lambda f: f.helper.bound_window.configure_mock(side_effect=lambda *_: {'pid': 999})]
+        for change in changes:
+            with self.subTest(change=change):
+                f = self.gtk(); change(f)
+                with self.assertRaises(RuntimeError): self.capture(f)
+                f.pixels.assert_not_called(); f.update.action.do_action.assert_not_called()
+
+    def test_modal_pair_replacement_during_pixels_never_publishes_image_or_presses(self):
+        f = self.gtk()
+        def replace(*_):
+            f.native.client_ids.return_value = [101, 999]
+            return b'png', {'nonblank': True}
+        f.pixels.side_effect = replace
+        with self.assertRaisesRegex(RuntimeError, 'confirmation window'): self.capture(f)
+        f.native.write_new.assert_not_called(); f.update.action.do_action.assert_not_called()
+
+    def test_ambiguous_confirmation_action_is_recorded_once_without_retry(self):
+        f = self.gtk(); f.update.action.do_action.side_effect = RuntimeError('Unknown native click result')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(RuntimeError, 'Unknown native click result'): self.capture(f, file=root)
+            record = json.loads((root / 'root-confirmation-action.json').read_bytes())
+            self.assertEqual(record['actionAttemptCount'], 1); self.assertIsNone(record['returned']); self.assertFalse(record['retry'])
+        f.update.action.do_action.assert_called_once_with(0); f.cancel.action.do_action.assert_not_called()
+
+    def test_modal_bitmap_refuses_a_request_for_the_other_owned_window(self):
+        f = self.gtk()
+        first = {'native': f.dialog, 'frame': list(f.frames[102]),
+                 'pair': M.confirmation_pair(f.owner, f.main, f.dialog, f.helper, f.native, f.x11, f.polkit)}
+        request = f.helper.Request('snapshot', 222, '123', M.HUB, M.ELF14[1], 101, M.TITLE, 'ALERT')
+        with self.assertRaisesRegex(RuntimeError, 'capture request differs'):
+            M.confirmation_bitmap(Path('unused'), request, f.owner, f.main, first, f.helper, f.native, f.x11, f.polkit)
+        f.native.write_new.assert_not_called()
+
+    def visibility(self, frame, *, occluder=False, offscreen=False):
+        class Attributes(C.Structure):
+            _fields_ = [(name, C.c_int) for name in ('x', 'y', 'width', 'height', 'border', 'map_state', 'class_')]
+        helper, x11 = Mock(), Mock(); helper.WindowAttributes = Attributes
+        x = x11.x; x.XDefaultRootWindow.return_value = 1
+        arrays = []
+        def tree(_display, xid, root, parent, children, count):
+            p, ids = {102: (1002, []), 1002: (1, []), 1: (0, [1001, 1002] + ([1003] if occluder else []))}[xid]
+            C.cast(root, C.POINTER(C.c_ulong))[0] = 1
+            C.cast(parent, C.POINTER(C.c_ulong))[0] = p
+            C.cast(count, C.POINTER(C.c_uint))[0] = len(ids)
+            array = (C.c_ulong * len(ids))(*ids); arrays.append(array)
+            C.cast(children, C.POINTER(C.POINTER(C.c_ulong)))[0] = C.cast(array, C.POINTER(C.c_ulong))
+            return 1
+        def attrs(_display, xid, value):
+            v = C.cast(value, C.POINTER(Attributes)).contents
+            v.x, v.y, v.width, v.height, v.border, v.map_state, v.class_ = (
+                (0, 0, 600 if offscreen else 1280, 1000, 0, 2, 1) if xid == 1 else (400, 430, 100, 100, 0, 2, 1))
+            return 1
+        x.XQueryTree.side_effect = tree; x.XGetWindowAttributes.side_effect = attrs
+        return M.dialog_unobscured(SimpleNamespace(window=102), frame, helper, x11)
+
+    def test_actual_small_modal_frame_is_visible_but_occlusion_and_screen_overflow_refuse(self):
+        self.visibility([325, 420, 631, 184])
+        for args in ({'occluder': True}, {'offscreen': True}):
+            with self.subTest(args=args), self.assertRaises(RuntimeError): self.visibility([325, 420, 631, 184], **args)
+        for frame in ([-1, 0, 100, 100], [0, 0, 0, 100], [0, 950, 100, 100]):
+            with self.subTest(frame=frame), self.assertRaises(RuntimeError): self.visibility(frame)
+
+    def authentication(self):
+        f = self.gtk()
+        f.agent = {'pid': 333, 'startTime': '456', 'parentPid': 111, 'executable': '/fixed/polkit-agent',
+                   'kernelImageSha256': 'b' * 64, 'uids': [M.UID] * 4}
+        f.auth = {'window': 201, 'pid': 333, 'client': 60, 'title': 'Authenticate', 'mapped': True}
+        f.bindings[201] = f.auth; f.frames[201] = (300, 300, 640, 350)
+        f.polkit.AGENT = f.agent['executable']; f.polkit.FILES = {f.polkit.AGENT: ('package', 'version', 123, 'b' * 64, 0o755)}
+        f.native.native_process.side_effect = lambda pid, _: {222: f.owner, 333: f.agent}[pid]
+        f.native.client_ids.return_value = [101, 201]
+        f.polkit.windows.side_effect = lambda pid, *_: {222: [f.main], 333: [f.auth]}[pid]
+        f.auth_request = f.helper.Request('snapshot', 333, '456', f.agent['executable'], 'b' * 64, 201, 'Authenticate', 'DIALOG')
+        return f
+
+    def auth_capture(self, f):
+        first = {'native': f.auth, 'frame': list(f.frames[201]),
+                 'pair': M.authentication_pair(f.owner, f.main, f.agent, f.auth, f.helper, f.native, f.x11, f.polkit)}
+        with patch.object(M, 'dialog_unobscured', f.visibility), patch.object(M, 'dialog_frame_pixels', f.pixels):
+            return M.authentication_bitmap(Path('unused'), f.auth_request, f.owner, f.main, f.agent, first,
+                                           f.helper, f.native, f.x11, f.polkit)
+
+    def test_authentication_pair_captures_only_owned_agent_dialog_without_input_or_acceptance(self):
+        f = self.authentication(); result = self.auth_capture(f)
+        self.assertEqual(result['pair']['windows'], [f.main, f.auth])
+        self.assertEqual(result['rectangle'], [300, 300, 640, 350])
+        self.assertEqual(result['actionCount'], 0); self.assertFalse(result['authorization']); self.assertTrue(result['readOnly'])
+        self.assertEqual(f.pixels.call_count, 1); self.assertEqual(f.visibility.call_count, 2)
+        self.assertEqual([call.args[0].pid for call in f.helper.bound_window.call_args_list], [222, 333] * 3)
+        f.native.bitmap.assert_not_called(); f.update.action.do_action.assert_not_called(); f.cancel.action.do_action.assert_not_called()
+
+    def test_authentication_foreign_replaced_or_extra_windows_and_processes_refuse_before_capture(self):
+        changes = [lambda f: f.native.client_ids.configure_mock(return_value=[101, 201, 999]),
+                   lambda f: f.polkit.windows.configure_mock(side_effect=lambda pid, *_: [{**f.main, 'window': 999}] if pid == 222 else [f.auth]),
+                   lambda f: f.auth.update(pid=444), lambda f: f.auth.update(client=50), lambda f: f.auth.update(title='Other'),
+                   lambda f: f.agent.update(executable='/foreign/program'), lambda f: f.agent.update(kernelImageSha256='c' * 64),
+                   lambda f: f.agent.update(uids=[0] * 4),
+                   lambda f: f.native.native_process.configure_mock(side_effect=lambda pid, _: {**f.agent, 'startTime': '457'} if pid == 333 else f.owner),
+                   lambda f: f.helper.bound_window.configure_mock(side_effect=lambda *_: {'pid': 999})]
+        for change in changes:
+            with self.subTest(change=change):
+                f = self.authentication(); change(f)
+                with self.assertRaises(RuntimeError): self.auth_capture(f)
+                f.pixels.assert_not_called(); f.native.write_new.assert_not_called()
+
+    def test_authentication_pair_change_during_pixels_refuses_before_retaining_image(self):
+        changes = [lambda f: f.native.client_ids.configure_mock(return_value=[101, 999]),
+                   lambda f: f.native.native_process.configure_mock(side_effect=lambda pid, _: {**f.agent, 'startTime': '457'} if pid == 333 else f.owner),
+                   lambda f: f.frames.update({201: (301, 300, 640, 350)}),
+                   lambda f: f.helper.bound_window.configure_mock(side_effect=lambda *_: {'pid': 999})]
+        for change in changes:
+            with self.subTest(change=change):
+                f = self.authentication()
+                def replace(*_):
+                    change(f)
+                    return b'png', {'nonblank': True}
+                f.pixels.side_effect = replace
+                with self.assertRaises(RuntimeError): self.auth_capture(f)
+                f.native.write_new.assert_not_called()
+
+    def test_authentication_capture_request_must_bind_the_fixed_agent_and_exact_dialog(self):
+        for key, value in (('window', 101), ('pid', 222), ('start', '457'), ('sha256', 'c' * 64), ('role', 'FRAME')):
+            with self.subTest(key=key):
+                f = self.authentication(); setattr(f.auth_request, key, value)
+                with self.assertRaisesRegex(RuntimeError, 'capture request differs'): self.auth_capture(f)
+                f.pixels.assert_not_called(); f.native.write_new.assert_not_called()
+
+    def test_session_uses_finite_authentication_pair_capture_not_the_singleton_bitmap(self):
+        source = (HERE / 'native-linux-integrated-update.py').read_text()
+        tree = ast.parse(source)
+        session = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'session')
+        calls = [node for node in ast.walk(session) if isinstance(node, ast.Call)]
+        self.assertEqual(sum(isinstance(call.func, ast.Name) and call.func.id == 'authentication_bitmap' for call in calls), 1)
+        generic = [call for call in calls if isinstance(call.func, ast.Attribute) and call.func.attr == 'bitmap']
+        self.assertEqual(len(generic), 1)  # Only the best-effort failure screenshot retains the singleton policy.
+        body = ast.get_source_segment(source, session)
+        self.assertIn("report['axToXidAssociationVerified'] = False", body)
+        self.assertNotIn('do_action', body)
+
+    def original_report(self, raw, **changes):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / 'report.json').write_bytes(raw)
+            info = {'st_mode': stat.S_IFREG | 0o600, 'st_nlink': 1, 'st_uid': M.UID, 'st_size': len(raw), **changes}
+            with patch.object(Path, 'lstat', return_value=SimpleNamespace(**info)), \
+                    patch.object(Path, 'resolve', autospec=True, side_effect=lambda file, strict: file):
+                return M.original_session_failure(root)
+
+    def test_original_session_report_allows_incomplete_owned_writes_then_retains_exact_error(self):
+        for raw in (b'', b'{"phase":', b'{}'):
+            with self.subTest(raw=raw): self.assertIsNone(self.original_report(raw))
+        failure = {'phase': 'capture-and-press-root-confirmation-once',
+                   'error': {'type': 'RuntimeError', 'message': 'Other managed windows present; bitmap refused'}}
+        self.assertEqual(self.original_report(json.dumps(failure).encode()), failure)
+
+    def test_original_session_report_refuses_foreign_links_oversize_and_invalid_error_shape(self):
+        raw = b'{"phase":"capture","error":{"type":"RuntimeError","message":"original"}}'
+        for changes in ({'st_uid': 0}, {'st_nlink': 2}, {'st_mode': stat.S_IFLNK | 0o777}, {'st_size': 262145}):
+            with self.subTest(changes=changes), self.assertRaises(RuntimeError): self.original_report(raw, **changes)
+        with self.assertRaises(RuntimeError): self.original_report(b'{"phase":"capture","error":{"message":"missing type"}}')
+
+    def broker_failure(self, *, original=True, observer=False, pump_error=False, close_error=False, save_error=False):
+        failure = {'phase': 'capture-and-press-root-confirmation-once',
+                   'error': {'type': 'RuntimeError', 'message': 'Other managed windows present; bitmap refused'}}
+        child, capture, native, helper, polkit = Mock(), Mock(), Mock(), Mock(), Mock()
+        polls = iter((None, None, 1, 1)); child.poll.side_effect = lambda: next(polls, 1)
+        native.Capture.return_value = capture
+        if pump_error:
+            def pump(*args):
+                if not args: raise OSError('drain failed')
+            capture.pump.side_effect = pump
+        if close_error:
+            capture.close.side_effect = OSError('close failed')
+        errors = iter((None, failure if original else None)) if observer else iter((failure if original else None,) * 2)
+        records = {}
+        def save(file, value):
+            records[file.name] = copy.deepcopy(value)
+            if save_error and file.name == 'broker-report.json': raise OSError('diagnostic save failed')
+        pending_error = RuntimeError('Owned process is not live')
+        with patch.object(M.os, 'getuid', return_value=0, create=True), patch.object(M.os, 'geteuid', return_value=0, create=True), \
+                patch.object(M, 'binding'), patch.object(M, 'locked_account'), patch.object(M, 'load', return_value=polkit), \
+                patch.object(M, 'pages', return_value=SimpleNamespace(helpers=lambda: (helper, native))), \
+                patch.object(M, 'session_command', return_value=['synthetic-session']), patch.object(M.subprocess, 'Popen', return_value=child) as launch, \
+                patch.object(M, 'original_session_failure', side_effect=lambda _: next(errors, failure if original else None)), \
+                patch.object(M, 'pending_request', side_effect=pending_error if observer else None) as pending, \
+                patch.object(M, 'evidence', side_effect=save), patch('builtins.print'):
+            with self.assertRaises(RuntimeError) as raised: M.broker(ENV)
+        launch.assert_called_once(); capture.close.assert_called_once_with()
+        child.terminate.assert_not_called(); child.kill.assert_not_called()
+        return raised.exception, records['broker-report.json'], pending, pending_error
+
+    def test_broker_stops_observation_when_original_session_failure_is_already_recorded(self):
+        error, report, pending, _ = self.broker_failure()
+        self.assertIn('Other managed windows present; bitmap refused', str(error)); pending.assert_not_called()
+        self.assertEqual(report['originalSessionFailure']['phase'], 'capture-and-press-root-confirmation-once')
+        self.assertEqual(report['sessionExit'], 1); self.assertFalse(report['pendingDpkgObserved'])
+        self.assertTrue(all(report[key] is False for key in M.FALSE_GATES))
+
+    def test_broker_original_session_error_wins_over_observer_cleanup_and_diagnostic_save_errors(self):
+        for args in ({}, {'pump_error': True}, {'close_error': True}, {'pump_error': True, 'close_error': True, 'save_error': True}):
+            with self.subTest(args=args):
+                error, report, pending, observer = self.broker_failure(observer=True, **args)
+                self.assertIn('Other managed windows present; bitmap refused', str(error)); self.assertIs(error.__cause__, observer)
+                self.assertEqual(report['observerError']['message'], 'Owned process is not live'); pending.assert_called_once()
+                self.assertEqual(report['originalSessionFailure']['error']['message'], 'Other managed windows present; bitmap refused')
+                self.assertEqual(report['credentialActionCount'], 0); self.assertFalse(report['passwordProvisioned'])
+                if args.get('pump_error') or args.get('close_error'): self.assertIn('cleanupError', report)
+
+    def test_broker_retains_observer_error_when_no_original_session_error_exists(self):
+        error, report, pending, observer = self.broker_failure(original=False, observer=True, close_error=True)
+        self.assertIs(error, observer); pending.assert_called_once()
+        self.assertNotIn('originalSessionFailure', report); self.assertIn('cleanupError', report)
 
     def test_session_is_finite_locked_user_pam_logind_no_password_or_auth_mode(self):
         command = M.session_command(ENV)

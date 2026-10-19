@@ -14,6 +14,8 @@ mod client_ownership;
 mod client_setup_write;
 #[path = "../../../../../modules/mcp/launcher/src-tauri/src/hosted_unix.rs"]
 mod hosted_unix;
+#[path = "../../../../../modules/mcp/launcher/src-tauri/src/integration_context.rs"]
+mod integration_context;
 #[path = "../../../../../modules/mcp/launcher/src-tauri/src/jsonc.rs"]
 mod jsonc;
 #[path = "../../../../../modules/mcp/launcher/src-tauri/src/settings_backup.rs"]
