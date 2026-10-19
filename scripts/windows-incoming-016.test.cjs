@@ -117,7 +117,7 @@ test('fresh CDP must belong to the exact owned Hub process tree, never a foreign
 
 test('new native lane is explicit/manual, read-only, data-bound and tests before native execution', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/windows-incoming-016.yml'), 'utf8');
-  assert.match(workflow, /workflow_dispatch:/); assert.match(workflow, /options: \[fresh, guarded, incoming\]/);
+  assert.match(workflow, /workflow_dispatch:/); assert.match(workflow, /options: \[fresh, guarded, incoming, migration\]/);
   assert.match(workflow, /push:\s+branches: \[validation\/windows-incoming-016\]/);
   assert.match(workflow, /acceptance:\s+if: github\.repository == 'BOBWORKS-XR\/CREATOR-HUB' && github\.event_name == 'workflow_dispatch'/);
   assert.doesNotMatch(workflow, /contents: write|pull_request:|macos|cargo |build:unified|signer sign|gh release|TAURI_SIGNING|rejectUnauthorized|ignore-certificate/);
@@ -175,6 +175,22 @@ test('current finite target refuses the superseded development16 bytes', () => {
   assert.equal(incoming.TARGET.bytes, 37980864);
   assert.throws(() => incoming.validatePins({ ...pins(), installer: '7229cfcf919dc3a9e27a459fd482cbbe059fd54caa9ad379b2a75c8baa113a20',
     executable: '7ef27351edefe4545d3e530e8d5c51e7eb3092e7cc7b20498591bfe7456c2389' }));
+});
+
+test('single-guide receipt requires exact payload, cancellation, restart and preservation without broader acceptance', () => {
+  const report = { ...require('./native-windows-016-migration.cjs').reportTemplate('a'.repeat(40)),
+    passed: true, policyRestored: true, nativeGuideAccepted: true, repeatStartupAccepted: true,
+    settingsPreserved: true, cancelAccepted: true, installedResourcesVerified: true,
+    nativeDecisions: [{ name: 'Not now' }, { name: 'Move to Hub' }] };
+  incoming.checkReceipt(report, 'migration');
+  for (const field of ['policyRestored', 'nativeGuideAccepted', 'repeatStartupAccepted', 'settingsPreserved', 'cancelAccepted', 'installedResourcesVerified']) {
+    assert.throws(() => incoming.checkReceipt({ ...report, [field]: false }, 'migration'));
+  }
+  for (const field of ['migrationAccepted', 'signedUpdateAccepted', 'liveAiAppAccepted', 'crashRecoveryAccepted', 'backupBeforeEveryWriteAccepted', 'userMachineUsed', 'releaseReady']) {
+    assert.throws(() => incoming.checkReceipt({ ...report, [field]: true }, 'migration'));
+  }
+  assert.throws(() => incoming.checkReceipt({ ...report, nativeDecisions: [] }, 'migration'));
+  assert.throws(() => incoming.checkReceipt({ ...report, executableSha256: 'a'.repeat(64) }, 'migration'));
 });
 
 test('guarded installer receipt cannot stand in for GUI, signed updater or migration acceptance', () => {

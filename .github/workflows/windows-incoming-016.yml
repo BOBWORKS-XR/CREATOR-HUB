@@ -6,7 +6,7 @@ on:
     inputs:
       mode:
         type: choice
-        options: [fresh, guarded, incoming]
+        options: [fresh, guarded, incoming, migration]
         default: fresh
       artifact_run:
         description: Completed run containing the reviewed data-only windows-016-acceptance-input artifact
@@ -86,7 +86,7 @@ jobs:
           node scripts/windows-incoming-016.cjs $env:MODE $directory $env:SIGNED_PINS
           if ($LASTEXITCODE -ne 0) { throw 'Native scenario/signature contract refused; no native work started.' }
       - name: Focused refusal/transport/direct-feature regressions before any native operation
-        run: node --test scripts/windows-incoming-016.test.cjs scripts/native-self-update-direct.test.cjs scripts/self-update-lab-feed.test.cjs scripts/native-self-update-lab.test.cjs scripts/native-unified-outgoing-target.test.cjs
+        run: node --test scripts/windows-incoming-016.test.cjs scripts/native-self-update-direct.test.cjs scripts/self-update-lab-feed.test.cjs scripts/native-self-update-lab.test.cjs scripts/native-unified-outgoing-target.test.cjs scripts/native-windows-016-migration.test.cjs
       - name: Parse native lifecycle before execution
         shell: pwsh
         run: |
@@ -97,6 +97,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Fresh16 parse failed.' }
           node --check scripts/native-windows-016-guarded.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Guarded16 parse failed.' }
+          node --check scripts/native-windows-016-migration.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Migration16 parse failed.' }
       - name: Exact fresh installer/direct-page/settings preservation acceptance
         if: inputs.mode == 'fresh'
         run: node scripts/native-windows-016-fresh.cjs "${{ github.workspace }}/artifacts/incoming-016/candidate/Creator.Hub_0.1.16_x64-setup.exe"
@@ -111,6 +113,23 @@ jobs:
         env:
           CREATOR_WINDOWS_016_GUARDED: '1'
         run: node scripts/native-windows-016-guarded.cjs "${{ github.workspace }}/artifacts/incoming-016/candidate/Creator.Hub_0.1.16_x64-setup.exe" "${{ github.workspace }}/artifacts/incoming-016/public14.exe"
+      - name: Stage three exact original standalone baseline installers for migration only
+        if: inputs.mode == 'migration'
+        shell: pwsh
+        run: |
+          $directory = New-Item -ItemType Directory -Path artifacts/incoming-016/baselines
+          node -e "const {baselines}=require('./scripts/native-installed-baseline.cjs');process.stdout.write(JSON.stringify(baselines))" | Set-Content artifacts/incoming-016/baselines.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline contract unavailable.' }
+          foreach ($baseline in (Get-Content artifacts/incoming-016/baselines.json -Raw | ConvertFrom-Json)) {
+            $target = Join-Path $directory.FullName $baseline.asset
+            Invoke-WebRequest -Uri "https://github.com/BOBWORKS-XR/$($baseline.repo)/releases/download/v$($baseline.version)/$($baseline.asset)" -OutFile $target -TimeoutSec 180
+            if ((Get-FileHash -LiteralPath $target).Hash.ToLowerInvariant() -cne $baseline.sha256) { throw 'Original baseline installer changed.' }
+          }
+      - name: Native single-guide cancellation, project import, route migration and repeat startup
+        if: inputs.mode == 'migration'
+        env:
+          CREATOR_WINDOWS_016_MIGRATION: '1'
+        run: node scripts/native-windows-016-migration.cjs "${{ github.workspace }}/artifacts/incoming-016/candidate" "${{ github.workspace }}/artifacts/incoming-016/baselines"
       - name: Native public14 cancellation/signed update/automatic restart into direct16
         if: inputs.mode == 'incoming'
         shell: pwsh
@@ -124,7 +143,7 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
         run: |
-          $filter = if ($env:MODE -ceq 'fresh') { 'fresh-016-report.json' } elseif ($env:MODE -ceq 'guarded') { 'guarded-016-report.json' } else { 'self-update-report.json' }
+          $filter = if ($env:MODE -ceq 'fresh') { 'fresh-016-report.json' } elseif ($env:MODE -ceq 'guarded') { 'guarded-016-report.json' } elseif ($env:MODE -ceq 'migration') { 'migration-016-report.json' } else { 'self-update-report.json' }
           $reports = @(Get-ChildItem -LiteralPath artifacts -Recurse -File -Filter $filter)
           if ($reports.Count -ne 1) { throw 'Expected one native acceptance receipt.' }
           node -e "const f=require('fs');require('./scripts/windows-incoming-016.cjs').checkReceipt(JSON.parse(f.readFileSync(process.argv[1],'utf8')),process.argv[2])" $reports[0].FullName $env:MODE

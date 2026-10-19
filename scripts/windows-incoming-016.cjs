@@ -94,7 +94,14 @@ function checkReceipt(receipt, mode) {
     return;
   }
   assert.equal(receipt.policyRestored, true);
-  if (mode === 'fresh') {
+  if (mode === 'migration') {
+    assert.equal(receipt.scope, 'exact-direct16-three-client-clean-legacy-guide-probe');
+    assert.equal(receipt.productSource, TARGET.productSource);
+    assert.equal(receipt.installerSha256, TARGET.installer); assert.equal(receipt.executableSha256, TARGET.exe);
+    for (const field of ['nativeGuideAccepted', 'repeatStartupAccepted', 'settingsPreserved', 'cancelAccepted', 'installedResourcesVerified']) assert.equal(receipt[field], true);
+    for (const field of ['migrationAccepted', 'signedUpdateAccepted', 'liveAiAppAccepted', 'crashRecoveryAccepted', 'backupBeforeEveryWriteAccepted', 'userMachineUsed']) assert.equal(receipt[field], false);
+    assert.equal(receipt.nativeDecisions.length, 2);
+  } else if (mode === 'fresh') {
     assert.equal(receipt.freshInstallAccepted, true); assert.equal(receipt.installerSha256, TARGET.installer);
     assert.equal(receipt.executableSha256, TARGET.exe); assert.equal(receipt.migrationAccepted, false);
     assert.equal(receipt.settingsPreserved, true); assert.equal(receipt.pluginsRemoved, true); assert.equal(receipt.signedUpdateAccepted, false);
@@ -133,7 +140,7 @@ module.exports = { KIND, BASELINE, TARGET, hash, keys, validatePins, validateInp
 if (require.main === module) {
   try {
     const [mode, directory, pinsText] = process.argv.slice(2);
-    assert.ok(['inspect-installer', 'fresh', 'guarded', 'incoming'].includes(mode)); assert.ok(path.isAbsolute(directory));
+    assert.ok(['inspect-installer', 'fresh', 'guarded', 'incoming', 'migration'].includes(mode)); assert.ok(path.isAbsolute(directory));
     installer(path.join(directory, TARGET.asset));
     if (mode === 'incoming') {
       const config = { schemaVersion: 1, kind: KIND, baselineVersion: BASELINE.version, targetVersion: TARGET.version,
