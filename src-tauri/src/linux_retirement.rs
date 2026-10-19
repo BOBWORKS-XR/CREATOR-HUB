@@ -400,8 +400,10 @@ fn retire_development_response(
     Ok(Outcome::ExperimentalVerified)
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "linux-production-migration")))]
 const PRODUCTION_COHORT: &str = "creator-hub-deb-retirement-016-v1";
 
+#[cfg(any(test, all(target_os = "linux", feature = "linux-production-migration")))]
 fn production_identity(
     protocol: u32,
     cohort: &str,
@@ -420,6 +422,7 @@ fn production_identity(
     Ok(())
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "linux-production-migration")))]
 fn production_target(target: Target, retained: bool) -> (&'static str, &'static str, &'static str) {
     match (target, retained) {
         (Target::Mcp, false) => ("mcp", "creator-works-mcp", "2.7.7"),
@@ -435,6 +438,7 @@ fn production_target(target: Target, retained: bool) -> (&'static str, &'static 
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(test, all(target_os = "linux", feature = "linux-production-migration")))]
 struct ProductionInspection {
     protocol_version: u32,
     cohort: String,
@@ -456,6 +460,7 @@ struct ProductionInspection {
     omitted_files_verified: u32,
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "linux-production-migration")))]
 pub(crate) fn production_inspect_response(
     target: Target,
     bytes: &[u8],
@@ -512,6 +517,7 @@ pub(crate) fn production_inspect_response(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(test, all(target_os = "linux", feature = "linux-production-migration")))]
 struct ProductionCompletion {
     protocol_version: u32,
     cohort: String,
@@ -531,6 +537,7 @@ struct ProductionCompletion {
     retry_policy: String,
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "linux-production-migration")))]
 fn production_candidate(target: Target, candidate: &str) -> bool {
     let (prefix, suffix) = match target {
         Target::Mcp => (
@@ -553,6 +560,7 @@ fn production_candidate(target: Target, candidate: &str) -> bool {
         })
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "linux-production-migration")))]
 pub(crate) fn production_retire_response(
     target: Target,
     code: Option<i32>,
