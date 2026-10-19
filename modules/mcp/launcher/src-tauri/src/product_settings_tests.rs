@@ -352,6 +352,454 @@ fn missing_server_field_can_be_reviewed_without_inventing_other_defaults() {
     );
 }
 
+struct ServerReviewFixture {
+    settings: Fixture,
+    old: PathBuf,
+    server: PathBuf,
+    original: Vec<u8>,
+    clients: Vec<(PathBuf, Vec<u8>)>,
+}
+impl ServerReviewFixture {
+    fn new() -> Self {
+        let settings = Fixture::new();
+        let old = settings
+            .root
+            .path()
+            .join("hub-cache/generations/unretained-old/server/creator-works-mcp.mjs");
+        let server = settings
+            .root
+            .path()
+            .join("managed-runtime/current/server/creator-works-mcp.mjs");
+        // Inert files only; verifying the real replacement belongs to the native caller.
+        for (path, bytes) in [
+            (&old, b"unverified old generation fixture".as_slice()),
+            (&server, b"replacement runtime fixture".as_slice()),
+        ] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        let mut value: serde_json::Value = serde_json::from_slice(&settings.legacy()).unwrap();
+        value["mcp_server_path"] = serde_json::json!(old);
+        value["auto_start"] = false.into();
+        value["enable_custom_scripts"] = true.into();
+        value["allow_all_tests"] = false.into();
+        value["automatic_update_checks"] = false.into();
+        value["tool_groups"] = "core,scene,custom".into();
+        value["channels"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "b", "name": "Disabled project", "enabled": false,
+                "unity_project_path": "/second/unchanged/project",
+                "scene_path": "Assets/Scenes/Keep.unity",
+                "futureChannel": {"nested": [false, null, {"keep": "exact"}]}
+            }));
+        value["active_channel_id"] = "b".into();
+        value["futurePreference"] = serde_json::json!({"keep": [null, false, "verbatim"]});
+        let mut original = serde_json::to_vec_pretty(&value).unwrap();
+        original.push(b'\n');
+        for path in [&settings.paths.current, &settings.paths.legacy] {
+            fs::write(path, &original).unwrap();
+        }
+        let clients = ["codex", "claude", "antigravity", "opencode"]
+            .into_iter()
+            .map(|client| {
+                let path = settings.root.path().join("client-configs").join(client);
+                let bytes = removal_original(client).into_bytes();
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, &bytes).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        Self {
+            settings,
+            old,
+            server,
+            original,
+            clients,
+        }
+    }
+
+    fn assert_other_files_unchanged(&self) {
+        for (path, bytes) in &self.clients {
+            assert_eq!(&fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(
+            fs::read(&self.old).unwrap(),
+            b"unverified old generation fixture"
+        );
+        assert_eq!(
+            fs::read(&self.server).unwrap(),
+            b"replacement runtime fixture"
+        );
+    }
+
+    fn assert_no_review_artifacts(&self) {
+        assert!(!self.settings.paths.journal.exists());
+        for path in [&self.settings.paths.current, &self.settings.paths.legacy] {
+            assert!(!backup_path(path, &self.original).parent().unwrap().exists());
+        }
+        self.assert_other_files_unchanged();
+    }
+
+    fn assert_original_stores(&self) {
+        for path in [&self.settings.paths.current, &self.settings.paths.legacy] {
+            assert_eq!(fs::read(path).unwrap(), self.original);
+        }
+    }
+}
+
+#[test]
+fn server_review_unverified_old_generation_stages_replacement_without_writes() {
+    let fixture = ServerReviewFixture::new();
+    let paths = &fixture.settings.paths;
+    let before = inventory(paths).unwrap();
+    assert!(server_writes(paths, &before, &fixture.server, |_| Ok(false)).is_err());
+    let review = server_review(paths, &before, &fixture.server, |path| {
+        assert_eq!(path, fixture.old.as_path());
+        Ok(false)
+    })
+    .unwrap();
+    assert!(review.requires_replacement);
+    assert_eq!(review.writes.len(), 2);
+    let mut expected: serde_json::Value = serde_json::from_slice(&fixture.original).unwrap();
+    expected["mcp_server_path"] = serde_json::json!(fixture.server);
+    for (write, path) in review.writes.iter().zip([&paths.current, &paths.legacy]) {
+        assert_eq!(&write.path, path);
+        assert_eq!(write.before, fixture.original);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&write.after).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(inventory(paths).unwrap(), before);
+    fixture.assert_original_stores();
+    fixture.assert_no_review_artifacts();
+}
+
+#[test]
+fn server_review_explicit_cancel_has_no_writes_journal_or_backups() {
+    for recognized in [false, true] {
+        let fixture = ServerReviewFixture::new();
+        let paths = &fixture.settings.paths;
+        let before = inventory(paths).unwrap();
+        let review = server_review(paths, &before, &fixture.server, |_| Ok(recognized)).unwrap();
+        let result = finish_server_review(paths, &before, &fixture.server, &review, false, |_| {
+            panic!("Cancellation must return before revalidation or publication")
+        });
+        let error = result.err().expect("Cancellation must not report success");
+        assert!(error.to_ascii_lowercase().contains("cancel"), "{error}");
+        assert_eq!(inventory(paths).unwrap(), before);
+        fixture.assert_original_stores();
+        fixture.assert_no_review_artifacts();
+    }
+}
+
+#[test]
+fn server_review_explicit_replacement_preserves_every_other_field_client_and_exact_backup() {
+    for recognition_error in [false, true] {
+        let fixture = ServerReviewFixture::new();
+        let paths = &fixture.settings.paths;
+        let before = inventory(paths).unwrap();
+        let recognizes = |path: &Path| {
+            assert_eq!(path, fixture.old.as_path());
+            if recognition_error {
+                Err("No matching retained descriptor for the old generation".into())
+            } else {
+                Ok(false)
+            }
+        };
+        let review = server_review(paths, &before, &fixture.server, recognizes).unwrap();
+        assert!(review.requires_replacement);
+        fixture.assert_original_stores();
+        fixture.assert_no_review_artifacts();
+        let historical = after();
+        for path in [&paths.current, &paths.legacy] {
+            let backup = backup_path(path, &historical);
+            storage::private_directory(backup.parent().unwrap()).unwrap();
+            fs::write(backup, &historical).unwrap();
+        }
+        let transition =
+            finish_server_review(paths, &before, &fixture.server, &review, true, recognizes)
+                .unwrap();
+        assert!(transition.changed);
+        assert_eq!(transition.server, fixture.server);
+        let mut expected: serde_json::Value = serde_json::from_slice(&fixture.original).unwrap();
+        expected["mcp_server_path"] = serde_json::json!(fixture.server);
+        for path in [&paths.current, &paths.legacy] {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
+                expected
+            );
+            assert_eq!(
+                fs::read(backup_path(path, &fixture.original)).unwrap(),
+                fixture.original
+            );
+            assert_eq!(
+                fs::read(backup_path(path, &historical)).unwrap(),
+                historical
+            );
+        }
+        fixture.assert_other_files_unchanged();
+        let report = fixture.settings.inspect();
+        assert_eq!(report.status, Status::Identical);
+        assert_eq!(report.recovery.len(), 1);
+        let receipt = &report.recovery[0];
+        assert!(receipt.completed);
+        assert_eq!(receipt.files.len(), 2);
+        for (file, write) in receipt.files.iter().zip(&review.writes) {
+            assert_eq!(file.path, fs::canonicalize(&write.path).unwrap());
+            assert_eq!(fs::read(&file.before_image).unwrap(), fixture.original);
+            assert_eq!(fs::read(&file.after_image).unwrap(), write.after);
+            assert_eq!(fs::read(&file.path).unwrap(), write.after);
+        }
+    }
+}
+
+#[test]
+fn server_review_recognized_to_unverified_or_error_race_rejects_before_publication() {
+    for recognition_error in [false, true] {
+        let fixture = ServerReviewFixture::new();
+        let paths = &fixture.settings.paths;
+        let before = inventory(paths).unwrap();
+        let review = server_review(paths, &before, &fixture.server, |_| Ok(true)).unwrap();
+        assert!(!review.requires_replacement);
+        assert!(
+            finish_server_review(paths, &before, &fixture.server, &review, true, |_| {
+                if recognition_error {
+                    Err("The previously recognized old payload changed during review".into())
+                } else {
+                    Ok(false)
+                }
+            })
+            .is_err()
+        );
+        assert_eq!(inventory(paths).unwrap(), before);
+        fixture.assert_original_stores();
+        fixture.assert_no_review_artifacts();
+    }
+}
+
+#[test]
+fn server_review_changed_current_or_legacy_config_after_staging_is_not_overwritten() {
+    for change_current in [false, true] {
+        let fixture = ServerReviewFixture::new();
+        let paths = &fixture.settings.paths;
+        let before = inventory(paths).unwrap();
+        let review = server_review(paths, &before, &fixture.server, |_| Ok(false)).unwrap();
+        let path = if change_current {
+            &paths.current
+        } else {
+            &paths.legacy
+        };
+        let mut external: serde_json::Value = serde_json::from_slice(&fixture.original).unwrap();
+        external["futurePreference"]["externalEdit"] = "keep this concurrent edit".into();
+        fs::write(path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();
+        let changed = inventory(paths).unwrap();
+        assert!(
+            finish_server_review(paths, &before, &fixture.server, &review, true, |_| {
+                panic!("Inventory changes must refuse before recognition")
+            })
+            .is_err()
+        );
+        assert_eq!(inventory(paths).unwrap(), changed);
+        fixture.assert_no_review_artifacts();
+    }
+}
+
+#[test]
+fn server_review_recognition_error_requires_replacement_consent_and_never_auto_adopts() {
+    let fixture = ServerReviewFixture::new();
+    let paths = &fixture.settings.paths;
+    let before = inventory(paths).unwrap();
+    assert!(server_writes(paths, &before, &fixture.server, |_| Err(
+        "unreadable descriptor".into()
+    ))
+    .is_err());
+    let review = server_review(paths, &before, &fixture.server, |_| {
+        Err("unreadable descriptor".into())
+    })
+    .unwrap();
+    assert!(review.requires_replacement);
+    assert_eq!(review.writes.len(), 2);
+    fixture.assert_original_stores();
+    fixture.assert_no_review_artifacts();
+    assert!(
+        finish_server_review(paths, &before, &fixture.server, &review, false, |_| {
+            panic!("Recognition errors are not approval")
+        })
+        .is_err()
+    );
+    assert_eq!(inventory(paths).unwrap(), before);
+    fixture.assert_no_review_artifacts();
+}
+
+#[test]
+fn server_review_changed_recognition_or_write_plan_is_not_implicitly_approved() {
+    for change in [
+        "recognition",
+        "before",
+        "after",
+        "destination",
+        "target",
+        "missing-write",
+    ] {
+        let fixture = ServerReviewFixture::new();
+        let paths = &fixture.settings.paths;
+        let before = inventory(paths).unwrap();
+        let mut review = server_review(paths, &before, &fixture.server, |_| Ok(false)).unwrap();
+        let mut target = fixture.server.clone();
+        match change {
+            "recognition" => review.requires_replacement = false,
+            "before" => review.writes[0].before.push(b' '),
+            "after" => {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&review.writes[0].after).unwrap();
+                value["auto_start"] = true.into();
+                review.writes[0].after = serde_json::to_vec_pretty(&value).unwrap();
+            }
+            "destination" => review.writes[0].path = fixture.clients[0].0.clone(),
+            "target" => target = fixture.old.clone(),
+            "missing-write" => {
+                review.writes.pop();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            finish_server_review(paths, &before, &target, &review, true, |_| Ok(false)).is_err(),
+            "{change}"
+        );
+        assert_eq!(inventory(paths).unwrap(), before);
+        fixture.assert_original_stores();
+        fixture.assert_no_review_artifacts();
+    }
+}
+
+#[test]
+fn server_review_known_path_approval_and_subsequent_noop_keep_existing_behavior() {
+    let fixture = ServerReviewFixture::new();
+    let paths = &fixture.settings.paths;
+    let before = inventory(paths).unwrap();
+    let review = server_review(paths, &before, &fixture.server, |path| {
+        Ok(path == fixture.old.as_path())
+    })
+    .unwrap();
+    assert!(!review.requires_replacement);
+    assert_eq!(review.writes.len(), 2);
+    fixture.assert_no_review_artifacts();
+    let transition = finish_server_review(paths, &before, &fixture.server, &review, true, |path| {
+        Ok(path == fixture.old.as_path())
+    })
+    .unwrap();
+    assert!(transition.changed);
+    assert_eq!(transition.server, fixture.server);
+    let saved = inventory(paths).unwrap();
+    let noop = server_review(paths, &saved, &fixture.server, |_| {
+        panic!("Already current")
+    })
+    .unwrap();
+    assert!(!noop.requires_replacement);
+    assert!(noop.writes.is_empty());
+    let transition = finish_server_review(paths, &saved, &fixture.server, &noop, true, |_| {
+        panic!("Already current")
+    })
+    .unwrap();
+    assert!(!transition.changed);
+    assert_eq!(transition.server, fixture.server);
+    assert_eq!(inventory(paths).unwrap(), saved);
+    assert_eq!(fixture.settings.inspect().recovery.len(), 1);
+    for path in [&paths.current, &paths.legacy] {
+        assert_eq!(
+            fs::read(backup_path(path, &fixture.original)).unwrap(),
+            fixture.original
+        );
+        let mut expected: serde_json::Value = serde_json::from_slice(&fixture.original).unwrap();
+        expected["mcp_server_path"] = serde_json::json!(fixture.server);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
+            expected
+        );
+    }
+    fixture.assert_other_files_unchanged();
+}
+
+#[test]
+fn server_review_empty_missing_or_blank_server_settings_do_not_require_replacement() {
+    for layout in ["none", "current", "legacy", "both", "blank"] {
+        let fixture = Fixture::new();
+        let paths = &fixture.paths;
+        let mut original = after();
+        if layout == "blank" {
+            let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            value["mcp_server_path"] = "".into();
+            original = serde_json::to_vec_pretty(&value).unwrap();
+        }
+        if matches!(layout, "current" | "both" | "blank") {
+            fs::write(&paths.current, &original).unwrap();
+        }
+        if matches!(layout, "legacy" | "both" | "blank") {
+            fs::write(&paths.legacy, &original).unwrap();
+        }
+        let before = inventory(paths).unwrap();
+        let server = fixture.root.path().join("verified/server.mjs");
+        let review = server_review(paths, &before, &server, |_| panic!("No old server")).unwrap();
+        assert!(!review.requires_replacement);
+        assert_eq!(
+            review.writes.len(),
+            match layout {
+                "none" => 0,
+                "current" | "legacy" => 1,
+                _ => 2,
+            }
+        );
+        assert_eq!(inventory(paths).unwrap(), before);
+        assert!(!paths.journal.exists());
+        let transition = finish_server_review(paths, &before, &server, &review, true, |_| {
+            panic!("No old server")
+        })
+        .unwrap();
+        assert_eq!(transition.changed, layout != "none");
+        assert_eq!(transition.server, server);
+        for (path, bytes) in [
+            (&paths.current, &before.current),
+            (&paths.legacy, &before.legacy),
+        ] {
+            if let Some(bytes) = bytes {
+                let mut expected: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                expected["mcp_server_path"] = serde_json::json!(server);
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
+                    expected
+                );
+                assert_eq!(fs::read(backup_path(path, bytes)).unwrap(), *bytes);
+            } else {
+                assert!(!path.exists());
+            }
+        }
+        assert_eq!(
+            fixture.inspect().recovery.len(),
+            usize::from(layout != "none")
+        );
+        if layout == "none" {
+            assert!(!paths.journal.exists());
+        }
+    }
+}
+
+#[test]
+fn server_review_conflicting_stores_are_not_downgraded_to_replacement_consent() {
+    let fixture = ServerReviewFixture::new();
+    let paths = &fixture.settings.paths;
+    fs::write(&paths.current, after()).unwrap();
+    let before = inventory(paths).unwrap();
+    assert!(server_review(paths, &before, &fixture.server, |_| {
+        panic!("Conflicting settings must refuse before server recognition")
+    })
+    .is_err());
+    assert_eq!(inventory(paths).unwrap(), before);
+    fixture.assert_no_review_artifacts();
+}
+
 const PREVIOUS_UNIX_FIXTURE: &[u8] = b"disposable pinned previous release server; never executed";
 
 fn unix_fixture_servers(fixture: &Fixture) -> (PathBuf, UnixPreviousServers) {

@@ -197,10 +197,94 @@ pub(super) struct ServerTransition {
     pub server: PathBuf,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct ServerWrite {
     path: PathBuf,
     before: Vec<u8>,
     after: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ServerReview {
+    writes: Vec<ServerWrite>,
+    requires_replacement: bool,
+}
+
+fn server_review(
+    paths: &Paths,
+    saved: &Snapshot,
+    server: &Path,
+    recognized: impl Fn(&Path) -> Result<bool, String>,
+) -> Result<ServerReview, String> {
+    let requires_replacement = std::cell::Cell::new(false);
+    // This stages a reviewed replacement, not trust in or execution of the old
+    // server. Publication still requires the explicit native decision below.
+    let writes = server_writes(paths, saved, server, |path| {
+        if !recognized(path).unwrap_or(false) {
+            requires_replacement.set(true);
+        }
+        Ok(true)
+    })?;
+    Ok(ServerReview {
+        writes,
+        requires_replacement: requires_replacement.get(),
+    })
+}
+
+fn finish_server_review(
+    paths: &Paths,
+    before: &Snapshot,
+    server: &Path,
+    review: &ServerReview,
+    approved: bool,
+    recognized: impl Fn(&Path) -> Result<bool, String>,
+) -> Result<ServerTransition, String> {
+    if !approved {
+        return Err("Server-path migration was cancelled; settings and old apps were kept.".into());
+    }
+    if inventory(paths)? != *before {
+        return Err("MCP settings changed during review; nothing was overwritten.".into());
+    }
+    if server_review(paths, before, server, recognized)? != *review {
+        return Err("The previous MCP server changed during review. Review it again; settings and old apps were kept.".into());
+    }
+    if review.writes.is_empty() {
+        return Ok(ServerTransition {
+            changed: false,
+            server: server.to_path_buf(),
+        });
+    }
+    preserve(paths, before)?;
+    let transaction = recovery::Transaction::prepare(
+        &paths.journal,
+        review
+            .writes
+            .iter()
+            .map(|write| {
+                recovery::ReviewedWrite::new(
+                    "MCP retained server path",
+                    &write.path,
+                    &write.before,
+                    &write.after,
+                )
+            })
+            .collect(),
+    )?;
+    if !transaction.resume(|_| true)?.completed {
+        return Err("Server-path migration needs recovery review. Old apps were kept.".into());
+    }
+    for write in &review.writes {
+        if storage::read_bytes(&write.path)?.as_deref() != Some(write.after.as_slice()) {
+            return Err(
+                "MCP settings changed after publication; inspect the retained recovery records."
+                    .into(),
+            );
+        }
+    }
+    Ok(ServerTransition {
+        changed: true,
+        server: server.to_path_buf(),
+    })
 }
 
 fn server_writes(
@@ -425,55 +509,33 @@ pub(super) fn native_review_server(app: &tauri::AppHandle) -> Result<ServerTrans
     let recognized = |path: &Path| previous.recognizes(path);
     #[cfg(not(unix))]
     let recognized = official_previous_server;
-    let writes = server_writes(&paths, &before, &runtime.server, recognized)?;
-    if writes.is_empty() {
+    let review = server_review(&paths, &before, &runtime.server, recognized)?;
+    if review.writes.is_empty() {
         return Ok(ServerTransition {
             changed: false,
             server: runtime.server,
         });
     }
+    let (question, action) = if review.requires_replacement {
+        ("The saved MCP server could not be verified as a supported previous build. Use the verified MCP runtime included with Hub instead?\n\nThis does not trust or run the old server. Existing AI-client entries are reviewed separately.", "Use Hub runtime")
+    } else {
+        (
+            "Move the saved MCP server path to Hub's verified retained runtime?",
+            "Move server path",
+        )
+    };
     let approved = app.dialog().message(format!(
-        "Move the saved MCP server path to Hub's verified retained runtime?\n\nNew server: {}\n\nOnly this path changes. Project selection, options and unknown settings are preserved. Exact local backups and recovery records are kept. Old apps and AI clients are not stopped or removed by this step.", runtime.server.display()
+        "{question}\n\nNew server: {}\n\nOnly this path changes. Project selection, options and unknown settings are preserved. Exact local backups and recovery records are kept. Old apps and AI clients are not stopped or removed by this step.", runtime.server.display()
     )).title("Keep MCP settings working in Hub").kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::OkCancelCustom("Move server path".into(), "Keep existing".into())).blocking_show();
-    if !approved {
-        return Err("Server-path migration was cancelled; settings and old apps were kept.".into());
-    }
-    if inventory(&paths)? != before {
-        return Err("MCP settings changed during review; nothing was overwritten.".into());
-    }
-    // Revalidate the exact old payload after the user has reviewed the change.
-    let _ = server_writes(&paths, &before, &runtime.server, recognized)?;
-    preserve(&paths, &before)?;
-    let transaction = recovery::Transaction::prepare(
-        &paths.journal,
-        writes
-            .iter()
-            .map(|write| {
-                recovery::ReviewedWrite::new(
-                    "MCP retained server path",
-                    &write.path,
-                    &write.before,
-                    &write.after,
-                )
-            })
-            .collect(),
-    )?;
-    if !transaction.resume(|_| true)?.completed {
-        return Err("Server-path migration needs recovery review. Old apps were kept.".into());
-    }
-    for write in &writes {
-        if storage::read_bytes(&write.path)?.as_deref() != Some(write.after.as_slice()) {
-            return Err(
-                "MCP settings changed after publication; inspect the retained recovery records."
-                    .into(),
-            );
-        }
-    }
-    Ok(ServerTransition {
-        changed: true,
-        server: runtime.server,
-    })
+        .buttons(MessageDialogButtons::OkCancelCustom(action.into(), "Keep existing".into())).blocking_show();
+    finish_server_review(
+        &paths,
+        &before,
+        &runtime.server,
+        &review,
+        approved,
+        recognized,
+    )
 }
 
 // Only the owned form's load_config handler may renew this UI before-image.

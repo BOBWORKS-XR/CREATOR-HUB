@@ -70,6 +70,14 @@ Existing update preferences remain under Update settings; legacy builds retain
 their Apps/Projects navigation. This frontend change requires a new local Root
 candidate; it does not change frozen runtime payloads or published release bytes.
 
+Server-path recovery is a separate native decision. An unrecognized saved MCP
+server is not automatically trusted or run. The user may explicitly choose the
+already verified Hub runtime instead; only `mcp_server_path` changes, with exact
+backups and a recoverable transaction. Cancelling keeps both settings stores.
+Project selection, preferences, unknown fields and AI-client entries are not
+changed by this step. Snapshot and recognition changes during review require a
+new review. Client migration and standalone retirement retain their own gates.
+
 Setup retains its existing creation, installation and repair handlers. MCP uses
 an explicit, thread-bound integration scope, retained writer locks, exact
 before-images and operation/recovery journals. Its service-only settings review
