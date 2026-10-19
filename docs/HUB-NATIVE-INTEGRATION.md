@@ -7,7 +7,8 @@ with normal pages in the main Hub interface. Packaging their existing app
 interfaces inside Hub is not the requested completed integration.
 
 Hold additional Linux/Flatpak packaging and publication of the hosted-app design.
-Keep the published and installed Windows version unchanged. macOS remains
+Keep the published Windows version unchanged; explicitly requested local test
+installations remain separate from release acceptance. macOS remains
 suspended. Preserve existing test artifacts and evidence; do not rebuild old
 candidates to change their description.
 
@@ -32,8 +33,8 @@ decision is not a claim of Flathub eligibility or completed Flatpak support.
   ownership checks, journals and stable MCP routing are implementation contracts
   to preserve, not data to reset during the UI change.
 - **Unknown / not accepted:** actual signed Linux installation and automatic
-  restart, complete migration, production Flatpak host operation and direct Hub
-  page operation. Prior component/authentication tests cover their named
+  restart, complete migration and production Flatpak host operation. Windows
+  direct-page read-only evidence is scoped below. Prior component/authentication tests cover their named
   mechanisms only; they do not establish these outcomes.
 
 ## Direct Implementation Checkpoint (2026-10-18)
@@ -43,7 +44,7 @@ as internal Rust libraries. `src-tauri/src/features.rs` dispatches a finite,
 bounded command set on blocking workers; no module GUI or module webview is
 started. `src/features/` contains scoped pages under the existing Hub shell.
 Legacy app-opening commands refuse in this mode, including development builds
-without a bundled descriptor. Existing Windows builds do not enable the feature.
+without a bundled descriptor. Published Windows builds do not enable the feature.
 
 2026-10-19 Windows local continuation: direct-feature compilation,407 Root
 native tests,287 MCP internal-service tests and102 browser tests pass on Windows.
@@ -54,6 +55,20 @@ internal service to the already verified frozen runtime payload; existing
 launcher resources remain for descriptor compatibility but are not executed by
 direct page navigation. Installed native page/process/preservation checks remain
 required before describing this as an accepted Windows integrated build.
+
+The exact installer-extracted Windows candidate at source `98dd708` passed
+read-only native page checks in
+`artifacts/local-direct-features-20261019/native-run-1792407453032/native-readonly-receipt.json`.
+MCP and Setup returned Ready in the single main document, with only WebView2
+child processes, no module GUI launch, unchanged settings and a normal close.
+The operation journal appended only its expected successful read records.
+This is not signed update/restart, complete migration or live-client acceptance.
+
+Direct-feature Hub now uses Projects as its home, with one Hub updater above
+the project list. MCP and Setup are menu tools, not separately updated app rows.
+Existing update preferences remain under Update settings; legacy builds retain
+their Apps/Projects navigation. This frontend change requires a new local Root
+candidate; it does not change frozen runtime payloads or published release bytes.
 
 Setup retains its existing creation, installation and repair handlers. MCP uses
 an explicit, thread-bound integration scope, retained writer locks, exact

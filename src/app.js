@@ -32,7 +32,27 @@
   const invoke = (command, args) => window.CreatorHubNative.invoke(command, args);
   const directFeatures = window.CreatorHubNative.integratedFeatures === true;
   let directReady = false;
-  if (directFeatures) byId('restore-hosted-views').closest('label').lastChild.textContent = ' Return to last tool after updating';
+  if (directFeatures) {
+    current = 'projects';
+    document.body.classList.add('integrated-home');
+    byId('restore-hosted-views').closest('label').lastChild.textContent = ' Return to last tool after updating';
+    menu.querySelector('[data-view="hub"] small').textContent = 'Projects';
+    menu.setAttribute('aria-label', 'Creator tools');
+    trigger.title = 'Creator tools';
+    const updater = document.querySelector('.hub-update');
+    updater.querySelector('.page-heading').insertBefore(byId('check-updates'), byId('hub-update-button'));
+    byId('update-settings').append(document.querySelector('#view-hub > .update-preferences'));
+    byId('unified-home-updater').prepend(updater);
+    byId('unified-home-updater').append(byId('preferences-status'));
+    byId('view-hub').classList.add('hidden');
+    byId('view-projects').classList.remove('hidden');
+    byId('view-projects').setAttribute('aria-labelledby', 'projects-home-title');
+    byId('projects-home-title').hidden = false;
+    byId('unified-home-updater').classList.remove('hidden');
+    byId('hub-tab-apps').classList.add('hidden');
+    byId('hub-tab-projects').classList.add('hidden');
+    document.querySelector('#hub-pages .project-actions').classList.remove('hidden');
+  }
   const platformLabel = () => {
     const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent;
     if (/mac/i.test(platform)) return 'macOS';
@@ -85,17 +105,19 @@
     menu.inert = true;
     menu.setAttribute('aria-hidden', 'true');
     trigger.setAttribute('aria-expanded', 'false');
-    trigger.setAttribute('aria-label', 'Open Creator apps');
+    trigger.setAttribute('aria-label', directFeatures ? 'Open Creator tools' : 'Open Creator apps');
   }
   function show(view, preserveError = false) {
     if (!['hub', 'plugins', 'projects'].includes(view) && !Object.hasOwn(tools, view)) return;
+    if (directFeatures && view === 'hub') view = 'projects';
     current = view;
     close();
     if (!preserveError) error.classList.add('hidden');
     document.querySelector('#view-hub').classList.toggle('hidden', view !== 'hub');
     byId('hub-pages').classList.toggle('hidden', !['hub', 'projects'].includes(view));
     byId('view-projects').classList.toggle('hidden', view !== 'projects');
-    byId('check-updates').classList.toggle('hidden', view !== 'hub');
+    byId('unified-home-updater').classList.toggle('hidden', !directFeatures || view !== 'projects');
+    byId('check-updates').classList.toggle('hidden', view !== 'hub' && !(directFeatures && view === 'projects'));
     document.querySelector('#hub-pages .project-actions').classList.toggle('hidden', view !== 'projects');
     for (const item of byId('hub-pages').querySelectorAll('[data-view]')) {
       item.classList.toggle('current', item.dataset.view === view);
@@ -182,7 +204,7 @@
     menu.inert = false;
     menu.setAttribute('aria-hidden', 'false');
     trigger.setAttribute('aria-expanded', 'true');
-    trigger.setAttribute('aria-label', 'Close Creator apps');
+    trigger.setAttribute('aria-label', directFeatures ? 'Close Creator tools' : 'Close Creator apps');
     menu.querySelector(`[data-view="${current === 'projects' ? 'hub' : current}"]`).focus({ preventScroll: true });
   });
   document.addEventListener('keydown', event => {
@@ -459,7 +481,7 @@
     busy = true; renderState();
     byId('catalog-status').textContent = check ? 'Checking verified releases...' : 'Checking installed apps...';
     try {
-      const result = await invoke('app_inventory', { check, preview: byId('preview-channel').checked });
+      const result = await invoke('app_inventory', { check: check && !directFeatures, preview: byId('preview-channel').checked });
       acceptInventory(result);
       byId('catalog-status').textContent = !inventory.supported ? `App management is not supported on ${platformLabel()} in this build.`
         : inventory.apps.some(app => app.checkWarning) ? 'Some update checks failed. Last verified releases remain available.'
@@ -665,6 +687,7 @@
     });
   }
   async function start() {
+    if (directFeatures) show(current);
     function applyLaunch(request) {
       if (!request || !['hub', 'mcp', 'setup'].includes(request.view) || !Number.isSafeInteger(request.revision) || request.revision <= launchRevision) return;
       launchRevision = request.revision;

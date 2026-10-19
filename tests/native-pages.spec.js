@@ -1,5 +1,4 @@
 const { test, expect } = require('@playwright/test');
-const path = require('node:path');
 const { helpOcclusion } = require('./help-layout.cjs');
 
 // Controller cases isolate feature calls; shell cases also run actual app.js routing.
@@ -138,13 +137,17 @@ async function open(page, options = {}) {
 const field = (page, feature, name) => page.locator(`#feature-${feature} [data-field="${name}"]`);
 const commands = (page, name) => page.evaluate(name => calls.filter(call => call.command === 'feature_call' && call.args.command === name), name);
 const show = (page, feature, load = true) => page.evaluate(({ feature, load }) => CreatorFeaturePages.show(feature, { load }), { feature, load });
+async function selectSuiteView(page, view) {
+  await page.locator('#suite-trigger').click();
+  await page.locator(`#suite-menu [data-view="${view}"]`).click();
+}
 
 test('actual Root navigation opens Setup and MCP as pages without hosted startup or frame authority', async ({ page }) => {
   await open(page, { shell: true });
   await expect(page.locator('#catalog-status')).toContainText('Update check complete');
-  await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
+  await selectSuiteView(page, 'setup');
   await expect(field(page, 'setup', 'create')).toBeEnabled();
-  await page.locator('#suite-trigger').click(); await page.locator('#suite-menu [data-view="mcp"]').click();
+  await selectSuiteView(page, 'mcp');
   await expect(field(page, 'mcp', 'setup')).toBeEnabled();
   expect(await page.locator('iframe').count()).toBe(0);
   expect(await page.evaluate(() => calls.filter(call => ['start_hosted_app', 'hosted_app_call', 'stop_hosted_app'].includes(call.command)))).toEqual([]);
@@ -388,7 +391,7 @@ test('first-run guide has no connection writes; saving skip failure remains reco
 test('Unity CLI documentation uses only the fixed Hub resource key, not an MCP or shell opener', async ({ page }) => {
   await open(page, { shell: true });
   await expect(page.locator('#catalog-status')).toContainText('Update check complete');
-  await page.getByRole('button', { name: 'View Creator Works MCP', exact: true }).click();
+  await selectSuiteView(page, 'mcp');
   await expect(field(page, 'mcp', 'setup')).toBeEnabled();
   await page.getByText('Optional Unity CLI', { exact: true }).click();
   await field(page, 'mcp', 'cli-docs').click();
@@ -920,10 +923,10 @@ for (const width of [1280, 390, 320]) test(`actual Root feature layouts have no 
   const height = 780;
   await page.setViewportSize({ width, height }); await open(page, { shell: true });
   await expect(page.locator('#catalog-status')).toContainText('Update check complete');
-  await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
+  await selectSuiteView(page, 'setup');
   await expect(field(page, 'setup', 'create')).toBeEnabled();
   const capture = async (name, fullPage = true) => {
-    const screenshot = path.resolve(__dirname, '../artifacts/direct-feature-pages', `${width}-${name}.png`);
+    const screenshot = testInfo.outputPath(`${width}-${name}.png`);
     await page.screenshot({ path: screenshot, fullPage });
     await testInfo.attach(name, { path: screenshot, contentType: 'image/png' });
   };
@@ -958,7 +961,7 @@ for (const width of [1280, 390, 320]) test(`actual Root feature layouts have no 
   await checkHelp('setup');
   await field(page, 'setup', 'existing-tab').click();
   await checkPage('setup'); await capture('setup-existing');
-  await page.locator('#suite-trigger').click(); await page.locator('#suite-menu [data-view="mcp"]').click();
+  await selectSuiteView(page, 'mcp');
   await expect(field(page, 'mcp', 'setup')).toBeEnabled();
   await checkPage('mcp'); await capture('mcp');
   await checkHelp('mcp');
