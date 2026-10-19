@@ -256,6 +256,7 @@ pub(crate) fn check(handle: &tauri::AppHandle, online: bool) -> Result<self_upda
             .clone()
             .or_else(|| release.as_ref().and_then(|r| r.installable().err())),
         warning,
+        preview_supported: Some(false),
     };
     runtime.release = release;
     Ok(result)

@@ -53,6 +53,8 @@ pub struct State {
     pub(super) downloaded: bool,
     pub(super) install_blocked: Option<String>,
     pub(super) warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) preview_supported: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -315,6 +317,7 @@ fn check(handle: &tauri::AppHandle, online: bool, preview: bool) -> Result<State
                 .or_else(|| installed_location(handle).err())
         }),
         warning,
+        preview_supported: None,
     };
     *handle
         .state::<SelfUpdate>()
@@ -526,6 +529,28 @@ pub async fn install_hub_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stable_only_capability_is_explicit_without_changing_native_update_payloads() {
+        let mut state = State {
+            current_version: "0.1.16",
+            available_version: None,
+            downloaded: false,
+            install_blocked: None,
+            warning: None,
+            preview_supported: None,
+        };
+        let original = serde_json::to_value(&state).unwrap();
+        assert_eq!(original.as_object().unwrap().len(), 5);
+        assert!(original.get("previewSupported").is_none());
+        state.preview_supported = Some(false);
+        let portable = serde_json::to_value(&state).unwrap();
+        assert_eq!(portable["previewSupported"], false);
+        assert_eq!(portable.as_object().unwrap().len(), 6);
+        for (name, value) in original.as_object().unwrap() {
+            assert_eq!(&portable[name], value);
+        }
+    }
+
     #[test]
     fn update_confirmation_respects_reopen_preference_and_names_each_view() {
         let views = catalog::AppId::ALL.map(|app| crate::hosted_restore::View {

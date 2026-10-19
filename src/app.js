@@ -25,6 +25,7 @@
   let inventory = null;
   let inventoryError = '';
   let hubUpdate = null;
+  let previewSupported = true;
   let retainedUpdate = null;
   let busy = false;
   let launchRevision = -1;
@@ -316,7 +317,9 @@
       menuDownload.title = state?.installed ? `Download latest ${tools[id].title} update` : `Download latest ${tools[id].title}`;
       menuDownload.setAttribute('aria-label', menuDownload.title);
     }
-    for (const [id] of preferenceControls) byId(id).disabled = !preferencesReady || preferencesSaving || (id === 'preview-channel' && busy);
+    byId('preview-channel-option').classList.toggle('hidden', previewSupported !== true);
+    byId('preview-channel-stable').classList.toggle('hidden', previewSupported !== false);
+    for (const [id] of preferenceControls) byId(id).disabled = !preferencesReady || preferencesSaving || (id === 'preview-channel' && (busy || previewSupported !== true));
     byId('hub-update-button').disabled = busy || featureBusy || preferencesSaving || !hubUpdate?.availableVersion || Boolean(hubUpdate?.installBlocked);
     byId('hub-update-status').textContent = !hubUpdate ? 'Hub update check is unavailable. Try Check for updates.'
       : hubUpdate.availableVersion ? `Version ${hubUpdate.availableVersion}${hubUpdate.downloaded ? ' is ready to install.' : ' is available.'}`
@@ -497,8 +500,10 @@
     // A broken companion scan must not hide a Hub update that can repair it.
     try {
       const result = await invoke('hub_update_status', { online: check, preview: byId('preview-channel').checked });
-      if (!result || typeof result.currentVersion !== 'string') throw 'Hub update response is unavailable.';
+      if (!result || typeof result.currentVersion !== 'string'
+        || (result.previewSupported !== undefined && typeof result.previewSupported !== 'boolean')) throw 'Hub update response is unavailable.';
       hubUpdate = result;
+      previewSupported = result.previewSupported !== false;
       hubChecked = true;
     } catch (reason) { hubUpdate = { warning: String(reason) }; }
     finally {
@@ -713,6 +718,7 @@
   });
   for (const [id, key] of preferenceControls) {
     byId(id).addEventListener('change', async () => {
+      if (id === 'preview-channel' && previewSupported !== true) return;
       if (nativePreferences) {
         preferencesSaving += 1; renderState();
         try {

@@ -3,9 +3,11 @@
 // run_install tests; this browser fixture does not claim native installation.
 const { test, expect } = require('@playwright/test');
 
-async function load(page, { recovery = false } = {}) {
+async function load(page, { recovery = false, preview = false, previewSupported, platform = 'Linux x86_64', updateError = null } = {}) {
   const state = { calls: [], errors: [], update: { currentVersion: '0.1.16', availableVersion: '0.1.17',
-    downloaded: false, installBlocked: null, warning: null }, recovery: { retained: false, message: null } };
+    downloaded: false, installBlocked: null, warning: null }, recovery: { retained: false, message: null },
+    preferences: { preview, autoDownload: false, restoreHostedViews: true }, updateError };
+  if (previewSupported !== undefined) state.update.previewSupported = previewSupported;
   page.on('pageerror', error => state.errors.push(error.message));
   await page.exposeFunction('portableUpdateNativeFixture', async (command, args) => {
     state.calls.push({ command, args });
@@ -16,13 +18,17 @@ async function load(page, { recovery = false } = {}) {
       case 'convergence_status':
         if (state.recovery.retained) throw Error('Another Hub operation is already running.');
         return { enabled: false, required: false, stage: 'review', settings: [], backups: [], legacyApps: [], message: '' };
-      case 'hub_preferences_status': return { preview: false, autoDownload: false, restoreHostedViews: true };
+      case 'hub_preferences_status': return state.preferences;
+      case 'set_hub_preference':
+        state.preferences[{ preview: 'preview', 'auto-download': 'autoDownload', 'restore-hosted-views': 'restoreHostedViews' }[args.key]] = args.value;
+        return null;
       case 'app_inventory':
         if (state.recovery.retained) throw Error('Another Hub operation is already running.');
         return { supported: true, apps: [] };
       case 'project_inventory': return { projects: [], warnings: [] };
       case 'hub_update_status':
         if (state.recovery.retained) throw Error('Another Hub operation is already running.');
+        if (state.updateError) throw Error(state.updateError);
         return state.update;
       case 'hub_update_recovery_status': return state.recovery;
       case 'review_retained_hub_update': return new Promise((resolve, reject) => {
@@ -38,8 +44,10 @@ async function load(page, { recovery = false } = {}) {
       default: throw Error(`Unexpected fixture command: ${command}`);
     }
   });
-  await page.addInitScript(({ recovery }) => {
+  await page.addInitScript(({ recovery, preview, platform }) => {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
+    if (localStorage.getItem('creator-hub.preview') === null) localStorage.setItem('creator-hub.preview', String(preview));
+    Object.defineProperty(navigator, 'platform', { value: platform });
     window.__CREATOR_HUB_FEATURE_PROTOCOL__ = 1;
     window.__CREATOR_HUB_PREFERENCES_PROTOCOL__ = 1;
     if (recovery) {
@@ -51,11 +59,16 @@ async function load(page, { recovery = false } = {}) {
       core: { invoke: (command, args) => window.portableUpdateNativeFixture(command, args) },
       event: { listen: async (name, handler) => { window.events[name] = handler; return () => {}; } },
     };
-  }, { recovery });
+  }, { recovery, preview, platform });
   await page.goto('http://127.0.0.1:4188');
-  await expect(page.locator('#hub-update-button')).toBeEnabled();
   await expect(page.locator('#check-updates')).toBeEnabled();
-  await expect(page.locator('#hub-update-status')).toHaveText('Version 0.1.17 is available.');
+  if (updateError) {
+    await expect(page.locator('#hub-update-warning')).toContainText(updateError);
+    await expect(page.locator('#hub-update-button')).toBeDisabled();
+  } else {
+    await expect(page.locator('#hub-update-button')).toBeEnabled();
+    await expect(page.locator('#hub-update-status')).toHaveText('Version 0.1.17 is available.');
+  }
   await expect(page.locator('#auto-download')).not.toBeChecked();
   expect(state.calls.some(c => c.command === 'download_hub_update')).toBe(false);
   expect(state.errors).toEqual([]);
@@ -202,3 +215,131 @@ test('verification refusal stays an error; staged handoff never changes the disp
   expect(state.calls.filter(c => c.command === 'install_hub_update')).toHaveLength(2);
   expect(state.errors).toEqual([]);
 });
+
+test('portable stable channel preserves a saved preview preference across status checks and renderer reload', async ({ page }) => {
+  const state = await load(page, { preview: true, previewSupported: false });
+  await page.locator('#update-settings > summary').click();
+  await expect(page.locator('#preview-channel-option')).toBeHidden();
+  await expect(page.locator('#preview-channel-stable')).toHaveText('Stable channel (portable Hub)');
+  await expect(page.locator('#preview-channel-stable')).toBeVisible();
+  await expect(page.locator('#preview-channel')).toBeChecked();
+  await expect(page.locator('#preview-channel')).toBeDisabled();
+  await page.locator('#preview-channel').dispatchEvent('change');
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#check-updates')).toBeEnabled();
+  const beforeReload = state.calls.length;
+  await page.reload();
+  await expect(page.locator('#check-updates')).toBeEnabled();
+  await page.locator('#update-settings > summary').click();
+  await expect(page.locator('#preview-channel-stable')).toBeVisible();
+  await expect(page.locator('#preview-channel-option')).toBeHidden();
+  await expect(page.locator('#preview-channel')).toBeChecked();
+  expect(state.calls.slice(beforeReload).some(c => c.command === 'hub_update_status')).toBe(true);
+  expect(state.calls.filter(c => c.command === 'hub_update_status').every(c => c.args.preview === true)).toBe(true);
+  expect(state.calls.some(c => c.command === 'set_hub_preference')).toBe(false);
+  expect(state.preferences.preview).toBe(true);
+  expect(await page.evaluate(() => localStorage.getItem('creator-hub.preview'))).toBe('true');
+  expect(state.errors).toEqual([]);
+});
+
+for (const [runtime, platform] of [['Windows', 'Win32'], ['native DEB', 'Linux x86_64']]) {
+  test(`${runtime}: omitted preview capability keeps the existing prerelease control and explicit preference saving`, async ({ page }) => {
+    const state = await load(page, { preview: true, platform });
+    await page.locator('#update-settings > summary').click();
+    await expect(page.locator('#preview-channel-option')).toBeVisible();
+    await expect(page.locator('#preview-channel-stable')).toBeHidden();
+    await expect(page.locator('#preview-channel')).toBeChecked();
+    await expect(page.locator('#preview-channel')).toBeEnabled();
+    expect(state.calls.some(c => c.command === 'set_hub_preference')).toBe(false);
+    await page.locator('#preview-channel').uncheck();
+    await expect(page.locator('#check-updates')).toBeEnabled();
+    expect(state.calls.filter(c => c.command === 'set_hub_preference')).toEqual([
+      { command: 'set_hub_preference', args: { key: 'preview', value: false } },
+    ]);
+    expect(state.preferences.preview).toBe(false);
+    expect(state.calls.filter(c => c.command === 'hub_update_status').at(-1).args.preview).toBe(false);
+    expect(state.errors).toEqual([]);
+  });
+}
+
+test('refresh errors and invalid responses retain the last channel capability until a valid status replaces it', async ({ page }) => {
+  const state = await load(page, { preview: true, previewSupported: false });
+  await page.locator('#update-settings > summary').click();
+  state.updateError = 'Update check unavailable';
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#hub-update-warning')).toContainText(state.updateError);
+  await expect(page.locator('#preview-channel-stable')).toBeVisible();
+  await expect(page.locator('#preview-channel-option')).toBeHidden();
+  state.updateError = null;
+  state.update.previewSupported = 'false';
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#hub-update-warning')).toContainText('Hub update response is unavailable.');
+  await expect(page.locator('#preview-channel-stable')).toBeVisible();
+  await expect(page.locator('#preview-channel')).toBeDisabled();
+  const validUpdate = state.update;
+  state.update = { previewSupported: true };
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#check-updates')).toBeEnabled();
+  await expect(page.locator('#preview-channel-stable')).toBeVisible();
+  state.update = validUpdate;
+  delete state.update.previewSupported;
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#preview-channel-option')).toBeVisible();
+  await expect(page.locator('#preview-channel-stable')).toBeHidden();
+  await expect(page.locator('#preview-channel')).toBeChecked();
+  await expect(page.locator('#preview-channel')).toBeEnabled();
+  expect(state.calls.some(c => c.command === 'set_hub_preference')).toBe(false);
+  expect(state.preferences.preview).toBe(true);
+  expect(state.errors).toEqual([]);
+});
+
+for (const [runtime, platform] of [['Windows', 'Win32'], ['native DEB', 'Linux x86_64']]) {
+  test(`${runtime}: initial update failures without a portable capability keep the existing channel control usable`, async ({ page }) => {
+    const state = await load(page, { preview: true, platform, updateError: 'Initial update check unavailable' });
+    await page.locator('#update-settings > summary').click();
+    await expect(page.locator('#preview-channel-option')).toBeVisible();
+    await expect(page.locator('#preview-channel-stable')).toBeHidden();
+    await expect(page.locator('#preview-channel')).toBeChecked();
+    await expect(page.locator('#preview-channel')).toBeEnabled();
+    expect(state.preferences.preview).toBe(true);
+    expect(await page.evaluate(() => localStorage.getItem('creator-hub.preview'))).toBe('true');
+    expect(state.calls.some(c => c.command === 'set_hub_preference')).toBe(false);
+    await page.locator('#preview-channel').uncheck();
+    await expect(page.locator('#check-updates')).toBeEnabled();
+    await expect(page.locator('#preview-channel')).toBeEnabled();
+    expect(state.calls.filter(c => c.command === 'set_hub_preference')).toEqual([
+      { command: 'set_hub_preference', args: { key: 'preview', value: false } },
+    ]);
+    expect(state.preferences.preview).toBe(false);
+    expect(state.calls.filter(c => c.command === 'hub_update_status').at(-1).args.preview).toBe(false);
+    await expect(page.locator('#hub-update-warning')).toContainText(state.updateError);
+    await expect(page.locator('#preview-channel-option')).toBeVisible();
+    await expect(page.locator('#preview-channel-stable')).toBeHidden();
+    expect(state.errors).toEqual([]);
+  });
+}
+
+for (const width of [360, 940]) {
+  test(`portable channel label fits the ${width}px viewport without changing saved preferences`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 740 });
+    const state = await load(page, { preview: true, previewSupported: false });
+    await page.locator('#update-settings > summary').click();
+    await expect(page.locator('#preview-channel-stable')).toBeVisible();
+    const bounds = await page.locator('#update-settings .update-preferences').evaluate(element => {
+      const visible = [...element.children].filter(child => !child.classList.contains('hidden'));
+      return visible.map(child => {
+        const rect = child.getBoundingClientRect();
+        return { left: rect.left, right: rect.right, width: rect.width, viewport: innerWidth };
+      });
+    });
+    expect(bounds).toHaveLength(3);
+    for (const rect of bounds) {
+      expect(rect.left).toBeGreaterThanOrEqual(0);
+      expect(rect.right).toBeLessThanOrEqual(rect.viewport);
+      expect(rect.width).toBeGreaterThan(0);
+    }
+    await expect(page.locator('#preview-channel')).toBeChecked();
+    expect(state.calls.some(c => c.command === 'set_hub_preference')).toBe(false);
+    expect(state.errors).toEqual([]);
+  });
+}
