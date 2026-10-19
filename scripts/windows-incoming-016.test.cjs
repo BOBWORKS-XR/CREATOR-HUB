@@ -159,6 +159,17 @@ test('native lifecycle parses in an available bounded PowerShell process', t => 
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
+test('seeded fresh migration offer must be explicitly deferred before page navigation', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-windows-016-fresh.cjs'), 'utf8');
+  const offered = source.indexOf("page.locator('#convergence-dialog').waitFor({ state: 'visible' })");
+  const deferred = source.indexOf("page.locator('#convergence-later').click()", offered);
+  const hidden = source.indexOf("page.locator('#convergence-dialog').waitFor({ state: 'hidden' })", deferred);
+  assert.ok(offered > 0 && offered < deferred && deferred < hidden && hidden < source.indexOf('direct.checkPages'));
+  assert.doesNotMatch(source, /convergence-dialog[^\n]*\|\|/);
+  assert.ok(source.indexOf('ownedPage = true') > source.indexOf('candidate.assertOwnedDebugging'));
+  assert.ok(source.includes("path.join(out, 'failure.png')"));
+});
+
 test('current finite target refuses the superseded development16 bytes', () => {
   assert.equal(incoming.TARGET.productSource, 'f9f0e1e5cb27b3ae5178c8aac16429e83ba34593');
   assert.equal(incoming.TARGET.bytes, 37980864);
