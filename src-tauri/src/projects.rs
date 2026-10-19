@@ -110,7 +110,7 @@ fn save(path: &Path, value: &Saved) -> Result<(), String> {
     Ok(())
 }
 
-fn key(path: &Path) -> String {
+pub(crate) fn key(path: &Path) -> String {
     let normalized: PathBuf = path.components().collect();
     let path = normalized.to_string_lossy();
     let value = if cfg!(windows) {

@@ -9,9 +9,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{fs, path::PathBuf, sync::Mutex};
 use tauri::Manager as _;
-use tauri_plugin_dialog::{
-    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
-};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 const POLICY: u32 = 1;
 
@@ -465,47 +463,99 @@ fn can_retain(plan: &Plan) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SettingsChoice {
-    Current,
-    Earlier,
+#[derive(Debug)]
+struct ProjectImport {
+    bytes: Vec<u8>,
+    added: usize,
+    already_present: usize,
 }
 
-fn settings_choice(result: MessageDialogResult) -> Result<SettingsChoice, String> {
-    match result {
-        MessageDialogResult::Custom(label) if label == "Use current settings" => {
-            Ok(SettingsChoice::Current)
-        }
-        MessageDialogResult::Custom(label) if label == "Use earlier settings" => {
-            Ok(SettingsChoice::Earlier)
-        }
-        _ => {
-            Err("Settings selection was cancelled. Both configurations were kept unchanged.".into())
+fn project_key(channel: &Value) -> Result<String, String> {
+    use std::path::{Component, Path};
+    let text = channel["unity_project_path"]
+        .as_str()
+        .ok_or("A saved project has no folder.")?;
+    let path = Path::new(text);
+    if !path.is_absolute()
+        || text.chars().any(char::is_control)
+        || path.components().any(|part| part == Component::ParentDir)
+    {
+        return Err(
+            "A saved project folder is ambiguous. Both configurations were kept for review.".into(),
+        );
+    }
+    // Match Hub's project inventory without requiring an offline drive to exist.
+    Ok(crate::projects::key(path))
+}
+
+fn merge_project_settings(current: &[u8], legacy: &[u8]) -> Result<ProjectImport, String> {
+    use std::collections::HashSet;
+    stores::validate(stores::Store::McpCurrent, current)?;
+    stores::validate(stores::Store::McpLegacy, legacy)?;
+    let mut result: Value =
+        serde_json::from_slice(current).map_err(|_| "Cannot read current MCP settings.")?;
+    let earlier: Value =
+        serde_json::from_slice(legacy).map_err(|_| "Cannot read earlier MCP settings.")?;
+    let channels = result["channels"]
+        .as_array_mut()
+        .ok_or("Cannot read current MCP projects.")?;
+    let mut paths = HashSet::new();
+    let mut ids = HashSet::new();
+    for channel in channels.iter() {
+        paths.insert(project_key(channel)?);
+        let id = channel["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or("A current project ID is missing.")?;
+        if !ids.insert(id.to_owned()) {
+            return Err(
+                "Current project IDs are duplicated. Both configurations were kept for review."
+                    .into(),
+            );
         }
     }
-}
-
-fn settings_summary(snapshot: &stores::Snapshot) -> Result<String, String> {
-    let value: Value = serde_json::from_slice(snapshot.bytes().ok_or("MCP settings are missing.")?)
-        .map_err(|_| "Cannot summarize MCP settings.")?;
-    let channels = value["channels"]
+    let mut added = 0;
+    let mut already_present = 0;
+    for channel in earlier["channels"]
         .as_array()
-        .ok_or("Cannot summarize MCP projects.")?;
-    let active = value["active_channel_id"].as_str();
-    let selected = channels
-        .iter()
-        .find(|channel| channel["id"].as_str() == active && active.is_some())
-        .and_then(|channel| channel["name"].as_str())
-        .unwrap_or("None");
-    let selected: String = selected
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(100)
-        .collect();
-    Ok(format!(
-        "{} saved projects; selected project: {selected}",
-        channels.len()
-    ))
+        .ok_or("Cannot read earlier MCP projects.")?
+    {
+        if !paths.insert(project_key(channel)?) {
+            already_present += 1;
+            continue;
+        }
+        if channels.len() >= 256 {
+            return Err("Import would exceed the 256-project limit. Both originals were kept; nothing was imported.".into());
+        }
+        let mut imported = channel.clone();
+        let id = imported["id"]
+            .as_str()
+            .ok_or("An earlier project ID is missing.")?
+            .to_owned();
+        if id.is_empty() || !ids.insert(id) {
+            loop {
+                let id = uuid::Uuid::new_v4().to_string();
+                if ids.insert(id.clone()) {
+                    imported["id"] = json!(id);
+                    break;
+                }
+            }
+        }
+        channels.push(imported);
+        added += 1;
+    }
+    // Avoid a formatting-only rewrite when every earlier project is already listed.
+    let bytes = if added == 0 {
+        current.to_vec()
+    } else {
+        serde_json::to_vec_pretty(&result).map_err(|_| "Cannot encode imported MCP projects.")?
+    };
+    stores::validate(stores::Store::McpCurrent, &bytes)?;
+    Ok(ProjectImport {
+        bytes,
+        added,
+        already_present,
+    })
 }
 
 fn check_settings_recovery(base: &stores::Roots) -> Result<PathBuf, String> {
@@ -536,7 +586,7 @@ fn check_settings_recovery(base: &stores::Roots) -> Result<PathBuf, String> {
         }
         count += 1;
         // The frozen MCP backend accepts 32 records. Reserve one record for
-        // this selection and one for the subsequent reviewed server transition.
+        // this import and one for the subsequent reviewed server transition.
         if count >= 31 {
             return Err(
                 "MCP settings recovery history is full for this migration. Existing settings were not replaced; retain and review the completed history before continuing."
@@ -546,23 +596,17 @@ fn check_settings_recovery(base: &stores::Roots) -> Result<PathBuf, String> {
         let status = crate::convergence_recovery::Transaction::open_allowlisted(&path, &allowed)?
             .inspect()?;
         if !status.completed && !status.historical_completed {
-            return Err(format!("An earlier MCP settings change needs recovery review at {}. Resolve it in MCP before choosing settings; both configurations were kept.", path.display()));
+            return Err(format!("An earlier MCP settings change needs recovery review at {}. Resolve it in MCP before importing projects; both configurations were kept.", path.display()));
         }
     }
     Ok(journal)
 }
 
-fn resolve_settings_choice(
-    plan: &mut Plan,
-    base: &stores::Roots,
-    choice: SettingsChoice,
-) -> Result<(), String> {
+fn import_missing_projects(plan: &mut Plan, base: &stores::Roots) -> Result<usize, String> {
     use crate::convergence_recovery::{ReviewedWrite, Transaction};
     can_prepare(plan)?;
     if !settings_conflict(plan) {
-        return Err(
-            "The settings conflict changed. Check again before choosing a configuration.".into(),
-        );
+        return Err("The settings changed. Check again before importing projects.".into());
     }
     for snapshot in &plan.stores {
         if snapshot.bytes().is_some()
@@ -571,48 +615,53 @@ fn resolve_settings_choice(
                 .iter()
                 .any(|backup| backup.verify(snapshot).is_ok())
         {
-            return Err("Both original configurations must have verified backups before selecting settings.".into());
+            return Err("Both original configurations must have verified backups before importing projects.".into());
         }
     }
-    let (source, target) = match choice {
-        SettingsChoice::Current => (0, 1),
-        SettingsChoice::Earlier => (1, 0),
-    };
-    let source_path = plan.stores[source].store().path(base)?;
-    // Keep the chosen source reserved while the other active store is updated.
-    // The shared writer separately checks and retains the displaced target.
-    let mut source_file = stores::storage::protected_options()
-        .open(&source_path)
-        .map_err(|_| "The chosen settings are busy. Nothing was changed.")?;
-    let chosen = stores::storage::read(&mut source_file)?;
-    if Some(chosen.as_slice()) != plan.stores[source].bytes() {
-        return Err(
-            "The chosen settings changed after review. Check again; nothing was replaced.".into(),
-        );
+    let import = merge_project_settings(
+        plan.stores[0].bytes().unwrap(),
+        plan.stores[1].bytes().unwrap(),
+    )?;
+    let mut writes = Vec::new();
+    let mut reservations = Vec::new();
+    for saved in &plan.stores[..2] {
+        let path = saved.store().path(base)?;
+        let before = saved.bytes().unwrap();
+        if before != import.bytes {
+            writes.push(ReviewedWrite::new(
+                "MCP missing-project import",
+                &path,
+                before,
+                &import.bytes,
+            ));
+        } else {
+            // A byte-identical current store is not rewritten. Reserve it while
+            // the other member is published; changed members use transaction guards.
+            let mut file = stores::storage::protected_options()
+                .open(&path)
+                .map_err(|_| "Current MCP settings are busy. Nothing was imported.")?;
+            if stores::storage::read(&mut file)? != before {
+                return Err(
+                    "MCP settings changed after review. Check again; nothing was imported.".into(),
+                );
+            }
+            reservations.push(file);
+        }
     }
-    let target_path = plan.stores[target].store().path(base)?;
     let journal = check_settings_recovery(base)?;
     plan.retry_allowed = false;
-    let transaction = Transaction::prepare(
-        &journal,
-        vec![ReviewedWrite::new(
-            "MCP settings selection",
-            &target_path,
-            plan.stores[target].bytes().unwrap(),
-            &chosen,
-        )],
-    )?;
+    let transaction = Transaction::prepare(&journal, writes)?;
     recheck(plan)?;
     let outcome = transaction.resume(|_| true)?;
     if !outcome.completed {
-        return Err(format!("Settings selection needs recovery review at {}. Both originals are backed up; no automatic retry was started.", outcome.journal.display()));
+        return Err(format!("Project import needs recovery review at {}. Both originals are backed up; no automatic retry was started.", outcome.journal.display()));
     }
     let mut renewed = Vec::new();
     for (index, previous) in plan.stores.iter().enumerate() {
         let fresh = stores::Snapshot::inspect(previous.store(), base)?;
         if index <= 1 {
-            if fresh.bytes() != Some(chosen.as_slice()) {
-                return Err("Settings changed during selection. Keep the backups and review recovery before continuing.".into());
+            if fresh.bytes() != Some(import.bytes.as_slice()) {
+                return Err("Settings changed during import. Keep the backups and review recovery before continuing.".into());
             }
         } else {
             previous.recheck()?;
@@ -624,7 +673,7 @@ fn resolve_settings_choice(
     }
     plan.stores = renewed;
     plan.retry_allowed = true;
-    Ok(())
+    Ok(import.added)
 }
 
 fn refresh_finished_outcome_journal(plan: &mut Plan, base: &stores::Roots) -> Result<(), String> {
@@ -775,19 +824,17 @@ pub async fn prepare_convergence(handle: tauri::AppHandle) -> Result<Report, Str
             return Ok(plan.report.clone());
         }
         can_prepare(plan)?;
-        let choice = if settings_conflict(plan) {
-            let message = format!(
-                "Two different MCP configurations were found. Choose which settings Hub should use.\n\nCurrent Creator Works: {}\nEarlier Banter MCP: {}\n\nHub will first keep exact backups of BOTH originals, then apply the chosen configuration to both active MCP settings files so the old conflict cannot recur. Projects, scenes and AI-client settings are not changed here. These configurations are not merged; projects unique to the other configuration remain in its backup.\n\nCancel keeps both active files unchanged.",
-                settings_summary(&plan.stores[0])?, settings_summary(&plan.stores[1])?
-            );
-            Some(settings_choice(handle.dialog().message(message)
-                .title("Choose MCP settings for Hub").kind(MessageDialogKind::Warning)
-                .buttons(MessageDialogButtons::YesNoCancelCustom("Use current settings".into(), "Use earlier settings".into(), "Cancel".into()))
-                .blocking_show_with_result())?)
+        let import = if settings_conflict(plan) {
+            Some(merge_project_settings(plan.stores[0].bytes().unwrap(), plan.stores[1].bytes().unwrap())?)
         } else { None };
-        let approved = handle.dialog().message(
-            "Let Creator Hub use your existing MCP and Project Setup settings?\n\nHub will ask verified idle standalone app windows to close normally, then keep exact local backups. Busy or unverified apps are not force-closed. AI clients, Unity and Node connections stay open.\n\nSettings remain in their current locations; Unity projects are not moved or edited. Existing AI connections are reviewed separately before changing them. No standalone installation is removed by this step. Cancel leaves the current setup unchanged."
-        ).title("Move to unified Creator Hub").kind(MessageDialogKind::Info)
+        let import_message = import.as_ref().map(|proposal| format!(
+            "\n\nMissing projects to import: {}. Earlier entries already listed: {}. Projects are matched by folder and will not be duplicated. Current preferences, selected project and existing project entries are kept. Both original configurations are backed up first, then both active settings files receive the combined project list with current preferences. Older preferences remain in their backup.",
+            proposal.added, proposal.already_present
+        )).unwrap_or_default();
+        let message = format!(
+            "Let Creator Hub use your existing MCP and Project Setup settings?{import_message}\n\nHub will ask verified idle standalone app windows to close normally, then keep exact local backups. Busy or unverified apps are not force-closed. AI clients, Unity and Node connections stay open.\n\nSettings remain in their current locations; Unity projects are not moved or edited. Existing AI connections are reviewed separately before changing them. No standalone installation is removed by this step. Cancel leaves the current setup unchanged."
+        );
+        let approved = handle.dialog().message(message).title("Move to unified Creator Hub").kind(MessageDialogKind::Info)
             .buttons(MessageDialogButtons::OkCancelCustom("Back up and continue".into(), "Keep existing".into())).blocking_show();
         if !approved {
             return Err("Migration was cancelled. Existing apps and settings were kept.".into());
@@ -812,12 +859,13 @@ pub async fn prepare_convergence(handle: tauri::AppHandle) -> Result<Report, Str
         recheck(plan)?;
         plan.report.backups = backups;
         plan.retained_images = retained_images;
-        if let Some(choice) = choice {
-            resolve_settings_choice(plan, &roots()?, choice)?;
-        }
+        let imported = if import.is_some() { Some(import_missing_projects(plan, &roots()?)?) } else { None };
         can_retain(plan)?;
         plan.report.stage = "backed-up";
-        plan.report.message = "Exact settings backups are verified. Next, review existing AI connections. Old apps have not been removed.".into();
+        plan.report.message = match imported {
+            Some(count) => format!("Exact backups of both configurations are verified. Imported {count} missing project(s) without duplicates; current preferences and existing project entries were kept. Next, review existing AI connections. Old apps have not been removed."),
+            None => "Exact settings backups are verified. Next, review existing AI connections. Old apps have not been removed.".into(),
+        };
         Ok(plan.report.clone())
     }).await.map_err(|_| "Backup outcome is unknown. Retained files were kept; no app was removed.")?
 }
@@ -1451,77 +1499,282 @@ mod tests {
             .collect();
     }
 
-    #[test]
-    fn settings_selection_requires_exact_native_button_not_default_or_cancel() {
-        assert_eq!(
-            settings_choice(MessageDialogResult::Custom("Use current settings".into())).unwrap(),
-            SettingsChoice::Current
-        );
-        assert_eq!(
-            settings_choice(MessageDialogResult::Custom("Use earlier settings".into())).unwrap(),
-            SettingsChoice::Earlier
-        );
-        for result in [
-            MessageDialogResult::Yes,
-            MessageDialogResult::No,
-            MessageDialogResult::Ok,
-            MessageDialogResult::Cancel,
-            MessageDialogResult::Custom("Cancel".into()),
-            MessageDialogResult::Custom("unknown".into()),
-        ] {
-            assert!(settings_choice(result).is_err());
-        }
+    fn project(id: &str, path: &std::path::Path) -> Value {
+        json!({"id":id,"name":"Same project name","unity_project_path":path,
+            "scene_path":null,"enabled":false,"futureChannelOption":{"keep":true}})
+    }
+
+    fn config_with(channels: Vec<Value>) -> Value {
+        json!({"channels":channels,"active_channel_id":null,"auto_start":false,
+            "allow_all_tests":false,"automatic_update_checks":false,"futurePreference":{"keep":true}})
     }
 
     #[test]
-    fn settings_selection_applies_either_exact_configuration_and_keeps_both_originals() {
-        for choice in [SettingsChoice::Current, SettingsChoice::Earlier] {
-            let (_temp, base, mut plan) = conflicting_plan();
-            let originals = [
-                plan.stores[0].bytes().unwrap().to_vec(),
-                plan.stores[1].bytes().unwrap().to_vec(),
-            ];
-            assert!(can_prepare(&plan).is_ok());
-            assert!(can_retain(&plan).is_err());
-            retain_fixture(&mut plan);
-            resolve_settings_choice(&mut plan, &base, choice).unwrap();
-            assert!(can_retain(&plan).is_ok());
-            let selected = &originals[if choice == SettingsChoice::Current {
-                0
-            } else {
-                1
-            }];
-            for saved in &plan.stores[..2] {
-                assert_eq!(saved.bytes(), Some(selected.as_slice()));
-                saved.recheck().unwrap();
-            }
-            for (backup, original) in plan.retained_images.iter().zip(originals) {
-                assert_eq!(fs::read(backup.path()).unwrap(), original);
-                backup.recheck().unwrap();
-            }
-            let journal = base
-                .config
-                .join("creator-works-mcp/.creator-hub-product-settings");
-            let directory = fs::read_dir(journal)
-                .unwrap()
-                .map(|p| p.unwrap().path())
-                .find(|p| p.is_dir())
-                .unwrap();
-            let outcome = crate::convergence_recovery::Transaction::open_allowlisted(
-                &directory,
-                &[
-                    stores::Store::McpCurrent.path(&base).unwrap(),
-                    stores::Store::McpLegacy.path(&base).unwrap(),
-                ],
+    fn project_merge_only_adds_missing_folders_and_preserves_all_current_preferences() {
+        let (_temp, base, _) = fixture_plan();
+        let existing = project("current", &base.local_data.join("existing"));
+        let mut current = config_with(vec![existing.clone()]);
+        current["active_channel_id"] = json!("current");
+        current["mcp_server_path"] = json!("keep-current-server");
+        let mut duplicate = existing.clone();
+        duplicate["id"] = json!("old-id");
+        duplicate["enabled"] = json!(true);
+        duplicate["scene_path"] = json!("old-scene");
+        let missing = project("missing", &base.local_data.join("missing"));
+        let mut legacy = config_with(vec![duplicate, missing.clone(), missing.clone()]);
+        legacy["auto_start"] = json!(true);
+        legacy["allow_all_tests"] = json!(true);
+        legacy["automatic_update_checks"] = json!(true);
+        legacy["active_channel_id"] = json!("missing");
+        legacy["oldOnlyPreference"] = json!("do not activate");
+        let import = merge_project_settings(
+            &serde_json::to_vec(&current).unwrap(),
+            &serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let result: Value = serde_json::from_slice(&import.bytes).unwrap();
+        assert_eq!((import.added, import.already_present), (1, 2));
+        let mut expected = current;
+        expected["channels"] = json!([existing, missing]);
+        assert_eq!(result, expected);
+        let again =
+            merge_project_settings(&import.bytes, &serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(again.added, 0);
+        assert_eq!(again.bytes, import.bytes);
+    }
+
+    #[test]
+    fn project_merge_remaps_only_colliding_import_ids_not_current_selection() {
+        let (_temp, base, _) = fixture_plan();
+        let mut current = config_with(vec![project("same-id", &base.local_data.join("one"))]);
+        current["active_channel_id"] = json!("same-id");
+        let legacy = config_with(vec![
+            project("same-id", &base.local_data.join("two")),
+            project("same-id", &base.local_data.join("three")),
+        ]);
+        let import = merge_project_settings(
+            &serde_json::to_vec(&current).unwrap(),
+            &serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let result: Value = serde_json::from_slice(&import.bytes).unwrap();
+        assert_eq!(import.added, 2);
+        assert_eq!(result["active_channel_id"], current["active_channel_id"]);
+        assert_eq!(result["channels"][0], current["channels"][0]);
+        let ids: std::collections::HashSet<_> = result["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 3);
+        assert!(uuid::Uuid::parse_str(result["channels"][1]["id"].as_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn project_merge_reuses_inventory_folder_normalization_without_needing_live_drives() {
+        let (_temp, base, _) = fixture_plan();
+        let folder = base.local_data.join("Project");
+        let first = project("one", &folder);
+        let mut alias = first.clone();
+        let spelling = folder.join(".").to_string_lossy().into_owned();
+        alias["unity_project_path"] = json!(if cfg!(windows) {
+            format!("{}/", spelling.replace('\\', "/").to_uppercase())
+        } else {
+            format!("{spelling}/")
+        });
+        let current = config_with(vec![first]);
+        let legacy = config_with(vec![alias]);
+        let bytes = serde_json::to_vec_pretty(&current).unwrap();
+        let import = merge_project_settings(&bytes, &serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(import.added, 0);
+        assert_eq!(import.already_present, 1);
+        assert_eq!(import.bytes, bytes);
+        assert!(!folder.exists());
+    }
+
+    #[test]
+    fn project_merge_keeps_distinct_unix_case_sensitive_folders() {
+        if cfg!(windows) {
+            return;
+        }
+        let (_temp, base, _) = fixture_plan();
+        let current = config_with(vec![project("one", &base.local_data.join("Project"))]);
+        let legacy = config_with(vec![project("two", &base.local_data.join("project"))]);
+        assert_eq!(
+            merge_project_settings(
+                &serde_json::to_vec(&current).unwrap(),
+                &serde_json::to_vec(&legacy).unwrap()
             )
             .unwrap()
-            .inspect()
-            .unwrap();
-            assert!(outcome.completed);
-            assert!(!plan.report.retirement_available);
-            assert!(plan.report.required);
-            assert!(resolve_settings_choice(&mut plan, &base, choice).is_err());
+            .added,
+            1
+        );
+    }
+
+    #[test]
+    fn project_merge_refuses_ambiguous_paths_duplicate_current_ids_and_output_limits() {
+        let (_temp, base, _) = fixture_plan();
+        let valid = serde_json::to_vec(&config_with(vec![])).unwrap();
+        for path in [
+            std::path::PathBuf::from("relative"),
+            base.local_data.join("../ambiguous"),
+        ] {
+            let invalid = serde_json::to_vec(&config_with(vec![project("one", &path)])).unwrap();
+            assert!(merge_project_settings(&valid, &invalid).is_err());
         }
+        let duplicated_ids = config_with(vec![
+            project("one", &base.local_data.join("one")),
+            project("one", &base.local_data.join("two")),
+        ]);
+        assert!(
+            merge_project_settings(&serde_json::to_vec(&duplicated_ids).unwrap(), &valid).is_err()
+        );
+        let current = config_with(
+            (0..256)
+                .map(|n| {
+                    project(
+                        &format!("id-{n}"),
+                        &base.local_data.join(format!("project-{n}")),
+                    )
+                })
+                .collect(),
+        );
+        let missing = config_with(vec![project("new", &base.local_data.join("new"))]);
+        assert!(merge_project_settings(
+            &serde_json::to_vec(&current).unwrap(),
+            &serde_json::to_vec(&missing).unwrap()
+        )
+        .unwrap_err()
+        .contains("256-project"));
+        let mut large = config_with(vec![]);
+        large["padding"] = json!("x".repeat(256 * 1024 - 220));
+        let large = serde_json::to_vec(&large).unwrap();
+        assert!(large.len() <= 256 * 1024);
+        assert!(merge_project_settings(&large, &serde_json::to_vec(&missing).unwrap()).is_err());
+    }
+
+    #[test]
+    fn project_import_publishes_one_recoverable_two_store_transaction_after_exact_backups() {
+        let (_temp, base, mut plan) = conflicting_plan();
+        let current = config_with(vec![project("current", &base.local_data.join("current"))]);
+        let legacy = config_with(vec![project("old", &base.local_data.join("old"))]);
+        for (index, value) in [current.clone(), legacy].iter().enumerate() {
+            fs::write(
+                plan.stores[index].store().path(&base).unwrap(),
+                serde_json::to_vec(value).unwrap(),
+            )
+            .unwrap();
+            plan.stores[index] =
+                stores::Snapshot::inspect(plan.stores[index].store(), &base).unwrap();
+        }
+        let originals: Vec<_> = plan.stores[..2]
+            .iter()
+            .map(|s| s.bytes().unwrap().to_vec())
+            .collect();
+        retain_fixture(&mut plan);
+        assert_eq!(import_missing_projects(&mut plan, &base).unwrap(), 1);
+        assert!(can_retain(&plan).is_ok());
+        let result: Value = serde_json::from_slice(plan.stores[0].bytes().unwrap()).unwrap();
+        assert_eq!(result["channels"].as_array().unwrap().len(), 2);
+        for (key, value) in current.as_object().unwrap() {
+            if key != "channels" {
+                assert_eq!(&result[key], value);
+            }
+        }
+        for (backup, original) in plan.retained_images.iter().zip(originals) {
+            assert_eq!(fs::read(backup.path()).unwrap(), original);
+        }
+        let journal = base
+            .config
+            .join("creator-works-mcp/.creator-hub-product-settings");
+        let directory = fs::read_dir(journal)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.is_dir())
+            .unwrap();
+        let report = crate::convergence_recovery::Transaction::open_allowlisted(
+            &directory,
+            &[
+                stores::Store::McpCurrent.path(&base).unwrap(),
+                stores::Store::McpLegacy.path(&base).unwrap(),
+            ],
+        )
+        .unwrap()
+        .inspect()
+        .unwrap();
+        assert!(report.completed);
+        assert_eq!(report.files.len(), 2);
+    }
+
+    #[test]
+    #[ignore = "Read-only preview of this machine's two MCP stores; never publishes or creates backups"]
+    fn live_project_import_preview_preserves_preferences_and_original_files() {
+        let base = roots().unwrap();
+        let current = stores::Snapshot::inspect(stores::Store::McpCurrent, &base).unwrap();
+        let legacy = stores::Snapshot::inspect(stores::Store::McpLegacy, &base).unwrap();
+        let preview =
+            merge_project_settings(current.bytes().unwrap(), legacy.bytes().unwrap()).unwrap();
+        let before: Value = serde_json::from_slice(current.bytes().unwrap()).unwrap();
+        let after: Value = serde_json::from_slice(&preview.bytes).unwrap();
+        for (key, value) in before.as_object().unwrap() {
+            if key != "channels" {
+                assert_eq!(&after[key], value);
+            }
+        }
+        assert!(after["channels"]
+            .as_array()
+            .unwrap()
+            .starts_with(before["channels"].as_array().unwrap()));
+        current.recheck().unwrap();
+        legacy.recheck().unwrap();
+        println!("Read-only import preview: current={}, missing={}, already_present={}; preferences and both original files unchanged",
+            before["channels"].as_array().unwrap().len(), preview.added, preview.already_present);
+    }
+
+    #[test]
+    fn project_import_preserves_current_bytes_when_no_projects_are_missing() {
+        let (_temp, base, mut plan) = conflicting_plan();
+        let originals = [
+            plan.stores[0].bytes().unwrap().to_vec(),
+            plan.stores[1].bytes().unwrap().to_vec(),
+        ];
+        assert!(can_prepare(&plan).is_ok());
+        assert!(can_retain(&plan).is_err());
+        retain_fixture(&mut plan);
+        assert_eq!(import_missing_projects(&mut plan, &base).unwrap(), 0);
+        assert!(can_retain(&plan).is_ok());
+        let selected = &originals[0];
+        for saved in &plan.stores[..2] {
+            assert_eq!(saved.bytes(), Some(selected.as_slice()));
+            saved.recheck().unwrap();
+        }
+        for (backup, original) in plan.retained_images.iter().zip(&originals) {
+            assert_eq!(fs::read(backup.path()).unwrap(), *original);
+            backup.recheck().unwrap();
+        }
+        let journal = base
+            .config
+            .join("creator-works-mcp/.creator-hub-product-settings");
+        let directory = fs::read_dir(journal)
+            .unwrap()
+            .map(|p| p.unwrap().path())
+            .find(|p| p.is_dir())
+            .unwrap();
+        let outcome = crate::convergence_recovery::Transaction::open_allowlisted(
+            &directory,
+            &[
+                stores::Store::McpCurrent.path(&base).unwrap(),
+                stores::Store::McpLegacy.path(&base).unwrap(),
+            ],
+        )
+        .unwrap()
+        .inspect()
+        .unwrap();
+        assert!(outcome.completed);
+        assert!(!plan.report.retirement_available);
+        assert!(plan.report.required);
+        assert!(import_missing_projects(&mut plan, &base).is_err());
     }
 
     #[test]
@@ -1536,7 +1789,7 @@ mod tests {
                 retain_fixture(&mut plan);
                 fs::write(plan.retained_images[1].path(), b"changed backup").unwrap();
             }
-            assert!(resolve_settings_choice(&mut plan, &base, SettingsChoice::Current).is_err());
+            assert!(import_missing_projects(&mut plan, &base).is_err());
             for (saved, original) in plan.stores[..2].iter().zip(originals) {
                 assert_eq!(
                     fs::read(saved.store().path(&base).unwrap()).unwrap(),
@@ -1562,7 +1815,7 @@ mod tests {
                 )
                 .unwrap();
             }
-            assert!(resolve_settings_choice(&mut plan, &base, SettingsChoice::Current).is_err());
+            assert!(import_missing_projects(&mut plan, &base).is_err());
             assert!(!base
                 .config
                 .join("creator-works-mcp/.creator-hub-product-settings")
@@ -1574,7 +1827,7 @@ mod tests {
     fn settings_selection_never_creates_a_missing_legacy_store() {
         let (_temp, base, mut plan) = fixture_plan();
         retain_fixture(&mut plan);
-        assert!(resolve_settings_choice(&mut plan, &base, SettingsChoice::Current).is_err());
+        assert!(import_missing_projects(&mut plan, &base).is_err());
         assert!(!stores::Store::McpLegacy.path(&base).unwrap().exists());
     }
 
@@ -1602,11 +1855,9 @@ mod tests {
                 )],
             )
             .unwrap();
-            assert!(
-                resolve_settings_choice(&mut plan, &base, SettingsChoice::Current)
-                    .unwrap_err()
-                    .contains("recovery review")
-            );
+            assert!(import_missing_projects(&mut plan, &base)
+                .unwrap_err()
+                .contains("recovery review"));
             for snapshot in &plan.stores {
                 snapshot.recheck().unwrap();
             }
@@ -1646,11 +1897,9 @@ mod tests {
         }
         plan.stores[0] = stores::Snapshot::inspect(stores::Store::McpCurrent, &base).unwrap();
         retain_fixture(&mut plan);
-        assert!(
-            resolve_settings_choice(&mut plan, &base, SettingsChoice::Current)
-                .unwrap_err()
-                .contains("history is full")
-        );
+        assert!(import_missing_projects(&mut plan, &base)
+            .unwrap_err()
+            .contains("history is full"));
         for snapshot in &plan.stores {
             snapshot.recheck().unwrap();
         }
@@ -1660,20 +1909,6 @@ mod tests {
                 .filter(|entry| entry.as_ref().unwrap().path().is_dir())
                 .count(),
             31
-        );
-    }
-
-    #[test]
-    fn settings_summary_identifies_project_counts_and_selected_project_without_control_characters()
-    {
-        let (_temp, base, mut plan) = fixture_plan();
-        let body = serde_json::to_vec(&json!({"channels":[{"id":"one","name":"Example\nproject","unity_project_path":"fixture","enabled":true}],
-            "active_channel_id":"one","auto_start":false})).unwrap();
-        fs::write(stores::Store::McpCurrent.path(&base).unwrap(), body).unwrap();
-        plan.stores[0] = stores::Snapshot::inspect(stores::Store::McpCurrent, &base).unwrap();
-        assert_eq!(
-            settings_summary(&plan.stores[0]).unwrap(),
-            "1 saved projects; selected project: Exampleproject"
         );
     }
 

@@ -6,20 +6,29 @@ See [the exact package and update evidence](RELEASE-0.1.14.md) for current
 publication status and limits. The dated checkpoints below retain the development
 history. Linux/Flatpak are deferred; macOS support is suspended.
 
-## Local Conflict Resolution (2026-10-19)
+## Local Project Import (2026-10-19)
 
-The local Windows test build adds an explicit native choice when current Creator
-Works and earlier Banter MCP configuration files differ. Cancel changes neither
-active file. Approval retains and verifies both exact originals before applying
-the selected configuration to the other active settings file through the existing
-write-ahead recovery transaction. No fields are merged or defaulted, and Unity
-project files and AI-client configurations are not edited by this selection.
-Project entries unique to the unselected configuration remain in its backup.
+The local Windows test build imports missing projects from earlier Banter MCP
+settings into the current Creator Works configuration. Native approval shows the
+missing and already-listed counts. Cancel changes neither active file. Both exact
+originals are retained and verified before a write-ahead recovery transaction
+updates the active settings files. The earlier whole-configuration choice is no
+longer used.
+
+Projects are compared using Hub's OS-specific normalized folder identity, without
+requiring an offline drive to exist. Existing current project entries, selected
+project, preferences, unknown fields and false/absent flags are preserved. Only
+missing project entries are appended; colliding imported IDs get new IDs without
+changing current IDs or selection. Older-only preferences remain in the backup,
+not active settings. If no projects are missing, the current file stays byte-for-
+byte unchanged. Ambiguous paths, duplicate current IDs and output-limit violations
+refuse before writing. Existing current duplicate-folder entries are not deleted.
+Unity project files and AI-client configurations are not edited by this import.
 
 Changed files, missing or corrupt backups, uncertain operations and unfinished
-settings journals still refuse. The selection reserves recovery-history capacity
+settings journals still refuse. The import reserves recovery-history capacity
 for its own transaction and the following reviewed server-path transition. An
-interrupted selection retains its evidence for MCP's existing recovery review;
+interrupted import retains its evidence for MCP's existing recovery review;
 it does not automatically replay or roll back. Connection migration and legacy
 app retirement retain their separate approvals and checks. This local change
 does not replace the published 0.1.14 installer or establish Linux acceptance.
@@ -46,7 +55,7 @@ installs without prior Creator data or standalone applications skip it.
 1. Inspect only source-established Creator settings and known app locations.
 2. Ask for native approval and keep exact, verified, deduplicated before-images.
 3. Refuse unresolved conflicting settings, changed files and unresolved operation
-   outcomes. The local test's native settings choice can resolve a known conflict
+   outcomes. The local test's backed-up project import can resolve a known conflict
    before continuing; the published package still refuses it.
 4. Open the verified private MCP backend, preserving exclusive settings ownership.
 5. Review existing supported client routes through the existing native, journaled

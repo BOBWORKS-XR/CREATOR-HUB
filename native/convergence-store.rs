@@ -130,7 +130,7 @@ enum Outcome {
     UnknownAcknowledged,
 }
 
-fn validate(store: Store, bytes: &[u8]) -> Result<bool, String> {
+pub(super) fn validate(store: Store, bytes: &[u8]) -> Result<bool, String> {
     if bytes.len() > store.limit() {
         return Err("Creator store exceeds its source-defined bound; original kept.".into());
     }
