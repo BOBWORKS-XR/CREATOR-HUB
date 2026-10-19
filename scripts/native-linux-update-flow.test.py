@@ -289,8 +289,38 @@ class OldChildTests(unittest.TestCase):
             with mock.patch.object(p.os, "getpid", return_value=40), self.assertRaises(RuntimeError):
                 p.recorded_old_zombie(44, {44: child}, old, b, helper)
 
+    def test_nonlive_helper_is_never_accepted_as_hub_and_never_reaped(self):
+        helper = mock.Mock()
+        helper.Proc.return_value.stat.return_value = self.stat_line()
+        b = types.SimpleNamespace(process_uids=mock.Mock(return_value=[0]*4))
+        with mock.patch.object(p.os, "getpid", return_value=40):
+            result = p.nonlive_child(44, b, helper)
+        self.assertEqual(result, {"pid": 44, "startTime": "101", "parentPid": 40, "uids": [0]*4,
+                                  "state": "Z", "reaped": False, "acceptedAsHub": False})
+        helper.Proc.return_value.stat.return_value = self.stat_line(state="R")
+        self.assertIsNone(p.nonlive_child(44, b, helper))
+
+    def test_nonlive_observation_refuses_parent_uid_or_state_races_and_invalid_pid(self):
+        for lines, uids in (([self.stat_line(parent=99)]*2, [21314]*4),
+                            ([self.stat_line(), self.stat_line(start="102")], [21314]*4),
+                            ([self.stat_line()]*2, [21314]),
+                            ([self.stat_line()]*2, [True]*4)):
+            helper = mock.Mock()
+            helper.Proc.return_value.stat.side_effect = lines
+            b = types.SimpleNamespace(process_uids=mock.Mock(return_value=uids))
+            with mock.patch.object(p.os, "getpid", return_value=40), self.assertRaises(RuntimeError):
+                p.nonlive_child(44, b, helper)
+        for pid in (True, 0, 1, "44"):
+            with self.assertRaises(RuntimeError):
+                p.nonlive_child(pid, mock.Mock(), mock.Mock())
+
 
 class RestartObserverTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(p, "nonlive_child", return_value=None)
+        self.nonlive = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def fixture(self):
         child = mock.Mock(pid=41, returncode=0)
         child.poll.side_effect = [None, 0]
@@ -359,6 +389,31 @@ class RestartObserverTests(unittest.TestCase):
             p.wait_successor(child, old, {30}, b, mock.Mock(), capture, timeout=0.01)
         spawn.assert_not_called()
         child.send_signal.assert_not_called()
+
+    def test_only_dead_children_never_satisfy_restart_and_no_new_process_is_launched(self):
+        child, old, _new, b, capture = self.fixture()
+        child.poll.side_effect, child.poll.return_value = None, 0
+        dead = {"pid": 44, "state": "Z", "acceptedAsHub": False}
+        self.nonlive.return_value = dead
+        observation = {}
+        with mock.patch.object(p, "direct_children", return_value={44}), mock.patch.object(p.subprocess, "Popen") as spawn, \
+                self.assertRaisesRegex(RuntimeError, "no manual relaunch"):
+            p.wait_successor(child, old, set(), b, mock.Mock(), capture, timeout=0.01, observation=observation)
+        self.assertEqual(observation, {"rejectedNonliveChildren": [dead]})
+        b.native_process.assert_not_called()
+        spawn.assert_not_called()
+
+    def test_dead_helper_does_not_replace_a_fully_verified_live_root(self):
+        child, old, new, b, capture = self.fixture()
+        new["pid"] = 45
+        dead = {"pid": 44, "state": "Z", "acceptedAsHub": False}
+        self.nonlive.side_effect = lambda pid, *_args: dead if pid == 44 else None
+        observation = {}
+        with mock.patch.object(p.os, "getpid", return_value=40), mock.patch.object(p, "direct_children", return_value={44, 45}):
+            result = p.wait_successor(child, old, set(), b, mock.Mock(), capture, observation=observation)
+        self.assertEqual(result, new)
+        self.assertEqual(observation, {"rejectedNonliveChildren": [dead]})
+        self.assertEqual([call.args[0] for call in b.native_process.call_args_list], [45, 45])
 
     def test_rejected_candidate_records_bounded_kernel_state_and_preserves_failure(self):
         child, old, _new, b, capture = self.fixture()

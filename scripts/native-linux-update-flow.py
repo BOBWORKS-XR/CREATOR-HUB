@@ -254,9 +254,27 @@ def recorded_old_zombie(pid, records, old, b, helper):
             "kernelImageSha256BeforeUpdate": value["kernelImageSha256"], "state": "Z", "reaped": False}
 
 
+def nonlive_child(pid, b, helper):
+    require(type(pid) is int and pid > 1, "Exact child PID required")
+    def snapshot():
+        raw = helper.Proc().stat(pid)
+        require(raw.startswith(str(pid) + " (") and len(raw) <= 4096, "Exact bounded child kernel record required")
+        fields = raw[raw.rfind(")") + 2:].split()
+        require(len(fields) >= 20, "Incomplete child kernel record")
+        return fields[0], fields[1], fields[19], b.process_uids(pid)
+    first = snapshot()
+    if first[0] != "Z":
+        return None
+    require(first[1] == str(os.getpid()) and re.fullmatch(r"[1-9][0-9]*", first[2])
+            and type(first[3]) is list and len(first[3]) == 4 and all(type(uid) is int and uid >= 0 for uid in first[3])
+            and snapshot() == first, "Nonlive child PID/start/parent/UID changed")
+    return {"pid": pid, "startTime": first[2], "parentPid": os.getpid(), "uids": first[3],
+            "state": "Z", "reaped": False, "acceptedAsHub": False}
+
+
 def wait_successor(old_child, old, baseline, b, helper, capture, timeout=35, observation=None, old_children=None):
     """Observe only; never spawn a replacement or signal any Root/renderer."""
-    deadline, replacement, old_zombies = time.monotonic() + timeout, None, set()
+    deadline, replacement, old_zombies, rejected_dead = time.monotonic() + timeout, None, set(), set()
     while time.monotonic() < deadline:
         capture.pump(0.02)
         # Popen alone reaps old14. Do not waitpid(-1), consume agents or renderers.
@@ -270,6 +288,12 @@ def wait_successor(old_child, old, baseline, b, helper, capture, timeout=35, obs
                     if observation is not None and pid not in old_zombies:
                         observation.setdefault("measuredOldZombies", []).append(zombie)
                     old_zombies.add(pid)
+                    continue
+                dead = nonlive_child(pid, b, helper)
+                if dead is not None:
+                    if observation is not None and pid not in rejected_dead:
+                        observation.setdefault("rejectedNonliveChildren", []).append(dead)
+                    rejected_dead.add(pid)
                     continue
                 record = b.native_process(pid, helper)
             except (FileNotFoundError, ProcessLookupError):
