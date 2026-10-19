@@ -199,6 +199,643 @@ fn review_is_read_only_and_explicit_cancel_never_revalidates_or_writes_after_dri
 }
 
 #[test]
+fn resume_keep_precedes_native_admission_all_access_and_the_cancellation_callback() {
+    let ctx = Context::new();
+    // An intentionally unusable private model: only Keep may accept it. This
+    // exercises the public early branch even on unsupported native platforms.
+    let review = BootstrapResumeReview {
+        context: ctx.review().unwrap(),
+        observed: ResumeState {
+            directory: hold_parent(ctx.session.store_path()).unwrap(),
+            metadata: BTreeMap::new(),
+            records: BTreeMap::new(),
+            action: ResumeAction::Install,
+        },
+    };
+    fs::write(&ctx.image, b"changed image").unwrap();
+    fs::remove_dir(ctx.home.join("data")).unwrap();
+    assert_eq!(
+        resume_bootstrap(
+            &ctx.session,
+            &review,
+            &ctx.package,
+            BootstrapResumeChoice::Keep,
+            || panic!("Keep must not access native state or cancellation"),
+        )
+        .unwrap(),
+        BootstrapResumeOutcome::Kept
+    );
+    assert!(!ctx.home.join("data").exists());
+    ctx.preserved();
+}
+
+#[cfg(target_os = "linux")]
+mod resume {
+    use super::*;
+    use crate::store::registration::BootstrapRegistration;
+
+    fn staged() -> (Context, Store) {
+        let ctx = Context::new();
+        let initial = ctx.review().unwrap();
+        let BootstrapOutcome::Created(store) = ctx.apply(&initial, &|| false, &|_| Ok(())).unwrap()
+        else {
+            panic!("created")
+        };
+        store
+            .stage_with(&ctx.package, &|| false, &|_| Ok(()), &test_verify)
+            .unwrap();
+        (ctx, store)
+    }
+
+    fn review(ctx: &Context) -> Result<BootstrapResumeReview> {
+        resume_review_with(
+            &ctx.session,
+            &ctx.package,
+            &ctx.expected,
+            File::open(&ctx.image).unwrap(),
+            &ctx.globals,
+            &test_verify,
+        )
+    }
+
+    fn apply(
+        ctx: &Context,
+        review: &BootstrapResumeReview,
+        cancelled: &dyn Fn() -> bool,
+        checkpoint: &dyn Fn(&str) -> Result<()>,
+    ) -> Result<BootstrapResumeOutcome> {
+        resume_with(
+            &ctx.session,
+            review,
+            &ctx.package,
+            cancelled,
+            ResumeEffects {
+                image: &|| File::open(&ctx.image).map_err(|_| refused("Test image missing")),
+                globals: &ctx.globals,
+                verifier: &test_verify,
+                checkpoint,
+            },
+        )
+    }
+
+    fn select(
+        ctx: &Context,
+        store: &Store,
+        checkpoint: &dyn Fn(&str) -> Result<()>,
+    ) -> Result<Activation> {
+        store.activate_with(
+            &ctx.package.generation(),
+            &ctx.expected,
+            None,
+            &|| false,
+            checkpoint,
+            &test_verify,
+        )
+    }
+
+    fn registration(
+        ctx: &Context,
+        store: &Store,
+        checkpoint: &dyn Fn(&str) -> Result<()>,
+    ) -> Result<crate::RegistrationOutcome> {
+        let _lock = disk::lock(&store.root.join("transaction.lock"))?;
+        let BootstrapRegistration::Absent(review) =
+            store.bootstrap_registration_unlocked(&ctx.session, &ctx.package, &test_verify)?
+        else {
+            panic!("absent")
+        };
+        store.apply_registration_locked(&ctx.session, &review, &|| false, checkpoint, &test_verify)
+    }
+
+    fn bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut result = BTreeMap::new();
+        let mut paths = vec![root.to_path_buf()];
+        while let Some(path) = paths.pop() {
+            for entry in fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    paths.push(path);
+                } else {
+                    result.insert(path.clone(), fs::read(path).unwrap());
+                }
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn staged_select_register_complete_are_separate_explicit_steps_without_settings_changes() {
+        let (ctx, store) = staged();
+        let before = bytes(&ctx.home);
+        let install = review(&ctx).unwrap();
+        assert_eq!(install.store_path(), ctx.session.store_path());
+        assert_eq!(install.version(), ctx.expected.version);
+        assert_eq!(install.generation(), ctx.package.generation());
+        assert_eq!(install.step(), BootstrapResumeStep::Install);
+        assert_eq!(bytes(&ctx.home), before); // review is read-only
+        assert_eq!(
+            apply(&ctx, &install, &|| false, &|_| Ok(())).unwrap(),
+            BootstrapResumeOutcome::Advanced
+        );
+        assert!(store.snapshot_with(&test_verify).unwrap().is_some());
+        assert!(!ctx.home.join("data/dbus-1").exists());
+        assert!(apply(&ctx, &install, &|| false, &|_| panic!("No replay")).is_err());
+        let register = review(&ctx).unwrap();
+        assert_eq!(register.step(), BootstrapResumeStep::Register);
+        assert_eq!(
+            apply(&ctx, &register, &|| false, &|_| Ok(())).unwrap(),
+            BootstrapResumeOutcome::Advanced
+        );
+        let complete = review(&ctx).unwrap();
+        assert_eq!(complete.step(), BootstrapResumeStep::Complete);
+        let before = bytes(&ctx.home);
+        assert_eq!(
+            apply(&ctx, &complete, &|| false, &|_| Ok(())).unwrap(),
+            BootstrapResumeOutcome::Complete
+        );
+        assert_eq!(bytes(&ctx.home), before);
+        assert!(ctx
+            .home
+            .join("data/dbus-1/services/com.creatorworks.hub.Host.service")
+            .is_file());
+        assert!(!store.root.join("pending.json").exists());
+        assert!(!store.root.join("activation-v1/pending.json").exists());
+        ctx.preserved();
+    }
+
+    #[test]
+    fn deployment_acknowledgement_never_selects_registers_or_replays_the_journal() {
+        for point in ["journal-synced", "selection-committed"] {
+            let (ctx, store) = staged();
+            assert!(select(&ctx, &store, &|at| if at == point {
+                Err(refused("Interrupt selection"))
+            } else {
+                Ok(())
+            })
+            .is_err());
+            let before = store.snapshot_with(&test_verify).unwrap();
+            let recovery = review(&ctx).unwrap();
+            let state = if before.is_none() {
+                RecoveryState::PreparedOldSelectionRetained
+            } else {
+                RecoveryState::SelectionCommitted
+            };
+            assert_eq!(
+                recovery.step(),
+                BootstrapResumeStep::AcknowledgeDeployment(state)
+            );
+            assert_eq!(
+                apply(&ctx, &recovery, &|| false, &|_| Ok(())).unwrap(),
+                BootstrapResumeOutcome::Advanced
+            );
+            assert_eq!(store.snapshot_with(&test_verify).unwrap(), before);
+            assert!(!store.root.join("pending.json").exists());
+            assert!(!ctx.home.join("data/dbus-1").exists());
+            assert!(apply(&ctx, &recovery, &|| false, &|_| panic!("No repeated ack")).is_err());
+            assert_eq!(
+                review(&ctx).unwrap().step(),
+                if before.is_none() {
+                    BootstrapResumeStep::Install
+                } else {
+                    BootstrapResumeStep::Register
+                }
+            );
+            ctx.preserved();
+        }
+    }
+
+    #[test]
+    fn registration_interruptions_require_explicit_restore_then_a_new_registration_review() {
+        for point in [
+            "registration-journal-published-before-directory-flush",
+            "registration-journaled",
+            "registration-tool",
+            "registration-service",
+            "registration-owner",
+            "registration-verified",
+        ] {
+            let (ctx, store) = staged();
+            select(&ctx, &store, &|_| Ok(())).unwrap();
+            let selected = fs::read(store.root.join("current.json")).unwrap();
+            assert_eq!(
+                registration(&ctx, &store, &|at| if at == point {
+                    Err(refused("Interrupt registration"))
+                } else {
+                    Ok(())
+                })
+                .unwrap_err()
+                .kind,
+                ErrorKind::OutcomeUnknown
+            );
+            let restore = review(&ctx).unwrap();
+            assert_eq!(
+                restore.step(),
+                BootstrapResumeStep::RestoreRegistrationBefore
+            );
+            let before = bytes(&ctx.home);
+            assert_eq!(
+                resume_bootstrap(
+                    &ctx.session,
+                    &restore,
+                    &ctx.package,
+                    BootstrapResumeChoice::Keep,
+                    || panic!("Keep")
+                )
+                .unwrap(),
+                BootstrapResumeOutcome::Kept
+            );
+            assert_eq!(bytes(&ctx.home), before);
+            assert_eq!(
+                apply(&ctx, &restore, &|| false, &|_| Ok(())).unwrap(),
+                BootstrapResumeOutcome::Advanced
+            );
+            assert_eq!(fs::read(store.root.join("current.json")).unwrap(), selected);
+            assert!(!store.root.join("activation-v1/pending.json").exists());
+            assert!(!ctx
+                .home
+                .join("data/dbus-1/services/com.creatorworks.hub.Host.service")
+                .exists());
+            assert_eq!(review(&ctx).unwrap().step(), BootstrapResumeStep::Register);
+            assert!(apply(&ctx, &restore, &|| false, &|_| panic!(
+                "No repeated restore"
+            ))
+            .is_err());
+            ctx.preserved();
+        }
+    }
+
+    #[test]
+    fn empty_store_missing_copied_or_changed_origins_and_other_generations_are_not_adopted() {
+        for change in 0..9 {
+            let (ctx, store) = staged();
+            let origin = store.root.join(ORIGIN);
+            match change {
+                0 => fs::remove_file(origin).unwrap(),
+                1 => fs::write(origin, b"{}").unwrap(),
+                2 => {
+                    let (other, _) = staged();
+                    fs::write(
+                        origin,
+                        fs::read(other.session.store_path().join(ORIGIN)).unwrap(),
+                    )
+                    .unwrap();
+                }
+                3 => {
+                    fs::create_dir(store.root.join("generations").join("f".repeat(64))).unwrap();
+                }
+                4 => fs::write(
+                    store.root.join("history/foreign.json"),
+                    b"unrelated history",
+                )
+                .unwrap(),
+                5 => fs::write(
+                    store.root.join("unknown-settings.json"),
+                    b"keep unknown fields",
+                )
+                .unwrap(),
+                6 => fs::write(&ctx.globals[0], b"foreign native installation").unwrap(),
+                7 => fs::write(&ctx.image, b"different current Root").unwrap(),
+                _ => {
+                    let mut value: serde_json::Value =
+                        serde_json::from_slice(&fs::read(&origin).unwrap()).unwrap();
+                    value["generation"] = "e".repeat(64).into();
+                    fs::write(origin, serde_json::to_vec(&value).unwrap()).unwrap();
+                }
+            }
+            let before = bytes(&ctx.home);
+            assert!(review(&ctx).is_err(), "change {change}");
+            assert_eq!(bytes(&ctx.home), before);
+            ctx.preserved();
+        }
+        let ctx = Context::new();
+        let initial = ctx.review().unwrap();
+        ctx.apply(&initial, &|| false, &|_| Ok(())).unwrap();
+        assert!(review(&ctx).is_err()); // existing empty recovery remains mandatory
+        recovery_review_with(
+            &ctx.session,
+            &ctx.package,
+            &ctx.expected,
+            File::open(&ctx.image).unwrap(),
+            &ctx.globals,
+            &test_verify,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn selection_lineage_and_foreign_registration_images_are_kept_not_overwritten() {
+        for change in 0..5 {
+            let (ctx, store) = staged();
+            select(&ctx, &store, &|_| Ok(())).unwrap();
+            match change {
+                0 => {
+                    let path = store.root.join("current.json");
+                    let mut current: Selection =
+                        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    current.previous_generation = Some("f".repeat(64));
+                    fs::write(path, serde_json::to_vec(&current).unwrap()).unwrap();
+                }
+                1 => {
+                    disk::create_dir(&ctx.home.join("data/dbus-1")).unwrap();
+                    disk::create_dir(&ctx.home.join("data/dbus-1/services")).unwrap();
+                    disk::write_new(
+                        &ctx.home
+                            .join("data/dbus-1/services/com.creatorworks.hub.Host.service"),
+                        b"foreign service",
+                        0o644,
+                    )
+                    .unwrap();
+                }
+                2 => {
+                    disk::create_dir(&store.root.join("activation-v1")).unwrap();
+                    disk::write_new(
+                        &store.root.join("activation-v1/owner.json"),
+                        b"foreign owner",
+                        0o600,
+                    )
+                    .unwrap();
+                }
+                3 => {
+                    registration(&ctx, &store, &|at| {
+                        if at == "registration-journaled" {
+                            Err(refused("retained"))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .unwrap_err();
+                    let path = store.root.join("activation-v1/pending.json");
+                    let mut pending: serde_json::Value =
+                        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    pending["before"] = pending["after"].clone();
+                    fs::write(path, serde_json::to_vec(&pending).unwrap()).unwrap();
+                }
+                _ => {
+                    disk::create_dir(&store.root.join("activation-v1")).unwrap();
+                    fs::write(
+                        store.root.join("activation-v1/unknown"),
+                        b"unknown preserved",
+                    )
+                    .unwrap();
+                }
+            }
+            let before = bytes(&ctx.home);
+            assert!(review(&ctx).is_err(), "change {change}");
+            assert_eq!(bytes(&ctx.home), before);
+            ctx.preserved();
+        }
+    }
+
+    #[test]
+    fn locks_cancel_and_state_or_inode_drift_refuse_before_any_mutation() {
+        for change in 0..6 {
+            let (ctx, store) = staged();
+            let reviewed = review(&ctx).unwrap();
+            match change {
+                0 => fs::write(store.root.join(ORIGIN), b"changed receipt").unwrap(),
+                1 => fs::write(&ctx.image, b"changed image").unwrap(),
+                2 => fs::write(store.root.join("new-unknown"), b"retained").unwrap(),
+                3 => {
+                    fs::rename(&store.root, ctx.home.join("retained-original")).unwrap();
+                    Store::create_inner(&store.root).unwrap();
+                }
+                4 => {
+                    fs::rename(ctx.home.join("data"), ctx.home.join("original-parent")).unwrap();
+                    disk::create_dir(&ctx.home.join("data")).unwrap();
+                }
+                _ => fs::write(&ctx.globals[2], b"new global conflict").unwrap(),
+            }
+            let before = bytes(&ctx.home);
+            assert_eq!(
+                apply(&ctx, &reviewed, &|| false, &|_| panic!(
+                    "No mutation after drift"
+                ))
+                .unwrap_err()
+                .kind,
+                ErrorKind::Refused
+            );
+            assert_eq!(bytes(&ctx.home), before);
+        }
+        let (ctx, store) = staged();
+        let reviewed = review(&ctx).unwrap();
+        let lock = disk::lock(&store.root.join("transaction.lock")).unwrap();
+        assert!(review(&ctx).is_err());
+        assert_eq!(
+            apply(&ctx, &reviewed, &|| false, &|_| panic!("Locked"))
+                .unwrap_err()
+                .kind,
+            ErrorKind::Refused
+        );
+        drop(lock);
+        let before = bytes(&ctx.home);
+        assert_eq!(
+            apply(&ctx, &reviewed, &|| true, &|_| panic!("Cancelled"))
+                .unwrap_err()
+                .kind,
+            ErrorKind::Cancelled
+        );
+        assert_eq!(
+            apply(&ctx, &reviewed, &|| false, &|at| {
+                assert_eq!(at, "bootstrap-resume-locked");
+                fs::write(store.root.join("late-unknown"), b"preserve").unwrap();
+                Ok(())
+            })
+            .unwrap_err()
+            .kind,
+            ErrorKind::Refused
+        );
+        assert!(!store.root.join("current.json").exists());
+        assert_ne!(bytes(&ctx.home), before); // only our explicit injected evidence
+        ctx.preserved();
+    }
+
+    #[test]
+    fn resume_revalidates_package_links_and_late_cancellation_without_touching_settings() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        for change in 0..6 {
+            let (mut ctx, store) = staged();
+            let reviewed = review(&ctx).unwrap();
+            let origin = store.root.join(ORIGIN);
+            match change {
+                0 => ctx.package.signature = b"untrusted replacement".to_vec(),
+                1 => {
+                    let saved = ctx.home.join("retained-origin");
+                    fs::rename(&origin, &saved).unwrap();
+                    symlink(saved, &origin).unwrap();
+                }
+                2 => fs::hard_link(&origin, ctx.home.join("other-origin-link")).unwrap(),
+                3 => fs::set_permissions(&origin, fs::Permissions::from_mode(0o644)).unwrap(),
+                4 => {
+                    let bytes = fs::read(&ctx.image).unwrap();
+                    fs::rename(&ctx.image, ctx.home.join("retained-original-image")).unwrap();
+                    fs::write(&ctx.image, bytes).unwrap(); // same bytes, different inode after review
+                }
+                _ => {
+                    let mut profile = ctx.package.contents[crate::HOST_PROFILE].clone();
+                    profile.push(b' ');
+                    file(&mut ctx.package, crate::HOST_PROFILE, profile, 0o644);
+                    rebind(&mut ctx.package);
+                }
+            }
+            assert_eq!(
+                apply(&ctx, &reviewed, &|| false, &|_| panic!(
+                    "No work after invalid proof"
+                ))
+                .unwrap_err()
+                .kind,
+                ErrorKind::Refused
+            );
+            assert!(!store.root.join("current.json").exists());
+            assert!(!ctx.home.join("data/dbus-1").exists());
+            ctx.preserved();
+        }
+        let (ctx, store) = staged();
+        let reviewed = review(&ctx).unwrap();
+        let cancelled = std::cell::Cell::new(false);
+        assert_eq!(
+            apply(&ctx, &reviewed, &|| cancelled.get(), &|at| {
+                assert_eq!(at, "bootstrap-resume-locked");
+                cancelled.set(true);
+                Ok(())
+            })
+            .unwrap_err()
+            .kind,
+            ErrorKind::Cancelled
+        );
+        assert!(!store.root.join("current.json").exists());
+        assert!(members(&store.root.join("history"), 1).unwrap().is_empty());
+        ctx.preserved();
+    }
+
+    #[test]
+    fn acknowledgement_and_final_readback_interruptions_never_chain_another_step() {
+        let (ctx, store) = staged();
+        select(&ctx, &store, &|at| {
+            if at == "journal-synced" {
+                Err(refused("Retain deployment"))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        let reviewed = review(&ctx).unwrap();
+        let pending = fs::read(store.root.join("pending.json")).unwrap();
+        assert_eq!(
+            apply(
+                &ctx,
+                &reviewed,
+                &|| false,
+                &|at| if at == "bootstrap-resume-before-acknowledge" {
+                    Err(refused("Interrupt acknowledgement"))
+                } else {
+                    Ok(())
+                }
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::OutcomeUnknown
+        );
+        assert_eq!(fs::read(store.root.join("pending.json")).unwrap(), pending);
+        assert!(store.snapshot_with(&test_verify).unwrap().is_none());
+        let reviewed = review(&ctx).unwrap();
+        apply(&ctx, &reviewed, &|| false, &|_| Ok(())).unwrap();
+        let reviewed = review(&ctx).unwrap();
+        assert_eq!(
+            apply(
+                &ctx,
+                &reviewed,
+                &|| false,
+                &|at| if at == "bootstrap-resume-step-complete" {
+                    Err(refused("Readback interrupted after selection"))
+                } else {
+                    Ok(())
+                }
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::OutcomeUnknown
+        );
+        assert!(!store.root.join("pending.json").exists());
+        assert!(store.snapshot_with(&test_verify).unwrap().is_some());
+        assert!(!ctx.home.join("data/dbus-1").exists());
+        assert_eq!(review(&ctx).unwrap().step(), BootstrapResumeStep::Register);
+        ctx.preserved();
+    }
+
+    #[test]
+    fn resume_interruption_reports_unknown_and_retains_the_actual_commit_state() {
+        for point in ["journal-synced", "selection-committed"] {
+            let (ctx, store) = staged();
+            let reviewed = review(&ctx).unwrap();
+            assert_eq!(
+                apply(&ctx, &reviewed, &|| false, &|at| if at == point {
+                    Err(refused("Exact interrupted resume"))
+                } else {
+                    Ok(())
+                })
+                .unwrap_err()
+                .kind,
+                ErrorKind::OutcomeUnknown
+            );
+            let pending = fs::read(store.root.join("pending.json")).unwrap();
+            let next = review(&ctx).unwrap();
+            assert!(matches!(
+                next.step(),
+                BootstrapResumeStep::AcknowledgeDeployment(_)
+            ));
+            assert_eq!(fs::read(store.root.join("pending.json")).unwrap(), pending);
+            assert!(!ctx.home.join("data/dbus-1").exists());
+            ctx.preserved();
+        }
+        let (ctx, store) = staged();
+        select(&ctx, &store, &|_| Ok(())).unwrap();
+        let reviewed = review(&ctx).unwrap();
+        assert_eq!(
+            apply(
+                &ctx,
+                &reviewed,
+                &|| false,
+                &|at| if at == "registration-tool" {
+                    Err(refused("Exact interrupted registration"))
+                } else {
+                    Ok(())
+                }
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::OutcomeUnknown
+        );
+        let restore = review(&ctx).unwrap();
+        assert_eq!(
+            restore.step(),
+            BootstrapResumeStep::RestoreRegistrationBefore
+        );
+        assert_eq!(
+            apply(
+                &ctx,
+                &restore,
+                &|| false,
+                &|at| if at == "registration-tool" {
+                    Err(refused("Exact interrupted restore"))
+                } else {
+                    Ok(())
+                }
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::OutcomeUnknown
+        );
+        assert_eq!(
+            review(&ctx).unwrap().step(),
+            BootstrapResumeStep::RestoreRegistrationBefore
+        );
+        assert!(store.root.join(ORIGIN).is_file());
+        assert!(store.root.join("activation-v1/pending.json").is_file());
+        ctx.preserved();
+    }
+}
+
+#[test]
 fn package_signature_exact_version_profile_selector_and_running_image_are_required() {
     for change in 0..8 {
         let mut ctx = Context::new();

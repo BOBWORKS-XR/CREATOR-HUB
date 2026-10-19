@@ -1,5 +1,5 @@
-//! First native installation only: reviewed identity and empty-store creation.
-//! No download, settings import, package staging, selection or registration.
+//! Origin-bound first native installation and explicit single-step resumption.
+//! No download, settings import, automatic replay, cleanup or process launch.
 use super::*;
 use crate::HostSession;
 use sha2::{Digest, Sha256};
@@ -123,6 +123,97 @@ pub enum BootstrapRecoveryChoice {
 pub enum BootstrapRecoveryOutcome {
     Kept,
     Recovered(Store),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootstrapResumeStep {
+    Install,
+    AcknowledgeDeployment(RecoveryState),
+    RestoreRegistrationBefore,
+    Register,
+    Complete,
+}
+
+/// The origin, image, directory identities and exact observed state are private.
+/// This is never authority to adopt an arbitrary existing Store.
+pub struct BootstrapResumeReview {
+    context: BootstrapReview,
+    observed: ResumeState,
+}
+
+impl BootstrapResumeReview {
+    pub fn store_path(&self) -> &Path {
+        self.context.store_path()
+    }
+    pub fn version(&self) -> &str {
+        self.context.version()
+    }
+    pub fn generation(&self) -> String {
+        self.context.generation()
+    }
+    pub fn step(&self) -> BootstrapResumeStep {
+        self.observed.action.step()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootstrapResumeChoice {
+    Keep,
+    ApplyReviewedStep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootstrapResumeOutcome {
+    Kept,
+    Advanced,
+    Complete,
+}
+
+/// Read-only inspection of a retained FIRST installation. An empty Store still
+/// requires the existing explicit empty-store recovery API. The existing lock
+/// is held only while inspecting; it is never held across caller consent.
+pub fn review_bootstrap_resume(
+    session: &HostSession,
+    package: &VerifiedPackage,
+    expected: &Expected,
+) -> Result<BootstrapResumeReview> {
+    native_session(session)?;
+    resume_review_with(
+        session,
+        package,
+        expected,
+        current_image()?,
+        &global_paths(),
+        &production_verify,
+    )
+}
+
+/// Performs ONE reviewed step. Keep returns before all access, including native
+/// admission and the cancellation callback. Advanced requires a fresh review;
+/// it never authorizes replay, registration recovery or a subsequent launch.
+pub fn resume_bootstrap(
+    session: &HostSession,
+    review: &BootstrapResumeReview,
+    package: &VerifiedPackage,
+    choice: BootstrapResumeChoice,
+    cancelled: impl Fn() -> bool,
+) -> Result<BootstrapResumeOutcome> {
+    if choice == BootstrapResumeChoice::Keep {
+        return Ok(BootstrapResumeOutcome::Kept);
+    }
+    native_session(session)?;
+    resume_with(
+        session,
+        review,
+        package,
+        &cancelled,
+        ResumeEffects {
+            image: &current_image,
+            globals: &global_paths(),
+            verifier: &production_verify,
+            checkpoint: &|_| Ok(()),
+        },
+    )
 }
 
 /// Read-only recovery inspection, never marker-only adoption. The exact signed
@@ -698,6 +789,527 @@ fn recover_with(
         Store::open_inner(&context.root).map(BootstrapRecoveryOutcome::Recovered)
     })().map_err(|_| Error { kind: ErrorKind::OutcomeUnknown,
         message: "Empty-store recovery completion could not be confirmed. Keep its origin and metadata, review again explicitly; no package was selected or registered." })
+}
+
+enum ResumeAction {
+    Install,
+    Acknowledge(Recovery),
+    Restore(crate::RegistrationRecovery),
+    Register(crate::RegistrationReview),
+    Complete,
+}
+
+impl ResumeAction {
+    fn step(&self) -> BootstrapResumeStep {
+        match self {
+            Self::Install => BootstrapResumeStep::Install,
+            Self::Acknowledge(recovery) => {
+                BootstrapResumeStep::AcknowledgeDeployment(recovery.state)
+            }
+            Self::Restore(_) => BootstrapResumeStep::RestoreRegistrationBefore,
+            Self::Register(_) => BootstrapResumeStep::Register,
+            Self::Complete => BootstrapResumeStep::Complete,
+        }
+    }
+}
+
+struct ResumeState {
+    directory: File,
+    metadata: BTreeMap<String, fs::Metadata>,
+    records: BTreeMap<String, String>,
+    action: ResumeAction,
+}
+
+impl ResumeState {
+    fn matches(&self, other: &Self) -> Result<bool> {
+        Ok(self.action.step() == other.action.step()
+            && self.records == other.records
+            && metadata_matches(&self.metadata, &other.metadata)
+            && super::host::same_file(&self.directory, &other.directory)?)
+    }
+}
+
+fn resume_globals(globals: &[PathBuf]) -> Result<()> {
+    for path in globals {
+        require(
+            fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+            "Existing global native installation was kept; bootstrap cannot override it",
+        )?;
+    }
+    Ok(())
+}
+
+fn resume_context(
+    session: &HostSession,
+    package: &VerifiedPackage,
+    expected: &Expected,
+    image: File,
+    globals: &[PathBuf],
+    verifier: &Verifier,
+) -> Result<BootstrapReview> {
+    let manifest = package_manifest(package, expected, verifier)?;
+    resume_globals(globals)?;
+    let parent = hold_parent(session.store_path())?;
+    image_matches(&image, &manifest)?;
+    Ok(BootstrapReview {
+        root: session.store_path().into(),
+        config: session.config_home(),
+        parent,
+        image,
+        pid: std::process::id(),
+        expected: expected.clone(),
+        manifest: package.bytes.clone(),
+        signature: package.signature.clone(),
+    })
+}
+
+fn resume_anchor(
+    session: &HostSession,
+    context: &BootstrapReview,
+    image: &File,
+    globals: &[PathBuf],
+    verifier: &Verifier,
+) -> Result<()> {
+    require(
+        session.store_path() == context.root
+            && session.config_home() == context.config
+            && std::process::id() == context.pid,
+        "Bootstrap resume belongs to another native session/process",
+    )?;
+    let manifest = signed_manifest(
+        &context.manifest,
+        &context.signature,
+        &context.expected,
+        verifier,
+    )?;
+    image_matches(image, &manifest)?;
+    require(
+        super::host::same_file(&context.image, image)?,
+        "Bootstrap Root image changed",
+    )?;
+    resume_globals(globals)?;
+    require(
+        super::host::same_file(&context.parent, &hold_parent(&context.root)?)?,
+        "Bootstrap native parent changed",
+    )?;
+    let directory = hold_parent(&context.root.join(ORIGIN))?;
+    let bytes = disk::read_regular(&context.root.join(ORIGIN), ORIGIN_LIMIT, true)?;
+    disk::metadata(&context.root.join(ORIGIN), false, Some(0o600), true)?;
+    let origin: Origin =
+        serde_json::from_slice(&bytes).map_err(|_| refused("Invalid bootstrap resume origin"))?;
+    require(
+        serde_json::to_vec(&origin).map_err(|_| refused("Invalid origin"))? == bytes
+            && receipt(&directory, context)? == bytes,
+        "Bootstrap origin/image/generation/directory differs; no adoption",
+    )
+}
+
+fn members(path: &Path, maximum: usize) -> Result<std::collections::BTreeSet<String>> {
+    let mut names = std::collections::BTreeSet::new();
+    for entry in fs::read_dir(path)
+        .map_err(|_| refused("Cannot inspect bootstrap members"))?
+        .take(maximum + 1)
+    {
+        let name = entry
+            .map_err(|_| refused("Cannot inspect bootstrap member"))?
+            .file_name()
+            .into_string()
+            .map_err(|_| refused("Noncanonical bootstrap member"))?;
+        names.insert(name);
+    }
+    require(
+        names.len() <= maximum,
+        "Too many bootstrap members; retained",
+    )?;
+    Ok(names)
+}
+
+/// Caller holds transaction.lock. Inspection never creates, flushes or adopts.
+fn inspect_resume(
+    session: &HostSession,
+    context: &BootstrapReview,
+    package: &VerifiedPackage,
+    verifier: &Verifier,
+) -> Result<ResumeState> {
+    use super::registration::BootstrapRegistration;
+    let root = &context.root;
+    let store = Store::open_inner(root)?;
+    let directory = hold_parent(&root.join(ORIGIN))?;
+    let names = members(root, 8)?;
+    require(
+        [
+            "store.id",
+            "transaction.lock",
+            "generations",
+            "history",
+            ORIGIN,
+        ]
+        .iter()
+        .all(|n| names.contains(*n))
+            && names.iter().all(|n| {
+                matches!(
+                    n.as_str(),
+                    "store.id"
+                        | "transaction.lock"
+                        | "generations"
+                        | "history"
+                        | ORIGIN
+                        | "current.json"
+                        | "pending.json"
+                        | "activation-v1"
+                )
+            }),
+        "Unknown or incomplete origin-bound bootstrap store; retained",
+    )?;
+    require(
+        disk::read_regular(&root.join("transaction.lock"), 0, true)?.is_empty(),
+        "Bootstrap lock is not empty",
+    )?;
+    let generation = context.generation();
+    require(
+        members(&root.join("generations"), 1)? == [generation.clone()].into(),
+        "Resume needs only this staged generation; empty recovery and other generations are separate",
+    )?;
+    store.generation(&generation, &context.expected, verifier)?;
+    require(
+        disk::read_regular(
+            &root
+                .join("generations")
+                .join(&generation)
+                .join("manifest.json"),
+            MAX_MANIFEST as u64,
+            true,
+        )? == context.manifest,
+        "Staged generation differs from the external signed package",
+    )?;
+    let selected = Selection {
+        schema_version: 1,
+        generation,
+        version: context.version().into(),
+        previous_generation: None,
+    };
+    let selected_bytes =
+        serde_json::to_vec(&selected).map_err(|_| refused("Invalid first selection"))?;
+    let transition = serde_json::to_vec(&Transition {
+        schema_version: 1,
+        before: None,
+        after: selected,
+    })
+    .map_err(|_| refused("Invalid first deployment journal"))?;
+    let history_name = format!("transaction-{}.json", digest(&transition));
+    let history = members(&root.join("history"), 1)?;
+    require(
+        history.is_empty() || history == [history_name.clone()].into(),
+        "Foreign/prior bootstrap history was kept",
+    )?;
+    if !history.is_empty() {
+        require(
+            optional_record(&root.join("history").join(&history_name))?.as_deref()
+                == Some(&transition),
+            "Bootstrap history is not this first installation",
+        )?;
+    }
+    let current = store.snapshot_with(verifier)?;
+    require(
+        current.as_ref().is_none_or(|s| s.bytes == selected_bytes),
+        "Prior/different selection cannot be adopted",
+    )?;
+    let pending = store.recovery_unlocked(verifier)?;
+    if let Some(pending) = &pending {
+        require(
+            pending.previous.is_none() && pending.pending == transition,
+            "Only this first deployment journal may resume",
+        )?;
+    }
+    require(
+        (current.is_none() && pending.is_none()) || !history.is_empty(),
+        "First deployment history is missing",
+    )?;
+    if names.contains("activation-v1") {
+        require(
+            members(&root.join("activation-v1"), 4)?.iter().all(|n| {
+                matches!(
+                    n.as_str(),
+                    "creator-hub-portable-selector" | "owner.json" | "pending.json"
+                )
+            }),
+            "Unknown activation evidence was kept",
+        )?;
+    }
+    let registration = store.bootstrap_registration_unlocked(session, package, verifier)?;
+    require(
+        (current.is_some() && pending.is_none())
+            || matches!(registration, BootstrapRegistration::Absent(_)),
+        "Registration cannot precede this first committed deployment",
+    )?;
+    let action = match (pending, current, registration) {
+        (Some(recovery), _, _) => ResumeAction::Acknowledge(recovery),
+        (None, None, _) => ResumeAction::Install,
+        (None, Some(_), BootstrapRegistration::Absent(review)) => ResumeAction::Register(review),
+        (None, Some(_), BootstrapRegistration::Pending(review)) => ResumeAction::Restore(review),
+        (None, Some(_), BootstrapRegistration::Complete) => ResumeAction::Complete,
+    };
+    let mut metadata = empty_metadata(root)?;
+    let mut records = BTreeMap::new();
+    for name in [
+        "store.id",
+        "transaction.lock",
+        ORIGIN,
+        "current.json",
+        "pending.json",
+    ] {
+        if let Some(bytes) = optional_record(&root.join(name))? {
+            records.insert(name.into(), digest(&bytes));
+            metadata.insert(
+                name.into(),
+                disk::metadata(&root.join(name), false, Some(0o600), true)?,
+            );
+        }
+    }
+    for name in history {
+        let key = format!("history/{name}");
+        let path = root.join(&key);
+        records.insert(
+            key.clone(),
+            digest(&disk::read_regular(&path, RECORD_LIMIT, true)?),
+        );
+        metadata.insert(key, disk::metadata(&path, false, Some(0o600), true)?);
+    }
+    let generation = context.generation();
+    for (suffix, directory, mode) in [
+        ("", true, 0o555),
+        ("AppDir", true, 0o555),
+        ("manifest.json", false, 0o444),
+        ("manifest.minisig", false, 0o444),
+        ("AppDir/usr/bin/creator-hub", false, 0o555),
+        (
+            "AppDir/usr/libexec/creator-hub-portable-selector",
+            false,
+            0o555,
+        ),
+    ] {
+        let key = format!("generations/{generation}/{suffix}");
+        metadata.insert(
+            key.clone(),
+            disk::metadata(&root.join(&key), directory, Some(mode), true)?,
+        );
+    }
+    if names.contains("activation-v1") {
+        metadata.insert(
+            "activation-v1".into(),
+            disk::metadata(&root.join("activation-v1"), true, Some(0o700), true)?,
+        );
+        for name in members(&root.join("activation-v1"), 4)? {
+            let key = format!("activation-v1/{name}");
+            let mode = if name == "creator-hub-portable-selector" {
+                0o555
+            } else {
+                0o600
+            };
+            let path = root.join(&key);
+            records.insert(
+                key.clone(),
+                digest(&disk::read_regular(&path, SELECTOR_LIMIT, true)?),
+            );
+            metadata.insert(key, disk::metadata(&path, false, Some(mode), true)?);
+        }
+    }
+    for (suffix, is_dir) in [
+        ("dbus-1", true),
+        ("dbus-1/services", true),
+        ("dbus-1/services/com.creatorworks.hub.Host.service", false),
+    ] {
+        let path = root.parent().unwrap().join(suffix);
+        disk::unlinked(&path)?;
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                metadata.insert(
+                    format!("native-parent/{suffix}"),
+                    disk::metadata(&path, is_dir, if is_dir { None } else { Some(0o644) }, true)?,
+                );
+                if !is_dir {
+                    records.insert(
+                        suffix.into(),
+                        digest(&disk::read_regular(&path, 8192, true)?),
+                    );
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(refused("Cannot inspect native activation parents")),
+        }
+    }
+    Ok(ResumeState {
+        directory,
+        metadata,
+        records,
+        action,
+    })
+}
+
+fn resume_review_with(
+    session: &HostSession,
+    package: &VerifiedPackage,
+    expected: &Expected,
+    image: File,
+    globals: &[PathBuf],
+    verifier: &Verifier,
+) -> Result<BootstrapResumeReview> {
+    let context = resume_context(session, package, expected, image, globals, verifier)?;
+    let _lock = disk::lock(&context.root.join("transaction.lock"))?;
+    resume_anchor(session, &context, &context.image, globals, verifier)?;
+    let observed = inspect_resume(session, &context, package, verifier)?;
+    resume_anchor(session, &context, &context.image, globals, verifier)?;
+    require(
+        observed.matches(&inspect_resume(session, &context, package, verifier)?)?,
+        "Bootstrap changed during resume review",
+    )?;
+    Ok(BootstrapResumeReview { context, observed })
+}
+
+struct ResumeEffects<'a> {
+    image: &'a dyn Fn() -> Result<File>,
+    globals: &'a [PathBuf],
+    verifier: &'a Verifier,
+    checkpoint: &'a dyn Fn(&str) -> Result<()>,
+}
+
+fn resume_with(
+    session: &HostSession,
+    review: &BootstrapResumeReview,
+    package: &VerifiedPackage,
+    cancelled: &dyn Fn() -> bool,
+    effects: ResumeEffects<'_>,
+) -> Result<BootstrapResumeOutcome> {
+    let ResumeEffects {
+        image,
+        globals,
+        verifier,
+        checkpoint,
+    } = effects;
+    cancel(cancelled)?;
+    let context = &review.context;
+    package_manifest(package, &context.expected, verifier)?;
+    require(
+        package.bytes == context.manifest && package.signature == context.signature,
+        "Reviewed resume package changed",
+    )?;
+    let store = Store::open_inner(&context.root)?;
+    let lock = disk::lock(&context.root.join("transaction.lock"))?;
+    let check = || -> Result<()> {
+        resume_anchor(session, context, &image()?, globals, verifier)?;
+        require(
+            review
+                .observed
+                .matches(&inspect_resume(session, context, package, verifier)?)?,
+            "Bootstrap resume evidence changed; no writes",
+        )
+    };
+    check()?;
+    checkpoint("bootstrap-resume-locked")?;
+    check()?;
+    cancel(cancelled)?;
+    if matches!(review.observed.action, ResumeAction::Complete) {
+        return Ok(BootstrapResumeOutcome::Complete);
+    }
+    let started = std::cell::Cell::new(false);
+    let anchored_checkpoint = |at: &str| {
+        checkpoint(at)?;
+        resume_anchor(session, context, &image()?, globals, verifier)
+    };
+    let result = match &review.observed.action {
+        ResumeAction::Install => {
+            // Only a previously verified staged generation is selected here.
+            // activate_with owns the same existing lock and CAS against None.
+            drop(lock);
+            let guard_error = std::cell::RefCell::new(None);
+            let first = std::cell::Cell::new(true);
+            let guard = || {
+                if cancelled() {
+                    return true;
+                }
+                let checked = (|| {
+                    if first.replace(false) {
+                        check()
+                    } else {
+                        resume_anchor(session, context, &image()?, globals, verifier)
+                    }
+                })();
+                if let Err(error) = checked {
+                    *guard_error.borrow_mut() = Some(error);
+                    true
+                } else {
+                    false
+                }
+            };
+            let result = store
+                .activate_with(
+                    &context.generation(),
+                    &context.expected,
+                    None,
+                    &guard,
+                    &|at| {
+                        checkpoint(at)?;
+                        if at == "prior-retained" {
+                            check()?;
+                        } else {
+                            resume_anchor(session, context, &image()?, globals, verifier)?;
+                        }
+                        started.set(true);
+                        Ok(())
+                    },
+                    verifier,
+                )
+                .map(|_| BootstrapResumeOutcome::Advanced);
+            if let Some(error) = guard_error.into_inner() {
+                Err(error)
+            } else {
+                result
+            }
+        }
+        ResumeAction::Acknowledge(recovery) => {
+            started.set(true);
+            // Same acknowledgement primitives as Store::acknowledge_recovery,
+            // under its existing lock plus the additional bound-origin check.
+            retain(
+                &context
+                    .root
+                    .join("history")
+                    .join(format!("transaction-{}.json", digest(&recovery.pending))),
+                &recovery.pending,
+            )
+            .and_then(|_| disk::sync_dir(&context.root.join("history")))
+            .and_then(|_| checkpoint("bootstrap-resume-before-acknowledge"))
+            .and_then(|_| check())
+            .and_then(|_| remove_pending(&context.root, &recovery.pending))
+            .map(|_| BootstrapResumeOutcome::Advanced)
+        }
+        ResumeAction::Register(registration) => {
+            started.set(true);
+            store
+                .apply_registration_locked(
+                    session,
+                    registration,
+                    cancelled,
+                    &anchored_checkpoint,
+                    verifier,
+                )
+                .map(|_| BootstrapResumeOutcome::Advanced)
+        }
+        ResumeAction::Restore(recovery) => {
+            started.set(true);
+            store
+                .recover_registration_locked(session, recovery, &anchored_checkpoint, verifier)
+                .map(|_| BootstrapResumeOutcome::Advanced)
+        }
+        ResumeAction::Complete => unreachable!(),
+    };
+    let result = result.and_then(|outcome| {
+        anchored_checkpoint("bootstrap-resume-step-complete")?;
+        Ok(outcome)
+    });
+    result.map_err(|error| if started.get() {
+        Error { kind: ErrorKind::OutcomeUnknown, message: "Bootstrap resume may have advanced. Keep its origin, generations and journals; review again explicitly. No further step or launch was requested." }
+    } else { error })
 }
 
 fn apply_with(

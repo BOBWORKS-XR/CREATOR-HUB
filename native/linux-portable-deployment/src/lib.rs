@@ -5,9 +5,11 @@ mod filesystem;
 mod store;
 
 pub use store::bootstrap::{
-    apply_bootstrap, recover_bootstrap, review_bootstrap, review_bootstrap_recovery,
-    BootstrapOutcome, BootstrapRecoveryChoice, BootstrapRecoveryOutcome, BootstrapRecoveryReview,
-    BootstrapReview, ReviewedBootstrapChoice,
+    apply_bootstrap, recover_bootstrap, resume_bootstrap, review_bootstrap,
+    review_bootstrap_recovery, review_bootstrap_resume, BootstrapOutcome, BootstrapRecoveryChoice,
+    BootstrapRecoveryOutcome, BootstrapRecoveryReview, BootstrapResumeChoice,
+    BootstrapResumeOutcome, BootstrapResumeReview, BootstrapResumeStep, BootstrapReview,
+    ReviewedBootstrapChoice,
 };
 pub use store::host::{
     HostSession, InstallChoice, InstallOutcome, InstallReview, LaunchLease, HOST_MARKER,

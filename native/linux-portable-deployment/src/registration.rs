@@ -113,6 +113,14 @@ pub enum RegistrationRecoveryChoice {
     RestoreBefore,
 }
 
+// Only the origin-bound bootstrap caller uses this private inspection while
+// holding transaction.lock. No journal fields or ownership constructors escape.
+pub(super) enum BootstrapRegistration {
+    Absent(RegistrationReview),
+    Pending(RegistrationRecovery),
+    Complete,
+}
+
 impl Store {
     /// The package must inventory the fixed selector, independently of AppRun.
     /// Installation/selection is separately reviewed with review_install and
@@ -183,8 +191,21 @@ impl Store {
         checkpoint: &dyn Fn(&str) -> Result<()>,
         verifier: &Verifier,
     ) -> Result<RegistrationOutcome> {
-        let service = self.registration_paths(session)?;
+        self.registration_paths(session)?;
         let _lock = disk::lock(&self.root.join("transaction.lock"))?;
+        self.apply_registration_locked(session, review, cancelled, checkpoint, verifier)
+    }
+
+    /// Caller must hold transaction.lock, including its origin/state recheck.
+    pub(super) fn apply_registration_locked(
+        &self,
+        session: &HostSession,
+        review: &RegistrationReview,
+        cancelled: &dyn Fn() -> bool,
+        checkpoint: &dyn Fn(&str) -> Result<()>,
+        verifier: &Verifier,
+    ) -> Result<RegistrationOutcome> {
+        let service = self.registration_paths(session)?;
         require(
             review.root == self.root && review.service == service,
             "Registration review belongs to another native session/store",
@@ -292,8 +313,20 @@ impl Store {
         checkpoint: &dyn Fn(&str) -> Result<()>,
         verifier: &Verifier,
     ) -> Result<()> {
-        let service = self.registration_paths(session)?;
+        self.registration_paths(session)?;
         let _lock = disk::lock(&self.root.join("transaction.lock"))?;
+        self.recover_registration_locked(session, review, checkpoint, verifier)
+    }
+
+    /// Caller must hold transaction.lock, including its origin/state recheck.
+    pub(super) fn recover_registration_locked(
+        &self,
+        session: &HostSession,
+        review: &RegistrationRecovery,
+        checkpoint: &dyn Fn(&str) -> Result<()>,
+        verifier: &Verifier,
+    ) -> Result<()> {
+        let service = self.registration_paths(session)?;
         require(
             review.root == self.root && review.service == service,
             "Recovery belongs to another native session/store",
@@ -315,6 +348,53 @@ impl Store {
             )?;
             remove_pending(&self.root.join(DIRECTORY), &review.journal)
         })().map_err(|_| Error { kind: ErrorKind::OutcomeUnknown, message: "Registration recovery was interrupted; keep the journal and review again. No deployment selection or settings were rolled back." })
+    }
+
+    /// A first-install journal can only have absent before-images and this
+    /// exact signed target. Foreign owners, removals and upgrade journals refuse.
+    pub(super) fn bootstrap_registration_unlocked(
+        &self,
+        session: &HostSession,
+        package: &VerifiedPackage,
+        verifier: &Verifier,
+    ) -> Result<BootstrapRegistration> {
+        let service = self.registration_paths(session)?;
+        let target = package_owner(package, verifier)?;
+        let observed = self.registration_images(&service)?;
+        if let Some(journal) = self.registration_journal()? {
+            let pending = transition(&journal)?;
+            require(
+                pending.before.is_none() && pending.after.as_ref() == Some(&target),
+                "Only this origin's first registration journal can resume",
+            )?;
+            let before = self.owner_images(&service, None, verifier)?;
+            let after = self.owner_images(&service, Some(&target), verifier)?;
+            known_intermediate(&observed, &before, &after)?;
+            return Ok(BootstrapRegistration::Pending(RegistrationRecovery {
+                root: self.root.clone(),
+                service,
+                journal,
+                observed,
+            }));
+        }
+        let owner = self.owned_registration(&service, &observed, verifier)?;
+        require(
+            owner.as_ref().is_none_or(|owner| owner == &target),
+            "Another registration owner cannot be adopted by bootstrap",
+        )?;
+        if owner.is_some() {
+            return Ok(BootstrapRegistration::Complete);
+        }
+        Ok(BootstrapRegistration::Absent(RegistrationReview {
+            root: self.root.clone(),
+            service,
+            transition: Transition {
+                schema_version: 1,
+                before: None,
+                after: Some(target),
+            },
+            before: observed,
+        }))
     }
 
     /// Version comes from a production-verified selection, never this crate's
