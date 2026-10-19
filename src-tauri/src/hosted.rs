@@ -1070,11 +1070,23 @@ mod tests {
             std::fs::write(&path, b"fixture").unwrap();
             let release = temp.path().join("release");
             let drained = temp.path().join("drained");
+            let ready = temp.path().join("ready");
             let mut child = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command",
-                "$null = [Console]::In.ReadToEnd(); [IO.File]::WriteAllText($env:RESTORE_DRAINED, 'EOF'); while (-not [IO.File]::Exists($env:RESTORE_RELEASE)) { Start-Sleep -Milliseconds 20 }"])
+                "[IO.File]::WriteAllText($env:RESTORE_READY, 'ready'); $null = [Console]::In.ReadToEnd(); [IO.File]::WriteAllText($env:RESTORE_DRAINED, 'EOF'); while (-not [IO.File]::Exists($env:RESTORE_RELEASE)) { Start-Sleep -Milliseconds 20 }"])
                 .env("RESTORE_DRAINED", &drained).env("RESTORE_RELEASE", &release)
+                .env("RESTORE_READY", &ready)
                 .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
                 .creation_flags(0x08000000).spawn().unwrap();
+            // Measure owned-backend exit, not PowerShell's variable startup time.
+            let startup = Instant::now();
+            while !ready.exists() && startup.elapsed() < Duration::from_secs(90) {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "Fixture exited before readiness"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(ready.exists(), "PowerShell fixture did not become ready");
             let connection = Arc::new(SessionConnection {
                 input: Mutex::new(child.stdin.take()),
                 ..Default::default()

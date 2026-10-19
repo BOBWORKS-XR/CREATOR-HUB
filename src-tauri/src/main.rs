@@ -5,10 +5,14 @@ mod catalog;
 mod community;
 mod community_project;
 mod convergence;
+use convergence::stores::storage as settings_backup;
 #[allow(dead_code)]
 mod convergence_dependencies;
 #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
 mod convergence_linux;
+#[allow(dead_code)]
+#[path = "../../modules/mcp/launcher/src-tauri/src/migration_recovery.rs"]
+mod convergence_recovery;
 mod features;
 #[cfg(all(
     target_os = "linux",

@@ -1,7 +1,7 @@
 //! First-launch adoption of retained Creator stores. Removal has a separate
 //! native provenance/retention gate; a backup or presence label cannot pass it.
 #[path = "../../native/convergence-store.rs"]
-mod stores;
+pub(crate) mod stores;
 
 use crate::{builtin, catalog::AppId, hosted::Hosting, manager, platform};
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{fs, path::PathBuf, sync::Mutex};
 use tauri::Manager as _;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 
 const POLICY: u32 = 1;
 
@@ -436,7 +438,7 @@ fn recheck_durable_settings(plan: &Plan) -> Result<(), String> {
     Ok(())
 }
 
-fn can_retain(plan: &Plan) -> Result<(), String> {
+fn can_prepare(plan: &Plan) -> Result<(), String> {
     if !plan.retry_allowed {
         return Err("The previous migration did not finish its operation and completion checks. Keep original apps and review recovery before retrying.".into());
     }
@@ -448,11 +450,180 @@ fn can_retain(plan: &Plan) -> Result<(), String> {
     {
         return Err("An earlier MCP operation has an unresolved outcome. Review it in MCP before removing any app. Original data were kept.".into());
     }
-    let current = plan.stores[0].bytes();
-    let legacy = plan.stores[1].bytes();
-    if matches!((current, legacy), (Some(a), Some(b)) if a != b) {
+    Ok(())
+}
+
+fn settings_conflict(plan: &Plan) -> bool {
+    matches!((plan.stores[0].bytes(), plan.stores[1].bytes()), (Some(a), Some(b)) if a != b)
+}
+
+fn can_retain(plan: &Plan) -> Result<(), String> {
+    can_prepare(plan)?;
+    if settings_conflict(plan) {
         return Err("Current and earlier MCP settings differ. Both were kept; review which setup to use before migration.".into());
     }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsChoice {
+    Current,
+    Earlier,
+}
+
+fn settings_choice(result: MessageDialogResult) -> Result<SettingsChoice, String> {
+    match result {
+        MessageDialogResult::Custom(label) if label == "Use current settings" => {
+            Ok(SettingsChoice::Current)
+        }
+        MessageDialogResult::Custom(label) if label == "Use earlier settings" => {
+            Ok(SettingsChoice::Earlier)
+        }
+        _ => {
+            Err("Settings selection was cancelled. Both configurations were kept unchanged.".into())
+        }
+    }
+}
+
+fn settings_summary(snapshot: &stores::Snapshot) -> Result<String, String> {
+    let value: Value = serde_json::from_slice(snapshot.bytes().ok_or("MCP settings are missing.")?)
+        .map_err(|_| "Cannot summarize MCP settings.")?;
+    let channels = value["channels"]
+        .as_array()
+        .ok_or("Cannot summarize MCP projects.")?;
+    let active = value["active_channel_id"].as_str();
+    let selected = channels
+        .iter()
+        .find(|channel| channel["id"].as_str() == active && active.is_some())
+        .and_then(|channel| channel["name"].as_str())
+        .unwrap_or("None");
+    let selected: String = selected
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(100)
+        .collect();
+    Ok(format!(
+        "{} saved projects; selected project: {selected}",
+        channels.len()
+    ))
+}
+
+fn check_settings_recovery(base: &stores::Roots) -> Result<PathBuf, String> {
+    let current = stores::Store::McpCurrent.path(base)?;
+    let legacy = stores::Store::McpLegacy.path(base)?;
+    let journal = current
+        .parent()
+        .unwrap()
+        .join(".creator-hub-product-settings");
+    stores::storage::reject_links(&journal)?;
+    let entries = match fs::read_dir(&journal) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(journal),
+        Err(_) => {
+            return Err(
+                "Cannot inspect MCP settings recovery; both configurations were kept.".into(),
+            )
+        }
+    };
+    let allowed = [current, legacy];
+    let mut count = 0;
+    for entry in entries {
+        let path = entry
+            .map_err(|_| "Cannot inspect MCP settings recovery.")?
+            .path();
+        if path.file_name().is_some_and(|name| name == "hub.lock") {
+            continue;
+        }
+        count += 1;
+        // The frozen MCP backend accepts 32 records. Reserve one record for
+        // this selection and one for the subsequent reviewed server transition.
+        if count >= 31 {
+            return Err(
+                "MCP settings recovery history is full for this migration. Existing settings were not replaced; retain and review the completed history before continuing."
+                    .into(),
+            );
+        }
+        let status = crate::convergence_recovery::Transaction::open_allowlisted(&path, &allowed)?
+            .inspect()?;
+        if !status.completed && !status.historical_completed {
+            return Err(format!("An earlier MCP settings change needs recovery review at {}. Resolve it in MCP before choosing settings; both configurations were kept.", path.display()));
+        }
+    }
+    Ok(journal)
+}
+
+fn resolve_settings_choice(
+    plan: &mut Plan,
+    base: &stores::Roots,
+    choice: SettingsChoice,
+) -> Result<(), String> {
+    use crate::convergence_recovery::{ReviewedWrite, Transaction};
+    can_prepare(plan)?;
+    if !settings_conflict(plan) {
+        return Err(
+            "The settings conflict changed. Check again before choosing a configuration.".into(),
+        );
+    }
+    for snapshot in &plan.stores {
+        if snapshot.bytes().is_some()
+            && !plan
+                .retained_images
+                .iter()
+                .any(|backup| backup.verify(snapshot).is_ok())
+        {
+            return Err("Both original configurations must have verified backups before selecting settings.".into());
+        }
+    }
+    let (source, target) = match choice {
+        SettingsChoice::Current => (0, 1),
+        SettingsChoice::Earlier => (1, 0),
+    };
+    let source_path = plan.stores[source].store().path(base)?;
+    // Keep the chosen source reserved while the other active store is updated.
+    // The shared writer separately checks and retains the displaced target.
+    let mut source_file = stores::storage::protected_options()
+        .open(&source_path)
+        .map_err(|_| "The chosen settings are busy. Nothing was changed.")?;
+    let chosen = stores::storage::read(&mut source_file)?;
+    if Some(chosen.as_slice()) != plan.stores[source].bytes() {
+        return Err(
+            "The chosen settings changed after review. Check again; nothing was replaced.".into(),
+        );
+    }
+    let target_path = plan.stores[target].store().path(base)?;
+    let journal = check_settings_recovery(base)?;
+    plan.retry_allowed = false;
+    let transaction = Transaction::prepare(
+        &journal,
+        vec![ReviewedWrite::new(
+            "MCP settings selection",
+            &target_path,
+            plan.stores[target].bytes().unwrap(),
+            &chosen,
+        )],
+    )?;
+    recheck(plan)?;
+    let outcome = transaction.resume(|_| true)?;
+    if !outcome.completed {
+        return Err(format!("Settings selection needs recovery review at {}. Both originals are backed up; no automatic retry was started.", outcome.journal.display()));
+    }
+    let mut renewed = Vec::new();
+    for (index, previous) in plan.stores.iter().enumerate() {
+        let fresh = stores::Snapshot::inspect(previous.store(), base)?;
+        if index <= 1 {
+            if fresh.bytes() != Some(chosen.as_slice()) {
+                return Err("Settings changed during selection. Keep the backups and review recovery before continuing.".into());
+            }
+        } else {
+            previous.recheck()?;
+        }
+        renewed.push(fresh);
+    }
+    for backup in &plan.retained_images {
+        backup.recheck()?;
+    }
+    plan.stores = renewed;
+    plan.retry_allowed = true;
     Ok(())
 }
 
@@ -603,7 +774,17 @@ pub async fn prepare_convergence(handle: tauri::AppHandle) -> Result<Report, Str
             recheck(plan)?;
             return Ok(plan.report.clone());
         }
-        can_retain(plan)?;
+        can_prepare(plan)?;
+        let choice = if settings_conflict(plan) {
+            let message = format!(
+                "Two different MCP configurations were found. Choose which settings Hub should use.\n\nCurrent Creator Works: {}\nEarlier Banter MCP: {}\n\nHub will first keep exact backups of BOTH originals, then apply the chosen configuration to both active MCP settings files so the old conflict cannot recur. Projects, scenes and AI-client settings are not changed here. These configurations are not merged; projects unique to the other configuration remain in its backup.\n\nCancel keeps both active files unchanged.",
+                settings_summary(&plan.stores[0])?, settings_summary(&plan.stores[1])?
+            );
+            Some(settings_choice(handle.dialog().message(message)
+                .title("Choose MCP settings for Hub").kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::YesNoCancelCustom("Use current settings".into(), "Use earlier settings".into(), "Cancel".into()))
+                .blocking_show_with_result())?)
+        } else { None };
         let approved = handle.dialog().message(
             "Let Creator Hub use your existing MCP and Project Setup settings?\n\nHub will ask verified idle standalone app windows to close normally, then keep exact local backups. Busy or unverified apps are not force-closed. AI clients, Unity and Node connections stay open.\n\nSettings remain in their current locations; Unity projects are not moved or edited. Existing AI connections are reviewed separately before changing them. No standalone installation is removed by this step. Cancel leaves the current setup unchanged."
         ).title("Move to unified Creator Hub").kind(MessageDialogKind::Info)
@@ -611,9 +792,9 @@ pub async fn prepare_convergence(handle: tauri::AppHandle) -> Result<Report, Str
         if !approved {
             return Err("Migration was cancelled. Existing apps and settings were kept.".into());
         }
-        can_retain(plan)?;
+        can_prepare(plan)?;
         close_reviewed_guis(plan)?;
-        can_retain(plan)?;
+        can_prepare(plan)?;
         let mut backups = Vec::new();
         let mut retained_images = Vec::new();
         for snapshot in &plan.stores {
@@ -631,6 +812,10 @@ pub async fn prepare_convergence(handle: tauri::AppHandle) -> Result<Report, Str
         recheck(plan)?;
         plan.report.backups = backups;
         plan.retained_images = retained_images;
+        if let Some(choice) = choice {
+            resolve_settings_choice(plan, &roots()?, choice)?;
+        }
+        can_retain(plan)?;
         plan.report.stage = "backed-up";
         plan.report.message = "Exact settings backups are verified. Next, review existing AI connections. Old apps have not been removed.".into();
         Ok(plan.report.clone())
@@ -1246,6 +1431,250 @@ mod tests {
             },
         };
         (temp, roots, plan)
+    }
+
+    fn conflicting_plan() -> (tempfile::TempDir, stores::Roots, Plan) {
+        let (temp, base, mut plan) = fixture_plan();
+        let path = stores::Store::McpLegacy.path(&base).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, br#"{"channels":[],"auto_start":true,"futureOption":"earlier","allow_all_tests":false}"#).unwrap();
+        plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &base).unwrap();
+        (temp, base, plan)
+    }
+
+    fn retain_fixture(plan: &mut Plan) {
+        plan.retained_images = plan
+            .stores
+            .iter()
+            .filter(|s| s.bytes().is_some())
+            .map(|s| s.retain_reviewed().unwrap())
+            .collect();
+    }
+
+    #[test]
+    fn settings_selection_requires_exact_native_button_not_default_or_cancel() {
+        assert_eq!(
+            settings_choice(MessageDialogResult::Custom("Use current settings".into())).unwrap(),
+            SettingsChoice::Current
+        );
+        assert_eq!(
+            settings_choice(MessageDialogResult::Custom("Use earlier settings".into())).unwrap(),
+            SettingsChoice::Earlier
+        );
+        for result in [
+            MessageDialogResult::Yes,
+            MessageDialogResult::No,
+            MessageDialogResult::Ok,
+            MessageDialogResult::Cancel,
+            MessageDialogResult::Custom("Cancel".into()),
+            MessageDialogResult::Custom("unknown".into()),
+        ] {
+            assert!(settings_choice(result).is_err());
+        }
+    }
+
+    #[test]
+    fn settings_selection_applies_either_exact_configuration_and_keeps_both_originals() {
+        for choice in [SettingsChoice::Current, SettingsChoice::Earlier] {
+            let (_temp, base, mut plan) = conflicting_plan();
+            let originals = [
+                plan.stores[0].bytes().unwrap().to_vec(),
+                plan.stores[1].bytes().unwrap().to_vec(),
+            ];
+            assert!(can_prepare(&plan).is_ok());
+            assert!(can_retain(&plan).is_err());
+            retain_fixture(&mut plan);
+            resolve_settings_choice(&mut plan, &base, choice).unwrap();
+            assert!(can_retain(&plan).is_ok());
+            let selected = &originals[if choice == SettingsChoice::Current {
+                0
+            } else {
+                1
+            }];
+            for saved in &plan.stores[..2] {
+                assert_eq!(saved.bytes(), Some(selected.as_slice()));
+                saved.recheck().unwrap();
+            }
+            for (backup, original) in plan.retained_images.iter().zip(originals) {
+                assert_eq!(fs::read(backup.path()).unwrap(), original);
+                backup.recheck().unwrap();
+            }
+            let journal = base
+                .config
+                .join("creator-works-mcp/.creator-hub-product-settings");
+            let directory = fs::read_dir(journal)
+                .unwrap()
+                .map(|p| p.unwrap().path())
+                .find(|p| p.is_dir())
+                .unwrap();
+            let outcome = crate::convergence_recovery::Transaction::open_allowlisted(
+                &directory,
+                &[
+                    stores::Store::McpCurrent.path(&base).unwrap(),
+                    stores::Store::McpLegacy.path(&base).unwrap(),
+                ],
+            )
+            .unwrap()
+            .inspect()
+            .unwrap();
+            assert!(outcome.completed);
+            assert!(!plan.report.retirement_available);
+            assert!(plan.report.required);
+            assert!(resolve_settings_choice(&mut plan, &base, choice).is_err());
+        }
+    }
+
+    #[test]
+    fn settings_selection_refuses_missing_or_changed_original_backups() {
+        for corrupted in [false, true] {
+            let (_temp, base, mut plan) = conflicting_plan();
+            let originals = [
+                plan.stores[0].bytes().unwrap().to_vec(),
+                plan.stores[1].bytes().unwrap().to_vec(),
+            ];
+            if corrupted {
+                retain_fixture(&mut plan);
+                fs::write(plan.retained_images[1].path(), b"changed backup").unwrap();
+            }
+            assert!(resolve_settings_choice(&mut plan, &base, SettingsChoice::Current).is_err());
+            for (saved, original) in plan.stores[..2].iter().zip(originals) {
+                assert_eq!(
+                    fs::read(saved.store().path(&base).unwrap()).unwrap(),
+                    original
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settings_selection_refuses_external_edits_and_unknown_operation_outcomes() {
+        for index in 0..3 {
+            let (_temp, base, mut plan) = conflicting_plan();
+            retain_fixture(&mut plan);
+            if index == 2 {
+                write_outcome(&base, "accepted");
+                plan.stores[2] =
+                    stores::Snapshot::inspect(stores::Store::McpHostedOutcomes, &base).unwrap();
+            } else {
+                fs::write(
+                    plan.stores[index].store().path(&base).unwrap(),
+                    b"external edit",
+                )
+                .unwrap();
+            }
+            assert!(resolve_settings_choice(&mut plan, &base, SettingsChoice::Current).is_err());
+            assert!(!base
+                .config
+                .join("creator-works-mcp/.creator-hub-product-settings")
+                .exists());
+        }
+    }
+
+    #[test]
+    fn settings_selection_never_creates_a_missing_legacy_store() {
+        let (_temp, base, mut plan) = fixture_plan();
+        retain_fixture(&mut plan);
+        assert!(resolve_settings_choice(&mut plan, &base, SettingsChoice::Current).is_err());
+        assert!(!stores::Store::McpLegacy.path(&base).unwrap().exists());
+    }
+
+    #[test]
+    fn settings_selection_does_not_bypass_a_pending_change_to_either_store() {
+        use crate::convergence_recovery::{ReviewedWrite, Transaction};
+        for pending in [stores::Store::McpCurrent, stores::Store::McpLegacy] {
+            let (_temp, base, mut plan) = conflicting_plan();
+            retain_fixture(&mut plan);
+            let index = if pending == stores::Store::McpCurrent {
+                0
+            } else {
+                1
+            };
+            let journal = base
+                .config
+                .join("creator-works-mcp/.creator-hub-product-settings");
+            Transaction::prepare(
+                &journal,
+                vec![ReviewedWrite::new(
+                    "Pending test save",
+                    &pending.path(&base).unwrap(),
+                    plan.stores[index].bytes().unwrap(),
+                    br#"{"channels":[],"auto_start":false}"#,
+                )],
+            )
+            .unwrap();
+            assert!(
+                resolve_settings_choice(&mut plan, &base, SettingsChoice::Current)
+                    .unwrap_err()
+                    .contains("recovery review")
+            );
+            for snapshot in &plan.stores {
+                snapshot.recheck().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn settings_selection_reserves_history_capacity_for_the_following_server_transition() {
+        use crate::convergence_recovery::{ReviewedWrite, Transaction};
+        let (_temp, base, mut plan) = conflicting_plan();
+        let path = stores::Store::McpCurrent.path(&base).unwrap();
+        let journal = base
+            .config
+            .join("creator-works-mcp/.creator-hub-product-settings");
+        for index in 0..31 {
+            let before = fs::read(&path).unwrap();
+            let after = serde_json::to_vec(&json!({"channels":[],"auto_start":false,"save":index}))
+                .unwrap();
+            assert!(
+                Transaction::prepare(
+                    &journal,
+                    vec![ReviewedWrite::new(
+                        "Completed fixture save",
+                        &path,
+                        &before,
+                        &after
+                    )]
+                )
+                .unwrap()
+                .resume(|_| true)
+                .unwrap()
+                .completed
+            );
+            if index == 29 {
+                assert!(check_settings_recovery(&base).is_ok());
+            }
+        }
+        plan.stores[0] = stores::Snapshot::inspect(stores::Store::McpCurrent, &base).unwrap();
+        retain_fixture(&mut plan);
+        assert!(
+            resolve_settings_choice(&mut plan, &base, SettingsChoice::Current)
+                .unwrap_err()
+                .contains("history is full")
+        );
+        for snapshot in &plan.stores {
+            snapshot.recheck().unwrap();
+        }
+        assert_eq!(
+            fs::read_dir(journal)
+                .unwrap()
+                .filter(|entry| entry.as_ref().unwrap().path().is_dir())
+                .count(),
+            31
+        );
+    }
+
+    #[test]
+    fn settings_summary_identifies_project_counts_and_selected_project_without_control_characters()
+    {
+        let (_temp, base, mut plan) = fixture_plan();
+        let body = serde_json::to_vec(&json!({"channels":[{"id":"one","name":"Example\nproject","unity_project_path":"fixture","enabled":true}],
+            "active_channel_id":"one","auto_start":false})).unwrap();
+        fs::write(stores::Store::McpCurrent.path(&base).unwrap(), body).unwrap();
+        plan.stores[0] = stores::Snapshot::inspect(stores::Store::McpCurrent, &base).unwrap();
+        assert_eq!(
+            settings_summary(&plan.stores[0]).unwrap(),
+            "1 saved projects; selected project: Exampleproject"
+        );
     }
 
     #[test]

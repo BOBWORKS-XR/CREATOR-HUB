@@ -3,7 +3,7 @@
 //! activation, consent import, client editing, app shutdown or uninstall occurs.
 #[allow(dead_code)]
 #[path = "../modules/mcp/launcher/src-tauri/src/settings_backup.rs"]
-mod storage;
+pub(crate) mod storage;
 
 // Shared with the MCP product-settings recognizer once native Unix payload pins
 // are established. This is not enabled migration or an uninstall authority.
@@ -272,7 +272,7 @@ impl Backup {
         Ok(())
     }
 
-    fn verify(&self, snapshot: &Snapshot) -> Result<(), String> {
+    pub(super) fn verify(&self, snapshot: &Snapshot) -> Result<(), String> {
         if self.source != snapshot.path
             || storage::read_bytes(&self.path)?.as_deref() != snapshot.bytes()
             || snapshot
