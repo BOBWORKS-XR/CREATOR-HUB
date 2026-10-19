@@ -153,6 +153,37 @@ def installed(stage, binding):
         require(not check.stdout and not check.stderr, "Installed package verification differs")
 
 
+def single_visible(d, selector):
+    matches = d.elements(selector)
+    require(len(matches) <= 1, "Ambiguous readiness control: " + selector)
+    return bool(matches) and d.read(selector, "displayed") is True
+
+
+def failure_ui(d):
+    result = {}
+    fields = (("#view-projects", "attribute/aria-busy"), ("#project-status", "text"),
+              ("#project-warnings", "text"), ("#project-list", "text"),
+              ("#convergence-error", "text"), ("#convergence-progress", "text"))
+    for selector, endpoint in fields:
+        matches = d.elements(selector)
+        require(len(matches) <= 1, "Ambiguous diagnostic control")
+        result[selector] = str(d.read(selector, endpoint))[:2048] if matches else None
+    result["projectRows"] = len(d.elements("#project-list .project-row"))
+    result["selectedRows"] = len(d.elements('#project-list .project-row[data-mcp-selected="true"]'))
+    return result
+
+
+def capture_failure(d, result, bitmap):
+    try:
+        result["failureUi"] = failure_ui(d)
+    except Exception as error:
+        result["failureUiError"] = str(error)[:700]
+    try:
+        result["failureSurface"] = bitmap()
+    except Exception as error:
+        result["failureSurfaceError"] = str(error)[:700]
+
+
 def current_ui(d, pages, mode, reopened):
     pages.wait(lambda: d.read("#view-projects", "displayed") is True)
     require(d.read("#view-hub", "displayed") is False and d.read("#projects-home-title") == "Projects", "Current Projects home missing")
@@ -169,7 +200,7 @@ def current_ui(d, pages, mode, reopened):
     pages.wait(lambda: d.read("#convergence-dialog", "attribute/open") is None)
     # start() awaits convergence before populating Projects. This positive
     # readiness check prevents accepting a closed dialog before status returns.
-    pages.wait(lambda: d.read('#project-list .project-row[data-mcp-selected="true"]', "displayed") is True)
+    pages.wait(lambda: single_visible(d, '#project-list .project-row[data-mcp-selected="true"]'))
     require(d.read("#convergence-dialog", "attribute/open") is None, "Migration guide reopened after startup")
     if mode == "migration-cancel":
         return {"oneGuideDeferred": True, "reminderSuppressionObserved": reopened}
@@ -299,6 +330,11 @@ def session(root, home, binding, reopened=False):
         result["root"] = owned
     except Exception as error:
         failure = error; result["error"] = str(error)[:1500]
+        if request is not None:
+            def failure_bitmap():
+                capture_dir = root / "physical"; capture_dir.mkdir(mode=0o700, exist_ok=True)
+                return native.bitmap(request, capture_dir, helper, x11)
+            capture_failure(d, result, failure_bitmap)
     finally:
         if request is not None:
             try:
@@ -315,6 +351,13 @@ def session(root, home, binding, reopened=False):
                 result["disposableTeardownRequired"] = False
             except Exception as error:
                 result["closeError"] = str(error)[:700]
+                result["closeState"] = {"pidfdExited": bool(select.select([pidfd], [], [], 0)[0]),
+                                        "procExists": Path(f"/proc/{request.pid}").exists()}
+                if not result["closeState"]["pidfdExited"]:
+                    try:
+                        result["closeState"]["ui"] = failure_ui(d)
+                    except Exception as capture_error:
+                        result["closeState"]["captureError"] = str(capture_error)[:700]
                 if failure is None:
                     failure = error
         if pidfd is not None:

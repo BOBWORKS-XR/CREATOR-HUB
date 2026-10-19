@@ -139,11 +139,56 @@ class Driver:
         return ["one"]
 
     def elements(self, selector):
+        if selector == '#project-list .project-row[data-mcp-selected="true"]':
+            return ["selected"]
         assert selector == "iframe,object,embed"
         return []
 
 
 class Pure016(unittest.TestCase):
+    def test_dynamic_single_visible_waits_for_presence_not_strict_element_read(self):
+        d = Driver(); calls = []
+        def absent(selector):
+            calls.append(selector)
+            return []
+        d.elements = absent
+        self.assertFalse(P.single_visible(d, "not-created"))
+        self.assertEqual(calls, ["not-created"])
+        d.elements = lambda _: ["first", "second"]
+        with self.assertRaisesRegex(RuntimeError, "Ambiguous readiness"):
+            P.single_visible(d, "not-created")
+        d = Driver()
+        self.assertTrue(P.single_visible(d, '#project-list .project-row[data-mcp-selected="true"]'))
+
+    def test_failure_ui_is_read_only_fixed_scoped_and_bounded(self):
+        class DiagnosticDriver:
+            def elements(self, selector):
+                return ["selected"] if selector != "#convergence-error" else []
+            def read(self, selector, endpoint):
+                return "x" * 4096
+        result = P.failure_ui(DiagnosticDriver())
+        self.assertEqual(result["#convergence-error"], None)
+        self.assertEqual(result["projectRows"], 1)
+        self.assertEqual(result["selectedRows"], 1)
+        self.assertEqual(len(result["#project-status"]), 2048)
+        self.assertLess(len(json.dumps(result)), 12000)
+
+    def test_ui_capture_failure_does_not_skip_owned_bitmap_or_mask_original_error(self):
+        result = {"error": "original operation refused"}; calls = []
+        def bitmap():
+            calls.append("owned bitmap")
+            return {"nonblank": True}
+        with patch.object(P, "failure_ui", side_effect=RuntimeError("driver unavailable")):
+            P.capture_failure(None, result, bitmap)
+        self.assertEqual(calls, ["owned bitmap"])
+        self.assertEqual(result["failureUiError"], "driver unavailable")
+        self.assertEqual(result["failureSurface"], {"nonblank": True})
+        self.assertEqual(result["error"], "original operation refused")
+        with patch.object(P, "failure_ui", return_value={"projectRows": 1}):
+            P.capture_failure(None, result, lambda: (_ for _ in ()).throw(RuntimeError("ownership refused")))
+        self.assertEqual(result["failureSurfaceError"], "ownership refused")
+        self.assertEqual(result["error"], "original operation refused")
+
     def test_startup_wait_absent_empty_singleton_without_action_retry(self):
         class X11:
             display = 1
