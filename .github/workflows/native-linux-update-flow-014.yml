@@ -217,7 +217,7 @@ jobs:
             openssl ca-certificates libpam-systemd policykit-1-gnome=0.105-7ubuntu3 pkexec=0.105-33ubuntu0.2 \
             polkitd=0.105-33ubuntu0.2 coreutils=8.32-4.1ubuntu1.4 passwd=1:4.8.1-2ubuntu2.2
           sudo systemctl start systemd-logind.service polkit.service
-      - name: Secure only measured root-owned hosted-runner policy ancestry
+      - name: Secure only measured root-owned hosted-runner fixture and policy ancestry
         run: |
           python3 -B - <<'PY'
           import json, os, stat, subprocess
@@ -225,7 +225,7 @@ jobs:
           for parent in (Path('/'), Path('/usr')):
               info = parent.lstat()
               assert stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0 and not info.st_mode & 0o7022
-          paths = tuple(map(Path, ('/usr/share', '/usr/share/polkit-1', '/usr/share/polkit-1/actions')))
+          paths = tuple(map(Path, ('/opt', '/usr/share', '/usr/share/polkit-1', '/usr/share/polkit-1/actions')))
           originals = []
           for target in paths:
               info = target.lstat()

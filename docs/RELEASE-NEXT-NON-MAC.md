@@ -44,7 +44,7 @@ not approval of untested packages or a publication receipt.
 
 ## Source Validation
 
-The 0.1.16 source candidate passed 375 browser tests, 947 script tests
+The 0.1.16 source candidate passed 375 browser tests, 950 script tests
 (135 skipped), 412 integrated Hub Rust tests (14 ignored), and
 304 MCP internal-service Rust tests (9 ignored) on Windows. Strict Clippy passed
 for integrated Hub and all release targets of MCP and Project Setup. Logs are in
@@ -57,6 +57,13 @@ different source version rather than authorizing new bytes with the old receipt.
 Clean Windows CI also caught an unused lifecycle idle query in its isolated
 native fixture. The fixture now checks active-workflow and completed-work idle
 states; strict release Clippy passes without suppressing the warning.
+
+A separate fresh Windows CRLF checkout passed 928 script tests (132 skipped).
+Five explicit LF attributes protect exact Unix protocol/source contracts. The
+installed-candidate compatibility workflow now builds its refusal-only helper
+before script assertions. The pure archive fixture uses Python's canonical path
+spelling, retains inode/device checks, and still proves redirected paths are
+refused. These are checkout/test corrections, not Mac platform enablement.
 
 The public Windows baseline registry now includes 0.1.14's published installer
 and executable hashes, verified against the release API and descriptor. Newer
@@ -75,12 +82,22 @@ bounded authentication-window capture and original-error retention now pass
 capture-only workflow does not approve system authentication or install updates.
 
 The separate frozen-input full-flow controller now admits system Cancel and one
-synthetic approval on disposable GitHub Linux runners. Its 72 pure tests and
+synthetic approval on disposable GitHub Linux runners. Its 76 pure tests and
 workflow/script parse checks pass. Scoped acceptance requires actual package and
 executable replacement, product-initiated restart, fresh UI ownership, unchanged
 settings/selection and unrelated synthetic runtime, and normal close. Native
 execution remains required; its private 0.1.15 fixture cannot qualify or publish
 the new source candidate.
+
+Run 39257702384 passed preflight and signed input staging but stopped in the
+fixture broker before Hub launch. Read-only diagnostic run 39258494136 confirmed
+the GitHub runner's root-owned `/opt` is mode 0777. The exact disposable-runner
+ancestry setup now secures that measured directory, preserving owner/inode
+checks and the original application's ownership requirements. Native repetition
+is still required. Earlier preflight/input failures remain recorded: missing
+frozen history in shallow checkout, and a private draft exceeding an obsolete
+32-asset count cap. Exact frozen-source fetch and a 256 KiB private metadata
+budget replace those assumptions without changing selected signed asset pins.
 
 Flatpak run 39138975316 stopped at AT-SPI/launcher PID provenance before disclosure
 input. Corrected bus-peer/namespace observations pass 35 pure regressions, but

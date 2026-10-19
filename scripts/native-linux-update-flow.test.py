@@ -1040,6 +1040,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertLess(commands.index(fetch), tests)
         self.assertIn("stat --format='%n uid=%u gid=%g mode=%a' / /opt", commands[tests])
 
+    def test_measured_fixture_ancestor_is_secured_without_relaxing_source_or_system_policy(self):
+        steps = self.workflow["jobs"]["native"]["steps"]
+        index = next(i for i, step in enumerate(steps) if step.get("name", "").startswith("Secure only measured"))
+        source = steps[index]["run"]
+        self.assertIn("('/opt', '/usr/share', '/usr/share/polkit-1', '/usr/share/polkit-1/actions')", source)
+        self.assertIn("stat.S_IMODE(info.st_mode) in (0o755, 0o777)", source)
+        self.assertIn("(before.st_dev, before.st_ino, before.st_uid, before.st_gid)", source)
+        self.assertIn("'policyChanged': False", source)
+        fixture = next(i for i, step in enumerate(steps) if step.get("name", "").startswith("Install exact protected fixture"))
+        self.assertLess(index, fixture)
+
     def test_private_draft_growth_is_byte_bounded_without_changing_exact_asset_pins(self):
         script = next(step["with"]["script"] for step in self.workflow["jobs"]["stage-input"]["steps"]
                       if step.get("uses", "").startswith("actions/github-script@"))
