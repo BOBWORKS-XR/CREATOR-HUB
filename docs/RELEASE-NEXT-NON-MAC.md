@@ -86,8 +86,8 @@ synthetic approval on disposable GitHub Linux runners. Its 104 pure tests and
 workflow/script parse checks pass. Scoped acceptance requires actual package and
 executable replacement, product-initiated restart, fresh UI ownership, unchanged
 settings/selection and unrelated synthetic runtime, and normal close. Native
-complete-flow acceptance remains required; its private 0.1.15 fixture cannot qualify or publish
-the new source candidate.
+complete-flow acceptance passed in the bounded run recorded below. Its private
+0.1.15 fixture cannot qualify or publish the new source candidate.
 
 Capture run 39259885862 and native system-Cancel run 39260331976 passed their
 finite scopes. Cancel retained the original package, live Hub, settings, selected
@@ -113,18 +113,92 @@ None of these older-package results qualifies a final 0.1.16 installer.
 Run 39273696186 verified the replacement and automatic restart, dismissed the
 expected migration offer once, and scrolled the owned footer control into view
 without opening its link. It still refused visible-version acceptance because
-the current accessibility text reader returned no version text. A bounded,
-failure-only interface capture is the next diagnostic; it cannot substitute for
-readiness or erase the original refusal. No complete approval pass is claimed.
+the current accessibility text reader returned no version text. That original
+refusal is retained. The subsequent capture identified the source-bound native
+status element; the reader now requires its exact current-version string,
+visible state, WebKitGTK interface and the same owned renderer.
+
+Run 39294045915 at test source 607a978 passed the full frozen-0.1.14 to private
+0.1.15 native flow: system cancellation and authorized signed installation,
+exact package/ELF and clean `dpkg --verify`, automatic restart, visible exact
+version, settings and selected-project preservation, unrelated synthetic Node
+runtime survival, and normal exit zero. The synthetic account was relocked.
+This scoped mechanism pass does not qualify final 0.1.16, Flatpak, legacy-app
+retirement or public release discovery.
+
+The new Linux 0.1.16 payload producer, run 39294433900 at source 966f35c, passed.
+Its exact original artifact ZIP was independently hash-verified, bound to fresh
+run/job/attempt metadata, and the nine-file handoff was signed with the existing
+production key. No key material is included. Final native assembly, outer
+installer qualification and 0.1.16 install/update acceptance remain separate
+gates. The finite 0.1.16 build route does not admit Mac or reuse the frozen
+0.1.14 qualification.
+
+The first 0.1.16 assembly attempt, 39297225857, passed signed-input staging but
+stopped before native compilation. A profile test inherited the real 0.1.16
+branch while exercising the frozen 0.1.14 flag combinations. Commit 3bf0fb8
+isolates that historical test context and separately exercises the current
+preflight, including invalid event/repository/platform inputs. The targeted
+tests pass with the new branch set; production admission was not relaxed.
+
+## New Project And Migration Reports
+
+The 2026-10-19 report shows a duplicated Unity-helper warning on Projects. The
+same missing/unavailable cached-helper path can block both current Unity Hub
+discovery and launching a known project. Native preparation with explicit
+approval, without requiring the old Setup app, is implemented in 86115a8.
+Background discovery stays cache-only. Explicit Open can prepare only the
+missing pinned registry helper; it does not enable optional AI Unity CLI controls.
+Root project/helper tests pass on Windows; actual packaged download consent and
+Editor launch still need a disposable native acceptance run.
+
+The direct MCP page had omitted the older per-project SDK/bridge badges and
+clear selected-row treatment. Those indicators and `aria-pressed` selection are
+restored in 592f988; 34d00ba also keeps the recent-project picker aligned with
+the displayed path. Native Home inventory now supplies selection and bounded,
+independently checked bridge metadata. MCP mutations invalidate the cached Home
+inventory; an idle visible Home refreshes once, including an invalidation during
+an older in-flight read. Read-only checks and ordinary navigation do not poll.
+The latest focused UI suite passed 102 tests, including narrow/wide screenshots,
+in-flight selection, queued refresh and explicit-only retry after read failure.
+
+Integrated migration now has one in-app guide and Move to Hub action, a native
+snapshot-bound approval and backup/connection/cleanup progress. Verified paths
+reuse the existing writers and exact backups; unsafe/custom settings retain
+their specific approval/refusal. Unknown outcomes are not replayed. Two
+independent source audits identified and tested corrections for colliding-ID
+merge bytes, settings drift during exception approval, and cleanup-start/prior
+evidence classification. The final focused re-audit found no additional issue.
+This is source review, not packaged migration acceptance.
+
+Default Root passed 439 tests and integrated Root 440 (14 ignored each) before
+the final coordinator-only correction. That correction passed 45 integrated
+convergence tests (1 ignored). The MCP integrated-service library passed 312
+tests (9 ignored); strict Clippy passed for both Root modes and the MCP library
+and tests. Permission/legacy-controller checks passed 35 tests. The final full
+browser suite passed 399 tests, including all five added cache regressions.
+None of these latest product changes is in the earlier Windows installer or
+signed Linux handoff below. A new local candidate is required; old evidence is
+retained and must not be relabelled as acceptance of the new product source.
+
+The isolated portable deployment primitive passed 41 actual Linux tests and
+strict Clippy in run 39299443308. Its first workflow failed before any job because
+`runner.temp` is unavailable in job-level environment expressions. That original
+failure is retained; a regression now requires step-scoped runner paths. This
+library is not wired into Hub, Flatpak activation or the updater. Real complete
+AppDir inputs, memory/dependency measurements, Deck activation, signed update,
+restart and removal remain required.
 
 ## Windows Candidate Checkpoint
 
 The local 0.1.16 direct-feature candidate built successfully at
 `artifacts/unified/windows-016-20261019`. Installer extraction verified the raw
-and packaged Hub executable; PE ProductVersion is 0.1.16.
+and packaged Hub executable using the documented Tauri bundle-marker change;
+the two whole-file hashes are intentionally different. PE ProductVersion is 0.1.16.
 
 - Installer SHA-256: `7229cfcf919dc3a9e27a459fd482cbbe059fd54caa9ad379b2a75c8baa113a20`.
-- Hub SHA-256: `7ef27351edefe4545d3e530e8d5c51e7eb3092e7cc7b20498591bfe7456c2389`.
+- Installed Hub SHA-256: `7ef27351edefe4545d3e530e8d5c51e7eb3092e7cc7b20498591bfe7456c2389`.
+- Raw Hub SHA-256: `f15e54f9da730f48b6a3692a41311e49f2b89db077841ce369622b2ccaf60e0f`.
 - Both managed runtime/router signatures passed offline production-key checks,
   including rejection of altered metadata. This is not installer acceptance.
 - The installed local app was not replaced and remains at its original hash.

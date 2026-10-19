@@ -11,6 +11,9 @@ of defect-free releases. Source tests do not replace the installed checks below.
 | --- | --- | --- |
 | Indefinite Checking, misleading Needs attention, wrong platform label or missing Install action | `tests/startup.spec.js`, `tests/hub.spec.js` | Fresh profile with neither companion installed; explicit installed/not-installed/error states, correct platform, actionable retry |
 | Squashed or partial menu highlights; misplaced terms/help/AI warnings | `tests/hub.spec.js`, `tests/usage-terms.spec.js`, `tests/hosted.spec.js` | Narrow/wide packaged view; original icons/font; centered, usable dialogs; acknowledgement actually saved and retained after restart |
+| Known project cannot open without a separately cached Unity helper; the same warning appears twice | Root project/helper admission tests, `tests/projects.spec.js` | Fresh profile: explicit approved helper preparation, verified identity, exact Editor/project arguments; cancellation preserves files, background discovery does not download |
+| Direct project selection loses active-project, SDK or per-project bridge indicators; Home retains stale badges after a change | `tests/native-pages.spec.js`, `tests/projects.spec.js` | Actual packaged rows show verified bridge states/current selection; changes preserve preferences and projects; Home refreshes after completion, including a concurrent older read, without polling or automatic failure retries |
+| Consolidation requires a chain of import/migrate/finish prompts | `tests/convergence.spec.js`, native convergence snapshot/consent and recovery tests | One guide/action for the ordinary flow; backup-before-write, no duplicate projects, current preferences retained, explicit unsafe-case review and verified standalone cleanup; no replay of uncertain outcomes |
 | Downloaded version opens an old executable or cannot discover an update | `scripts/check-release-feed.test.cjs`, `scripts/self-update-baselines.test.cjs`, `scripts/native-self-update-lab.test.cjs` | Exact previous stable app discovers the target; Cancel changes nothing; approved signed install restarts to the expected installed hash/version |
 | Old clients cannot read the growing GitHub release response | `scripts/check-release-feed.cjs VERSION --draft`, guarded `scripts/publish-hub-draft.cjs` | Real projected feed below 256 KiB with at least 4 KiB spare; preserve published installer/signature bytes; verify public discovery before latest/announcement |
 | MCP update is blocked by Node processes; user has to kill unrelated apps | `scripts/hosted-release-contract.test.cjs`, native process/routing fixtures | Existing live MCP connection survives approved GUI retirement/update; new connection works; unrelated Node/AI/Unity processes remain untouched |
@@ -53,9 +56,9 @@ Native preflight also checks these captured boundaries:
 
 ## Still Open
 
-- Linux native system cancellation passed on frozen package 0.1.14. Synthetic
-  approval installed the exact signed private 0.1.15 package and automatically
-  restarted it; complete UI/preservation/normal-close acceptance is still open.
+- Linux native cancellation and synthetic approval passed in run 39294045915
+  on frozen 0.1.14 to private 0.1.15: exact package, automatic restart, visible
+  version, settings/selection preservation and normal close were verified.
   These bounded older-package results do not accept final 0.1.16 or Flatpak.
   See [the current release gates](RELEASE-NEXT-NON-MAC.md) and the historical
   [source audit](LINUX-UPDATE-AUDIT-014.md).
