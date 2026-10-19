@@ -415,13 +415,16 @@ pub(crate) fn discover_target(
     Ok(Some((release, bytes, signature)))
 }
 
+#[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+type SignedPortableDiscovery = (Version, Vec<u8>, Vec<u8>);
+
 /// Portable discovery supplies its own signed schema; native Target/Release
 /// validation remains unchanged. Asset locations never come from API URLs.
 #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
 pub(crate) fn discover_portable(
     client: &Client,
     baseline: &Version,
-) -> Result<Option<(Version, Vec<u8>, Vec<u8>)>, String> {
+) -> Result<Option<SignedPortableDiscovery>, String> {
     let url = "https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases?per_page=10";
     let items: Vec<GithubRelease> = serde_json::from_slice(&fetch_small(client, url, 256 * 1024)?)
         .map_err(|_| "GitHub returned invalid release metadata.")?;
