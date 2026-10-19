@@ -99,6 +99,11 @@ test('production build proof binds exact Cargo declarations, helper/policy and n
       assert.ok([b.PRODUCTION_SOURCE_PATHS, b.PORTABLE_SOURCE_PATHS].some(paths => JSON.stringify(args) === JSON.stringify(['diff', '--exit-code', 'HEAD', '--', ...paths])));
       return '';
     }
+    if (args[0] === 'status') {
+      assert.ok([b.PRODUCTION_SOURCE_PATHS, b.PORTABLE_SOURCE_PATHS].some(paths => JSON.stringify(args) === JSON.stringify(['status', '--porcelain=v1', '--untracked-files=all', '--', ...paths])));
+      return '';
+    }
+    assert.equal(args[0], 'rev-parse');
     return args[1] === 'HEAD' ? commit : tree;
   };
   try {
@@ -128,6 +133,45 @@ test('production build proof binds exact Cargo declarations, helper/policy and n
     assert.deepEqual(combined.portableHostBuild, portable);
     assert.deepEqual(combined.productionMigration, production);
     assert.equal(combined.releaseReady, false);
+    for (const [label, paths, makeProof, untracked] of [
+      ['production', b.PRODUCTION_SOURCE_PATHS,
+        run => b.productionBuildProof(root, file, featureArgs, { GITHUB_SHA: commit }, staged, run),
+        ['src-tauri/src/native_support.rs', 'src-tauri/src/portable_package.rs', 'scripts/linux-retirement-package-verify.py']],
+      ['production portable', b.PORTABLE_SOURCE_PATHS,
+        run => b.portableBuildProof(root, file, portableArgs, { GITHUB_SHA: commit }, run),
+        ['src-tauri/src/native_support.rs', 'src-tauri/src/portable_package.rs', 'native/linux-portable-deployment/src/new.rs',
+          'modules/mcp/launcher/src-tauri/src/new.rs']],
+    ]) {
+      const calls = [];
+      const clean = (command, args) => {
+        if (command === 'git') calls.push(args);
+        return execute(command, args);
+      };
+      const before = makeProof(clean);
+      const diff = calls.findIndex(args => args[0] === 'diff');
+      const status = calls.findIndex(args => args[0] === 'status');
+      const treeRead = calls.findIndex(args => args[0] === 'rev-parse' && args[1] === 'HEAD^{tree}');
+      assert.ok(diff >= 0 && diff < status && status < treeRead, `${label}: bounded cleanliness before proof publication`);
+      assert.deepEqual(calls[status], ['status', '--porcelain=v1', '--untracked-files=all', '--', ...paths]);
+      for (const changed of [null, ...untracked]) {
+        const attempted = [];
+        let published = false;
+        assert.throws(() => {
+          makeProof((command, args) => {
+            if (command === 'git') {
+              attempted.push(args);
+              if (args[0] === 'diff' && changed === null) throw Error('post-build tracked source injection');
+              if (args[0] === 'status' && changed !== null) return `?? ${changed}\n`;
+            }
+            return execute(command, args);
+          });
+          published = true;
+        }, changed === null ? /post-build tracked source injection/ : /Untracked or changed production.*source/, label);
+        assert.equal(published, false);
+        assert.equal(attempted.some(args => args[0] === 'rev-parse' && args[1] === 'HEAD^{tree}'), false);
+      }
+      assert.deepEqual(makeProof(clean), before, `${label}: unchanged source before and after refusals`);
+    }
     for (const change of [{ rawHub: { ...portable.rawHub, sha256: 'f'.repeat(64) } }, { sourceTree: 'f'.repeat(40) }]) {
       assert.throws(() => b.signedAssemblyReceipt(result, 'linux', 'x86_64', commit, portableArgs, { ...portable, ...change }, production), /same actual Root/);
     }

@@ -101,6 +101,8 @@ function productionBuildProof(root, file, featureArgs, env, staged, execute = ex
   const git = args => String(execute('git', args, { cwd: root, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 })).trim();
   if (git(['rev-parse', 'HEAD']) !== env.GITHUB_SHA) throw Error('Production source changed after admission.');
   git(['diff', '--exit-code', 'HEAD', '--', ...PRODUCTION_SOURCE_PATHS]);
+  assert.equal(git(['status', '--porcelain=v1', '--untracked-files=all', '--', ...PRODUCTION_SOURCE_PATHS]), '',
+    'Untracked or changed production source after assembly admission.');
   return validateProductionBuildProof({ schemaVersion: 1, profile: retirementPackage.PRODUCTION_PROFILE,
     sourceCommit: env.GITHUB_SHA, sourceTree: git(['rev-parse', 'HEAD^{tree}']), compiledFeatures: features,
     rawHub: { size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') }, staging: staged.productionReceipt }, env.GITHUB_SHA, features);
@@ -155,6 +157,10 @@ function portableBuildProof(root, file, featureArgs, env, execute = execFileSync
   const git = args => String(execute('git', args, { cwd: root, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 })).trim();
   if (git(['rev-parse', 'HEAD']) !== env.GITHUB_SHA) throw Error('Portable build source changed after assembly admission.');
   git(['diff', '--exit-code', 'HEAD', '--', ...PORTABLE_SOURCE_PATHS]);
+  if (expected.includes(retirementPackage.PRODUCTION_ROOT_FEATURE)) {
+    require('node:assert/strict').equal(git(['status', '--porcelain=v1', '--untracked-files=all', '--', ...PORTABLE_SOURCE_PATHS]), '',
+      'Untracked or changed production portable source after assembly admission.');
+  }
   const proof = { schemaVersion: 1, version: '0.1.16', target: 'x86_64-unknown-linux-gnu', sourceCommit: env.GITHUB_SHA,
     sourceTree: git(['rev-parse', 'HEAD^{tree}']), compiledFeatures: featureArgs[1].split(','), startupImageBinding: 1,
     rawHub: { size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') } };
