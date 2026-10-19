@@ -1156,12 +1156,15 @@ class FreshUiTests(unittest.TestCase):
         snapshot = {"nodes": [{"name": "0.1.15", "showing": True}]}
         b = types.SimpleNamespace(TITLE="Creator Hub", native_ax_references=mock.Mock(return_value=(refs, bus)),
             native_process=mock.Mock(return_value=value), RootOwnership=mock.Mock(return_value=owner), snapshot_owned=mock.Mock(return_value=snapshot))
-        c = types.SimpleNamespace(owned_windows=mock.Mock(return_value=[{"window": 88, "mapped": True, "title": "Creator Hub"}]))
+        c = types.SimpleNamespace(owned_windows=mock.Mock(return_value=[{"window": 88, "mapped": True, "title": "Creator Hub"}]),
+            shown_names=lambda snapshot: [n["name"] for n in snapshot["nodes"] if n["showing"]],
+            press=mock.Mock(return_value={"action": "skip-migration", "actionCount": 1}))
         polkit = types.SimpleNamespace(dbus_call=mock.Mock(return_value=[True]), bus_identity=mock.Mock(return_value={"pid": 42, "uid": 21314}))
         return types.SimpleNamespace(**locals())
 
-    def invoke(self, f):
-        return p.successor_ui(f.value, 77, f.b, f.c, f.polkit, f.helper, None, f.atspi, "session-bus", None, mock.Mock(), {"system": "pin"})
+    def invoke(self, f, observation=None):
+        return p.successor_ui(f.value, 77, f.b, f.c, f.polkit, f.helper, None, f.atspi, "session-bus", None, mock.Mock(),
+                              {"system": "pin"}, observation=observation)
 
     def test_fresh_phase15_binds_new_pid_xid_ax_aliases_and_renderer(self):
         f = self.fixture()
@@ -1198,6 +1201,37 @@ class FreshUiTests(unittest.TestCase):
             self.invoke(f)
         f.b.RootOwnership.assert_called_once()
         f.bus.close_sync.assert_called_once_with(None)
+        f.c.press.assert_not_called()
+
+    def test_reopened_migration_offer_is_declined_once_in_new_owned_window(self):
+        f = self.fixture()
+        offer = {"nodes": [{"name": "Move to unified Creator Hub", "showing": True}]}
+        f.b.snapshot_owned.side_effect = [offer, f.snapshot]
+        observation = {}
+        request, _owner, _bus, snapshot = self.invoke(f, observation)
+        self.assertEqual(request.pid, 42)
+        self.assertEqual(snapshot, f.snapshot)
+        f.c.press.assert_called_once_with("skip-migration", f.owner, f.atspi)
+        self.assertTrue(observation["migrationSkipAttempted"])
+        self.assertEqual(observation["migrationSkip"]["actionCount"], 1)
+
+    def test_unchanged_migration_offer_cannot_cause_repeat_clicks(self):
+        f = self.fixture()
+        f.b.snapshot_owned.return_value = {"nodes": [{"name": "Move to unified Creator Hub", "showing": True}]}
+        with mock.patch.object(p.time, "monotonic", side_effect=[0, 0, 1, 26]), self.assertRaisesRegex(RuntimeError, "deadline"):
+            self.invoke(f, {})
+        f.c.press.assert_called_once_with("skip-migration", f.owner, f.atspi)
+
+    def test_uncertain_migration_decline_is_not_retried_or_accepted(self):
+        f = self.fixture()
+        f.b.snapshot_owned.return_value = {"nodes": [{"name": "Move to unified Creator Hub", "showing": True}]}
+        f.c.press.side_effect = RuntimeError("Uncertain press")
+        observation = {}
+        with self.assertRaisesRegex(RuntimeError, "Uncertain press"):
+            self.invoke(f, observation)
+        self.assertTrue(observation["migrationSkipAttempted"])
+        self.assertNotIn("migrationSkip", observation)
+        self.assertEqual(f.c.press.call_count, 1)
 
 
 class ProtectedSourceTests(unittest.TestCase):

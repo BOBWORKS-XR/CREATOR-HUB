@@ -651,6 +651,12 @@ def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, captur
             snapshot = b.snapshot_owned(request, helper, atspi, owner)
             last.update(stage="visible-version", versionNodes=[n for n in snapshot["nodes"]
                 if isinstance(n.get("name"), str) and "0.1." in n["name"]])
+            if "Move to unified Creator Hub" in c.shown_names(snapshot):
+                last["stage"] = "migration-offer"
+                if not last.get("migrationSkipAttempted"):
+                    last["migrationSkipAttempted"] = True
+                    last["migrationSkip"] = c.press("skip-migration", owner, atspi)
+                continue
             if not any(n["name"] == "0.1.15" and n["showing"] for n in snapshot["nodes"]):
                 continue
             require(owner.renderer is not None, "Fresh independently bound WebKit producer required")
