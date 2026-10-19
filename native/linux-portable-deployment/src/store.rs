@@ -18,6 +18,9 @@ const RECORD_LIMIT: u64 = 16384;
 pub(crate) mod host;
 #[path = "registration.rs"]
 pub(crate) mod registration;
+#[cfg(feature = "experimental-restart")]
+#[path = "restart.rs"]
+pub(crate) mod restart;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

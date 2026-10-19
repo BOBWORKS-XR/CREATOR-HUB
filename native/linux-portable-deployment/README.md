@@ -208,6 +208,136 @@ acceptance; portable update/restart wiring. None is simulated by this library.
 Windows tests cover pure bindings/refusals; Unix registration/rollback/removal
 tests require a Linux test runner. Compiling those tests is not executing them.
 
+## Experimental Restart Coordinator
+
+`experimental-restart` is a default-off crate feature. No Root workflow or Root
+application feature is enabled by this change. Without it, the installed
+`activate_registered` callback and ordinary selector wait path are unchanged.
+The typed manifest/metadata source helpers and install/registration APIs retain
+their signatures. There is still no CLI install/removal UI.
+
+The Linux Root/caller contract is:
+
+```text
+Store::review_restart(&HostSession, &VerifiedPackage) -> Result<RestartReview>
+Store::stage_restart(&RestartReview, &VerifiedPackage, RestartChoice,
+                     impl Fn() -> bool) -> Result<RestartStageOutcome>
+RootRestart::admit(&HostSession, &Store) -> Result<Option<RootRestart>>
+RootRestart::prepare(&mut self, StagedRestart) -> Result<RestartReady>
+RootRestart::authorize_exit(&mut self, RestartReady) -> Result<()>
+RootRestart::cancel(&mut self, RestartReady) -> Result<()>
+RootRestart::abort_pending(&mut self) -> Result<()>
+RootRestart::disposition(&self) -> RestartDisposition
+RootRestart::normal_exit_allowed(&self) -> bool
+Store::supervise_registered(&HostSession) -> Result<SupervisionOutcome>
+```
+
+`RestartChoice` is `KeepCurrent | StageReviewed`; `RestartStageOutcome` is
+`Declined | Staged(StagedRestart)`. Capability fields are private; review and
+staged objects expose version/generation getters, and review exposes the old
+selection. No supplied PID, digest or path alone constructs an approved target.
+
+The order is **verify -> review/approve -> stage only -> authenticated READY/ARM
+receipt handshake -> explicit ExitIntent/ExitGranted -> normal owned Root exit
+zero -> exact old snapshot recheck
+-> existing CAS activation -> one signed new AppRun launch**. This update path
+never calls `install_reviewed`, which would select before Root has exited.
+Staging, cancelled staging, readiness, Arm, EOF and child-spawn success are not a
+selection or restart receipt. Pending deployment/registration recovery, stale
+selection, invalid protocol, timeout, abnormal exit and unsupported supervision
+never select, roll back, kill a process or retry a failed launch automatically.
+A failure after a committed selection reports an unknown restart outcome, not
+that the prior selection was retained. All generations and settings are kept.
+
+The selector creates one anonymous inherited `AF_UNIX/SOCK_SEQPACKET` channel.
+Only fixed-size 137-byte versioned control/target-identity packets are accepted;
+there are no commands, filenames, caller PIDs or install/selection flags on the
+wire. Descriptor 198 and the fixed environment marker are discovery hints, not
+authority. The consumed Root endpoint is CLOEXEC to avoid later exec leakage.
+Every received packet needs exactly one kernel `SCM_CREDENTIALS` message through
+`SO_PASSCRED`. Socket-creation `SO_PEERCRED` is not authentication. Extra/truncated
+ancillary data, `SCM_RIGHTS` (closing delivered descriptors), unknown packet
+fields/padding, oversized and empty packets refuse. Empty packets are not EOF.
+
+Both sides check UID, PID/start identity and `/proc` executable identity against
+the signed selected Root and signed registered selector. The selector owns the
+AppRun `Child`, records its birth and requires actual Root to exec into **that
+same PID/start identity with the selector still its parent**. An AppRun that
+forks Root cannot qualify. No alternative process enumeration or supplied PID
+is accepted. This relationship must be demonstrated with the actual signed
+package before enabling automatic updates. Native unit-process fixtures are not
+that evidence. Admission/readiness waits are bounded to 30 seconds and the
+offered/prepared/exiting deadline to 60 seconds (not extended by later packets);
+these limits are not measured SteamOS
+performance acceptance. EOF never substitutes for the owned child's exit code.
+The coordinator polls control alongside the owned child's status. Invalid
+control, unexpected EOF or expiry disarms and closes its endpoint **before**
+waiting for ordinary app exit. EOF is expected only after explicit ExitIntent;
+even then actual owned exit zero and the deadline are mandatory before CAS.
+
+Root integration requirements (owned by the Root caller, not supplied here):
+
+- Keep existing portable startup image/selection admission mandatory. Missing
+  restart supervision returns `None`; restart admission errors disable this
+  optional updater, not normal Root operation or those existing startup guards.
+- Admit once, retain the client, and serialize preparation with the close gate.
+  Do signature verification and explicit approval before stage-only work. A
+  successful `prepare` returns a readiness token but does not authorize any
+  selection, even if Armed was accepted. The existing reviewed close path must
+  call `authorize_exit(token)` and require success with `ExitAuthorized` before
+  requesting normal update exit zero. Never use Tauri `request_restart`, an
+  APPIMAGE override, a signal or a shell command. Serialize cancellation and
+  authorization with every close path; retain the client through actual exit.
+- **Every zero-code close/restart path must honor `normal_exit_allowed`.**
+  Preparation retains abort authority before sending any proposal. The predicate
+  permits ordinary close from Prepared but is not evidence of update success.
+- Preparation errors never send ExitIntent. They resolve as confirmed `Aborted`,
+  observable `PeerClosedSafe`, or `SafeNotArmed` (no exit authorization was sent,
+  regardless of missing cancellation ACK). None needs an indefinite close block.
+  `Idle` and `Prepared` also permit ordinary close **without updating**.
+- An authorization attempt can fail after ExitIntent may have reached the
+  selector. Authenticated, matching `Cancelled` resolves to `Aborted`. Observed
+  endpoint EOF while the same Root PID/start/image remains alive resolves to
+  `PeerClosedSafe`: this coordinator cannot have observed that still-live Root's
+  exit. Cleanup alone permits Root reparenting after selector death; admission
+  and received-packet authentication still require the exact original parent.
+- If neither abort acknowledgement nor safe peer EOF is observed after an exit
+  intent, the result is `OutcomeUnknown`, disposition `Unknown` and
+  `normal_exit_allowed == false`. Retain the client; do not replace it with
+  `None`, claim unchanged, or permit a later ordinary exit zero. `abort_pending`
+  remains available without a token, including after an error. On coordinator
+  timeout/failure, its immediate endpoint closure allows a subsequent abort
+  resolution to observe EOF instead of permanently blocking a known-safe close.
+  The crate does not terminate Root. No classification proves that an unrelated
+  process did not change the store; it describes this coordinator's authority.
+- Cancellation consumes a token but retains unresolved exit authorization.
+  The channel permits one update attempt per Root
+  launch, not automatic prepare/select retries. No caller UX is implemented.
+
+The source/pure tests cover stage-only review, cancellation, stale state,
+recovery and exit modes. Linux-only tests cover real per-message credentials
+(including a child whose PID differs from socketpair creation credentials),
+packet/ancillary refusal and descriptor closure, process identity checks, and a
+real socket peer that accepts Arm but withholds Armed until preparation fails.
+That regression checks that failed preparation cannot authorize a later modeled
+exit zero, including a delayed Armed ACK and missing abort ACK. Further tests
+distinguish safe-not-armed from unknown post-intent outcomes, resolve unknown via
+real endpoint EOF, and observe coordinator disarm EOF while its owned fixture
+child is still waiting on a private release pipe. These tests do not substitute
+for native signed coordinator admission or real Root close-path acceptance.
+Private unit-test construction is not signed Root/AppRun acceptance. Run these
+on a disposable Linux test runner before enabling any Root workflow feature:
+
+```sh
+cargo test --locked --manifest-path native/linux-portable-deployment/Cargo.toml --features experimental-restart -- --test-threads=1
+cargo clippy --locked --manifest-path native/linux-portable-deployment/Cargo.toml --features experimental-restart --all-targets -- -D warnings
+```
+
+Installed signed Root/AppRun same-child proof, Root close-interlock integration,
+native delayed-ACK/abort behavior, GUI restart/version evidence, MCP reconnect,
+SteamOS/Flatpak and settings retention remain separate acceptance gates. No
+production release or automatic update readiness is claimed here.
+
 ## Package Contract And Provisional Bounds
 
 The signed camelCase JSON manifest has exactly these fields:

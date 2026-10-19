@@ -12,6 +12,10 @@ pub use store::registration::{
     RegistrationChoice, RegistrationOutcome, RegistrationRecovery, RegistrationRecoveryChoice,
     RegistrationReview, SELECTOR_ENTRYPOINT,
 };
+#[cfg(feature = "experimental-restart")]
+pub use store::restart::{RestartChoice, RestartReview, RestartStageOutcome, StagedRestart};
+#[cfg(all(feature = "experimental-restart", target_os = "linux"))]
+pub use store::restart::{RestartDisposition, RestartReady, RootRestart, SupervisionOutcome};
 pub use store::{Activation, Recovery, RecoveryState, Selection, SelectionSnapshot, Store};
 
 use minisign_verify::{PublicKey, Signature};

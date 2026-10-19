@@ -14,12 +14,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         use creator_hub_linux_portable_deployment::{HostSession, Store};
         let session = HostSession::capture()?;
         let store = Store::open(session.store_path())?;
-        // Root owns the bus name; keep activation Exec alive during its startup.
-        let status = store.activate_registered(&session)?.wait()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err("Native Hub exited without a successful process result.".into())
+        #[cfg(feature = "experimental-restart")]
+        {
+            let outcome = store.supervise_registered(&session)?;
+            if outcome.exit_code == Some(0) {
+                Ok(())
+            } else {
+                Err("Native Hub did not exit normally with code zero.".into())
+            }
+        }
+        #[cfg(not(feature = "experimental-restart"))]
+        {
+            // Root owns the bus name; keep activation Exec alive during its startup.
+            let status = store.activate_registered(&session)?.wait()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err("Native Hub exited without a successful process result.".into())
+            }
         }
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]

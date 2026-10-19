@@ -370,7 +370,7 @@ struct HostProfile {
     executable_sha256: String,
 }
 
-fn host_profile(manifest: &Manifest, bytes: &[u8]) -> Result<()> {
+pub(super) fn host_profile(manifest: &Manifest, bytes: &[u8]) -> Result<()> {
     require(
         !bytes.is_empty() && bytes.len() <= 4096,
         "Bounded signed host profile is required",
@@ -394,7 +394,7 @@ fn host_profile(manifest: &Manifest, bytes: &[u8]) -> Result<()> {
     )
 }
 
-fn require_runner(manifest: &Manifest) -> Result<()> {
+pub(super) fn require_runner(manifest: &Manifest) -> Result<()> {
     require(
         matches!(
             manifest.entries.get(RUNNER),

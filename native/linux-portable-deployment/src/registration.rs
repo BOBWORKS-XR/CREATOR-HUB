@@ -344,32 +344,51 @@ impl Store {
     /// exact running stable image before spawning AppRun; no D-Bus RPC is added.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub fn activate_registered(&self, session: &HostSession) -> Result<std::process::Child> {
+        self.admit_registered_selector(session)?;
+        self.selected_activation(session)?.spawn(session)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn admit_registered_selector(&self, session: &HostSession) -> Result<fs::File> {
         disk::admit()?;
         no_global_registration()?;
+        self.registration_paths(session)?;
+        let _lock = disk::lock(&self.root.join("transaction.lock"))?;
+        let named = self.registered_selector_image_unlocked(session)?;
+        let tool = self.root.join(DIRECTORY).join(TOOL);
+        require(
+            std::env::current_exe().ok().as_deref() == Some(tool.as_path()),
+            "Activation must run the exact registered stable selector",
+        )?;
+        let actual = fs::File::open("/proc/self/exe")
+            .map_err(|_| refused("Cannot inspect running selector"))?;
+        require(
+            super::host::same_file(&named, &actual)?,
+            "Running selector differs from signed registered image",
+        )?;
+        Ok(named)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "experimental-restart"))]
+    pub(super) fn registered_selector_image(&self, session: &HostSession) -> Result<fs::File> {
+        self.registration_paths(session)?;
+        let _lock = disk::lock(&self.root.join("transaction.lock"))?;
+        self.registered_selector_image_unlocked(session)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn registered_selector_image_unlocked(&self, session: &HostSession) -> Result<fs::File> {
         let service = self.registration_paths(session)?;
-        {
-            let _lock = disk::lock(&self.root.join("transaction.lock"))?;
-            self.no_registration_recovery()?;
-            let images = self.registration_images(&service)?;
-            require(
-                self.owned_registration(&service, &images, &production_verify)?
-                    .is_some(),
-                "No owned native selector registration",
-            )?;
-            let tool = self.root.join(DIRECTORY).join(TOOL);
-            require(
-                std::env::current_exe().ok().as_deref() == Some(tool.as_path()),
-                "Activation must run the exact registered stable selector",
-            )?;
-            let (named, _) = disk::hold_regular(&tool, TOOL_LIMIT, true)?;
-            let actual = fs::File::open("/proc/self/exe")
-                .map_err(|_| refused("Cannot inspect running selector"))?;
-            require(
-                super::host::same_file(&named, &actual)?,
-                "Running selector differs from signed registered image",
-            )?;
-        }
-        self.selected_activation(session)?.spawn(session)
+        self.no_registration_recovery()?;
+        let images = self.registration_images(&service)?;
+        require(
+            self.owned_registration(&service, &images, &production_verify)?
+                .is_some(),
+            "No owned native selector registration",
+        )?;
+        let (image, _) =
+            disk::hold_regular(&self.root.join(DIRECTORY).join(TOOL), TOOL_LIMIT, true)?;
+        Ok(image)
     }
 
     fn registration_paths(&self, session: &HostSession) -> Result<PathBuf> {
@@ -399,7 +418,7 @@ impl Store {
         optional_record(&self.root.join(DIRECTORY).join(PENDING))
     }
 
-    fn no_registration_recovery(&self) -> Result<()> {
+    pub(super) fn no_registration_recovery(&self) -> Result<()> {
         require(
             optional_record(&self.root.join("pending.json"))?.is_none(),
             "Review Hub deployment recovery first",
