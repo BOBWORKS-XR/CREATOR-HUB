@@ -13,7 +13,7 @@ assert.equal(process.argv.length, 3, 'Supply the absolute, reviewed installer pa
 const input = candidate.installer(process.argv[2]);
 const hub = path.join(process.env.LOCALAPPDATA, 'Creator Hub', 'creator-hub.exe');
 assert.equal(fs.existsSync(hub), false, 'Fresh16 requires no installed Hub');
-const out = path.resolve('artifacts', `native-016-fresh-${Date.now()}`);
+const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out, { recursive: true });
 const policyState = path.join(out, 'webview-policy.json'), stop = path.join(out, 'stop-runtime');
 const report = { passed: false, freshInstallAccepted: false, migrationAccepted: false, signedUpdateAccepted: false,

@@ -142,6 +142,12 @@ test('fresh driver keeps real install/hash/terms/direct-service/normal-close/pre
     'direct.checkPages', 'direct.settingsSnapshot', 'runtime.exitCode, null', "native('close')", 'child.exitCode, 0',
     'migrationAccepted: false', 'signedUpdateAccepted: false', 'releaseReady: false', "policy('Restore')", "flag: 'wx'"]) assert.ok(source.includes(contract));
   assert.doesNotMatch(source, /taskkill|Stop-Process|\.kill\(|rejectUnauthorized|ignore-certificate|auth\.json/);
+  assert.ok(source.includes('`native-suite-${Date.now()}`'), 'Use the exact existing owned policy-helper namespace');
+  const policy = fs.readFileSync(path.join(__dirname, 'native-webview-policy.ps1'), 'utf8');
+  const ownedFolder = new RegExp(policy.match(/-notmatch '([^']+)'/)[1]);
+  assert.equal(ownedFolder.test('native-suite-1792442915860'), true);
+  assert.equal(ownedFolder.test('native-016-fresh-1792442915860'), false);
+  assert.equal(ownedFolder.test('native-suite-016-fresh-1792442915860'), false);
 });
 
 test('native lifecycle parses in an available bounded PowerShell process', t => {
