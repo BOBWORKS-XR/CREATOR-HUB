@@ -182,6 +182,14 @@ def await_native_window(child, pin, window, api, helper):
         x11.dispose()
 
 
+def connect_map_once(widget, callback, phase):
+    def mapped(source, event):
+        widget.disconnect(handler)
+        return callback(source, event, phase)
+
+    handler = widget.connect("map-event", mapped)
+
+
 def gtk_child(expected_source):
     require(re.fullmatch(r"[a-f0-9]{64}", expected_source) and digest(__file__) == expected_source, "Fixture source changed")
     import gi
@@ -224,7 +232,7 @@ def gtk_child(expected_source):
         dialog.add_button(APPROVE, 2)
         dialog.get_content_area().add(Gtk.Label(label="Synthetic fixture only; no product permission is granted."))
         dialog.connect("response", respond)
-        dialog.connect("map-event", mapped, state["phase"])
+        connect_map_once(dialog, mapped, state["phase"])
         dialog.show_all()
 
     def close(_widget, _event):
@@ -250,7 +258,7 @@ def gtk_child(expected_source):
             return True
         return abort()
 
-    frame.connect("map-event", mapped, 0)
+    connect_map_once(frame, mapped, 0)
     frame.connect("delete-event", close)
     frame.connect("destroy", lambda _widget: Gtk.main_quit())
     GLib.io_add_watch(sys.stdin.fileno(), GLib.PRIORITY_DEFAULT,

@@ -32,18 +32,22 @@ test('compiled pins match permanent runtime and public package evidence', () => 
   }
 });
 
-test('default stays closed and experimental installer has only the fixed handoff', () => {
+test('default stays closed and explicit development/production installers have only the fixed handoff', () => {
   const code = source('linux.rs').replace(/\/\/[^\n]*/g, '');
   assert.doesNotMatch(code, /"--(?:install|remove|purge|force[^" ]*)"|pkexec|sudo|remove_file|remove_dir|setuid\(/);
   assert.match(code, /libc::F_SETLK/);
   assert.match(code, /lock-frontend/);
-  assert.match(code, /#\[cfg\(feature = "experimental-transaction"\)\]\s*mod transaction/);
+  const features = String.raw`any\(\s*feature = "experimental-transaction",\s*feature = "production-transaction"\s*\)`;
+  assert.match(code, new RegExp(String.raw`#\[cfg\(${features}\)\]\s*mod transaction;`));
   assert.match(code, /env_clear\(\)/);
   assert.match(code, /O_NOFOLLOW/);
   assert.match(code, /create_new\(true\)/);
-  assert.match(source('main.rs'), /Action::Retire[\s\S]*?INSTALL_REFUSAL/);
+  assert.match(source('main.rs'), new RegExp(String.raw`#\[cfg\(not\(${features}\)\)\]\s*if matches!\(action, Action::Retire \| Action::RetireSetup\)\s*\{\s*return Err\(INSTALL_REFUSAL\.into\(\)\);`));
   const manifest = fs.readFileSync(path.join(crate, 'Cargo.toml'), 'utf8');
-  assert.match(manifest, /default = \[\]/);
+  assert.match(manifest, /^default = \[\]$/m);
+  for (const feature of ['experimental-transaction', 'production-transaction']) {
+    assert.ok(manifest.includes(`${feature} = ["dep:signal-hook"]`));
+  }
   const transaction = source('linux/transaction.rs');
   assert.match(transaction, /env\("DPKG_FRONTEND_LOCKED", "1"\)/);
   assert.match(transaction, /arg\("--install"\)\s*\.arg\(candidate\)/);
@@ -154,7 +158,12 @@ test('Setup verifier admits no scripts, foreign owner, pre-existing notice or us
 });
 
 test('Setup read-only inspection independently re-queries state and rejects false absence', () => {
-  const inspect = source('linux/setup.rs').split('pub(super) fn inspect(retained_only: bool)')[1].split('#[cfg(feature')[0];
+  const code = source('linux/setup.rs');
+  const start = code.indexOf('pub(super) fn inspect(retained_only: bool)');
+  assert.ok(start >= 0, 'Setup inspection function must exist');
+  const end = code.indexOf('\n}', start);
+  assert.ok(end > start, 'Setup inspection must have its own top-level closing brace');
+  const inspect = code.slice(start, end + 2);
   for (const check of ['queried_state()?', 'installed(false)?', 'installed(true)?', 'info_members(true)?',
     'unowned_absent', 'original_notice_absent()?', 'metadata.unchanged()?', 'queried_state()? == state']) {
     assert.ok(inspect.includes(check), check);

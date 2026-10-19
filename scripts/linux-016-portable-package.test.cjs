@@ -35,6 +35,12 @@ function put(root, name, bytes, mode = 0o644) {
 function elf() {
   const bytes = Buffer.alloc(64); bytes.set([127, 69, 76, 70, 2, 1, 1]); bytes.writeUInt16LE(3, 16); bytes.writeUInt16LE(62, 18); return bytes;
 }
+function dynamicTable(needed = []) {
+  return `Dynamic section at offset 0x1000 contains ${needed.length + 1} ${needed.length ? 'entries' : 'entry'}:\n`
+    + '  Tag                Type        Name/Value\n'
+    + needed.map(name => `  0x0000000000000001 (NEEDED) Shared library: [${name}]\n`).join('')
+    + '  0x0000000000000000 (NULL) 0x0\n';
+}
 function identity() {
   const pins = { schemaVersion: 1, sourceCommit: 'd'.repeat(40), sourceTree: 'e'.repeat(40), runId: 9001, runAttempt: 2,
     jobId: 9002, workflowId: 9003, artifactId: 9004, artifact: { size: 1234, sha256: 'f'.repeat(64) },
@@ -998,20 +1004,88 @@ test('Root permits exactly the documented UNK -> APP marker and nothing else', (
   const raw = Buffer.concat([elf(), Buffer.from('__TAURI_BUNDLE_TYPE_VAR_UNK')]), app = Buffer.from(raw); app.write('APP', app.length - 3, 'ascii');
   unix.verifyLinuxHub(raw, app, 'appimage'); app[20] ^= 1; assert.throws(() => unix.verifyLinuxHub(raw, app, 'appimage'));
 });
+test('the hash-bound ICU readelf table has a valid dynamic section with no DT_NEEDED', () => {
+  // ICU 70 data DSO from retained run 39341933523, inspected without execution.
+  const text = `Dynamic section at offset 0x1c1d268 contains 18 entries:
+  Tag                Type        Name/Value
+  0x000000000000001d (RUNPATH)   Library runpath: [$ORIGIN]
+  0x000000000000000e (SONAME)    Library soname: [libicudata.so.70]
+  0x0000000000000010 (SYMBOLIC)  0x0
+  0x000000000000000c (INIT)      0x1000
+  0x000000000000000d (FINI)      0x11a4
+  0x000000006ffffef5 (GNU_HASH)  0x2b8
+  0x0000000000000005 (STRTAB)    0x1c1e3c8
+  0x0000000000000006 (SYMTAB)    0x2e0
+  0x000000000000000a (STRSZ)     122 (bytes)
+  0x000000000000000b (SYMENT)    24 (bytes)
+  0x0000000000000003 (PLTGOT)    0x1c1cfc8
+  0x0000000000000007 (RELA)      0x3e8
+  0x0000000000000008 (RELASZ)    120 (bytes)
+  0x0000000000000009 (RELAENT)   24 (bytes)
+  0x000000000000001e (FLAGS)     SYMBOLIC BIND_NOW
+  0x000000006ffffffb (FLAGS_1)   NOW
+  0x000000006ffffff9 (RELACOUNT) 1
+  0x0000000000000000 (NULL)      0x0
+`;
+  assert.deepEqual(p.dynamicDependencies(text), []);
+  assert.deepEqual(p.dynamicDependencies(dynamicTable()), []);
+  assert.deepEqual(p.dynamicDependencies(text.replaceAll('\n', '\r\n')), []);
+});
+test('dynamic dependency parsing preserves order and the full 128-entry bound', () => {
+  const needed = Array.from({ length: 128 }, (_, i) => `libfixture${i}.so.1`);
+  assert.deepEqual(p.dynamicDependencies(dynamicTable(needed)), needed);
+  assert.throws(() => p.dynamicDependencies(dynamicTable([...needed, 'liboverflow.so.1'])), /count exceeds bound/);
+});
+test('empty, absent or unbounded dynamic output cannot stand in for an empty dependency set', () => {
+  for (const text of ['', ' \r\n', 'There is no dynamic section in this file.\n',
+    'Dynamic section at offset 0x1000 contains 0 entries:\n  Tag Type Name/Value\n',
+    ' (NEEDED) Shared library: [libc.so.6]\n',
+    `readelf: failed to read section\n${dynamicTable()}`, dynamicTable() + dynamicTable()]) {
+    assert.throws(() => p.dynamicDependencies(text), /dynamic section/);
+  }
+  assert.throws(() => p.dynamicDependencies(' '.repeat(256 * 1024 + 1)), /Bounded/);
+});
+test('truncated and malformed dynamic tables refuse instead of silently returning no dependencies', () => {
+  const valid = dynamicTable(['libc.so.6']);
+  for (const text of [
+    valid.replace('contains 2', 'contains 3'),
+    valid.replace('  Tag                Type        Name/Value\n', ''),
+    valid.replace('0x0000000000000000 (NULL) 0x0', '0x0000000000000002 (PLTRELSZ) 0 (bytes)'),
+    valid.replace('(NEEDED) Shared library: [libc.so.6]', '(NEEDED) invalid library'),
+    valid.replace('(NEEDED)', '(NULL)'), valid.replace('(NULL)', '(NEEDED)'),
+    valid.replace('0x0000000000000001', '0x0000000000000002'),
+    valid.replace('0x0000000000000000', 'not-a-tag'),
+    dynamicTable().replace('contains 1 entry:', 'contains 2 entries:') + '  0x0000000000000002 (PLTRELSZ) 0 (bytes)\n',
+  ]) assert.throws(() => p.dynamicDependencies(text));
+});
 test('actual packaged WebKit/JSC processes and injected library must be x64 ELF, not filenames alone', t => {
   const root = temp(t), names = ['usr/lib/libwebkit2gtk-4.1.so.0', 'usr/lib/libjavascriptcoregtk-4.1.so.0',
     'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebProcess', 'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess',
     'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so'];
   const entries = Object.fromEntries(names.map(n => { put(root, n, elf()); return [n, { kind: 'file', ...p.record(elf()), mode: 0o644 }]; }));
-  const run = (command, args) => { assert.equal(command, '/usr/bin/readelf'); assert.equal(args[0], '--dynamic'); return ' (NEEDED) Shared library: [libc.so.6]\n'; };
+  const run = (command, args) => { assert.equal(command, '/usr/bin/readelf'); assert.equal(args[0], '--dynamic'); return dynamicTable(['libc.so.6']); };
   const verified = p.dependencies(root, entries, run);
   assert.equal(Object.keys(verified.primary).length, 5); assert.equal(Object.keys(verified.closure).length, 5);
   assert.deepEqual(verified.hostBaseline, ['libc.so.6']);
   assert.throws(() => p.dependencies(root, Object.fromEntries(Object.entries(entries).slice(1)), run), /Missing/);
-  assert.throws(() => p.dependencies(root, entries, () => ' (NEEDED) Shared library: [libmissing.so.9]\n'), /Missing packaged subprocess dependency/);
+  assert.throws(() => p.dependencies(root, entries, () => dynamicTable(['libmissing.so.9'])), /Missing packaged subprocess dependency/);
+  assert.throws(() => p.dependencies(root, entries, () => dynamicTable(['../libforeign.so.1'])), /Path-bearing/);
   const extra = 'usr/lib/libextra.so.1'; put(root, extra, elf()); entries[extra] = { kind: 'file', ...p.record(elf()), mode: 0o644 };
-  const transitive = p.dependencies(root, entries, (cmd, args) => args[1].endsWith('libextra.so.1') ? run(cmd, args) : ' (NEEDED) Shared library: [libextra.so.1]\n');
+  const transitive = p.dependencies(root, entries, (cmd, args) => args[1].endsWith('libextra.so.1') ? run(cmd, args) : dynamicTable(['libextra.so.1']));
   assert.ok(transitive.closure[extra]);
+  const data = 'usr/lib/libicudata.so.70'; put(root, data, elf()); entries[data] = { kind: 'file', ...p.record(elf()), mode: 0o644 };
+  const emptyLeaf = p.dependencies(root, entries, (cmd, args) => args[1].endsWith('libicudata.so.70') ? dynamicTable() : dynamicTable(['libicudata.so.70']));
+  assert.deepEqual(emptyLeaf.closure[data].needed, []); assert.deepEqual(emptyLeaf.closure[data].resolution, {});
+  assert.equal(emptyLeaf.closure[data].sha256, entries[data].sha256);
+  assert.equal(emptyLeaf.closure[data].dynamicSha256, p.record(Buffer.from(dynamicTable())).sha256);
+  for (const output of ['', 'There is no dynamic section in this file.\n', dynamicTable().replace('(NULL)', '(BROKEN)')]) {
+    assert.throws(() => p.dependencies(root, entries, () => output));
+  }
+  const commandError = Object.assign(Error('readelf exited unsuccessfully'), { status: 1, stdout: dynamicTable() }); let calls = 0;
+  assert.throws(() => p.dependencies(root, entries, () => { calls++; throw commandError; }), error => error === commandError);
+  assert.equal(calls, 1, 'Failed inspection must not be retried or adopt partial stdout');
+  const changed = Buffer.from(elf()); changed[30] = 1; fs.writeFileSync(path.join(root, names[0]), changed);
+  assert.throws(() => p.dependencies(root, entries, () => assert.fail('Changed bytes reached readelf')));
   fs.writeFileSync(path.join(root, names[0]), 'not ELF'); assert.throws(() => p.dependencies(root, entries, run), /ELF/);
 });
 test('new portable analysis includes Root dependencies and primary ABI needs, not available version definitions', t => {
@@ -1019,11 +1093,11 @@ test('new portable analysis includes Root dependencies and primary ABI needs, no
     'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebProcess', 'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess',
     'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so'];
   const entries = Object.fromEntries(names.map(n => { put(root, n, elf()); return [n, { kind: 'file', ...p.record(elf()), mode: 0o755 }]; }));
-  const dynamic = (command, args) => { assert.equal(command, '/usr/bin/readelf'); assert.equal(args[0], '--dynamic'); return ' (NEEDED) Shared library: [libc.so.6]\n'; };
+  const dynamic = (command, args) => { assert.equal(command, '/usr/bin/readelf'); assert.equal(args[0], '--dynamic'); return dynamicTable(['libc.so.6']); };
   const dependencies = p.dependencies(root, entries, dynamic, { includeHub: true });
   assert.deepEqual(dependencies.primary.hub, ['usr/bin/creator-hub']);
   assert.throws(() => p.dependencies(root, entries, (command, args) => args[1].endsWith('creator-hub')
-    ? ' (NEEDED) Shared library: [libmissing-hub.so.1]\n' : dynamic(command, args), { includeHub: true }), /creator-hub -> libmissing-hub/);
+    ? dynamicTable(['libmissing-hub.so.1']) : dynamic(command, args), { includeHub: true }), /creator-hub -> libmissing-hub/);
   const versionText = "Version definition section '.gnu.version_d' contains 1 entry:\n  Name: GLIBCXX_3.4.99 Flags: none Version: 1\n"
     + "Version needs section '.gnu.version_r' contains 1 entry:\n  File: libc.so.6 Cnt: 1\n  Name: GLIBC_2.34 Flags: none Version: 2\n";
   const abi = p.primaryAbiRequirements(root, dependencies, (command, args, options) => {
@@ -1042,7 +1116,7 @@ test('new portable analysis includes Root dependencies and primary ABI needs, no
   assert.deepEqual(withGio.primary.gioTls, [tls]);
   assert.ok(withGio.closure[tls]);
   assert.throws(() => p.dependencies(root, entries, (command, args) => args[1].endsWith('libgiognutls.so')
-    ? ' (NEEDED) Shared library: [libmissing-tls.so.1]\n' : dynamic(command, args), { includeHub: true }), /libgiognutls.so -> libmissing-tls/);
+    ? dynamicTable(['libmissing-tls.so.1']) : dynamic(command, args), { includeHub: true }), /libgiognutls.so -> libmissing-tls/);
   const gioAbi = p.primaryAbiRequirements(root, withGio, () => versionText);
   assert.equal(Object.keys(gioAbi.files).length, 7);
   assert.deepEqual(gioAbi.files[tls].requiredSymbolVersions, ['GLIBC_2.34']);

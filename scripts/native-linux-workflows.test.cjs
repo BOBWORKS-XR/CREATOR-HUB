@@ -52,7 +52,14 @@ test('direct Hub libraries compile natively only after real payload preparation,
   assert.match(job.if, /github.event_name == 'push' \|\| github.event_name == 'workflow_dispatch'/);
   const commands = job.steps.filter(step => step.run).map(step => step.run).join('\n');
   assert.ok(commands.indexOf('run release:launcher') < commands.indexOf('cargo clippy'));
-  assert.match(commands, /src-tauri\/Cargo.toml --tests --features integrated-features,experimental-flatpak-host,experimental-linux-migration,experimental-linux-portable-host -- -D warnings/);
+  for (const features of [
+    'integrated-features,experimental-flatpak-host,experimental-linux-migration,experimental-linux-portable-host',
+    'integrated-features,experimental-flatpak-host,experimental-linux-migration,experimental-linux-portable-update',
+    'integrated-features,experimental-flatpak-host,linux-production-migration,experimental-linux-portable-update',
+  ]) {
+    assert.ok(commands.includes(`cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --features ${features} -- -D warnings`), features);
+  }
+  assert.match(commands, /native\/linux-deb-retirement\/Cargo.toml --all-targets --features production-transaction -- -D warnings/);
   assert.match(commands, /npm ci --ignore-scripts/);
   assert.match(commands, /node --test scripts\/build-unified.test.cjs scripts\/linux-016-portable-package.test.cjs/);
   assert.match(commands, /modules\/mcp\/launcher\/src-tauri\/Cargo.toml --lib --tests --features integrated-service/);

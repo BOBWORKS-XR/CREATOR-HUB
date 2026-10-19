@@ -766,6 +766,32 @@ function flatten(root, destination) {
   for (const [n, e] of Object.entries(before.entries)) assert.deepEqual(after.entries[n], { ...e, mode: transportMode(n, e) });
   return { original: before, flattened: after };
 }
+function dynamicDependencies(text) {
+  assert.ok(typeof text === 'string' && Buffer.byteLength(text) <= 256 * 1024, 'Bounded dynamic table output required');
+  const headers = [...text.matchAll(/^Dynamic section at offset 0x[0-9a-fA-F]+ contains ([1-9][0-9]*) entr(?:y|ies):\r?$/gm)];
+  assert.ok(headers.length === 1 && text.slice(0, headers[0].index).trim() === '', 'Positive unambiguous dynamic section required');
+  const count = Number(headers[0][1]); assert.ok(Number.isSafeInteger(count), 'Invalid dynamic table count');
+  const lines = text.slice(headers[0].index + headers[0][0].length).split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  assert.match(lines.shift() || '', /^Tag\s+Type\s+Name\/Value$/, 'Dynamic table columns missing');
+  assert.equal(lines.length, count, 'Truncated or malformed dynamic table');
+  const needed = [];
+  for (const [index, line] of lines.entries()) {
+    const row = /^0x([0-9a-fA-F]{1,16})\s+\(([^()\r\n]+)\)\s+(.+)$/.exec(line);
+    assert.ok(row, 'Malformed dynamic table row');
+    const tag = BigInt(`0x${row[1]}`), type = row[2].trim();
+    assert.equal(tag === 0n, type === 'NULL', 'Inconsistent dynamic NULL tag');
+    assert.equal(tag === 1n, type === 'NEEDED', 'Inconsistent dynamic NEEDED tag');
+    if (tag === 0n) assert.equal(index, count - 1, 'Dynamic NULL must terminate the table');
+    if (tag === 1n) {
+      const library = /^Shared library:\s*\[([^\]\r\n]+)\]$/.exec(row[3]);
+      assert.ok(library, 'Malformed dynamic NEEDED entry'); needed.push(library[1]);
+    }
+    if (index === count - 1) assert.equal(tag, 0n, 'Dynamic table terminator missing');
+  }
+  // DT_NEEDED is optional, not evidence that the dynamic table itself is absent.
+  // https://gabi.xinuos.com/elf/08-dynamic.html#dynamic-section
+  assert.ok(needed.length <= 128, 'Dynamic dependency count exceeds bound'); return needed;
+}
 function dependencies(root, files, run, { includeHub = false } = {}) {
   const finite = require('./flatpak-package.cjs');
   const patterns = { webkit: /(?:^|\/)libwebkit2gtk-4\.1\.so(?:\.\d+)*$/,
@@ -784,8 +810,7 @@ function dependencies(root, files, run, { includeHub = false } = {}) {
     if (checked.has(name)) return; checked.set(name, true);
     const bytes = read(path.join(root, name)); finite.validateElf(bytes); assert.deepEqual(record(bytes), { size: entry.size, sha256: entry.sha256 });
     const dynamic = String(run('/usr/bin/readelf', ['--dynamic', path.join(root, name)], { maxBuffer: 256 * 1024 }));
-    const needed = [...dynamic.matchAll(/\(NEEDED\).*?\[([^\]]+)\]/g)].map(m => m[1]);
-    assert.ok(needed.length > 0 && needed.length <= 128, `Missing/bounded dynamic dependency evidence: ${name}`);
+    const needed = dynamicDependencies(dynamic);
     const item = { ...entry, dynamicSha256: hash(Buffer.from(dynamic)), needed, resolution: {} }; result.closure[name] = item;
     for (const library of needed) {
       assert.ok(relative(library) && !library.includes('/'), 'Path-bearing ELF dependency refused');
@@ -1093,7 +1118,7 @@ function fetchInputs(output, env = process.env) {
 }
 module.exports = { VERSION, TARGET, FEATURES, HOST_PROFILE, LIMITS, WORKFLOW, BRANCH, INPUTS, RECEIPTS, get MAIN_ALLOWED() { return mainAllowed(); }, RECEIPT_ALLOWED,
   record, flags, validatePins, admission, preflight, verifyProducer, verifyPrivateProof, collect, ZIP_STAGE, stageZip, validateReceipts,
-  relative, prohibited, validateGtkMetadata, validateGioRuntime, retainAppImage, internalTarget, inventory, retainOriginalAppDir, flatten, dependencies, primaryAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
+  relative, prohibited, validateGtkMetadata, validateGioRuntime, retainAppImage, internalTarget, inventory, retainOriginalAppDir, flatten, dynamicDependencies, dependencies, primaryAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
   hostProfile, verifyHostProfileInventory, attachHostProfile, SCHEMA_DIRECTORY, COMPILED_SCHEMA, METADATA_PINS, METADATA_PROBES, DATA_LIMIT,
   metadataRole, gvdbVariants, GVDB_VARIANTS, validateCompiledSchema, validateMetadataFormat, validateMetadata, metadataRead, metadataEvidence, transportMode,
   APPRUN_WRAPPED, APPRUN_TOOL, APPRUN_PIN, APPRUN_SOURCES, validateAppRunWrapped, appRunToolBinding };

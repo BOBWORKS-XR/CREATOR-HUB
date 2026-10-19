@@ -32,7 +32,89 @@ def receipt(action="snapshot"):
             "nodes": [{"name": win["title"]}]}
 
 
+class MapWidget:
+    def __init__(self):
+        self.handlers, self.next_handler = {}, 0
+
+    def connect(self, signal, callback):
+        assert signal == "map-event"
+        self.next_handler += 1
+        self.handlers[self.next_handler] = callback
+        return self.next_handler
+
+    def disconnect(self, handler):
+        del self.handlers[handler]
+
+    def map_event(self, event):
+        return [callback(self, event) for handler, callback in list(self.handlers.items()) if handler in self.handlers]
+
+
 class FixtureTests(unittest.TestCase):
+    def test_retained_duplicate_maps_fail_strict_reader_but_one_shot_announcements_preserve_callbacks(self):
+        # Run 39342754983 emitted both maps twice before the decline callback.
+        frame = {"kind": "window", "pid": 2826, "phase": 0, "title": f.FRAME, "role": "FRAME", "xid": 4194307}
+        dialog = {"kind": "window", "pid": 2826, "phase": 1, "title": f.TITLE, "role": "DIALOG", "xid": 4194311}
+        declined = {"kind": "callback", "pid": 2826, "phase": 1, "button": f.DECLINE,
+                    "accepted": False, "count": 1, "responseId": 1}
+        retained = [frame, dialog, frame, dialog, declined]
+
+        def reader(records):
+            events = f.Events(types.SimpleNamespace(pid=2826, stdout=None))
+            events.pending = b"".join(json.dumps(record).encode() + b"\n" for record in records)
+            return events
+
+        before = reader(retained)
+        f.validate_window(before.next("window"), 0, f.FRAME, "FRAME")
+        f.validate_window(before.next("window"), 1, f.TITLE, "DIALOG")
+        with self.assertRaisesRegex(RuntimeError, "Unexpected owned GTK event"):
+            before.next("callback")
+        self.assertEqual(before.records, retained[:3])
+        self.assertEqual(before.next("window"), dialog)
+        f.validate_callback(before.next("callback"), 1, f.DECLINE)
+
+        announced, widgets = [], {0: MapWidget(), 1: MapWidget()}
+
+        def mapped(widget, event, phase):
+            self.assertIs(widget, widgets[phase])
+            self.assertEqual(event["phase"], phase)
+            announced.append(event)
+            return False
+
+        for phase, widget in widgets.items():
+            f.connect_map_once(widget, mapped, phase)
+        for event in retained[:-1]:
+            widgets[event["phase"]].map_event(event)
+        self.assertEqual(announced, retained[:2])
+        after = reader([*announced, declined])
+        f.validate_window(after.next("window"), 0, f.FRAME, "FRAME")
+        f.validate_window(after.next("window"), 1, f.TITLE, "DIALOG")
+        f.validate_callback(after.next("callback"), 1, f.DECLINE)
+        self.assertEqual(after.pending, b"")
+
+    def test_fresh_retry_widget_announces_even_with_reused_title_and_xid(self):
+        announcements = []
+
+        def mapped(widget, event, phase):
+            announcements.append((widget, phase, event))
+            self.assertEqual(widget.map_event(event), [])
+            return False
+
+        first, retry = MapWidget(), MapWidget()
+        f.connect_map_once(first, mapped, 1)
+        self.assertEqual(first.map_event(window()), [False])
+        self.assertEqual(first.map_event(window()), [])
+        f.connect_map_once(retry, mapped, 2)
+        retry_window = {**window(), "phase": 2}
+        self.assertEqual(retry.map_event(retry_window), [False])
+        self.assertEqual(retry.map_event(retry_window), [])
+        self.assertEqual(announcements, [(first, 1, window()), (retry, 2, retry_window)])
+
+    def test_actual_child_registers_frame_and_each_new_dialog_through_one_shot(self):
+        child = Path(f.__file__).read_text().split("def gtk_child(", 1)[1].split("def run_fixture(", 1)[0]
+        self.assertIn("connect_map_once(frame, mapped, 0)", child)
+        self.assertIn('connect_map_once(dialog, mapped, state["phase"])', child)
+        self.assertNotIn('.connect("map-event"', child)
+
     def test_explicit_disposable_linux_x11_optin_only(self):
         env = dict(GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="Linux", RUNNER_ARCH="X64",
                    CREATOR_UNIX_WINDOW_TEST="1", CREATOR_UNIX_WINDOW_FIXTURE="1", GDK_BACKEND="x11", NO_AT_BRIDGE="0", DISPLAY=":99")

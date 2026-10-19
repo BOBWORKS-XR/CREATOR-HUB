@@ -18,6 +18,7 @@ test('Linux migration route is nondefault and excluded from Windows compilation'
   const manifest = read('src-tauri/Cargo.toml');
   assert.match(manifest, /default = \["custom-protocol"\]/);
   assert.match(manifest, /experimental-linux-migration = \[\]/);
+  assert.match(manifest, /linux-production-migration = \["experimental-linux-migration"\]/);
   const main = read('src-tauri/src/main.rs');
   for (const module of ['convergence_linux', 'linux_retirement']) {
     assert.ok(main.includes(`#[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]\nmod ${module};`));
@@ -123,9 +124,20 @@ test('Root caller keeps backup, journal, router, explicit approval and missing-G
   assert.ok(source.includes('for backup in &plan.retained_images'));
   assert.ok(source.includes('backup.recheck()?'));
   const helper = read('native/linux-deb-retirement/src/main.rs');
-  assert.match(helper, /cfg\(not\(feature = "experimental-transaction"\)\)/);
-  assert.ok(helper.includes('Action::Retire | Action::RetireSetup'));
-  assert.ok(helper.includes('return Err(INSTALL_REFUSAL.into())'));
+  const helperManifest = read('native/linux-deb-retirement/Cargo.toml');
+  assert.match(helperManifest, /^default = \[\]$/m);
+  for (const feature of ['experimental-transaction', 'production-transaction']) {
+    assert.ok(helperManifest.includes(`${feature} = ["dep:signal-hook"]`));
+  }
+  const features = String.raw`any\(\s*feature = "experimental-transaction",\s*feature = "production-transaction"\s*\)`;
+  const enabled = String.raw`#\[cfg\(${features}\)\]`;
+  const disabled = String.raw`#\[cfg\(not\(${features}\)\)\]`;
+  assert.match(helper, new RegExp(String.raw`${disabled}\s*if matches!\(action, Action::Retire \| Action::RetireSetup\)\s*\{\s*return Err\(INSTALL_REFUSAL\.into\(\)\);`));
+  const linux = read('native/linux-deb-retirement/src/linux.rs');
+  assert.match(linux, new RegExp(String.raw`${enabled}\s*mod transaction;`));
+  for (const [action, call] of [['Retire', 'retire'], ['RetireSetup', 'retire_setup']]) {
+    assert.match(linux, new RegExp(String.raw`Action::${action} => \{\s*${enabled}\s*\{\s*transaction::${call}\(\)\s*\}\s*${disabled}\s*\{\s*Err\(INSTALL_REFUSAL\.into\(\)\)\s*\}\s*\}`));
+  }
 });
 
 test('Linux native review covers Setup and partial cancellation without granting release acceptance', () => {
