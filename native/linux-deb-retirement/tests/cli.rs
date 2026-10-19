@@ -16,11 +16,23 @@ fn default_refuses_and_feature_build_still_requires_the_trusted_installed_image(
         assert_eq!(report["packageTransactionStarted"], false);
         assert_eq!(report["manualRepairRequired"], false);
         assert_eq!(report["nativeAcceptance"], false);
-        assert_eq!(
-            report["experimentalTransactionCompiled"],
-            cfg!(feature = "experimental-transaction")
-        );
-        if cfg!(feature = "experimental-transaction") {
+        if cfg!(feature = "production-transaction") {
+            assert_eq!(report["protocolVersion"], 2);
+            assert_eq!(report["cohort"], "creator-hub-deb-retirement-016-v1");
+            assert_eq!(report["mode"], "production");
+            assert_eq!(report["externalQualificationRequired"], true);
+            assert!(report.get("experimentalTransactionCompiled").is_none());
+            assert!(report.get("installationEnabled").is_none());
+        } else {
+            assert_eq!(
+                report["experimentalTransactionCompiled"],
+                cfg!(feature = "experimental-transaction")
+            );
+        }
+        if cfg!(any(
+            feature = "experimental-transaction",
+            feature = "production-transaction"
+        )) {
             assert_ne!(report["reason"], INSTALL_REFUSAL);
         } else {
             assert_eq!(report["reason"], INSTALL_REFUSAL);

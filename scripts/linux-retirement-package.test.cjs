@@ -66,11 +66,116 @@ function nativeFixture() {
   const output = path.join(root, 'artifacts/unified/candidate');
   fs.mkdirSync(output, { recursive: true });
   fs.mkdirSync(path.join(root, 'packaging/linux'), { recursive: true });
-  for (const name of ['tauri-retirement-acceptance.json', 'tauri-integrated-candidate.json', path.posix.basename(packaging.POLICY)]) {
+  for (const name of ['tauri-retirement-acceptance.json', 'tauri-integrated-candidate.json', 'tauri-production-migration-016.json',
+    packaging.PRODUCTION_POLICY_SOURCE, path.posix.basename(packaging.POLICY)]) {
     fs.copyFileSync(path.join(repo, 'packaging/linux', name), path.join(root, 'packaging/linux', name));
   }
   return { root, output, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
+
+function productionVersion(root, version = '0.1.16') {
+  fs.mkdirSync(path.join(root, 'src-tauri'), { recursive: true });
+  for (const name of ['package.json', 'src-tauri/tauri.conf.json']) fs.writeFileSync(path.join(root, name), JSON.stringify({ version }));
+}
+function productionStaging(files, commit = 'a'.repeat(40)) {
+  return { schemaVersion: 2, acceptanceOnly: true, sourceCommit: commit, platform: 'linux', arch: 'x86_64',
+    rootFeature: packaging.PRODUCTION_ROOT_FEATURE, helperFeature: packaging.PRODUCTION_HELPER_FEATURE,
+    files, profile: packaging.PRODUCTION_PROFILE, productionContract: packaging.PRODUCTION_CONTRACT, ...packaging.FLAGS };
+}
+
+test('production overlay and helper arguments are distinct finite016 contracts, not renamed development', () => {
+  const f = nativeFixture();
+  try {
+    productionVersion(f.root);
+    const overlay = packaging.writeOverlay(f.root, f.output, {}, { profile: packaging.PRODUCTION_PROFILE });
+    const recipe = JSON.parse(fs.readFileSync(overlay));
+    assert.equal(path.basename(overlay), 'tauri-linux-production-migration-016.json');
+    assert.deepEqual(recipe.build.features, ['linux-production-migration', 'integrated-features', 'experimental-flatpak-host']);
+    assert.deepEqual(recipe.bundle.targets, ['deb']);
+    assert.equal(recipe.bundle.shortDescription, packaging.INTEGRATED_SHORT);
+    assert.deepEqual(Object.keys(recipe.bundle.linux.deb.files), [packaging.HELPER, packaging.POLICY]);
+    const production = packaging.helperBuildArguments(f.root, 'owned-target', packaging.PRODUCTION_PROFILE);
+    assert.equal(production[production.indexOf('--features') + 1], 'production-transaction');
+    assert.ok(production.includes('--no-default-features')); assert.ok(!production.includes('experimental-transaction'));
+    for (const profile of [packaging.DEFAULT_PROFILE, packaging.INTEGRATED_PROFILE]) {
+      const args = packaging.helperBuildArguments(f.root, 'owned-target', profile);
+      assert.equal(args[args.indexOf('--features') + 1], 'experimental-transaction');
+      assert.ok(!args.includes('--no-default-features'));
+    }
+    assert.throws(() => packaging.helperBuildArguments(f.root, 'owned-target', 'foreign'), /Unknown/);
+    productionVersion(f.root, '0.1.14');
+    assert.throws(() => packaging.writeOverlay(f.root, f.output, {}, { profile: packaging.PRODUCTION_PROFILE }), /actual 016/);
+  } finally { f.cleanup(); }
+});
+
+test('production template refuses development flags, arbitrary authority and changed descriptions', () => {
+  for (const change of [recipe => { recipe.build.features[0] = packaging.FEATURE; },
+    recipe => { recipe.bundle.shortDescription = 'TEST ONLY - old'; },
+    recipe => { recipe.bundle.longDescription = 'foreign'; },
+    recipe => { recipe.bundle.linux.deb.postInstallScript = 'never-run'; },
+    recipe => { recipe.bundle.linux.deb.files['/usr/libexec/another'] = 'another'; }]) {
+    const f = nativeFixture();
+    try {
+      productionVersion(f.root);
+      const file = path.join(f.root, 'packaging/linux/tauri-production-migration-016.json');
+      const recipe = JSON.parse(fs.readFileSync(file)); change(recipe); fs.writeFileSync(file, JSON.stringify(recipe));
+      assert.throws(() => packaging.writeOverlay(f.root, f.output, {}, { profile: packaging.PRODUCTION_PROFILE }));
+      assert.equal(fs.existsSync(path.join(f.output, 'tauri-linux-production-migration-016.json')), false);
+    } finally { f.cleanup(); }
+  }
+});
+
+test('production staging builds only the production helper and preserves false qualification gates', { skip: process.platform !== 'linux' }, () => {
+  const f = nativeFixture();
+  try {
+    productionVersion(f.root);
+    const execute = (command, args) => {
+      assert.equal(command, 'cargo');
+      assert.equal(args[args.indexOf('--features') + 1], packaging.PRODUCTION_HELPER_FEATURE);
+      assert.ok(args.includes('--no-default-features')); assert.ok(!args.includes('experimental-transaction'));
+      const file = path.join(args[args.indexOf('--target-dir') + 1], 'x86_64-unknown-linux-gnu/release/creator-hub-linux-deb-retirement');
+      fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, Buffer.alloc(128, 1), { mode: 0o755 });
+    };
+    const env = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB',
+      GITHUB_REPOSITORY_ID: '1364807512', GITHUB_SHA: 'a'.repeat(40) };
+    const staged = packaging.stage(f.root, f.output, {}, env, execute, { profile: packaging.PRODUCTION_PROFILE });
+    assert.equal(staged.profile, packaging.PRODUCTION_PROFILE);
+    packaging.validateProductionReceipt(staged.productionReceipt, env.GITHUB_SHA);
+    assert.deepEqual(staged.files, staged.productionReceipt.files);
+    assert.equal(staged.productionReceipt.productionContract.nativeAcceptance, false);
+    assert.equal(staged.productionReceipt.productionContract.externalQualificationRequired, true);
+    const expected = fs.readFileSync(path.join(f.root, 'packaging/linux', packaging.PRODUCTION_POLICY_SOURCE));
+    assert.deepEqual(fs.readFileSync(path.join(f.output, 'linux-retirement', path.posix.basename(packaging.POLICY))), expected);
+    assert.throws(() => packaging.stage(f.root, f.output, {}, env, execute, { profile: packaging.PRODUCTION_PROFILE }), /EEXIST/);
+  } finally { f.cleanup(); }
+});
+
+test('production DEB verification requires new staging provenance, exact profile and unchanged root metadata', () => {
+  const f = nativeFixture();
+  try {
+    productionVersion(f.root);
+    fs.mkdirSync(path.join(f.output, 'native-packages'));
+    const file = path.join(f.output, 'native-packages/production.deb'); fs.writeFileSync(file, 'synthetic-package-not-executed');
+    const files = { [packaging.HELPER]: { sha256: 'a'.repeat(64), size: 128, mode: 0o755, uid: 0, gid: 0 },
+      [packaging.POLICY]: { sha256: 'b'.repeat(64), size: 1000, mode: 0o644, uid: 0, gid: 0 } };
+    const staged = { profile: packaging.PRODUCTION_PROFILE, files, productionReceipt: productionStaging(files) };
+    const integrity = { integrityPassed: true, packages: [{ format: 'deb', path: 'native-packages/production.deb', sha256: digest('synthetic-package-not-executed') }] };
+    const verified = { profile: packaging.PRODUCTION_PROFILE, files: { ...files, [packaging.SERVICE]: {
+      sha256: digest(packaging.SERVICE_BYTES), size: packaging.SERVICE_BYTES.length, mode: 0o644, uid: 0, gid: 0 } } };
+    const execute = (command, args) => {
+      assert.equal(command, 'python3'); assert.deepEqual(args.slice(2), [file, files[packaging.HELPER].sha256, files[packaging.POLICY].sha256,
+        '0.1.16', '--profile', packaging.PRODUCTION_PROFILE]); return JSON.stringify(verified);
+    };
+    assert.throws(() => packaging.verifyDeb(f.root, f.output, integrity, { ...staged, productionReceipt: { ...staged.productionReceipt, schemaVersion: 1 } },
+      () => assert.fail('No verifier invocation for development receipts')));
+    assert.throws(() => packaging.verifyDeb(f.root, f.output, integrity, staged, () => JSON.stringify({ ...verified, profile: 'integrated-candidate' })));
+    const receipt = packaging.verifyDeb(f.root, f.output, integrity, staged, execute);
+    assert.equal(receipt.schemaVersion, 2); assert.equal(receipt.profile, packaging.PRODUCTION_PROFILE);
+    assert.deepEqual(receipt.productionContract, packaging.PRODUCTION_CONTRACT);
+    assert.equal(receipt.systemInstallationTested, false);
+    for (const key of Object.keys(packaging.FLAGS)) assert.equal(receipt[key], false);
+  } finally { f.cleanup(); }
+});
 
 test('actual staged overlay parses to the fixed helper/policy destinations and explicit Root feature on every host', () => {
   const f = nativeFixture();
@@ -339,6 +444,7 @@ function workflowBash(t, script, retirement, integrated, overrides = {}) {
       GITHUB_EVENT_NAME: 'workflow_dispatch', SIGNED_INPUTS: '',
       CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: retirement,
       CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: '0',
+      CREATOR_LINUX_PRODUCTION_MIGRATION_016: '0',
       CREATOR_LINUX_INTEGRATED_CANDIDATE: integrated, ...overrides },
   });
 }
@@ -346,7 +452,7 @@ function workflowBash(t, script, retirement, integrated, overrides = {}) {
 test('assembly profiles default off and conflict refusal precedes every signed input download', t => {
   const workflow = assemblyYaml(t); if (!workflow) return;
   const inputs = workflow.on.workflow_dispatch.inputs;
-  for (const name of ['linux_retirement_test_candidate', 'linux_integrated_candidate', 'linux_portable_host_candidate']) {
+  for (const name of ['linux_retirement_test_candidate', 'linux_integrated_candidate', 'linux_portable_host_candidate', 'linux_production_migration_016']) {
     assert.equal(inputs[name].type, 'boolean');
     assert.equal(inputs[name].default, 'false');
     assert.equal(inputs[name].required, 'false');
@@ -462,4 +568,70 @@ test('pre-package tests keep optional MCP libraries off until the builder verifi
   assert.doesNotMatch(steps[packageIndex].run, /npm(?:\s+--prefix\s+\S+)?\s+run\s+release:launcher|cp\s.*modules\/mcp\/release/);
   const source = fs.readFileSync(path.join(repo, '.github/workflows/unix-managed-assembly.yml'), 'utf8');
   assert.doesNotMatch(source, /gh release|dpkg --install|--draft=false|--latest|publish-hub-draft\.cjs/);
+});
+
+test('production workflow refuses both development profiles before downloads and forwards only its explicit016 selector', t => {
+  const workflow = assemblyYaml(t); if (!workflow) return;
+  const input = workflow.on.workflow_dispatch.inputs.linux_production_migration_016;
+  assert.equal(input.default, 'false'); assert.equal(input.type, 'boolean'); assert.equal(input.required, 'false');
+  const mapped = "${{ inputs.linux_production_migration_016 && '1' || '0' }}";
+  const preflight = workflow.jobs['candidate-options'];
+  assert.equal(preflight.env.CREATOR_LINUX_PRODUCTION_MIGRATION_016, mapped);
+  assert.equal(workflow.jobs.assembly.env.CREATOR_LINUX_PRODUCTION_MIGRATION_016, mapped);
+  const scope = { GITHUB_REF: 'refs/heads/validation/linux-integrated-candidate-016',
+    CREATOR_LINUX_PRODUCTION_MIGRATION_016: '1', SIGNED_INPUTS: JSON.stringify([{ target: 'linux', os: 'ubuntu-22.04' }]) };
+  for (const portable of ['0', '1']) {
+    const accepted = workflowBash(t, preflight.steps[0].run, '0', '0', { ...scope, CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: portable });
+    if (!accepted) return;
+    assert.equal(accepted.status, 0, accepted.stderr); assert.equal(accepted.stdout, '');
+  }
+  const step = workflow.jobs.assembly.steps.find(item => item.id === 'package');
+  const stubs = "python3() { printf '%s\\n' '/reviewed-runner'; }\nnpm() { printf '%s\\n' \"$@\"; }\n";
+  for (const change of [{ CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: '1' }, { CREATOR_LINUX_INTEGRATED_CANDIDATE: '1' },
+    { GITHUB_EVENT_NAME: 'push' }, { GITHUB_REF: 'refs/heads/validation/unix-assembly-014' }]) {
+    for (const script of [preflight.steps[0].run, stubs + step.run]) {
+      const refused = workflowBash(t, script, '0', '0', { ...scope, ...change }); if (!refused) return;
+      assert.equal(refused.status, 64, refused.stderr); assert.equal(refused.stdout, '');
+    }
+  }
+  for (const portable of ['0', '1']) {
+    const forwarded = workflowBash(t, stubs + step.run, '0', '0', { ...scope, CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: portable });
+    assert.equal(forwarded.status, 0, forwarded.stderr);
+    const options = parseBuildOptions(forwarded.stdout.trimEnd().split(/\r?\n/).slice(4));
+    assert.equal(options.linuxProductionMigration, true); assert.equal(options.integratedFeatures, true);
+    assert.equal(options.linuxIntegratedCandidate, undefined); assert.equal(options.linuxRetirementCandidate, undefined);
+    const builder = require('./build-unified.cjs');
+    assert.deepEqual(builder.integrationArguments('linux', 'x86_64', true, true, portable === '1', true),
+      ['--features', (portable === '1' ? builder.PRODUCTION_PORTABLE_FEATURES : builder.PRODUCTION_FEATURES).join(',')]);
+  }
+  const tests = workflow.jobs.assembly.steps.find(item => item.name === 'Test the strict production protocol without accepting or installing a package');
+  assert.equal(tests.if, "runner.os == 'Linux' && inputs.linux_production_migration_016");
+  assert.match(tests.run, /--features production-transaction/);
+  assert.match(tests.run, /--features linux-production-migration linux_retirement/);
+  assert.match(tests.run, /--features linux-production-migration convergence/);
+  assert.doesNotMatch(tests.run, /experimental-transaction|dpkg|sudo|--features integrated-features/);
+});
+
+test('assembly workflow Bash, embedded Python and JavaScript parse without running a build or API request', t => {
+  const workflow = assemblyYaml(t); if (!workflow) return;
+  const bash = process.platform === 'win32' ? path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git/bin/bash.exe') : '/bin/bash';
+  if (!fs.existsSync(bash)) return t.skip('Bash parser unavailable');
+  const python = process.platform === 'win32' ? 'python' : 'python3';
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  let bashBodies = 0, pythonBodies = 0, jsBodies = 0;
+  for (const job of Object.values(workflow.jobs)) for (const step of job.steps || []) {
+    if (step.uses?.startsWith('actions/github-script@')) { new AsyncFunction(step.with.script); jsBodies++; }
+    if (!step.run) continue;
+    const parsed = spawnSync(bash, ['--noprofile', '--norc', '-n'], { input: step.run, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    assert.equal(parsed.status, 0, parsed.stderr); bashBodies++;
+    for (const match of step.run.matchAll(/python3(?: -B)? - <<'PY'\r?\n([\s\S]*?)^PY(?:\r?\n|$)/gm)) {
+      const result = spawnSync(python, ['-B', '-c', 'import ast,sys;ast.parse(sys.stdin.read())'],
+        { input: match[1], encoding: 'utf8', windowsHide: true, timeout: 15000 });
+      assert.equal(result.status, 0, result.stderr); pythonBodies++;
+    }
+    for (const match of step.run.matchAll(/node - <<'NODE'\r?\n([\s\S]*?)^NODE(?:\r?\n|$)/gm)) {
+      new Function(match[1]); jsBodies++;
+    }
+  }
+  assert.ok(bashBodies >= 5 && pythonBodies >= 1 && jsBodies >= 2);
 });

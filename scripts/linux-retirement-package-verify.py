@@ -16,6 +16,10 @@ ACTION = "com.creatorworks.hub.deb-retirement"
 LIMIT = 512 * 1024 * 1024
 DEFAULT_PROFILE = "retirement-acceptance"
 INTEGRATED_PROFILE = "integrated-candidate"
+PRODUCTION_PROFILE = "production-migration-016"
+PRODUCTION_DESCRIPTION = "Move existing Creator apps to Creator Hub"
+PRODUCTION_MESSAGE = ("Administrator authentication is required to retire the verified MCP 2.7.7 or Project Setup 0.3.7 standalone app. "
+                      "MCP runtime files, user settings and Unity projects will be kept.")
 INTEGRATED_DESCRIPTION = "Creator Hub\n Manage projects, connect AI tools to Unity and set up Creator SDK projects."
 SERVICE = "usr/share/dbus-1/services/com.creatorworks.hub.Host.service"
 SERVICE_BYTES = b"[D-BUS Service]\nName=com.creatorworks.hub.Host\nExec=/usr/bin/creator-hub --flatpak-activate\n"
@@ -28,11 +32,12 @@ def require(ok, message):
 
 
 def profile_name(profile):
-    require(profile in (DEFAULT_PROFILE, INTEGRATED_PROFILE), "Unknown native DEB candidate profile")
+    require(profile in (DEFAULT_PROFILE, INTEGRATED_PROFILE, PRODUCTION_PROFILE), "Unknown native DEB candidate profile")
     return profile
 
 
-def policy(bytes_):
+def policy(bytes_, profile=DEFAULT_PROFILE):
+    profile_name(profile)
     require(len(bytes_) <= 16 * 1024 and b"<!ENTITY" not in bytes_, "Unexpected policy declarations")
     root = ET.fromstring(bytes_)
     require(root.tag == "policyconfig" and not root.attrib, "Unknown policy root")
@@ -43,7 +48,14 @@ def policy(bytes_):
         require(action.attrib == {"id": ACTION} and identifier == ACTION, "Unknown authorization action")
         require([node.tag for node in action] == ["description", "message", "defaults", "annotate"],
                 "Unknown authorization fields")
-        require(action.findtext("description") and "TEST ONLY" in action.findtext("message", ""), "Missing test-only consent")
+        if profile == PRODUCTION_PROFILE:
+            require(root.findtext("vendor") == "Creator Works" and not root.find("vendor").attrib
+                    and not list(root.find("vendor")), "Exact production vendor required")
+            for tag, text in (("description", PRODUCTION_DESCRIPTION), ("message", PRODUCTION_MESSAGE)):
+                node = action.find(tag)
+                require(node.text == text and not node.attrib and not list(node), "Exact production consent required; no development relabel")
+        else:
+            require(action.findtext("description") and "TEST ONLY" in action.findtext("message", ""), "Missing test-only consent")
         defaults = action.find("defaults")
         require(not defaults.attrib and [node.tag for node in defaults] == ["allow_any", "allow_inactive", "allow_active"],
                 "Unknown policy defaults")
@@ -79,13 +91,14 @@ def data(stream, helper_hash, policy_hash, profile=DEFAULT_PROFILE):
     profile_name(profile)
     expected = {HELPER: (helper_hash, 0o755), POLICY: (policy_hash, 0o644)}
     required_parents = PARENTS
-    if profile == INTEGRATED_PROFILE:
+    integrated = profile in (INTEGRATED_PROFILE, PRODUCTION_PROFILE)
+    if integrated:
         expected[SERVICE] = (hashlib.sha256(SERVICE_BYTES).hexdigest(), 0o644)
         required_parents = PARENTS | SERVICE_PARENTS
     found, parents = {}, set()
     for name, member, archive in members(stream):
         require(not name.startswith("etc/") and not name.endswith((".rules", ".pkla")), "System policy/config overrides refused")
-        if profile == INTEGRATED_PROFILE and name.startswith("usr/share/dbus-1/"):
+        if integrated and name.startswith("usr/share/dbus-1/"):
             require(name in required_parents or name == SERVICE, "Only the fixed session activation service admitted")
         if name in required_parents:
             require(member.isdir() and member.uid == member.gid == 0 and member.mode == 0o755,
@@ -102,7 +115,7 @@ def data(stream, helper_hash, policy_hash, profile=DEFAULT_PROFILE):
         bytes_ = archive.extractfile(member).read()
         require(len(bytes_) == member.size and hashlib.sha256(bytes_).hexdigest() == digest, "Helper/policy bytes changed")
         if name == POLICY:
-            policy(bytes_)
+            policy(bytes_, profile)
         elif name == HELPER:
             require(len(bytes_) >= 20 and bytes_[:6] == b"\x7fELF\x02\x01" and bytes_[18:20] == b"\x3e\x00",
                     "Native Linux x86_64 ELF helper required")
@@ -126,7 +139,9 @@ def control(stream, version, profile=DEFAULT_PROFILE):
     require(all(len(fields.get_all(key)) == 1 for key in fields.keys()), "Duplicate DEB control fields")
     require(fields["Package"] == "creator-hub" and fields["Architecture"] == "amd64"
             and fields["Version"] == version, "Wrong native package identity")
-    if profile == INTEGRATED_PROFILE:
+    if profile == PRODUCTION_PROFILE:
+        require(version == "0.1.16", "Production migration requires exact 016 package identity")
+    if profile in (INTEGRATED_PROFILE, PRODUCTION_PROFILE):
         require(fields.get("Description", "") == INTEGRATED_DESCRIPTION, "Exact integrated product description required")
     else:
         require(fields.get("Description", "").startswith("TEST ONLY - "), "Wrong test package identity")
@@ -138,6 +153,8 @@ def control(stream, version, profile=DEFAULT_PROFILE):
 
 def verify(package, helper_hash, policy_hash, version, profile=DEFAULT_PROFILE):
     profile_name(profile)
+    if profile == PRODUCTION_PROFILE:
+        require(version == "0.1.16", "Production migration requires exact 016 package identity")
     require(all(re.fullmatch(r"[a-f0-9]{64}", digest) for digest in (helper_hash, policy_hash)), "Invalid expected digest")
     env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"}
     result = None
@@ -152,14 +169,14 @@ def verify(package, helper_hash, policy_hash, version, profile=DEFAULT_PROFILE):
                 control(output, version, profile)
             else:
                 result = data(output, helper_hash, policy_hash, profile)
-    return {"files": result, **({"profile": profile} if profile == INTEGRATED_PROFILE else {})}
+    return {"files": result, **({"profile": profile} if profile != DEFAULT_PROFILE else {})}
 
 
 if __name__ == "__main__":
     try:
         arguments = sys.argv[1:]
         require(len(arguments) == 4 or (len(arguments) == 6 and arguments[4] == "--profile"),
-                "Expected DEB, helper SHA256, policy SHA256 and version, optionally --profile integrated-candidate")
+                "Expected DEB, helper SHA256, policy SHA256 and version, optionally --profile integrated-candidate or production-migration-016")
         profile = profile_name(arguments[5]) if len(arguments) == 6 else DEFAULT_PROFILE
         print(json.dumps(verify(*arguments[:4], profile=profile)))
     except (ValueError, OSError, tarfile.TarError, ET.ParseError, subprocess.SubprocessError) as error:

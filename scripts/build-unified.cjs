@@ -8,6 +8,13 @@ const repositoryRoot = path.resolve(__dirname, '..');
 const PORTABLE_HOST_FEATURE = 'experimental-linux-portable-host';
 const PORTABLE_ROOT_WITNESSES = ['CREATOR_HUB_PORTABLE_HOST', 'Running Hub is not the selected signed executable'];
 const PORTABLE_HOST_FEATURES = ['integrated-features', 'experimental-flatpak-host', 'experimental-linux-migration', PORTABLE_HOST_FEATURE];
+const retirementPackage = require('./linux-retirement-package.cjs');
+const PRODUCTION_FEATURES = ['integrated-features', 'experimental-flatpak-host', retirementPackage.PRODUCTION_ROOT_FEATURE];
+const PRODUCTION_PORTABLE_FEATURE = 'experimental-linux-portable-update';
+const PRODUCTION_PORTABLE_FEATURES = [...PRODUCTION_FEATURES, PRODUCTION_PORTABLE_FEATURE];
+const PRODUCTION_SOURCE_PATHS = ['package.json', 'package-lock.json', 'src', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock',
+  'src-tauri/build.rs', 'src-tauri/tauri.conf.json', 'src-tauri/src', 'native/linux-deb-retirement', 'native/linux-portable-deployment',
+  'packaging/linux', 'scripts/build-unified.cjs', 'scripts/linux-retirement-package.cjs', 'scripts/linux-retirement-package-verify.py'];
 const PORTABLE_SOURCE_PATHS = ['package.json', 'package-lock.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock',
   'src-tauri/build.rs', 'src-tauri/tauri.conf.json', 'src-tauri/src', 'src/features', 'native/linux-portable-deployment',
   'modules/mcp/launcher/src-tauri/src', 'modules/project-setup/src-tauri/src'];
@@ -17,17 +24,90 @@ function stageFileMode(file, platform, executable, chmod = fs.chmodSync) {
   if (platform === 'linux') chmod(file, executable ? 0o755 : 0o644);
   else if (platform === 'macos' && executable) chmod(file, 0o755);
 }
-function integrationArguments(platform, arch, enabled, retirement = false, portableHost = false) {
+function integrationArguments(platform, arch, enabled, retirement = false, portableHost = false, productionMigration = false) {
+  if (productionMigration && !(enabled && retirement && platform === 'linux' && arch === 'x86_64')) throw Error('Production migration requires explicit integrated Linux x86_64 DEB assembly.');
   if (portableHost && !(enabled && retirement && platform === 'linux' && arch === 'x86_64')) throw Error('Portable host candidates require the explicit integrated Linux x86_64 profile.');
   if (!enabled) return [];
   if (platform === 'windows' && arch === 'x86_64' && !retirement) return ['--features', 'integrated-features'];
   if (platform !== 'linux' || arch !== 'x86_64') throw Error('Direct feature candidates require Windows or Linux x86_64. Linux retirement flags cannot be used on Windows.');
   return ['--features', ['integrated-features', 'experimental-flatpak-host',
-    ...(retirement ? ['experimental-linux-migration'] : []), ...(portableHost ? [PORTABLE_HOST_FEATURE] : [])].join(',')];
+    ...(retirement ? [productionMigration ? retirementPackage.PRODUCTION_ROOT_FEATURE : 'experimental-linux-migration'] : []),
+    ...(portableHost ? [productionMigration ? PRODUCTION_PORTABLE_FEATURE : PORTABLE_HOST_FEATURE] : [])].join(',')];
+}
+function checkProductionOptions(options, platform, arch, root, env = process.env) {
+  if (!options.linuxProductionMigration) return;
+  candidateProfile(options);
+  if (!(platform === 'linux' && arch === 'x86_64' && options.installer && options.managed && options.experimentalUnix
+    && options.experimentalWritable && !options.prepareManagedUnix && typeof options.signedUnixInput === 'string'
+    && path.isAbsolute(options.signedUnixInput))) throw Error('--linux-production-migration-016 requires signed native Linux x86_64 installer assembly.');
+  for (const name of ['package.json', 'src-tauri/tauri.conf.json']) {
+    if (JSON.parse(fs.readFileSync(path.join(root, name), 'utf8')).version !== '0.1.16') throw Error('Production migration requires actual 016 Root source; old Root cannot be relabelled.');
+  }
+  if (Object.keys(env).some(key => /^(RUSTFLAGS$|CARGO_ENCODED_RUSTFLAGS$|CARGO_BUILD_RUSTFLAGS$|CARGO_TARGET_.*_RUSTFLAGS$)/.test(key))) {
+    throw Error('Production migration refuses inherited compiler overrides.');
+  }
+}
+function admitProductionSource(root, execute = execFileSync, portable = false) {
+  for (const [manifest, name, feature, expected] of [
+    ['src-tauri/Cargo.toml', 'creator-hub', retirementPackage.PRODUCTION_ROOT_FEATURE, ['experimental-linux-migration']],
+    ['native/linux-deb-retirement/Cargo.toml', 'creator-hub-linux-deb-retirement', retirementPackage.PRODUCTION_HELPER_FEATURE, ['dep:signal-hook']],
+    ...(portable ? [['native/linux-portable-deployment/Cargo.toml', 'creator-hub-linux-portable-deployment', 'experimental-restart', []]] : []),
+  ]) {
+    const file = path.join(root, manifest);
+    const metadata = JSON.parse(String(execute('cargo', ['metadata', '--locked', '--offline', '--no-deps', '--format-version', '1', '--manifest-path', file],
+      { cwd: root, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 })));
+    const packages = metadata.packages.filter(item => path.resolve(item.manifest_path) === file);
+    if (packages.length !== 1 || packages[0].name !== name || (name === 'creator-hub' && packages[0].version !== '0.1.16')
+      || JSON.stringify(packages[0].features[feature]?.slice().sort()) !== JSON.stringify(expected.slice().sort())
+      || (name !== 'creator-hub' && (packages[0].features.default || []).length !== 0)
+      || (packages[0].features.default || []).includes(feature)) throw Error('Exact default-off production Cargo source contract required.');
+    if (portable && name === 'creator-hub'
+      && JSON.stringify(packages[0].features[PRODUCTION_PORTABLE_FEATURE]?.slice().sort())
+        !== JSON.stringify(['experimental-linux-portable-host', 'creator-hub-linux-portable-deployment/experimental-restart'].sort())) {
+      throw Error('Production portable source must include the native host and restart implementation.');
+    }
+  }
+}
+function validateProductionBuildProof(proof, commit, features) {
+  const assert = require('node:assert/strict');
+  assert.deepEqual(Object.keys(proof || {}).sort(), ['schemaVersion', 'profile', 'sourceCommit', 'sourceTree', 'compiledFeatures', 'rawHub', 'staging'].sort(),
+    'Actual production Root build proof required; old receipts cannot be relabelled');
+  assert.equal(proof.schemaVersion, 1); assert.equal(proof.profile, retirementPackage.PRODUCTION_PROFILE);
+  assert.match(commit, /^[a-f0-9]{40}$/); assert.equal(proof.sourceCommit, commit); assert.match(proof.sourceTree, /^[a-f0-9]{40}$/);
+  const expected = features.some(feature => [PORTABLE_HOST_FEATURE, PRODUCTION_PORTABLE_FEATURE].includes(feature)) ? PRODUCTION_PORTABLE_FEATURES : PRODUCTION_FEATURES;
+  assert.deepEqual(features, expected); assert.deepEqual(proof.compiledFeatures, expected);
+  retirementPackage.validateProductionReceipt(proof.staging, commit);
+  assert.deepEqual(Object.keys(proof.rawHub || {}).sort(), ['sha256', 'size']);
+  assert.ok(Number.isSafeInteger(proof.rawHub.size) && proof.rawHub.size >= 64 && proof.rawHub.size <= 256 * 1024 * 1024);
+  assert.match(proof.rawHub.sha256, /^[a-f0-9]{64}$/);
+  return proof;
+}
+function productionBuildProof(root, file, featureArgs, env, staged, execute = execFileSync) {
+  const assert = require('node:assert/strict');
+  const features = featureArgs?.[0] === '--features' && featureArgs.length === 2 ? featureArgs[1].split(',') : [];
+  if (JSON.stringify(features) !== JSON.stringify(features.includes(PRODUCTION_PORTABLE_FEATURE) ? PRODUCTION_PORTABLE_FEATURES : PRODUCTION_FEATURES)) {
+    throw Error('Production proof requires the exact actual Cargo feature arguments.');
+  }
+  retirementPackage.validateProductionReceipt(staged.productionReceipt, env.GITHUB_SHA);
+  assert.equal(staged.profile, retirementPackage.PRODUCTION_PROFILE);
+  assert.deepEqual(staged.files, staged.productionReceipt.files);
+  for (const [name, installed] of Object.entries(staged.files)) {
+    const source = path.join(path.dirname(staged.overlay), 'linux-retirement', path.posix.basename(name));
+    assert.deepEqual(retirementPackage.record(source, installed.mode), installed, 'Production helper/policy changed after staging.');
+  }
+  const bytes = require('./flatpak-package.cjs').read(file, 256 * 1024 * 1024);
+  require('./flatpak-package.cjs').validateElf(bytes);
+  admitProductionSource(root, execute, features.includes(PRODUCTION_PORTABLE_FEATURE));
+  const git = args => String(execute('git', args, { cwd: root, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 })).trim();
+  if (git(['rev-parse', 'HEAD']) !== env.GITHUB_SHA) throw Error('Production source changed after admission.');
+  git(['diff', '--exit-code', 'HEAD', '--', ...PRODUCTION_SOURCE_PATHS]);
+  return validateProductionBuildProof({ schemaVersion: 1, profile: retirementPackage.PRODUCTION_PROFILE,
+    sourceCommit: env.GITHUB_SHA, sourceTree: git(['rev-parse', 'HEAD^{tree}']), compiledFeatures: features,
+    rawHub: { size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') }, staging: staged.productionReceipt }, env.GITHUB_SHA, features);
 }
 function checkPortableHostOptions(options, platform, arch, root) {
   if (!options.linuxPortableHostCandidate) return;
-  if (!(platform === 'linux' && arch === 'x86_64' && options.linuxIntegratedCandidate && options.integratedFeatures
+  if (!(platform === 'linux' && arch === 'x86_64' && (options.linuxIntegratedCandidate || options.linuxProductionMigration) && options.integratedFeatures
     && !options.linuxRetirementCandidate && options.installer && options.managed && options.experimentalUnix
     && options.experimentalWritable && !options.prepareManagedUnix && typeof options.signedUnixInput === 'string'
     && path.isAbsolute(options.signedUnixInput))) {
@@ -43,7 +123,8 @@ function validatePortableBuildProof(proof, commit, features, rawHub = null, sour
   assert.deepEqual(Object.keys(proof).sort(), ['schemaVersion', 'version', 'target', 'sourceCommit', 'sourceTree', 'compiledFeatures', 'startupImageBinding', 'rawHub'].sort());
   assert.equal(proof.schemaVersion, 1); assert.equal(proof.version, '0.1.16'); assert.equal(proof.target, 'x86_64-unknown-linux-gnu');
   assert.equal(proof.sourceCommit, commit); assert.match(proof.sourceCommit, /^[a-f0-9]{40}$/); assert.match(proof.sourceTree, /^[a-f0-9]{40}$/);
-  assert.deepEqual(proof.compiledFeatures, PORTABLE_HOST_FEATURES); assert.deepEqual(features, PORTABLE_HOST_FEATURES);
+  const expected = features.includes(retirementPackage.PRODUCTION_ROOT_FEATURE) ? PRODUCTION_PORTABLE_FEATURES : PORTABLE_HOST_FEATURES;
+  assert.deepEqual(proof.compiledFeatures, expected); assert.deepEqual(features, expected);
   assert.equal(proof.startupImageBinding, 1);
   assert.deepEqual(Object.keys(proof.rawHub || {}).sort(), ['sha256', 'size']);
   assert.ok(Number.isSafeInteger(proof.rawHub.size) && proof.rawHub.size >= 64 && proof.rawHub.size <= 256 * 1024 * 1024);
@@ -66,7 +147,8 @@ function admitPortableSource(root, execute = execFileSync) {
 }
 function portableBuildProof(root, file, featureArgs, env, execute = execFileSync) {
   const finite = require('./flatpak-package.cjs');
-  if (JSON.stringify(featureArgs) !== JSON.stringify(['--features', PORTABLE_HOST_FEATURES.join(',')])) throw Error('Portable build proof requires the actual complete Cargo feature arguments.');
+  const expected = featureArgs?.[1]?.split(',').includes(retirementPackage.PRODUCTION_ROOT_FEATURE) ? PRODUCTION_PORTABLE_FEATURES : PORTABLE_HOST_FEATURES;
+  if (JSON.stringify(featureArgs) !== JSON.stringify(['--features', expected.join(',')])) throw Error('Portable build proof requires the actual complete Cargo feature arguments.');
   const bytes = finite.read(file, 256 * 1024 * 1024); finite.validateElf(bytes);
   for (const witness of PORTABLE_ROOT_WITNESSES) if (!bytes.includes(Buffer.from(witness))) throw Error('Root is missing its compiled portable startup binding; no profile can be generated.');
   admitPortableSource(root, execute);
@@ -85,7 +167,12 @@ function stageWindowsIntegration(output) {
     nativeGuiAccepted: false, migrationAccepted: false, signedUpdateAccepted: false, releaseReady: false,
   }, null, 2), { flag: 'wx' });
 }
-function candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures }) {
+function candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures, linuxProductionMigration = false }) {
+  if (typeof linuxProductionMigration !== 'boolean') throw Error('Production profile selection must be an explicit boolean.');
+  if (linuxProductionMigration) {
+    if (linuxRetirementCandidate || linuxIntegratedCandidate || !integratedFeatures) throw Error('Production migration requires --integrated-features and refuses both development profiles.');
+    return retirementPackage.PRODUCTION_PROFILE;
+  }
   if (linuxIntegratedCandidate && (linuxRetirementCandidate || !integratedFeatures)) {
     throw Error('--linux-integrated-candidate requires --integrated-features and cannot use the old retirement test profile.');
   }
@@ -193,18 +280,20 @@ function verifyStage(directory, manifest) {
 }
 function build(label, { installer = false, managed = false, experimentalUnix = false, experimentalWritable = false,
   prepareManagedUnix = false, signedUnixInput = null, linuxRetirementCandidate = false,
-  linuxIntegratedCandidate = false, integratedFeatures = false, linuxPortableHostCandidate = false } = {}, context = {}) {
+  linuxIntegratedCandidate = false, integratedFeatures = false, linuxPortableHostCandidate = false, linuxProductionMigration = false } = {}, context = {}) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(label || '')) throw Error('Provide a unique, simple build name.');
   const root = context.root || repositoryRoot;
   const execute = context.execute || execFileSync;
   const environment = context.env || process.env;
   const platform = context.platform || { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
   const arch = context.arch || { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
+  checkProductionOptions({ installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput,
+    linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures, linuxProductionMigration }, platform, arch, root, environment);
   checkPortableHostOptions({ installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput,
-    linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures, linuxPortableHostCandidate }, platform, arch, root);
-  candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures });
-  const retirementCandidate = linuxRetirementCandidate || linuxIntegratedCandidate;
-  const featureArgs = integrationArguments(platform, arch, integratedFeatures, retirementCandidate, linuxPortableHostCandidate);
+    linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures, linuxPortableHostCandidate, linuxProductionMigration }, platform, arch, root);
+  candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures, linuxProductionMigration });
+  const retirementCandidate = linuxRetirementCandidate || linuxIntegratedCandidate || linuxProductionMigration;
+  const featureArgs = integrationArguments(platform, arch, integratedFeatures, retirementCandidate, linuxPortableHostCandidate, linuxProductionMigration);
   if (integratedFeatures && platform === 'windows' && (!managed || experimentalUnix || experimentalWritable || prepareManagedUnix || signedUnixInput)) {
     throw Error('Direct Windows features require a managed Hub candidate without Unix-only options.');
   }
@@ -216,7 +305,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   const payload = require('./unix-managed-payload.cjs');
   payload.checkSplitOptions({ platform, installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput });
   if (signedUnixInput) return buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCandidate,
-    linuxIntegratedCandidate, integratedFeatures, linuxPortableHostCandidate }, context);
+    linuxIntegratedCandidate, integratedFeatures, linuxPortableHostCandidate, linuxProductionMigration }, context);
   const unix = require('./unix-package-payload.cjs');
   const plan = unix.nativePlan(platform, arch, { installer, experimentalUnix, experimentalWritable, managed });
   const nativeTargetArgs = plan.rustTarget ? ['--target', plan.rustTarget] : [];
@@ -358,38 +447,49 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   console.log(`Local unified candidate: ${output}. Not a release or migration acceptance.`);
   return output;
 }
-function signedAssemblyReceipt(result, platform, arch, commit, featureArgs, portableProof = null) {
+function signedAssemblyReceipt(result, platform, arch, commit, featureArgs, portableProof = null, productionProof = null) {
   if (result.version !== '0.1.14' && !(result.version === '0.1.16' && platform === 'linux' && arch === 'x86_64')) {
     throw Error('Signed assembly receipt requires its independently admitted version and platform.');
   }
   let compiledFeatures;
-  const portable = featureArgs?.[1]?.split(',').includes(PORTABLE_HOST_FEATURE);
+  const portable = featureArgs?.[1]?.split(',').some(feature => [PORTABLE_HOST_FEATURE, PRODUCTION_PORTABLE_FEATURE].includes(feature));
+  const production = featureArgs?.[1]?.split(',').includes(retirementPackage.PRODUCTION_ROOT_FEATURE);
+  if (production && result.version !== '0.1.16') throw Error('Production migration cannot relabel old Root.');
   if (portable && result.version !== '0.1.16') throw Error('Portable host profile cannot be attached to old Root.');
   if (result.version === '0.1.16') {
-    const actual = ['--features', (portable ? PORTABLE_HOST_FEATURES : PORTABLE_HOST_FEATURES.slice(0, -1)).join(',')];
+    const expected = production ? PRODUCTION_FEATURES : PORTABLE_HOST_FEATURES.slice(0, -1);
+    const actual = ['--features', [...expected, ...(portable ? [production ? PRODUCTION_PORTABLE_FEATURE : PORTABLE_HOST_FEATURE] : [])].join(',')];
     if (JSON.stringify(featureArgs) !== JSON.stringify(actual)) throw Error('Linux 0.1.16 receipt requires the actual integrated Cargo feature arguments.');
     compiledFeatures = featureArgs[1].split(',');
   }
   if (portable) validatePortableBuildProof(portableProof, commit, compiledFeatures);
   else if (portableProof) throw Error('Portable build proof requires the actual portable Cargo feature.');
+  if (production) validateProductionBuildProof(productionProof, commit, compiledFeatures);
+  else if (productionProof) throw Error('Production build proof requires the actual production Cargo feature.');
+  if (production && portable && (productionProof.sourceTree !== portableProof.sourceTree
+    || productionProof.rawHub.sha256 !== portableProof.rawHub.sha256 || productionProof.rawHub.size !== portableProof.rawHub.size)) {
+    throw Error('Production and portable proofs must bind the same actual Root and source tree.');
+  }
   return { schemaVersion: 1, product: 'com.creatorworks.hub.unix-signed-assembly', platform, arch,
     hubVersion: result.version, assemblyCommit: commit, privateSource: result.source, handoffSha256: result.handoffSha256,
     ...(compiledFeatures ? { compiledFeatures } : {}),
     ...(portable ? { portableHostBuild: portableProof } : {}),
+    ...(production ? { productionMigration: productionProof } : {}),
     mcpMode: 'writable', privateModulesRecompiled: false, privateModulesResigned: false,
     nativeGuiAccepted: false, releaseReady: false };
 }
 function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCandidate = false,
-  linuxIntegratedCandidate = false, integratedFeatures = false, linuxPortableHostCandidate = false }, context = {}) {
+  linuxIntegratedCandidate = false, integratedFeatures = false, linuxPortableHostCandidate = false, linuxProductionMigration = false }, context = {}) {
   const root = context.root || repositoryRoot;
   const execute = context.execute || execFileSync;
   const environment = context.env || process.env;
   const platform = context.platform || { darwin: 'macos', linux: 'linux' }[process.platform];
   const arch = context.arch || { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
-  const profile = candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures });
-  const retirementCandidate = linuxRetirementCandidate || linuxIntegratedCandidate;
-  const featureArgs = integrationArguments(platform, arch, integratedFeatures, retirementCandidate, linuxPortableHostCandidate);
+  const profile = candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures, linuxProductionMigration });
+  const retirementCandidate = linuxRetirementCandidate || linuxIntegratedCandidate || linuxProductionMigration;
+  const featureArgs = integrationArguments(platform, arch, integratedFeatures, retirementCandidate, linuxPortableHostCandidate, linuxProductionMigration);
   const output = path.join(root, 'artifacts', 'unified', label);
+  if (linuxProductionMigration) admitProductionSource(root, execute, linuxPortableHostCandidate);
   if (linuxPortableHostCandidate) admitPortableSource(root, execute);
   const result = require('./assemble-unix-payload.cjs').assemble(signedUnixInput, output, platform, arch,
     { root, env: environment, execute });
@@ -441,8 +541,9 @@ function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCan
     if (retirement) require('./linux-retirement-package.cjs').verifyDeb(root, output, integrity, retirement, execute);
   }
   const portableProof = linuxPortableHostCandidate ? portableBuildProof(root, path.join(output, 'creator-hub'), featureArgs, environment, execute) : null;
+  const productionProof = linuxProductionMigration ? productionBuildProof(root, path.join(output, 'creator-hub'), featureArgs, environment, retirement, execute) : null;
   fs.writeFileSync(path.join(output, 'signed-unix-assembly.json'), JSON.stringify(
-    signedAssemblyReceipt(result, platform, arch, environment.GITHUB_SHA, featureArgs, portableProof), null, 2), { flag: 'wx' });
+    signedAssemblyReceipt(result, platform, arch, environment.GITHUB_SHA, featureArgs, portableProof, productionProof), null, 2), { flag: 'wx' });
   console.log(`Signed native Unix candidate: ${output}. Not migration or release acceptance.`);
   return output;
 }
@@ -454,11 +555,12 @@ function writeAssemblyManifests(output, signedManifest, finalManifest) {
 }
 function parseBuildOptions(args) {
   const options = {};
-  const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix. --integrated-features is Windows/Linux candidate-only; --linux-integrated-candidate and --linux-portable-host-candidate are Linux-only.';
+  const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix. --integrated-features is Windows/Linux candidate-only; --linux-integrated-candidate, --linux-production-migration-016 and --linux-portable-host-candidate are Linux-only.';
   const flags = { '--installer': 'installer', '--managed': 'managed', '--experimental-unix': 'experimentalUnix',
     '--experimental-unix-writable': 'experimentalWritable', '--prepare-managed-unix': 'prepareManagedUnix',
     '--linux-retirement-test-candidate': 'linuxRetirementCandidate', '--integrated-features': 'integratedFeatures',
-    '--linux-integrated-candidate': 'linuxIntegratedCandidate', '--linux-portable-host-candidate': 'linuxPortableHostCandidate' };
+    '--linux-integrated-candidate': 'linuxIntegratedCandidate', '--linux-portable-host-candidate': 'linuxPortableHostCandidate',
+    '--linux-production-migration-016': 'linuxProductionMigration' };
   const seen = new Set();
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
@@ -473,7 +575,9 @@ function parseBuildOptions(args) {
   }
   return options;
 }
-module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, integrationArguments, integrationEnvironment, stageIntegratedMcpResources, candidateProfile, stageIntegrationService, stageWindowsIntegration, build, parseBuildOptions, writeAssemblyManifests, signedAssemblyReceipt, checkPortableHostOptions, validatePortableBuildProof, portableBuildProof, admitPortableSource, PORTABLE_HOST_FEATURES, PORTABLE_ROOT_WITNESSES, PORTABLE_SOURCE_PATHS };
+module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, integrationArguments, integrationEnvironment, stageIntegratedMcpResources, candidateProfile, stageIntegrationService, stageWindowsIntegration, build, parseBuildOptions, writeAssemblyManifests, signedAssemblyReceipt, checkPortableHostOptions, validatePortableBuildProof, portableBuildProof, admitPortableSource, PORTABLE_HOST_FEATURES, PORTABLE_ROOT_WITNESSES, PORTABLE_SOURCE_PATHS,
+  checkProductionOptions, admitProductionSource, validateProductionBuildProof, productionBuildProof,
+  PRODUCTION_FEATURES, PRODUCTION_PORTABLE_FEATURE, PRODUCTION_PORTABLE_FEATURES, PRODUCTION_SOURCE_PATHS };
 if (require.main === module) {
   try {
     if (!process.argv[2]) throw Error('Provide one build name.');

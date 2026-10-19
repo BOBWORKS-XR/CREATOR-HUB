@@ -20,7 +20,7 @@ import tempfile
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-MEMBERS_SHA = "caf44ce996251fbc14656a76454a8ed95a16ed2fb05e39272e31cb4c73590a81"
+MEMBERS_SHA = "07429e4febdf404bf31fe8b4a75c17e144399b3c7f2af640caf9c351765c6974"
 SERVICE = "usr/share/dbus-1/services/com.creatorworks.hub.Host.service"
 PARENTS = {"usr", "usr/share", "usr/share/dbus-1", "usr/share/dbus-1/services"}
 SERVICE_BYTES = b"[D-BUS Service]\nName=com.creatorworks.hub.Host\nExec=/usr/bin/creator-hub --flatpak-activate\n"

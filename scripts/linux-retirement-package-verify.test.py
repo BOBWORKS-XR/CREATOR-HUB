@@ -15,6 +15,7 @@ spec = importlib.util.spec_from_file_location("retirement_package", ROOT / "scri
 v = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(v)
 POLICY = (ROOT / "packaging/linux/com.creatorworks.hub.deb-retirement.policy").read_bytes()
+PRODUCTION_POLICY = (ROOT / "packaging/linux/com.creatorworks.hub.deb-retirement.production-016.policy").read_bytes()
 HELPER = b"\x7fELF\x02\x01" + b"\x00" * 12 + b"\x3e\x00" + b"fixture-not-executed" * 4
 sha = lambda value: hashlib.sha256(value).hexdigest()
 
@@ -238,6 +239,87 @@ class PackageAudit(unittest.TestCase):
         combined = integrated_rows() + [("usr/bin/creator-hub", bytes(image), tarfile.REGTYPE, 0o755, 0, 0)]
         self.assertEqual(len(v.data(archive(combined), sha(HELPER), sha(POLICY), v.INTEGRATED_PROFILE)), 3)
         self.assertEqual(set(activation.inspect_data(archive(combined), sha(image))), {v.SERVICE, "usr/bin/creator-hub"})
+
+
+class ProductionAudit(unittest.TestCase):
+    def production_rows(self):
+        return [(name, PRODUCTION_POLICY if name == v.POLICY else body, kind, mode, uid, gid)
+                for name, body, kind, mode, uid, gid in integrated_rows()]
+
+    def production_control(self):
+        return control(integrated_control()[0][1].replace(b"0.1.14", b"0.1.16"))
+
+    def audit(self, data):
+        return v.data(archive(data), sha(HELPER), sha(PRODUCTION_POLICY), v.PRODUCTION_PROFILE)
+
+    def test_exact_production_policy_and_service_do_not_admit_development_relabelling(self):
+        v.policy(PRODUCTION_POLICY, v.PRODUCTION_PROFILE)
+        self.assertEqual(len(self.audit(self.production_rows())), 3)
+        v.control(archive(self.production_control()), "0.1.16", v.PRODUCTION_PROFILE)
+        for body, profile in ((POLICY, v.PRODUCTION_PROFILE), (PRODUCTION_POLICY, v.DEFAULT_PROFILE),
+                              (PRODUCTION_POLICY, v.INTEGRATED_PROFILE)):
+            with self.subTest(profile=profile), self.assertRaises(ValueError):
+                v.policy(body, profile)
+        with self.assertRaises(ValueError):
+            v.data(archive(integrated_rows()), sha(HELPER), sha(POLICY), v.PRODUCTION_PROFILE)
+        with self.assertRaises(ValueError):
+            v.control(archive(integrated_control()), "0.1.14", v.PRODUCTION_PROFILE)
+        recipe = json.loads((ROOT / "packaging/linux/tauri-production-migration-016.json").read_text())
+        self.assertEqual(recipe["build"]["features"], ["linux-production-migration", "integrated-features", "experimental-flatpak-host"])
+        self.assertEqual(v.INTEGRATED_DESCRIPTION, recipe["bundle"]["shortDescription"] + "\n " + recipe["bundle"]["longDescription"])
+
+    def test_production_consent_cannot_be_generalized_or_grant_cached_or_extra_authority(self):
+        for tag, value in (("vendor", "other"), ("action/description", "TEST ONLY"), ("action/message", "Approve anything"),
+                           ("action/defaults/allow_active", "auth_admin_keep"), ("action/defaults/allow_any", "yes"),
+                           ("action/defaults/allow_inactive", "auth_self"), ("action/annotate", "/bin/sh")):
+            root = ET.fromstring(PRODUCTION_POLICY); root.find(tag).text = value
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                v.policy(ET.tostring(root), v.PRODUCTION_PROFILE)
+        for kind in ("annotation", "second-action", "nested-consent"):
+            root = ET.fromstring(PRODUCTION_POLICY); action = root.find("action")
+            if kind == "annotation":
+                ET.SubElement(action, "annotate", {"key": "org.freedesktop.policykit.exec.argv1"}).text = "retire-mcp-2.7.7"
+            elif kind == "second-action":
+                root.append(copy.deepcopy(action))
+            else:
+                ET.SubElement(action.find("message"), "nested").text = "extra"
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                v.policy(ET.tostring(root), v.PRODUCTION_PROFILE)
+
+    def test_production_keeps_exact_ownership_and_forbids_other_helpers_policies_or_maintainer_scripts(self):
+        rows_ = self.production_rows()
+        for target in (v.HELPER, v.POLICY, v.SERVICE, *v.PARENTS, *v.SERVICE_PARENTS):
+            with self.subTest(missing=target), self.assertRaises(ValueError):
+                self.audit([row for row in rows_ if row[0] != target])
+            for field, value in ((3, 0o777), (3, 0o4755), (4, 1001), (5, 1001)):
+                modified = list(rows_); index = [row[0] for row in modified].index(target)
+                changed = list(modified[index]); changed[field] = value; modified[index] = tuple(changed)
+                with self.subTest(target=target, field=field), self.assertRaises(ValueError):
+                    self.audit(modified)
+        for name in ("usr/libexec/other-helper", "usr/share/polkit-1/actions/other.policy", "etc/polkit-1/override",
+                     "usr/share/dbus-1/services/foreign.service"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.audit(rows_ + [(name, b"extra", tarfile.REGTYPE, 0o644, 0, 0)])
+        for name in ("preinst", "postinst", "prerm", "postrm", "conffiles", "triggers"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                v.control(archive(self.production_control() + [(name, b"never executed", tarfile.REGTYPE, 0o755, 0, 0)]),
+                          "0.1.16", v.PRODUCTION_PROFILE)
+
+    def test_production_verify_requires016_before_queries_and_returns_explicit_profile(self):
+        with mock.patch.object(v.subprocess, "run") as called:
+            with self.assertRaises(ValueError):
+                v.verify("never-opened.deb", sha(HELPER), sha(PRODUCTION_POLICY), "0.1.14", v.PRODUCTION_PROFILE)
+            called.assert_not_called()
+
+        def query(command, **kwargs):
+            kwargs["stdout"].write(archive(self.production_control() if command[1] == "--ctrl-tarfile" else self.production_rows()).read())
+            return subprocess.CompletedProcess(command, 0, stderr=b"")
+
+        with mock.patch.object(v.subprocess, "run", side_effect=query) as called:
+            report = v.verify("not-installed.deb", sha(HELPER), sha(PRODUCTION_POLICY), "0.1.16", v.PRODUCTION_PROFILE)
+        self.assertEqual(called.call_count, 2)
+        self.assertEqual(report["profile"], v.PRODUCTION_PROFILE)
+        self.assertEqual(set(report), {"files", "profile"})
 
 
 if __name__ == "__main__":

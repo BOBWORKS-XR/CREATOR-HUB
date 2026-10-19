@@ -18,8 +18,13 @@ on:
         type: boolean
         default: false
         required: false
+      linux_production_migration_016:
+        description: Build a new 016 Root with strict production migration protocol and fixed administrator policy; qualification and publication remain separate
+        type: boolean
+        default: false
+        required: false
       linux_portable_host_candidate:
-        description: Compile new Linux Root with signed portable startup binding; requires integrated candidate, not installation or acceptance
+        description: Compile new Linux Root with signed portable startup binding; production016 also includes native portable update/restart; not installation or acceptance
         type: boolean
         default: false
         required: false
@@ -32,6 +37,7 @@ jobs:
     env:
       CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: ${{ inputs.linux_retirement_test_candidate && '1' || '0' }}
       CREATOR_LINUX_INTEGRATED_CANDIDATE: ${{ inputs.linux_integrated_candidate && '1' || '0' }}
+      CREATOR_LINUX_PRODUCTION_MIGRATION_016: ${{ inputs.linux_production_migration_016 && '1' || '0' }}
       CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: ${{ inputs.linux_portable_host_candidate && '1' || '0' }}
       SIGNED_INPUTS: ${{ inputs.signed_inputs }}
     steps:
@@ -39,7 +45,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 && ( "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 1 || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+          if [[ "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" == 1 && ( "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+            echo '::error::Production migration requires the explicit 016 profile, not either development profile.' >&2
+            exit 64
+          fi
+          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 && ( ( "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 1 && "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" != 1 ) || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
             echo '::error::Portable host compilation requires the explicit 016 integrated Linux profile.' >&2
             exit 64
           fi
@@ -53,7 +63,7 @@ jobs:
           assert os.environ['GITHUB_REPOSITORY'] == 'BOBWORKS-XR/CREATOR-HUB'
           assert os.environ['GITHUB_REPOSITORY_ID'] == '1364807512'
           assert os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
-          assert os.environ['CREATOR_LINUX_INTEGRATED_CANDIDATE'] == '1'
+          assert (os.environ['CREATOR_LINUX_INTEGRATED_CANDIDATE'] == '1') != (os.environ.get('CREATOR_LINUX_PRODUCTION_MIGRATION_016', '0') == '1')
           assert os.environ['CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE'] == '0'
           inputs = json.loads(os.environ['SIGNED_INPUTS'])
           assert len(inputs) == 1 and inputs[0]['target'] == 'linux' and inputs[0]['os'] == 'ubuntu-22.04'
@@ -118,6 +128,7 @@ jobs:
       CREATOR_UNIX_HANDOFF_SHA256: ${{ matrix.handoffSha256 }}
       CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: ${{ inputs.linux_retirement_test_candidate && '1' || '0' }}
       CREATOR_LINUX_INTEGRATED_CANDIDATE: ${{ inputs.linux_integrated_candidate && '1' || '0' }}
+      CREATOR_LINUX_PRODUCTION_MIGRATION_016: ${{ inputs.linux_production_migration_016 && '1' || '0' }}
       CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: ${{ inputs.linux_portable_host_candidate && '1' || '0' }}
     steps:
       - uses: actions/checkout@v6
@@ -180,13 +191,23 @@ jobs:
           cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target-dir artifacts/unix-verifier-target --features experimental-linux-migration convergence
           cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target-dir artifacts/unix-verifier-target --features experimental-linux-migration linux_retirement
           cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --features experimental-transaction
+      - name: Test the strict production protocol without accepting or installing a package
+        if: runner.os == 'Linux' && inputs.linux_production_migration_016
+        run: |
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --features production-transaction
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target-dir artifacts/unix-verifier-target --features linux-production-migration linux_retirement
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target-dir artifacts/unix-verifier-target --features linux-production-migration convergence
       - name: Verify trusted handoff and compile only the outer native Hub
         id: package
         shell: bash
         run: |
           set -euo pipefail
           temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
-          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 && ( "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 1 || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+          if [[ "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" == 1 && ( "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+            echo '::error::Conflicting or non-016 production migration profile.' >&2
+            exit 64
+          fi
+          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 && ( ( "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 1 && "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" != 1 ) || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
             echo '::error::Portable host compilation requires the explicit 016 integrated Linux profile.' >&2
             exit 64
           fi
@@ -197,6 +218,7 @@ jobs:
           extra=()
           if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 ]]; then extra+=(--linux-retirement-test-candidate); fi
           if [[ "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then extra+=(--linux-integrated-candidate --integrated-features); fi
+          if [[ "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" == 1 ]]; then extra+=(--linux-production-migration-016 --integrated-features); fi
           if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 ]]; then extra+=(--linux-portable-host-candidate); fi
           # Integrated runtime snapshot preparation belongs after the builder's trusted extraction.
           # Do not regenerate release:launcher or enable optional-library tests before that trusted boundary.

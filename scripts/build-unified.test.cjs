@@ -26,7 +26,134 @@ test('signed assembly receipts use the admitted version and actual 016 Cargo fea
   const source = fs.readFileSync(path.join(__dirname, 'assemble-unix-payload.cjs'), 'utf8');
   assert.match(source, /return \{ manifest, version: accepted\.version, source: handoff\.source/);
   const builder = fs.readFileSync(path.join(__dirname, 'build-unified.cjs'), 'utf8');
-  assert.match(builder, /signedAssemblyReceipt\(result, platform, arch, environment\.GITHUB_SHA, featureArgs, portableProof\)/);
+  assert.match(builder, /signedAssemblyReceipt\(result, platform, arch, environment\.GITHUB_SHA, featureArgs, portableProof, productionProof\)/);
+});
+
+function productionStaging(commit, files) {
+  const p = require('./linux-retirement-package.cjs');
+  return { schemaVersion: 2, acceptanceOnly: true, sourceCommit: commit, platform: 'linux', arch: 'x86_64',
+    rootFeature: p.PRODUCTION_ROOT_FEATURE, helperFeature: p.PRODUCTION_HELPER_FEATURE, files, profile: p.PRODUCTION_PROFILE,
+    productionContract: p.PRODUCTION_CONTRACT, ...p.FLAGS };
+}
+
+test('production016 profile is explicit, exclusive and refuses unsigned or old source before any tooling', () => {
+  const b = require('./build-unified.cjs');
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'creator-production-options-')));
+  const options = { linuxProductionMigration: true, integratedFeatures: true, installer: true, managed: true,
+    experimentalUnix: true, experimentalWritable: true, signedUnixInput: path.resolve('/reviewed-input') };
+  const versions = version => {
+    for (const file of ['package.json', 'src-tauri/tauri.conf.json']) fs.writeFileSync(path.join(root, file), JSON.stringify({ version }));
+  };
+  try {
+    fs.mkdirSync(path.join(root, 'src-tauri')); versions('0.1.16');
+    assert.deepEqual(b.parseBuildOptions(['--linux-production-migration-016']), { linuxProductionMigration: true });
+    assert.throws(() => b.parseBuildOptions(['--linux-production-migration-016', '--linux-production-migration-016']), /Duplicate/);
+    assert.equal(b.candidateProfile(options), 'production-migration-016');
+    b.checkProductionOptions(options, 'linux', 'x86_64', root, {});
+    assert.deepEqual(b.integrationArguments('linux', 'x86_64', true, true, false, true), ['--features', b.PRODUCTION_FEATURES.join(',')]);
+    assert.deepEqual(b.integrationArguments('linux', 'x86_64', true, true, true, true), ['--features', b.PRODUCTION_PORTABLE_FEATURES.join(',')]);
+    assert.deepEqual(b.PRODUCTION_PORTABLE_FEATURES, ['integrated-features', 'experimental-flatpak-host', 'linux-production-migration', 'experimental-linux-portable-update']);
+    for (const change of [{ linuxRetirementCandidate: true }, { linuxIntegratedCandidate: true }, { integratedFeatures: false },
+      { installer: false }, { managed: false }, { experimentalUnix: false }, { experimentalWritable: false },
+      { prepareManagedUnix: true }, { signedUnixInput: null }]) {
+      assert.throws(() => b.build('never-build', { ...options, ...change }, { root, platform: 'linux', arch: 'x86_64',
+        env: {}, execute() { assert.fail('No tooling for rejected production options'); } }));
+    }
+    for (const [platform, arch] of [['windows', 'x86_64'], ['macos', 'x86_64'], ['linux', 'aarch64']]) {
+      assert.throws(() => b.checkProductionOptions(options, platform, arch, root, {}), /signed native Linux/);
+      assert.throws(() => b.integrationArguments(platform, arch, true, true, false, true), /integrated Linux/);
+    }
+    for (const key of ['RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CARGO_BUILD_RUSTFLAGS', 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS']) {
+      assert.throws(() => b.checkProductionOptions(options, 'linux', 'x86_64', root, { [key]: '' }), /compiler overrides/);
+    }
+    versions('0.1.14');
+    assert.throws(() => b.build('never-build', options, { root, platform: 'linux', arch: 'x86_64', env: {},
+      execute() { assert.fail('No tooling or receipt relabel for old Root'); } }), /old Root cannot be relabelled/);
+    assert.throws(() => b.candidateProfile({ linuxProductionMigration: 'true' }), /explicit boolean/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('production build proof binds exact Cargo declarations, helper/policy and new actual Root, not old receipts', () => {
+  const b = require('./build-unified.cjs'), p = require('./linux-retirement-package.cjs');
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'creator-production-proof-')));
+  const commit = 'a'.repeat(40), tree = 'b'.repeat(40), featureArgs = ['--features', b.PRODUCTION_FEATURES.join(',')];
+  const helper = Buffer.alloc(128, 1), policy = Buffer.from('synthetic policy, never executed');
+  const header = Buffer.alloc(64); Buffer.from([127, 69, 76, 70, 2, 1, 1]).copy(header); header.writeUInt16LE(3, 16); header.writeUInt16LE(62, 18);
+  const metadata = file => {
+    const helper = file.includes('linux-deb-retirement'), portable = file.includes('linux-portable-deployment');
+    return { packages: [{ manifest_path: file, name: helper ? 'creator-hub-linux-deb-retirement' : portable ? 'creator-hub-linux-portable-deployment' : 'creator-hub',
+      version: helper || portable ? '0.1.0' : '0.1.16', features: { default: [],
+        ...(helper ? { [p.PRODUCTION_HELPER_FEATURE]: ['dep:signal-hook'] } : portable ? { 'experimental-restart': [] } : {
+          [p.PRODUCTION_ROOT_FEATURE]: ['experimental-linux-migration'],
+          'experimental-linux-portable-host': ['dep:creator-hub-linux-portable-deployment', 'integrated-features', 'experimental-flatpak-host'],
+          [b.PRODUCTION_PORTABLE_FEATURE]: ['experimental-linux-portable-host', 'creator-hub-linux-portable-deployment/experimental-restart'],
+        }) } }] };
+  };
+  const execute = (command, args) => {
+    if (command === 'cargo') {
+      assert.deepEqual(args.slice(0, 7), ['metadata', '--locked', '--offline', '--no-deps', '--format-version', '1', '--manifest-path']);
+      return JSON.stringify(metadata(args[7]));
+    }
+    assert.equal(command, 'git');
+    if (args[0] === 'diff') {
+      assert.ok([b.PRODUCTION_SOURCE_PATHS, b.PORTABLE_SOURCE_PATHS].some(paths => JSON.stringify(args) === JSON.stringify(['diff', '--exit-code', 'HEAD', '--', ...paths])));
+      return '';
+    }
+    return args[1] === 'HEAD' ? commit : tree;
+  };
+  try {
+    fs.mkdirSync(path.join(root, 'linux-retirement'));
+    for (const [name, bytes, mode] of [[p.HELPER, helper, 0o755], [p.POLICY, policy, 0o644]]) {
+      const file = path.join(root, 'linux-retirement', path.posix.basename(name)); fs.writeFileSync(file, bytes, { mode }); fs.chmodSync(file, mode);
+    }
+    const files = { [p.HELPER]: p.record(path.join(root, 'linux-retirement', path.posix.basename(p.HELPER)), 0o755),
+      [p.POLICY]: p.record(path.join(root, 'linux-retirement', path.posix.basename(p.POLICY)), 0o644) };
+    const staged = { overlay: path.join(root, 'overlay.json'), profile: p.PRODUCTION_PROFILE, files, productionReceipt: productionStaging(commit, files) };
+    const file = path.join(root, 'creator-hub'); fs.writeFileSync(file, header);
+    const proof = b.productionBuildProof(root, file, featureArgs, { GITHUB_SHA: commit }, staged, execute);
+    assert.equal(proof.sourceTree, tree); assert.equal(proof.rawHub.sha256, crypto.createHash('sha256').update(header).digest('hex'));
+    const result = { version: '0.1.16', source: { sourceCommit: 'c'.repeat(40) }, handoffSha256: 'd'.repeat(64) };
+    const receipt = b.signedAssemblyReceipt(result, 'linux', 'x86_64', commit, featureArgs, null, proof);
+    assert.deepEqual(receipt.productionMigration, proof); assert.deepEqual(receipt.compiledFeatures, b.PRODUCTION_FEATURES);
+    assert.equal(receipt.releaseReady, false); assert.equal(receipt.nativeGuiAccepted, false);
+    assert.throws(() => b.signedAssemblyReceipt(result, 'linux', 'x86_64', commit, featureArgs), /Actual production Root build proof/);
+    assert.throws(() => b.signedAssemblyReceipt(result, 'linux', 'x86_64', commit, b.integrationArguments('linux', 'x86_64', true, true), null, proof), /actual production Cargo/);
+    assert.throws(() => b.signedAssemblyReceipt({ ...result, version: '0.1.14' }, 'linux', 'x86_64', commit, featureArgs, null, proof), /old Root/);
+    const portableArgs = ['--features', b.PRODUCTION_PORTABLE_FEATURES.join(',')];
+    fs.writeFileSync(file, Buffer.concat([header, Buffer.from(b.PORTABLE_ROOT_WITNESSES.join('\n'))]));
+    const portable = b.portableBuildProof(root, file, portableArgs, { GITHUB_SHA: commit }, execute);
+    const production = b.productionBuildProof(root, file, portableArgs, { GITHUB_SHA: commit }, staged, execute);
+    const combined = b.signedAssemblyReceipt(result, 'linux', 'x86_64', commit, portableArgs, portable, production);
+    assert.deepEqual(combined.compiledFeatures, b.PRODUCTION_PORTABLE_FEATURES);
+    assert.deepEqual(combined.portableHostBuild, portable);
+    assert.deepEqual(combined.productionMigration, production);
+    assert.equal(combined.releaseReady, false);
+    for (const change of [{ rawHub: { ...portable.rawHub, sha256: 'f'.repeat(64) } }, { sourceTree: 'f'.repeat(40) }]) {
+      assert.throws(() => b.signedAssemblyReceipt(result, 'linux', 'x86_64', commit, portableArgs, { ...portable, ...change }, production), /same actual Root/);
+    }
+    assert.throws(() => b.signedAssemblyReceipt(result, 'linux', 'x86_64', commit,
+      ['--features', [...b.PRODUCTION_FEATURES, 'experimental-linux-portable-host'].join(',')], portable, production), /actual integrated Cargo/);
+    assert.throws(() => b.signedAssemblyReceipt(result, 'linux', 'x86_64', commit,
+      ['--features', b.PRODUCTION_FEATURES.join(',')], portable, production), /actual portable Cargo feature/);
+    assert.throws(() => b.validatePortableBuildProof({ ...portable, compiledFeatures: [...b.PRODUCTION_FEATURES, 'experimental-linux-portable-host'] },
+      commit, [...b.PRODUCTION_FEATURES, 'experimental-linux-portable-host']));
+    assert.throws(() => b.admitProductionSource(root, (command, args) => {
+      const value = metadata(args[7]);
+      if (value.packages[0].name === 'creator-hub') value.packages[0].features[b.PRODUCTION_PORTABLE_FEATURE] = ['experimental-linux-portable-host'];
+      return JSON.stringify(value);
+    }, true), /native host and restart/);
+    for (const change of [{ schemaVersion: 1 }, { helperFeature: 'experimental-transaction' }, { rootFeature: 'experimental-linux-migration' },
+      { profile: 'integrated-candidate' }, { sourceCommit: 'f'.repeat(40) }, { productionContract: { ...p.PRODUCTION_CONTRACT, nativeAcceptance: true } },
+      { releaseReady: true }]) {
+      assert.throws(() => b.validateProductionBuildProof({ ...proof, staging: { ...proof.staging, ...change } }, commit, b.PRODUCTION_FEATURES));
+    }
+    assert.throws(() => b.productionBuildProof(root, file, ['--features', b.PORTABLE_HOST_FEATURES.slice(0, -1).join(',')], { GITHUB_SHA: commit }, staged, execute), /actual Cargo/);
+    fs.writeFileSync(path.join(root, 'linux-retirement', path.posix.basename(p.HELPER)), 'changed');
+    assert.throws(() => b.productionBuildProof(root, file, featureArgs, { GITHUB_SHA: commit }, staged, execute), /changed after staging/);
+    assert.throws(() => b.admitProductionSource(root, (command, args) => {
+      const value = metadata(args[7]); delete value.packages[0].features[p.PRODUCTION_ROOT_FEATURE]; return JSON.stringify(value);
+    }), /source contract/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('portable startup binding is a new explicit Linux-only profile and cannot relabel old Root', () => {
