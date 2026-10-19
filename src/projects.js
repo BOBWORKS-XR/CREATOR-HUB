@@ -32,13 +32,23 @@
       }
       return names.compare(a.name, b.name) || names.compare(a.path, b.path) || a.id.localeCompare(b.id);
     });
-    byId('project-warnings').textContent = (snapshot?.warnings || []).join(' ');
+    const status = byId('project-status').textContent.replace(/^Error: /, '').trim();
+    const warnings = [...new Set(snapshot?.warnings || [])].filter(warning => warning.trim() !== status);
+    byId('project-warnings').textContent = warnings.join(' ');
+    byId('project-warnings').hidden = !warnings.length;
     const rows = projects.map(project => {
       const row = element('div', '', 'project-row');
+      row.dataset.mcpSelected = String(project.selected === true);
       const info = element('div', '', 'project-info');
       info.append(element('strong', project.name), element('small', project.path));
       const tags = element('div', '', 'project-tags');
       tags.append(element('span', project.sdkLabel, `sdk-label sdk-${project.sdk}`), element('span', project.unityVersion ? `Unity ${project.unityVersion}` : 'Version unknown'), element('span', project.source));
+      if (project.selected === true) tags.append(element('span', 'Selected for MCP', 'project-selected'));
+      if (project.bridge) {
+        const bridge = project.bridge;
+        const checked = typeof bridge.installed === 'boolean' && typeof bridge.current === 'boolean' && (!bridge.current || bridge.installed);
+        tags.append(element('span', !checked ? 'MCP bridge not checked' : bridge.current ? 'MCP bridge current' : bridge.installed ? 'MCP bridge update available' : 'MCP bridge not installed', checked && bridge.current ? 'project-bridge-current' : 'project-bridge-warning'));
+      }
       const modified = modifiedDate(project);
       const date = element('span', modified === null ? 'Modified date unavailable' : `Modified ${dateFormat.format(modified)}`, 'project-modified');
       tags.append(date);

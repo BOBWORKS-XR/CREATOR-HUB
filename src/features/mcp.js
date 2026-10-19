@@ -63,6 +63,7 @@ export function mount(root, api) {
   let productReviewed = false;
   let feedbackProject = null;
   let feedbackRequest = 0;
+  const projectChecks = new Map();
   const clientUi = new Map();
   const active = () => config?.channels?.find(channel => channel.id === config.active_channel_id);
   const selectedClients = () => clients.filter(([id]) => clientUi.get(id).checkbox.checked);
@@ -199,10 +200,25 @@ export function mount(root, api) {
   }
   function renderProjects() {
     $('projects').replaceChildren(...config.channels.map(channel => {
-      const row = node('div', null, 'feature-row');
-      const info = node('span'); info.append(node('strong', channel.name), node('p', channel.unity_project_path, 'feature-note'));
-      const actions = node('div', null, 'feature-actions');
-      const select = node('button', channel.id === config.active_channel_id ? 'Active project' : 'Use project', 'text-button'); select.type = 'button';
+      const selected = channel.id === config.active_channel_id;
+      const row = node('div', null, 'feature-project');
+      row.dataset.selected = String(selected);
+      row.dataset.projectPath = channel.unity_project_path;
+      const select = node('button', null, 'feature-project-select'); select.type = 'button';
+      select.setAttribute('aria-pressed', String(selected));
+      select.setAttribute('aria-label', `Select ${channel.name} for MCP`);
+      select.title = channel.unity_project_path;
+      const indicator = node('span', null, 'feature-project-indicator'); indicator.setAttribute('aria-hidden', 'true');
+      const info = node('span', null, 'feature-project-info');
+      info.append(node('strong', channel.name), node('span', channel.unity_project_path, 'feature-note'));
+      select.append(indicator, info);
+      const meta = node('div', null, 'feature-project-meta');
+      if (selected) meta.append(node('span', 'Selected for MCP', 'feature-project-badge feature-good'));
+      const checked = projectChecks.get(channel.unity_project_path);
+      meta.append(node('span', checked?.sdk || 'Checking SDK', 'feature-project-badge feature-note'));
+      const badge = node('span', checked?.bridge || 'Checking bridge', `feature-project-badge ${checked?.current ? 'feature-good' : 'feature-warn'}`);
+      if (checked?.issue) badge.title = checked.issue;
+      meta.append(badge);
       page.on(select, 'click', () => run(async () => {
         const next = { ...config, active_channel_id: channel.id };
         await page.call('save_config', { config: next }); config = next; $('project').value = channel.unity_project_path; await check(); await followActive(channel); renderProjects();
@@ -214,9 +230,26 @@ export function mount(root, api) {
         const next = { ...config, channels: remaining, active_channel_id: config.active_channel_id === channel.id ? remaining[0]?.id || null : config.active_channel_id };
         await page.call('save_config', { config: next }); config = next; $('project').value = active()?.unity_project_path || ''; await check(); renderProjects();
       }, 'Updating saved projects'));
-      actions.append(select, remove); row.append(info, actions); return row;
+      row.append(select, meta, remove); return row;
     }));
     if (!config.channels.length) $('projects').append(node('p', 'No saved Unity projects.', 'feature-note'));
+  }
+  async function checkProjectBadges() {
+    for (const channel of config.channels) {
+      const result = { sdk: 'SDK unavailable', bridge: 'Bridge not checked', current: false };
+      try {
+        const status = await page.call('get_unity_extension_status', { unityProjectPath: channel.unity_project_path });
+        if (typeof status?.installed !== 'boolean' || typeof status?.current !== 'boolean' || (status.current && !status.installed)) throw new Error('Bridge status is incomplete.');
+        result.bridge = status.current ? 'Bridge current' : status.installed ? 'Bridge update available' : 'Bridge not installed';
+        result.current = status.current;
+      } catch (reason) { result.issue = text(reason); }
+      try {
+        const profile = await page.call('get_project_sdk_profile', { unityProjectPath: channel.unity_project_path });
+        if (typeof profile?.label === 'string' && profile.label) result.sdk = profile.label;
+      } catch { /* Bridge and SDK checks are independent. */ }
+      projectChecks.set(channel.unity_project_path, result);
+      renderProjects();
+    }
   }
   async function reload() {
     page.lock(true);
@@ -234,7 +267,7 @@ export function mount(root, api) {
     if (![...$('groups').options].some(option => option.value === groups)) { const option = node('option', `Current: ${groups}`); option.value = groups; $('groups').append(option); }
     $('groups').value = groups; $('follow').checked = config.auto_start === true;
     $('scripts').checked = config.enable_custom_scripts === true; $('tests').checked = config.allow_all_tests !== false;
-    renderProjects(); await check(); productIssue = false; productVisibility(); page.lock(false);
+    renderProjects(); await check(); await checkProjectBadges(); productIssue = false; productVisibility(); page.lock(false);
   }
   for (const [id, label, commandId] of clients) {
     const row = node('div', null, 'feature-client');
@@ -328,7 +361,7 @@ export function mount(root, api) {
     if (typeof channel?.unity_project_path !== 'string' || !channel.unity_project_path.trim()) throw new Error('No confirmed project path was returned. Check the project before retrying.');
     const existing = config.channels.find(item => item.unity_project_path === channel.unity_project_path);
     const next = { ...config, channels: existing ? config.channels : [...config.channels, channel], active_channel_id: existing?.id || channel.id };
-    await page.call('save_config', { config: next }); config = next; $('project').value = channel.unity_project_path; renderProjects(); await check();
+    await page.call('save_config', { config: next }); config = next; $('project').value = channel.unity_project_path; renderProjects(); await check(); await checkProjectBadges();
   }, 'Adding project'));
   page.on($('cli'), 'change', async () => {
     cliTouched = true;
@@ -362,8 +395,9 @@ export function mount(root, api) {
     const value = await page.call('update_configured_unity_extensions');
     lines($('setup-result'), [`Bridges updated: ${value.updated}. Failed: ${value.failed.length}.`, ...value.failed]);
     await check();
+    await checkProjectBadges();
   }, 'Updating bridges'));
-  page.on($('bridge'), 'click', () => run(async () => { await page.call('install_unity_extension', { unityProjectPath: $('project').value }); await check(); }, 'Installing Unity bridge'));
+  page.on($('bridge'), 'click', () => run(async () => { await page.call('install_unity_extension', { unityProjectPath: $('project').value }); await check(); await checkProjectBadges(); }, 'Installing Unity bridge'));
   page.on($('save'), 'click', () => run(async () => {
     const next = { ...config, mcp_server_path: $('server').value.trim(), tool_groups: $('groups').value, auto_start: $('follow').checked, enable_custom_scripts: $('scripts').checked, allow_all_tests: $('tests').checked };
     await page.call('save_config', { config: next }); config = next;

@@ -25,6 +25,15 @@
 .feature-page .feature-value { color: var(--muted, #9ba7af); text-align: right; }
 .feature-page .feature-good { color: #38c976; }
 .feature-page .feature-warn { color: #e8b84a; }
+.feature-page .feature-project { display: grid; grid-template-columns: minmax(0, 1fr) auto 32px; align-items: center; gap: 12px; min-height: 76px; padding: 10px 8px; border-bottom: 1px solid #293238; border-left: 2px solid transparent; }
+.feature-page .feature-project[data-selected="true"] { background: #111b1f; border-left-color: var(--cyan); }
+.feature-page .feature-project-select { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 44px; padding: 4px; background: transparent; text-align: left; }
+.feature-page .feature-project-select:hover:not(:disabled) { color: var(--cyan); }
+.feature-page .feature-project-info { display: grid; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
+.feature-page .feature-project-indicator { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: #647077; }
+.feature-page [data-selected="true"] .feature-project-indicator { background: var(--cyan); }
+.feature-page .feature-project-meta { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 310px; }
+.feature-page .feature-project-badge { padding: 3px 6px; border: 1px solid #35434b; border-radius: 4px; font-size: 11px; overflow-wrap: anywhere; }
 .feature-page .feature-tabs { display: flex; gap: 16px; border-bottom: 1px solid #293238; margin-bottom: 20px; }
 .feature-page .feature-tabs button { padding: 10px 0; background: transparent; border-bottom: 2px solid transparent; }
 .feature-page .feature-tabs [aria-selected="true"] { border-color: var(--cyan); color: var(--cyan); }
@@ -44,6 +53,9 @@
   .feature-page .feature-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .feature-page .feature-client { grid-template-columns: minmax(0, 1fr); }
   .feature-page .feature-row { align-items: start; }
+  .feature-page .feature-project { grid-template-columns: minmax(0, 1fr) 32px; }
+  .feature-page .feature-project-meta { grid-column: 1; grid-row: 2; justify-content: flex-start; max-width: none; padding-left: 22px; }
+  .feature-page .feature-project > .icon-button { grid-column: 2; grid-row: 1; }
   .feature-page .feature-banner { flex-wrap: wrap; }
   .feature-page .feature-banner p { flex-basis: 100%; }
   .feature-page .feature-banner > button { margin-left: auto; }

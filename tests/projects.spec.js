@@ -39,6 +39,37 @@ async function load(page, { openProjects = true } = {}) {
 
 const projectNames = page => page.locator('.project-info > strong');
 
+test('a project-opening warning already in the inventory is shown once and keeps the project', async ({ page }) => {
+  await load(page);
+  const warning = 'Current Unity Hub discovery needs the verified Unity helper from Project Setup. Add a project folder manually in the meantime.';
+  await page.evaluate(warning => { window.projects.warnings = [warning, warning]; }, warning);
+  await page.locator('#refresh-projects').click();
+  await expect(page.locator('#project-warnings')).toHaveText(warning);
+  await page.evaluate(warning => { window.failure = warning; }, warning);
+  await page.getByRole('button', { name: 'Open Creator Forest', exact: true }).click();
+  await expect(page.locator('#project-status')).toHaveText(warning);
+  await expect(page.locator('#project-warnings')).toBeHidden();
+  await expect(projectNames(page)).toHaveText(['Creator Forest', 'Banter Playground']);
+});
+
+test('project rows identify the selected MCP project and independently checked bridges', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => {
+    Object.assign(window.projects.projects[0], { selected: true, bridge: { installed: true, current: true } });
+    Object.assign(window.projects.projects[1], { selected: false, bridge: { installed: true, current: false } });
+  });
+  await page.locator('#refresh-projects').click();
+  const rows = page.locator('.project-row');
+  await expect(rows.nth(0)).toContainText('Selected for MCP');
+  await expect(rows.nth(0)).toContainText('MCP bridge current');
+  await expect(rows.nth(0)).toHaveAttribute('data-mcp-selected', 'true');
+  await expect(rows.nth(1)).toContainText('MCP bridge update available');
+  await expect(rows.nth(1)).not.toContainText('Selected for MCP');
+  await page.evaluate(() => { window.projects.projects[1].bridge = { installed: false, current: true }; });
+  await page.locator('#refresh-projects').click();
+  await expect(rows.nth(1)).toContainText('MCP bridge not checked');
+});
+
 test('Hub opens Apps by default without scanning, opening or modifying a project', async ({ page }) => {
   await load(page, { openProjects: false });
   await expect(page.locator('#hub-pages [data-view="hub"]')).toHaveAttribute('aria-current', 'page');

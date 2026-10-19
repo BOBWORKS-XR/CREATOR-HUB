@@ -13,7 +13,7 @@ async function open(page, options = {}) {
     const recipe = { editorVersion: '6000.3.21f1', creatorSdkVersion: '4.0.14', urpVersion: '17.3.0', inputSystemVersion: '1.20.0' };
     const channel = { id: 'one', name: 'Creator project', unity_project_path: '/projects/Creator', enabled: true };
     const profile = { profile: 'creator', label: 'Creator SDK 4.0.14', packages: [] };
-    const config = { channels: [channel], active_channel_id: 'one', mcp_server_path: '/private/server.mjs',
+    const config = { channels: options.channels || [channel], active_channel_id: options.activeChannel || 'one', mcp_server_path: '/private/server.mjs',
       tool_groups: 'core', auto_start: true, enable_custom_scripts: false, allow_all_tests: true,
       connection_guide_version: options.guide ? 0 : 1, unrelatedSetting: 'preserve' };
     window.savedConfig = config;
@@ -83,6 +83,8 @@ async function open(page, options = {}) {
           case 'load_config': return structuredClone(config);
           case 'save_config': Object.assign(config, structuredClone(fields.config)); return null;
           case 'discover_unity_projects': return [{ name: 'Creator project', path: '/projects/Creator' }];
+          case 'get_unity_extension_status': return options.bridgeStatuses?.[fields.unityProjectPath] || { installed: true, current: true };
+          case 'get_project_sdk_profile': return options.sdkProfiles?.[fields.unityProjectPath] || profile;
           case 'get_onboarding_status': return { managedRouting: true, runtime: { ready: true, bundled: true },
             project: { valid: Boolean(fields.unityProjectPath?.trim()) && !options.invalidProject, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: profile }, clients,
             unityCli: { available: true, canEnable: true, enabled: config.unity_cli_enabled === true, message: 'Unity CLI detected; optional and experimental.' } };
@@ -141,6 +143,55 @@ async function selectSuiteView(page, view) {
   await page.locator('#suite-trigger').click();
   await page.locator(`#suite-menu [data-view="${view}"]`).click();
 }
+
+for (const width of [1100, 390, 320]) test(`MCP saved projects show selected state and each bridge at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 844 });
+  const channels = ['Current', 'Old bridge', 'Missing bridge'].map((name, index) => ({
+    id: index === 0 ? 'one' : String(index), name, unity_project_path: `/projects/${name}`, enabled: true,
+  }));
+  await open(page, { channels, bridgeStatuses: {
+    '/projects/Current': { installed: true, current: true },
+    '/projects/Old bridge': { installed: true, current: false },
+    '/projects/Missing bridge': { installed: false, current: false },
+  } });
+  await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'controls')).toBeEnabled();
+  const rows = field(page, 'mcp', 'projects').locator('.feature-project');
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(0).getByRole('button', { name: 'Select Current for MCP', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(rows.nth(0)).toHaveAttribute('data-selected', 'true');
+  await expect(rows.nth(0)).toContainText('Selected for MCP');
+  for (const [index, label] of ['Bridge current', 'Bridge update available', 'Bridge not installed'].entries()) {
+    await expect(rows.nth(index)).toContainText(label);
+    await expect(rows.nth(index)).toContainText('Creator SDK 4.0.14');
+  }
+  await rows.nth(1).getByRole('button', { name: 'Select Old bridge for MCP', exact: true }).click();
+  await expect(rows.nth(1)).toHaveAttribute('data-selected', 'true');
+  await expect(rows.nth(0)).toHaveAttribute('data-selected', 'false');
+  await expect(field(page, 'mcp', 'project')).toHaveValue('/projects/Old bridge');
+  const saved = await page.evaluate(() => window.savedConfig);
+  expect(saved.channels).toEqual(channels);
+  expect(saved.active_channel_id).toBe('1');
+  expect(saved.unrelatedSetting).toBe('preserve');
+  expect(saved.tool_groups).toBe('core');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  for (const row of await rows.all()) {
+    expect(await row.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  }
+  await page.screenshot({ path: testInfo.outputPath('mcp-project-selection.png'), fullPage: true });
+});
+
+test('a failed bridge check is not shown as a missing or current bridge and is not retried automatically', async ({ page }) => {
+  await open(page, { fail: 'get_unity_extension_status' });
+  await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'controls')).toBeEnabled();
+  const row = field(page, 'mcp', 'projects').locator('.feature-project');
+  await expect(row).toContainText('Bridge not checked');
+  await expect(row).toContainText('Creator SDK 4.0.14');
+  await expect(row).not.toContainText('Bridge current');
+  await expect(row).not.toContainText('Bridge not installed');
+  expect((await commands(page, 'get_unity_extension_status')).length).toBe(1);
+});
 
 test('actual Root navigation opens Setup and MCP as pages without hosted startup or frame authority', async ({ page }) => {
   await open(page, { shell: true });

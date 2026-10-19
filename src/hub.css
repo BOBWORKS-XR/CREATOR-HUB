@@ -24,6 +24,9 @@ main { padding-top: 10px; }
 .project-filters :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 .project-row { display: flex; align-items: center; gap: 16px; padding: 14px 8px; border-bottom: 1px solid #20282d; border-radius: 4px; }
 .project-row:hover { background: #14191d; }
+.project-row[data-mcp-selected="true"] { border-left: 2px solid var(--cyan); background: #111b1f; }
+.project-selected, .project-bridge-current { color: #38c976; }
+.project-bridge-warning { color: var(--amber); }
 .project-info { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .project-info strong, .project-info small { display: block; }
 .project-info small { color: var(--muted); font-size: 11px; margin-top: 5px; }
