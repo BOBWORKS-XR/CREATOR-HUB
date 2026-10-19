@@ -52,7 +52,9 @@ test('direct Hub libraries compile natively only after real payload preparation,
   assert.match(job.if, /github.event_name == 'push' \|\| github.event_name == 'workflow_dispatch'/);
   const commands = job.steps.filter(step => step.run).map(step => step.run).join('\n');
   assert.ok(commands.indexOf('run release:launcher') < commands.indexOf('cargo clippy'));
-  assert.match(commands, /src-tauri\/Cargo.toml --tests --features integrated-features,experimental-flatpak-host,experimental-linux-migration -- -D warnings/);
+  assert.match(commands, /src-tauri\/Cargo.toml --tests --features integrated-features,experimental-flatpak-host,experimental-linux-migration,experimental-linux-portable-host -- -D warnings/);
+  assert.match(commands, /npm ci --ignore-scripts/);
+  assert.match(commands, /node --test scripts\/build-unified.test.cjs scripts\/linux-016-portable-package.test.cjs/);
   assert.match(commands, /modules\/mcp\/launcher\/src-tauri\/Cargo.toml --lib --tests --features integrated-service/);
   assert.match(commands, /cargo test --locked --manifest-path src-tauri\/Cargo.toml --features integrated-features/);
   assert.doesNotMatch(commands, /--ignored|tauri build|gh release|--publish|signing|auth\.json|--privileged/);

@@ -18,6 +18,11 @@ on:
         type: boolean
         default: false
         required: false
+      linux_portable_host_candidate:
+        description: Compile new Linux Root with signed portable startup binding; requires integrated candidate, not installation or acceptance
+        type: boolean
+        default: false
+        required: false
 permissions:
   contents: read
 jobs:
@@ -27,12 +32,17 @@ jobs:
     env:
       CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: ${{ inputs.linux_retirement_test_candidate && '1' || '0' }}
       CREATOR_LINUX_INTEGRATED_CANDIDATE: ${{ inputs.linux_integrated_candidate && '1' || '0' }}
+      CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: ${{ inputs.linux_portable_host_candidate && '1' || '0' }}
       SIGNED_INPUTS: ${{ inputs.signed_inputs }}
     steps:
       - name: Refuse conflicting candidate profiles before any download
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 && ( "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 1 || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+            echo '::error::Portable host compilation requires the explicit 016 integrated Linux profile.' >&2
+            exit 64
+          fi
           if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 && "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then
             echo '::error::Choose either the TEST ONLY retirement profile or the integrated candidate, not both.' >&2
             exit 64
@@ -108,6 +118,7 @@ jobs:
       CREATOR_UNIX_HANDOFF_SHA256: ${{ matrix.handoffSha256 }}
       CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: ${{ inputs.linux_retirement_test_candidate && '1' || '0' }}
       CREATOR_LINUX_INTEGRATED_CANDIDATE: ${{ inputs.linux_integrated_candidate && '1' || '0' }}
+      CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: ${{ inputs.linux_portable_host_candidate && '1' || '0' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -146,12 +157,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev build-essential file \
-            patchelf rpm libarchive-tools
+            patchelf rpm libarchive-tools python3-yaml
           for tool in patchelf rpm bsdtar dpkg-deb file; do command -v "$tool"; done
       - run: npm ci
       - name: Check the handoff and bounded native extraction contracts
         run: |
-          node --test scripts/assemble-unix-payload.test.cjs scripts/sign-unix-payload.test.cjs scripts/unix-managed-payload.test.cjs scripts/linux-retirement-package.test.cjs
+          node --test scripts/assemble-unix-payload.test.cjs scripts/sign-unix-payload.test.cjs scripts/unix-managed-payload.test.cjs scripts/linux-retirement-package.test.cjs scripts/build-unified.test.cjs scripts/linux-016-portable-package.test.cjs
           python3 -B scripts/stage-signed-unix-handoff.test.py
           python3 -B scripts/linux-retirement-package-verify.test.py
       - name: Test Linux migration completion and real owned GUI process detection before packaging
@@ -175,6 +186,10 @@ jobs:
         run: |
           set -euo pipefail
           temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 && ( "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 1 || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+            echo '::error::Portable host compilation requires the explicit 016 integrated Linux profile.' >&2
+            exit 64
+          fi
           if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 && "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then
             echo '::error::Conflicting native DEB candidate profiles.' >&2
             exit 64
@@ -182,6 +197,7 @@ jobs:
           extra=()
           if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 ]]; then extra+=(--linux-retirement-test-candidate); fi
           if [[ "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then extra+=(--linux-integrated-candidate --integrated-features); fi
+          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 ]]; then extra+=(--linux-portable-host-candidate); fi
           # Integrated runtime snapshot preparation belongs after the builder's trusted extraction.
           # Do not regenerate release:launcher or enable optional-library tests before that trusted boundary.
           npm run build:unified -- ci-signed-unix-hub --installer --managed --experimental-unix --experimental-unix-writable --signed-unix-input "$temp/signed-unix-input" "${extra[@]}"

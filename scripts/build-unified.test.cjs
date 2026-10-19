@@ -26,7 +26,83 @@ test('signed assembly receipts use the admitted version and actual 016 Cargo fea
   const source = fs.readFileSync(path.join(__dirname, 'assemble-unix-payload.cjs'), 'utf8');
   assert.match(source, /return \{ manifest, version: accepted\.version, source: handoff\.source/);
   const builder = fs.readFileSync(path.join(__dirname, 'build-unified.cjs'), 'utf8');
-  assert.match(builder, /signedAssemblyReceipt\(result, platform, arch, environment\.GITHUB_SHA, featureArgs\)/);
+  assert.match(builder, /signedAssemblyReceipt\(result, platform, arch, environment\.GITHUB_SHA, featureArgs, portableProof\)/);
+});
+
+test('portable startup binding is a new explicit Linux-only profile and cannot relabel old Root', () => {
+  const builder = require('./build-unified.cjs');
+  const options = { linuxPortableHostCandidate: true, linuxIntegratedCandidate: true, integratedFeatures: true,
+    installer: true, managed: true, experimentalUnix: true, experimentalWritable: true, signedUnixInput: path.resolve('/reviewed/runtime-inputs') };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-portable-options-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'src-tauri'));
+    const versions = version => { for (const name of ['package.json', 'src-tauri/tauri.conf.json']) fs.writeFileSync(path.join(dir, name), JSON.stringify({ version })); };
+    versions('0.1.16');
+    builder.checkPortableHostOptions(options, 'linux', 'x86_64', dir);
+    assert.deepEqual(builder.parseBuildOptions(['--linux-portable-host-candidate']), { linuxPortableHostCandidate: true });
+    assert.throws(() => builder.parseBuildOptions(['--linux-portable-host-candidate', '--linux-portable-host-candidate']), /Duplicate/);
+    assert.deepEqual(builder.integrationArguments('linux', 'x86_64', true, true, true), ['--features', builder.PORTABLE_HOST_FEATURES.join(',')]);
+    assert.deepEqual(builder.integrationArguments('windows', 'x86_64', true), ['--features', 'integrated-features']);
+    assert.deepEqual(builder.integrationArguments('linux', 'x86_64', true, true), ['--features', builder.PORTABLE_HOST_FEATURES.slice(0, -1).join(',')]);
+    for (const [platform, arch] of [['windows', 'x86_64'], ['linux', 'aarch64'], ['macos', 'x86_64']]) {
+      assert.throws(() => builder.checkPortableHostOptions(options, platform, arch, dir), /explicit signed integrated Linux/);
+      assert.throws(() => builder.integrationArguments(platform, arch, true, true, true), /explicit integrated Linux/);
+    }
+    for (const change of [{ linuxIntegratedCandidate: false }, { integratedFeatures: false }, { linuxRetirementCandidate: true },
+      { installer: false }, { managed: false }, { experimentalUnix: false }, { experimentalWritable: false },
+      { prepareManagedUnix: true }, { signedUnixInput: null }]) {
+      assert.throws(() => builder.checkPortableHostOptions({ ...options, ...change }, 'linux', 'x86_64', dir), /explicit signed integrated Linux/);
+    }
+    versions('0.1.14');
+    assert.throws(() => builder.build('never-build', options, { root: dir, platform: 'linux', arch: 'x86_64',
+      execute() { assert.fail('Old Root must refuse before tooling'); } }), /old Root cannot be relabelled/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('portable proof uses locked Cargo source metadata, actual Root bytes and compiled startup witnesses', () => {
+  const builder = require('./build-unified.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-portable-proof-'));
+  const commit = 'a'.repeat(40), tree = 'b'.repeat(40), featureArgs = ['--features', builder.PORTABLE_HOST_FEATURES.join(',')];
+  const header = Buffer.alloc(64); Buffer.from([127, 69, 76, 70, 2, 1, 1]).copy(header); header.writeUInt16LE(3, 16); header.writeUInt16LE(62, 18);
+  const bytes = Buffer.concat([header, Buffer.from(builder.PORTABLE_ROOT_WITNESSES.join('\n'))]);
+  const file = path.join(dir, 'creator-hub');
+  const metadata = { packages: [{ name: 'creator-hub', version: '0.1.16', manifest_path: path.join(dir, 'src-tauri/Cargo.toml'),
+    features: { 'experimental-linux-portable-host': ['dep:creator-hub-linux-portable-deployment', 'integrated-features', 'experimental-flatpak-host'] } }] };
+  const execute = (command, args) => {
+    if (command === 'cargo') {
+      assert.deepEqual(args.slice(0, 7), ['metadata', '--locked', '--offline', '--no-deps', '--format-version', '1', '--manifest-path']);
+      return JSON.stringify(metadata);
+    }
+    assert.equal(command, 'git');
+    if (args[0] === 'diff') {
+      assert.deepEqual(args, ['diff', '--exit-code', 'HEAD', '--', ...builder.PORTABLE_SOURCE_PATHS]);
+      return '';
+    }
+    assert.equal(args[0], 'rev-parse');
+    return args[1] === 'HEAD' ? commit : tree;
+  };
+  try {
+    fs.writeFileSync(file, header);
+    assert.throws(() => builder.portableBuildProof(dir, file, featureArgs, { GITHUB_SHA: commit }, () => assert.fail('No source probe for an old binary')), /missing its compiled/);
+    fs.writeFileSync(file, bytes);
+    const proof = builder.portableBuildProof(dir, file, featureArgs, { GITHUB_SHA: commit }, execute);
+    assert.throws(() => builder.portableBuildProof(dir, file, featureArgs, { GITHUB_SHA: 'f'.repeat(40) }, execute), /source changed/);
+    assert.throws(() => builder.portableBuildProof(dir, file, featureArgs, { GITHUB_SHA: commit }, (command, args) => {
+      if (command === 'git' && args[0] === 'diff') throw Error('changed Root source');
+      return execute(command, args);
+    }), /changed Root source/);
+    assert.deepEqual(proof.rawHub, { size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') });
+    const result = { version: '0.1.16', source: { sourceCommit: 'c'.repeat(40) }, handoffSha256: 'd'.repeat(64) };
+    assert.deepEqual(builder.signedAssemblyReceipt(result, 'linux', 'x86_64', commit, featureArgs, proof).portableHostBuild, proof);
+    assert.throws(() => builder.signedAssemblyReceipt(result, 'linux', 'x86_64', commit, featureArgs), /actual Root build proof/);
+    assert.throws(() => builder.signedAssemblyReceipt({ ...result, version: '0.1.14' }, 'linux', 'x86_64', commit, featureArgs, proof), /old Root/);
+    assert.throws(() => builder.signedAssemblyReceipt(result, 'linux', 'x86_64', commit, builder.integrationArguments('linux', 'x86_64', true, true), proof), /actual portable Cargo feature/);
+    assert.throws(() => builder.validatePortableBuildProof(proof, commit, builder.PORTABLE_HOST_FEATURES, { ...proof.rawHub, sha256: 'f'.repeat(64) }, tree), /actual Root bytes/);
+    metadata.packages[0].version = '0.1.14';
+    assert.throws(() => builder.admitPortableSource(dir, execute), /old compiled Root version/);
+    metadata.packages[0].version = '0.1.16'; delete metadata.packages[0].features['experimental-linux-portable-host'];
+    assert.throws(() => builder.admitPortableSource(dir, execute), /exact native startup-binding feature/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('direct page packaging is explicit, platform-specific and cannot disguise writable features as a read-only candidate', () => {

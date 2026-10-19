@@ -338,6 +338,7 @@ function workflowBash(t, script, retirement, integrated, overrides = {}) {
       GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512',
       GITHUB_EVENT_NAME: 'workflow_dispatch', SIGNED_INPUTS: '',
       CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: retirement,
+      CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: '0',
       CREATOR_LINUX_INTEGRATED_CANDIDATE: integrated, ...overrides },
   });
 }
@@ -345,7 +346,7 @@ function workflowBash(t, script, retirement, integrated, overrides = {}) {
 test('assembly profiles default off and conflict refusal precedes every signed input download', t => {
   const workflow = assemblyYaml(t); if (!workflow) return;
   const inputs = workflow.on.workflow_dispatch.inputs;
-  for (const name of ['linux_retirement_test_candidate', 'linux_integrated_candidate']) {
+  for (const name of ['linux_retirement_test_candidate', 'linux_integrated_candidate', 'linux_portable_host_candidate']) {
     assert.equal(inputs[name].type, 'boolean');
     assert.equal(inputs[name].default, 'false');
     assert.equal(inputs[name].required, 'false');
@@ -370,6 +371,37 @@ test('assembly profiles default off and conflict refusal precedes every signed i
     assert.equal(result.status, retirement === '1' && integrated === '1' ? 64 : 0, result.stderr || result.error?.message);
     assert.equal(result.stdout, '');
   }
+});
+
+test('portable host workflow is default-off, exact016-only and forwards the new actual Cargo feature', t => {
+  const workflow = assemblyYaml(t); if (!workflow) return;
+  const input = workflow.on.workflow_dispatch.inputs.linux_portable_host_candidate;
+  assert.equal(input.default, 'false'); assert.equal(input.type, 'boolean');
+  const preflight = workflow.jobs['candidate-options'];
+  const assembly = workflow.jobs.assembly;
+  const mapped = "${{ inputs.linux_portable_host_candidate && '1' || '0' }}";
+  assert.equal(preflight.env.CREATOR_LINUX_PORTABLE_HOST_CANDIDATE, mapped);
+  assert.equal(assembly.env.CREATOR_LINUX_PORTABLE_HOST_CANDIDATE, mapped);
+  const scope = { GITHUB_REF: 'refs/heads/validation/linux-integrated-candidate-016',
+    CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: '1',
+    SIGNED_INPUTS: JSON.stringify([{ target: 'linux', os: 'ubuntu-22.04' }]) };
+  const accepted = workflowBash(t, preflight.steps[0].run, '0', '1', scope); if (!accepted) return;
+  assert.equal(accepted.status, 0, accepted.stderr);
+  for (const change of [{ GITHUB_REF: 'refs/heads/validation/unix-assembly-014' },
+    { CREATOR_LINUX_INTEGRATED_CANDIDATE: '0' }, { CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: '1' },
+    { GITHUB_EVENT_NAME: 'push' }]) {
+    const refused = workflowBash(t, preflight.steps[0].run, '0', '1', { ...scope, ...change });
+    assert.equal(refused.status, 64, refused.stderr); assert.equal(refused.stdout, '');
+  }
+  const step = assembly.steps.find(item => item.id === 'package');
+  const stubs = "python3() { printf '%s\\n' '/reviewed-runner'; }\nnpm() { printf '%s\\n' \"$@\"; }\n";
+  const result = workflowBash(t, stubs + step.run, '0', '1', scope); if (!result) return;
+  assert.equal(result.status, 0, result.stderr);
+  const options = parseBuildOptions(result.stdout.trimEnd().split(/\r?\n/).slice(4));
+  assert.equal(options.linuxPortableHostCandidate, true);
+  const builder = require('./build-unified.cjs');
+  assert.deepEqual(builder.integrationArguments('linux', 'x86_64', options.integratedFeatures, true,
+    options.linuxPortableHostCandidate), ['--features', builder.PORTABLE_HOST_FEATURES.join(',')]);
 });
 
 test('016 assembly preflight is separately exercised and cannot inherit a historical test profile', t => {

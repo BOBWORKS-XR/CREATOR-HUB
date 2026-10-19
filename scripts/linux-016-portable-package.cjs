@@ -13,7 +13,8 @@ const BRANCH = 'refs/heads/validation/linux-016-portable-package';
 const ASSEMBLY_WORKFLOW = '.github/workflows/unix-managed-assembly.yml';
 const ASSEMBLY_BRANCH = 'validation/linux-integrated-candidate-016';
 const VERSION = '0.1.16', TARGET = 'x86_64-unknown-linux-gnu';
-const FEATURES = ['integrated-features', 'experimental-flatpak-host', 'experimental-linux-migration'];
+const FEATURES = ['integrated-features', 'experimental-flatpak-host', 'experimental-linux-migration', 'experimental-linux-portable-host'];
+const HOST_PROFILE = 'creator-hub-portable-host.json';
 const LIMITS = Object.freeze({ manifest: 2 * 1024 * 1024, archive: 256 * 1024 * 1024,
   file: 256 * 1024 * 1024, total: 512 * 1024 * 1024, entries: 8192, zip: 768 * 1024 * 1024 });
 const INPUTS = ['creator-hub', 'modules.tar.gz', 'builtin-manifest.json', 'signed-unix-assembly.json', 'unix-package-integrity.json'];
@@ -229,6 +230,7 @@ function validateReceipts(input, receipts, binding) {
   assert.deepEqual(a.privateSource, privateProof.prepared.source);
   // No inference from a workflow name or direct-page scope can prove the exact Cargo features.
   assert.deepEqual(a.compiledFeatures, FEATURES, 'Parent assembly must attest the exact compiledFeatures; scope alone is insufficient');
+  require('./build-unified.cjs').validatePortableBuildProof(a.portableHostBuild, p.sourceCommit, FEATURES, p.files['creator-hub'], p.sourceTree);
   for (const n of ['privateModulesRecompiled', 'privateModulesResigned', 'nativeGuiAccepted', 'releaseReady']) assert.equal(a[n], false);
   assert.equal(a.mcpMode, 'writable');
   const direct = JSON.parse(exact(path.join(receipts, 'direct-features-candidate.json'), p.files['direct-features-candidate.json']));
@@ -254,11 +256,54 @@ function validateReceipts(input, receipts, binding) {
   assert.equal(deb.format, 'deb'); assert.equal(deb.path, `native-packages/Creator Hub_${VERSION}_amd64.deb`);
   sha(deb.sha256); assert.deepEqual(deb.files, archive.rawFiles(m));
   const hub = bytes['creator-hub']; finite.validateElf(hub); assert.ok(hub.includes(bytes['builtin-manifest.json']), 'Root descriptor is not build-bound');
+  for (const witness of require('./build-unified.cjs').PORTABLE_ROOT_WITNESSES) {
+    assert.ok(hub.includes(Buffer.from(witness)), 'Old Root without portable startup binding cannot receive a host profile');
+  }
   const marker = Buffer.from('__TAURI_BUNDLE_TYPE_VAR_UNK'), at = hub.indexOf(marker);
   assert.ok(at >= 0 && hub.indexOf(marker, at + 1) === -1, 'Exactly one raw UNK marker required');
   const debHub = Buffer.from(hub); debHub.write('DEB', at + marker.length - 3, 'ascii');
   assert.equal(hash(debHub), deb.hubSha256, 'Root does not bind the parent DEB integrity receipt');
-  return { bytes, manifest: m };
+  return { bytes, manifest: m, portableHostBuild: a.portableHostBuild };
+}
+
+function hostProfile(rawHub, packagedHub, proof, pins) {
+  validatePins(pins);
+  const builder = require('./build-unified.cjs');
+  builder.validatePortableBuildProof(proof, pins.sourceCommit, FEATURES, record(rawHub), pins.sourceTree);
+  for (const witness of builder.PORTABLE_ROOT_WITNESSES) {
+    assert.ok(rawHub.includes(Buffer.from(witness)), 'Old Root cannot be relabelled with a portable profile');
+  }
+  require('./unix-package-payload.cjs').verifyLinuxHub(rawHub, packagedHub, 'appimage');
+  return Buffer.from(JSON.stringify({ schemaVersion: 1, version: VERSION,
+    activationInterface: 'com.creatorworks.hub.Host1', integratedFeatures: true,
+    startupImageBinding: 1, executableSha256: hash(packagedHub) }, null, 2) + '\n');
+}
+function verifyHostProfileInventory(inv, bytes, executable) {
+  validateInventory(inv);
+  assert.ok(Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 4096);
+  const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  assert.deepEqual(bytes, Buffer.from(JSON.stringify(value, null, 2) + '\n'), 'Canonical unambiguous host profile required');
+  keys(value, ['schemaVersion', 'version', 'activationInterface', 'integratedFeatures', 'startupImageBinding', 'executableSha256']);
+  assert.deepEqual(value, { schemaVersion: 1, version: VERSION, activationInterface: 'com.creatorworks.hub.Host1',
+    integratedFeatures: true, startupImageBinding: 1, executableSha256: executable.sha256 });
+  assert.deepEqual(inv.entries[HOST_PROFILE], { kind: 'file', ...record(bytes), mode: 0o644 }, 'Host profile must be bound into the complete AppDir inventory');
+  assert.deepEqual(inv.entries['usr/bin/creator-hub'], { kind: 'file', ...executable, mode: 0o755 }, 'Profile executable differs from final inventory');
+  assert.ok(inv.entries.AppRun?.kind === 'file' && inv.entries.AppRun.mode === 0o755 && inv.entries.AppRun.size > 0, 'Signed executable AppRun is required');
+  return value;
+}
+function attachHostProfile(root, before, bytes, executable) {
+  const finite = require('./flatpak-package.cjs'); finite.ordinary(root);
+  assert.deepEqual(inventory(root), before, 'Transport changed before profile insertion');
+  assert.equal(Object.hasOwn(before.entries, HOST_PROFILE), false, 'Existing host profile cannot be replaced');
+  const file = path.join(root, HOST_PROFILE);
+  fs.writeFileSync(file, bytes, { flag: 'wx', mode: 0o644 });
+  fs.chmodSync(file, 0o644);
+  assert.deepEqual(read(file, 4096), bytes);
+  const after = inventory(root);
+  assert.deepEqual(after, { entries: { ...before.entries, [HOST_PROFILE]: { kind: 'file', ...record(bytes), mode: 0o644 } },
+    links: {}, unpackedSize: before.unpackedSize + bytes.length }, 'Only the exact new host profile may be added');
+  verifyHostProfileInventory(after, bytes, executable);
+  return after;
 }
 
 function relative(name) {
@@ -337,7 +382,7 @@ function flatten(root, destination) {
     mode: e.kind === 'directory' || e.mode & 0o111 ? 0o755 : 0o644 });
   return { original: before, flattened: after };
 }
-function dependencies(root, files, run) {
+function dependencies(root, files, run, { includeHub = false } = {}) {
   const finite = require('./flatpak-package.cjs');
   const patterns = { webkit: /(?:^|\/)libwebkit2gtk-4\.1\.so(?:\.\d+)*$/,
     javascriptCore: /(?:^|\/)libjavascriptcoregtk-4\.1\.so(?:\.\d+)*$/,
@@ -379,11 +424,33 @@ function dependencies(root, files, run) {
     assert.ok(matches.length > 0 && matches.length <= 8, `Missing/ambiguous packaged dependency: ${kind}`);
     result.primary[kind] = matches; for (const n of matches) inspect(n);
   }
+  if (includeHub) {
+    assert.ok(files['usr/bin/creator-hub']?.kind === 'file', 'Missing fixed Hub executable for dependency inspection');
+    result.primary.hub = ['usr/bin/creator-hub']; inspect('usr/bin/creator-hub');
+  }
   result.hostBaseline = [...new Set(result.hostBaseline)].sort();
   result.scope = 'static ELF dependency closure only; loader search, ABI versions, dlopen/plugins and native execution unaccepted';
   if (result.unresolved.length) {
     const error = Error(`Missing packaged subprocess dependency: ${result.unresolved[0].from} -> ${result.unresolved[0].library}`);
     error.dependencyEvidence = result; throw error;
+  }
+  return result;
+}
+function primaryAbiRequirements(root, dependencyEvidence, run) {
+  const result = { scope: 'primary Hub and WebKit symbol-version requirements only; host ABI availability, transitive versions and native execution unaccepted', files: {} };
+  const names = [...new Set(Object.values(dependencyEvidence.primary).flat())].sort();
+  assert.ok(names.length > 0 && names.length <= 41, 'Bounded primary ABI inventory required');
+  for (const name of names) {
+    const text = String(run('/usr/bin/readelf', ['--version-info', path.join(root, name)], { maxBuffer: 4 * 1024 * 1024 }));
+    assert.ok(Buffer.byteLength(text) <= 4 * 1024 * 1024, 'Primary ABI report exceeds bound');
+    let needs = false; const required = new Set();
+    for (const line of text.split(/\r?\n/)) {
+      if (/^Version (?:needs|symbols|definition) section /.test(line)) needs = line.startsWith('Version needs section ');
+      if (needs) for (const match of line.matchAll(/\bName:\s+([A-Za-z0-9_.]+)\s+Flags:/g)) required.add(match[1]);
+    }
+    assert.ok(required.size <= 256, 'Primary ABI requirement count exceeds bound');
+    result.files[name] = { executableSha256: dependencyEvidence.closure[name].sha256,
+      versionInfoSha256: hash(Buffer.from(text)), requiredSymbolVersions: [...required].sort() };
   }
   return result;
 }
@@ -561,18 +628,28 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     archive.verify(path.join(appdir, 'usr/lib/Creator Hub/modules.tar.gz'), baseline.manifest, decoder, (command, args, opts) => run(command, args, opts));
     receipt.rootTransform = 'exactly one __TAURI_BUNDLE_TYPE_VAR_UNK -> APP marker; all other Root bytes identical';
     const transport = path.join(output, 'Creator Hub.AppDir'), transformation = flatten(appdir, transport);
+    // Tauri copies custom usr/ files only. Keep the original AppImage unchanged;
+    // bind this root-level record into the canonical transport instead.
+    const profile = hostProfile(baseline.bytes['creator-hub'], bytes, baseline.portableHostBuild, p);
+    const finalInventory = attachHostProfile(transport, transformation.flattened, profile, record(bytes));
     write(path.join(output, 'appdir-original-inventory.json'), transformation.original);
-    write(path.join(output, 'appdir-flattened-inventory.json'), transformation.flattened);
-    receipt.dependencies = dependencies(transport, transformation.flattened.entries, run);
+    write(path.join(output, 'appdir-flattened-inventory.json'), finalInventory);
+    receipt.dependencies = dependencies(transport, finalInventory.entries, run, { includeHub: true });
+    receipt.primaryAbi = primaryAbiRequirements(transport, receipt.dependencies, run);
+    receipt.portableHostProfile = { path: HOST_PROFILE, ...record(profile), executable: record(bytes),
+      rawExecutable: baseline.portableHostBuild.rawHub, compiledFeatures: FEATURES,
+      scope: 'canonical-appdir-transport-only', appImageContainsProfile: false };
     finite.validateElf(read(path.join(transport, 'usr/bin/creator-hub')));
     const tar = path.join(output, 'creator-hub-linux-x86_64-0.1.16.appdir.tar.gz');
-    const tarBinding = await packTar(transport, tar, transformation.flattened);
-    const unsigned = manifest(p, transformation.flattened, tarBinding);
+    verifyHostProfileInventory(inventory(transport), profile, record(bytes));
+    const tarBinding = await packTar(transport, tar, finalInventory);
+    const unsigned = manifest(p, finalInventory, tarBinding);
     write(path.join(output, 'portable-manifest.unsigned.json'), unsigned);
     receipt.archive = tarBinding; receipt.manifest = record(read(path.join(output, 'portable-manifest.unsigned.json'), LIMITS.manifest));
     receipt.measurements = { entries: Object.keys(unsigned.entries).length, unpackedFileBytes: tarBinding.unpackedSize,
       archiveBytes: tarBinding.size, manifestBytes: receipt.manifest.size,
       largestFileBytes: Math.max(...Object.values(unsigned.entries).filter(e => e.kind === 'file').map(e => e.size)),
+      nodeProcessMaxRssKiB: process.resourceUsage().maxRSS,
       flattenedLinks: Object.keys(transformation.original.links).length, boundsProvisional: true, productionEnabled: false };
     receipt.flattenedLinks = transformation.original.links;
     validateReceipts(input, receipts, binding);
@@ -603,9 +680,10 @@ function fetchInputs(output, env = process.env) {
   assert.deepEqual(collect(p, privateInput, api), binding, 'API evidence changed during download');
   write(path.join(output, 'input-binding.json'), binding);
 }
-module.exports = { VERSION, TARGET, FEATURES, LIMITS, WORKFLOW, BRANCH, INPUTS, RECEIPTS, get MAIN_ALLOWED() { return mainAllowed(); }, RECEIPT_ALLOWED,
+module.exports = { VERSION, TARGET, FEATURES, HOST_PROFILE, LIMITS, WORKFLOW, BRANCH, INPUTS, RECEIPTS, get MAIN_ALLOWED() { return mainAllowed(); }, RECEIPT_ALLOWED,
   record, flags, validatePins, admission, preflight, verifyProducer, verifyPrivateProof, collect, ZIP_STAGE, stageZip, validateReceipts,
-  relative, prohibited, internalTarget, inventory, flatten, dependencies, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs };
+  relative, prohibited, internalTarget, inventory, flatten, dependencies, primaryAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
+  hostProfile, verifyHostProfileInventory, attachHostProfile };
 if (require.main === module) (async () => {
   const [mode, ...args] = process.argv.slice(2);
   if (mode === 'preflight') { assert.equal(args.length, 0); preflight(); console.log(JSON.stringify({ preflightPassed: true, releaseReady: false })); }

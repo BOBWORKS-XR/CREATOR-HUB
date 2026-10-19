@@ -76,9 +76,37 @@ AppDir root, with mode 0644 and at most 4096 bytes. Its exact fields are
 `activationInterface: com.creatorworks.hub.Host1`, `integratedFeatures: true`,
 `startupImageBinding: 1`, and `executableSha256` matching the signed fixed Hub
 entrypoint. Unknown/duplicate fields and older or missing profiles refuse both
-review and activation. The current portable producer does not yet supply this
-profile or enable the startup feature. Adding that record must follow an actual
-source-bound build with the feature; it is not a way to relabel old package bytes.
+review and activation. The producer never infers this profile from older bytes.
+The explicit `--linux-portable-host-candidate` build option
+requires signed 0.1.16 Linux integrated assembly and enables the startup feature.
+Its build receipt binds actual Cargo arguments, locked Root package metadata,
+source commit/tree and raw ELF hash. The portable sidecar refuses older Root or
+missing/mismatched proof, then adds the profile to the canonical AppDir transport
+with its final APP-marked executable hash before inventory/TAR hashing. The
+original diagnostic AppImage is retained unchanged and does not contain that
+root-level profile. No host installation/service/activation acceptance follows
+from producing these bytes.
+
+Inside the existing admitted `validation/linux-integrated-candidate-016` assembly
+workflow, set `linux_integrated_candidate=true` and
+`linux_portable_host_candidate=true` with independently pinned matching signed
+runtime inputs. Its fixed builder command includes:
+
+```sh
+npm run build:unified -- ci-signed-unix-hub --installer --managed \
+  --experimental-unix --experimental-unix-writable \
+  --signed-unix-input "$RUNNER_TEMP/signed-unix-input" \
+  --linux-integrated-candidate --integrated-features \
+  --linux-portable-host-candidate
+```
+
+The unchanged assembler source-equality check still applies to signed private
+payloads. The older `966f35c` payload is not automatically accepted when its
+private-module source differs. Matching new inputs or a separately reviewed
+runtime-only adapter are required; do not suppress that refusal. The sidecar
+then records full inventory/archive sizes, Node-process peak RSS (not child or
+consumer peak memory), Root/WebKit dependency closure and primary symbol-version
+requirements. Actual SteamOS ABI availability and native operation remain untested.
 
 Before commit, cancellation/interruption leaves the prior selection readable.
 After commit, cancellation cannot undo the switch: a flush/cleanup failure is

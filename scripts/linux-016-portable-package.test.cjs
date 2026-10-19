@@ -78,11 +78,14 @@ function candidate(t) {
     unpackedSize: Object.values(raw).reduce((sum, b) => sum + b.length, 0),
     files: Object.fromEntries(Object.entries(raw).map(([n, bytes]) => [n, { size: bytes.length, mode: modules.modeFor(m, n) }])) };
   binding.privateProof.prepared.files['mcp-runtime.json'] = { ...p.record(Buffer.from(JSON.stringify(runtimeDescriptor(m, p.VERSION)))), mode: 0o644 };
-  const descriptor = jsonBytes(m), hub = Buffer.concat([elf(), descriptor, Buffer.from('__TAURI_BUNDLE_TYPE_VAR_UNK')]);
+  const descriptor = jsonBytes(m), hub = Buffer.concat([elf(), descriptor,
+    Buffer.from(require('./build-unified.cjs').PORTABLE_ROOT_WITNESSES.join('\n')), Buffer.from('__TAURI_BUNDLE_TYPE_VAR_UNK')]);
   const debHub = Buffer.from(hub); debHub.write('DEB', hub.length - 3, 'ascii');
   const assembly = { schemaVersion: 1, product: 'com.creatorworks.hub.unix-signed-assembly', platform: 'linux', arch: 'x86_64',
     hubVersion: p.VERSION, assemblyCommit: pins.sourceCommit, privateSource: binding.privateProof.prepared.source,
     handoffSha256: pins.handoffSha256, mcpMode: 'writable', compiledFeatures: p.FEATURES,
+    portableHostBuild: { schemaVersion: 1, version: p.VERSION, target: p.TARGET, sourceCommit: pins.sourceCommit,
+      sourceTree: pins.sourceTree, compiledFeatures: p.FEATURES, startupImageBinding: 1, rawHub: p.record(hub) },
     privateModulesRecompiled: false, privateModulesResigned: false, nativeGuiAccepted: false, releaseReady: false };
   const integrity = { schemaVersion: 1, platform: 'linux', arch: 'x86_64', integrityPassed: true, experimental: true,
     mcpMode: 'writable', writableGuiAccepted: false, releaseReady: false, packages: [{ format: 'deb',
@@ -201,6 +204,66 @@ test('historical hardcoded14 receipt and missing feature attestation are explici
   assert.throws(() => p.validateReceipts(f.input, f.receipts, f.binding), /exact compiledFeatures/);
   a.compiledFeatures = ['integrated-features']; f.bytes['signed-unix-assembly.json'] = jsonBytes(a); f.save();
   assert.throws(() => p.validateReceipts(f.input, f.receipts, f.binding), /exact compiledFeatures/);
+});
+test('portable assembly requires byte-bound startup proof, not merely the older integrated feature list', t => {
+  const f = candidate(t), original = JSON.parse(f.bytes['signed-unix-assembly.json']);
+  for (const change of [
+    a => delete a.portableHostBuild,
+    a => a.compiledFeatures = p.FEATURES.slice(0, -1),
+    a => a.portableHostBuild.rawHub.sha256 = 'f'.repeat(64),
+    a => a.portableHostBuild.sourceTree = 'f'.repeat(40),
+    a => a.portableHostBuild.startupImageBinding = 0,
+  ]) {
+    const a = structuredClone(original); change(a);
+    f.bytes['signed-unix-assembly.json'] = jsonBytes(a); f.save();
+    assert.throws(() => p.validateReceipts(f.input, f.receipts, f.binding));
+  }
+  f.bytes['creator-hub'] = Buffer.concat([elf(), f.bytes['builtin-manifest.json'], Buffer.from('__TAURI_BUNDLE_TYPE_VAR_UNK')]);
+  const relabelled = structuredClone(original); relabelled.portableHostBuild.rawHub = p.record(f.bytes['creator-hub']);
+  f.bytes['signed-unix-assembly.json'] = jsonBytes(relabelled); f.save();
+  assert.throws(() => p.validateReceipts(f.input, f.receipts, f.binding), /Old Root without portable startup binding/);
+});
+test('portable host profile binds only the actual APP image and exact complete inventory', t => {
+  const f = candidate(t), raw = f.bytes['creator-hub'], proof = JSON.parse(f.bytes['signed-unix-assembly.json']).portableHostBuild;
+  const packaged = Buffer.from(raw); packaged.write('APP', packaged.length - 3, 'ascii');
+  const profile = p.hostProfile(raw, packaged, proof, f.binding.pins), parsed = JSON.parse(profile);
+  assert.equal(parsed.executableSha256, p.record(packaged).sha256);
+  assert.notEqual(parsed.executableSha256, proof.rawHub.sha256);
+  const runner = elf();
+  const inv = { entries: { usr: { kind: 'directory', mode: 0o755 }, 'usr/bin': { kind: 'directory', mode: 0o755 },
+    'usr/bin/creator-hub': { kind: 'file', ...p.record(packaged), mode: 0o755 },
+    AppRun: { kind: 'file', ...p.record(runner), mode: 0o755 },
+    [p.HOST_PROFILE]: { kind: 'file', ...p.record(profile), mode: 0o644 } }, links: {},
+  unpackedSize: packaged.length + runner.length + profile.length };
+  assert.deepEqual(p.verifyHostProfileInventory(inv, profile, p.record(packaged)), parsed);
+  for (const change of [b => delete b.entries[p.HOST_PROFILE], b => b.entries[p.HOST_PROFILE].sha256 = 'f'.repeat(64),
+    b => b.entries[p.HOST_PROFILE].mode = 0o755, b => b.entries.AppRun.mode = 0o644,
+    b => b.entries['usr/bin/creator-hub'].sha256 = proof.rawHub.sha256]) {
+    const b = structuredClone(inv); change(b);
+    assert.throws(() => p.verifyHostProfileInventory(b, profile, p.record(packaged)));
+  }
+  const changed = Buffer.from(packaged); changed[24] ^= 1;
+  assert.throws(() => p.hostProfile(raw, changed, proof, f.binding.pins));
+  assert.throws(() => p.hostProfile(raw, packaged, { ...proof, compiledFeatures: p.FEATURES.slice(0, -1) }, f.binding.pins));
+  const consumer = fs.readFileSync(path.join(ROOT, 'native/linux-portable-deployment/src/host.rs'), 'utf8');
+  assert.ok(consumer.includes(`HOST_PROFILE: &str = "${p.HOST_PROFILE}"`));
+  for (const field of ['schemaVersion', 'version', 'activationInterface', 'integratedFeatures', 'startupImageBinding', 'executableSha256']) assert.ok(Object.hasOwn(parsed, field));
+});
+test('canonical AppDir profile is added once before inventory and TAR hashing without replacing existing files', async t => {
+  if (process.platform === 'win32') return t.skip('Actual Unix modes belong to the Linux workflow');
+  const f = candidate(t), raw = f.bytes['creator-hub'], packaged = Buffer.from(raw); packaged.write('APP', packaged.length - 3, 'ascii');
+  const profile = p.hostProfile(raw, packaged, JSON.parse(f.bytes['signed-unix-assembly.json']).portableHostBuild, f.binding.pins);
+  const root = temp(t), appdir = path.join(root, 'AppDir'); fs.mkdirSync(appdir);
+  put(appdir, 'usr/bin/creator-hub', packaged, 0o755); put(appdir, 'AppRun', elf(), 0o755); put(appdir, 'usr/data', 'preserve');
+  const before = p.inventory(appdir), after = p.attachHostProfile(appdir, before, profile, p.record(packaged));
+  assert.equal(after.unpackedSize, before.unpackedSize + profile.length);
+  assert.deepEqual(fs.readFileSync(path.join(appdir, p.HOST_PROFILE)), profile);
+  assert.throws(() => p.attachHostProfile(appdir, after, Buffer.from('replacement'), p.record(packaged)), /cannot be replaced/);
+  const file = path.join(root, 'profiled.tar.gz'), binding = await p.packTar(appdir, file, after);
+  const manifest = p.manifest(f.binding.pins, after, binding);
+  assert.deepEqual(manifest.entries[p.HOST_PROFILE], { kind: 'file', ...p.record(profile), mode: 0o644 });
+  execFileSync(PYTHON, ['-B', '-c', VERIFY_TAR, file], { input: JSON.stringify(manifest) });
+  assert.equal(fs.readFileSync(path.join(appdir, 'usr/data'), 'utf8'), 'preserve');
 });
 test('receipt tampering, original private artifact drift and byte-pin changes fail closed', t => {
   const f = candidate(t);
@@ -409,6 +472,29 @@ test('actual packaged WebKit/JSC processes and injected library must be x64 ELF,
   const transitive = p.dependencies(root, entries, (cmd, args) => args[1].endsWith('libextra.so.1') ? run(cmd, args) : ' (NEEDED) Shared library: [libextra.so.1]\n');
   assert.ok(transitive.closure[extra]);
   fs.writeFileSync(path.join(root, names[0]), 'not ELF'); assert.throws(() => p.dependencies(root, entries, run), /ELF/);
+});
+test('new portable analysis includes Root dependencies and primary ABI needs, not available version definitions', t => {
+  const root = temp(t), names = ['usr/bin/creator-hub', 'usr/lib/libwebkit2gtk-4.1.so.0', 'usr/lib/libjavascriptcoregtk-4.1.so.0',
+    'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebProcess', 'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess',
+    'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so'];
+  const entries = Object.fromEntries(names.map(n => { put(root, n, elf()); return [n, { kind: 'file', ...p.record(elf()), mode: 0o755 }]; }));
+  const dynamic = (command, args) => { assert.equal(command, '/usr/bin/readelf'); assert.equal(args[0], '--dynamic'); return ' (NEEDED) Shared library: [libc.so.6]\n'; };
+  const dependencies = p.dependencies(root, entries, dynamic, { includeHub: true });
+  assert.deepEqual(dependencies.primary.hub, ['usr/bin/creator-hub']);
+  assert.throws(() => p.dependencies(root, entries, (command, args) => args[1].endsWith('creator-hub')
+    ? ' (NEEDED) Shared library: [libmissing-hub.so.1]\n' : dynamic(command, args), { includeHub: true }), /creator-hub -> libmissing-hub/);
+  const versionText = "Version definition section '.gnu.version_d' contains 1 entry:\n  Name: GLIBCXX_3.4.99 Flags: none Version: 1\n"
+    + "Version needs section '.gnu.version_r' contains 1 entry:\n  File: libc.so.6 Cnt: 1\n  Name: GLIBC_2.34 Flags: none Version: 2\n";
+  const abi = p.primaryAbiRequirements(root, dependencies, (command, args, options) => {
+    assert.equal(command, '/usr/bin/readelf'); assert.equal(args[0], '--version-info');
+    assert.equal(options.maxBuffer, 4 * 1024 * 1024); return versionText;
+  });
+  assert.equal(Object.keys(abi.files).length, 6);
+  for (const file of Object.values(abi.files)) {
+    assert.deepEqual(file.requiredSymbolVersions, ['GLIBC_2.34']);
+    assert.equal(file.executableSha256, p.record(elf()).sha256);
+  }
+  assert.match(abi.scope, /host ABI availability.*unaccepted/);
 });
 test('bundler command is bundle-only, no-sign, same features and opaque module resource', () => {
   const args = p.bundleArgs(ROOT, '/owned/overlay.json'); assert.equal(args[1], 'bundle'); assert.ok(args.includes('--no-sign'));
