@@ -3,7 +3,8 @@
 This library verifies a complete signed AppDir, stages a content-addressed
 generation and switches a private selection record. Its guarded native-host
 boundary can prepare a fixed AppRun launch and bind a running Hub image to the
-signed selection. No activation service, host installation UI, dependency
+signed selection. Reviewed user-scoped service registration and a fixed native
+selector executable are supplied below. No host installation UI, dependency
 installation, settings migration or updater integration is supplied. No release
 readiness is claimed. The default-off Root startup hook is Linux-only; ordinary
 DEB and frozen14/15 contracts are unchanged.
@@ -114,6 +115,99 @@ After commit, cancellation cannot undo the switch: a flush/cleanup failure is
 Malformed, foreign, redirected or changed records refuse without fallback.
 Pending transactions block another activation until explicitly reviewed.
 
+## Offline Native Selector And User Registration
+
+This is a typed native-caller boundary, not a finished installer or Flatpak UX.
+The only executable operation is `creator-hub-portable-selector activate`.
+All other argument sets refuse; no package path, command string, settings root,
+install approval or sandbox RPC can be passed to activation.
+
+The stable tool must come from the separately inventoried, mode-0755 signed
+entry `usr/libexec/creator-hub-portable-selector` in a `VerifiedPackage`. A copied
+unsigned binary or caller-supplied hash is not accepted as registration authority.
+The tool is bounded to 32 MiB and must be x86_64 little-endian ELF. The current
+packaging scripts do **not** yet add this new executable to signed packages; the
+API intentionally refuses packages without it. No release acceptance follows
+from compiling the binary here.
+
+A trusted outside-sandbox caller must supply the real review/consent UX:
+
+1. Capture `HostSession`; explicitly initialize an absent dedicated store with
+   `Store::create`, or open its verified existing marker with `Store::open`.
+   The native data parent must already exist; this API does not create HOME,
+   redirect settings, adopt foreign stores or import sandbox data.
+2. Use `verify(manifest, signature, archive, expected)` for the exact signed
+   package. Obtain `review_install` and `review_registration` before approval.
+   Present the package version, existing selection, service/tool paths and old/new
+   selector hashes. These review methods do not stage, select or register.
+3. On decline use `InstallChoice::KeepCurrent` and
+   `RegistrationChoice::KeepCurrent`: no staging or registration writes occur.
+   Empty-store initialization, if previously approved, is not undone.
+4. On approval call `install_reviewed(..., InstallReviewed, ...)`, then
+   `apply_registration(..., ApplyReviewed, ...)` with the reviewed objects.
+   Registration requires that the exact target generation is selected and still
+   independently signature/tree-verified. Installation and registration are
+   **separate transactions**: registration failure does not undo a committed Hub
+   selection. Report that partial result and inspect recovery, not a clean cancel.
+5. On removal obtain `review_unregister`, display its exact paths/previous tool
+   hash and request the same explicit apply/decline choice. It removes only the
+   exact owned service, stable tool and ownership receipt. Generations, journals,
+   native settings, backups, AI-client files, old runtime paths and parent
+   directories are not recursively removed. No process is force-closed.
+
+Stable files live below the already admitted store in
+`activation-v1/{creator-hub-portable-selector,owner.json,pending.json}`. The
+session service is `$XDG_DATA_HOME/dbus-1/services/com.creatorworks.hub.Host.service`
+(native HOME fallback as above), with one fixed `Exec=<stable-tool> activate`.
+No global service, DEB installation, system service or privileged command is
+modified. Registration refuses a known global Hub executable/service in
+`/usr/bin`, `/usr/share/dbus-1/services` or `/usr/local/share/dbus-1/services`.
+Unknown existing user service/tool bytes refuse even if their text happens to
+match the desired service. Existing owned files require exact before-images,
+owner/mode/link checks and a production-signed retained tool generation.
+Native activation paths currently accept only unambiguous unquoted ASCII
+components (`A-Z`, `a-z`, digits, `.`, `_`, `-`); spaces/non-ASCII paths refuse
+without registration. Supporting them requires separately tested Exec escaping.
+
+The fixed service format follows the
+[D-Bus activation specification](https://dbus.freedesktop.org/doc/dbus-specification.html#message-bus-starting-services).
+Installing a file is not proof that a particular desktop discovers/activates it.
+Custom D-Bus search directories, runtime registrations and live bus-name ownership
+still require caller preflight/native tests; this API does not replace them or
+claim that an existing global installation has been retired.
+
+Each mutation retains a flushed before/after journal before publishing/removing
+any tool/service/receipt. File publication is atomic; changed review images,
+unknown files, malformed records, foreign permissions and links refuse. After
+journaling, failure/cancellation returns `OutcomeUnknown`, retaining evidence.
+`registration_recovery` returns an opaque review bound to the exact journal and
+currently observed before/after images; any unknown image refuses without writes.
+The caller can show its paths and old/observed hashes, then choose `KeepPending`
+or `RestoreBefore` with `recover_registration`. Recovery restores only the exact
+signed registration before-images, never Hub selection. Interrupted recovery can
+be reviewed again. There is no automatic recovery, generation pruning or retry.
+The existing same-UID filesystem threat-model limitation still applies.
+
+`activate_registered` verifies the ownership receipt against its retained signed
+package, requires the exact stable pathname and `/proc/self/exe` identity, and
+refuses pending registration/deployment recovery. `selected_activation` obtains
+the version from a production-verified selection and rechecks it through the
+existing activation lease; it never pins later launches to this crate's compiled
+version. The stable selector may therefore remain from an earlier signed package
+while a later verified Hub generation is selected. Only fixed signed AppRun is
+spawned with the existing native environment allowlist and `--flatpak-activate`.
+Root, not the selector, still owns `Host1.Start()` and its integrated window.
+The CLI waits for its child rather than exiting while Root acquires the name;
+it does not impersonate the service or claim a successful native activation.
+
+Still missing: native consent/recovery/removal UI and first-store initialization
+flow; signed packaging/distribution of this selector; installed D-Bus discovery
+and cold/warm activation tests (including bus environment and ownership handoff);
+actual running-selector admission; one-window and settings/runtime preservation
+acceptance; portable update/restart wiring. None is simulated by this library.
+Windows tests cover pure bindings/refusals; Unix registration/rollback/removal
+tests require a Linux test runner. Compiling those tests is not executing them.
+
 ## Package Contract And Provisional Bounds
 
 The signed camelCase JSON manifest has exactly these fields:
@@ -199,8 +293,9 @@ integrated-feature check still passes with the added optional Linux dependency.
 No new Linux CI/native package run, signed installation, activation or restart
 acceptance is claimed by these local results.
 
-Still required: real signed complete portable inputs and measured bounds;
-dependency/ABI and SteamOS tests; native acceptance of running-image binding;
-stable native activation/launcher integration; consent and removal UX; signed updater
-and restart wiring; actual settings/migration/runtime preservation acceptance.
+Still required: real signed complete portable inputs including the selector and
+measured bounds; dependency/ABI and SteamOS tests; native acceptance of running
+image binding and the reviewed user registration/activation lifecycle; consent
+and removal UX; signed updater and restart wiring; actual settings/migration/
+runtime preservation acceptance.
 This crate alone supplies none of those product acceptance results.

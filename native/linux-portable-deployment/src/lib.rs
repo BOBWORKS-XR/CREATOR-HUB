@@ -1,5 +1,5 @@
 //! Signed AppDir verification, explicit private-store transactions and guarded
-//! native activation. No network, service registration or settings migration.
+//! native activation and reviewed user registration. No network or settings migration.
 mod archive;
 mod filesystem;
 mod store;
@@ -7,6 +7,10 @@ mod store;
 pub use store::host::{
     HostSession, InstallChoice, InstallOutcome, InstallReview, LaunchLease, HOST_MARKER,
     HOST_PROFILE,
+};
+pub use store::registration::{
+    RegistrationChoice, RegistrationOutcome, RegistrationRecovery, RegistrationRecoveryChoice,
+    RegistrationReview, SELECTOR_ENTRYPOINT,
 };
 pub use store::{Activation, Recovery, RecoveryState, Selection, SelectionSnapshot, Store};
 

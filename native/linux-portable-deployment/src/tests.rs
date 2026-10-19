@@ -30,7 +30,7 @@ fn workflow_runner_temp_is_scoped_to_each_cargo_step_not_job_environment() {
     }
 }
 
-fn test_verify(bytes: &[u8], signature: &[u8]) -> Result<()> {
+pub(super) fn test_verify(bytes: &[u8], signature: &[u8]) -> Result<()> {
     require(
         signature == digest(bytes).as_bytes(),
         "Test fixture signature changed",
@@ -68,13 +68,13 @@ fn tar(entries: &[(&str, &[u8], u32, u8)]) -> Vec<u8> {
     builder.into_inner().unwrap()
 }
 
-struct Fixture {
+pub(super) struct Fixture {
     manifest: Manifest,
     raw: Vec<u8>,
 }
 
 impl Fixture {
-    fn with_runner(mut self) -> Self {
+    pub(super) fn with_runner(mut self) -> Self {
         let runner = elf(99);
         let binary = elf(if self.manifest.version == "0.1.16" {
             16
@@ -115,7 +115,7 @@ impl Fixture {
         self.bind();
         self
     }
-    fn new(version: &str) -> Self {
+    pub(super) fn new(version: &str) -> Self {
         let binary = elf(if version == "0.1.16" { 16 } else { 17 });
         let entries = BTreeMap::from([
             ("usr".into(), Entry::Directory { mode: 0o755 }),
@@ -171,7 +171,7 @@ impl Fixture {
     fn bytes(&self) -> Vec<u8> {
         serde_json::to_vec(&self.manifest).unwrap()
     }
-    fn package(&self) -> Result<VerifiedPackage> {
+    pub(super) fn package(&self) -> Result<VerifiedPackage> {
         let bytes = self.bytes();
         let signature = digest(&bytes).into_bytes();
         let manifest = signed_manifest(
@@ -1525,6 +1525,34 @@ fn authoritative_new_records_are_atomic_and_never_overwrite_existing_history() {
     atomic_new_record(&path, b"complete old record").unwrap();
     assert!(atomic_new_record(&path, b"replacement").is_err());
     assert_eq!(fs::read(path).unwrap(), b"complete old record");
+}
+
+#[test]
+fn record_directory_flush_failure_after_publication_is_unknown_not_refused() {
+    let (_temp, store) = setup();
+    let path = store.root.join("history/post-publication.json");
+    let bytes = b"complete published record";
+    let called = Cell::new(false);
+    let error = atomic_new_record_with_directory_flush(&path, bytes, &|parent| {
+        assert_eq!(parent, store.root.join("history"));
+        assert_eq!(disk::read_regular(&path, 128, true).unwrap(), bytes);
+        called.set(true);
+        Err(refused(
+            "Injected parent-directory flush failure after record publication",
+        ))
+    })
+    .unwrap_err();
+    assert!(called.get());
+    assert_eq!(error.kind, ErrorKind::OutcomeUnknown);
+    assert_eq!(disk::read_regular(&path, 128, true).unwrap(), bytes);
+
+    // A pre-publication refusal must not be relabelled as an unknown outcome.
+    let error = atomic_new_record_with_directory_flush(&path, b"replacement", &|_| {
+        panic!("Existing records must refuse before directory flush")
+    })
+    .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Refused);
+    assert_eq!(disk::read_regular(&path, 128, true).unwrap(), bytes);
 }
 
 #[test]

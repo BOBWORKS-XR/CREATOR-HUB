@@ -496,7 +496,7 @@ impl LaunchLease {
     }
 }
 
-fn same_file(left: &File, right: &File) -> Result<bool> {
+pub(super) fn same_file(left: &File, right: &File) -> Result<bool> {
     let a = left
         .metadata()
         .map_err(|_| refused("Cannot recheck held executable"))?;
