@@ -718,6 +718,11 @@ def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, captur
         raise RuntimeError("Fresh phase15 UI/version deadline; no manual relaunch or outcome adoption")
     except Exception:
         last["snapshot"] = snapshot
+        if snapshot is not None and owner is not None:
+            try:
+                last["textObservation"] = c.text_interface_observation(nodes, owner, atspi)
+            except Exception as error:
+                last["textObservationRefusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
         try:
             axbus.close_sync(None)
         except Exception as error:

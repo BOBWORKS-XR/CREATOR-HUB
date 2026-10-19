@@ -82,7 +82,7 @@ bounded authentication-window capture and original-error retention now pass
 capture-only workflow does not approve system authentication or install updates.
 
 The separate frozen-input full-flow controller now admits system Cancel and one
-synthetic approval on disposable GitHub Linux runners. Its 101 pure tests and
+synthetic approval on disposable GitHub Linux runners. Its 104 pure tests and
 workflow/script parse checks pass. Scoped acceptance requires actual package and
 executable replacement, product-initiated restart, fresh UI ownership, unchanged
 settings/selection and unrelated synthetic runtime, and normal close. Native
@@ -109,6 +109,38 @@ Full source CI 39259888960 and direct Linux library checks 39260921684 passed
 at source 69cb13a; macOS was skipped. Subsequent controller-only corrections
 reuse the immutable signed product inputs rather than rebuilding those apps.
 None of these older-package results qualifies a final 0.1.16 installer.
+
+Run 39273696186 verified the replacement and automatic restart, dismissed the
+expected migration offer once, and scrolled the owned footer control into view
+without opening its link. It still refused visible-version acceptance because
+the current accessibility text reader returned no version text. A bounded,
+failure-only interface capture is the next diagnostic; it cannot substitute for
+readiness or erase the original refusal. No complete approval pass is claimed.
+
+## Windows Candidate Checkpoint
+
+The local 0.1.16 direct-feature candidate built successfully at
+`artifacts/unified/windows-016-20261019`. Installer extraction verified the raw
+and packaged Hub executable; PE ProductVersion is 0.1.16.
+
+- Installer SHA-256: `7229cfcf919dc3a9e27a459fd482cbbe059fd54caa9ad379b2a75c8baa113a20`.
+- Hub SHA-256: `7ef27351edefe4545d3e530e8d5c51e7eb3092e7cc7b20498591bfe7456c2389`.
+- Both managed runtime/router signatures passed offline production-key checks,
+  including rejection of altered metadata. This is not installer acceptance.
+- The installed local app was not replaced and remains at its original hash.
+- The Windows smoke now has an exact source-bound 0.1.16 direct-page branch;
+  historical hosted assertions remain. The focused combined suite passed 55
+  tests. Native-HTTP catalogue capture and actual install/update execution are
+  still required. Renderer request/resource checks do not claim native-HTTP proof.
+- The historical controlled-lab feed/workflow still selects 0.1.12/0.1.14 and
+  cannot be used unchanged for an incoming public 0.1.14-to-0.1.16 test. A new
+  finite lab contract must preserve those original fixtures and bind this exact
+  new installer before native execution.
+
+No 0.1.16 release/draft/tag was created, public assets were unchanged, and no
+local installer was run. Linux/Flatpak production gates remain open.
+
+## Earlier Fixture Diagnoses
 
 Run 39257702384 passed preflight and signed input staging but stopped in the
 fixture broker before Hub launch. Read-only diagnostic run 39258494136 confirmed

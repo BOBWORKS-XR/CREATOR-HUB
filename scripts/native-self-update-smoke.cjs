@@ -12,12 +12,14 @@ const { checkLive } = require('./check-release-feed.cjs');
 const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
 const { selectBaseline, assertPreviousStable } = require('./self-update-baselines.cjs');
 const { managedLocations } = require('./native-managed-target.cjs');
+const direct = require('./native-self-update-direct.cjs');
 const to = {
   version: process.env.CREATOR_SELF_UPDATE_TARGET_VERSION || require('../package.json').version,
   installer: process.env.CREATOR_SELF_UPDATE_INSTALLER_SHA256,
   exe: process.env.CREATOR_SELF_UPDATE_EXECUTABLE_SHA256,
 };
 assert.equal(to.version, require('../package.json').version, 'Update acceptance pins for the intended release; testing an older update is not sufficient');
+const directTarget = direct.directTarget(to.version, require('../package.json').version);
 const from = selectBaseline(to.version);
 assert.match(to.installer || '', /^[a-f0-9]{64}$/, 'Supply the exact published target installer SHA-256');
 assert.match(to.exe || '', /^[a-f0-9]{64}$/, 'Supply the exact packaged target executable SHA-256');
@@ -68,14 +70,15 @@ const apps = {
 };
 const configPath = path.join(process.env.APPDATA, 'creator-works-mcp', 'launcher-config.json');
 const backends = {}, frames = {};
-let configHash;
-async function connect(waitReady = true) {
+let configHash, directRequests, directSettings;
+async function connect(waitReady = true, updated = false) {
   browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'), 90);
   page = await retry(() => {
     const found = browser.contexts().flatMap(context => context.pages()).find(p => p.url().includes('tauri.localhost'));
     assert.ok(found); return found;
   });
   page.setDefaultTimeout(30000);
+  if (updated && directTarget) directRequests = direct.watchRequests(page);
   page.on('pageerror', error => { (report.pageErrors ||= []).push(String(error)); });
   await page.waitForFunction(() => window.CreatorHubNative);
   const terms = page.locator('#usage-terms-dialog');
@@ -84,6 +87,15 @@ async function connect(waitReady = true) {
     await page.locator('#usage-terms-continue').click();
     await page.waitForFunction(() => !document.querySelector('#usage-terms-dialog')?.open);
     report.checks.push('Accepted the required usage terms through the visible dialog on the disposable runner');
+  }
+  if (updated && directTarget) {
+    await direct.checkProtocol(page);
+    await page.waitForFunction(() => document.querySelector('#convergence-dialog')?.open || !document.querySelector('#check-updates').disabled,
+      null, { timeout: 180000 });
+    if (await page.locator('#convergence-dialog').isVisible()) {
+      await page.locator('#convergence-later').click();
+      report.migrationDeferred = true;
+    }
   }
   if (waitReady) await page.waitForFunction(() => !document.querySelector('#check-updates').disabled, null, { timeout: 180000 });
   const state = diagnostics();
@@ -125,6 +137,14 @@ async function checkUpdatedBuiltIns() {
   assert.equal(inventory.supported, true);
   assert.equal(inventory.apps.length, 2);
   assert.ok(inventory.apps.every(app => app.builtIn && app.trusted && !app.issue));
+  if (directTarget) {
+    report.directServices = await direct.checkPages({ page, showApp, processes, requests: directRequests,
+      screenshot: app => page.screenshot({ path: path.join(out, `direct-${app}.png`), animations: 'disabled' }) });
+    const locations = managedLocations(process.env.LOCALAPPDATA);
+    report.directServices.mcp = await direct.prepareManagedRoute(page, { active: locations.active,
+      clientConfig: path.join(process.env.USERPROFILE, '.codex', 'config.toml'),
+      approve: () => retry(() => native(ownedPid, 'button', 'Enable managed routing')) });
+  } else {
   for (const app of ['setup', 'mcp']) {
     await showApp(app);
     if (app === 'mcp') await retry(() => native(ownedPid, 'button', 'Enable managed routing'));
@@ -141,6 +161,7 @@ async function checkUpdatedBuiltIns() {
     await readyFrame(app);
     if (app === 'mcp') await frames[app].locator('#connection-guide-close').click();
   }
+  }
   const sdk = require('node:module').createRequire(path.resolve('modules/mcp/package.json'));
   const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
   const { StdioClientTransport } = sdk('@modelcontextprotocol/sdk/client/stdio.js');
@@ -156,6 +177,13 @@ async function checkUpdatedBuiltIns() {
     } finally { await client.close(); }
   }
   report.managedRouteReconnectTested = true;
+  if (directTarget) {
+    await direct.checkCleanDocument(page, directRequests);
+    assert.deepEqual(processes(), [], 'SDK service reconnect must not launch module GUIs');
+    report.directHubUpdateTested = true;
+    report.checks.push('Exact 0.1.16 native direct MCP/Setup pages return real internal-service results, retain a navigation draft, make no renderer Plugins catalogue/asset requests and launch no private GUI; the signed router connects and reconnects through the unchanged official SDK checks. Not native-HTTP capture, live AI or Unity acceptance.');
+    return;
+  }
   report.checks.push('After signed installation/restart, actual built-in Setup/MCP open through native consent; signed managed router connects and reconnects with the official SDK and serves bundled Creator docs. Not live AI/model or Editor acceptance.');
   for (const app of ['setup', 'mcp']) {
     await showApp(app);
@@ -183,6 +211,9 @@ async function installCompanions() {
     mcp_server_path: path.join(path.dirname(apps.mcp), 'server', 'creator-works-mcp.mjs'), tool_groups: 'core',
     enable_custom_scripts: false, allow_all_tests: true, automatic_update_checks: false }), { flag: 'wx' });
   configHash = hash(configPath);
+  await startUnrelatedRuntime();
+}
+async function startUnrelatedRuntime() {
   unrelatedRuntime = spawn(process.execPath, [path.resolve('scripts/owned-hub-fixture.cjs'), runtimeStop], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   unrelatedRuntime.stdout.on('data', chunk => { output += chunk; });
@@ -201,6 +232,7 @@ async function installCompanions() {
   assert.equal(hash(hub), from.exe);
   if (lab) require('./self-update-lab-target.cjs').checkBaseline(lab, installer, hub);
   if (fixture) await installCompanions();
+  else if (directTarget) await startUnrelatedRuntime();
   const sentinel = path.join(path.dirname(hub), 'ci-self-update-sentinel.txt');
   fs.writeFileSync(sentinel, 'Preserve unmanaged installed content.', { flag: 'wx' });
   const sentinelHash = hash(sentinel);
@@ -211,6 +243,7 @@ async function installCompanions() {
   report.originalPid = child.pid;
   await connect();
   assert.equal((await page.locator('.footer-version').innerText()).trim(), from.version);
+  if (directTarget) directSettings = direct.settingsSnapshot(process.env.APPDATA, process.env.LOCALAPPDATA);
   if (fixture) {
     for (const app of Object.keys(apps)) {
       await showApp(app);
@@ -242,6 +275,10 @@ async function installCompanions() {
   assert.equal(child.exitCode, null);
   assert.equal(hash(hub), from.exe);
   assert.equal(hash(sentinel), sentinelHash);
+  if (directTarget) {
+    assert.deepEqual(direct.settingsSnapshot(process.env.APPDATA, process.env.LOCALAPPDATA), directSettings);
+    assert.equal(unrelatedRuntime.exitCode, null);
+  }
   if (fixture) {
     assert.equal(await frames.setup.locator('#project-name').inputValue(), 'Keep this draft when update is cancelled');
     const live = processes().map(p => p.ProcessId);
@@ -265,16 +302,26 @@ async function installCompanions() {
   }, 120);
   ownedPid = restarted.ProcessId;
   report.restartedPid = ownedPid;
-  await connect(!fixture);
+  await connect(!fixture, true);
+  if (directTarget && !fixture) await direct.checkHome(page);
   if (fixture) {
+    if (directTarget) await direct.checkRestored(page);
+    else {
     for (const app of Object.keys(apps)) await approveHosted(app);
     await page.waitForFunction(() => document.querySelector('#hosted-restore-message').textContent.includes('views have reopened'));
+    }
     await page.waitForFunction(() => !document.querySelector('#check-updates').disabled);
     assert.equal(fs.existsSync(path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'hub-updates', 'hosted-restore.json')), false);
     assert.equal(hash(configPath), configHash);
     assert.equal(unrelatedRuntime.exitCode, null);
     const live = processes().map(p => p.ProcessId);
     assert.ok(Object.values(report.beforeBackendPids).every(pid => !live.includes(pid)), 'All original owned backends exited');
+    if (directTarget) {
+      assert.deepEqual(live, [], 'Restored 0.1.16 tools must not reopen old private GUIs');
+      await direct.showHome(page);
+      report.directViewsUpdateTested = true;
+      report.checks.push('Legacy update restoration selects direct Hub tools, consumes the ticket, preserves MCP settings and the unrelated runtime, and does not reopen private GUIs.');
+    } else {
     assert.equal(await page.locator('#view-hub').isVisible(), true, 'Restoring views keeps Apps as the initial page');
     for (const app of Object.keys(apps)) {
       await showApp(app);
@@ -285,13 +332,15 @@ async function installCompanions() {
     report.afterBackendPids = { ...backends };
     report.hostedViewsUpdateTested = true;
     report.checks.push('New updater closes owned views automatically, exact signed public target installs/restarts, both real views reopen after native permission, consumed ticket and unchanged MCP settings; unrelated Node survives');
+    }
   }
   assert.equal((await page.locator('.footer-version').innerText()).trim(), to.version);
   assert.equal(await page.evaluate(() => localStorage.getItem('creator-hub.ci-self-update')), preference);
   assert.equal(hash(sentinel), sentinelHash);
   const registry = execFileSync('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Creator Hub', '/v', 'DisplayVersion'], { encoding: 'utf8', windowsHide: true });
   assert.equal(registry.match(/DisplayVersion\s+REG_SZ\s+(\S+)/)?.[1], to.version);
-  assert.equal(await page.locator('#view-hub').isVisible(), true, 'Restart opens Apps by default');
+  if (directTarget) await direct.checkHome(page);
+  else assert.equal(await page.locator('#view-hub').isVisible(), true, 'Restart opens Apps by default');
   await page.screenshot({ path: path.join(out, 'after-restart.png') });
   await page.locator('#suite-trigger').click();
   await page.waitForFunction(() => document.querySelector('#suite-shell').getBoundingClientRect().width >= 303);
@@ -306,15 +355,28 @@ async function installCompanions() {
   assert.ok(menuLayout.every(row => row.titleFits && row.statusBelow && row.fits));
   await page.locator('#suite-shell').screenshot({ path: path.join(out, 'updated-app-menu.png') });
   report.checks.push('Restarted installed build shows the wider menu with single-line app names and status beneath each description');
+  if (directTarget) {
+    await direct.checkCleanDocument(page, directRequests);
+    await page.keyboard.press('Escape');
+    report.pluginsRemoved = true;
+  } else {
   await page.locator('#suite-menu [data-view="plugins"]').click();
   report.pluginsIcon = await verifyPluginsIcon(page, '#suite-trigger .plugins-mark img', hash('src/icons/creator-plugins.png'));
   await page.locator('#suite-menu').waitFor({ state: 'hidden' });
   await page.screenshot({ path: path.join(out, 'updated-plugins-icon.png') });
   report.checks.push('Restarted app opens Apps and renders the exact accepted transparent Plugins icon');
+  }
   if (lab) await checkUpdatedBuiltIns();
+  if (directTarget && !lab) await checkUpdatedBuiltIns();
+  if (directTarget) {
+    assert.deepEqual(direct.settingsSnapshot(process.env.APPDATA, process.env.LOCALAPPDATA), directSettings);
+    assert.equal(unrelatedRuntime.exitCode, null);
+    assert.deepEqual(report.pageErrors || [], []);
+    report.checks.push('Native cancellation and automatic signed restart preserve the exact MCP/legacy/Setup settings images, unmanaged sentinel, browser preference and unrelated Node runtime.');
+  }
   report.checks.push(`Actual in-app consent downloads/verifies, exits ${from.version}, installs exact ${to.version} and automatically restarts without a manual launch`);
   report.checks.push(`Restarted footer and uninstall registry show ${to.version}; browser preference and unmanaged installation file survive`);
-  if (fixture) {
+  if (fixture && !directTarget) {
     for (const app of Object.keys(apps)) {
       await showApp(app);
       await page.locator('#hosted-stop').click();

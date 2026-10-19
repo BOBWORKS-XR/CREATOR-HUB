@@ -1187,7 +1187,8 @@ class FreshUiTests(unittest.TestCase):
             shown_names=lambda snapshot: [value for n in snapshot["nodes"] if n["showing"]
                                          for value in (n["name"], n.get("text", "")) if value],
             press=mock.Mock(return_value={"action": "skip-migration", "actionCount": 1}),
-            own_tree=mock.Mock(return_value=[frame]), ui_snapshot=mock.Mock(return_value=snapshot))
+            own_tree=mock.Mock(return_value=[frame]), ui_snapshot=mock.Mock(return_value=snapshot),
+            text_interface_observation=mock.Mock(return_value={"readOnly": True, "verified": False}))
         polkit = types.SimpleNamespace(dbus_call=mock.Mock(return_value=[True]), bus_identity=mock.Mock(return_value={"pid": 42, "uid": 21314}))
         return types.SimpleNamespace(**locals())
 
@@ -1209,6 +1210,7 @@ class FreshUiTests(unittest.TestCase):
         self.assertIs(f.c.own_tree.call_args.args[1], f.owner)
         self.assertIs(f.c.ui_snapshot.call_args.args[1], f.owner)
         self.assertEqual(f.refs.window, [":1.8", "/frame"])
+        f.c.text_interface_observation.assert_not_called()
 
     def test_first_component_walk_binds_once_and_refuses_replacement_or_foreign_frame(self):
         f = self.fixture()
@@ -1266,6 +1268,18 @@ class FreshUiTests(unittest.TestCase):
         f.b.RootOwnership.assert_called_once()
         f.bus.close_sync.assert_called_once_with(None)
         f.c.press.assert_not_called()
+
+    def test_failure_only_text_capture_cannot_replace_original_refusal_or_certify_readiness(self):
+        f = self.fixture()
+        f.c.ui_snapshot.side_effect = [f.snapshot, RuntimeError("Original UI refusal")]
+        f.snapshot["nodes"][0]["showing"] = False
+        f.c.text_interface_observation.side_effect = RuntimeError("Diagnostic read refused")
+        observation = {}
+        with mock.patch.object(p, "scroll_successor_footer"), self.assertRaisesRegex(RuntimeError, "Original UI refusal"):
+            self.invoke(f, observation)
+        f.c.text_interface_observation.assert_called_once()
+        self.assertEqual(observation["textObservationRefusal"]["message"], "Diagnostic read refused")
+        f.bus.close_sync.assert_called_once_with(None)
 
     def test_offscreen_version_scrolls_once_then_requires_visible_exact_version(self):
         f = self.fixture()
