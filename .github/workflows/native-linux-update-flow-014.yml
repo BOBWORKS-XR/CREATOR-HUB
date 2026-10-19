@@ -1,0 +1,388 @@
+name: Frozen Root14 signed TESTONLY15 native update flow
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Disposable frozen14/TESTONLY15 only; capture, system Cancel, or one synthetic approval
+        type: choice
+        options: [capture, system-cancel, approve]
+        default: capture
+  push:
+    branches: [validation/linux-installed-candidate-014]
+    paths:
+      - scripts/native-linux-update-flow.py
+      - scripts/native-linux-update-flow.test.py
+      - .github/workflows/native-linux-update-flow-014.yml
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CREATOR_LINUX_UPDATE_FLOW: '1'
+  CREATOR_LINUX_UPDATE_FLOW_MODE: ${{ inputs.mode || 'capture' }}
+  CREATOR_LINUX_UPDATE_DISCOVERY: '1'
+  CREATOR_LINUX_COMPONENTS_PROBE: '1'
+  CREATOR_LINUX_ROOT_PROBE: '1'
+  CREATOR_UNIX_WINDOW_TEST: '1'
+  CREATOR_LINUX_ROOT_CANDIDATE: retirement-534465a
+
+jobs:
+  preflight:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-installed-candidate-014' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Source unit YAML Bash and embedded JavaScript contracts only
+        run: |
+          npm ci --ignore-scripts
+          python3 -B scripts/native-linux-update-flow.test.py
+          python3 -B scripts/native-linux-update-flow.py checkpoint
+
+  stage-input:
+    needs: preflight
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-installed-candidate-014' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    # GitHub draft binary GET requires this permission. No write API is used.
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: edece084a8b5711d5c1c7bc5050b350a0f8286d0
+          path: flow-frozen
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Admit finite mode before any download or privileged operation
+        run: python3 -B scripts/native-linux-update-flow.py pins > "$RUNNER_TEMP/linux-flow-pins.json"
+      - name: GET immutable archives and exact draft metadata only
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            assert.equal(`${context.repo.owner}/${context.repo.repo}`,'BOBWORKS-XR/CREATOR-HUB');
+            assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
+            assert.equal(process.env.GITHUB_REF,'refs/heads/validation/linux-installed-candidate-014');
+            assert.equal(process.env.GITHUB_EVENT_NAME,'workflow_dispatch');
+            assert.ok(['capture','system-cancel','approve'].includes(process.env.CREATOR_LINUX_UPDATE_FLOW_MODE));
+            assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted');assert.equal(process.env.RUNNER_OS,'Linux');assert.equal(process.env.RUNNER_ARCH,'X64');
+            const temp=fs.realpathSync(process.env.RUNNER_TEMP),workspace=fs.realpathSync(process.env.GITHUB_WORKSPACE),repo=context.repo;
+            const raw=fs.readFileSync(path.join(temp,'linux-flow-pins.json'));assert.ok(raw.length<=32768);
+            const pins=JSON.parse(raw),r=pins.root,t=pins.target;
+            assert.equal(r.SOURCE,'534465a86554e95b909bf9c7decbbb29cbca5267');assert.equal(r.RUN,39042746816);
+            assert.equal(r.PRIVATE_SOURCE,'f66d37fae372ad975daaae4ef392089c6d8f784b');assert.equal(r.PRIVATE_RUN,39041386789);
+            assert.equal(t.source,'eef90658c4d9e6743c6c25f67e00ad36c783ca6e');assert.equal(t.artifact,12127943519);
+            assert.equal(pins.frozenSource,'edece084a8b5711d5c1c7bc5050b350a0f8286d0');
+            for(const [name,[size,sha]] of Object.entries(pins.frozenFiles)) {
+              assert.match(name,/^[a-z0-9.-]+$/);const data=fs.readFileSync(path.join(workspace,'flow-frozen/scripts',name));
+              assert.equal(data.length,size);assert.equal(crypto.createHash('sha256').update(data).digest('hex'),sha);
+            }
+            const dest=path.join(temp,'linux-flow-input');fs.mkdirSync(dest,{mode:0o700});
+            const write=(name,data)=>fs.writeFileSync(path.join(dest,name),data,{flag:'wx',mode:0o600});
+            function json(name,value,max=196608){const data=Buffer.from(JSON.stringify(value,null,2)+'\n');assert.ok(data.length<=max);write(name,data);}
+            async function producer(p,current) {
+              const runId=current?p.RUN:p.run,sha=current?p.SOURCE:p.source,tree=current?p.TREE:p.tree;
+              const artifactId=current?p.ARTIFACT:p.artifact,size=current?p.ZIP_SIZE:p.zipBytes,digest=current?p.ZIP_SHA:p.zipSha256;
+              const {data:run}=await github.rest.actions.getWorkflowRun({...repo,run_id:runId});
+              assert.equal(run.id,runId);assert.equal(run.run_attempt,1);assert.equal(run.head_sha,sha);
+              assert.equal(run.repository.id,1364807512);assert.equal(run.status,'completed');assert.equal(run.conclusion,'success');
+              assert.equal(run.event,current?'workflow_dispatch':'push');
+              assert.equal(run.head_branch,current?'validation/linux-retirement-candidate-014':'validation/linux-outer-update-fixture-014');
+              assert.equal(run.path,current?'.github/workflows/unix-managed-assembly.yml':'.github/workflows/linux-outer-update-fixture-014.yml');
+              const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:artifactId});
+              assert.equal(artifact.id,artifactId);assert.equal(artifact.name,current?p.ARTIFACT_NAME:p.name);
+              assert.equal(artifact.expired,false);assert.equal(artifact.size_in_bytes,size);assert.equal(artifact.digest,`sha256:${digest}`);
+              for(const key of ['repository_id','head_repository_id'])assert.equal(artifact.workflow_run[key],1364807512);
+              assert.equal(artifact.workflow_run.id,runId);assert.equal(artifact.workflow_run.head_sha,sha);
+              const {data:page}=await github.rest.actions.listJobsForWorkflowRunAttempt({...repo,run_id:runId,attempt_number:1,per_page:100});
+              assert.ok(page.jobs.length<=16&&page.total_count===page.jobs.length);
+              const jobs=page.jobs.filter(j=>current?j.name.startsWith('assembly (linux,'):j.name==='target');assert.equal(jobs.length,1);
+              const job=jobs[0];assert.equal(job.id,current?p.JOB:p.job);assert.equal(job.run_id,runId);assert.equal(job.run_attempt,1);assert.equal(job.conclusion,'success');
+              const {data:commit}=await github.rest.git.getCommit({...repo,commit_sha:sha});assert.equal(commit.sha,sha);assert.equal(commit.tree.sha,tree);
+              const binding={run:{id:run.id,run_attempt:run.run_attempt,head_sha:run.head_sha,status:run.status,conclusion:run.conclusion,
+                repository:{id:run.repository.id},event:run.event,head_branch:run.head_branch,path:run.path},
+                artifact:{id:artifact.id,name:artifact.name,expired:artifact.expired,size_in_bytes:artifact.size_in_bytes,digest:artifact.digest,workflow_run:artifact.workflow_run},
+                job:{id:job.id,run_id:job.run_id,run_attempt:job.run_attempt,conclusion:job.conclusion,name:job.name},commit:{sha:commit.sha,tree:{sha:commit.tree.sha}}};
+              const {data}=await github.rest.actions.downloadArtifact({...repo,artifact_id:artifactId,archive_format:'zip'});
+              assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer);const zip=Buffer.from(data);
+              assert.equal(zip.length,size);assert.equal(crypto.createHash('sha256').update(zip).digest('hex'),digest);
+              write(current?'linux-root-input.zip':'linux-discovery-target-original.zip',zip);return binding;
+            }
+            const root=await producer(r,true);
+            async function source(file){const {data}=await github.rest.repos.getContent({...repo,path:file,ref:r.SOURCE});
+              assert.equal(data.encoding,'base64');assert.ok(typeof data.content==='string'&&data.content.length<=131072);
+              const bytes=Buffer.from(data.content,'base64');assert.ok(bytes.length>0&&bytes.length<=65536);return JSON.parse(bytes);}
+            root.package=await source('package.json');root.tauri=await source('src-tauri/tauri.conf.json');
+            assert.equal(root.package.name,'creator-hub');assert.equal(root.package.version,'0.1.14');assert.equal(root.tauri.version,'0.1.14');
+            assert.equal(root.tauri.productName,'Creator Hub');assert.equal(root.tauri.identifier,'com.creatorworks.hub');
+            assert.equal(root.tauri.app.windows[0].title,'Creator Hub - Development Preview');json('linux-root-source-binding.json',root);
+            const target=await producer(t,false),{data:release}=await github.rest.repos.getRelease({...repo,release_id:411494394});
+            assert.equal(release.id,411494394);assert.equal(release.tag_name,'v0.1.13-validation');assert.equal(release.draft,true);
+            assert.ok(release.assets.length<=32);target.draft={id:release.id,tag_name:release.tag_name,draft:release.draft};target.assets=[];
+            for(const [local,[id,size,sha,name]] of Object.entries(pins.metadata)) {
+              assert.match(local,/^(creator-hub-linux-x86_64-deb\.json(?:\.minisig)?|latest\.json)$/);
+              const matches=release.assets.filter(a=>a.id===id);assert.equal(matches.length,1);
+              const {data:asset}=await github.rest.repos.getReleaseAsset({...repo,asset_id:id});
+              for(const a of [asset,matches[0]]){assert.equal(a.id,id);assert.equal(a.name,name);assert.equal(a.size,size);
+                assert.equal(a.digest,`sha256:${sha}`);assert.equal(a.state,'uploaded');assert.equal(a.url,`https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/${id}`);}
+              const {data}=await github.rest.repos.getReleaseAsset({...repo,asset_id:id,headers:{accept:'application/octet-stream'}});
+              assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer);const bytes=Buffer.from(data);
+              assert.equal(bytes.length,size);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),sha);
+              write('linux-discovery-'+local,bytes);target.assets.push({id,name,size,digest:asset.digest,state:asset.state});
+            }
+            const {data:after}=await github.rest.repos.getRelease({...repo,release_id:411494394});
+            assert.equal(after.id,release.id);assert.equal(after.tag_name,release.tag_name);assert.equal(after.draft,true);
+            json('linux-discovery-target-binding.json',target,32768);write('linux-flow-pins.json',raw);
+            const files={};for(const file of ['scripts/native-linux-update-flow.py','scripts/native-linux-update-flow.test.py','.github/workflows/native-linux-update-flow-014.yml'])
+              files[file]=crypto.createHash('sha256').update(fs.readFileSync(path.join(workspace,file))).digest('hex');
+            json('linux-flow-current-source.json',{source:context.sha,frozenSource:pins.frozenSource,files});
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-update-flow-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/linux-flow-input/*
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+
+  native:
+    needs: stage-input
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-installed-candidate-014' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: edece084a8b5711d5c1c7bc5050b350a0f8286d0
+          path: flow-frozen
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-linux-update-flow-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}
+      - name: Recheck current source and frozen dependencies before staging
+        run: |
+          python3 -B - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          temp, workspace = Path(os.environ['RUNNER_TEMP']), Path.cwd()
+          binding = json.loads((temp / 'linux-flow-current-source.json').read_bytes())
+          assert binding['source'] == os.environ['GITHUB_SHA']
+          assert binding['frozenSource'] == 'edece084a8b5711d5c1c7bc5050b350a0f8286d0'
+          expected = {'scripts/native-linux-update-flow.py', 'scripts/native-linux-update-flow.test.py', '.github/workflows/native-linux-update-flow-014.yml'}
+          assert set(binding['files']) == expected
+          for name, sha in binding['files'].items():
+              assert hashlib.sha256((workspace / name).read_bytes()).hexdigest() == sha
+          PY
+          python3 -B scripts/native-linux-update-flow.py stage
+      - name: Provision pinned stock authentication and native GTK runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libxdo3 librsvg2-2 \
+            python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core libx11-6 libxres1 dbus-x11 xvfb xauth openbox \
+            openssl ca-certificates libpam-systemd policykit-1-gnome=0.105-7ubuntu3 pkexec=0.105-33ubuntu0.2 \
+            polkitd=0.105-33ubuntu0.2 coreutils=8.32-4.1ubuntu1.4 passwd=1:4.8.1-2ubuntu2.2
+          sudo systemctl start systemd-logind.service polkit.service
+      - name: Secure only measured root-owned hosted-runner policy ancestry
+        run: |
+          python3 -B - <<'PY'
+          import json, os, stat, subprocess
+          from pathlib import Path
+          for parent in (Path('/'), Path('/usr')):
+              info = parent.lstat()
+              assert stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0 and not info.st_mode & 0o7022
+          paths = tuple(map(Path, ('/usr/share', '/usr/share/polkit-1', '/usr/share/polkit-1/actions')))
+          originals = []
+          for target in paths:
+              info = target.lstat()
+              assert target.resolve(strict=True) == target and stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0
+              assert stat.S_IMODE(info.st_mode) in (0o755, 0o777)
+              originals.append((target, info))
+          rows = []
+          for target, before in originals:
+              if stat.S_IMODE(before.st_mode) == 0o777:
+                  subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/chmod', '0755', str(target)], check=True)
+              after = target.lstat()
+              assert (before.st_dev, before.st_ino, before.st_uid, before.st_gid) == (after.st_dev, after.st_ino, 0, 0)
+              assert stat.S_IMODE(after.st_mode) == 0o755
+              rows.append({'path': str(target), 'beforeMode': stat.S_IMODE(before.st_mode), 'afterMode': 0o755})
+          with (Path(os.environ['RUNNER_TEMP']) / 'linux-flow-policy-ancestry.json').open('x') as output:
+              json.dump({'scope': 'disposable-runner-only', 'directories': rows, 'policyChanged': False}, output)
+          PY
+      - name: Install frozen14 and create ephemeral CI-only TLS trust before synthetic session
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util, os, sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('flow_stock_preflight', Path('scripts/native-linux-update-flow.py'))
+          flow = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = flow
+          spec.loader.exec_module(flow)
+          flow.admission(os.environ, sys.platform, 'x86_64')
+          flow.dependencies()[3].secure_stock_policy(Path(os.environ['RUNNER_TEMP']) / 'linux-root-probe')
+          PY
+          python3 -B scripts/native-linux-update-flow.py install14
+          python3 -B scripts/native-linux-update-flow.py tls
+      - name: Install exact protected fixture source and private synthetic data
+        run: |
+          set -euo pipefail
+          test ! -e /opt/creator-polkit-fixture
+          ! getent passwd creator-polkit-fixture
+          ! getent passwd 21314
+          ! getent group creator-polkit-fixture
+          ! getent group 21314
+          sudo useradd --uid 21314 --user-group --create-home --home-dir /var/lib/creator-polkit-fixture --shell /bin/bash creator-polkit-fixture
+          sudo install -d -o 0 -g 0 -m 0755 /opt/creator-polkit-fixture /opt/creator-polkit-fixture/scripts /opt/creator-polkit-fixture/scripts/frozen
+          sudo install -d -o 21314 -g 21314 -m 0700 /opt/creator-polkit-fixture/result /opt/creator-polkit-fixture/result/runtime
+          sudo -n /usr/bin/env -i PATH=/usr/bin:/bin RUNNER_TEMP="$RUNNER_TEMP" GITHUB_SHA="$GITHUB_SHA" /usr/bin/python3 -B - <<'PY'
+          import hashlib, importlib.util, json, os, stat
+          from pathlib import Path
+          workspace, temp, base = Path.cwd(), Path(os.environ['RUNNER_TEMP']), Path('/opt/creator-polkit-fixture')
+          spec = importlib.util.spec_from_file_location('reviewed_flow_prepare', workspace / 'scripts/native-linux-update-flow.py')
+          flow = importlib.util.module_from_spec(spec)
+          import sys
+          sys.modules[spec.name] = flow
+          spec.loader.exec_module(flow)
+          flow.verify_frozen(workspace / 'flow-frozen/scripts')
+          def copy(source, target, uid, mode):
+              info = source.lstat()
+              assert source.resolve(strict=True) == source and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+              with source.open('rb') as incoming, target.open('xb') as output:
+                  while block := incoming.read(65536):
+                      output.write(block)
+              os.chmod(target, mode)
+              os.chown(target, uid, uid)
+          files = {}
+          for name in flow.FROZEN:
+              target = base / 'scripts/frozen' / name
+              copy(workspace / 'flow-frozen/scripts' / name, target, 0, 0o644)
+              files['frozen/' + name] = hashlib.sha256(target.read_bytes()).hexdigest()
+          driver = base / 'scripts/native-linux-update-flow.py'
+          copy(workspace / 'scripts/native-linux-update-flow.py', driver, 0, 0o644)
+          files[driver.name] = hashlib.sha256(driver.read_bytes()).hexdigest()
+          with (base / 'update-flow-source-binding.json').open('x') as output:
+              json.dump({'source': os.environ['GITHUB_SHA'], 'frozenSource': flow.FROZEN_SOURCE, 'files': files}, output)
+          os.chmod(base / 'update-flow-source-binding.json', 0o644)
+          _d, b, _c, p = flow.dependencies()
+          root = base / 'result/linux-root-probe'
+          root.mkdir(mode=0o700)
+          os.chown(root, 21314, 21314)
+          (root / 'input').mkdir(mode=0o700)
+          os.chown(root / 'input', 21314, 21314)
+          for name in b.input_pins():
+              source = b.input_path(temp / 'linux-root-probe', name)
+              copy(source, root / 'input' / source.name, 21314, stat.S_IMODE(source.stat().st_mode))
+          for name in ('source-binding.json', 'installed-package.json'):
+              copy(temp / 'linux-root-probe' / name, root / name, 21314, 0o600)
+          lab = base / 'result/creator-linux-update-lab'
+          for name in ('', 'inputs', 'ephemeral-tls'):
+              target = lab / name
+              target.mkdir(mode=0o700)
+              os.chown(target, 21314, 21314)
+          names = ['config.json', 'input-binding.json', 'ephemeral-tls/tls.cnf', 'ephemeral-tls/private.pem', 'ephemeral-tls/public.crt']
+          names += ['inputs/' + n for n in (*_d.METADATA, _d.ASSET)]
+          for name in names:
+              copy(temp / 'creator-linux-update-lab' / name, lab / name, 21314, 0o600)
+          config = json.loads((lab / 'config.json').read_bytes())
+          assert config['directory'] == str(temp / 'creator-linux-update-lab/inputs')
+          # Only this fixture's path changes; exact signed bytes/pins are untouched.
+          config['directory'] = str(lab / 'inputs')
+          (lab / 'config.json').write_text(json.dumps(config))
+          os.chown(lab / 'config.json', 21314, 21314)
+          before, policy = p.group_inventory(), p.admin_config()
+          assert not any(flow.USER in group['members'] for group in before.values())
+          import subprocess
+          subprocess.run(['/usr/sbin/usermod', '--append', '--groups', 'sudo', flow.USER], check=True)
+          p.admin_group_delta(before, p.group_inventory())
+          assert p.admin_config() == policy
+          PY
+      - name: Manual fixed broker finite actual Root system Cancel or approved install and automatic restart
+        run: |
+          set -euo pipefail
+          node_image=$(node -p 'process.execPath')
+          sudo -n /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REPOSITORY_ID="$GITHUB_REPOSITORY_ID" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
+            RUNNER_TEMP=/opt/creator-polkit-fixture/result CREATOR_DISCOVERY_NODE="$node_image" \
+            CREATOR_LINUX_UPDATE_FLOW=1 CREATOR_LINUX_UPDATE_FLOW_MODE="$CREATOR_LINUX_UPDATE_FLOW_MODE" \
+            CREATOR_LINUX_UPDATE_DISCOVERY=1 CREATOR_LINUX_COMPONENTS_PROBE=1 CREATOR_LINUX_ROOT_PROBE=1 \
+            CREATOR_UNIX_WINDOW_TEST=1 CREATOR_LINUX_ROOT_CANDIDATE=retirement-534465a \
+            /usr/bin/python3 -B /opt/creator-polkit-fixture/scripts/native-linux-update-flow.py broker </dev/null
+      - name: Export only bounded fixed synthetic receipts for the runner
+        if: always()
+        run: |
+          sudo -n /usr/bin/env -i PATH=/usr/bin:/bin RUNNER_TEMP="$RUNNER_TEMP" RUNNER_UID="$(id -u)" RUNNER_GID="$(id -g)" /usr/bin/python3 -B - <<'PY'
+          import os, stat
+          from pathlib import Path
+          base = Path('/opt/creator-polkit-fixture')
+          output = Path(os.environ['RUNNER_TEMP']) / 'linux-flow-evidence'
+          output.mkdir(mode=0o700)
+          uid, gid = int(os.environ['RUNNER_UID']), int(os.environ['RUNNER_GID'])
+          os.chown(output, uid, gid)
+          names = ['update-flow-source-binding.json', 'update-flow-broker.json', 'dpkg-request-proof.json']
+          names += ['dpkg-input-' + str(i) + '.json' for i in range(1, 6)]
+          names += ['result/linux-root-probe/' + n for n in ('update-flow-report.json', 'original-dpkg-authorization.json',
+              'updater-confirmation-contract.json', 'root-ownership.json', 'renderer-ownership.json', 'ax-ownership.json',
+              'signed15-ui-ready.json', 'cancelled-ui-status.json', 'system-input-attempt.json', 'phase15-ui.json',
+              'system-files-observation.json', 'root.stdout', 'root.stderr')]
+          names += ['result/creator-linux-update-lab/transport-report.json']
+          for name in names:
+              source = base / name
+              if not source.exists():
+                  continue
+              assert source.resolve(strict=True) == source
+              info = source.lstat()
+              assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid in (0, 21314) and 0 <= info.st_size <= 1048576
+              target = output / source.name
+              with source.open('rb') as incoming, target.open('xb') as destination:
+                  data = incoming.read(1048577)
+                  assert len(data) == info.st_size
+                  destination.write(data)
+              os.chmod(target, 0o600)
+              os.chown(target, uid, gid)
+          PY
+      - name: Retain scoped receipts only never TLS private material or account files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-update-flow-${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/linux-flow-current-source.json
+            ${{ runner.temp }}/linux-flow-pins.json
+            ${{ runner.temp }}/linux-root-source-binding.json
+            ${{ runner.temp }}/linux-discovery-target-binding.json
+            ${{ runner.temp }}/linux-flow-policy-ancestry.json
+            ${{ runner.temp }}/linux-root-probe/*.json
+            ${{ runner.temp }}/linux-flow-evidence/*
