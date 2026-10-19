@@ -1462,7 +1462,11 @@ fn retain_after_close(
     Ok(())
 }
 
-#[cfg(any(all(windows, feature = "integrated-features"), test))]
+#[cfg(any(
+    all(windows, feature = "integrated-features"),
+    all(target_os = "linux", feature = "experimental-linux-migration", feature = "integrated-features"),
+    test,
+))]
 fn track_cleanup_evidence<T>(
     cleanup_started: &mut bool,
     mut prior_evidence: impl FnMut() -> Result<bool, String>,
@@ -1553,6 +1557,76 @@ fn retire_batch_apps(
     )
 }
 
+#[cfg(all(target_os = "linux", feature = "experimental-linux-migration", feature = "integrated-features"))]
+fn linux_originals(plan: &Plan) -> Result<Option<crate::convergence_linux::Originals>, String> {
+    if retirement_pending()? {
+        return Err("An earlier Linux cleanup needs explicit outcome review. No transaction was replayed.".into());
+    }
+    if plan.report.legacy_apps.is_empty() {
+        require_no_retirement(plan, &legacy_apps()?)?;
+        return Ok(None);
+    }
+    let paths = plan.report.legacy_apps.iter().map(|app| app.path.clone()).collect::<Vec<_>>();
+    crate::convergence_linux::Originals::inspect(&paths).map(Some)
+}
+
+#[cfg(any(all(target_os = "linux", feature = "experimental-linux-migration", feature = "integrated-features"), test))]
+fn track_linux_cleanup<T>(
+    attempted: &std::cell::Cell<bool>,
+    inspect: impl FnMut() -> Result<bool, String>,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let mut started = attempted.get();
+    let result = track_cleanup_evidence(&mut started, inspect, |_| operation());
+    attempted.set(attempted.get() || started);
+    result
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-linux-migration", feature = "integrated-features"))]
+fn retire_linux_batch(
+    plan: &mut Plan,
+    native: Option<&crate::convergence_linux::Plan>,
+    generation: &str,
+    router: &std::path::Path,
+    attempted: &std::cell::Cell<bool>,
+) -> Result<(), String> {
+    track_linux_cleanup(attempted, retirement_pending, || {
+        let store = creator_hub_mcp_router::Store::installed()?;
+        let preflight = || {
+            can_retain(plan)?;
+            if store.resolve()?.generation != generation || store.router()?.command.as_path() != router {
+                return Err("The signed MCP route changed during Linux migration. Cleanup stopped; retained files were kept.".into());
+            }
+            Ok(())
+        };
+        preflight()?;
+        if let Some(native) = native {
+            match native.retire_after_native_review_batch(preflight, || attempted.set(true))? {
+                crate::linux_retirement::Outcome::Cancelled => {
+                    return Err("System authorization was cancelled. Settings and connection transfer were kept; no later app cleanup was started.".into());
+                }
+                crate::linux_retirement::Outcome::ExperimentalVerified => {}
+            }
+            preflight()?;
+            if !legacy_apps()?.is_empty() {
+                return Err("A standalone GUI remains after Linux cleanup. Keep retained files and review package state.".into());
+            }
+            native.complete_review()?;
+            preflight()?;
+        } else {
+            require_no_retirement(plan, &legacy_apps()?)?;
+        }
+        if retirement_pending()? {
+            return Err("Linux cleanup still has a pending outcome. No transaction was replayed.".into());
+        }
+        plan.report.stage = "complete";
+        plan.report.required = false;
+        plan.report.retirement_available = false;
+        plan.report.legacy_apps.clear();
+        Ok(())
+    })
+}
+
 #[tauri::command]
 pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String> {
     #[cfg(not(feature = "integrated-features"))]
@@ -1578,6 +1652,8 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
         let mut cleanup_started = false;
         #[cfg(not(windows))]
         let cleanup_started = false;
+        #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+        let linux_cleanup_started = std::cell::Cell::new(false);
         let mut journal_started = false;
         let mut approved_key = String::new();
         let mut journal = BatchJournal::open(batch_path()?)?;
@@ -1595,6 +1671,10 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             // not a renderer list or an installation discovered after approval.
             #[cfg(windows)]
             let installations = retirement_plans(plan)?;
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            let originals = linux_originals(plan)?;
+            #[cfg(all(target_os = "linux", not(feature = "experimental-linux-migration")))]
+            require_no_retirement(plan, &legacy_apps()?)?;
             let route = builtin::convergence_route_review(&handle)?.ok_or("This Hub has no signed MCP route.")?;
             let candidate = builtin::hosting_candidate(&handle, AppId::Mcp)?.ok_or("Verified internal MCP is unavailable.")?;
             let server_root = candidate.path.parent().ok_or("Invalid internal MCP payload.")?.join("server");
@@ -1605,6 +1685,10 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             let review_key = prompt_review_key(&plan.stores, &plan.report.legacy_apps, retirement_pending()?)?;
             let summary = format!("{} missing project(s); {} known standalone app location(s). Custom launchers that need an old GUI or its registration are not converted.",
                 import.as_ref().map_or(0, |proposal| proposal.added), plan.report.legacy_apps.len());
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            let summary = if originals.is_some() {
+                format!("{summary}\n\nLinux development test only: only exact MCP 2.7.7 and Project Setup 0.3.7 DEBs are eligible. Linux requests administrator authentication separately for each app after settings and connections transfer. Cancelling a later system prompt does not undo earlier cleanup or the completed transfer. Unknown outcomes require review, never automatic retry. All nine old MCP Node/server/license/bridge files stay at their existing paths. Setup keeps one fixed non-executable retirement notice.\n\nContinuing also accepts the unknown custom-GUI integration risk: custom integrations requiring an old app window or its desktop registration may stop working and are not converted. Cancel if you need those integrations. These TEST ONLY packages are not release acceptance.")
+            } else { summary };
             let Some(approved) = review.approve(&handle, &summary)? else {
                 cancelled = true;
                 return Ok(());
@@ -1613,12 +1697,19 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             consent.recheck(plan)?;
             route.recheck()?;
             approved.recheck()?;
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            if let Some(originals) = &originals { originals.recheck()?; }
             approved_key = consent.review_key.clone();
             phase = "backup";
             journal.record(&BatchRecord { policy: POLICY, phase: phase.into(), outcome: "started".into(), review_key: approved_key.clone(), retry_blocked: true })?;
             journal_started = true;
             let _ = handle.emit("convergence-progress", phase);
-            retain_batch_settings(plan, &base, import.as_ref(), || approved.recheck())?;
+            retain_batch_settings(plan, &base, import.as_ref(), || {
+                approved.recheck()?;
+                #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+                if let Some(originals) = &originals { originals.recheck()?; }
+                Ok(())
+            })?;
             if let Some(proposal) = &import {
                 creator_works_mcp_launcher::service::verify_convergence_import(
                     &proposal.bytes, plan.stores[0].bytes(), plan.stores[1].bytes())?;
@@ -1628,10 +1719,19 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             let _ = handle.emit("convergence-progress", phase);
             // No legacy child GUI, hosted launch/hash prompt or dialog bypass.
             // Initial routing approval is this native receipt for the exact route.
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            let linux_router = route.activate_convergence(&consent)?;
+            #[cfg(not(all(target_os = "linux", feature = "experimental-linux-migration")))]
             route.activate_convergence(&consent)?;
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            let linux_runtime = creator_hub_mcp_router::Store::installed()?.resolve()?;
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            let mut linux_native = originals.map(|originals| originals.bind(&linux_router.command)).transpose()?;
             creator_works_mcp_launcher::service::initialize(&handle, server_root)?;
             creator_works_mcp_launcher::service::bind_managed_route(&handle)?;
             plan.retry_allowed = false;
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            let linux_transfer = linux_native.as_mut().map(|native| native.begin_connection_transfer()).transpose()?;
             let workflow = creator_works_mcp_launcher::service::call(&handle, "begin_ui_operation", json!({}))?;
             let transfer = creator_works_mcp_launcher::service::apply_convergence(&handle, approved);
             let finish = creator_works_mcp_launcher::service::call(&handle, "finish_ui_operation", json!({"id":workflow}));
@@ -1648,6 +1748,8 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             finish?;
             if !idle { return Err("The internal MCP workflow still needs outcome review.".into()); }
             recheck(plan)?;
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            if let Some(transfer) = linux_transfer { transfer.complete()?; }
             save_review_at(&record_path()?, &plan.stores)?;
             plan.report.stage = "connections-reviewed";
             phase = "cleanup";
@@ -1655,7 +1757,9 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             let _ = handle.emit("convergence-progress", phase);
             #[cfg(windows)]
             retire_batch_apps(plan, &installations, &mut cleanup_started)?;
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            retire_linux_batch(plan, linux_native.as_ref(), &linux_runtime.generation, &linux_router.command, &linux_cleanup_started)?;
+            #[cfg(all(target_os = "linux", not(feature = "experimental-linux-migration")))]
             finish_without_retirement(plan, |plan| {
                 can_retain(plan)?;
                 require_no_retirement(plan, &legacy_apps()?)?;
@@ -1666,6 +1770,8 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             return Err("Native standalone cleanup is not available on this platform.".into());
             Ok::<_, String>(())
         })();
+        #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+        let cleanup_started = cleanup_started || linux_cleanup_started.get();
         let (mut outcome, mut message) = match result {
             Ok(()) if cancelled => ("cancelled", "Move to Hub was cancelled. Settings, client connections and installations were not changed.".to_owned()),
             Ok(()) if plan.report.stage == "complete" => ("complete", "Move complete. Settings and backups were kept; standalone cleanup was verified.".to_owned()),
@@ -2193,6 +2299,165 @@ mod tests {
         ] {
             assert!(!body.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn linux_single_action_prepares_originals_before_the_only_guide_approval() {
+        let body = include_str!("convergence.rs").split("pub async fn move_to_hub(").nth(1).unwrap()
+            .split("fn cleanup_failure(").next().unwrap();
+        let originals = body.find("let originals = linux_originals(plan)?").unwrap();
+        let approval = body.find("review.approve(&handle").unwrap();
+        let cancelled = body.find("cancelled = true;").unwrap();
+        let journal = body.find("journal.record(").unwrap();
+        assert!(originals < approval && approval < cancelled && cancelled < journal);
+        assert_eq!(body.matches("review.approve(&handle").count(), 1);
+        assert!(!body.contains(".blocking_show()"));
+        assert!(body.contains("originals.recheck()?"));
+        assert!(body.contains("administrator authentication separately for each app"));
+        assert!(body.contains("Cancelling a later system prompt does not undo earlier cleanup"));
+        assert!(body.contains("Continuing also accepts the unknown custom-GUI integration risk"));
+        assert!(body.contains("These TEST ONLY packages are not release acceptance"));
+        assert!(body.contains("#[cfg(all(target_os = \"linux\", not(feature = \"experimental-linux-migration\")))]\n            require_no_retirement"));
+        let native = include_str!("convergence_linux.rs");
+        let originals = native.split("impl Originals {").nth(1).unwrap().split("pub struct Plan").next().unwrap();
+        assert!(originals.contains("linux_retirement::Plan::inspect(target)?"));
+        assert!(originals.contains("helper.recheck_baseline()?"));
+        for write in ["save(", "retire_after_native_review", "atomic_write", "prepare_router"] {
+            assert!(!originals.contains(write), "initial read-only plan: {write}");
+        }
+    }
+
+    #[test]
+    fn linux_renewal_is_after_the_known_transfer_and_never_replaces_original_helper_plans() {
+        let body = include_str!("convergence.rs").split("pub async fn move_to_hub(").nth(1).unwrap()
+            .split("fn cleanup_failure(").next().unwrap();
+        let bind = body.find("originals.bind(&linux_router.command)").unwrap();
+        let boundary = body.find("native.begin_connection_transfer()").unwrap();
+        let apply = body.find("service::apply_convergence(").unwrap();
+        let finish = body.find("transfer?;").unwrap();
+        let idle = body.find("if !idle").unwrap();
+        let renewal = body.find("transfer.complete()?").unwrap();
+        let cleanup = body.find("retire_linux_batch(plan").unwrap();
+        assert!(bind < boundary && boundary < apply && apply < finish && finish < idle && idle < renewal && renewal < cleanup);
+        assert!(body[..renewal].contains("refresh_reviewed_server_paths(plan"));
+        assert!(body[..renewal].contains("refresh_finished_outcome_journal(plan"));
+        let native = include_str!("convergence_linux.rs");
+        let renew = native.split("impl ConnectionTransfer<'_>").nth(1).unwrap().split("impl Plan").next().unwrap();
+        assert!(renew.contains("plan.recheck_native_with(&[])"));
+        assert!(renew.contains("app.dependencies = dependencies"));
+        for replaced in ["linux_retirement::Plan::inspect", "app.helper =", "plan.installations ="] {
+            assert!(!renew.contains(replaced), "original identity must stay bound: {replaced}");
+        }
+        let cleanup = include_str!("convergence.rs").split("fn retire_linux_batch(").nth(1).unwrap()
+            .split("pub async fn move_to_hub(").next().unwrap();
+        for guard in ["can_retain(plan)?", "store.resolve()?.generation != generation", "store.router()?.command.as_path() != router",
+            "retire_after_native_review_batch(preflight, || attempted.set(true))", "native.complete_review()?", "retirement_pending()?"] {
+            assert!(cleanup.contains(guard), "Linux batch guard: {guard}");
+        }
+        assert!(!cleanup.contains(".blocking_show()"));
+    }
+
+    #[test]
+    fn linux_cancelled_or_unknown_cleanup_blocks_batch_replay_and_keeps_backups() {
+        for outcome in ["first-system-cancel", "later-system-cancel", "unknown-helper-outcome"] {
+            let (temp, base, mut plan) = fixture_plan();
+            retain_after_close(&mut plan, &base, None, || Ok(())).unwrap();
+            plan.report.stage = "connections-reviewed";
+            let before: Vec<_> = plan.stores.iter().map(|snapshot| snapshot.bytes().map(Vec::from)).collect();
+            cleanup_failure(&mut plan, true);
+            assert!(!plan.retry_allowed, "{outcome}");
+            assert!(can_prepare(&plan).is_err(), "{outcome}");
+            let path = temp.path().join("move-v1.json");
+            record_batch_at(&path, &BatchRecord { policy: POLICY, phase: "cleanup".into(), outcome: "stopped".into(),
+                review_key: "a".repeat(64), retry_blocked: !plan.retry_allowed }).unwrap();
+            assert!(batch_needs_review(&read_batch_at(&path).unwrap().unwrap()));
+            assert!(!plan.retained_images.is_empty());
+            for (snapshot, expected) in plan.stores.iter().zip(&before) {
+                snapshot.recheck().unwrap();
+                assert_eq!(snapshot.bytes(), expected.as_deref());
+            }
+            for backup in &plan.retained_images { backup.recheck().unwrap(); }
+        }
+    }
+
+    #[test]
+    fn linux_new_or_unreadable_cleanup_evidence_never_reopens_batch_retry() {
+        for evidence in [Ok(false), Ok(true), Err("unknown cleanup record".to_owned())] {
+            let (temp, _base, mut plan) = fixture_plan();
+            let attempted = std::cell::Cell::new(false);
+            let unknown = evidence.is_err();
+            let expected = evidence.as_ref().copied().unwrap_or(true);
+            let router_opened = std::cell::Cell::new(false);
+            let result = track_linux_cleanup(&attempted, || evidence.clone(), || {
+                router_opened.set(true);
+                Err::<(), String>("router store admission refused".into())
+            });
+            assert!(result.is_err());
+            assert_eq!(router_opened.get(), !unknown);
+            assert_eq!(attempted.get(), expected);
+            cleanup_failure(&mut plan, attempted.get());
+            assert_eq!(plan.retry_allowed, !expected);
+            let path = temp.path().join("move-v1.json");
+            record_batch_at(&path, &BatchRecord { policy: POLICY, phase: "cleanup".into(), outcome: "stopped".into(),
+                review_key: "a".repeat(64), retry_blocked: !plan.retry_allowed }).unwrap();
+            assert_eq!(batch_needs_review(&read_batch_at(&path).unwrap().unwrap()), expected);
+        }
+        let attempted = std::cell::Cell::new(true);
+        track_linux_cleanup(&attempted, || Ok(false), || Ok(())).unwrap();
+        assert!(attempted.get());
+    }
+
+    #[test]
+    fn linux_evidence_appearing_during_refusing_diagnostics_latches_uncertainty() {
+        for unreadable in [false, true] {
+            let (temp, _base, mut plan) = fixture_plan();
+            let attempted = std::cell::Cell::new(false);
+            let diagnostic_entered = std::cell::Cell::new(false);
+            let observations = std::cell::Cell::new(0);
+            let result = track_linux_cleanup(&attempted, || {
+                observations.set(observations.get() + 1);
+                if diagnostic_entered.get() && unreadable {
+                    Err("cleanup record became unreadable".into())
+                } else {
+                    Ok(diagnostic_entered.get())
+                }
+            }, || {
+                diagnostic_entered.set(true);
+                Err::<(), String>("router diagnostic refused before any helper call".into())
+            });
+            assert_eq!(result.unwrap_err(), "router diagnostic refused before any helper call");
+            assert_eq!(observations.get(), 2);
+            assert!(attempted.get());
+            cleanup_failure(&mut plan, attempted.get());
+            assert!(can_prepare(&plan).is_err());
+            let path = temp.path().join("move-v1.json");
+            record_batch_at(&path, &BatchRecord { policy: POLICY, phase: "cleanup".into(), outcome: "stopped".into(),
+                review_key: "a".repeat(64), retry_blocked: !plan.retry_allowed }).unwrap();
+            assert!(batch_needs_review(&read_batch_at(&path).unwrap().unwrap()));
+        }
+        // Preserve the exact helper-attempt callback even if both journal reads
+        // happen to report no pending entry. Absence cannot clear observed work.
+        let attempted = std::cell::Cell::new(false);
+        assert!(track_linux_cleanup(&attempted, || Ok(false), || {
+            attempted.set(true);
+            Err::<(), String>("helper outcome unknown".into())
+        }).is_err());
+        assert!(attempted.get());
+    }
+
+    #[test]
+    fn linux_cleanup_latch_covers_router_admission_and_refusal_tail() {
+        let source = include_str!("convergence.rs");
+        let body = source.split("fn retire_linux_batch(").nth(1).unwrap()
+            .split("pub async fn move_to_hub(").next().unwrap();
+        let latch = body.find("track_linux_cleanup(attempted, retirement_pending, || {")
+            .expect("Linux cleanup evidence must surround all admission, not just preflight");
+        let router = body.find("Store::installed()?").unwrap();
+        assert!(latch < router);
+        let adapter = source.split("fn track_linux_cleanup<").nth(1).unwrap()
+            .split("fn retire_linux_batch(").next().unwrap();
+        assert!(adapter.contains("track_cleanup_evidence("));
+        assert!(adapter.contains("attempted.set(attempted.get() || started)"));
     }
 
     #[test]
