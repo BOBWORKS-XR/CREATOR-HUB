@@ -584,6 +584,10 @@ def perform_system_input(selected_mode, p, profile, guard, record, secret):
         p.cancel_once(profile, guard, record)
 
 
+def component_worker_environment(environment):
+    return environment | {"CREATOR_LINUX_COMPONENTS_PROBE": "1"}
+
+
 def native_capture(root, env):
     d, b, c, p = dependencies()
     selected_mode = mode(env)
@@ -663,9 +667,10 @@ def native_capture(root, env):
         report["baselineOwnedChildren"] = sorted(baseline)
         b.run_worker(root, environment, "snapshot", child.pid, start, xid, root_output, report["workers"])
         b.accept_terms(root, environment, child, start, xid, root_output, report)
-        navigation = c.call(root, environment, "navigation", child, start, xid, root_output, report)
+        component_environment = component_worker_environment(environment)
+        navigation = c.call(root, component_environment, "navigation", child, start, xid, root_output, report)
         if "Move to unified Creator Hub" in c.shown_names(navigation):
-            c.call(root, environment, "skip-migration", child, start, xid, root_output, report)
+            c.call(root, component_environment, "skip-migration", child, start, xid, root_output, report)
         report["migrationSkipped"] = True
         before = preservation(root, b)
         selection_before = selected_project(root, b)

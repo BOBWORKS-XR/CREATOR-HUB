@@ -82,7 +82,7 @@ bounded authentication-window capture and original-error retention now pass
 capture-only workflow does not approve system authentication or install updates.
 
 The separate frozen-input full-flow controller now admits system Cancel and one
-synthetic approval on disposable GitHub Linux runners. Its 76 pure tests and
+synthetic approval on disposable GitHub Linux runners. Its 77 pure tests and
 workflow/script parse checks pass. Scoped acceptance requires actual package and
 executable replacement, product-initiated restart, fresh UI ownership, unchanged
 settings/selection and unrelated synthetic runtime, and normal close. Native
@@ -98,6 +98,14 @@ is still required. Earlier preflight/input failures remain recorded: missing
 frozen history in shallow checkout, and a private draft exceeding an obsolete
 32-asset count cap. Exact frozen-source fetch and a 256 KiB private metadata
 budget replace those assumptions without changing selected signed asset pins.
+
+Run 39258879815 then passed fixture protection and launched Hub; the terms
+acknowledgement was verified. It stopped at the navigation worker because the
+Root child environment intentionally strips the component-probe opt-in. The
+controller now creates a separate worker-only environment with that exact flag;
+a regression exercises the real frozen admission contract and proves the Root
+environment is unchanged. This remains a harness correction, not update or
+authentication acceptance.
 
 Flatpak run 39138975316 stopped at AT-SPI/launcher PID provenance before disclosure
 input. Corrected bus-peer/namespace observations pass 35 pure regressions, but

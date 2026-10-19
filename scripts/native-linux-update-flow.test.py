@@ -143,6 +143,18 @@ class FrozenTests(unittest.TestCase):
         self.assertNotIn("polkit.QUESTION =", source)
         self.assertNotIn("INSTALLED_HUB_PIN =", source)
 
+    def test_navigation_worker_gets_required_opt_in_without_changing_root_environment(self):
+        with mock.patch.object(p, "frozen_directory", return_value=self.directory), mock.patch.object(p, "_dependencies", None):
+            _d, _b, components, _polkit = p.dependencies()
+            root_environment = runner()
+            root_environment.pop("CREATOR_LINUX_COMPONENTS_PROBE")
+            with self.assertRaisesRegex(RuntimeError, "Components opt-in required"):
+                components.admission(root_environment, "linux", "x86_64")
+            worker_environment = p.component_worker_environment(root_environment)
+            components.admission(worker_environment, "linux", "x86_64")
+            self.assertNotIn("CREATOR_LINUX_COMPONENTS_PROBE", root_environment)
+            self.assertEqual(worker_environment, root_environment | {"CREATOR_LINUX_COMPONENTS_PROBE": "1"})
+
 
 class PhaseTests(unittest.TestCase):
     def test_exact_phase14_and15_different_size_and_hash(self):

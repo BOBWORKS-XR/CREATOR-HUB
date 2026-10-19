@@ -24,6 +24,9 @@ of defect-free releases. Source tests do not replace the installed checks below.
 | The Linux verifier mistakes dpkg's default Multi-Arch=no for changed package metadata | `dpkg_showformat_requires_default_multiarch_no_not_an_empty_field`, exact native query captures (`5fc08dd`) | Native baseline and compatibility metadata accepted without ignoring other fields; live MCP identity/reconnect and settings/file preservation through the package transaction |
 | Container test evidence disappears because upload paths use host runner namespaces | `scripts/linux-deb-helper-transaction.test.py` (`1600b08`) | Complete preflight and transaction logs under the verified container temp path; missing evidence leaves outcome unknown, never safely failed or accepted |
 | Native harness errors trigger repeated expensive rebuilds | Focused changed-harness tests, Python/script/YAML preflight | Bind test source separately from product source; reuse immutable original installers for test-only corrections; retain first failure and compact captures |
+| Fresh Windows checkout changes exact Unix protocol/source bytes, or runs CLI tests before their binary exists | `scripts/checkout-contracts.test.cjs`, `scripts/linux-deb-helper.test.cjs`; five explicit LF attributes | A fresh CRLF checkout passes the script suite; build the refusal-only helper before assertions, without enabling transaction features |
+| Frozen-source tests pass locally but fail on shallow Actions history; private fixture metadata outgrows a file-count assumption | `scripts/native-linux-update-flow.test.py` | Fetch only the exact frozen source before fixture tests; bound private metadata bytes while preserving exact selected asset IDs, hashes and signatures; native outcomes remain separately required |
+| Disposable Linux fixture source sits beneath a world-writable runner ancestor | Exact public path/UID/GID/mode refusal and measured-ancestry workflow regression | Record original metadata before changes; secure only enumerated root-owned runner fixture/policy ancestors and recheck inode/ownership; do not relax the application guard or modify user machines |
 
 Native preflight also checks these captured boundaries:
 
@@ -33,6 +36,9 @@ Native preflight also checks these captured boundaries:
   strict installed-image checks; do not weaken package/resource link checks.
 - Read the workflow's actual event/branch before pushing a validation ref, then
   verify the resulting run's source. A push alone is not a dispatched test.
+- Keep historical transport baselines explicit when the public registry advances.
+  New Windows targets after 0.1.14 use its published pins; the historical public12
+  and B05-to-private15 labs retain their original scope and cannot qualify 0.1.16.
 - Preserve unrelated dpkg diversions/statoverrides. The experimental helper's
   target-scoped parser and protected-parent snapshot are implemented but not
   natively accepted. Run the unprivileged metadata gate before packages or
