@@ -733,6 +733,7 @@ pub async fn remove_project_folder(
     .map_err(|_| "Project-list worker failed.")?
 }
 
+#[cfg(any(not(all(target_os = "linux", feature = "integrated-features")), test))]
 fn editor_from(value: &Value, version: &str) -> Option<PathBuf> {
     entries(value)
         .into_iter()
@@ -745,6 +746,62 @@ fn editor_from(value: &Value, version: &str) -> Option<PathBuf> {
                     .is_some_and(|s| s.eq_ignore_ascii_case("Unity.exe"))
                 && p.is_file()
                 && crate::platform::reject_links(p).is_ok()
+        })
+}
+
+#[cfg(all(target_os = "linux", any(feature = "integrated-features", test)))]
+fn linux_editor_from(value: &Value, version: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    let editors = value.get("editors")?.as_array()?;
+    if editors.len() > MAX_PROJECTS {
+        return None;
+    }
+    editors
+        .iter()
+        .filter(|editor| editor["version"] == version)
+        .filter_map(|editor| editor["executable"].as_str())
+        .map(PathBuf::from)
+        .find(|path| {
+            if !local_path(path)
+                || path.file_name() != Some(std::ffi::OsStr::new("Unity"))
+                || crate::platform::reject_links(path).is_err()
+            {
+                return false;
+            }
+            let Ok(mut file) = File::options()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)
+            else {
+                return false;
+            };
+            let Ok(metadata) = file.metadata() else {
+                return false;
+            };
+            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+                return false;
+            }
+            let mut header = [0_u8; 20];
+            if file.read_exact(&mut header).is_err() {
+                return false;
+            }
+            let native_machine = if cfg!(target_arch = "x86_64") {
+                62
+            } else if cfg!(target_arch = "aarch64") {
+                183
+            } else {
+                return false;
+            };
+            let native = &header[..7] == b"\x7fELF\x02\x01\x01"
+                && matches!(u16::from_le_bytes([header[16], header[17]]), 2 | 3)
+                && u16::from_le_bytes([header[18], header[19]]) == native_machine;
+            native
+                && fs::symlink_metadata(path).is_ok_and(|named| {
+                    named.file_type().is_file()
+                        && named.dev() == metadata.dev()
+                        && named.ino() == metadata.ino()
+                })
+                && crate::platform::reject_links(path).is_ok()
         })
 }
 
@@ -785,7 +842,14 @@ pub async fn open_unity_project(handle: tauri::AppHandle, id: String) -> Result<
         check_open_project(&project)?;
         #[cfg(feature = "integrated-features")]
         prepare_helper_for_open(&handle)?;
-        let editor = editor_from(&cli(&["editors", "--installed"] )?, &project.unity_version)
+        #[cfg(all(target_os = "linux", feature = "integrated-features"))]
+        let editor = linux_editor_from(
+            &creator_project_setup::service::call(&handle, "probe_environment", serde_json::json!({}))?,
+            &project.unity_version,
+        );
+        #[cfg(not(all(target_os = "linux", feature = "integrated-features")))]
+        let editor = editor_from(&cli(&["editors", "--installed"] )?, &project.unity_version);
+        let editor = editor
             .ok_or_else(|| format!("Unity {} is not available. Install this exact version in Unity Hub, then retry. No project upgrade was attempted.", project.unity_version))?;
         open_command(&project, &editor)?.spawn().map_err(|_| "Unity could not be started.")?;
         Ok(format!("Unity {} launch requested for {}.", project.unity_version, project.name))
@@ -1508,6 +1572,69 @@ mod tests {
             "6000.3.21f1"
         )
         .is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_editor_fixture(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut header = [0_u8; 20];
+        header[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        header[16] = 3;
+        header[18] = if cfg!(target_arch = "x86_64") {
+            62
+        } else {
+            183
+        };
+        fs::write(path, header).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_editor_selection_uses_exact_version_without_unrelated_module_readiness() {
+        let root = tempfile::tempdir().unwrap();
+        let editor = root.path().join("Unity installs/6000.3.21f1/Editor/Unity");
+        linux_editor_fixture(&editor, 0o755);
+        let report = json!({"ready": false, "editors": [{
+            "version": "6000.3.21f1", "executable": editor, "ready": false,
+            "androidPlayer": false, "windowsStandalone": false
+        }]});
+        assert_eq!(linux_editor_from(&report, "6000.3.21f1"), Some(editor));
+        assert!(linux_editor_from(&report, "6000.3.10f1").is_none());
+        assert!(linux_editor_from(&json!({"editors": null}), "6000.3.21f1").is_none());
+        let oversized = json!({"editors": vec![report["editors"][0].clone(); MAX_PROJECTS + 1]});
+        assert!(linux_editor_from(&oversized, "6000.3.21f1").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_editor_selection_refuses_unexecutable_linked_foreign_or_missing_files() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let root = tempfile::tempdir().unwrap();
+        let editor = root.path().join("Editor/Unity");
+        let report = json!({"editors": [{"version": "6000.3.21f1", "executable": editor}]});
+        assert!(linux_editor_from(&report, "6000.3.21f1").is_none());
+        linux_editor_fixture(&editor, 0o644);
+        assert!(linux_editor_from(&report, "6000.3.21f1").is_none());
+        fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&editor, b"#!/bin/sh\nexit 0\n").unwrap();
+        assert!(linux_editor_from(&report, "6000.3.21f1").is_none());
+        linux_editor_fixture(&editor, 0o755);
+        let mut header = fs::read(&editor).unwrap();
+        header[18] = 0;
+        fs::write(&editor, header).unwrap();
+        assert!(linux_editor_from(&report, "6000.3.21f1").is_none());
+        linux_editor_fixture(&editor, 0o755);
+        fs::rename(&editor, root.path().join("actual-unity")).unwrap();
+        symlink(root.path().join("actual-unity"), &editor).unwrap();
+        assert!(linux_editor_from(&report, "6000.3.21f1").is_none());
+        fs::remove_file(&editor).unwrap();
+        fs::remove_dir(editor.parent().unwrap()).unwrap();
+        let target = root.path().join("real-editor");
+        linux_editor_fixture(&target.join("Unity"), 0o755);
+        symlink(&target, editor.parent().unwrap()).unwrap();
+        assert!(linux_editor_from(&report, "6000.3.21f1").is_none());
     }
 
     #[test]
