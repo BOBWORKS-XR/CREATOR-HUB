@@ -19,8 +19,6 @@ jobs:
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-22.04
     timeout-minutes: 10
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/linux-portable-deployment-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -29,11 +27,15 @@ jobs:
         with:
           components: clippy,rustfmt
       - name: Verify formatting and reject warnings in this isolated crate only
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/linux-portable-deployment-target
         run: |
           set -euo pipefail
           cargo fmt --manifest-path native/linux-portable-deployment/Cargo.toml --check
           cargo clippy --locked --manifest-path native/linux-portable-deployment/Cargo.toml --all-targets -- -D warnings
       - name: Test signed inventory, native filesystem guards and transaction recovery
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/linux-portable-deployment-target
         run: |
           set -euo pipefail
           cargo test --locked --manifest-path native/linux-portable-deployment/Cargo.toml -- --test-threads=1
