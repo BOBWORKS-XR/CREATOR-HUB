@@ -333,6 +333,21 @@ cargo test --locked --manifest-path native/linux-portable-deployment/Cargo.toml 
 cargo clippy --locked --manifest-path native/linux-portable-deployment/Cargo.toml --features experimental-restart --all-targets -- -D warnings
 ```
 
+Failure retained: [native run 39335649930](https://github.com/BOBWORKS-XR/CREATOR-HUB/actions/runs/39335649930)
+passed default 71 library tests plus the selector test; experimental tests had
+92 passed, 1 failed and 2 ignored fixtures. The failure was the immediate
+`OutcomeUnknown` in `disarm_is_observable_before_waiting_for_still_running_child`,
+not an exhausted 30-second deadline. The channel is created after fixture-child
+spawn, excluding inheritance into that child. Linux
+[`unix_release_sock`](https://github.com/torvalds/linux/blob/v6.8/net/unix/af_unix.c#L572)
+reports `ECONNRESET` for a closing sequence-packet peer with unread data. Abort
+cleanup now distinguishes that exact errno, drains at most one reset and the
+bounded authenticated ACKs, and still requires actual EOF plus a live Root
+identity before classifying safe peer closure. Reset alone is not abort success;
+the coordinator always disarms on reset. The original test now deterministically
+queues Cancel before disarm; additional raw-syscall/late-ACK/live-identity tests
+must execute on native Linux before treating the proposed correction as passed.
+
 Installed signed Root/AppRun same-child proof, Root close-interlock integration,
 native delayed-ACK/abort behavior, GUI restart/version evidence, MCP reconnect,
 SteamOS/Flatpak and settings retention remain separate acceptance gates. No

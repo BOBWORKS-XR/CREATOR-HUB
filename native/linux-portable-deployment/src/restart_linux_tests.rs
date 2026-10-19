@@ -439,6 +439,128 @@ fn authorized_abort_drains_late_exit_ack_and_requires_matching_cancelled() {
 }
 
 #[test]
+fn unread_cancel_on_seqpacket_close_really_reports_kernel_reset_before_eof() {
+    let (root_channel, peer_channel) = Channel::pair().unwrap();
+    root_channel
+        .send(&Frame {
+            kind: Kind::Cancel,
+            target: packet().target,
+        })
+        .unwrap();
+    peer_channel.shutdown();
+    drop(peer_channel);
+    // Preserve the raw syscall observation, rather than turning arbitrary
+    // receive errors into modeled closure. This is a real AF_UNIX packet pair.
+    let mut bytes = [0u8; FRAME_SIZE];
+    let count = unsafe {
+        libc::recv(
+            root_channel.fd(),
+            bytes.as_mut_ptr().cast(),
+            bytes.len(),
+            libc::MSG_DONTWAIT,
+        )
+    };
+    assert_eq!(count, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECONNRESET)
+    );
+    assert!(matches!(root_channel.receive().unwrap(), Received::Closed));
+}
+
+#[test]
+fn abort_resolution_drains_reset_and_authenticated_late_ack_but_requires_actual_eof() {
+    for late_ack in [false, true] {
+        let (root_channel, peer_channel) = Channel::pair().unwrap();
+        let client = protocol_client(root_channel);
+        let target = packet().target;
+        client
+            .channel
+            .send(&Frame {
+                kind: Kind::Cancel,
+                target: target.clone(),
+            })
+            .unwrap();
+        if late_ack {
+            peer_channel
+                .send(&Frame {
+                    kind: Kind::ExitGranted,
+                    target: target.clone(),
+                })
+                .unwrap();
+        }
+        peer_channel.shutdown();
+        drop(peer_channel);
+        let authenticated = std::cell::Cell::new(0);
+        let alive = std::cell::Cell::new(false);
+        let result = resolve_abort(
+            &client.channel,
+            &target,
+            Instant::now() + ADMISSION_TIMEOUT,
+            &|cred| {
+                client.selector.check(cred)?;
+                authenticated.set(authenticated.get() + 1);
+                Ok(())
+            },
+            &|| {
+                client.me.alive_image()?;
+                alive.set(true);
+                Ok(())
+            },
+        );
+        assert!(matches!(result.unwrap(), AbortResolution::PeerClosed));
+        assert_eq!(authenticated.get(), i32::from(late_ack));
+        assert!(alive.get());
+    }
+}
+
+#[test]
+fn reset_cleanup_does_not_hide_unexpected_packet_or_skip_live_root_proof() {
+    for unexpected_packet in [false, true] {
+        let (root_channel, peer_channel) = Channel::pair().unwrap();
+        let mut client = protocol_client(root_channel);
+        client.me.birth.start = client.me.birth.start.saturating_add(1);
+        let target = packet().target;
+        client
+            .channel
+            .send(&Frame {
+                kind: Kind::Cancel,
+                target: target.clone(),
+            })
+            .unwrap();
+        if unexpected_packet {
+            peer_channel
+                .send(&Frame {
+                    kind: Kind::Hello,
+                    target: target.clone(),
+                })
+                .unwrap();
+        }
+        peer_channel.shutdown();
+        drop(peer_channel);
+        let authenticated = std::cell::Cell::new(false);
+        let alive_checked = std::cell::Cell::new(false);
+        let result = resolve_abort(
+            &client.channel,
+            &target,
+            Instant::now() + ADMISSION_TIMEOUT,
+            &|cred| {
+                client.selector.check(cred)?;
+                authenticated.set(true);
+                Ok(())
+            },
+            &|| {
+                alive_checked.set(true);
+                client.me.alive_image()
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(authenticated.get(), unexpected_packet);
+        assert_eq!(alive_checked.get(), !unexpected_packet);
+    }
+}
+
+#[test]
 fn real_exit_intent_exchange_distinguishes_acknowledged_and_delayed_authorization() {
     for delayed in [false, true] {
         let (root_channel, peer_channel) = Channel::pair().unwrap();
@@ -576,6 +698,23 @@ fn disarm_is_observable_before_waiting_for_still_running_child() {
     assert!(machine.expired(Duration::from_secs(61)));
     let (done, completion) = std::sync::mpsc::channel();
     let peer = std::thread::spawn(move || {
+        // CI 39335649930 failed here with unread Cancel at peer shutdown.
+        // Observe it queued without consuming it, making that close/reset race
+        // deterministic. The child was spawned before either socket existed.
+        let deadline = Instant::now() + ADMISSION_TIMEOUT;
+        loop {
+            let mut queued: libc::c_int = 0;
+            assert_eq!(
+                unsafe { libc::ioctl(peer_channel.fd(), libc::FIONREAD, &mut queued) },
+                0
+            );
+            if queued != 0 {
+                assert_eq!(queued as usize, FRAME_SIZE);
+                break;
+            }
+            assert!(Instant::now() < deadline, "Root never queued its Cancel");
+            peer_channel.poll(deadline);
+        }
         let result = wait_disarmed(child, peer_channel, &mut machine);
         assert!(matches!(machine.phase, Phase::Disarmed));
         assert!(machine.exited(Some(0), Duration::from_secs(62)).is_none());

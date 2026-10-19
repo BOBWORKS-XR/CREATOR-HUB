@@ -88,6 +88,7 @@ struct Credentials {
 enum Received {
     Pending,
     Closed,
+    Reset,
     Packet(Frame, Credentials),
 }
 
@@ -217,6 +218,7 @@ impl Channel {
         if count < 0 {
             return match std::io::Error::last_os_error().raw_os_error() {
                 Some(libc::EAGAIN | libc::EINTR) => Ok(Received::Pending),
+                Some(libc::ECONNRESET) => Ok(Received::Reset),
                 _ => Err(refused("Cannot receive restart packet")),
             };
         }
@@ -290,7 +292,9 @@ impl Channel {
                 return Err(refused("Restart channel deadline expired"));
             }
             match self.receive()? {
-                packet @ (Received::Packet(_, _) | Received::Closed) => return Ok(packet),
+                packet @ (Received::Packet(_, _) | Received::Closed | Received::Reset) => {
+                    return Ok(packet)
+                }
                 Received::Pending => self.poll(deadline),
             }
         }
@@ -741,28 +745,38 @@ fn abort_exchange(
     validate: &dyn Fn(Credentials) -> Result<()>,
     alive_root: &dyn Fn() -> Result<()>,
 ) -> Result<AbortResolution> {
-    let sent = channel.send(&Frame {
+    // A failed send is not abort evidence. Still inspect the authenticated
+    // endpoint for matching ACKs or terminal closure, without resending.
+    let _sent = channel.send(&Frame {
         kind: Kind::Cancel,
         target: target.clone(),
     });
+    resolve_abort(channel, target, deadline, validate, alive_root)
+}
+
+fn resolve_abort(
+    channel: &Channel,
+    target: &Target,
+    deadline: Instant,
+    validate: &dyn Fn(Credentials) -> Result<()>,
+    alive_root: &dyn Fn() -> Result<()>,
+) -> Result<AbortResolution> {
     // The authenticated endpoint can close after disarming (or dying). Since
     // this exact Root is still alive, that peer cannot have observed its exit.
-    if let Err(error) = sent {
-        return match channel.receive()? {
-            Received::Closed => {
-                alive_root()?;
-                Ok(AbortResolution::PeerClosed)
-            }
-            _ => Err(error),
-        };
-    }
-    // At most three already-in-flight readiness/exit ACKs precede cancellation.
-    // They are authenticated but do not constitute abort success or readiness.
-    for _ in 0..4 {
+    // Linux may report ECONNRESET before EOF when the peer closed with unread
+    // Cancel data. Reset alone is NOT safe closure: require subsequent real EOF.
+    // Budget: three in-flight ACKs, one reset, one terminal ACK/EOF.
+    let mut reset_seen = false;
+    for _ in 0..5 {
         let (frame, credentials) = match channel.wait_received(deadline)? {
             Received::Closed => {
                 alive_root()?;
                 return Ok(AbortResolution::PeerClosed);
+            }
+            Received::Reset => {
+                require(!reset_seen, "Repeated restart reset without safe closure")?;
+                reset_seen = true;
+                continue;
             }
             Received::Packet(frame, credentials) => (frame, credentials),
             Received::Pending => unreachable!("wait_received never returns Pending"),
@@ -971,6 +985,9 @@ impl Store {
                         }
                         eof = true;
                     }
+                    // Reset never authorizes coordinator selection, even in
+                    // Exiting. Only Root's abort cleanup may resolve it via EOF.
+                    Received::Reset => return wait_disarmed(child, channel, &mut machine),
                     Received::Pending => {}
                 }
             }
