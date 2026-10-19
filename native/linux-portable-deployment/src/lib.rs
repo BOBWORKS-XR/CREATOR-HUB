@@ -1,9 +1,13 @@
-//! Offline signed AppDir verification and explicit private-store transactions.
-//! No launcher, network, service registration, settings migration or execution.
+//! Signed AppDir verification, explicit private-store transactions and guarded
+//! native activation. No network, service registration or settings migration.
 mod archive;
 mod filesystem;
 mod store;
 
+pub use store::host::{
+    HostSession, InstallChoice, InstallOutcome, InstallReview, LaunchLease, HOST_MARKER,
+    HOST_PROFILE,
+};
 pub use store::{Activation, Recovery, RecoveryState, Selection, SelectionSnapshot, Store};
 
 use minisign_verify::{PublicKey, Signature};

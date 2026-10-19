@@ -49,6 +49,8 @@ mod legacy_shortcut_native_windows;
 #[cfg(windows)]
 #[allow(dead_code)]
 mod legacy_shortcuts_windows;
+#[cfg(all(target_os = "linux", feature = "experimental-linux-portable-host"))]
+mod linux_portable_host;
 #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
 mod linux_retirement;
 #[cfg(any(target_os = "linux", test))]
@@ -354,6 +356,11 @@ fn configure_linux_webkit() {
 }
 
 fn main() {
+    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-host"))]
+    if let Err(message) = linux_portable_host::admit_startup() {
+        eprintln!("{message}");
+        std::process::exit(2);
+    }
     #[cfg(target_os = "linux")]
     configure_linux_webkit();
     if let Some(wait) = installer_preflight::mode(std::env::args_os().skip(1)) {

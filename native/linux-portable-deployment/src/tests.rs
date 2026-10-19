@@ -74,6 +74,47 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn with_runner(mut self) -> Self {
+        let runner = elf(99);
+        let binary = elf(if self.manifest.version == "0.1.16" {
+            16
+        } else {
+            17
+        });
+        let profile = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":1, "version":self.manifest.version,
+            "activationInterface":"com.creatorworks.hub.Host1", "integratedFeatures":true,
+            "startupImageBinding":1, "executableSha256":digest(&binary),
+        }))
+        .unwrap();
+        self.manifest.entries.insert(
+            crate::HOST_PROFILE.into(),
+            Entry::File {
+                size: profile.len() as u64,
+                sha256: digest(&profile),
+                mode: 0o644,
+            },
+        );
+        self.manifest.entries.insert(
+            "AppRun".into(),
+            Entry::File {
+                size: runner.len() as u64,
+                sha256: digest(&runner),
+                mode: 0o755,
+            },
+        );
+        self.manifest.archive.unpacked_size += (runner.len() + profile.len()) as u64;
+        self.raw = gzip(&tar(&[
+            ("AppRun", &runner, 0o755, b'0'),
+            (crate::HOST_PROFILE, &profile, 0o644, b'0'),
+            ("usr", b"", 0o755, b'5'),
+            ("usr/bin", b"", 0o755, b'5'),
+            (ENTRYPOINT, &binary, 0o755, b'0'),
+            ("usr/data.txt", b"preserved", 0o644, b'0'),
+        ]));
+        self.bind();
+        self
+    }
     fn new(version: &str) -> Self {
         let binary = elf(if version == "0.1.16" { 16 } else { 17 });
         let entries = BTreeMap::from([
@@ -146,6 +187,465 @@ impl Fixture {
             signature,
             contents,
         })
+    }
+}
+
+#[test]
+fn host_install_cancel_and_stale_review_never_stage_or_change_selection() {
+    use crate::{InstallChoice, InstallOutcome};
+    let (_temp, store) = setup();
+    let old = activate(
+        &store,
+        &Fixture::new("0.1.16").with_runner().package().unwrap(),
+        None,
+    );
+    let package = Fixture::new("0.1.17").with_runner().package().unwrap();
+    let review = store.review_install_with(&package, &test_verify).unwrap();
+    assert_eq!(review.version(), "0.1.17");
+    assert_eq!(review.previous(), Some(old.selection()));
+    assert!(matches!(
+        store
+            .install_reviewed_with(
+                &review,
+                &package,
+                InstallChoice::KeepCurrent,
+                &|| false,
+                &test_verify
+            )
+            .unwrap(),
+        InstallOutcome::Declined
+    ));
+    assert_eq!(
+        store.snapshot_with(&test_verify).unwrap(),
+        Some(old.clone())
+    );
+    assert!(!store
+        .root
+        .join("generations")
+        .join(package.generation())
+        .exists());
+    let replacement = Fixture::new("0.1.18").with_runner().package().unwrap();
+    let new = activate(&store, &replacement, Some(&old));
+    assert!(store
+        .install_reviewed_with(
+            &review,
+            &package,
+            InstallChoice::InstallReviewed,
+            &|| false,
+            &test_verify
+        )
+        .is_err());
+    assert!(!store
+        .root
+        .join("generations")
+        .join(package.generation())
+        .exists());
+    assert_eq!(store.snapshot_with(&test_verify).unwrap(), Some(new));
+}
+
+#[test]
+fn host_reviewed_install_is_exact_and_requires_a_separate_launch() {
+    use crate::{InstallChoice, InstallOutcome};
+    let (_temp, store) = setup();
+    let package = Fixture::new("0.1.16").with_runner().package().unwrap();
+    let review = store.review_install_with(&package, &test_verify).unwrap();
+    assert!(review.previous().is_none());
+    let outcome = store
+        .install_reviewed_with(
+            &review,
+            &package,
+            InstallChoice::InstallReviewed,
+            &|| false,
+            &test_verify,
+        )
+        .unwrap();
+    let InstallOutcome::Selected(Activation::Committed(selected)) = outcome else {
+        panic!("new installation");
+    };
+    assert_eq!(store.snapshot_with(&test_verify).unwrap(), Some(selected));
+    let lease = store
+        .activation_lease_with(&Expected::linux_x86_64("0.1.16").unwrap(), &test_verify)
+        .unwrap();
+    assert_eq!(lease.selection().generation, package.generation());
+    lease.recheck(&test_verify).unwrap();
+}
+
+#[test]
+fn host_review_refuses_other_store_target_same_version_and_downgrade() {
+    use crate::InstallChoice;
+    let (_temp, store) = setup();
+    let (_other_temp, other) = setup();
+    let package = Fixture::new("0.1.16").with_runner().package().unwrap();
+    let review = store.review_install_with(&package, &test_verify).unwrap();
+    assert!(other
+        .install_reviewed_with(
+            &review,
+            &package,
+            InstallChoice::InstallReviewed,
+            &|| false,
+            &test_verify
+        )
+        .is_err());
+    assert!(other.snapshot_with(&test_verify).unwrap().is_none());
+    let target = Fixture::new("0.1.17").with_runner().package().unwrap();
+    assert!(store
+        .install_reviewed_with(
+            &review,
+            &target,
+            InstallChoice::InstallReviewed,
+            &|| false,
+            &test_verify
+        )
+        .is_err());
+    let old = activate(&store, &target, None);
+    assert!(store.review_install_with(&package, &test_verify).is_err());
+    let mut changed = Fixture::new("0.1.17").with_runner();
+    changed.manifest.source_commit = "c".repeat(40);
+    assert!(store
+        .review_install_with(&changed.package().unwrap(), &test_verify)
+        .is_err());
+    assert_eq!(store.snapshot_with(&test_verify).unwrap(), Some(old));
+}
+
+#[test]
+fn host_cancel_before_staging_keeps_previous_and_has_no_recovery() {
+    use crate::InstallChoice;
+    let (_temp, store) = setup();
+    let package = Fixture::new("0.1.16").with_runner().package().unwrap();
+    let review = store.review_install_with(&package, &test_verify).unwrap();
+    assert_eq!(
+        store
+            .install_reviewed_with(
+                &review,
+                &package,
+                InstallChoice::InstallReviewed,
+                &|| true,
+                &test_verify
+            )
+            .unwrap_err()
+            .kind,
+        ErrorKind::Cancelled
+    );
+    assert!(store.snapshot_with(&test_verify).unwrap().is_none());
+    assert!(store.recovery_with(&test_verify).unwrap().is_none());
+    assert!(!store
+        .root
+        .join("generations")
+        .join(package.generation())
+        .exists());
+}
+
+#[test]
+fn pending_recovery_blocks_host_install_and_launch_without_acknowledging_it() {
+    for site in ["journal-synced", "selection-committed"] {
+        let (_temp, store) = setup();
+        let old = activate(
+            &store,
+            &Fixture::new("0.1.16").with_runner().package().unwrap(),
+            None,
+        );
+        let package = Fixture::new("0.1.17").with_runner().package().unwrap();
+        let id = stage(&store, &package);
+        store
+            .activate_with(
+                &id,
+                &Expected::linux_x86_64("0.1.17").unwrap(),
+                Some(&old),
+                &|| false,
+                &interrupt(site),
+                &test_verify,
+            )
+            .unwrap_err();
+        let before = fs::read(store.root.join("pending.json")).unwrap();
+        assert!(store.review_install_with(&package, &test_verify).is_err());
+        let expected = Expected::linux_x86_64(if site == "journal-synced" {
+            "0.1.16"
+        } else {
+            "0.1.17"
+        })
+        .unwrap();
+        assert!(matches!(
+            store.activation_lease_with(&expected, &test_verify),
+            Err(Error {
+                kind: ErrorKind::RecoveryRequired,
+                ..
+            })
+        ));
+        assert_eq!(fs::read(store.root.join("pending.json")).unwrap(), before);
+    }
+}
+
+#[test]
+fn host_activation_requires_exact_selected_version_and_signed_apprun() {
+    let (_temp, store) = setup();
+    let without = Fixture::new("0.1.16").package().unwrap();
+    let old = activate(&store, &without, None);
+    assert!(store
+        .activation_lease_with(&Expected::linux_x86_64("0.1.16").unwrap(), &test_verify)
+        .is_err());
+    let with = Fixture::new("0.1.17").with_runner().package().unwrap();
+    activate(&store, &with, Some(&old));
+    assert!(store
+        .activation_lease_with(&Expected::linux_x86_64("0.1.16").unwrap(), &test_verify)
+        .is_err());
+    assert!(store
+        .activation_lease_with(&Expected::linux_x86_64("0.1.17").unwrap(), &test_verify)
+        .is_ok());
+}
+
+#[test]
+fn host_activation_lock_and_tampered_runner_refuse_mutation_or_launch() {
+    let (_temp, store) = setup();
+    let old = activate(
+        &store,
+        &Fixture::new("0.1.16").with_runner().package().unwrap(),
+        None,
+    );
+    let lease = store
+        .activation_lease_with(&Expected::linux_x86_64("0.1.16").unwrap(), &test_verify)
+        .unwrap();
+    let next = Fixture::new("0.1.17").with_runner().package().unwrap();
+    assert!(store.review_install_with(&next, &test_verify).is_err());
+    let runner = store
+        .root
+        .join("generations")
+        .join(old.selection.generation)
+        .join("AppDir/AppRun");
+    disk::set_mode(&runner, 0o755).unwrap();
+    let change = fs::write(&runner, elf(98));
+    #[cfg(windows)]
+    {
+        // The held Windows read handle refuses an in-place competing writer.
+        assert!(change.is_err());
+        assert_eq!(fs::read(&runner).unwrap(), elf(99));
+        lease.recheck(&test_verify).unwrap();
+    }
+    #[cfg(not(windows))]
+    {
+        change.unwrap();
+        disk::set_mode(&runner, 0o555).unwrap();
+        assert!(lease.recheck(&test_verify).is_err());
+        assert_eq!(fs::read(&runner).unwrap(), elf(98));
+    }
+}
+
+#[test]
+fn host_command_uses_signed_apprun_fixed_navigation_and_exact_native_settings_environment() {
+    use crate::store::host::HostSession;
+    use std::ffi::OsString;
+    let (temp, store) = setup();
+    activate(
+        &store,
+        &Fixture::new("0.1.16").with_runner().package().unwrap(),
+        None,
+    );
+    let lease = store
+        .activation_lease_with(&Expected::linux_x86_64("0.1.16").unwrap(), &test_verify)
+        .unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    let config = home.join("native-config");
+    let data = home.join("native-data");
+    let native_path =
+        std::env::join_paths([home.join("native-ai-tools/bin"), home.join("system/bin")]).unwrap();
+    let session = HostSession::from_values([
+        (OsString::from("HOME"), home.as_os_str().to_owned()),
+        (
+            OsString::from("XDG_CONFIG_HOME"),
+            config.as_os_str().to_owned(),
+        ),
+        (OsString::from("XDG_DATA_HOME"), data.as_os_str().to_owned()),
+        (OsString::from("DISPLAY"), OsString::from(":native")),
+        (OsString::from("PATH"), native_path.clone()),
+    ])
+    .unwrap();
+    assert_eq!(session.config_home(), config);
+    assert_eq!(session.store_path(), data.join("creator-hub-portable"));
+    let command = lease.command(&session);
+    assert!(Path::new(command.get_program()).ends_with("AppDir/AppRun"));
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        ["--flatpak-activate"]
+    );
+    let environment: BTreeMap<_, _> = command
+        .get_envs()
+        .map(|(k, v)| (k.to_owned(), v.unwrap().to_owned()))
+        .collect();
+    assert_eq!(environment[std::ffi::OsStr::new("HOME")], home);
+    assert_eq!(environment[std::ffi::OsStr::new("XDG_CONFIG_HOME")], config);
+    assert_eq!(environment[std::ffi::OsStr::new("XDG_DATA_HOME")], data);
+    assert_eq!(environment[std::ffi::OsStr::new("PATH")], native_path);
+    assert_eq!(environment.len(), 7);
+    for forbidden in [
+        "HOST_XDG_CONFIG_HOME",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "FLATPAK_ID",
+        "APPIMAGE",
+        "NODE_OPTIONS",
+        "TAURI_CONFIG",
+    ] {
+        assert!(!environment.contains_key(std::ffi::OsStr::new(forbidden)));
+    }
+}
+
+#[test]
+fn host_startup_binding_requires_signed_selection_exact_appdir_and_version() {
+    let (_temp, store) = setup();
+    let package = Fixture::new("0.1.16").with_runner().package().unwrap();
+    activate(&store, &package, None);
+    let appdir = store
+        .root
+        .join("generations")
+        .join(package.generation())
+        .join("AppDir");
+    let image = fs::File::open(appdir.join(ENTRYPOINT)).unwrap();
+    let expected = Expected::linux_x86_64("0.1.16").unwrap();
+    store
+        .bind_process_with(&expected, Some(appdir.as_os_str()), &image, &test_verify)
+        .unwrap();
+    assert!(store
+        .bind_process_with(&expected, None, &image, &test_verify)
+        .is_err());
+    assert!(store
+        .bind_process_with(
+            &expected,
+            Some(store.root.as_os_str()),
+            &image,
+            &test_verify
+        )
+        .is_err());
+    assert!(store
+        .bind_process_with(
+            &Expected::linux_x86_64("0.1.17").unwrap(),
+            Some(appdir.as_os_str()),
+            &image,
+            &test_verify
+        )
+        .is_err());
+    // A test-only signature cannot qualify the actual production admission.
+    assert!(store
+        .bind_process_with(
+            &expected,
+            Some(appdir.as_os_str()),
+            &image,
+            &production_verify
+        )
+        .is_err());
+}
+
+#[test]
+fn host_profile_is_signed_bounded_exact_and_never_inferred_from_an_old_package() {
+    for case in 0..10 {
+        let (_temp, store) = setup();
+        let mut package = Fixture::new("0.1.16").with_runner().package().unwrap();
+        let original = package.contents.remove(crate::HOST_PROFILE).unwrap();
+        package.manifest.archive.unpacked_size -= original.len() as u64;
+        if case == 0 {
+            package.manifest.entries.remove(crate::HOST_PROFILE);
+        } else {
+            let mut profile: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            match case {
+                1 => profile["version"] = "0.1.15".into(),
+                2 => profile["executableSha256"] = "f".repeat(64).into(),
+                3 => profile["integratedFeatures"] = false.into(),
+                4 => profile["startupImageBinding"] = 0.into(),
+                5 => profile["activationInterface"] = "com.foreign.Host1".into(),
+                6 => profile["unknown"] = true.into(),
+                _ => {}
+            }
+            let mut bytes = serde_json::to_vec(&profile).unwrap();
+            if case == 7 {
+                bytes = [b"{\"schemaVersion\":1,".as_slice(), &bytes[1..]].concat();
+            }
+            if case == 8 {
+                bytes.resize(4097, b' ');
+            }
+            package.manifest.entries.insert(
+                crate::HOST_PROFILE.into(),
+                Entry::File {
+                    size: bytes.len() as u64,
+                    sha256: digest(&bytes),
+                    mode: if case == 9 { 0o755 } else { 0o644 },
+                },
+            );
+            package.manifest.archive.unpacked_size += bytes.len() as u64;
+            package.contents.insert(crate::HOST_PROFILE.into(), bytes);
+        }
+        // Private fixture seam creates signed older/unsupported layouts; the
+        // public verifier has no key override and cannot construct this value.
+        package.bytes = serde_json::to_vec(&package.manifest).unwrap();
+        package.signature = digest(&package.bytes).into_bytes();
+        assert!(
+            store.review_install_with(&package, &test_verify).is_err(),
+            "review case {case}"
+        );
+        let selected = activate(&store, &package, None);
+        assert!(
+            store
+                .activation_lease_with(&Expected::linux_x86_64("0.1.16").unwrap(), &test_verify)
+                .is_err(),
+            "lease case {case}"
+        );
+        assert_eq!(store.snapshot_with(&test_verify).unwrap(), Some(selected));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_host_binding_rejects_a_different_inode_with_identical_signed_bytes() {
+    let (temp, store) = setup();
+    let package = Fixture::new("0.1.16").with_runner().package().unwrap();
+    activate(&store, &package, None);
+    let appdir = store
+        .root
+        .join("generations")
+        .join(package.generation())
+        .join("AppDir");
+    let substitute = temp.path().join("same-name-and-content");
+    fs::copy(appdir.join(ENTRYPOINT), &substitute).unwrap();
+    let other = fs::File::open(substitute).unwrap();
+    assert!(store
+        .bind_process_with(
+            &Expected::linux_x86_64("0.1.16").unwrap(),
+            Some(appdir.as_os_str()),
+            &other,
+            &test_verify
+        )
+        .is_err());
+}
+
+#[test]
+fn host_native_roots_preserve_defaults_and_refuse_ambiguous_or_sandbox_hints() {
+    use crate::store::host::HostSession;
+    use std::ffi::OsString;
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    let pair = || (OsString::from("HOME"), home.as_os_str().to_owned());
+    let session = HostSession::from_values([pair()]).unwrap();
+    assert_eq!(session.config_home(), home.join(".config"));
+    assert_eq!(
+        session.store_path(),
+        home.join(".local/share/creator-hub-portable")
+    );
+    assert!(HostSession::from_values([]).is_err());
+    let mut traversal = home.as_os_str().to_owned();
+    traversal.push(std::path::MAIN_SEPARATOR_STR);
+    traversal.push("..");
+    traversal.push(std::path::MAIN_SEPARATOR_STR);
+    traversal.push("escape");
+    for value in [OsString::new(), OsString::from("relative"), traversal] {
+        assert!(
+            HostSession::from_values([pair(), (OsString::from("XDG_DATA_HOME"), value.clone())])
+                .is_err(),
+            "ambiguous root: {value:?}"
+        );
+    }
+    for name in ["HOME", "HOST_XDG_DATA_HOME", "FLATPAK_ID", "LD_PRELOAD"] {
+        assert!(HostSession::from_values([
+            pair(),
+            (OsString::from(name), home.as_os_str().to_owned())
+        ])
+        .is_err());
     }
 }
 

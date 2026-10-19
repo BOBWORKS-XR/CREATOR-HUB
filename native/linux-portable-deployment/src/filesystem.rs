@@ -125,6 +125,10 @@ fn same(first: &Metadata, last: &Metadata) -> bool {
 }
 
 pub(crate) fn read_regular(path: &Path, limit: u64, owned: bool) -> Result<Vec<u8>> {
+    hold_regular(path, limit, owned).map(|(_, bytes)| bytes)
+}
+
+pub(crate) fn hold_regular(path: &Path, limit: u64, owned: bool) -> Result<(File, Vec<u8>)> {
     let named = metadata(path, false, None, owned)?;
     require(named.len() <= limit, "Deployment file exceeds bound")?;
     let mut options = OpenOptions::new();
@@ -165,7 +169,7 @@ pub(crate) fn read_regular(path: &Path, limit: u64, owned: bool) -> Result<Vec<u
             && same(&before, &current),
         "Deployment file changed while reading",
     )?;
-    Ok(bytes)
+    Ok((file, bytes))
 }
 
 pub(crate) fn create_dir(path: &Path) -> Result<()> {

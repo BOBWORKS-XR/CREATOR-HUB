@@ -1,11 +1,12 @@
 # Linux Portable Deployment Primitive
 
-This isolated library verifies a complete signed AppDir, stages a content-addressed
-generation and switches a private selection record. It does not execute any
-payload, create an activation service, install dependencies, open an app, select
-host settings, migrate data, sign anything or claim release readiness. Nothing
-calls it from Hub, the updater or Flatpak. The existing DEB and frozen14/15
-contracts are unchanged.
+This library verifies a complete signed AppDir, stages a content-addressed
+generation and switches a private selection record. Its guarded native-host
+boundary can prepare a fixed AppRun launch and bind a running Hub image to the
+signed selection. No activation service, host installation UI, dependency
+installation, settings migration or updater integration is supplied. No release
+readiness is claimed. The default-off Root startup hook is Linux-only; ordinary
+DEB and frozen14/15 contracts are unchanged.
 
 ## Public Boundary
 
@@ -32,6 +33,52 @@ contracts are unchanged.
   from a committed new selection. `acknowledge_recovery(reviewed)` rechecks the
   observed state and removes only its exact pending marker. It never chooses the
   target, executes it, rolls back, discards prior history or reports app success.
+
+## Guarded Native Host Boundary
+
+- `HostSession::capture()` admits an unprivileged native Linux x86_64 process,
+  rejecting Flatpak identity and `/.flatpak-info`. It captures a finite set of
+  native desktop environment values; HOST_XDG hints never grant authority. HOME
+  and optional XDG config/data/state/cache locations are retained, not redirected
+  to a new settings store. The native executable PATH is retained when valid;
+  loader, Node and Tauri overrides are not inherited by the child command.
+- The dedicated executable store is `XDG_DATA_HOME/creator-hub-portable`, or
+  `HOME/.local/share/creator-hub-portable` when XDG_DATA_HOME is unset. No shared
+  directory or setting is created/adopted by path discovery.
+- `review_install` binds the signed package, exact prior selection and store.
+  `install_reviewed` refuses stale review, changed target and pending recovery.
+  KeepCurrent is read-only. Approval stages and selects through the existing
+  transaction primitive; it does not launch, migrate or authorize AI-client writes.
+- `activation_lease` re-verifies the selected signed inventory, exact expected
+  version, executable AppRun and signed host profile. It retains the cooperative transaction lock and
+  open runner/Hub image handles. Missing AppRun, pending recovery or changed files
+  refuse without repair or fallback.
+- `LaunchLease::spawn` uses only the signed fixed AppRun, fixed
+  `--flatpak-activate` navigation and captured native desktop environment. It
+  supplies no arbitrary command, settings root, install approval or script text.
+  A returned child is **spawn evidence only**, not a visible-window, D-Bus version,
+  MCP connection or restart acceptance receipt. Actual AppRun argument forwarding
+  and all dependency/ABI behavior still require the real signed package test.
+- The optional `experimental-linux-portable-host` Root feature requires direct
+  integrated pages and existing native activation. When the native launcher
+  marker is present, startup validates signed selection/version, exact AppDir and
+  `/proc/self/exe` inode/device ownership before creating a GUI. It is not enabled
+  by default or any packaging workflow. Absent marker leaves normal DEB operation
+  unchanged. Marker/path/version text alone is never signed-image authority.
+
+The Linux direct-library workflow now compiles/tests that optional Root feature
+and this crate; its source regression checks actual Cargo feature arguments.
+These checks do not run/install a package or qualify the Flatpak service.
+
+The full signed manifest must inventory `creator-hub-portable-host.json` at the
+AppDir root, with mode 0644 and at most 4096 bytes. Its exact fields are
+`schemaVersion: 1`, `version` matching the signed manifest,
+`activationInterface: com.creatorworks.hub.Host1`, `integratedFeatures: true`,
+`startupImageBinding: 1`, and `executableSha256` matching the signed fixed Hub
+entrypoint. Unknown/duplicate fields and older or missing profiles refuse both
+review and activation. The current portable producer does not yet supply this
+profile or enable the startup feature. Adding that record must follow an actual
+source-bound build with the feature; it is not a way to relabel old package bytes.
 
 Before commit, cancellation/interruption leaves the prior selection readable.
 After commit, cancellation cannot undo the switch: a flush/cleanup failure is
@@ -98,7 +145,7 @@ links/FIFOs or directory fsync. The separate `linux-portable-deployment.yml`
 workflow runs only this crate on its finite validation branch; it does not build
 or launch Hub, change existing workflows or qualify a package.
 
-Local checkpoint: 36 Windows tests pass, formatting passes, and strict Clippy
+Historical primitive checkpoint: 36 Windows tests pass, formatting passes, and strict Clippy
 passes for Windows and the Linux x86_64 target, including four additional Unix
 tests compiled but not executed. The actual workflow YAML and both embedded Bash
 scripts parse; its repository/ref guards and read-only permissions were checked.
@@ -117,8 +164,15 @@ are not power-loss testing. Filesystem identity rechecks and no-follow leaf open
 do not replace the documented same-UID race limitation. Cancellation is
 cooperative; a complete file read/hash can finish before the next check.
 
+The guarded-host continuation passed 48 Windows tests plus two workflow/wiring
+regressions. Strict Clippy passed for Windows and the Linux x86_64 target,
+including Linux-only methods/tests compiled but not executed. The Root Windows
+integrated-feature check still passes with the added optional Linux dependency.
+No new Linux CI/native package run, signed installation, activation or restart
+acceptance is claimed by these local results.
+
 Still required: real signed complete portable inputs and measured bounds;
-dependency/ABI and SteamOS tests; deployment-to-running-image binding; stable
-native activation/launcher integration; consent and removal UX; signed updater
+dependency/ABI and SteamOS tests; native acceptance of running-image binding;
+stable native activation/launcher integration; consent and removal UX; signed updater
 and restart wiring; actual settings/migration/runtime preservation acceptance.
 This crate alone supplies none of those product acceptance results.

@@ -14,6 +14,9 @@ use std::{
 const MARKER: &[u8] = b"creator-hub-linux-portable-deployment-v1\n";
 const RECORD_LIMIT: u64 = 16384;
 
+#[path = "host.rs"]
+pub(crate) mod host;
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Selection {
