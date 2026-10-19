@@ -267,6 +267,30 @@ class RestartObserverTests(unittest.TestCase):
         spawn.assert_not_called()
         child.send_signal.assert_not_called()
 
+    def test_rejected_candidate_records_bounded_kernel_state_and_preserves_failure(self):
+        child, old, _new, b, capture = self.fixture()
+        failure = RuntimeError("Owned process is not live")
+        b.native_process.side_effect = failure
+        observation = {}
+        with mock.patch.object(p, "direct_children", return_value={42}), \
+                mock.patch.object(p, "restart_candidate_diagnostic", return_value={"pid": 42, "kernelStat": "42 (fixture) Z"}) as diagnostic, \
+                mock.patch.object(p.subprocess, "Popen") as spawn, self.assertRaises(RuntimeError) as refused:
+            p.wait_successor(child, old, set(), b, mock.Mock(), capture, observation=observation)
+        self.assertIs(refused.exception, failure)
+        self.assertEqual(observation, {"candidateRefusal": {"pid": 42, "kernelStat": "42 (fixture) Z"}})
+        diagnostic.assert_called_once_with(42)
+        spawn.assert_not_called()
+
+    def test_candidate_diagnostic_reads_only_exact_bounded_kernel_stat(self):
+        with mock.patch.object(p, "proc_bytes", return_value=b"42 (fixture) Z\n") as read:
+            self.assertEqual(p.restart_candidate_diagnostic(42), {"pid": 42, "kernelStat": "42 (fixture) Z\n"})
+        read.assert_called_once_with(Path("/proc/42/stat"), 4096)
+        with mock.patch.object(p, "proc_bytes", side_effect=FileNotFoundError):
+            self.assertEqual(p.restart_candidate_diagnostic(42), {"pid": 42, "kernelStatUnavailable": True})
+        for value in (True, 0, 1, "42"):
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                p.restart_candidate_diagnostic(value)
+
     def test_stale_wrong_hash_and_multiple_successors_refuse(self):
         for change in ("hash", "baseline", "multiple"):
             child, old, new, b, capture = self.fixture()

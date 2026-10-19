@@ -200,7 +200,15 @@ def installed15(root, b):
     return {"packageState": state, "image": image, "dpkgVerifyPassed": True, **FALSE_GATES}
 
 
-def wait_successor(old_child, old, baseline, b, helper, capture, timeout=35):
+def restart_candidate_diagnostic(pid):
+    require(type(pid) is int and pid > 1, "Exact candidate PID required")
+    try:
+        return {"pid": pid, "kernelStat": proc_bytes(Path(f"/proc/{pid}/stat"), 4096).decode("utf-8", "replace")}
+    except (OSError, RuntimeError):
+        return {"pid": pid, "kernelStatUnavailable": True}
+
+
+def wait_successor(old_child, old, baseline, b, helper, capture, timeout=35, observation=None):
     """Observe only; never spawn a replacement or signal any Root/renderer."""
     deadline, replacement = time.monotonic() + timeout, None
     while time.monotonic() < deadline:
@@ -214,6 +222,10 @@ def wait_successor(old_child, old, baseline, b, helper, capture, timeout=35):
                 record = b.native_process(pid, helper)
             except (FileNotFoundError, ProcessLookupError):
                 continue
+            except Exception:
+                if observation is not None:
+                    observation["candidateRefusal"] = restart_candidate_diagnostic(pid)
+                raise
             if record["executable"] != EXE:
                 continue
             successor_identity(record, old, os.getpid(), baseline)
@@ -753,7 +765,8 @@ def native_capture(root, env):
             report["systemDismissal"] = wait_dismissal(p, helper, x11, native, root_output, agent_guard)
         if selected_mode == "approve":
             report["phase"] = "observe-automatic-restart"
-            replacement = wait_successor(child, identity, baseline, b, helper, root_output)
+            report["restartObservation"] = {}
+            replacement = wait_successor(child, identity, baseline, b, helper, root_output, observation=report["restartObservation"])
             report["root15"] = replacement
             report["automaticRestartObserved"] = True
             report["installed15"] = installed15(root, b)
@@ -789,6 +802,12 @@ def native_capture(root, env):
     except Exception as error:
         failure = error
         report["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        if selected_mode == "approve" and report.get("confirmationAccepted"):
+            try:
+                report["installedPackageOnRefusal"] = b.installed_state(root, "installed-on-refusal")
+                report["installedImageOnRefusal"] = b.file_record(Path(EXE), 128 * 1024 * 1024, 0o755)
+            except Exception as observation_error:
+                report["installationObservationRefusal"] = {"type": type(observation_error).__name__, "message": str(observation_error)[:1000]}
     finally:
         wipe(secret)
         if feed is not None:
