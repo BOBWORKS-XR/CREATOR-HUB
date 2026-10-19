@@ -761,6 +761,55 @@ test('actual Linux GLib accepts normal variants and rejects malformed serialized
   const bad = gvdb(); bad[64] = 255;
   assert.throws(() => p.validateCompiledSchema(bad, pythonRun));
 });
+test('retained original refuses an existing foreign target, nested destination or unreviewed inventory before writes', t => {
+  const root = temp(t), source = path.join(root, 'source'), existing = path.join(root, 'foreign');
+  fs.mkdirSync(source); fs.mkdirSync(existing);
+  const sentinel = put(existing, 'keep', 'foreign destination must remain unchanged'), stamp = fs.lstatSync(sentinel);
+  const expected = p.inventory(source, true);
+  assert.throws(() => p.retainOriginalAppDir(source, existing, expected), /already exists/);
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'foreign destination must remain unchanged');
+  for (const field of ['dev', 'ino', 'size', 'mode', 'mtimeMs', 'ctimeMs']) assert.equal(fs.lstatSync(sentinel)[field], stamp[field]);
+  const nested = path.join(source, 'retained');
+  assert.throws(() => p.retainOriginalAppDir(source, nested, expected), /outside the source/);
+  assert.equal(fs.existsSync(nested), false);
+  const fresh = path.join(root, 'fresh'), forged = structuredClone(expected);
+  forged.entries['../foreign'] = { kind: 'directory', mode: 0o777 };
+  assert.throws(() => p.retainOriginalAppDir(source, fresh, forged), /changed before retention/);
+  assert.equal(fs.existsSync(fresh), false); assert.deepEqual(fs.readdirSync(source), []);
+  assert.deepEqual(p.retainOriginalAppDir(source, fresh, expected), expected);
+  assert.deepEqual(p.inventory(fresh, true), expected); assert.deepEqual(p.inventory(source, true), expected);
+  assert.throws(() => p.retainOriginalAppDir(source, fresh, expected), /already exists/);
+  const text = fs.readFileSync(path.join(__dirname, 'linux-016-portable-package.cjs'), 'utf8');
+  assert.ok(text.indexOf('retainOriginalAppDir(appdir, retained, inv)') < text.indexOf('transformation = flatten(appdir, transport)'));
+  assert.match(text, /retainOriginalAppDir\(appdir, retained, inv\);\s*assert\.deepEqual\(inventory\(retained, true\), inv\)/);
+});
+test('actual Unix retained copy preserves reviewed schema directory 0777 and exact source inventory before flatten', t => {
+  if (process.platform === 'win32') return t.skip('Original/retained POSIX directory-mode preservation requires Unix');
+  const root = temp(t), source = path.join(root, 'source'), retained = path.join(root, 'retained'); fs.mkdirSync(source);
+  put(source, COPYRIGHT_NAME, COPYRIGHT, 0o777); put(source, SCHEMA_NAME, SCHEMA_XML, 0o777);
+  put(source, p.APPRUN_WRAPPED, APPRUN_BYTES, 0o770); put(source, 'usr/lib/data', 'same ordinary data', 0o644);
+  fs.chmodSync(path.join(source, p.SCHEMA_DIRECTORY), 0o777);
+  fs.symlinkSync('usr/lib/data', path.join(source, '.DirIcon'));
+  const expected = p.inventory(source, true);
+  const stamps = new Map(['', ...Object.keys(expected.entries)].map(name => [name, fs.lstatSync(path.join(source, name))]));
+  assert.deepEqual(p.retainOriginalAppDir(source, retained, expected), expected);
+  assert.deepEqual(p.inventory(source, true), expected); assert.deepEqual(p.inventory(retained, true), expected);
+  assert.equal(fs.lstatSync(path.join(retained, p.SCHEMA_DIRECTORY)).mode & 0o7777, 0o777);
+  assert.equal(fs.lstatSync(path.join(retained, COPYRIGHT_NAME)).mode & 0o7777, 0o777);
+  assert.equal(fs.lstatSync(path.join(retained, p.APPRUN_WRAPPED)).mode & 0o7777, 0o770);
+  assert.equal(fs.readlinkSync(path.join(retained, '.DirIcon')), 'usr/lib/data');
+  for (const [name, before] of stamps) for (const field of ['dev', 'ino', 'size', 'mode', 'nlink', 'mtimeMs', 'ctimeMs'])
+    assert.equal(fs.lstatSync(path.join(source, name))[field], before[field], `Source changed: ${name} ${field}`);
+  const normalized = p.flatten(source, path.join(root, 'transport')).flattened;
+  assert.equal(normalized.entries[p.SCHEMA_DIRECTORY].mode, 0o755);
+  assert.equal(normalized.entries[SCHEMA_NAME].mode, 0o644);
+  assert.equal(normalized.entries[p.APPRUN_WRAPPED].mode, 0o755);
+  assert.deepEqual(p.inventory(source, true), expected); assert.deepEqual(p.inventory(retained, true), expected);
+  assert.throws(() => p.retainOriginalAppDir(source, retained, expected), /already exists/);
+  const redirected = path.join(root, 'redirected'); fs.symlinkSync('missing', redirected);
+  assert.throws(() => p.retainOriginalAppDir(source, redirected, expected), /already exists/);
+  assert.equal(fs.readlinkSync(redirected), 'missing'); assert.equal(fs.existsSync(path.join(root, 'missing')), false);
+});
 test('actual Unix normalization preserves original data/modes/inodes and hashes while canonical TAR is strict', async t => {
   if (process.platform === 'win32') return t.skip('Real source 0777, copied 0644 and schema directory modes require Unix');
   const root = temp(t), tree = path.join(root, 'source'), out = path.join(root, 'transport'); fs.mkdirSync(tree);

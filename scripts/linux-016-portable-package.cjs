@@ -698,6 +698,55 @@ function inventory(root, allowLinks = false) {
   }
   visit(root); return { entries, links, unpackedSize: total };
 }
+function retainOriginalAppDir(root, destination, expected) {
+  const finite = require('./flatpak-package.cjs');
+  assert.ok(finite.ordinary(root).isDirectory()); finite.ordinary(path.dirname(destination));
+  assert.ok(path.isAbsolute(destination) && path.resolve(destination) === destination, 'Ordinary retained destination required');
+  const outside = path.relative(root, destination);
+  assert.ok(outside === '..' || outside.startsWith(`..${path.sep}`) || path.isAbsolute(outside), 'Retained destination must be outside the source AppDir');
+  try { fs.lstatSync(destination); assert.fail('Retained destination already exists; nothing was adopted'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  assert.deepEqual(inventory(root, true), expected, 'Original AppDir changed before retention');
+  // Create every destination directory ourselves. cpSync otherwise maps the
+  // reviewed 0777 schema directory to 0755; restore only these owned copies.
+  fs.mkdirSync(destination, { mode: 0o755 });
+  const owned = new Map([[destination, fs.lstatSync(destination)]]);
+  const same = (actual, before) => actual.isDirectory() && actual.dev === before.dev && actual.ino === before.ino;
+  const requireOwned = target => {
+    assert.ok(owned.has(target) && same(finite.ordinary(target), owned.get(target)), 'Retained directory ownership changed');
+  };
+  const directories = Object.entries(expected.entries).filter(([, entry]) => entry.kind === 'directory');
+  for (const [name] of directories) {
+    const target = path.join(destination, name); requireOwned(destination); requireOwned(path.dirname(target));
+    fs.mkdirSync(target, { mode: 0o755 }); owned.set(target, fs.lstatSync(target));
+  }
+  fs.cpSync(root, destination, { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false,
+    filter: (source, target) => {
+      requireOwned(destination);
+      const name = path.relative(root, source).split(path.sep).join('/');
+      assert.ok(!name || relative(name) && Object.hasOwn(expected.entries, name), 'Unreviewed original-copy entry');
+      assert.equal(target, name ? path.join(destination, name) : destination, 'Original-copy destination escaped');
+      if (!name || expected.entries[name].kind === 'directory') requireOwned(target);
+      requireOwned(name ? path.dirname(target) : destination); return true;
+    } });
+  for (const target of owned.keys()) requireOwned(target);
+  const copied = inventory(destination, true);
+  assert.deepEqual(copied, { ...expected, entries: Object.fromEntries(Object.entries(expected.entries).map(([name, entry]) =>
+    [name, entry.kind === 'directory' ? { ...entry, mode: copied.entries[name]?.mode } : entry])) },
+  'Retained bytes, files, links or paths differ before directory-mode preservation');
+  for (const [name, entry] of directories) {
+    const target = path.join(destination, name); requireOwned(destination); requireOwned(target);
+    const fd = fs.openSync(target, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY || 0) | (fs.constants.O_NOFOLLOW || 0));
+    try {
+      assert.ok(same(fs.fstatSync(fd), owned.get(target)), 'Retained directory changed before chmod');
+      fs.fchmodSync(fd, entry.mode); requireOwned(target);
+    } finally { fs.closeSync(fd); }
+  }
+  requireOwned(destination);
+  assert.deepEqual(inventory(root, true), expected, 'Original AppDir changed while retaining its copy');
+  const retained = inventory(destination, true);
+  assert.deepEqual(retained, expected, 'Retained original AppDir inventory differs'); return retained;
+}
 function flatten(root, destination) {
   const finite = require('./flatpak-package.cjs');
   const before = inventory(root, true); finite.ordinary(path.dirname(destination));
@@ -973,7 +1022,7 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     receipt.appRunWrapper.original = inv.entries[APPRUN_WRAPPED];
     for (const name of [SCHEMA_DIRECTORY, ...Object.keys(METADATA_PINS)]) assert.ok(Object.hasOwn(inv.entries, name), `Missing inspected metadata: ${name}`);
     receipt.metadataNormalization.compiledSchemaFormat = validateCompiledSchema(metadataRead(path.join(appdir, COMPILED_SCHEMA)), run);
-    fs.cpSync(appdir, retained, { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false });
+    retainOriginalAppDir(appdir, retained, inv);
     assert.deepEqual(inventory(retained, true), inv);
     const packaged = path.join(appdir, 'usr/bin/creator-hub'), bytes = read(packaged);
     unix.verifyLinuxHub(baseline.bytes['creator-hub'], bytes, 'appimage');
@@ -1044,7 +1093,7 @@ function fetchInputs(output, env = process.env) {
 }
 module.exports = { VERSION, TARGET, FEATURES, HOST_PROFILE, LIMITS, WORKFLOW, BRANCH, INPUTS, RECEIPTS, get MAIN_ALLOWED() { return mainAllowed(); }, RECEIPT_ALLOWED,
   record, flags, validatePins, admission, preflight, verifyProducer, verifyPrivateProof, collect, ZIP_STAGE, stageZip, validateReceipts,
-  relative, prohibited, validateGtkMetadata, validateGioRuntime, retainAppImage, internalTarget, inventory, flatten, dependencies, primaryAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
+  relative, prohibited, validateGtkMetadata, validateGioRuntime, retainAppImage, internalTarget, inventory, retainOriginalAppDir, flatten, dependencies, primaryAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
   hostProfile, verifyHostProfileInventory, attachHostProfile, SCHEMA_DIRECTORY, COMPILED_SCHEMA, METADATA_PINS, METADATA_PROBES, DATA_LIMIT,
   metadataRole, gvdbVariants, GVDB_VARIANTS, validateCompiledSchema, validateMetadataFormat, validateMetadata, metadataRead, metadataEvidence, transportMode,
   APPRUN_WRAPPED, APPRUN_TOOL, APPRUN_PIN, APPRUN_SOURCES, validateAppRunWrapped, appRunToolBinding };
