@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { readBounded } = require('./read-bounded-input.cjs');
 
 const KIND = 'public14-incoming-direct16';
 const BASELINE = Object.freeze({ version: '0.1.14',
@@ -41,7 +42,7 @@ function validateConfig(config) {
   return config;
 }
 function installer(file) {
-  const bytes = feed().readBounded(file, TARGET.bytes);
+  const bytes = readBounded(file, TARGET.bytes);
   assert.equal(bytes.length, TARGET.bytes); assert.equal(hash(bytes), TARGET.installer);
   return file;
 }
@@ -132,7 +133,7 @@ module.exports = { KIND, BASELINE, TARGET, hash, keys, validatePins, validateInp
 if (require.main === module) {
   try {
     const [mode, directory, pinsText] = process.argv.slice(2);
-    assert.ok(['fresh', 'guarded', 'incoming'].includes(mode)); assert.ok(path.isAbsolute(directory));
+    assert.ok(['inspect-installer', 'fresh', 'guarded', 'incoming'].includes(mode)); assert.ok(path.isAbsolute(directory));
     installer(path.join(directory, TARGET.asset));
     if (mode === 'incoming') {
       const config = { schemaVersion: 1, kind: KIND, baselineVersion: BASELINE.version, targetVersion: TARGET.version,
@@ -140,6 +141,7 @@ if (require.main === module) {
       loadContract(config);
       fs.writeFileSync(path.join(directory, 'incoming-016-config.json'), JSON.stringify(config), { flag: 'wx' });
     }
-    console.log(JSON.stringify({ kind: KIND, mode, installer: TARGET.installer, executable: TARGET.exe, releaseReady: false }));
+    console.log(JSON.stringify({ kind: KIND, mode, installer: TARGET.installer, executable: TARGET.exe,
+      signedContractBound: mode === 'incoming', releaseReady: false }));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

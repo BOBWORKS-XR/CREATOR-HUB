@@ -72,6 +72,18 @@ test('actual pinned NSIS binds the new public14 five-route contract, not source-
   }
 });
 
+test('fresh/guarded pre-npm installer admission loads only built-ins and local input reader', { skip: !candidatePath }, () => {
+  const source = `const Module=require('node:module'); const load=Module._load;
+    Module._load=function(name,...args){
+      if(!name.startsWith('node:')&&!name.startsWith('./')&&!require('node:path').isAbsolute(name)) throw Error('Dependency loaded before npm: '+name);
+      return load.call(this,name,...args);
+    };
+    require(process.argv[1]).installer(process.argv[2]);`;
+  const result = spawnSync(process.execPath, ['-e', source, path.join(__dirname, 'windows-incoming-016.cjs'), path.resolve(candidatePath)],
+    { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
 test('baseline and target receipt cannot substitute build, transport, old15 or migration acceptance', () => {
   const receipt = { passed: true, policyRestored: true, releaseReady: false, from: incoming.BASELINE,
     to: { version: '0.1.16', installer: incoming.TARGET.installer, exe: incoming.TARGET.exe },
@@ -113,6 +125,8 @@ test('new native lane is explicit/manual, read-only, data-bound and tests before
     'persist-credentials: false', 'servedRouteCount -ne 5', 'rejectedRequestCount -ne 0', 'cleanupVerified -ne $true',
     'checkReceipt', '-Incoming016']) assert.ok(workflow.includes(expected));
   assert.ok(workflow.indexOf('node --test') < workflow.indexOf('run: node scripts/native-windows-016-fresh.cjs'));
+  assert.ok(workflow.indexOf('inspect-installer $directory') < workflow.indexOf('- run: npm ci'));
+  assert.ok(workflow.indexOf('node scripts/windows-incoming-016.cjs $env:MODE') > workflow.indexOf('- run: npm --prefix modules/mcp ci'));
   assert.ok(workflow.indexOf('node --test') < workflow.indexOf('./scripts/native-self-update-lab.ps1 -Incoming016'));
   const lifecycle = fs.readFileSync(path.join(__dirname, 'native-self-update-lab.ps1'), 'utf8');
   assert.match(lifecycle, /\[switch\]\$Incoming016/);

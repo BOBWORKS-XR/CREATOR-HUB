@@ -61,7 +61,7 @@ jobs:
           run-id: ${{ inputs.artifact_run }}
           path: artifacts/incoming-016/candidate
           merge-multiple: true
-      - name: Refuse extra input files and validate the exact candidate/optional signed contract
+      - name: Refuse extra input files and hash the exact installer without npm dependencies
         shell: pwsh
         env:
           MODE: ${{ inputs.mode }}
@@ -72,10 +72,19 @@ jobs:
           foreach ($file in Get-ChildItem -LiteralPath $directory -Recurse -Force) {
             if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint -or $file.PSIsContainer -or $file.Name -cnotin $allowed -or $file.DirectoryName -cne $directory) { throw 'Only the flat reviewed data-file set is admitted.' }
           }
-          node scripts/windows-incoming-016.cjs $env:MODE $directory $env:SIGNED_PINS
+          node scripts/windows-incoming-016.cjs inspect-installer $directory
           if ($LASTEXITCODE -ne 0) { throw 'Exact 016 input contract refused; no native work started.' }
       - run: npm ci
       - run: npm --prefix modules/mcp ci
+      - name: Bind the full native scenario and optional signed contract after dependency installation
+        shell: pwsh
+        env:
+          MODE: ${{ inputs.mode }}
+          SIGNED_PINS: ${{ inputs.signed_pins }}
+        run: |
+          $directory = (Get-Item -LiteralPath (Join-Path $PWD artifacts/incoming-016/candidate)).FullName
+          node scripts/windows-incoming-016.cjs $env:MODE $directory $env:SIGNED_PINS
+          if ($LASTEXITCODE -ne 0) { throw 'Native scenario/signature contract refused; no native work started.' }
       - name: Focused refusal/transport/direct-feature regressions before any native operation
         run: node --test scripts/windows-incoming-016.test.cjs scripts/native-self-update-direct.test.cjs scripts/self-update-lab-feed.test.cjs scripts/native-self-update-lab.test.cjs scripts/native-unified-outgoing-target.test.cjs
       - name: Parse native lifecycle before execution
