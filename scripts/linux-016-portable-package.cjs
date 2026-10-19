@@ -320,10 +320,29 @@ function relative(name) {
 const GTK_METADATA_PATHS = new Set(['usr/lib/girepository-1.0/Polkit-1.0.typelib',
   'usr/lib/girepository-1.0/PolkitAgent-1.0.typelib']);
 const TYPELIB_MAGIC = Buffer.from('GOBJ\nMETADATA\r\n\x1a', 'binary');
+// The retained GTK launcher sets GIO_EXTRA_MODULES to this fixed directory.
+// https://docs.gtk.org/gio/struct.IOExtensionPoint.html
+const GIO_DIRECTORY = 'usr/lib/x86_64-linux-gnu/gio/modules';
+const GIO_TLS = `${GIO_DIRECTORY}/libgiognutls.so`;
+const GIO_PATHS = new Set([GIO_DIRECTORY, GIO_TLS]);
 function prohibited(name) {
-  return /(?:^|\/)(?:modules|polkit-1|dbus-1|systemd|DEBIAN)(?:\/|$)/i.test(name)
+  return /(?:^|\/)(?:modules|polkit-1|dbus-1|systemd|DEBIAN)(?:\/|$)/i.test(name) && !GIO_PATHS.has(name)
     || /creator-hub-deb-retirement-helper|com\.creatorworks\.hub\.Host\.service|com\.creatorworks\.hub\.retire|(?:^|\/)pkexec$|\.policy$/i.test(name)
     || /polkit/i.test(name) && !GTK_METADATA_PATHS.has(name);
+}
+function validateGioRuntime(name, entry, bytes) {
+  if (!GIO_PATHS.has(name)) return;
+  if (name === GIO_DIRECTORY) {
+    assert.ok(entry.kind === 'directory' && entry.mode === 0o755, 'GIO module directory must be ordinary mode 0755');
+    return;
+  }
+  assert.ok(entry.kind === 'file' && entry.mode === 0o644 && entry.size >= 64,
+    'GIO TLS module must be a regular mode 0644 shared library');
+  if (bytes !== undefined) {
+    require('./flatpak-package.cjs').validateElf(bytes);
+    assert.equal(bytes.readUInt16LE(16), 3, 'GIO TLS module must be an ELF shared object');
+    assert.deepEqual(record(bytes), { size: entry.size, sha256: entry.sha256 }, 'GIO TLS module changed during inspection');
+  }
 }
 function validateGtkMetadata(name, entry, bytes) {
   if (!GTK_METADATA_PATHS.has(name)) return;
@@ -392,6 +411,7 @@ function inventory(root, allowLinks = false) {
         folded.add(rel.toLowerCase()); assert.ok(folded.size <= LIMITS.entries, `AppDir has at least ${folded.size} entries; bound ${LIMITS.entries}; coordinate with Parent`);
         assert.ok(!(s.mode & 0o7000) && (s.isSymbolicLink() || !(s.mode & 0o002)), 'Privileged/world-writable AppDir mode refused');
         if (GTK_METADATA_PATHS.has(rel)) assert.ok(s.isFile() && !s.isSymbolicLink(), 'GObject typelib exception cannot be a directory or link');
+        if (GIO_PATHS.has(rel)) assert.ok(!s.isSymbolicLink(), 'GIO runtime exception cannot be a link');
         if (s.isSymbolicLink()) {
           assert.ok(allowLinks, 'Transport AppDir cannot contain links');
           const link = fs.readlinkSync(file), resolved = internalTarget(root, file);
@@ -403,6 +423,7 @@ function inventory(root, allowLinks = false) {
           entries[rel] = { kind: 'directory', mode: s.mode & 0o7777 }; visit(file, `${rel}/`);
         } else entries[rel] = fileRecord(file);
         validateGtkMetadata(rel, entries[rel], GTK_METADATA_PATHS.has(rel) ? read(file) : undefined);
+        validateGioRuntime(rel, entries[rel], rel === GIO_TLS ? read(file) : undefined);
         if (entries[rel].kind === 'file') total += entries[rel].size;
         assert.ok(total <= LIMITS.total, `Flattened AppDir has at least ${total} file bytes; bound ${LIMITS.total}; coordinate with Parent`);
         if (!allowLinks) assert.ok(entries[rel].mode === 0o755 || entries[rel].kind === 'file' && entries[rel].mode === 0o644, 'Noncanonical transport mode');
@@ -484,6 +505,9 @@ function dependencies(root, files, run, { includeHub = false } = {}) {
     assert.ok(files['usr/bin/creator-hub']?.kind === 'file', 'Missing fixed Hub executable for dependency inspection');
     result.primary.hub = ['usr/bin/creator-hub']; inspect('usr/bin/creator-hub');
   }
+  if (files[GIO_TLS]) {
+    result.primary.gioTls = [GIO_TLS]; inspect(GIO_TLS);
+  }
   result.hostBaseline = [...new Set(result.hostBaseline)].sort();
   result.scope = 'static ELF dependency closure only; loader search, ABI versions, dlopen/plugins and native execution unaccepted';
   if (result.unresolved.length) {
@@ -493,9 +517,9 @@ function dependencies(root, files, run, { includeHub = false } = {}) {
   return result;
 }
 function primaryAbiRequirements(root, dependencyEvidence, run) {
-  const result = { scope: 'primary Hub and WebKit symbol-version requirements only; host ABI availability, transitive versions and native execution unaccepted', files: {} };
+  const result = { scope: 'primary Hub, WebKit and declared GIO TLS symbol-version requirements only; host ABI availability, transitive versions and native execution unaccepted', files: {} };
   const names = [...new Set(Object.values(dependencyEvidence.primary).flat())].sort();
-  assert.ok(names.length > 0 && names.length <= 41, 'Bounded primary ABI inventory required');
+  assert.ok(names.length > 0 && names.length <= 42, 'Bounded primary ABI inventory required');
   for (const name of names) {
     const text = String(run('/usr/bin/readelf', ['--version-info', path.join(root, name)], { maxBuffer: 4 * 1024 * 1024 }));
     assert.ok(Buffer.byteLength(text) <= 4 * 1024 * 1024, 'Primary ABI report exceeds bound');
@@ -590,6 +614,7 @@ function validateInventory(inv) {
       assert.ok([0o644, 0o755].includes(entry.mode), 'Ordinary file mode required'); total += entry.size;
     }
     validateGtkMetadata(name, entry);
+    validateGioRuntime(name, entry);
   }
   assert.ok(total <= LIMITS.total && total === inv.unpackedSize, 'Inventory total bound differs');
 }
@@ -741,7 +766,7 @@ function fetchInputs(output, env = process.env) {
 }
 module.exports = { VERSION, TARGET, FEATURES, HOST_PROFILE, LIMITS, WORKFLOW, BRANCH, INPUTS, RECEIPTS, get MAIN_ALLOWED() { return mainAllowed(); }, RECEIPT_ALLOWED,
   record, flags, validatePins, admission, preflight, verifyProducer, verifyPrivateProof, collect, ZIP_STAGE, stageZip, validateReceipts,
-  relative, prohibited, validateGtkMetadata, retainAppImage, internalTarget, inventory, flatten, dependencies, primaryAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
+  relative, prohibited, validateGtkMetadata, validateGioRuntime, retainAppImage, internalTarget, inventory, flatten, dependencies, primaryAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
   hostProfile, verifyHostProfileInventory, attachHostProfile };
 if (require.main === module) (async () => {
   const [mode, ...args] = process.argv.slice(2);

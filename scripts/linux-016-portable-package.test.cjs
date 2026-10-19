@@ -389,6 +389,35 @@ test('actual Unix inventory checks typelib bytes and rejects links or executable
   fs.unlinkSync(file); put(root, 'target', TYPELIB); fs.symlinkSync('../../target', file);
   assert.throws(() => p.inventory(root, true), /typelib/);
 });
+test('GIO exception permits only its exact TLS runtime namespace, not arbitrary modules or policies', () => {
+  const directory = 'usr/lib/x86_64-linux-gnu/gio/modules', tls = `${directory}/libgiognutls.so`;
+  for (const name of [directory, tls]) assert.equal(p.prohibited(name), false);
+  for (const name of ['modules', 'usr/modules/other', `${directory}/other.so`, `${directory}/pkexec`,
+    `${directory}/x.policy`, `${directory}/libgiognutls.so.policy`, `${directory.toUpperCase()}/libgiognutls.so`,
+    'usr/lib/gio/modules/libgiognutls.so', `${directory}/modules/extra`]) assert.equal(p.prohibited(name), true, name);
+  const bytes = elf(), file = { kind: 'file', mode: 0o644, ...p.record(bytes) };
+  p.validateGioRuntime(directory, { kind: 'directory', mode: 0o755 });
+  p.validateGioRuntime(tls, file, bytes);
+  for (const entry of [{ ...file, mode: 0o755 }, { ...file, kind: 'directory' }, { ...file, kind: 'symlink' },
+    { ...file, mode: 0o4644 }, { ...file, size: 0 }]) assert.throws(() => p.validateGioRuntime(tls, entry, bytes));
+  assert.throws(() => p.validateGioRuntime(directory, { kind: 'file', mode: 0o755 }));
+  for (const changed of [Buffer.alloc(64), Buffer.from(bytes)]) {
+    if (changed.subarray(0, 4).equals(bytes.subarray(0, 4))) changed.writeUInt16LE(183, 18);
+    assert.throws(() => p.validateGioRuntime(tls, { ...file, ...p.record(changed) }, changed));
+  }
+  const executable = Buffer.from(bytes); executable.writeUInt16LE(2, 16);
+  assert.throws(() => p.validateGioRuntime(tls, { ...file, ...p.record(executable) }, executable), /shared object/);
+});
+test('actual Unix GIO inventory refuses links and records independently checked TLS ELF bytes', t => {
+  if (process.platform === 'win32') return t.skip('Real Unix modes and links belong to native Linux');
+  const root = temp(t), name = 'usr/lib/x86_64-linux-gnu/gio/modules/libgiognutls.so';
+  const file = put(root, name, elf());
+  assert.equal(p.inventory(root, true).entries[name].sha256, p.record(elf()).sha256);
+  fs.chmodSync(file, 0o755); assert.throws(() => p.inventory(root, true), /GIO TLS/);
+  fs.chmodSync(file, 0o644); fs.writeFileSync(file, 'not ELF'); assert.throws(() => p.inventory(root, true), /GIO TLS/);
+  fs.unlinkSync(file); put(root, 'target', elf()); fs.symlinkSync('../../../../../target', file);
+  assert.throws(() => p.inventory(root, true), /GIO runtime/);
+});
 test('first rejected entry keeps bounded path/stat/prefix evidence without changing the rejected file', t => {
   const root = temp(t), file = put(root, 'pkexec', Buffer.alloc(4096, 97));
   const before = fs.readFileSync(file), stat = fs.lstatSync(file);
@@ -561,6 +590,16 @@ test('new portable analysis includes Root dependencies and primary ABI needs, no
     assert.equal(file.executableSha256, p.record(elf()).sha256);
   }
   assert.match(abi.scope, /host ABI availability.*unaccepted/);
+  const tls = 'usr/lib/x86_64-linux-gnu/gio/modules/libgiognutls.so';
+  put(root, tls, elf()); entries[tls] = { kind: 'file', ...p.record(elf()), mode: 0o644 };
+  const withGio = p.dependencies(root, entries, dynamic, { includeHub: true });
+  assert.deepEqual(withGio.primary.gioTls, [tls]);
+  assert.ok(withGio.closure[tls]);
+  assert.throws(() => p.dependencies(root, entries, (command, args) => args[1].endsWith('libgiognutls.so')
+    ? ' (NEEDED) Shared library: [libmissing-tls.so.1]\n' : dynamic(command, args), { includeHub: true }), /libgiognutls.so -> libmissing-tls/);
+  const gioAbi = p.primaryAbiRequirements(root, withGio, () => versionText);
+  assert.equal(Object.keys(gioAbi.files).length, 7);
+  assert.deepEqual(gioAbi.files[tls].requiredSymbolVersions, ['GLIBC_2.34']);
 });
 test('bundler command is bundle-only, no-sign, same features and opaque module resource', () => {
   const args = p.bundleArgs(ROOT, '/owned/overlay.json'); assert.equal(args[1], 'bundle'); assert.ok(args.includes('--no-sign'));
