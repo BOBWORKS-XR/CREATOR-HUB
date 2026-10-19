@@ -61,6 +61,16 @@ test('frontend CI builds the default helper before running its CLI assertions', 
   assert.match(ci, /workspaces: native\/linux-deb-retirement/);
 });
 
+test('installed candidate CI builds the refusal-only helper before script tests', () => {
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/unified-installed-candidate.yml'), 'utf8');
+  const buildJob = workflow.split('  build:')[1].split('  installed:')[0];
+  const command = 'cargo build --locked --manifest-path native/linux-deb-retirement/Cargo.toml --no-default-features';
+  const build = buildJob.indexOf(command);
+  assert.ok(build >= 0, 'A clean checkout must build the default refusal-only CLI');
+  assert.ok(build < buildJob.indexOf('npm run test:scripts'), 'CLI assertions must follow their prerequisite');
+  assert.match(buildJob.slice(build + command.length), /^\r?\n/, 'No extra Cargo flags may enable transaction code');
+});
+
 test('built CLI refuses retirement and every arbitrary path/unsupported action', () => {
   const binary = path.join(crate, 'target/debug', `creator-hub-linux-deb-retirement${process.platform === 'win32' ? '.exe' : ''}`);
   assert.ok(fs.existsSync(binary), 'Run cargo build --locked for this crate first');

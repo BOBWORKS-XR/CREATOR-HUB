@@ -37,6 +37,18 @@ function temporary(t) {
   return root;
 }
 
+function archiveDirectory(python, directory) {
+  // The parser compares Python's canonical spelling, which can differ from Node's on Windows.
+  const result = spawnSync(python, ['-c', 'import os,sys;sys.stdout.write(os.path.realpath(sys.argv[1]))', directory],
+    { encoding: 'utf8', maxBuffer: 8192 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  const before = fs.statSync(directory, { bigint: true }), after = fs.statSync(result.stdout, { bigint: true });
+  assert.ok(after.isDirectory());
+  assert.equal(after.dev, before.dev); assert.equal(after.ino, before.ino);
+  return result.stdout;
+}
+
 test('diagnostic failure is intentional, never successful package admission; merge label is not head', () => {
   const proof = validateSource(binding());
   assert.equal(proof.sourceConclusion, 'failure'); assert.notEqual(PIN.head, PIN.merge);
@@ -115,12 +127,30 @@ test('standard archive parser preflight accepts only reviewed regular/dir layout
   const made = spawnSync(python, ['-c', MAKE_ARCHIVE, root, JSON.stringify(archiveSpec()), 'none'], { maxBuffer: 65536 });
   assert.equal(made.status, 0, String(made.stderr));
   const spec = JSON.parse(made.stdout), dest = path.join(root, 'input'); fs.mkdirSync(dest);
-  const result = spawnSync(python, ['-c', ARCHIVE_SCRIPT, JSON.stringify(spec), path.join(root, 'unit.zip'), dest], { maxBuffer: 65536 });
+  const result = spawnSync(python, ['-c', ARCHIVE_SCRIPT, JSON.stringify(spec), path.join(root, 'unit.zip'), archiveDirectory(python, dest)], { maxBuffer: 65536 });
   assert.equal(result.status, 0, String(result.stderr));
   const report = JSON.parse(result.stdout);
   assert.equal(report.members.length, 26); assert.equal(report.linkCount, 0);
   assert.deepEqual(fs.readdirSync(dest).sort(), ['builtin-manifest.json', 'signed-app-before-dmg.tar.gz']);
   assert.equal(fs.existsSync(path.join(root, 'Creator Hub.app')), false); // No local app unpack/native operation.
+});
+
+test('archive fixture uses Python canonical spelling without relaxing unredirected destination refusal', t => {
+  const root = temporary(t), python = process.platform === 'win32' ? 'python' : 'python3';
+  const made = spawnSync(python, ['-c', MAKE_ARCHIVE, root, JSON.stringify(archiveSpec()), 'none'], { maxBuffer: 65536 });
+  assert.equal(made.status, 0, String(made.stderr));
+  const spec = JSON.parse(made.stdout), dest = path.join(root, 'input'); fs.mkdirSync(dest);
+  const noncanonical = dest + path.sep + '.';
+  const parse = directory => spawnSync(python, ['-c', ARCHIVE_SCRIPT, JSON.stringify(spec), path.join(root, 'unit.zip'), directory], { maxBuffer: 65536 });
+  const refused = parse(noncanonical);
+  assert.notEqual(refused.status, 0);
+  assert.match(String(refused.stderr), /New unredirected empty input root required/);
+  assert.deepEqual(fs.readdirSync(dest), []);
+  const canonical = archiveDirectory(python, noncanonical);
+  assert.notEqual(canonical, noncanonical);
+  const accepted = parse(canonical);
+  assert.equal(accepted.status, 0, String(accepted.stderr));
+  assert.deepEqual(fs.readdirSync(dest).sort(), ['builtin-manifest.json', 'signed-app-before-dmg.tar.gz']);
 });
 
 test('escape, duplicate paths, links, special modes/types, extensions and trailing TAR bytes refuse before writing', t => {
@@ -129,8 +159,9 @@ test('escape, duplicate paths, links, special modes/types, extensions and traili
     const made = spawnSync(python, ['-c', MAKE_ARCHIVE, root, JSON.stringify(archiveSpec()), fault], { maxBuffer: 65536 });
     assert.equal(made.status, 0, String(made.stderr));
     const spec = JSON.parse(made.stdout), dest = path.join(root, fault); fs.mkdirSync(dest);
-    const result = spawnSync(python, ['-c', ARCHIVE_SCRIPT, JSON.stringify(spec), path.join(root, 'unit.zip'), dest], { maxBuffer: 65536 });
+    const result = spawnSync(python, ['-c', ARCHIVE_SCRIPT, JSON.stringify(spec), path.join(root, 'unit.zip'), archiveDirectory(python, dest)], { maxBuffer: 65536 });
     assert.notEqual(result.status, 0, `${fault} must refuse`);
+    assert.doesNotMatch(String(result.stderr), /New unredirected empty input root required/, `${fault} must reach archive validation`);
     assert.deepEqual(fs.readdirSync(dest), [], `${fault} wrote archive members before validation`);
   }
 });
@@ -143,8 +174,9 @@ test('archive pin/size corruption refuses before any selected-member output', t 
   for (const field of ['zipBytes', 'zipSha256', 'tarSha256', 'manifestSha256', 'rawTarBytes']) {
     const spec = { ...good, [field]: field.endsWith('Bytes') ? good[field] - 1 : 'a'.repeat(64) };
     const dest = path.join(root, field); fs.mkdirSync(dest);
-    const result = spawnSync(python, ['-c', ARCHIVE_SCRIPT, JSON.stringify(spec), path.join(root, 'unit.zip'), dest], { maxBuffer: 65536 });
+    const result = spawnSync(python, ['-c', ARCHIVE_SCRIPT, JSON.stringify(spec), path.join(root, 'unit.zip'), archiveDirectory(python, dest)], { maxBuffer: 65536 });
     assert.notEqual(result.status, 0); assert.deepEqual(fs.readdirSync(dest), []);
+    assert.doesNotMatch(String(result.stderr), /New unredirected empty input root required/, `${field} must reach pin/size validation`);
   }
 });
 

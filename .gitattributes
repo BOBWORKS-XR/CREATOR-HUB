@@ -3,3 +3,10 @@ tests/fixtures/** -text
 scripts/license-overrides/** -text
 src/sidequest-mark-white.svg -text
 unity/com.creatorworks.plugins/** -text
+
+# Exact Unix protocol bytes and source boundaries inspected by script tests.
+native/flatpak-native-activation/com.creatorworks.hub.Host.service text eol=lf
+packaging/flatpak/com.creatorworks.hub.desktop text eol=lf
+native/flatpak-host-launch/src/linux/identity.rs text eol=lf
+src-tauri/src/main.rs text eol=lf
+.github/workflows/linux-deb-helper-fixtures-014.yml text eol=lf
