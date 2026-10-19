@@ -364,6 +364,67 @@ pub(super) struct RetirementPlan {
     saved: Record,
 }
 
+struct RetirementLocks {
+    _root: File,
+    archive: Option<File>,
+    servers: Vec<File>,
+    files: Vec<(File, bool)>,
+    shortcuts: Vec<(usize, File, bool)>,
+}
+
+fn prior_retirement_evidence(archive: &Path) -> Result<bool, String> {
+    platform::reject_links(archive)?;
+    match fs::read_dir(archive) {
+        Ok(mut entries) => match entries.next() {
+            None => Ok(false),
+            Some(Ok(_)) => Ok(true),
+            Some(Err(_)) => Err("Cannot inspect prior retirement evidence.".into()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("Cannot inspect prior retirement evidence.".into()),
+    }
+}
+
+fn retirement_attempt<T, F: FnMut() -> Result<(), String>>(
+    mut prior_evidence: impl FnMut() -> Result<bool, String>,
+    preflight: &mut F,
+    mut on_started: impl FnMut(),
+    reserve: impl FnOnce(&mut F) -> Result<T, String>,
+    mutate: impl FnOnce(T, &mut F, &mut dyn FnMut()) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut signalled = false;
+    let mut started = || {
+        if !signalled {
+            signalled = true;
+            on_started();
+        }
+    };
+    match prior_evidence() {
+        Ok(true) => started(),
+        Ok(false) => {}
+        Err(error) => {
+            started();
+            return Err(error);
+        }
+    }
+    let locks = match reserve(preflight) {
+        Ok(locks) => locks,
+        Err(error) => {
+            // A pending journal may have appeared while a read-only check waited.
+            // An unreadable archive is unknown, never positive not-started proof.
+            if prior_evidence().unwrap_or(true) {
+                started();
+            }
+            return Err(error);
+        }
+    };
+    let result = mutate(locks, preflight, &mut started);
+    if result.is_err() && prior_evidence().unwrap_or(true) {
+        started();
+    }
+    result
+}
+
 fn archive_path(app: AppId) -> Result<PathBuf, String> {
     Ok(manager::child_dir("convergence")?
         .join("legacy-retirement")
@@ -656,20 +717,51 @@ impl RetirementPlan {
         Ok(())
     }
 
+    #[cfg(feature = "integrated-features")]
+    pub(super) fn has_prior_evidence(&self) -> Result<bool, String> {
+        prior_retirement_evidence(&self.archive)
+    }
+
     /// The coordinator must supply native consent and settings/client checks.
     /// This leaf is not exposed as a Tauri command or installer CLI flag.
     pub(super) fn retire_after_native_review(
         &self,
-        mut preflight: impl FnMut() -> Result<(), String>,
+        preflight: impl FnMut() -> Result<(), String>,
     ) -> Result<(), String> {
+        self.retire_after_native_review_batch(preflight, || {})
+    }
+
+    /// A missing start signal proves this call failed before mutation and found
+    /// no prior evidence. Existing/unknown evidence always signals conservatively.
+    /// The signal is emitted once, before the first possible mutation, not after it.
+    pub(super) fn retire_after_native_review_batch(
+        &self,
+        mut preflight: impl FnMut() -> Result<(), String>,
+        on_started: impl FnMut(),
+    ) -> Result<(), String> {
+        retirement_attempt(
+            || prior_retirement_evidence(&self.archive),
+            &mut preflight,
+            on_started,
+            |preflight| self.reserve_retirement(preflight),
+            |locks, preflight, on_started| self.retire_reserved(locks, preflight, on_started),
+        )
+    }
+
+    fn reserve_retirement(
+        &self,
+        preflight: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<RetirementLocks, String> {
         self.recheck()?;
         preflight()?;
         let root_guard = open(&self.root, false, true)?;
         self.check_root(&root_guard)?;
         platform::reject_links(&self.archive)?;
-        fs::create_dir_all(&self.archive)
-            .map_err(|_| "Cannot create retirement before-image directory.")?;
-        let archive_guard = open(&self.archive, false, true)?;
+        let archive_guard = match fs::symlink_metadata(&self.archive) {
+            Ok(_) => Some(open(&self.archive, false, true)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err("Cannot inspect retirement before-image directory.".into()),
+        };
         let mut server_guards = Vec::new();
         for (name, bytes, hash) in legacy::accepted_files(self.app)
             .iter()
@@ -715,16 +807,47 @@ impl RetirementPlan {
             held_shortcuts.push((i, file, moved));
         }
         preflight()?;
+        Ok(RetirementLocks {
+            _root: root_guard,
+            archive: archive_guard,
+            servers: server_guards,
+            files: held_files,
+            shortcuts: held_shortcuts,
+        })
+    }
+
+    fn retire_reserved(
+        &self,
+        locks: RetirementLocks,
+        preflight: &mut impl FnMut() -> Result<(), String>,
+        on_started: &mut dyn FnMut(),
+    ) -> Result<(), String> {
+        let RetirementLocks {
+            _root,
+            mut archive,
+            servers,
+            files,
+            shortcuts,
+        } = locks;
+        if archive.is_none() {
+            platform::reject_links(&self.archive)?;
+            on_started();
+            fs::create_dir_all(&self.archive)
+                .map_err(|_| "Cannot create retirement before-image directory.")?;
+            archive = Some(open(&self.archive, false, true)?);
+        }
         let journal = self.archive.join("before.json");
-        if !journal
-            .try_exists()
-            .map_err(|_| "Cannot inspect before-images.")?
-        {
-            save_new(
-                &journal,
-                &serde_json::to_vec(&self.saved).map_err(|_| "Cannot retain retirement record.")?,
-            )?;
+        let exists = journal.try_exists().map_err(|_| {
+            on_started();
+            "Cannot inspect before-images."
+        })?;
+        if !exists {
+            let bytes =
+                serde_json::to_vec(&self.saved).map_err(|_| "Cannot retain retirement record.")?;
+            on_started();
+            save_new(&journal, &bytes)?;
         } else {
+            on_started();
             let bytes = manager::bounded_read(&journal, MAX_JOURNAL)?;
             let current: Record =
                 serde_json::from_slice(&bytes).map_err(|_| "Unknown retirement before-images.")?;
@@ -733,13 +856,13 @@ impl RetirementPlan {
             }
         }
         let journal_guard = open(&journal, false, false)?;
-        for (i, (file, moved)) in held_files.iter().enumerate() {
+        for (i, (file, moved)) in files.iter().enumerate() {
             if !moved {
                 rename_held(file, &self.archive.join(format!("{i}.retired")))?;
             }
             preflight()?;
         }
-        for (i, file, moved) in &held_shortcuts {
+        for (i, file, moved) in &shortcuts {
             if !moved {
                 rename_held(file, &self.archive.join(format!("shortcut-{i}.lnk")))?;
             }
@@ -752,10 +875,10 @@ impl RetirementPlan {
         remove_registration(self.app, true, &self.saved.registration.uninstall)?;
         preflight()?;
         self.require_gui_absent()?;
-        drop(held_files);
-        drop(held_shortcuts);
-        drop(server_guards);
-        drop(archive_guard);
+        drop(files);
+        drop(shortcuts);
+        drop(servers);
+        drop(archive);
         self.recheck()?;
         let mut completed = self.saved.clone();
         completed.gui_retired_compatibility_retained = true;
@@ -780,6 +903,230 @@ impl RetirementPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn batch_preflight_refusals_before_mutation_never_signal_started() {
+        for fail_at in [1, 2] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("fixture GUI.exe");
+            let archive = temp.path().join("retained");
+            fs::write(&source, b"fixture GUI").unwrap();
+            let signals = Cell::new(0);
+            let checks = Cell::new(0);
+            let result = retirement_attempt(
+                || prior_retirement_evidence(&archive),
+                &mut || {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == fail_at {
+                        Err("known read-only refusal".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || signals.set(signals.get() + 1),
+                |preflight| {
+                    preflight()?;
+                    let held = open(&source, true, false)?;
+                    preflight()?;
+                    Ok(held)
+                },
+                |_, _, _| panic!("A failed read-only preflight must not enter mutation"),
+            );
+            assert_eq!(result.unwrap_err(), "known read-only refusal");
+            assert_eq!(signals.get(), 0);
+            assert!(!archive.exists());
+            assert_eq!(fs::read(&source).unwrap(), b"fixture GUI");
+        }
+    }
+
+    #[test]
+    fn batch_busy_file_lock_refusal_does_not_create_evidence_or_signal_started() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("fixture GUI.exe");
+        let archive = temp.path().join("retained");
+        fs::write(&source, b"fixture GUI").unwrap();
+        let busy = File::open(&source).unwrap();
+        let signals = Cell::new(0);
+        let result = retirement_attempt(
+            || prior_retirement_evidence(&archive),
+            &mut || Ok(()),
+            || signals.set(signals.get() + 1),
+            |preflight| {
+                preflight()?;
+                open(&source, true, false)
+            },
+            |_, _, _| panic!("A busy file must stop before mutation"),
+        );
+        assert!(result.is_err());
+        assert_eq!(signals.get(), 0);
+        assert!(!archive.exists());
+        drop(busy);
+        assert_eq!(fs::read(source).unwrap(), b"fixture GUI");
+    }
+
+    #[test]
+    fn batch_failure_after_first_move_signals_once_before_any_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("fixture GUI.exe");
+        let archive = temp.path().join("retained");
+        let destination = archive.join("0.retired");
+        let bytes = b"fixture GUI";
+        fs::write(&source, bytes).unwrap();
+        let signals = Cell::new(0);
+        let checks = Cell::new(0);
+        let result = retirement_attempt(
+            || prior_retirement_evidence(&archive),
+            &mut || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 3 {
+                    Err("failure after first move".into())
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                assert!(source.exists());
+                assert!(
+                    !archive.exists(),
+                    "Signal must precede even archive creation"
+                );
+                signals.set(signals.get() + 1);
+            },
+            |preflight| {
+                preflight()?;
+                let mut held = open(&source, true, false)?;
+                proof(
+                    &mut held,
+                    bytes.len() as u64,
+                    &format!("{:x}", Sha256::digest(bytes)),
+                )?;
+                preflight()?;
+                Ok(held)
+            },
+            |held, preflight, started| {
+                assert_eq!(signals.get(), 0);
+                started();
+                fs::create_dir(&archive).map_err(|error| error.to_string())?;
+                started();
+                save_new(&archive.join("before.json"), b"fixture before-images")?;
+                rename_held(&held, &destination)?;
+                preflight()
+            },
+        );
+        assert_eq!(result.unwrap_err(), "failure after first move");
+        assert_eq!(signals.get(), 1);
+        assert_eq!(checks.get(), 3);
+        assert!(!source.exists());
+        assert_eq!(fs::read(destination).unwrap(), bytes);
+        assert_eq!(
+            fs::read(archive.join("before.json")).unwrap(),
+            b"fixture before-images"
+        );
+    }
+
+    #[test]
+    fn batch_pending_evidence_signals_before_even_a_read_only_refusal() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("retained");
+        fs::create_dir(&archive).unwrap();
+        let journal = archive.join("before.json");
+        fs::write(&journal, b"pending or unknown previous evidence").unwrap();
+        let signals = Cell::new(0);
+        let result = retirement_attempt(
+            || prior_retirement_evidence(&archive),
+            &mut || Err("read-only refusal".into()),
+            || signals.set(signals.get() + 1),
+            |preflight| {
+                assert_eq!(signals.get(), 1, "Pending evidence is not a fresh attempt");
+                preflight()
+            },
+            |_, _, _| panic!("A refused preflight must not replay cleanup"),
+        );
+        assert!(result.is_err());
+        assert_eq!(signals.get(), 1);
+        assert_eq!(
+            fs::read(journal).unwrap(),
+            b"pending or unknown previous evidence"
+        );
+    }
+
+    #[test]
+    fn batch_appeared_or_unreadable_evidence_cannot_be_classified_not_started() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("retained");
+        let signals = Cell::new(0);
+        let result = retirement_attempt(
+            || prior_retirement_evidence(&archive),
+            &mut || Ok(()),
+            || signals.set(signals.get() + 1),
+            |_| {
+                // A separate actor publishes a pending journal during preflight.
+                fs::create_dir(&archive).unwrap();
+                fs::write(archive.join("before.json"), b"appeared evidence").unwrap();
+                Err::<(), _>("read-only refusal after external publication".into())
+            },
+            |_, _, _| panic!("A refused preflight cannot replay the appeared journal"),
+        );
+        assert!(result.is_err());
+        assert_eq!(signals.get(), 1);
+        assert_eq!(
+            fs::read(archive.join("before.json")).unwrap(),
+            b"appeared evidence"
+        );
+        signals.set(0);
+        let result = retirement_attempt(
+            || Err("evidence is unreadable".into()),
+            &mut || Ok(()),
+            || signals.set(signals.get() + 1),
+            |_| -> Result<(), String> { panic!("Unknown evidence must stop admission") },
+            |_, _, _| panic!("Unknown evidence cannot authorize mutation"),
+        );
+        assert!(result.is_err());
+        assert_eq!(signals.get(), 1);
+    }
+
+    #[test]
+    fn batch_reservation_is_read_only_and_compatibility_wrapper_uses_the_same_leaf() {
+        let source = include_str!("legacy_retirement_windows.rs");
+        let reserve = source
+            .split("fn reserve_retirement(")
+            .nth(1)
+            .unwrap()
+            .split("fn retire_reserved(")
+            .next()
+            .unwrap();
+        assert_eq!(reserve.matches("preflight()?").count(), 2);
+        for mutation in [
+            "create_dir",
+            "save_new(",
+            "rename_held(",
+            "remove_registration(",
+            "write_all(",
+        ] {
+            assert!(
+                !reserve.contains(mutation),
+                "Reservation cannot mutate via {mutation}"
+            );
+        }
+        let wrapper = source
+            .split("pub(super) fn retire_after_native_review(")
+            .nth(1)
+            .unwrap()
+            .split("pub(super) fn retire_after_native_review_batch(")
+            .next()
+            .unwrap();
+        assert!(wrapper.contains("self.retire_after_native_review_batch(preflight, || {})"));
+        let mutate = source
+            .split("fn retire_reserved(")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(mutate.find("on_started();").unwrap() < mutate.find("fs::create_dir_all").unwrap());
+        assert!(mutate.find("on_started();").unwrap() < mutate.find("save_new(").unwrap());
+    }
 
     struct LegacySession {
         child: std::process::Child,

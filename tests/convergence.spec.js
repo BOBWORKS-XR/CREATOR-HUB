@@ -1,22 +1,49 @@
 const { test, expect } = require('@playwright/test');
 
-async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false, reviewKey = 'a'.repeat(64) } = {}) {
-  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey }) => {
+async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false, reviewKey = 'a'.repeat(64), streamlined = false, failPhase = '', nativeCancel = false, holdMove = false, uncertain = false, invalidComplete = false } = {}) {
+  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete }) => {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     localStorage.setItem('creator-hub.auto-download', 'false');
     window.__CREATOR_HUB_CONVERGENCE_PROTOCOL__ = 1;
+    window.__CREATOR_HUB_FEATURE_PROTOCOL__ = streamlined ? 1 : 0;
     window.calls = [];
     window.report = {
       enabled: true, required, stage: 'review', settings: ['MCP project selection and options'],
       legacyApps: required ? [{ name: 'Creator Works MCP', path: 'C:/fixture-only/Creator Works MCP/launcher.exe' }] : [],
       backups: [], retirementAvailable: false, message: 'Your saved projects and settings stay where they are.',
       reviewKey,
+      streamlined, moveAvailable: true,
     };
     window.__TAURI__ = {
-      event: { listen: async () => () => {} },
+      event: { listen: async (name, callback) => {
+        if (name === 'convergence-progress') window.progress = callback;
+        return () => {};
+      } },
       core: { invoke: async (command, args) => {
         window.calls.push({ command, args });
         if (command === 'convergence_status') return window.report;
+        if (command === 'move_to_hub') {
+          window.phases = [];
+          if (holdMove) await new Promise(resolve => { window.releaseMove = resolve; });
+          if (nativeCancel) return { outcome: 'cancelled', phase: 'review', report: window.report, message: 'Native review cancelled. Settings, clients and installations were not changed.' };
+          for (const phase of ['backup', 'connections', 'cleanup']) {
+            window.phases.push(phase); window.progress?.({ payload: phase });
+            if (phase === failPhase) {
+              window.report = { ...window.report, stage: phase === 'backup' ? 'review' : phase === 'connections' ? 'backed-up' : 'connections-reviewed',
+                backups: phase === 'backup' ? [] : ['C:/fixture-only/original.bak'], moveAvailable: false };
+              return { outcome: 'stopped', phase, report: window.report,
+                message: `Migration stopped during ${phase}. Settings and backups retained.${phase === 'cleanup' && uncertain ? ' Cleanup may be partial.' : ' Standalone cleanup was not started.'} No automatic retry.` };
+            }
+          }
+          window.report = { ...window.report, stage: 'complete', required: false, legacyApps: invalidComplete ? window.report.legacyApps : [], retirementAvailable: false,
+            backups: Array.from({ length: 30 }, (_, index) => `C:/fixture-only/backups/exact-before-image-${index}.bak`) };
+          return { outcome: 'complete', phase: 'cleanup', report: window.report, message: 'Move complete. Settings and backups kept; standalone cleanup verified.' };
+        }
+        if (command === 'inspect_convergence_outcome') {
+          window.report = { ...window.report, stage: 'review', moveAvailable: !uncertain,
+            message: uncertain ? 'Retained state inspected. Partial or uncertain native outcome needs recovery review; no transaction retried.' : 'Retained state inspected. No cleanup was started; fresh native review is available.' };
+          return window.report;
+        }
         if (command === 'prepare_convergence') {
           if (holdPrepare) await new Promise(resolve => { window.releasePrepare = resolve; });
           if (failPrepare) throw Error('Settings changed; original retained.');
@@ -38,13 +65,15 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
           return window.report;
         }
         if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
+        if (command === 'feature_status') return { integrated: streamlined, features: streamlined ? ['setup', 'mcp'] : [] };
+        if (command === 'project_inventory') return { projects: [], editors: [], errors: [], unityCliAvailable: false };
         if (command === 'pending_hosted_restore') return [];
         if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: false, trusted: false, availableVersion: '1.0.0', updateAvailable: false, issue: null })) };
         if (command === 'hub_update_status') return { currentVersion: '0.1.14', availableVersion: null, downloaded: false };
         return null;
       } },
     };
-  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey });
+  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete });
   await page.goto('http://127.0.0.1:4188');
 }
 
@@ -169,3 +198,117 @@ for (const viewport of [{ width: 1100, height: 785 }, { width: 390, height: 844 
     expect(await page.evaluate(() => window.calls.some(call => /uninstall|remove.*app/i.test(call.command)))).toBe(false);
   });
 }
+
+for (const viewport of [{ width: 1100, height: 785 }, { width: 390, height: 844 }]) {
+  test(`one integrated guide stays centered and completes from one action at ${viewport.width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await load(page, { streamlined: true });
+    await expect(page.locator('#convergence-explanation > li')).toHaveCount(3);
+    await expect(page.locator('#convergence-move')).toHaveText('Move to Hub');
+    await expect(page.locator('#convergence-later')).toHaveText('Not now');
+    for (const id of ['prepare', 'connections', 'retire', 'refresh']) await expect(page.locator(`#convergence-${id}`)).not.toBeVisible();
+    const box = await page.locator('#convergence-dialog').boundingBox();
+    expect(Math.abs(box.x - (viewport.width - box.x - box.width))).toBeLessThan(2);
+    expect(Math.abs(box.y - (viewport.height - box.y - box.height))).toBeLessThan(2);
+    expect(box.x).toBeGreaterThanOrEqual(10);
+    expect(box.y).toBeGreaterThanOrEqual(10);
+    await page.screenshot({ path: testInfo.outputPath('single-move-guide.png') });
+    await page.locator('#convergence-move').click();
+    await expect(page.locator('#convergence-title')).toHaveText('Move complete');
+    await expect(page.locator('#convergence-progress')).toContainText('standalone cleanup verified');
+    await expect(page.locator('#convergence-backups')).not.toHaveAttribute('open', '');
+    await expect(page.locator('#convergence-details')).not.toBeVisible();
+    await expect(page.locator('#convergence-details > li')).toHaveCount(31);
+    expect(await page.evaluate(() => window.phases)).toEqual(['backup', 'connections', 'cleanup']);
+    expect(await page.evaluate(() => window.calls.filter(call => /convergence|move_to_hub/.test(call.command)).map(call => call.command))).toEqual(['convergence_status', 'move_to_hub']);
+    expect(await page.evaluate(() => window.calls.find(call => call.command === 'move_to_hub').args)).toEqual({});
+    expect(await page.evaluate(() => window.calls.some(call => ['start_hosted_app', 'hosted_app_call'].includes(call.command)))).toBe(false);
+    expect(await page.locator('#convergence-dialog').evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
+    await page.screenshot({ path: testInfo.outputPath('single-move-complete.png') });
+    await page.locator('#convergence-later').click();
+    await expect(page.locator('#convergence-dialog')).not.toBeVisible();
+    await expect(page.locator('#convergence-reopen')).not.toBeVisible();
+  });
+}
+
+for (const phase of ['backup', 'connections', 'cleanup']) test(`integrated ${phase} error stops the sequence without claiming completion`, async ({ page }) => {
+  await load(page, { streamlined: true, failPhase: phase });
+  await page.locator('#convergence-move').click();
+  await expect(page.locator('#convergence-error')).toContainText(`stopped during ${phase}`);
+  await expect(page.locator('#convergence-error')).not.toContainText('Cleanup may be partial');
+  await expect(page.locator('#convergence-title')).toHaveText('Move to Hub');
+  await expect(page.locator('#convergence-move')).not.toBeVisible();
+  expect(await page.evaluate(() => window.phases)).toEqual(['backup', 'connections', 'cleanup'].slice(0, ['backup', 'connections', 'cleanup'].indexOf(phase) + 1));
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'move_to_hub').length)).toBe(1);
+});
+
+test('known unchanged cleanup refusal permits a fresh review through read-only inspection', async ({ page }) => {
+  await load(page, { streamlined: true, failPhase: 'cleanup' });
+  await page.locator('#convergence-move').click();
+  await expect(page.locator('#convergence-error')).toContainText('cleanup was not started');
+  await page.locator('#convergence-refresh').click();
+  await expect(page.locator('#convergence-move')).toBeVisible();
+  expect(await page.evaluate(() => window.calls.filter(call => /move_to_hub|inspect_convergence_outcome/.test(call.command)).map(call => call.command))).toEqual(['move_to_hub', 'inspect_convergence_outcome']);
+});
+
+test('partial retirement can be inspected but is never automatically retried or re-enabled', async ({ page }) => {
+  await load(page, { streamlined: true, failPhase: 'cleanup', uncertain: true });
+  await page.locator('#convergence-move').click();
+  await expect(page.locator('#convergence-error')).toContainText('Cleanup may be partial');
+  await page.locator('#convergence-refresh').click();
+  await expect(page.locator('#convergence-progress')).toContainText('needs recovery review');
+  await expect(page.locator('#convergence-move')).not.toBeVisible();
+  await page.locator('#convergence-later').click();
+  await page.locator('#convergence-reopen').click();
+  await expect(page.locator('#convergence-move')).not.toBeVisible();
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'move_to_hub').length)).toBe(1);
+});
+
+test('native cancellation and Not now do not start migration phases', async ({ page }) => {
+  await load(page, { streamlined: true, nativeCancel: true });
+  await page.locator('#convergence-move').click();
+  await expect(page.locator('#convergence-progress')).toContainText('were not changed');
+  await expect(page.locator('#convergence-move')).toBeEnabled();
+  expect(await page.evaluate(() => window.phases)).toEqual([]);
+  await page.locator('#convergence-later').click();
+  await expect(page.locator('#convergence-dialog')).not.toBeVisible();
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'move_to_hub').length)).toBe(1);
+});
+
+test('integrated busy state prevents repeat execution, inspection and dismissal', async ({ page }) => {
+  await load(page, { streamlined: true, holdMove: true });
+  await page.locator('#convergence-move').click();
+  await expect.poll(() => page.evaluate(() => typeof window.releaseMove)).toBe('function');
+  await expect(page.locator('#convergence-move')).toBeDisabled();
+  await expect(page.locator('#convergence-later')).toBeDisabled();
+  await page.evaluate(() => document.querySelector('#convergence-move').dispatchEvent(new MouseEvent('click')));
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#convergence-dialog')).toBeVisible();
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'move_to_hub').length)).toBe(1);
+  await page.evaluate(() => window.releaseMove());
+  await expect(page.locator('#convergence-title')).toHaveText('Move complete');
+});
+
+test('inconsistent native completion cannot imply verified retirement', async ({ page }) => {
+  await load(page, { streamlined: true, invalidComplete: true });
+  await page.locator('#convergence-move').click();
+  await expect(page.locator('#convergence-error')).toContainText('outcome needs review', { ignoreCase: true });
+  await expect(page.locator('#convergence-title')).toHaveText('Move to Hub');
+  await expect(page.locator('#convergence-move')).not.toBeVisible();
+});
+
+test('integrated fresh install and skipping the guide perform no migration writes', async ({ page }) => {
+  await load(page, { streamlined: true, required: false });
+  await expect.poll(() => page.evaluate(() => window.calls.some(call => call.command === 'app_inventory'))).toBe(true);
+  await expect(page.locator('#convergence-dialog')).not.toBeVisible();
+  expect(await page.evaluate(() => window.calls.some(call => call.command === 'move_to_hub'))).toBe(false);
+});
+
+for (const dismiss of ['Not now', 'Escape']) test(`integrated ${dismiss} before moving performs no migration writes`, async ({ page }) => {
+  await load(page, { streamlined: true });
+  await expect(page.locator('#convergence-dialog')).toBeVisible();
+  if (dismiss === 'Escape') await page.keyboard.press('Escape');
+  else await page.locator('#convergence-later').click();
+  await expect(page.locator('#convergence-dialog')).not.toBeVisible();
+  expect(await page.evaluate(() => window.calls.some(call => /move_to_hub|prepare_convergence|migrate_convergence_connections|retire_convergence_apps/.test(call.command)))).toBe(false);
+});

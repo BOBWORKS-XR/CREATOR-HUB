@@ -55,7 +55,7 @@ test('native terms and preference commands have exact trusted-main-window grants
   for (const [module, commands] of [
     ['usage_terms', ['usage_terms_status', 'accept_usage_terms']],
     ['preferences', ['hub_preferences_status', 'set_hub_preference']],
-    ['convergence', ['convergence_status', 'refresh_convergence', 'prepare_convergence', 'migrate_convergence_connections', 'retire_convergence_apps']],
+    ['convergence', ['convergence_status', 'refresh_convergence', 'prepare_convergence', 'migrate_convergence_connections', 'retire_convergence_apps', 'move_to_hub', 'inspect_convergence_outcome']],
   ]) {
     for (const command of commands) {
       assert.ok(main.includes(`${module}::${command},`), `${command} missing from invoke handler`);
@@ -65,6 +65,11 @@ test('native terms and preference commands have exact trusted-main-window grants
   }
   assert.ok(main.includes('invoke.message.headers().get("x-creator-shell-key")'));
   assert.ok(main.includes('Hub commands are available only to its trusted shell.'));
+  const transport = fs.readFileSync(path.join(root, 'src', 'flatpak_rpc.rs'), 'utf8');
+  const nativeOnly = registry(transport, /NATIVE_WINDOW_ONLY: &\[&str\] = &\[([\s\S]*?)\];/, /^"[a-z_]+"$/);
+  for (const command of ['move_to_hub', 'inspect_convergence_outcome']) {
+    assert.ok(nativeOnly.includes(command), `${command} must not be exported through the sandbox command bridge`);
+  }
 });
 
 test('Hub self-update commands are registered and allowed only in the main window', () => {

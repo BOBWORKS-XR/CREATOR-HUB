@@ -18,7 +18,15 @@ export function controller(root, api, feature) {
   const error = field('error');
   const status = field('status');
   const controls = field('controls');
-  const call = (command, args = {}) => api.invoke('feature_call', { feature, command, args });
+  const call = async (command, args = {}) => {
+    try { return await api.invoke('feature_call', { feature, command, args }); }
+    finally {
+      if (feature === 'mcp' && ['save_config', 'one_click_setup', 'install_unity_extension',
+        'update_configured_unity_extensions', 'review_product_settings'].includes(command)) {
+        window.CreatorProjects?.invalidate();
+      }
+    }
+  };
   const update = () => {
     controls.disabled = working || !available || poisoned || locked;
     for (const button of root.querySelectorAll('[data-native-action]')) button.disabled = working || !available || poisoned;

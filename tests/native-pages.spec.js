@@ -44,7 +44,11 @@ async function open(page, options = {}) {
         if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, builtIn: true, installed: true, trusted: true, hostedCompatible: true, hostedPreview: 'writable', installedVersion: app === 'mcp' ? '2.7.7' : '0.3.7' })) };
         if (command === 'hub_update_status') return { currentVersion: '0.1.14', availableVersion: null, downloaded: false };
         if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
-        if (command === 'project_inventory') return { projects: [], warnings: [] };
+        if (command === 'project_inventory') return { projects: options.homeProjects ? window.savedConfig.channels.map(channel => ({
+          id: channel.id, name: channel.name, path: channel.unity_project_path, sdk: 'creator', sdkLabel: 'Creator SDK',
+          unityVersion: '6000.3.21f1', source: 'Creator Works MCP', selected: channel.id === window.savedConfig.active_channel_id,
+          bridge: options.bridgeStatuses?.[channel.unity_project_path],
+        })) : [], warnings: [] };
         if (command === 'pending_hosted_restore') return [...window.pendingRestore];
         if (command === 'restore_hosted_app') return { direct: true, app: args.app };
         if (command === 'complete_hosted_restore') { window.pendingRestore = window.pendingRestore.filter(app => app !== args.app); return; }
@@ -193,6 +197,52 @@ test('a failed bridge check is not shown as a missing or current bridge and is n
   await expect(row).not.toContainText('Bridge current');
   await expect(row).not.toContainText('Bridge not installed');
   expect((await commands(page, 'get_unity_extension_status')).length).toBe(1);
+});
+
+test('Home refreshes selection after an MCP change, not after read-only checks or ordinary navigation', async ({ page }) => {
+  await open(page, { shell: true, homeProjects: true, channels: [
+    { id: 'one', name: 'First project', unity_project_path: '/projects/First', enabled: true },
+    { id: 'two', name: 'Second project', unity_project_path: '/projects/Second', enabled: true },
+  ] });
+  const selected = page.locator('.project-row[data-mcp-selected="true"]');
+  const inventoryCount = () => page.evaluate(() => calls.filter(call => call.command === 'project_inventory').length);
+  await expect(selected).toContainText('First project');
+  await page.locator('#project-search').fill('project');
+  expect(await inventoryCount()).toBe(1);
+  await selectSuiteView(page, 'mcp');
+  await expect(field(page, 'mcp', 'controls')).toBeEnabled();
+  await field(page, 'mcp', 'check').click();
+  await expect(field(page, 'mcp', 'status')).toHaveText('Ready');
+  await selectSuiteView(page, 'hub');
+  expect(await inventoryCount()).toBe(1);
+  await selectSuiteView(page, 'mcp');
+  await page.getByRole('button', { name: 'Select Second project for MCP', exact: true }).click();
+  await expect(field(page, 'mcp', 'status')).toHaveText('Ready');
+  expect(await inventoryCount()).toBe(1);
+  await selectSuiteView(page, 'hub');
+  await expect(selected).toContainText('Second project');
+  await expect(page.locator('#project-search')).toHaveValue('project');
+  expect(await inventoryCount()).toBe(2);
+  await selectSuiteView(page, 'mcp'); await selectSuiteView(page, 'hub');
+  expect(await inventoryCount()).toBe(2);
+});
+
+test('Home waits for an in-flight MCP selection to finish before refreshing its badges', async ({ page }) => {
+  await open(page, { shell: true, homeProjects: true, channels: [
+    { id: 'one', name: 'First project', unity_project_path: '/projects/First', enabled: true },
+    { id: 'two', name: 'Second project', unity_project_path: '/projects/Second', enabled: true },
+  ] });
+  await expect(page.locator('.project-row[data-mcp-selected="true"]')).toContainText('First project');
+  await selectSuiteView(page, 'mcp');
+  await expect(field(page, 'mcp', 'controls')).toBeEnabled();
+  await page.evaluate(() => { window.hold = 'save_config'; });
+  await page.getByRole('button', { name: 'Select Second project for MCP', exact: true }).click();
+  await page.waitForFunction(() => pending.save_config);
+  await selectSuiteView(page, 'hub');
+  expect(await page.evaluate(() => calls.filter(call => call.command === 'project_inventory').length)).toBe(1);
+  await page.evaluate(() => { window.hold = null; pending.save_config(); });
+  await expect(page.locator('.project-row[data-mcp-selected="true"]')).toContainText('Second project');
+  expect(await page.evaluate(() => calls.filter(call => call.command === 'project_inventory').length)).toBe(2);
 });
 
 test('actual Root navigation opens Setup and MCP as pages without hosted startup or frame authority', async ({ page }) => {

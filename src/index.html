@@ -138,7 +138,13 @@
   <dialog id="convergence-dialog" class="convergence-dialog" aria-labelledby="convergence-title">
     <h2 id="convergence-title">Move to unified Creator Hub</h2>
     <p id="convergence-summary">Your MCP and Project Setup settings can be used by Hub. Unity projects stay where they are.</p>
-    <ul id="convergence-details"></ul>
+    <ul id="convergence-explanation" hidden>
+      <li>Back up settings, add missing projects without duplicates, and keep your current preferences and selection.</li>
+      <li>Reconnect recognised AI setups to Hub without changing your other MCP connections.</li>
+      <li>Remove recognised old app launchers only after checks pass. Keep settings, Unity projects and required runtime files.</li>
+    </ul>
+    <p id="convergence-progress" role="status" aria-live="polite" hidden></p>
+    <details id="convergence-backups"><summary>Backup and retained-state details</summary><ul id="convergence-details"></ul></details>
     <p id="convergence-error" role="alert" hidden></p>
     <div class="convergence-actions">
       <button id="convergence-later" class="text-button" type="button">Keep existing apps for now</button>
@@ -146,6 +152,7 @@
       <button id="convergence-prepare" class="primary-button" type="button">Back up and continue</button>
       <button id="convergence-connections" class="primary-button" type="button" hidden>Move existing connections</button>
       <button id="convergence-retire" class="primary-button" type="button" hidden>Finish migration</button>
+      <button id="convergence-move" class="primary-button" type="button" hidden>Move to Hub</button>
     </div>
   </dialog>
   <script src="convergence.js"></script>

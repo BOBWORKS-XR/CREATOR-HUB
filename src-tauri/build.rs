@@ -43,6 +43,8 @@ fn main() {
             "migrate_convergence_connections",
             "refresh_convergence",
             "retire_convergence_apps",
+            "move_to_hub",
+            "inspect_convergence_outcome",
             "open_resource",
             "open_plugins_website",
             "community_catalogue",

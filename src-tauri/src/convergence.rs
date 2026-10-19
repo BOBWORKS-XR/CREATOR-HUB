@@ -23,6 +23,8 @@ struct LegacyApp {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
+    streamlined: bool,
+    move_available: bool,
     enabled: bool,
     required: bool,
     stage: &'static str,
@@ -62,6 +64,87 @@ struct ReviewRecord {
 
 fn record_path() -> Result<PathBuf, String> {
     Ok(manager::child_dir("convergence")?.join("review-v1.json"))
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BatchRecord {
+    policy: u32,
+    phase: String,
+    outcome: String,
+    review_key: String,
+    retry_blocked: bool,
+}
+
+fn batch_path() -> Result<PathBuf, String> {
+    Ok(manager::child_dir("convergence")?.join("move-v1.json"))
+}
+
+fn read_batch_at(path: &std::path::Path) -> Result<Option<BatchRecord>, String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Cannot inspect the previous Move to Hub outcome.".into()),
+        Ok(_) => {}
+    }
+    let record: BatchRecord = serde_json::from_slice(&manager::bounded_read(path, 4096)?)
+        .map_err(|_| "Unknown Move to Hub record; keep retained files for review.")?;
+    if record.policy != POLICY
+        || !["backup", "connections", "cleanup"].contains(&record.phase.as_str())
+        || !["started", "stopped", "complete"].contains(&record.outcome.as_str())
+        || record.review_key.len() != 64
+        || !record
+            .review_key
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || (record.outcome == "complete" && (record.phase != "cleanup" || record.retry_blocked))
+    {
+        return Err("Unknown Move to Hub record; no operation was retried.".into());
+    }
+    Ok(Some(record))
+}
+
+fn batch_needs_review(record: &BatchRecord) -> bool {
+    record.outcome == "started" || record.retry_blocked
+}
+
+#[cfg(any(feature = "integrated-features", test))]
+fn record_batch_at(path: &std::path::Path, record: &BatchRecord) -> Result<(), String> {
+    // Never overwrite an unknown/newer record, including on an error path.
+    read_batch_at(path)?;
+    let bytes = serde_json::to_vec(record).map_err(|_| "Cannot encode migration phase.")?;
+    manager::atomic_write(path, &bytes)?;
+    if manager::bounded_read(path, 4096)? != bytes {
+        return Err(
+            "Migration phase publication could not be verified. Do not repeat the move.".into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "integrated-features", test))]
+struct BatchJournal {
+    path: PathBuf,
+    before: Option<Vec<u8>>,
+}
+
+#[cfg(any(feature = "integrated-features", test))]
+impl BatchJournal {
+    fn open(path: PathBuf) -> Result<Self, String> {
+        read_batch_at(&path)?;
+        let before = stores::storage::read_bytes(&path)?;
+        Ok(Self { path, before })
+    }
+
+    fn record(&mut self, record: &BatchRecord) -> Result<(), String> {
+        if stores::storage::read_bytes(&self.path)? != self.before {
+            return Err(
+                "The native migration phase record changed; inspect it before continuing.".into(),
+            );
+        }
+        record_batch_at(&self.path, record)?;
+        self.before = stores::storage::read_bytes(&self.path)?;
+        Ok(())
+    }
 }
 
 fn read_review_at(path: &std::path::Path) -> Result<Option<ReviewRecord>, String> {
@@ -185,7 +268,12 @@ fn inspect() -> Result<Plan, String> {
     let legacy_apps = legacy_apps()?;
     // Validate even when legacy apps exist; do not short-circuit a newer policy.
     let already_reviewed = reviewed_snapshots_at(&record_path()?, &snapshots)?;
-    let pending_retirement = retirement_pending()?;
+    let pending_batch = read_batch_at(&batch_path()?)?;
+    let uncertain_batch = pending_batch.as_ref().is_some_and(batch_needs_review);
+    let pending_retirement = retirement_pending()?
+        || pending_batch
+            .as_ref()
+            .is_some_and(|record| record.outcome != "complete");
     let review_key = prompt_review_key(&snapshots, &legacy_apps, pending_retirement)?;
     let already_using_hub = legacy_apps.is_empty()
         && !pending_retirement
@@ -202,12 +290,14 @@ fn inspect() -> Result<Plan, String> {
     Ok(Plan {
         stores: snapshots,
         retained_images: Vec::new(),
-        retry_allowed: true,
+        retry_allowed: !uncertain_batch,
         #[cfg(windows)]
         retirement_dependencies: None,
         #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
         retirement_linux: None,
         report: Report {
+            streamlined: cfg!(feature = "integrated-features"),
+            move_available: !uncertain_batch,
             enabled: true,
             required,
             stage: "review",
@@ -216,7 +306,11 @@ fn inspect() -> Result<Plan, String> {
             backups: vec![],
             retirement_available: false,
             review_key: Some(review_key),
-            message: if pending_retirement {
+            message: if uncertain_batch {
+                "An earlier Move to Hub operation has an uncertain or partial outcome. Settings, backups and recovery records were kept. Review the native phase record before repeating any operation."
+            } else if pending_batch.as_ref().is_some_and(|record| record.outcome != "complete") {
+                "An earlier Move to Hub stopped before completion. Retained state can be inspected before a fresh native review. No transaction is replayed."
+            } else if pending_retirement {
                 "An earlier standalone-app cleanup was interrupted. Review fresh backups and connections before resuming; no saved operation is replayed."
             } else if already_using_hub {
                 "Your MCP settings already use Hub's verified runtime. No standalone apps were found."
@@ -468,6 +562,8 @@ struct ProjectImport {
     bytes: Vec<u8>,
     added: usize,
     already_present: usize,
+    current_sha256: String,
+    legacy_sha256: String,
 }
 
 fn project_key(channel: &Value) -> Result<String, String> {
@@ -555,6 +651,8 @@ fn merge_project_settings(current: &[u8], legacy: &[u8]) -> Result<ProjectImport
         bytes,
         added,
         already_present,
+        current_sha256: format!("{:x}", Sha256::digest(current)),
+        legacy_sha256: format!("{:x}", Sha256::digest(legacy)),
     })
 }
 
@@ -603,6 +701,22 @@ fn check_settings_recovery(base: &stores::Roots) -> Result<PathBuf, String> {
 }
 
 fn import_missing_projects(plan: &mut Plan, base: &stores::Roots) -> Result<usize, String> {
+    can_prepare(plan)?;
+    if !settings_conflict(plan) {
+        return Err("The settings changed. Check again before importing projects.".into());
+    }
+    let import = merge_project_settings(
+        plan.stores[0].bytes().unwrap(),
+        plan.stores[1].bytes().unwrap(),
+    )?;
+    import_reviewed_projects(plan, base, &import)
+}
+
+fn import_reviewed_projects(
+    plan: &mut Plan,
+    base: &stores::Roots,
+    import: &ProjectImport,
+) -> Result<usize, String> {
     use crate::convergence_recovery::{ReviewedWrite, Transaction};
     can_prepare(plan)?;
     if !settings_conflict(plan) {
@@ -618,10 +732,14 @@ fn import_missing_projects(plan: &mut Plan, base: &stores::Roots) -> Result<usiz
             return Err("Both original configurations must have verified backups before importing projects.".into());
         }
     }
-    let import = merge_project_settings(
-        plan.stores[0].bytes().unwrap(),
-        plan.stores[1].bytes().unwrap(),
-    )?;
+    if format!("{:x}", Sha256::digest(plan.stores[0].bytes().unwrap())) != import.current_sha256
+        || format!("{:x}", Sha256::digest(plan.stores[1].bytes().unwrap())) != import.legacy_sha256
+    {
+        return Err(
+            "The approved project-import before-images changed. Nothing was imported.".into(),
+        );
+    }
+    stores::validate(stores::Store::McpCurrent, &import.bytes)?;
     let mut writes = Vec::new();
     let mut reservations = Vec::new();
     for saved in &plan.stores[..2] {
@@ -809,6 +927,37 @@ pub async fn refresh_convergence(handle: tauri::AppHandle) -> Result<Report, Str
         *saved = Some(fresh);
         Ok(report)
     }).await.map_err(|_| "Migration refresh failed; existing data were kept.")?
+}
+
+// Read-only inspection is available even when mutation admission is blocked.
+// It never clears an uncertain journal, resumes a transaction or retries cleanup.
+#[tauri::command]
+pub async fn inspect_convergence_outcome(handle: tauri::AppHandle) -> Result<Report, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        require_builtin()?;
+        let _operation = handle.state::<manager::Manager>().begin()?;
+        let state = handle.state::<Convergence>();
+        let mut saved = state.0.lock().map_err(|_| "Migration state is unavailable.")?;
+        let mut fresh = inspect()?;
+        let record = read_batch_at(&batch_path()?)?;
+        let prior_blocked = saved.as_ref().is_some_and(|plan| !plan.retry_allowed);
+        if !inspection_can_admit(prior_blocked, record.as_ref()) {
+            fresh.retry_allowed = false;
+            fresh.report.move_available = false;
+            fresh.report.required = true;
+            fresh.report.message = "Retained state was inspected without changing it. A partial or uncertain native outcome still needs explicit recovery review. No transaction was retried.".into();
+        }
+        let report = fresh.report.clone();
+        *saved = Some(fresh);
+        Ok(report)
+    }).await.map_err(|_| "Retained-state inspection failed. No operation was replayed.")?
+}
+
+fn inspection_can_admit(prior_blocked: bool, record: Option<&BatchRecord>) -> bool {
+    match record {
+        Some(record) => !batch_needs_review(record),
+        None => !prior_blocked,
+    }
 }
 
 #[tauri::command]
@@ -1145,6 +1294,10 @@ pub async fn migrate_convergence_connections(handle: tauri::AppHandle) -> Result
 
 fn retirement_diagnostics(plan: &mut Plan, manager: &manager::Manager) -> Result<String, String> {
     let _operation = manager.begin()?;
+    retirement_diagnostics_locked(plan)
+}
+
+fn retirement_diagnostics_locked(plan: &mut Plan) -> Result<String, String> {
     recheck(plan)?;
     #[cfg(windows)]
     {
@@ -1211,6 +1364,345 @@ fn retirement_diagnostics(plan: &mut Plan, manager: &manager::Manager) -> Result
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     Ok("Settings and existing connections are reviewed. Old apps were kept: native removal and connection acceptance are not completed on this platform.".into())
+}
+
+// Opaque native authority, minted only after the service's snapshot-bound
+// native dialog. Neither renderer arguments nor persisted review records mint it.
+#[cfg(feature = "integrated-features")]
+pub(crate) struct NativeConsent {
+    route_key: String,
+    review_key: String,
+}
+
+#[cfg(feature = "integrated-features")]
+impl NativeConsent {
+    pub(crate) fn authorize_route(&self, key: &str) -> Result<(), String> {
+        if self.route_key != key {
+            return Err("The signed routing review changed; no route was activated.".into());
+        }
+        Ok(())
+    }
+
+    fn recheck(&self, plan: &Plan) -> Result<(), String> {
+        self.recheck_at(plan, &legacy_apps()?, retirement_pending()?)
+    }
+
+    fn recheck_at(&self, plan: &Plan, apps: &[LegacyApp], pending: bool) -> Result<(), String> {
+        can_prepare(plan)?;
+        if prompt_review_key(&plan.stores, apps, pending)? != self.review_key {
+            return Err(
+                "Settings or standalone app state changed during native consent. Review again."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveOutcome {
+    outcome: &'static str,
+    phase: &'static str,
+    report: Report,
+    message: String,
+}
+
+#[cfg(feature = "integrated-features")]
+fn retain_batch_settings(
+    plan: &mut Plan,
+    base: &stores::Roots,
+    import: Option<&ProjectImport>,
+    native_recheck: impl Fn() -> Result<(), String>,
+) -> Result<(), String> {
+    can_prepare(plan)?;
+    native_recheck()?;
+    close_reviewed_guis(plan)?;
+    retain_after_close(plan, base, import, native_recheck)
+}
+
+#[cfg(any(feature = "integrated-features", test))]
+fn retain_after_close(
+    plan: &mut Plan,
+    base: &stores::Roots,
+    import: Option<&ProjectImport>,
+    native_recheck: impl Fn() -> Result<(), String>,
+) -> Result<(), String> {
+    can_prepare(plan)?;
+    native_recheck()?;
+    let mut images = Vec::new();
+    for snapshot in &plan.stores {
+        if let Some(before) = snapshot.bytes() {
+            let backup = snapshot.retain_reviewed()?;
+            if snapshot.store() != stores::Store::McpHostedOutcomes {
+                stores::validate_import(snapshot, &backup, Some(before), before)?;
+            }
+            images.push(backup);
+        }
+    }
+    recheck(plan)?;
+    plan.report.backups = images
+        .iter()
+        .map(|image| image.path().to_path_buf())
+        .collect();
+    plan.retained_images = images;
+    if settings_conflict(plan) {
+        import_reviewed_projects(
+            plan,
+            base,
+            import.ok_or(
+                "The exact approved project import is unavailable. Review again before continuing.",
+            )?,
+        )?;
+    } else if import.is_some() {
+        return Err("The settings no longer match the approved project import.".into());
+    }
+    can_retain(plan)?;
+    plan.report.stage = "backed-up";
+    Ok(())
+}
+
+#[cfg(any(all(windows, feature = "integrated-features"), test))]
+fn track_cleanup_evidence<T>(
+    cleanup_started: &mut bool,
+    mut prior_evidence: impl FnMut() -> Result<bool, String>,
+    operation: impl FnOnce(&mut bool) -> Result<T, String>,
+) -> Result<T, String> {
+    match prior_evidence() {
+        Ok(true) => *cleanup_started = true,
+        Ok(false) => {}
+        Err(reason) => {
+            *cleanup_started = true;
+            return Err(reason);
+        }
+    }
+    let result = operation(cleanup_started);
+    // Diagnostics can wait or fail before reaching the callback-protected leaf.
+    // New or unreadable prior evidence is not proof of an untouched installation.
+    if result.is_err() && prior_evidence().unwrap_or(true) {
+        *cleanup_started = true;
+    }
+    result
+}
+
+#[cfg(all(windows, feature = "integrated-features"))]
+fn retire_batch_apps(
+    plan: &mut Plan,
+    installations: &[crate::legacy_retirement_windows::RetirementPlan],
+    cleanup_started: &mut bool,
+) -> Result<(), String> {
+    track_cleanup_evidence(
+        cleanup_started,
+        || {
+            if retirement_pending()? {
+                return Ok(true);
+            }
+            for installation in installations {
+                if installation.has_prior_evidence()? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        },
+        |cleanup_started| {
+            retirement_diagnostics_locked(plan)?;
+            if !plan.report.retirement_available {
+                return Err("Standalone cleanup is not available for this reviewed setup.".into());
+            }
+            let store = creator_hub_mcp_router::Store::installed()?;
+            let runtime = store.resolve()?;
+            let router = store.router()?;
+            let preflight = || {
+                can_retain(plan)?;
+                if !installations.is_empty() {
+                    plan.retirement_dependencies.as_ref().ok_or("The reviewed client snapshot is unavailable.")?.recheck()
+                .map_err(|_| "Client settings changed or a GUI dependency appeared. Cleanup stopped; retained files were kept.")?;
+                }
+                if store.resolve()?.generation != runtime.generation
+                    || store.router()?.command != router.command
+                {
+                    return Err(
+                        "The signed runtime changed. Cleanup stopped; retained files were kept."
+                            .into(),
+                    );
+                }
+                Ok(())
+            };
+            preflight()?;
+            for installation in installations {
+                installation
+                    .retire_after_native_review_batch(preflight, || *cleanup_started = true)?;
+                if !installation.completed()? {
+                    return Err("Standalone cleanup did not verify completion.".into());
+                }
+            }
+            preflight()?;
+            if !legacy_apps()?.is_empty() || retirement_pending()? {
+                return Err(
+            "Standalone app cleanup is not verified complete. Keep retained files for review."
+                .into(),
+        );
+            }
+            plan.report.stage = "complete";
+            plan.report.required = false;
+            plan.report.retirement_available = false;
+            plan.report.legacy_apps.clear();
+            plan.retirement_dependencies = None;
+            Ok(())
+        },
+    )
+}
+
+#[tauri::command]
+pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String> {
+    #[cfg(not(feature = "integrated-features"))]
+    {
+        let _ = handle;
+        Err("Streamlined migration requires first-party integrated Hub services.".into())
+    }
+    #[cfg(feature = "integrated-features")]
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Emitter;
+        require_builtin()?;
+        // One admission spans every phase and the durable completion publication.
+        let _operation = handle.state::<manager::Manager>().begin()?;
+        let state = handle.state::<Convergence>();
+        let mut saved = state.0.try_lock().map_err(|_| "Migration is already active or unavailable.")?;
+        let plan = saved.as_mut().ok_or("Inspect existing settings before moving to Hub.")?;
+        if plan.report.stage != "review" || !plan.report.required {
+            return Err("Check the retained outcome before starting a fresh migration review.".into());
+        }
+        let mut phase = "review";
+        let mut cancelled = false;
+        let mut cleanup_started = false;
+        let mut journal_started = false;
+        let mut approved_key = String::new();
+        let mut journal = BatchJournal::open(batch_path()?)?;
+        let result = (|| {
+            can_prepare(plan)?;
+            let base = roots()?;
+            if read_batch_at(&batch_path()?)?.as_ref().is_some_and(batch_needs_review) {
+                return Err("The previous native migration outcome needs review. No write was repeated.".into());
+            }
+            check_settings_recovery(&base)?;
+            let import = if settings_conflict(plan) {
+                Some(merge_project_settings(plan.stores[0].bytes().unwrap(), plan.stores[1].bytes().unwrap())?)
+            } else { None };
+            // Native provenance plans bind original GUI/registration identities,
+            // not a renderer list or an installation discovered after approval.
+            #[cfg(windows)]
+            let installations = retirement_plans(plan)?;
+            let route = builtin::convergence_route_review(&handle)?.ok_or("This Hub has no signed MCP route.")?;
+            let candidate = builtin::hosting_candidate(&handle, AppId::Mcp)?.ok_or("Verified internal MCP is unavailable.")?;
+            let server_root = candidate.path.parent().ok_or("Invalid internal MCP payload.")?.join("server");
+            let server = server_root.join("creator-works-mcp.mjs");
+            let review = creator_works_mcp_launcher::service::ConvergenceReview::inspect(
+                &server, import.as_ref().map(|proposal| proposal.bytes.as_slice()))?;
+            let route_key = route.key();
+            let review_key = prompt_review_key(&plan.stores, &plan.report.legacy_apps, retirement_pending()?)?;
+            let summary = format!("{} missing project(s); {} known standalone app location(s). Custom launchers that need an old GUI or its registration are not converted.",
+                import.as_ref().map_or(0, |proposal| proposal.added), plan.report.legacy_apps.len());
+            let Some(approved) = review.approve(&handle, &summary)? else {
+                cancelled = true;
+                return Ok(());
+            };
+            let consent = NativeConsent { route_key, review_key };
+            consent.recheck(plan)?;
+            route.recheck()?;
+            approved.recheck()?;
+            approved_key = consent.review_key.clone();
+            phase = "backup";
+            journal.record(&BatchRecord { policy: POLICY, phase: phase.into(), outcome: "started".into(), review_key: approved_key.clone(), retry_blocked: true })?;
+            journal_started = true;
+            let _ = handle.emit("convergence-progress", phase);
+            retain_batch_settings(plan, &base, import.as_ref(), || approved.recheck())?;
+            if let Some(proposal) = &import {
+                creator_works_mcp_launcher::service::verify_convergence_import(
+                    &proposal.bytes, plan.stores[0].bytes(), plan.stores[1].bytes())?;
+            }
+            phase = "connections";
+            journal.record(&BatchRecord { policy: POLICY, phase: phase.into(), outcome: "started".into(), review_key: approved_key.clone(), retry_blocked: true })?;
+            let _ = handle.emit("convergence-progress", phase);
+            // No legacy child GUI, hosted launch/hash prompt or dialog bypass.
+            // Initial routing approval is this native receipt for the exact route.
+            route.activate_convergence(&consent)?;
+            creator_works_mcp_launcher::service::initialize(&handle, server_root)?;
+            creator_works_mcp_launcher::service::bind_managed_route(&handle)?;
+            plan.retry_allowed = false;
+            let workflow = creator_works_mcp_launcher::service::call(&handle, "begin_ui_operation", json!({}))?;
+            let transfer = creator_works_mcp_launcher::service::apply_convergence(&handle, approved);
+            let finish = creator_works_mcp_launcher::service::call(&handle, "finish_ui_operation", json!({"id":workflow}));
+            let idle = creator_works_mcp_launcher::service::is_idle(&handle)?;
+            if finish.is_ok() && idle {
+                // This only renews the service's known completed outcome journal.
+                // The server fields are renewed below from its checked transition.
+                if let Ok(transition) = &transfer {
+                    refresh_reviewed_server_paths(plan, &base, &server, transition)?;
+                }
+                refresh_finished_outcome_journal(plan, &base)?;
+            }
+            transfer?;
+            finish?;
+            if !idle { return Err("The internal MCP workflow still needs outcome review.".into()); }
+            recheck(plan)?;
+            save_review_at(&record_path()?, &plan.stores)?;
+            plan.report.stage = "connections-reviewed";
+            phase = "cleanup";
+            journal.record(&BatchRecord { policy: POLICY, phase: phase.into(), outcome: "started".into(), review_key: approved_key.clone(), retry_blocked: true })?;
+            let _ = handle.emit("convergence-progress", phase);
+            #[cfg(windows)]
+            retire_batch_apps(plan, &installations, &mut cleanup_started)?;
+            #[cfg(target_os = "linux")]
+            finish_without_retirement(plan, |plan| {
+                can_retain(plan)?;
+                require_no_retirement(plan, &legacy_apps()?)?;
+                if retirement_pending()? { return Err("System cleanup outcome needs explicit native review; no transaction was replayed.".into()); }
+                Ok(())
+            }, || true)?;
+            #[cfg(not(any(windows, target_os = "linux")))]
+            return Err("Native standalone cleanup is not available on this platform.".into());
+            Ok::<_, String>(())
+        })();
+        let (mut outcome, mut message) = match result {
+            Ok(()) if cancelled => ("cancelled", "Move to Hub was cancelled. Settings, client connections and installations were not changed.".to_owned()),
+            Ok(()) if plan.report.stage == "complete" => ("complete", "Move complete. Settings and backups were kept; standalone cleanup was verified.".to_owned()),
+            Ok(()) => ("stopped", format!("Migration stopped during {phase}. Completion was not verified; keep the retained settings and backups.")),
+            Err(reason) => {
+                if phase == "cleanup" {
+                    cleanup_failure(plan, cleanup_started);
+                    if let Ok(apps) = legacy_apps() { plan.report.legacy_apps = apps; }
+                }
+                let cleanup = if cleanup_started { " Cleanup may be partial." } else { " Standalone cleanup was not started." };
+                ("stopped", format!("Migration stopped during {phase}: {reason} Settings and any backups, recovery records and compatibility runtime files were retained.{cleanup} No automatic retry was started."))
+            }
+        };
+        if journal_started {
+            let publication = journal.record(&BatchRecord {
+                policy: POLICY, phase: phase.into(), outcome: if outcome == "complete" { "complete" } else { "stopped" }.into(),
+                review_key: approved_key, retry_blocked: !plan.retry_allowed,
+            });
+            if let Err(reason) = publication {
+                outcome = "stopped";
+                plan.retry_allowed = false;
+                // Never advertise completion without its durable phase outcome.
+                plan.report.stage = if phase == "cleanup" { "connections-reviewed" } else { plan.report.stage };
+                plan.report.required = true;
+                plan.report.retirement_available = false;
+                message = format!("Migration outcome publication failed during {phase}: {reason} Retained files and the last phase record were kept. Do not repeat the move.");
+            }
+        }
+        if outcome != "cancelled" { plan.report.message = message.clone(); }
+        plan.report.move_available = plan.retry_allowed && plan.report.stage == "review";
+        Ok(MoveOutcome { outcome, phase, report: plan.report.clone(), message })
+    }).await.map_err(|_| "Migration outcome is unknown. Keep retained files and review recovery; do not repeat the move.")?
+}
+
+#[cfg(any(feature = "integrated-features", test))]
+fn cleanup_failure(plan: &mut Plan, attempted: bool) {
+    plan.report.retirement_available = false;
+    if attempted {
+        plan.retry_allowed = false;
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1400,6 +1892,307 @@ mod tests {
     use super::*;
 
     #[test]
+    fn batch_phase_journal_is_durable_and_never_replays_or_overwrites_unknown_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("move.json");
+        let mut journal = BatchJournal::open(path.clone()).unwrap();
+        assert!(!path.exists());
+        for phase in ["backup", "connections", "cleanup"] {
+            journal
+                .record(&BatchRecord {
+                    policy: POLICY,
+                    phase: phase.into(),
+                    outcome: "started".into(),
+                    review_key: "a".repeat(64),
+                    retry_blocked: true,
+                })
+                .unwrap();
+            let retained = read_batch_at(&path).unwrap().unwrap();
+            assert_eq!(retained.phase, phase);
+            assert!(batch_needs_review(&retained));
+            assert!(!inspection_can_admit(false, Some(&retained)));
+        }
+        let original = fs::read(&path).unwrap();
+        fs::write(&path, b"unknown future journal").unwrap();
+        assert!(journal
+            .record(&BatchRecord {
+                policy: POLICY,
+                phase: "cleanup".into(),
+                outcome: "complete".into(),
+                review_key: "a".repeat(64),
+                retry_blocked: false
+            })
+            .is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"unknown future journal");
+        assert!(BatchJournal::open(path.clone()).is_err());
+        fs::write(&path, original).unwrap();
+        let retained = read_batch_at(&path).unwrap().unwrap();
+        assert!(batch_needs_review(&retained));
+    }
+
+    #[test]
+    fn known_cleanup_refusal_is_inspectable_but_uncertain_cleanup_never_reopens_mutation() {
+        let (_temp, _base, mut plan) = fixture_plan();
+        cleanup_failure(&mut plan, false);
+        assert!(plan.retry_allowed);
+        let mut record = BatchRecord {
+            policy: POLICY,
+            phase: "cleanup".into(),
+            outcome: "stopped".into(),
+            review_key: "b".repeat(64),
+            retry_blocked: false,
+        };
+        assert!(inspection_can_admit(false, Some(&record)));
+        cleanup_failure(&mut plan, true);
+        assert!(!plan.retry_allowed);
+        record.retry_blocked = true;
+        assert!(!inspection_can_admit(true, Some(&record)));
+        assert!(!inspection_can_admit(true, None));
+        record.outcome = "started".into();
+        record.retry_blocked = false;
+        assert!(!inspection_can_admit(false, Some(&record)));
+    }
+
+    #[test]
+    fn coordinator_prior_evidence_blocks_retry_when_diagnostics_refuse_before_leaf() {
+        for unknown in [false, true] {
+            let (temp, _base, mut plan) = fixture_plan();
+            let before = temp.path().join("retirement-before.json");
+            fs::write(&before, b"retained pending evidence").unwrap();
+            let diagnostics_called = std::cell::Cell::new(false);
+            let mut started = false;
+            let result = track_cleanup_evidence::<()>(
+                &mut started,
+                || {
+                    if unknown {
+                        Err("prior evidence is unreadable".into())
+                    } else {
+                        Ok(fs::read(&before).unwrap() == b"retained pending evidence")
+                    }
+                },
+                |started| {
+                    assert!(
+                        *started,
+                        "Prior evidence must be classified before diagnostics"
+                    );
+                    diagnostics_called.set(true);
+                    Err("dependency diagnostic refused before leaf".into())
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(diagnostics_called.get(), !unknown);
+            assert!(started);
+            cleanup_failure(&mut plan, started);
+            assert!(!plan.retry_allowed);
+            let path = temp.path().join("move.json");
+            let mut journal = BatchJournal::open(path.clone()).unwrap();
+            journal
+                .record(&BatchRecord {
+                    policy: POLICY,
+                    phase: "cleanup".into(),
+                    outcome: "stopped".into(),
+                    review_key: "a".repeat(64),
+                    retry_blocked: !plan.retry_allowed,
+                })
+                .unwrap();
+            let retained = read_batch_at(&path).unwrap().unwrap();
+            assert!(retained.retry_blocked);
+            assert!(!inspection_can_admit(false, Some(&retained)));
+            assert_eq!(fs::read(&before).unwrap(), b"retained pending evidence");
+        }
+    }
+
+    #[test]
+    fn coordinator_fresh_evidence_free_busy_refusal_stays_inspectable() {
+        let (temp, _base, mut plan) = fixture_plan();
+        let before = temp.path().join("retirement-before.json");
+        let mut started = false;
+        let checks = std::cell::Cell::new(0);
+        let result = track_cleanup_evidence::<()>(
+            &mut started,
+            || {
+                checks.set(checks.get() + 1);
+                Ok(before.exists())
+            },
+            |started| {
+                assert!(!*started);
+                Err("fresh busy refusal before leaf".into())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(checks.get(), 2);
+        assert!(!started);
+        assert!(!before.exists());
+        cleanup_failure(&mut plan, started);
+        assert!(plan.retry_allowed);
+        let path = temp.path().join("move.json");
+        let mut journal = BatchJournal::open(path.clone()).unwrap();
+        journal
+            .record(&BatchRecord {
+                policy: POLICY,
+                phase: "cleanup".into(),
+                outcome: "stopped".into(),
+                review_key: "a".repeat(64),
+                retry_blocked: !plan.retry_allowed,
+            })
+            .unwrap();
+        let retained = read_batch_at(&path).unwrap().unwrap();
+        assert!(!retained.retry_blocked);
+        assert!(inspection_can_admit(false, Some(&retained)));
+    }
+
+    #[test]
+    fn coordinator_refusal_rechecks_new_or_unreadable_evidence_before_classifying_fresh() {
+        for unreadable in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let before = temp.path().join("retirement-before.json");
+            let checks = std::cell::Cell::new(0);
+            let mut started = false;
+            let result = track_cleanup_evidence::<()>(
+                &mut started,
+                || {
+                    checks.set(checks.get() + 1);
+                    if unreadable && checks.get() > 1 {
+                        Err("evidence became unreadable".into())
+                    } else {
+                        Ok(before.exists())
+                    }
+                },
+                |_| {
+                    fs::write(&before, b"appeared during dependency inspection").unwrap();
+                    Err("coordinator refused before leaf".into())
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(checks.get(), 2);
+            assert!(started);
+            assert_eq!(
+                fs::read(&before).unwrap(),
+                b"appeared during dependency inspection"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_cleanup_admission_uses_the_leaf_start_signal_not_method_entry() {
+        let source = include_str!("convergence.rs");
+        let body = source
+            .split("fn retire_batch_apps(")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn move_to_hub(")
+            .next()
+            .unwrap();
+        assert_eq!(body.matches("*cleanup_started = true").count(), 1);
+        assert!(body
+            .contains("retire_after_native_review_batch(preflight, || *cleanup_started = true)"));
+        assert!(!body.contains("installation.retire_after_native_review(preflight)"));
+        assert!(
+            body.find("retire_after_native_review_batch(").unwrap()
+                < body.find("*cleanup_started = true").unwrap()
+        );
+        assert!(
+            body.find("track_cleanup_evidence(").unwrap()
+                < body.find("retirement_diagnostics_locked(plan)").unwrap()
+        );
+        assert!(body.contains("retirement_pending()?"));
+        assert!(body.contains("installation.has_prior_evidence()?"));
+        let leaf = include_str!("legacy_retirement_windows.rs");
+        let probe = leaf
+            .split("pub(super) fn has_prior_evidence(")
+            .nth(1)
+            .unwrap()
+            .split("/// The coordinator")
+            .next()
+            .unwrap();
+        assert!(probe.contains("prior_retirement_evidence(&self.archive)"));
+    }
+
+    #[cfg(feature = "integrated-features")]
+    #[test]
+    fn consent_to_backup_drift_preserves_external_edits_without_creating_backups() {
+        let (_temp, base, mut plan) = fixture_plan();
+        let consent = NativeConsent {
+            route_key: "a".repeat(64),
+            review_key: prompt_review_key(&plan.stores, &[], false).unwrap(),
+        };
+        consent.recheck_at(&plan, &[], false).unwrap();
+        let path = stores::Store::McpCurrent.path(&base).unwrap();
+        fs::write(&path, b"external edit after approval").unwrap();
+        assert!(consent.recheck_at(&plan, &[], false).is_err());
+        assert!(retain_after_close(&mut plan, &base, None, || Ok(())).is_err());
+        assert!(plan.retained_images.is_empty());
+        assert!(plan.report.backups.is_empty());
+        assert_eq!(fs::read(&path).unwrap(), b"external edit after approval");
+    }
+
+    #[test]
+    fn client_drift_after_close_stops_backup_and_project_import() {
+        let (_temp, base, mut plan) = conflicting_plan();
+        let originals: Vec<_> = plan
+            .stores
+            .iter()
+            .map(|snapshot| snapshot.bytes().map(Vec::from))
+            .collect();
+        assert!(retain_after_close(&mut plan, &base, None, || Err(
+            "client changed during close".into()
+        ))
+        .is_err());
+        assert!(plan.retained_images.is_empty());
+        for (snapshot, before) in plan.stores.iter().zip(originals) {
+            snapshot.recheck().unwrap();
+            assert_eq!(snapshot.bytes(), before.as_deref());
+        }
+    }
+
+    #[test]
+    fn batched_native_source_keeps_approval_phase_journals_and_completion_in_order() {
+        let source = include_str!("convergence.rs");
+        let body = source
+            .split("pub async fn move_to_hub(")
+            .nth(1)
+            .unwrap()
+            .split("fn cleanup_failure(")
+            .next()
+            .unwrap();
+        let approval = body.find("review.approve(&handle").unwrap();
+        let receipt = body.find("let consent = NativeConsent").unwrap();
+        let snapshot = body.find("approved.recheck()?").unwrap();
+        let backup_record = body.find("journal.record(").unwrap();
+        let backup = body.find("retain_batch_settings(plan").unwrap();
+        let activation = body.find("route.activate_convergence(&consent)").unwrap();
+        let clients = body.find("service::apply_convergence").unwrap();
+        let finish = body.find("\"finish_ui_operation\"").unwrap();
+        let idle = body.find("service::is_idle").unwrap();
+        let review = body.find("save_review_at(").unwrap();
+        let cleanup = body.find("retire_batch_apps(").unwrap();
+        assert!(
+            approval < receipt
+                && receipt < snapshot
+                && snapshot < backup_record
+                && backup_record < backup
+        );
+        assert!(
+            backup < activation
+                && activation < clients
+                && clients < finish
+                && finish < idle
+                && idle < review
+                && review < cleanup
+        );
+        assert_eq!(body.matches(".begin()?").count(), 1);
+        for forbidden in [
+            "Hosting::",
+            "MigrationMcp::start",
+            "prepare_convergence(",
+            "migrate_convergence_connections(",
+            "retire_convergence_apps(",
+        ] {
+            assert!(!body.contains(forbidden));
+        }
+    }
+
+    #[test]
     fn completion_keeps_native_admission_until_durable_review_publication() {
         let source = include_str!("convergence.rs");
         let finish = source
@@ -1467,6 +2260,8 @@ mod tests {
             #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
             retirement_linux: None,
             report: Report {
+                streamlined: cfg!(feature = "integrated-features"),
+                move_available: true,
                 enabled: true,
                 required: true,
                 stage: "backed-up",
@@ -1569,6 +2364,67 @@ mod tests {
             .collect();
         assert_eq!(ids.len(), 3);
         assert!(uuid::Uuid::parse_str(result["channels"][1]["id"].as_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn colliding_id_preview_survives_backup_import_and_service_byte_validation_unchanged() {
+        let (_temp, base, mut plan) = conflicting_plan();
+        let mut current = config_with(vec![project("collision", &base.local_data.join("current"))]);
+        current["active_channel_id"] = json!("collision");
+        let legacy = config_with(vec![project("collision", &base.local_data.join("earlier"))]);
+        let originals = [
+            serde_json::to_vec(&current).unwrap(),
+            serde_json::to_vec(&legacy).unwrap(),
+        ];
+        for (index, bytes) in originals.iter().enumerate() {
+            fs::write(plan.stores[index].store().path(&base).unwrap(), bytes).unwrap();
+            plan.stores[index] =
+                stores::Snapshot::inspect(plan.stores[index].store(), &base).unwrap();
+        }
+        let proposal = merge_project_settings(&originals[0], &originals[1]).unwrap();
+        let approved_bytes = proposal.bytes.clone();
+        let preview: Value = serde_json::from_slice(&approved_bytes).unwrap();
+        let imported_id = preview["channels"][1]["id"].as_str().unwrap();
+        assert_ne!(imported_id, "collision");
+        retain_after_close(&mut plan, &base, Some(&proposal), || Ok(())).unwrap();
+        let actual_current = fs::read(plan.stores[0].store().path(&base).unwrap()).unwrap();
+        let actual_legacy = fs::read(plan.stores[1].store().path(&base).unwrap()).unwrap();
+        assert_eq!(actual_current, approved_bytes);
+        assert_eq!(actual_legacy, approved_bytes);
+        #[cfg(feature = "integrated-features")]
+        creator_works_mcp_launcher::service::verify_convergence_import(
+            &approved_bytes,
+            Some(&actual_current),
+            Some(&actual_legacy),
+        )
+        .unwrap();
+        for (backup, original) in plan.retained_images.iter().zip(originals) {
+            assert_eq!(fs::read(backup.path()).unwrap(), original);
+        }
+        let saved: Value = serde_json::from_slice(&actual_current).unwrap();
+        assert_eq!(saved["active_channel_id"], "collision");
+        assert_eq!(saved["channels"][0], current["channels"][0]);
+        assert_eq!(saved["channels"][1]["id"], imported_id);
+        assert!(plan.retry_allowed);
+    }
+
+    #[test]
+    fn approved_import_is_bound_to_original_images_not_only_its_output_shape() {
+        let (_temp, base, mut plan) = conflicting_plan();
+        let proposal = merge_project_settings(
+            plan.stores[0].bytes().unwrap(),
+            plan.stores[1].bytes().unwrap(),
+        )
+        .unwrap();
+        let path = plan.stores[0].store().path(&base).unwrap();
+        let different = br#"{"channels":[],"auto_start":true,"futureOption":"new current"}"#;
+        fs::write(&path, different).unwrap();
+        plan.stores[0] = stores::Snapshot::inspect(stores::Store::McpCurrent, &base).unwrap();
+        retain_fixture(&mut plan);
+        assert!(import_reviewed_projects(&mut plan, &base, &proposal)
+            .unwrap_err()
+            .contains("before-images changed"));
+        assert_eq!(fs::read(path).unwrap(), different);
     }
 
     #[test]

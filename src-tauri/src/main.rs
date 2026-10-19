@@ -380,6 +380,8 @@ fn main() {
         convergence::prepare_convergence,
         convergence::migrate_convergence_connections,
         convergence::retire_convergence_apps,
+        convergence::move_to_hub,
+        convergence::inspect_convergence_outcome,
         plugins_retirement::open_plugins_website,
         open_resource,
         community_catalogue,

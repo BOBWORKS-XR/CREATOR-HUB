@@ -2694,6 +2694,89 @@ fn finish_ui_operation(id: u32) -> Result<(), &'static str> {
     lifecycle::LIFECYCLE.finish_workflow(id)
 }
 
+fn apply_convergence_clients(
+    app: &tauri::AppHandle,
+    consent: &service::ConvergenceConsent,
+) -> Result<serde_json::Value, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    if !settings_review_admission::enabled() || !integration_context::active() {
+        return Err("Native convergence requires an admitted internal MCP service.".into());
+    }
+    consent.recheck_clients()?;
+    let managed = app
+        .try_state::<managed_client::ManagedClient>()
+        .ok_or("The signed MCP router is unavailable.")?;
+    let mut plans = Vec::new();
+    let mut unverified = Vec::new();
+    for id in [
+        "codex",
+        "claude",
+        "claudeDesktop",
+        "antigravity",
+        "opencode",
+    ] {
+        if id == "claudeDesktop" && cfg!(target_os = "linux") {
+            continue;
+        }
+        let (name, path, format) = client_target(id)?;
+        client_recovery_ui::require_no_pending_adjacent(&path)?;
+        if let Some(plan) =
+            client_migration::Plan::review_router(name, &path, format, &managed.0.command)?
+        {
+            if !hosted_commands::product_settings::verified_previous_connection(
+                Path::new(&plan.old_node),
+                Path::new(&plan.old_server),
+            )? {
+                unverified.push(format!(
+                    "{}\nCommand: {}\nServer: {}\nProject kept: {}",
+                    plan.client,
+                    plan.old_node,
+                    plan.old_server,
+                    plan.project.as_deref().unwrap_or("Not specified")
+                ));
+            }
+            plans.push(plan);
+        }
+    }
+    if plans.is_empty() {
+        return Ok(serde_json::json!({"status":"unchanged", "count":0}));
+    }
+    if !unverified.is_empty() && !app.dialog().message(format!(
+        "These existing connections could not be publisher-verified:\n\n{}\n\nMove them to the verified Hub router at {}? Names and ownership markers are not proof. Continue only for your Creator Works connections. Exact backups, client options and other servers are kept. Cancel stops migration before changing any of these clients.",
+        unverified.join("\n\n"), managed.0.command.display()
+    )).title("Review unverified MCP connections").kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom("Move reviewed connections".into(), "Keep existing".into())).blocking_show()
+    {
+        return Err("Unverified connection review was cancelled. Client settings and old apps were kept.".into());
+    }
+    // The original snapshots include missing/no-op clients, not just changed entries.
+    service::recheck_convergence_owner(app)?;
+    consent.recheck_clients()?;
+    apply_convergence_client_plans(&plans, &client_recovery_ui::central_root()?, || {
+        consent.recheck_imported_settings()
+    })
+}
+
+fn apply_convergence_client_plans(
+    plans: &[client_migration::Plan],
+    journal_root: &Path,
+    recheck_settings: impl FnOnce() -> Result<(), String>,
+) -> Result<serde_json::Value, String> {
+    // This runs after any exception dialog and before preparation creates client
+    // backups or write intents. It checks imported MCP settings, not client
+    // before-images that our own transaction is about to change.
+    recheck_settings()?;
+    let report = client_migration::Plan::apply_reviewed(plans, journal_root, |_| true)?
+        .ok_or("Native connection migration did not return an outcome.")?;
+    if !report.completed {
+        return Err(format!(
+            "Client migration needs recovery review at {}. No automatic retry or restoration.",
+            report.journal.display()
+        ));
+    }
+    Ok(serde_json::json!({"status":"migrated", "count":report.files.len()}))
+}
+
 pub fn run() {
     if let Some(code) = hub::handle_entry(&env::args_os().skip(1).collect::<Vec<_>>()) {
         std::process::exit(code);

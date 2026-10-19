@@ -9,6 +9,41 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 const MAX_ARGUMENTS: usize = 60_000;
 static INITIALIZING: Mutex<()> = Mutex::new(());
 
+/// Home inventory only: verifies payload bytes without acquiring writer
+/// ownership, creating a service context, binding routes or changing settings.
+pub fn project_bridge_statuses(
+    server_root: PathBuf,
+    projects: &[PathBuf],
+) -> Result<Vec<Value>, String> {
+    available()?;
+    if projects.len() > 200 {
+        return Err("Bridge inventory is limited to 200 projects.".into());
+    }
+    let root = crate::hosted_payload::Root::verified(server_root)?;
+    let bridge = root.read_verified("unity-extension/Editor/BanterMCPBridge.cs")?;
+    let logo = root.read_verified("unity-extension/Editor/CreatorWorksMCPLogo.png")?;
+    projects
+        .iter()
+        .map(|project| {
+            serde_json::to_value(crate::extension_status_bytes(&bridge, &logo, project))
+                .map_err(|_| "Cannot encode the read-only bridge status.".into())
+        })
+        .collect()
+}
+
+/// Exact native preview/import boundary, shared by Root before client writes
+/// and by the service before a server transition. No paths or write authority.
+pub fn verify_convergence_import(
+    expected: &[u8],
+    current: Option<&[u8]>,
+    legacy: Option<&[u8]>,
+) -> Result<(), String> {
+    if expected.len() > 256 * 1024 || current != Some(expected) || legacy != Some(expected) {
+        return Err("The settings do not match the exact approved project import. No next client or server write was started.".into());
+    }
+    Ok(())
+}
+
 struct Context {
     owner: crate::gui_owner::GuiWriteOwner,
     _payload: Vec<File>,
@@ -262,6 +297,189 @@ pub fn call(app: &AppHandle, command: &str, args: Value) -> Result<Value, String
     )
 }
 
+/// Read-only review for Root's integrated migration. It is deliberately not a
+/// service command, serializable ticket, global flag or dialog override.
+pub struct ConvergenceReview {
+    clients: Vec<(PathBuf, Option<Vec<u8>>)>,
+    settings: hosted_commands::product_settings::ConvergenceSettings,
+}
+
+pub struct ConvergenceConsent {
+    review: ConvergenceReview,
+}
+
+fn recheck_client_images(clients: &[(PathBuf, Option<Vec<u8>>)]) -> Result<(), String> {
+    for (path, before) in clients {
+        crate::client_recovery_ui::require_no_pending_adjacent(path)?;
+        if crate::settings_backup::read_bytes(path)? != *before {
+            return Err(
+                "AI-client settings changed after native review. No next client write was started."
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn approve_snapshot<T>(
+    review: T,
+    recheck: impl Fn(&T) -> Result<(), String>,
+    approve: impl FnOnce() -> bool,
+) -> Result<Option<T>, String> {
+    recheck(&review)?;
+    if !approve() {
+        return Ok(None);
+    }
+    recheck(&review)?;
+    Ok(Some(review))
+}
+
+fn require_no_convergence_recovery() -> Result<(), String> {
+    // This read must use internal admission even before writer initialization;
+    // the standalone entry otherwise intentionally reports no recovery support.
+    let _scope = if crate::integration_context::active() {
+        None
+    } else {
+        Some(crate::integration_context::Scope::enter()?)
+    };
+    if !crate::client_recovery_ui::pending_client_recovery()?.is_empty() {
+        return Err("Existing client changes need recovery review. Nothing was retried.".into());
+    }
+    Ok(())
+}
+
+impl ConvergenceReview {
+    pub fn inspect(server: &std::path::Path, imported: Option<&[u8]>) -> Result<Self, String> {
+        available()?;
+        let mut clients = Vec::new();
+        for id in [
+            "codex",
+            "claude",
+            "claudeDesktop",
+            "antigravity",
+            "opencode",
+        ] {
+            if id == "claudeDesktop" && cfg!(target_os = "linux") {
+                continue;
+            }
+            let (_, path, _) = crate::client_target(id)?;
+            crate::client_recovery_ui::require_no_pending_adjacent(&path)?;
+            clients.push((path.clone(), crate::settings_backup::read_bytes(&path)?));
+        }
+        require_no_convergence_recovery()?;
+        Ok(Self {
+            clients,
+            settings: hosted_commands::product_settings::ConvergenceSettings::inspect(
+                server, imported,
+            )?,
+        })
+    }
+
+    fn recheck_clients(&self) -> Result<(), String> {
+        recheck_client_images(&self.clients)?;
+        require_no_convergence_recovery()?;
+        Ok(())
+    }
+
+    pub fn approve(
+        self,
+        app: &AppHandle,
+        native_summary: &str,
+    ) -> Result<Option<ConvergenceConsent>, String> {
+        let approved = approve_snapshot(
+            self,
+            |review| {
+                review.recheck_clients()?;
+                review.settings.recheck_original()
+            },
+            || {
+                app.dialog().message(format!(
+            "Move your existing setup to this Creator Hub?\n\n- Back up settings first; add missing projects without duplicates and keep current preferences and selection.\n- Move verified existing AI connections to this Hub's signed runtime; keep other client entries.\n- Retire only verified standalone app entries; keep settings, Unity projects, backups and old runtime files.\n\n{native_summary}\n\nCustom or unverified connections and servers need separate review. Busy apps are not force-closed. Cancel changes no settings or installations."
+        )).title("Move to Hub").kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom("Move to Hub".into(), "Not now".into())).blocking_show()
+            },
+        )?;
+        Ok(approved.map(|review| ConvergenceConsent { review }))
+    }
+}
+
+impl ConvergenceConsent {
+    pub fn recheck(&self) -> Result<(), String> {
+        self.review.recheck_clients()?;
+        self.review.settings.recheck_original()
+    }
+
+    pub(crate) fn recheck_clients(&self) -> Result<(), String> {
+        self.review.recheck_clients()
+    }
+
+    pub(crate) fn recheck_imported_settings(&self) -> Result<(), String> {
+        self.review.settings.recheck_imported()?;
+        require_no_convergence_recovery()
+    }
+}
+
+/// Uses the existing ownership lock, workflow, journal and writer scope. Only
+/// the opaque receipt from the native dialog above can enter this path.
+pub fn apply_convergence(app: &AppHandle, consent: ConvergenceConsent) -> Result<Value, String> {
+    available()?;
+    let context = app
+        .try_state::<Context>()
+        .ok_or("MCP is not initialized in this Hub.")?;
+    require_managed_route(
+        "review_existing_client_connections",
+        app.try_state::<crate::managed_client::ManagedClient>()
+            .is_some(),
+    )?;
+    let mut state = context
+        .state
+        .try_lock()
+        .map_err(|_| "An MCP operation is active or unavailable.")?;
+    // Explicit closures keep the consent outside all renderer command arguments.
+    state.execute(
+        "review_existing_client_connections",
+        json!({}),
+        || ensure_owner(&context.owner),
+        |frame| emit(app, frame),
+        |_, _| {
+            let _scope = crate::integration_context::Scope::enter()?;
+            consent.recheck_clients()?;
+            crate::apply_convergence_clients(app, &consent)
+        },
+    )?;
+    require_no_convergence_recovery()?;
+    state.execute(
+        "review_convergence_server",
+        json!({}),
+        || ensure_owner(&context.owner),
+        |frame| emit(app, frame),
+        |_, _| {
+            let _scope = crate::integration_context::Scope::enter()?;
+            consent.review.settings.apply(app)
+        },
+    )
+}
+
+pub(crate) fn recheck_convergence_owner(app: &AppHandle) -> Result<(), String> {
+    let context = app
+        .try_state::<Context>()
+        .ok_or("MCP writer ownership is unavailable.")?;
+    ensure_owner(&context.owner)?;
+    let root = app
+        .try_state::<crate::hosted_payload::Root>()
+        .ok_or("MCP payload authority is unavailable.")?;
+    let fresh = crate::managed_client::prepare(&root)?;
+    let bound = app
+        .try_state::<crate::managed_client::ManagedClient>()
+        .ok_or("The signed MCP route is unavailable.")?;
+    if fresh.0.command != bound.0.command {
+        return Err(
+            "The signed MCP route changed after native review. No next write was started.".into(),
+        );
+    }
+    Ok(())
+}
+
 /// Read-only quiescence proof. Never closes a backend, clears a workflow or acknowledges outcomes.
 /// A running worker holds this mutex through handler return and durable outcome completion.
 pub fn is_idle(app: &AppHandle) -> Result<bool, String> {
@@ -406,6 +624,126 @@ impl<'a> Session<'a> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn convergence_cancel_and_changes_during_native_review_never_issue_a_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("client.json");
+        std::fs::write(&path, b"before").unwrap();
+        let images = vec![(path.clone(), Some(b"before".to_vec()))];
+        let checks = Cell::new(0);
+        let check = |images: &Vec<_>| {
+            checks.set(checks.get() + 1);
+            recheck_client_images(images)
+        };
+        assert!(approve_snapshot(images.clone(), check, || false)
+            .unwrap()
+            .is_none());
+        assert_eq!(checks.get(), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), b"before");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        assert!(approve_snapshot(images, check, || {
+            std::fs::write(&path, b"external edit during dialog").unwrap();
+            true
+        })
+        .is_err());
+        assert_eq!(checks.get(), 3);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"external edit during dialog"
+        );
+    }
+
+    #[test]
+    fn convergence_rechecks_missing_and_noop_clients_before_any_client_apply() {
+        let temp = tempfile::tempdir().unwrap();
+        let existing = temp.path().join("existing.json");
+        let absent = temp.path().join("missing.json");
+        std::fs::write(&existing, b"exact original").unwrap();
+        let images = vec![
+            (existing.clone(), Some(b"exact original".to_vec())),
+            (absent.clone(), None),
+        ];
+        recheck_client_images(&images).unwrap();
+        std::fs::write(&absent, b"appeared after consent").unwrap();
+        assert!(recheck_client_images(&images).is_err());
+        std::fs::remove_file(&absent).unwrap();
+        std::fs::write(&existing, b"changed between backup and client apply").unwrap();
+        assert!(recheck_client_images(&images).is_err());
+        assert_eq!(
+            std::fs::read(&existing).unwrap(),
+            b"changed between backup and client apply"
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn native_convergence_remains_outside_renderer_dispatch_and_keeps_rechecks() {
+        let source = include_str!("service.rs");
+        let apply = source
+            .split("pub fn apply_convergence(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn recheck_convergence_owner")
+            .next()
+            .unwrap();
+        assert!(
+            apply.find("consent.recheck_clients()?").unwrap()
+                < apply.find("crate::apply_convergence_clients").unwrap()
+        );
+        assert!(
+            apply.find("crate::apply_convergence_clients").unwrap()
+                < apply.find("consent.review.settings.apply(app)").unwrap()
+        );
+        assert_eq!(apply.matches("state.execute(").count(), 2);
+        assert!(
+            apply.find("require_no_convergence_recovery()?").unwrap()
+                < apply.find("consent.review.settings.apply(app)").unwrap()
+        );
+        assert!(apply.contains("ensure_owner(&context.owner)"));
+        for command in [
+            "apply_convergence",
+            "ConvergenceConsent",
+            "approve_snapshot",
+        ] {
+            assert!(validate(command, &json!({})).is_err());
+        }
+        let helper = source
+            .split("pub fn project_bridge_statuses(")
+            .nth(1)
+            .unwrap()
+            .split("struct Context")
+            .next()
+            .unwrap();
+        assert!(helper.contains("Root::verified"));
+        assert!(helper.contains("read_verified"));
+        assert!(
+            helper.find("projects.len() > 200").unwrap() < helper.find("Root::verified").unwrap()
+        );
+        for forbidden in [
+            "initialize(",
+            "bind_managed_route(",
+            "GuiWriteOwner",
+            "Context {",
+            "Store::installed",
+        ] {
+            assert!(!helper.contains(forbidden));
+        }
+    }
+
+    #[cfg(feature = "integrated-service")]
+    #[test]
+    fn pure_bridge_inventory_is_bounded_and_verification_failure_does_not_create_context_or_files()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("missing-payload");
+        let projects = vec![dir.path().join("not-a-project"); 201];
+        assert!(project_bridge_statuses(root.clone(), &projects)
+            .unwrap_err()
+            .contains("200"));
+        assert!(project_bridge_statuses(root, &projects[..1]).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
     fn fixture<'a>(life: &'a crate::lifecycle::Lifecycle, dir: &std::path::Path) -> Session<'a> {
         Session::new(life, "a".repeat(64), Journal::open(dir).unwrap()).unwrap()

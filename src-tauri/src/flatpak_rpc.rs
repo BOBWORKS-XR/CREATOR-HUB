@@ -11,7 +11,13 @@ const MAX_REQUEST: usize = 64 * 1024;
 // Integrated pages belong to the native Hub window. The abandoned sandboxed-GUI
 // relay does not acquire new feature or settings authority.
 #[cfg(test)]
-const NATIVE_WINDOW_ONLY: &[&str] = &["feature_status", "feature_select", "feature_call"];
+const NATIVE_WINDOW_ONLY: &[&str] = &[
+    "feature_status",
+    "feature_select",
+    "feature_call",
+    "move_to_hub",
+    "inspect_convergence_outcome",
+];
 
 pub(super) const EVENTS: &[&str] = &[
     "app-progress",

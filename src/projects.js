@@ -2,6 +2,8 @@
   const byId = id => document.getElementById(id);
   let snapshot = null;
   let busy = false;
+  let revision = 0, loadedRevision = -1;
+  let refreshQueued = false;
   const names = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
   const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
   function modifiedDate(project) {
@@ -44,8 +46,8 @@
       const tags = element('div', '', 'project-tags');
       tags.append(element('span', project.sdkLabel, `sdk-label sdk-${project.sdk}`), element('span', project.unityVersion ? `Unity ${project.unityVersion}` : 'Version unknown'), element('span', project.source));
       if (project.selected === true) tags.append(element('span', 'Selected for MCP', 'project-selected'));
-      if (project.bridge) {
-        const bridge = project.bridge;
+      if (project.bridge || window.CreatorHubNative?.integratedFeatures === true) {
+        const bridge = project.bridge || {};
         const checked = typeof bridge.installed === 'boolean' && typeof bridge.current === 'boolean' && (!bridge.current || bridge.installed);
         tags.append(element('span', !checked ? 'MCP bridge not checked' : bridge.current ? 'MCP bridge current' : bridge.installed ? 'MCP bridge update available' : 'MCP bridge not installed', checked && bridge.current ? 'project-bridge-current' : 'project-bridge-warning'));
       }
@@ -78,6 +80,7 @@
   }
   async function run(command, args = {}) {
     if (busy) return;
+    const requestedRevision = revision;
     busy = true; render();
     byId('project-status').textContent = command === 'project_inventory' ? 'Reading known project locations...' : command === 'open_unity_project' ? 'Checking Unity version and project lock...' : 'Updating saved list...';
     try {
@@ -85,15 +88,28 @@
       if (result && typeof result === 'object') {
         if (!Array.isArray(result.projects) || !Array.isArray(result.warnings)) throw new Error('Project list response was invalid.');
         snapshot = result;
+        loadedRevision = requestedRevision;
         byId('project-status').textContent = `${result.projects.length} known projects. SDK labels reflect package declarations, not build validation.`;
       } else byId('project-status').textContent = result || 'No project added.';
     } catch (reason) { byId('project-status').textContent = String(reason); }
-    finally { busy = false; render(); }
+    finally {
+      busy = false; render();
+      const queued = refreshQueued; refreshQueued = false;
+      if (queued && requestedRevision !== revision && !byId('view-projects').classList.contains('hidden')
+        && window.CreatorFeaturePages?.busy() !== true) void run('project_inventory');
+    }
   }
   byId('refresh-projects').addEventListener('click', () => run('project_inventory'));
   byId('add-project').addEventListener('click', () => run('add_project_folder'));
   byId('project-search').addEventListener('input', render);
   byId('project-sdk').addEventListener('change', render);
   byId('project-sort').addEventListener('change', render);
-  window.CreatorProjects = Object.freeze({ show: () => { if (!snapshot) run('project_inventory'); } });
+  window.CreatorProjects = Object.freeze({
+    invalidate: () => { revision++; },
+    show: () => {
+      if (window.CreatorFeaturePages?.busy() === true || (snapshot && loadedRevision === revision)) return;
+      if (busy) refreshQueued = true;
+      else void run('project_inventory');
+    },
+  });
 })();

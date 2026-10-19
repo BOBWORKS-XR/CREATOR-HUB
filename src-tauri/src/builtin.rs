@@ -341,6 +341,81 @@ pub fn managed_route(
     handle: &tauri::AppHandle,
 ) -> Result<Option<creator_hub_mcp_router::Router>, String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let Some(review) = convergence_route_review(handle)? else {
+        return Ok(None);
+    };
+    if review.previous.is_none() && !handle.dialog().message("Enable Creator Hub's managed MCP connection?\n\nA signed retained router will keep AI-client command paths stable across compatible Hub updates. Existing client settings are not changed by this action. Moving their connections still requires your approval. Old apps and Unity projects stay in place.")
+        .title("Enable managed MCP routing").buttons(MessageDialogButtons::OkCancelCustom("Enable managed routing".into(), "Not now".into())).blocking_show()
+    { return Err("Managed MCP routing was declined. Existing connections were not changed.".into()); }
+    review.activate().map(Some)
+}
+
+pub(crate) struct ManagedRouteReview {
+    source: Source,
+    root: PathBuf,
+    entry: Module,
+    store: creator_hub_mcp_router::Store,
+    bytes: Vec<u8>,
+    signature: Vec<u8>,
+    previous: Option<Vec<u8>>,
+}
+
+impl ManagedRouteReview {
+    #[cfg(feature = "integrated-features")]
+    pub(crate) fn key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    &self.root,
+                    &self.entry,
+                    &self.bytes,
+                    &self.signature,
+                    &self.previous,
+                ))
+                .expect("native routing identity is serializable")
+            )
+        )
+    }
+
+    pub(crate) fn recheck(&self) -> Result<(), String> {
+        self.source
+            .verify(&self.root, "routing", self.entry.clone())?;
+        if self.store.snapshot()? != self.previous {
+            return Err(
+                "The active MCP route changed during native review. No route was activated.".into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn activate(self) -> Result<creator_hub_mcp_router::Router, String> {
+        self.recheck()?;
+        let read = |name: &str| crate::manager::bounded_read(&self.root.join(name), 32768);
+        let router = self.store.prepare_router(
+            &self.root.join(&self.entry.executable),
+            &read("routing/router.json")?,
+            &read("routing/router.minisig")?,
+        )?;
+        self.store
+            .activate(&self.bytes, &self.signature, self.previous.as_deref())?;
+        Ok(router)
+    }
+
+    #[cfg(feature = "integrated-features")]
+    pub(crate) fn activate_convergence(
+        self,
+        consent: &crate::convergence::NativeConsent,
+    ) -> Result<creator_hub_mcp_router::Router, String> {
+        consent.authorize_route(&self.key())?;
+        self.activate()
+    }
+}
+
+pub(crate) fn convergence_route_review(
+    handle: &tauri::AppHandle,
+) -> Result<Option<ManagedRouteReview>, String> {
     if !enabled() {
         return Ok(None);
     }
@@ -374,15 +449,12 @@ pub fn managed_route(
                 .to_owned()
         }
     };
-    source.verify(
-        &root,
-        "routing",
-        Module {
-            executable: binary.clone(),
-            version: env!("CARGO_PKG_VERSION").into(),
-            files: routing.files.clone(),
-        },
-    )?;
+    let entry = Module {
+        executable: binary.clone(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        files: routing.files.clone(),
+    };
+    source.verify(&root, "routing", entry.clone())?;
     let read = |name: &str| crate::manager::bounded_read(&root.join(name), 32768);
     let bytes = read("routing/runtime.json")?;
     let signature = read("routing/runtime.minisig")?;
@@ -398,16 +470,15 @@ pub fn managed_route(
         return Err("The signed runtime does not match this Hub package/version.".into());
     }
     let previous = store.snapshot()?;
-    if previous.is_none() && !handle.dialog().message("Enable Creator Hub's managed MCP connection?\n\nA signed retained router will keep AI-client command paths stable across compatible Hub updates. Existing client settings are not changed by this action. Moving their connections still requires your approval. Old apps and Unity projects stay in place.")
-        .title("Enable managed MCP routing").buttons(MessageDialogButtons::OkCancelCustom("Enable managed routing".into(), "Not now".into())).blocking_show()
-    { return Err("Managed MCP routing was declined. Existing connections were not changed.".into()); }
-    let router = store.prepare_router(
-        &root.join(binary),
-        &read("routing/router.json")?,
-        &read("routing/router.minisig")?,
-    )?;
-    store.activate(&bytes, &signature, previous.as_deref())?;
-    Ok(Some(router))
+    Ok(Some(ManagedRouteReview {
+        source,
+        root,
+        entry,
+        store,
+        bytes,
+        signature,
+        previous,
+    }))
 }
 
 fn generation_id(entry: &Module) -> Result<String, String> {

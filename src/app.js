@@ -658,7 +658,12 @@
     }
   });
   byId('hub-update-button').addEventListener('click', () => hubAction('install_hub_update'));
-  window.addEventListener('creator-feature-state', () => { if (directFeatures) renderState(); });
+  window.addEventListener('creator-feature-state', () => {
+    if (directFeatures) {
+      renderState();
+      if (current === 'projects' && !busy) window.CreatorProjects.show();
+    }
+  });
   byId('cancel-download').addEventListener('click', async () => {
     byId('cancel-download').disabled = true;
     try { await invoke('cancel_download'); } catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }

@@ -473,6 +473,154 @@ impl UnixPreviousServers {
     }
 }
 
+// Native-only before-images. No serialized argument or saved preference can
+// construct this authority; Root must obtain the service's native consent first.
+pub(crate) struct ConvergenceSettings {
+    paths: Paths,
+    original: Snapshot,
+    imported: Snapshot,
+    server: PathBuf,
+    review: ServerReview,
+    #[cfg(unix)]
+    previous: UnixPreviousServers,
+}
+
+impl ConvergenceSettings {
+    pub(crate) fn inspect(server: &Path, imported: Option<&[u8]>) -> Result<Self, String> {
+        let paths = Paths::new(&dirs::config_dir().ok_or("MCP config directory is unavailable.")?)?;
+        if inspect_paths(&paths)?
+            .recovery
+            .iter()
+            .any(|r| !r.completed && !r.historical_completed)
+        {
+            return Err("Review interrupted MCP settings changes before moving to Hub.".into());
+        }
+        let original = inventory(&paths)?;
+        let mut expected = original.clone();
+        if let Some(bytes) = imported {
+            // Root's reviewed project merge updates both existing stores only.
+            if original.current.is_none() || original.legacy.is_none() {
+                return Err("Project import requires both original settings stores.".into());
+            }
+            let _: crate::LauncherConfig = serde_json::from_slice(bytes)
+                .map_err(|_| "Invalid native project-import proposal.")?;
+            expected.current = Some(bytes.to_vec());
+            expected.legacy = Some(bytes.to_vec());
+        }
+        #[cfg(unix)]
+        let previous = UnixPreviousServers::native()?;
+        #[cfg(unix)]
+        let recognized = |path: &Path| previous.recognizes(path);
+        #[cfg(not(unix))]
+        let recognized = official_previous_server;
+        let review = server_review(&paths, &expected, server, recognized)?;
+        Ok(Self {
+            paths,
+            original,
+            imported: expected,
+            server: server.into(),
+            review,
+            #[cfg(unix)]
+            previous,
+        })
+    }
+
+    pub(crate) fn recheck_original(&self) -> Result<(), String> {
+        if inventory(&self.paths)? != self.original {
+            return Err(
+                "MCP settings changed during native review; nothing was overwritten.".into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn recheck_imported(&self) -> Result<(), String> {
+        let actual = inventory(&self.paths)?;
+        if let (Some(current), Some(legacy)) = (&self.imported.current, &self.imported.legacy) {
+            if current == legacy {
+                crate::service::verify_convergence_import(
+                    current,
+                    actual.current.as_deref(),
+                    actual.legacy.as_deref(),
+                )?;
+            }
+        }
+        if actual != self.imported
+            || inspect_paths(&self.paths)?
+                .recovery
+                .iter()
+                .any(|r| !r.completed && !r.historical_completed)
+        {
+            return Err("Settings or recovery changed after the reviewed project import. No server write was started.".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn apply(self, app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
+        use tauri::Manager;
+        require_writable()?;
+        if app
+            .try_state::<crate::managed_client::ManagedClient>()
+            .is_none()
+        {
+            return Err("Native migration requires the verified managed route.".into());
+        }
+        let runtime = creator_hub_mcp_router::Store::installed()?.resolve()?;
+        self.recheck_imported()?;
+        if runtime.server != self.server
+            || crate::normalized_existing_path(crate::default_mcp_server_path(app)?)
+                != crate::normalized_existing_path(self.server.clone())
+        {
+            return Err("Settings, recovery or the signed runtime changed after consent. Old apps were kept.".into());
+        }
+        #[cfg(unix)]
+        let recognized = |path: &Path| self.previous.recognizes(path);
+        #[cfg(not(unix))]
+        let recognized = official_previous_server;
+        if server_review(&self.paths, &self.imported, &self.server, recognized)? != self.review {
+            return Err("The previous MCP server changed after native consent.".into());
+        }
+        let result = if self.review.requires_replacement {
+            // An unverified/custom server remains a separate explicit decision.
+            native_review_server(app)?
+        } else {
+            finish_server_review(
+                &self.paths,
+                &self.imported,
+                &self.server,
+                &self.review,
+                true,
+                recognized,
+            )?
+        };
+        serde_json::to_value(result).map_err(|_| "Cannot encode native server transition.".into())
+    }
+}
+
+pub(crate) fn verified_previous_connection(node: &Path, server: &Path) -> Result<bool, String> {
+    #[cfg(unix)]
+    let recognized = UnixPreviousServers::native()?.recognizes(server)?;
+    #[cfg(not(unix))]
+    let recognized = official_previous_server(server)?;
+    if !recognized {
+        return Ok(false);
+    }
+    let Some(root) = server.parent() else {
+        return Ok(false);
+    };
+    let expected_node = root
+        .join("runtime")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    if crate::normalized_existing_path(node.into())
+        != crate::normalized_existing_path(expected_node)
+    {
+        return Ok(false);
+    }
+    // A name/ownership marker alone never proves a previous publisher. Verify
+    // the entire previous payload against this library's frozen runtime manifest.
+    Ok(crate::hosted_payload::Root::verified(root.into()).is_ok())
+}
+
 pub(super) fn native_review_server(app: &tauri::AppHandle) -> Result<ServerTransition, String> {
     use tauri::Manager;
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -888,3 +1036,217 @@ fn preserve(paths: &Paths, reviewed: &Snapshot) -> Result<(), String> {
 #[cfg(test)]
 #[path = "product_settings_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod convergence_tests {
+    use super::*;
+
+    fn imported_fixture(base: &Path) -> ConvergenceSettings {
+        let paths = Paths::new(base).unwrap();
+        fs::create_dir_all(paths.current.parent().unwrap()).unwrap();
+        fs::create_dir_all(paths.legacy.parent().unwrap()).unwrap();
+        let original = br#"{"channels":[],"auto_start":false,"future":"original"}"#;
+        let imported = br#"{"channels":[],"auto_start":false,"future":"approved import"}"#;
+        fs::write(&paths.current, original).unwrap();
+        fs::write(&paths.legacy, original).unwrap();
+        let saved = ConvergenceSettings {
+            original: inventory(&paths).unwrap(),
+            imported: Snapshot {
+                current: Some(imported.to_vec()),
+                legacy: Some(imported.to_vec()),
+            },
+            server: base.join("verified/creator-works-mcp.mjs"),
+            review: ServerReview {
+                writes: vec![],
+                requires_replacement: false,
+            },
+            #[cfg(unix)]
+            previous: UnixPreviousServers::new(vec![], 0, "fixture"),
+            paths,
+        };
+        fs::write(&saved.paths.current, imported).unwrap();
+        fs::write(&saved.paths.legacy, imported).unwrap();
+        saved
+    }
+
+    #[test]
+    fn mcp_settings_or_recovery_changed_during_exception_review_refuse_before_client_preparation() {
+        for drift in ["current", "legacy", "recovery", "unchanged"] {
+            let dir = tempfile::tempdir().unwrap();
+            let base = dir.path().to_path_buf();
+            let saved = imported_fixture(&base);
+            assert!(saved.recheck_original().is_err());
+            saved.recheck_imported().unwrap();
+            let client = base.join("client.json");
+            let router = base.join(if cfg!(windows) {
+                "hub-router.exe"
+            } else {
+                "hub-router"
+            });
+            fs::write(&router, b"disposable parser target, never executed").unwrap();
+            let before = serde_json::json!({"other":"kept", "mcpServers":{"creator-works":{
+                "command":base.join(if cfg!(windows) { "old/runtime/node.exe" } else { "old/runtime/node" }),
+                "args":[base.join("old/banter-mcp.mjs")], "env":{"CUSTOM":"kept"}
+            }}}).to_string();
+            fs::write(&client, &before).unwrap();
+            let plan = crate::client_migration::Plan::review_router(
+                "Fixture client",
+                &client,
+                crate::client_migration::Format::Json,
+                &router,
+            )
+            .unwrap()
+            .unwrap();
+            // Simulate the synchronous native exception dialog returning after
+            // an external editor changed valid MCP settings or recovery evidence.
+            let approve_exception = || {
+                match drift {
+                    "current" => fs::write(
+                        &saved.paths.current,
+                        br#"{"channels":[],"auto_start":true,"future":"external"}"#,
+                    )
+                    .unwrap(),
+                    "legacy" => fs::write(
+                        &saved.paths.legacy,
+                        br#"{"channels":[],"auto_start":true,"future":"external"}"#,
+                    )
+                    .unwrap(),
+                    "recovery" => {
+                        fs::create_dir_all(saved.paths.journal.join("unknown-operation")).unwrap();
+                    }
+                    _ => {}
+                }
+                true
+            };
+            assert!(approve_exception());
+            let journal = base.join("client-migrations");
+            let result = crate::apply_convergence_client_plans(&[plan], &journal, || {
+                saved.recheck_imported()
+            });
+            if drift == "unchanged" {
+                assert_eq!(result.unwrap()["status"], "migrated");
+                let after: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&client).unwrap()).unwrap();
+                assert_eq!(after["other"], "kept");
+                assert_eq!(
+                    after["mcpServers"]["creator-works"]["args"],
+                    serde_json::json!([])
+                );
+            } else {
+                assert!(result.is_err(), "drift: {drift}");
+                assert_eq!(fs::read_to_string(&client).unwrap(), before);
+                assert!(!journal.exists());
+                assert!(!base.join(".creator-hub-settings-backups").exists());
+                if drift == "current" {
+                    assert!(fs::read_to_string(&saved.paths.current)
+                        .unwrap()
+                        .contains("external"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exception_client_path_rechecks_imported_settings_after_dialog_before_any_client_preparation()
+    {
+        let source = include_str!("lib.rs");
+        let path = source
+            .split("fn apply_convergence_clients(")
+            .nth(1)
+            .unwrap()
+            .split("fn apply_convergence_client_plans(")
+            .next()
+            .unwrap();
+        assert!(
+            path.find(".blocking_show()").unwrap()
+                < path.find("consent.recheck_imported_settings()").unwrap()
+        );
+        let leaf = source
+            .split("fn apply_convergence_client_plans(")
+            .nth(1)
+            .unwrap()
+            .split("pub fn run()")
+            .next()
+            .unwrap();
+        assert!(
+            leaf.find("recheck_settings()?").unwrap() < leaf.find("Plan::apply_reviewed(").unwrap()
+        );
+        assert!(!leaf.contains("recheck_clients"));
+        let service = include_str!("service.rs");
+        let check = service
+            .split("pub(crate) fn recheck_imported_settings(")
+            .nth(1)
+            .unwrap()
+            .split("/// Uses the existing ownership")
+            .next()
+            .unwrap();
+        assert!(check.contains("self.review.settings.recheck_imported()?"));
+        assert!(check.contains("require_no_convergence_recovery()"));
+        assert!(!check.contains("recheck_original"));
+    }
+
+    #[test]
+    fn consent_binds_original_and_exact_predicted_import_without_renewing_unrelated_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path()).unwrap();
+        fs::create_dir_all(paths.current.parent().unwrap()).unwrap();
+        fs::create_dir_all(paths.legacy.parent().unwrap()).unwrap();
+        let before = br#"{"channels":[],"auto_start":false,"future":"kept"}"#;
+        let imported = br#"{"channels":[],"auto_start":false,"future":"reviewed import"}"#;
+        fs::write(&paths.current, before).unwrap();
+        fs::write(&paths.legacy, before).unwrap();
+        let saved = ConvergenceSettings {
+            original: inventory(&paths).unwrap(),
+            imported: Snapshot {
+                current: Some(imported.to_vec()),
+                legacy: Some(imported.to_vec()),
+            },
+            server: dir.path().join("verified/creator-works-mcp.mjs"),
+            review: ServerReview {
+                writes: vec![],
+                requires_replacement: false,
+            },
+            #[cfg(unix)]
+            previous: UnixPreviousServers::new(vec![], 0, "fixture"),
+            paths,
+        };
+        saved.recheck_original().unwrap();
+        assert!(saved.recheck_imported().is_err());
+        fs::write(&saved.paths.current, imported).unwrap();
+        fs::write(&saved.paths.legacy, imported).unwrap();
+        assert!(saved.recheck_original().is_err());
+        saved.recheck_imported().unwrap();
+        fs::write(&saved.paths.current, before).unwrap();
+        assert!(saved.recheck_imported().is_err());
+        assert_eq!(fs::read(&saved.paths.current).unwrap(), before);
+        assert!(!saved.paths.journal.exists());
+    }
+
+    #[test]
+    fn native_server_consent_still_checks_route_snapshots_recognition_and_replacement_review() {
+        let source = include_str!("product_settings.rs");
+        let apply = source
+            .split("pub(crate) fn apply(self,")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn verified_previous_connection")
+            .next()
+            .unwrap();
+        for guard in [
+            "require_writable()?",
+            "ManagedClient",
+            "Store::installed()",
+            "self.recheck_imported()?",
+            "server_review(",
+            "self.review.requires_replacement",
+            "native_review_server(app)?",
+            "finish_server_review(",
+        ] {
+            assert!(apply.contains(guard), "missing guard: {guard}");
+        }
+        assert!(
+            apply.find("self.recheck_imported()?").unwrap()
+                < apply.find("finish_server_review(").unwrap()
+        );
+    }
+}
