@@ -418,6 +418,9 @@ pub(crate) fn discover_target(
 #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
 type SignedPortableDiscovery = (Version, Vec<u8>, Vec<u8>);
 
+#[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+pub(crate) const PORTABLE_DESCRIPTOR_NAME: &str = "creator-hub-linux-x86_64-portable.json";
+
 /// Portable discovery supplies its own signed schema; native Target/Release
 /// validation remains unchanged. Asset locations never come from API URLs.
 #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
@@ -433,7 +436,7 @@ pub(crate) fn discover_portable(
         items,
         false,
         baseline,
-        crate::portable_update::DESCRIPTOR_NAME,
+        PORTABLE_DESCRIPTOR_NAME,
     );
     let Some(version) = versions.into_iter().next() else {
         return Ok(None);
@@ -441,7 +444,7 @@ pub(crate) fn discover_portable(
     let url = release_url(
         "CREATOR-HUB",
         &version.to_string(),
-        crate::portable_update::DESCRIPTOR_NAME,
+        PORTABLE_DESCRIPTOR_NAME,
     );
     Ok(Some((
         version,
