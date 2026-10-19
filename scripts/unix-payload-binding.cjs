@@ -48,7 +48,7 @@ function validatePrepared(p, target, version) {
 function validateBinding({ expected: e, run: r, artifact: a, commit, jobs, prepared: p }) {
   exactKeys(e, 'target version sourceCommit runId runAttempt artifactId zipSha256', 'Independent pins');
   const target = TARGETS[e.target]; assert.ok(target, 'Unknown target');
-  assert.equal(e.version, '0.1.14', 'This validation lane admits only the reviewed unified target');
+  assert.ok(e.version === '0.1.14' || e.version === '0.1.16' && e.target === 'linux', 'Only finite reviewed validation targets are admitted');
   sha(e.sourceCommit, 40); sha(e.zipSha256);
   for (const value of [e.runId, e.runAttempt, e.artifactId]) id(value);
   assert.equal(r.id, e.runId); assert.equal(r.head_sha, e.sourceCommit);
@@ -58,7 +58,8 @@ function validateBinding({ expected: e, run: r, artifact: a, commit, jobs, prepa
   for (const repository of [r.repository, r.head_repository]) {
     assert.equal(repository.id, REPOSITORY_ID); assert.equal(repository.full_name, REPOSITORY);
   }
-  if (r.event === 'push') assert.equal(r.head_branch, 'validation/unix-payload-014');
+  if (e.version === '0.1.16') assert.equal(r.head_branch, 'validation/unix-payload-016');
+  if (r.event === 'push') assert.equal(r.head_branch, e.version === '0.1.16' ? 'validation/unix-payload-016' : 'validation/unix-payload-014');
   else assert.equal(r.event, 'workflow_dispatch', 'PR merges are not supported by this producer');
   assert.equal(commit.sha, e.sourceCommit); sha(commit.tree.sha, 40);
   assert.equal(a.id, e.artifactId); assert.equal(a.expired, false);

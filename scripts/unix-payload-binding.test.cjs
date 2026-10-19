@@ -45,3 +45,23 @@ test('an exact successful dispatch is accepted without inventing PR merge ancest
   f.run.head_branch = 'feature/unified-creator-hub';
   assert.equal(validateBinding(f).sourceTree, tree);
 });
+
+test('0.1.16 payload admission is Linux-only and tied to its new exact producer branch', () => {
+  const current = (target = 'linux') => {
+    const f = fixture(target);
+    f.expected.version = f.prepared.hubVersion = '0.1.16';
+    f.run.head_branch = 'validation/unix-payload-016';
+    return f;
+  };
+  for (const event of ['push', 'workflow_dispatch']) {
+    const f = current(); f.run.event = f.prepared.source.event = event;
+    assert.equal(validateBinding(f).version, '0.1.16');
+    f.run.head_branch = 'validation/unix-payload-014';
+    assert.throws(() => validateBinding(f));
+  }
+  for (const target of ['macos-intel', 'macos-arm64']) assert.throws(() => validateBinding(current(target)));
+  for (const version of ['0.1.15', '0.1.17', '0.1.16+unreviewed']) {
+    const f = current(); f.expected.version = f.prepared.hubVersion = version;
+    assert.throws(() => validateBinding(f));
+  }
+});

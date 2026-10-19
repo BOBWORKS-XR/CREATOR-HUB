@@ -1,4 +1,4 @@
-name: Fresh signed14 Linux packages (not acceptance)
+name: Fresh signed Linux packages (not acceptance)
 on:
   push:
     branches: [validation/unix-assembly-014]
@@ -27,6 +27,7 @@ jobs:
     env:
       CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: ${{ inputs.linux_retirement_test_candidate && '1' || '0' }}
       CREATOR_LINUX_INTEGRATED_CANDIDATE: ${{ inputs.linux_integrated_candidate && '1' || '0' }}
+      SIGNED_INPUTS: ${{ inputs.signed_inputs }}
     steps:
       - name: Refuse conflicting candidate profiles before any download
         shell: bash
@@ -35,6 +36,18 @@ jobs:
           if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 && "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then
             echo '::error::Choose either the TEST ONLY retirement profile or the integrated candidate, not both.' >&2
             exit 64
+          fi
+          if [[ "$GITHUB_REF" == refs/heads/validation/linux-integrated-candidate-016 ]]; then
+            python3 - <<'PY'
+          import json, os
+          assert os.environ['GITHUB_REPOSITORY'] == 'BOBWORKS-XR/CREATOR-HUB'
+          assert os.environ['GITHUB_REPOSITORY_ID'] == '1364807512'
+          assert os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
+          assert os.environ['CREATOR_LINUX_INTEGRATED_CANDIDATE'] == '1'
+          assert os.environ['CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE'] == '0'
+          inputs = json.loads(os.environ['SIGNED_INPUTS'])
+          assert len(inputs) == 1 and inputs[0]['target'] == 'linux' and inputs[0]['os'] == 'ubuntu-22.04'
+          PY
           fi
   stage-input:
     needs: candidate-options
@@ -58,10 +71,13 @@ jobs:
           ZIP_SHA256: ${{ matrix.zipSha256 }}
           HANDOFF_SHA256: ${{ matrix.handoffSha256 }}
           TARGET: ${{ matrix.target }}
+          HUB_VERSION: ${{ github.ref == 'refs/heads/validation/linux-integrated-candidate-016' && '0.1.16' || '0.1.14' }}
         with:
           script: |
             const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
             assert.equal(process.env.TARGET,'linux','macOS support is suspended');
+            assert.ok(['0.1.14','0.1.16'].includes(process.env.HUB_VERSION));
+            if(process.env.HUB_VERSION==='0.1.16')assert.equal(context.ref,'refs/heads/validation/linux-integrated-candidate-016');
             const id=Number(process.env.ASSET_ID),size=Number(process.env.ZIP_BYTES),digest=process.env.ZIP_SHA256;
             assert.ok(Number.isSafeInteger(id)&&id>0&&Number.isSafeInteger(size)&&size>0&&size<=300*1024*1024);
             assert.match(digest,/^[a-f0-9]{64}$/);assert.match(process.env.HANDOFF_SHA256,/^[a-f0-9]{64}$/);
@@ -70,7 +86,7 @@ jobs:
             const assets=await github.paginate(github.rest.repos.listReleaseAssets,{...context.repo,release_id:release.id,per_page:100});
             const matches=assets.filter(a=>a.id===id);assert.equal(matches.length,1);
             const asset=matches[0];assert.equal(asset.size,size);assert.equal(asset.digest,`sha256:${digest}`);
-            assert.ok(asset.name.startsWith(`signed-unix-handoff-0.1.14-${process.env.TARGET}-`)&&asset.name.endsWith('.zip'));
+            assert.ok(asset.name.startsWith(`signed-unix-handoff-${process.env.HUB_VERSION}-${process.env.TARGET}-`)&&asset.name.endsWith('.zip'));
             const {data}=await github.rest.repos.getReleaseAsset({...context.repo,asset_id:id,headers:{accept:'application/octet-stream'}});
             const bytes=Buffer.from(data);assert.equal(bytes.length,size);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),digest);
             fs.writeFileSync(path.join(fs.realpathSync(process.env.RUNNER_TEMP),'signed-unix-handoff.zip'),bytes,{flag:'wx',mode:0o600});

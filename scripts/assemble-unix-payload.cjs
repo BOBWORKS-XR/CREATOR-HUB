@@ -51,7 +51,14 @@ function admission(root, platform, arch, env, execute = execFileSync) {
   assert.equal(git(['rev-parse', '--show-toplevel']), root);
   assert.equal(git(['rev-parse', 'HEAD']), env.GITHUB_SHA);
   assert.equal(git(['status', '--porcelain=v1', '--untracked-files=normal']), '', 'Clean initial assembly source required');
-  return { commit: env.GITHUB_SHA, handoffSha256: env.CREATOR_UNIX_HANDOFF_SHA256 };
+  const version = env.GITHUB_REF === 'refs/heads/validation/linux-integrated-candidate-016' ? '0.1.16' : '0.1.14';
+  if (version === '0.1.16') {
+    assert.ok(platform === 'linux' && arch === 'x86_64' && env.CREATOR_LINUX_INTEGRATED_CANDIDATE === '1', '0.1.16 assembly requires the direct Linux x86_64 profile');
+    for (const name of ['package.json', 'src-tauri/tauri.conf.json']) {
+      assert.equal(JSON.parse(fs.readFileSync(path.join(root, name), 'utf8')).version, version, '0.1.16 assembly source identity differs');
+    }
+  }
+  return { commit: env.GITHUB_SHA, handoffSha256: env.CREATOR_UNIX_HANDOFF_SHA256, version };
 }
 function inventory(root, names) {
   const found = [];
@@ -71,10 +78,11 @@ function inventory(root, names) {
   }
   walk(root); assert.deepEqual(found.sort(), [...names].sort(), 'Incomplete handoff');
 }
-function validateHandoff(h, prepared, records, platform, arch) {
+function validateHandoff(h, prepared, records, platform, arch, expectedVersion = '0.1.14') {
   keys(h, 'schemaVersion product hubVersion platform arch rustTarget mcpMode compiledFlags source apiProof transferFiles routingMetadata builtinManifest payloadFiles privateKeyIncluded nativeGuiAccepted releaseReady'.split(' '));
   assert.equal(h.schemaVersion, 1); assert.equal(h.product, 'com.creatorworks.hub.unix-signed-handoff');
-  assert.equal(h.hubVersion, '0.1.14'); assert.equal(h.platform, platform); assert.equal(h.arch, arch);
+  assert.ok(expectedVersion === '0.1.14' || expectedVersion === '0.1.16' && platform === 'linux' && arch === 'x86_64', 'Finite native assembly version required');
+  assert.equal(h.hubVersion, expectedVersion); assert.equal(h.platform, platform); assert.equal(h.arch, arch);
   assert.equal(h.privateKeyIncluded, false); assert.equal(h.nativeGuiAccepted, false); assert.equal(h.releaseReady, false);
   const binding = validateBinding({ ...h.apiProof, prepared });
   assert.equal(binding.platform, platform); assert.equal(binding.arch, arch);
@@ -158,7 +166,7 @@ function assemble(input, output, platform, arch, context = {}) {
     recheck(); return value;
   }
   const handoff = read('handoff.json', true), prepared = read('prepared-unix.json', true);
-  const manifest = validateHandoff(handoff, prepared, records, platform, arch);
+  const manifest = validateHandoff(handoff, prepared, records, platform, arch, accepted.version);
   // Different assembly commits are permitted only when all private source is unchanged.
   verifyPrivateSource(handoff.source.sourceCommit, run);
   for (const name of ['mcp', 'setup']) {

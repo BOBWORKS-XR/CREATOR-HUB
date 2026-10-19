@@ -9,8 +9,12 @@ const { moduleFiles, writeAssemblyManifests } = require('./build-unified.cjs');
 const { routeFiles } = require('./managed-router-package.cjs');
 const { admission, inventory, validateHandoff, verificationTools, verifyPrivateSource, assemble, INPUTS, TRANSFER, ROUTING, WORKFLOW } = require('./assemble-unix-payload.cjs');
 
-function data(target = 'linux') {
+function data(target = 'linux', version = '0.1.14') {
   const binding = fixture(target), prepared = binding.prepared;
+  if (version === '0.1.16') {
+    binding.expected.version = prepared.hubVersion = version;
+    binding.run.head_branch = 'validation/unix-payload-016';
+  }
   const modules = Object.fromEntries(['mcp', 'setup'].map(id => {
     const names = moduleFiles(id, prepared.platform);
     return [id, { executable: names[0], version: id === 'mcp' ? '2.7.7' : '0.3.7',
@@ -36,6 +40,19 @@ for (const target of ['linux', 'macos-arm64', 'macos-intel']) test(`${target} ex
   const f = data(target);
   assert.deepEqual(validateHandoff(f.h, f.prepared, f.records, f.prepared.platform, f.prepared.arch), f.h.builtinManifest);
   assert.equal(Object.keys(f.h.payloadFiles).length, 15);
+});
+
+test('the separate 016 handoff requires its independently admitted version and cannot replace the frozen 014 scope', () => {
+  const f = data('linux', '0.1.16');
+  assert.deepEqual(validateHandoff(f.h, f.prepared, f.records, 'linux', 'x86_64', '0.1.16'), f.h.builtinManifest);
+  assert.throws(() => validateHandoff(f.h, f.prepared, f.records, 'linux', 'x86_64'));
+  assert.throws(() => validateHandoff(f.h, f.prepared, f.records, 'linux', 'x86_64', '0.1.17'));
+  for (const target of ['macos-arm64', 'macos-intel']) {
+    const other = data(target, '0.1.16');
+    assert.throws(() => validateHandoff(other.h, other.prepared, other.records, 'macos', other.prepared.arch, '0.1.16'));
+  }
+  const old = data();
+  assert.throws(() => validateHandoff(old.h, old.prepared, old.records, 'linux', 'x86_64', '0.1.16'));
 });
 const faults = {
   target: f => { f.h.arch = 'wrong'; },
@@ -74,6 +91,32 @@ test('admission requires exact workflow, native target and clean source without 
       { NODE_OPTIONS: '--require never-read' }, { CREATOR_UNIX_HANDOFF_SHA256: '' }]) assert.throws(() => admission(root, 'linux', 'x86_64', { ...env, ...change }, execute));
     assert.throws(() => admission(root, 'linux', 'x86_64', env, (_, args) => args[0] === 'status' ? ' M source' : execute(_, args)), /Clean/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('016 assembly admission requires exact source, Linux x64 and the integrated candidate before any payload is read', () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unix-assembly-test-')));
+  try {
+    fs.mkdirSync(path.join(root, 'src-tauri'));
+    for (const file of ['package.json', 'src-tauri/tauri.conf.json']) fs.writeFileSync(path.join(root, file), JSON.stringify({ version: '0.1.16' }));
+    const ref = 'refs/heads/validation/linux-integrated-candidate-016';
+    const env = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
+      GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
+      GITHUB_REF: ref, GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/${WORKFLOW}@${ref}`, GITHUB_SHA: 'a'.repeat(40),
+      CREATOR_UNIX_HANDOFF_SHA256: 'b'.repeat(64), CREATOR_LINUX_INTEGRATED_CANDIDATE: '1' };
+    const execute = (_, args) => args.includes('--show-toplevel') ? root : args.includes('HEAD') ? env.GITHUB_SHA : '';
+    assert.equal(admission(root, 'linux', 'x86_64', env, execute).version, '0.1.16');
+    for (const change of [{ GITHUB_EVENT_NAME: 'push' }, { CREATOR_LINUX_INTEGRATED_CANDIDATE: '0' }]) {
+      assert.throws(() => admission(root, 'linux', 'x86_64', { ...env, ...change }, execute));
+    }
+    assert.throws(() => admission(root, 'macos', 'x86_64', { ...env, RUNNER_OS: 'macOS' }, execute));
+    assert.throws(() => admission(root, 'linux', 'aarch64', { ...env, RUNNER_ARCH: 'ARM64' }, execute));
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ version: '0.1.14' }));
+    assert.throws(() => admission(root, 'linux', 'x86_64', env, execute), /source identity/);
+  } finally {
+    assert.equal(fs.realpathSync(root), root);
+    assert.equal(path.dirname(root), fs.realpathSync(os.tmpdir()));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 test('exact input inventory refuses incomplete or extra handoff files', () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unix-handoff-test-')));
@@ -130,6 +173,26 @@ test('both Linux assembly jobs select the same bounded signed input', () => {
   assert.ok(Number.isSafeInteger(pin.assetId) && pin.assetId > 0);
   assert.ok(Number.isSafeInteger(pin.zipBytes) && pin.zipBytes > 0 && pin.zipBytes <= 300 * 1024 * 1024);
   for (const value of [pin.zipSha256, pin.handoffSha256]) assert.match(value, /^[a-f0-9]{64}$/);
+});
+
+test('016 workflow refuses wrong profiles before downloads and selects the asset version from its exact ref', () => {
+  const { yaml } = require('../node_modules/playwright-core/lib/utilsBundle.js');
+  const document = yaml.parseDocument(fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-assembly.yml'), 'utf8'), { uniqueKeys: true });
+  assert.deepEqual(document.errors, []);
+  const workflow = document.toJS();
+  const options = workflow.jobs['candidate-options'];
+  assert.match(options.steps[0].run, /refs\/heads\/validation\/linux-integrated-candidate-016/);
+  assert.match(options.steps[0].run, /GITHUB_EVENT_NAME.*workflow_dispatch/);
+  assert.match(options.steps[0].run, /CREATOR_LINUX_INTEGRATED_CANDIDATE.*== '1'/);
+  assert.match(options.steps[0].run, /CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE.*== '0'/);
+  assert.match(options.steps[0].run, /len\(inputs\) == 1.*'linux'.*'ubuntu-22\.04'/);
+  const staged = workflow.jobs['stage-input'];
+  assert.equal(staged.needs, 'candidate-options');
+  assert.match(staged.steps[0].env.HUB_VERSION, /linux-integrated-candidate-016.*'0\.1\.16'.*'0\.1\.14'/);
+  assert.match(staged.steps[0].with.script, /signed-unix-handoff-\$\{process\.env\.HUB_VERSION\}/);
+  assert.equal(staged.runs_on, undefined);
+  assert.equal(staged['runs-on'], 'ubuntu-22.04');
+  assert.equal(workflow.jobs.assembly['runs-on'], 'ubuntu-22.04');
 });
 
 test('small Linux receipts are retained before the large immutable package artifact', () => {
