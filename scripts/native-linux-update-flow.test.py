@@ -1023,6 +1023,13 @@ class WorkflowTests(unittest.TestCase):
         for forbidden in ("createRelease", "updateRelease", "uploadReleaseAsset", "deleteReleaseAsset", "NOPASSWD", "polkit.addRule", "sudoers", "rules.d"):
             self.assertNotIn(forbidden, text)
 
+    def test_shallow_preflight_fetches_only_exact_frozen_source_before_fixture_tests(self):
+        commands = [step["run"] for step in self.workflow["jobs"]["preflight"]["steps"] if "run" in step]
+        fetch = "git fetch --no-tags --depth=1 origin " + p.FROZEN_SOURCE
+        self.assertEqual(commands.count(fetch), 1)
+        tests = next(i for i, command in enumerate(commands) if "native-linux-update-flow.test.py" in command)
+        self.assertLess(commands.index(fetch), tests)
+
     def test_complete_frozen_checkout_and_stage_bindings(self):
         text = WORKFLOW.read_text()
         self.assertEqual(text.count("ref: " + p.FROZEN_SOURCE), 2)
@@ -1085,7 +1092,7 @@ class WorkflowTests(unittest.TestCase):
                 for embedded in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", body, re.S):
                     ast.parse(embedded)
                     python_bodies += 1
-        self.assertEqual(scripts, 9)
+        self.assertEqual(scripts, 10)
         self.assertEqual(python_bodies, 5)
 
 

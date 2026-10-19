@@ -43,6 +43,8 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24.17.0
+      - name: Fetch exact frozen helper source for unit fixtures
+        run: git fetch --no-tags --depth=1 origin edece084a8b5711d5c1c7bc5050b350a0f8286d0
       - name: Source unit YAML Bash and embedded JavaScript contracts only
         run: |
           npm ci --ignore-scripts
