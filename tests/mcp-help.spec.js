@@ -164,7 +164,10 @@ async function checkStandaloneHeader(page, frame, testInfo) {
   await expect(frame.locator('#appSwitcherToggle')).toHaveAttribute('aria-expanded', 'true');
   await expect(frame.locator('#appSwitcherShell')).toHaveCSS('position', 'fixed');
   await expect(frame.locator('#appSwitcherShell')).toHaveCSS('width', '224px');
-  await expect(frame.locator('#appSwitcherShell')).toHaveCSS('height', '294px');
+  await expect(frame.locator('#appSwitcherShell')).toHaveCSS('height', '236px');
+  await expect(frame.locator('#appSwitcherMenu [role="menuitem"] strong')).toHaveText([
+    'Creator Hub', 'Creator Works MCP', 'Creator Converter',
+  ]);
   await expect(frame.locator('#appSwitcherMenu')).toHaveJSProperty('inert', false);
   await expect(frame.locator('#appSwitcherMenu')).toHaveAttribute('aria-hidden', 'false');
   await expect(frame.locator('#appSwitcherScrim')).toHaveCSS('position', 'fixed');
@@ -179,6 +182,11 @@ async function checkStandaloneHeader(page, frame, testInfo) {
   await expect(frame.locator('#appSwitcherMenu')).toHaveAttribute('aria-hidden', 'true');
   await expect(frame.locator('#appSwitcherScrim')).toHaveCSS('visibility', 'hidden');
   await page.screenshot({ path: testInfo.outputPath('drawer-closed.png') });
+  await frame.locator('#appSwitcherToggle').click();
+  await frame.locator('[data-local-view="mcp"]').click();
+  await expect(frame.locator('#appSwitcherToggle')).toHaveAttribute('aria-expanded', 'false');
+  await expect(frame.locator('#view-mcp')).toBeVisible();
+  await expect(frame.locator('.app-context')).toHaveText('Unity project connections');
 }
 
 for (const mode of ['standalone', 'hosted']) {
@@ -188,6 +196,10 @@ for (const mode of ['standalone', 'hosted']) {
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
       const frame = await openMcp(page, mode);
+      await expect(frame.locator('#view-plugins, [data-local-view="plugins"]')).toHaveCount(0);
+      await expect(frame.locator('script[src*="community"], link[href*="community"]')).toHaveCount(0);
+      await expect(frame.locator('body')).not.toContainText(/Creator Plugins|creatorplugins\.store|retirement notice/i);
+      expect(await frame.evaluate(() => [typeof window.CreatorCommunity, typeof window.CreatorCommunityInvoke])).toEqual(['undefined', 'undefined']);
       await expect(frame.locator('#workspaceControls')).toHaveJSProperty('disabled', false);
       await expect(frame.locator('#setupChecks [data-check="opencode"] strong')).toHaveText('Configured');
       await expect(frame.locator('#ai-usage-notice')).toBeVisible();

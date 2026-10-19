@@ -117,7 +117,7 @@ label[for] {
   width: 55px;
   z-index: 40;
 }
-.app-shell.expanded { height: 294px; width: 224px; }
+.app-shell.expanded { height: 236px; width: 224px; }
 .app-shell:has(.app-tab:hover) { border-color: #687780; }
 .app-drawer-title {
   color: var(--text-2);
@@ -205,7 +205,7 @@ label[for] {
 .app-icon-converter img { height: 22px; width: 22px; }
 .app-menu {
   left: 0;
-  height: 244px;
+  height: 186px;
   max-height: calc(100dvh - 74px);
   opacity: 0;
   overflow-x: hidden;
@@ -1129,10 +1129,7 @@ h2 {
 }
 
 .creator-hosted .header, .creator-hosted .footer { display: none; }
-.creator-hosted #view-plugins, #view-mcp[hidden], #view-plugins[hidden] { display: none !important; }
-#view-plugins .icon-plugins { --icon: url('icons/puzzle.svg'); }
-#view-plugins .icon-refresh { --icon: url('icons/refresh-cw.svg'); }
-#view-plugins .icon-download { --icon: url('icons/download.svg'); }
+#view-mcp[hidden] { display: none !important; }
 .creator-hosted .main { padding-top: 16px; }
 .hosted-preview:not([hidden]) {
   display: flex;

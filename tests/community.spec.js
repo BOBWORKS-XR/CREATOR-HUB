@@ -2,8 +2,11 @@ const { test, expect } = require('@playwright/test');
 const entry = require('./fixtures/community/start-location.json');
 const path = require('node:path');
 const { verifyCommunityMedia } = require('../scripts/verify-community-media.cjs');
-// Historical protocol coverage only. The shipped retirement view has its own suite.
+// Historical protocol coverage only, isolated from the shipped Hub interface.
 test.beforeEach(async ({ page }) => {
+  await page.route('http://127.0.0.1:4188/', route => route.fulfill({ path: path.join(__dirname, 'fixtures/community/legacy-hub.html'), contentType: 'text/html' }));
+  await page.route('**/app.js', route => route.fulfill({ path: path.join(__dirname, 'fixtures/community/legacy-app.js'), contentType: 'text/javascript' }));
+  await page.route('**/community.css', route => route.fulfill({ path: path.join(__dirname, 'fixtures/community/legacy-community.css'), contentType: 'text/css' }));
   await page.route('**/community.js', route => route.fulfill({ path: path.join(__dirname, 'fixtures/community/legacy-catalogue.js'), contentType: 'text/javascript' }));
 });
 async function load(page, options = {}) {

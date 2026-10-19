@@ -307,7 +307,7 @@ test('legacy mode retains Apps-first home, both tabs and project navigation', as
   await expect(page.locator('#unified-home-updater')).toBeHidden();
   await expect(page.locator('#hub-tab-apps')).toBeVisible();
   await expect(page.locator('#hub-tab-projects')).toBeVisible();
-  await expect(page.locator('.app-row:visible')).toHaveCount(4);
+  await expect(page.locator('.app-row:visible')).toHaveCount(3);
   await expect(page.locator('#view-hub .hub-update')).toHaveCount(1);
   await expect(page.locator('#view-hub .update-preferences')).toBeVisible();
   await expect(page.locator('#hub-pages #check-updates')).toBeVisible();

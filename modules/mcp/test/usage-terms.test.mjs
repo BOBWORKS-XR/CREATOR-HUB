@@ -95,13 +95,11 @@ test('AI usage warning remains visible and recoverable when standalone storage f
   assert.equal(store.size, 0);
 });
 
-test('MCP help covers client support, token controls and Plugins retirement', () => {
+test('MCP help covers client support and token controls without removed Plugins content', () => {
   assert.match(html, /id="context-help-open"/);
   assert.match(html, /id="context-help-dialog"/);
   assert.match(html, /Claude Desktop is the separate desktop app/);
   assert.match(html, /disable fast or high-cost modes/);
-  assert.match(html, /What happened to Creator Plugins\?/);
-  assert.match(html, /Existing imported assets, Unity project files and import receipts are not removed/);
-  assert.match(html, /MCP scene, prefab, component and Visual Scripting tools are not retired/);
+  assert.doesNotMatch(html, /Creator Plugins|Plugins retirement/);
   assert.match(fs.readFileSync('launcher/src/help.js', 'utf8'), /showModal\(\)/);
 });

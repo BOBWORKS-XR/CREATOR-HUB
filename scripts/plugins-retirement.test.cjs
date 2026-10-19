@@ -5,11 +5,10 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const read = file => fs.readFileSync(path.join(root, file), 'utf8');
 
-test('native and browser retirement use the same exact UTC cutoff', () => {
+test('retired website command cannot launch a browser or depend on the clock', () => {
   const native = read('native/plugins_retirement.rs');
-  const seconds = Number(native.match(/CUTOFF_SECONDS: u64 = ([0-9_]+)/)[1].replaceAll('_', ''));
-  assert.equal(seconds * 1000, Date.UTC(2026, 9, 20));
-  assert.match(read('src/community.js'), /Date.UTC\(2026, 9, 20\)/);
+  assert.match(native, /pub fn open_plugins_website\(\) -> Result<\(\), String> \{\s*Err\(RETIRED.into\(\)\)/);
+  assert.doesNotMatch(native, /std::process::Command|SystemTime|creatorplugins.store/);
 });
 
 test('every native app enforces retirement before dispatch and registers the fixed opener', () => {
@@ -26,9 +25,11 @@ test('every native app enforces retirement before dispatch and registers the fix
   assert.ok(JSON.parse(read('src-tauri/capabilities/default.json')).permissions.includes('allow-open-plugins-website'));
 });
 
-test('production catalogue copies are identical and historical UI is fixture-only', () => {
-  const current = read('src/community.js');
-  for (const file of ['modules/mcp/launcher/src/community.js', 'modules/project-setup/src/community.js']) assert.equal(read(file), current);
-  assert.doesNotMatch(current, /community_catalogue|download_community_package|queue_community_import|install_community_menu/);
+test('Plugins UI and loader references are removed from all production app shells', () => {
+  for (const file of ['src/index.html', 'modules/mcp/launcher/src/index.html', 'modules/project-setup/src/index.html']) {
+    assert.doesNotMatch(read(file), /data-view="plugins"|id="view-plugins"|community\.(js|css)|creator-plugins\.png|Creator Plugins/);
+  }
+  assert.doesNotMatch(read('src/app.js'), /CreatorCommunity|view-plugins|current === 'plugins'|view === 'plugins'/);
   assert.match(read('tests/fixtures/community/legacy-catalogue.js'), /Historical catalogue fixture/);
+  assert.match(read('tests/community.spec.js'), /fixtures\/community\/legacy-hub.html/);
 });

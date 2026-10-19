@@ -19,13 +19,13 @@ test('standalone switcher keeps external links public and local navigation expli
   assert.match(chrome, /publicPages\[item.dataset.appLink\]/);
 });
 
-test('standalone navigation keeps Hub and built-in Plugins without linking Project Setup', () => {
+test('standalone navigation keeps Hub without Plugins or a Project Setup app link', () => {
   assert.match(html, /data-app-link="hub"/);
   assert.match(html, /data-local-view="mcp" aria-current="page"/);
-  assert.match(html, /data-local-view="plugins"/);
+  assert.doesNotMatch(html, /data-local-view="plugins"|view-plugins/);
   assert.doesNotMatch(html, /data-app-link="setup"|Creator Project Setup/);
   assert.doesNotMatch(chrome, /setup:\s*['"]|CREATOR-PROJECT-SETUP\/releases/);
-  assert.equal((html.match(/role="menuitem"/g) || []).length, 4);
+  assert.equal((html.match(/role="menuitem"/g) || []).length, 3);
   assert.match(html, /id="setupBtn"/); // MCP connection setup remains available.
 });
 
@@ -39,7 +39,7 @@ test('drawer has one frame and closes accessibility immediately without transiti
   assert.match(chrome, /preventScroll: true/);
   assert.match(chrome, /scrim.addEventListener\('click'/);
   assert.match(chrome, /if \(event.target === scrim\) return/);
-  assert.match(css, /\.app-shell.expanded \{ height: 294px; width: 224px; \}/);
+  assert.match(css, /\.app-shell.expanded \{ height: 236px; width: 224px; \}/);
   assert.match(css, /prefers-reduced-motion: reduce/);
 });
 
@@ -52,23 +52,19 @@ test('Hub badge uses a three-face cube backplate without replacing the original 
   assert.match(html, /app-icon app-icon-hub[^>]*><img src="creator-works-logo.png"/);
 });
 
-test('Converter remains disabled while Plugins opens the retirement notice', () => {
+test('Converter remains disabled and Plugins has no retirement page', () => {
   assert.equal(createHash('sha256').update(fs.readFileSync('launcher/src/sidequest-mark-white.svg')).digest('hex'),
     'bd5e1350ad3e1f6a3b767945f43631aa85b3ebb3f4278b1634d86c6e88cf14d6');
   assert.match(html, /aria-disabled="true">\s*<span class="app-icon app-icon-converter"/);
   assert.match(html, /sidequest-mark-white.svg/);
   assert.match(html, /Creator Converter<\/strong><small>SideQuest \/ Coming soon/);
-  assert.match(html, /data-local-view="plugins"/);
-  assert.match(html, /Creator Plugins<\/strong><small>Retirement notice/);
-  assert.match(html, /id="view-plugins" class="hidden" hidden inert/);
+  assert.doesNotMatch(html, /data-local-view="plugins"|Creator Plugins|id="view-plugins"/);
   assert.doesNotMatch(html, /URP Converter/);
   assert.match(chrome, /if \(item.getAttribute\('aria-disabled'\) === 'true'\) return/);
 });
 
-test('Plugins uses the exact approved shared PNG without the rejected SVG', () => {
-  const entry = html.slice(html.indexOf('data-local-view="plugins"'), html.indexOf('</button>', html.indexOf('data-local-view="plugins"')));
-  assert.match(entry, /src="icons\/creator-plugins\.png"/);
-  assert.doesNotMatch(entry, /app-letter/);
+test('historical Plugins artwork is preserved but not loaded by the app', () => {
+  assert.doesNotMatch(html, /creator-plugins\.(png|svg)/);
   const icon = fs.readFileSync('launcher/src/icons/creator-plugins.png');
   assert.equal(createHash('sha256').update(icon).digest('hex'),
     'ff107f1c0bca0380f35f25754fd023d60311fa4457f6fd84255a8f41f78fee6d');
@@ -82,7 +78,7 @@ test('Plugins uses the exact approved shared PNG without the rejected SVG', () =
   assert.doesNotMatch(notices, /creator-plugins\.svg/);
 });
 
-test('result-returning community operations retain the existing workflow guard', async () => {
+test('result-returning operations retain the existing workflow guard', async () => {
   const f = fixture();
   f.context.action = async () => 'saved fixture';
   assert.equal(await vm.runInContext('runUIOperation(action, true)', f.context), 'saved fixture');

@@ -5,11 +5,10 @@
 .icon-folder { --icon: url("icons/folder-open.svg"); }
 .icon-close { --icon: url("icons/x.svg"); }
 .icon-download { --icon: url("icons/download.svg"); }
-.icon-plugins { --icon: url("icons/puzzle.svg"); }
 .suite-dismiss { position: fixed; z-index: 35; inset: 0; background: #090b0d66; opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 120ms ease, visibility 0s linear 120ms; }
 body.suite-open .suite-dismiss { opacity: 1; visibility: visible; pointer-events: auto; transition-delay: 0s; }
 .suite-shell { position: fixed; z-index: 40; top: 12px; left: -1px; width: 55px; height: 48px; max-height: calc(100dvh - 24px); overflow: hidden; border: 1px solid #374149; border-left: 0; border-radius: 0 6px 6px 0; background: #111518; transition: width 220ms cubic-bezier(.2,.75,.25,1), height 220ms cubic-bezier(.2,.75,.25,1); }
-.suite-shell.suite-expanded { width: 224px; height: 352px; }
+.suite-shell.suite-expanded { width: 224px; height: 294px; }
 .suite-shell:has(.suite-trigger:hover) { border-color: #687780; }
 .suite-trigger { position: absolute; z-index: 2; top: 0; right: 0; display: grid; place-items: center; width: 54px; height: 46px; padding: 0; border: 0; border-radius: 0 5px 5px 0; background: transparent; color: #edf1f3; }
 .suite-trigger:hover { background: #252c32; }
@@ -29,7 +28,6 @@ body.suite-open .app-header .title-block { opacity: 0; pointer-events: none; }
 .hub-mark::after { background: linear-gradient(90deg, #4c5964 50%, #343f48 50%); clip-path: polygon(6% 25%, 50% 50%, 94% 25%, 94% 75%, 50% 100%, 6% 75%); }
 .hub-mark img { position: relative; z-index: 1; width: 22px; height: 22px; }
 .hub-mark .suite-letter { z-index: 2; }
-.plugins-mark img { width: 34px; height: 34px; }
 .converter-mark { background: #000; border-radius: 5px; }
 .converter-mark img { width: 22px; height: 22px; }
 .suite-menu { position: absolute; top: 48px; left: 0; width: 223px; height: calc(100% - 48px); overflow-y: auto; overflow-x: hidden; padding: 6px; background: transparent; opacity: 0; visibility: hidden; transform: translateX(-12px); transition: opacity 100ms ease, transform 180ms ease, visibility 0s linear 220ms; }

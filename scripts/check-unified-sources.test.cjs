@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { validateManifest, checkSources, assertReleaseReady } = require('./check-unified-sources.cjs');
+const { validateManifest, checkSources, checkRemovedPlugins, assertReleaseReady } = require('./check-unified-sources.cjs');
 const manifest = require('../modules/suite.json');
 const root = path.resolve(__dirname, '..');
 
@@ -16,6 +16,14 @@ test('source paths cannot escape the canonical module locations', () => {
     const invalid = structuredClone(manifest);
     invalid.modules.mcp[field] = '../outside';
     assert.throws(() => validateManifest(invalid), /source provenance or path/);
+  }
+});
+
+test('source gate refuses reintroduced Plugins navigation, assets and retirement UI', () => {
+  assert.doesNotThrow(() => checkRemovedPlugins('<main>Projects</main>', 'fixture'));
+  for (const html of ['<button data-view="plugins">', '<button data-local-view="plugins">', "<section id='view-plugins'>", '<script src="community.js">', '<script src="community-adapter.js">',
+    '<link href="community.css">', '<img src="icons/creator-plugins.png">', '<p>Creator Plugins has retired</p>']) {
+    assert.throws(() => checkRemovedPlugins(html, 'fixture'), /Removed Plugins interface is still included: fixture/);
   }
 });
 

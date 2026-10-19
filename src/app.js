@@ -108,7 +108,7 @@
     trigger.setAttribute('aria-label', directFeatures ? 'Open Creator tools' : 'Open Creator apps');
   }
   function show(view, preserveError = false) {
-    if (!['hub', 'plugins', 'projects'].includes(view) && !Object.hasOwn(tools, view)) return;
+    if (!['hub', 'projects'].includes(view) && !Object.hasOwn(tools, view)) return;
     if (directFeatures && view === 'hub') view = 'projects';
     current = view;
     close();
@@ -125,12 +125,8 @@
       else item.removeAttribute('aria-current');
     }
     if (view === 'projects') window.CreatorProjects.show();
-    const pageBrand = view === 'plugins' ? '<span>CREATOR</span> <strong>PLUGINS</strong>' : '<span>CREATOR</span> <strong>HUB</strong>';
-    shell.querySelector('.suite-brand').innerHTML = pageBrand;
-    trigger.replaceChildren(menu.querySelector(`[data-view="${view === 'plugins' ? 'plugins' : 'hub'}"] .suite-mark`).cloneNode(true));
-    document.querySelector('#view-plugins').classList.toggle('hidden', view !== 'plugins');
-    if (view === 'plugins') window.CreatorCommunity.show();
-    else window.CreatorCommunity.closePreview();
+    shell.querySelector('.suite-brand').innerHTML = '<span>CREATOR</span> <strong>HUB</strong>';
+    trigger.replaceChildren(menu.querySelector('[data-view="hub"] .suite-mark').cloneNode(true));
     for (const item of menu.querySelectorAll('[data-view]')) {
       const selected = item.dataset.view === (view === 'projects' ? 'hub' : view);
       item.classList.toggle('current', selected);
@@ -151,7 +147,7 @@
       }));
     }
     renderState();
-    const target = view === 'hub' || directFeatures || window.CreatorHosted.active(view) ? title : document.querySelector(view === 'projects' ? '#hub-tab-projects' : view === 'plugins' ? '#plugins-title' : appState()?.builtIn ? '#builtin-title' : '#tool-title');
+    const target = view === 'hub' || directFeatures || window.CreatorHosted.active(view) ? title : document.querySelector(view === 'projects' ? '#hub-tab-projects' : appState()?.builtIn ? '#builtin-title' : '#tool-title');
     target.tabIndex = -1;
     target.focus();
   }
@@ -427,8 +423,8 @@
       byId('view-detail').classList.add('hidden');
       byId('view-builtin').classList.add('hidden');
       window.CreatorFeaturePages?.show(tool ? current : null, { load: directReady });
-      title.innerHTML = current === 'plugins' ? '<span>CREATOR</span> <strong>PLUGINS</strong>' : '<span>CREATOR</span> <strong>HUB</strong>';
-      byId('mode-description').textContent = tool?.summary || (current === 'plugins' ? 'Plugins retirement' : 'Unity tools. One place.');
+      title.innerHTML = '<span>CREATOR</span> <strong>HUB</strong>';
+      byId('mode-description').textContent = tool?.summary || 'Unity tools. One place.';
       return;
     }
     const state = appState();
@@ -441,9 +437,9 @@
     byId('view-builtin').classList.toggle('hidden', !builtIn || hosted);
     title.innerHTML = hosted || builtIn
       ? current === 'setup' ? '<span>CREATOR</span> <strong>PROJECT</strong> SETUP' : '<span>CREATOR</span> <strong>WORKS</strong> MCP'
-      : current === 'plugins' ? '<span>CREATOR</span> <strong>PLUGINS</strong>' : '<span>CREATOR</span> <strong>HUB</strong>';
+      : '<span>CREATOR</span> <strong>HUB</strong>';
     byId('mode-description').textContent = builtIn ? tool.summary : hosted ? (current === 'setup' ? 'Unity and Creator SDK. Android + Windows.' :
-      (window.CreatorHosted.writable(current) ? 'Unity project connections and MCP setup.' : 'Unity project connections. Read-only preview.')) : current === 'plugins' ? 'Plugins retirement' : 'Unity tools. One place.';
+      (window.CreatorHosted.writable(current) ? 'Unity project connections and MCP setup.' : 'Unity project connections. Read-only preview.')) : 'Unity tools. One place.';
     if (!builtIn || hosted) return;
     const label = current === 'setup' ? 'Project Setup' : 'Creator Works MCP';
     const opening = hostOpening.has(current);

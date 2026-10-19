@@ -11,7 +11,7 @@ function bridge(invoke, key = 'test-shell-key') {
   return window;
 }
 
-test('native discovery calls run serially across Projects, Apps, Hub and plugin targets', async () => {
+test('native discovery calls run serially across Projects, Apps, Hub and migration', async () => {
   const calls = [];
   const finishes = [];
   const window = bridge((command, args, options) => {
@@ -19,7 +19,7 @@ test('native discovery calls run serially across Projects, Apps, Hub and plugin 
     assert.equal(options.headers['x-creator-shell-key'], 'test-shell-key');
     return new Promise(resolve => finishes.push(() => resolve(command)));
   });
-  const commands = ['project_inventory', 'app_inventory', 'hub_update_status', 'community_projects'];
+  const commands = ['project_inventory', 'app_inventory', 'hub_update_status', 'convergence_status'];
   const pending = commands.map(command => window.CreatorHubNative.invoke(command));
   for (let index = 0; index < commands.length; index++) {
     await new Promise(resolve => setImmediate(resolve));

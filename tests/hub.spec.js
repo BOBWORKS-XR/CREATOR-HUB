@@ -579,11 +579,11 @@ test('top-level switcher highlights span the full menu row', async ({ page }) =>
   await expect(page.locator('#suite-shell')).toHaveCSS('width', '304px');
   const menu = page.locator('#suite-menu');
   const hub = menu.locator('[data-view="hub"]');
-  const plugins = menu.locator('[data-view="plugins"]');
+  const converter = menu.locator('.suite-item.unavailable');
   const menuBox = await menu.boundingBox();
   const hubBox = await hub.boundingBox();
-  const pluginsBox = await plugins.boundingBox();
-  expect(hubBox.width).toBeCloseTo(pluginsBox.width, 0);
+  const converterBox = await converter.boundingBox();
+  expect(hubBox.width).toBeCloseTo(converterBox.width, 0);
   expect(hubBox.width).toBeGreaterThan(menuBox.width - 20);
 });
 
@@ -675,13 +675,11 @@ test('morphing drawer reverses, restores focus and honors reduced motion', async
   await expect(page.locator('.app-header .title-block')).toHaveCSS('opacity', '1');
 });
 
-test('Creator Plugins shows retirement without fetching the catalogue or changing projects', async ({ page }) => {
+test('Creator Plugins is absent without fetching the catalogue or changing projects', async ({ page }) => {
   await load(page);
-  await page.getByRole('button', { name: 'View Creator Plugins' }).click();
-  await expect(page.locator('#plugins-title')).toBeFocused();
-  await expect(page.locator('#view-plugins')).toContainText(/Creator Plugins (is retiring|has been retired)/);
-  await expect(page.locator('#view-plugins')).toContainText('Existing imported assets');
-  await expect(page.locator('#release-button')).toBeHidden();
+  await page.locator('#suite-trigger').click();
+  await expect(page.locator('[data-view="plugins"], #view-plugins, .plugins-mark')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Creator Plugins/ })).toHaveCount(0);
   expect(await page.evaluate(() => window.calls.filter(c => !['pending_hosted_restore', 'app_inventory', 'get_launch_request', 'hub_update_status', 'project_inventory'].includes(c.command)))).toEqual([]);
 });
 

@@ -44,6 +44,12 @@ function assertReleaseReady(manifest, intent = {}) {
   return reviewed;
 }
 
+function checkRemovedPlugins(html, label) {
+  if (/data-(?:local-)?view=["']plugins["']|id=["']view-plugins["']|community(?:-adapter)?\.(?:js|css)|creator-plugins\.png|Creator Plugins/.test(html)) {
+    throw Error(`Removed Plugins interface is still included: ${label}`);
+  }
+}
+
 function checkSources(directory, manifest) {
   validateManifest(manifest);
   const config = JSON.parse(fs.readFileSync(path.join(directory, 'src-tauri/tauri.conf.json'), 'utf8'));
@@ -55,9 +61,9 @@ function checkSources(directory, manifest) {
     `${manifest.modules.setup.path}/unity/com.creatorworks.plugins/Editor/CreatorPluginsWindow.cs`];
   const hashes = helpers.map(file => crypto.createHash('sha256').update(fs.readFileSync(path.join(directory, file))).digest('hex'));
   if (new Set(hashes).size !== 1) throw Error('Unity catalogue helpers differ between Hub modules.');
-  const retirementViews = ['src/community.js', ...Object.values(manifest.modules).map(entry => `${entry.frontend}/community.js`)];
-  const retirementHashes = retirementViews.map(file => crypto.createHash('sha256').update(fs.readFileSync(path.join(directory, file))).digest('hex'));
-  if (new Set(retirementHashes).size !== 1) throw Error('Plugins retirement views differ between Hub modules.');
+  for (const frontend of ['src', ...Object.values(manifest.modules).map(entry => entry.frontend)]) {
+    checkRemovedPlugins(fs.readFileSync(path.join(directory, frontend, 'index.html'), 'utf8'), frontend);
+  }
   for (const entry of Object.values(manifest.modules)) {
     const packageJson = JSON.parse(fs.readFileSync(path.join(directory, entry.path, 'package.json'), 'utf8'));
     if (!semver.valid(packageJson.version)) throw Error(`Invalid module version: ${entry.path}`);
@@ -79,7 +85,7 @@ function verifyImports(directory, manifest) {
   }
 }
 
-module.exports = { validateManifest, assertReleaseReady, checkSources, verifyImports };
+module.exports = { validateManifest, assertReleaseReady, checkSources, checkRemovedPlugins, verifyImports };
 if (require.main === module) {
   (async () => {
     const { values: flags } = parseArgs({ options: { 'verify-imports': { type: 'boolean' }, release: { type: 'boolean' },

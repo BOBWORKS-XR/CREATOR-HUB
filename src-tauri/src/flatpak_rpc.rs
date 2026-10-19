@@ -57,7 +57,6 @@ pub(super) enum Invocation {
     PrepareConvergence(Empty),
     MigrateConvergenceConnections(Empty),
     RetireConvergenceApps(Empty),
-    OpenPluginsWebsite(Empty),
     OpenResource {
         resource: String,
     },
@@ -178,7 +177,6 @@ pub(super) async fn execute(
         RetireConvergenceApps(_) => {
             encode(crate::convergence::retire_convergence_apps(handle).await)
         }
-        OpenPluginsWebsite(_) => encode(crate::plugins_retirement::open_plugins_website()),
         OpenResource { resource } => encode(crate::open_resource(resource)),
         CommunityImportStatus {
             project_id,
@@ -293,6 +291,7 @@ mod tests {
             r#"{"command":"open_resource","args":{"resource":"github","trusted":true}}"#,
             r#"{"command":"hub_update_status","args":{"online":true}}"#,
             r#"{"command":"start_hosted_app","args":{"app":"arbitrary"}}"#,
+            r#"{"command":"open_plugins_website","args":{}}"#,
         ] {
             assert!(decode(input.as_bytes()).is_err(), "{input}");
         }
@@ -346,7 +345,6 @@ mod tests {
             ("prepare_convergence", json!({})),
             ("migrate_convergence_connections", json!({})),
             ("retire_convergence_apps", json!({})),
-            ("open_plugins_website", json!({})),
             ("open_resource", json!({"resource":"github"})),
             (
                 "community_import_status",

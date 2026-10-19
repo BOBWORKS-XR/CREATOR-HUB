@@ -4,19 +4,6 @@
   const shell = document.querySelector('#suite-shell');
   const dismiss = document.querySelector('#suite-dismiss');
   const error = document.querySelector('#suite-error');
-  window.CreatorCommunityInvoke = (command, args) => window.CreatorRuntime.invoke(command, args);
-  function showPlugins(show) {
-    if (document.documentElement.classList.contains('creator-hosted')) return;
-    document.querySelector('#setup-workspace').classList.toggle('hidden', show);
-    document.querySelector('#view-plugins').classList.toggle('hidden', !show);
-    for (const [id, active] of [['suite-current', !show], ['suite-plugins', show]]) {
-      const node = document.getElementById(id); node.classList.toggle('current', active);
-      if (active) node.setAttribute('aria-current', 'page'); else node.removeAttribute('aria-current');
-    }
-    close();
-    if (show) { window.CreatorCommunity.show(); document.getElementById('plugins-title').focus(); }
-    else { window.CreatorCommunity.closePreview(); document.getElementById('new-mode').focus(); }
-  }
   const links = Object.freeze({
     hub: 'https://github.com/BOBWORKS-XR/CREATOR-HUB/releases',
     mcp: 'https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases',
@@ -42,8 +29,10 @@
     trigger.setAttribute('aria-label', 'Close Creator apps');
     menu.querySelector('button.suite-item')?.focus({ preventScroll: true });
   });
-  document.querySelector('#suite-current').addEventListener('click', () => showPlugins(false));
-  document.querySelector('#suite-plugins').addEventListener('click', () => showPlugins(true));
+  document.querySelector('#suite-current').addEventListener('click', () => {
+    close();
+    document.getElementById('new-mode').focus();
+  });
   dismiss.addEventListener('click', () => close(true));
   document.addEventListener('keydown', event => {
     if (isOpen() && event.key === 'Escape') { event.preventDefault(); close(true); }

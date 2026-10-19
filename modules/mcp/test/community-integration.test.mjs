@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
 
-const adapter = fs.readFileSync('launcher/src/community-adapter.js', 'utf8');
+const adapter = fs.readFileSync('test/fixtures/legacy-community-adapter.js', 'utf8');
 const commands = ['community_catalogue', 'open_community_link', 'download_community_package', 'community_projects', 'choose_community_project', 'install_community_menu', 'queue_community_import', 'community_import_status'];
 
 test('experimental native capability is shared by discovery and guarded project operations', () => {
@@ -24,10 +24,10 @@ test('community workers retain native lifecycle protection and are standalone-on
     for (const command of commands) assert.ok(!hosted.includes(`"${command}"`) && !hosted.includes(`'${command}'`), `${command} must not enter ${file}`);
   }
   const html = fs.readFileSync('launcher/src/index.html', 'utf8');
-  assert.ok(html.indexOf('src="community-adapter.js"') < html.indexOf('src="community.js"'));
+  assert.doesNotMatch(html, /community-adapter\.js|community\.js|view-plugins/);
 });
 
-test('community adapter preserves results, guards project writes and rejects hosted access', async () => {
+test('historical community adapter preserves results, guards project writes and rejects hosted access', async () => {
   const calls = [];
   const window = { CreatorRuntime: { ready: Promise.resolve(), hosted: false,
     invoke: async (command, args) => { calls.push({command, args}); return 'native result'; } },

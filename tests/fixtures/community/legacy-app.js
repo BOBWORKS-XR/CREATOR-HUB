@@ -1,0 +1,719 @@
+(() => {
+  const tools = Object.freeze({
+    mcp: {
+      title: 'Creator Works MCP', letter: 'M', summary: 'Connect AI assistants to Unity with scene, prefab, component and asset tools.',
+      facts: [['Clients', 'Codex, Claude Code and compatible MCP clients'], ['Tools', 'Scene, prefab, component and asset operations'], ['SDK support', 'Creator SDK, Banter and Unity Visual Scripting']],
+    },
+    setup: {
+      title: 'Creator Project Setup', letter: 'P', summary: 'Install Unity modules and create or validate Creator SDK projects.',
+      facts: [['Project setup', 'Pinned Unity, URP and Creator SDK recipe'], ['Build platforms', 'Android and Windows requirements'], ['Existing projects', 'Read-only inspection, reviewed repairs and settings backup']],
+    },
+  });
+  const title = document.querySelector('#page-title');
+  const trigger = document.querySelector('#suite-trigger');
+  const menu = document.querySelector('#suite-menu');
+  const shell = document.querySelector('#suite-shell');
+  const dismiss = document.querySelector('#suite-dismiss');
+  const error = document.querySelector('#action-error');
+  let current = 'hub';
+  let inventory = null;
+  let inventoryError = '';
+  let hubUpdate = null;
+  let busy = false;
+  let launchRevision = -1;
+  const preferenceControls = [['preview-channel', 'preview', 'preview'],
+    ['auto-download', 'auto-download', 'autoDownload'], ['restore-hosted-views', 'restore-hosted-views', 'restoreHostedViews']];
+  const nativePreferences = window.CreatorHubNative.preferencesPersistence === true;
+  let preferencesReady = !nativePreferences;
+  let preferencesSaving = 0;
+  const legacyPreferences = {};
+  const preferenceFailures = new Map();
+  const byId = id => document.getElementById(id);
+  const invoke = (command, args) => window.CreatorHubNative.invoke(command, args);
+  const directFeatures = window.CreatorHubNative.integratedFeatures === true;
+  let directReady = false;
+  if (directFeatures) {
+    current = 'projects';
+    document.body.classList.add('integrated-home');
+    byId('restore-hosted-views').closest('label').lastChild.textContent = ' Return to last tool after updating';
+    menu.querySelector('[data-view="hub"] small').textContent = 'Projects';
+    menu.setAttribute('aria-label', 'Creator tools');
+    trigger.title = 'Creator tools';
+    const updater = document.querySelector('.hub-update');
+    updater.querySelector('.page-heading').insertBefore(byId('check-updates'), byId('hub-update-button'));
+    byId('update-settings').append(document.querySelector('#view-hub > .update-preferences'));
+    byId('unified-home-updater').prepend(updater);
+    byId('unified-home-updater').append(byId('preferences-status'));
+    byId('view-hub').classList.add('hidden');
+    byId('view-projects').classList.remove('hidden');
+    byId('view-projects').setAttribute('aria-labelledby', 'projects-home-title');
+    byId('projects-home-title').hidden = false;
+    byId('unified-home-updater').classList.remove('hidden');
+    byId('hub-tab-apps').classList.add('hidden');
+    byId('hub-tab-projects').classList.add('hidden');
+    document.querySelector('#hub-pages .project-actions').classList.remove('hidden');
+  }
+  const platformLabel = () => {
+    const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent;
+    if (/mac/i.test(platform)) return 'macOS';
+    if (/win/i.test(platform)) return 'Windows';
+    if (/linux/i.test(platform)) return 'Linux';
+    return 'Desktop';
+  };
+  byId('platform-status').textContent = platformLabel();
+  if (typeof window.CreatorHubNative.version === 'string') document.querySelector('.footer-version').textContent = window.CreatorHubNative.version;
+  for (const [id, key, field] of preferenceControls) {
+    byId(id).checked = true;
+    try {
+      const saved = localStorage.getItem(`creator-hub.${key}`);
+      byId(id).checked = saved === null || saved === 'true';
+    } catch { /* Keep the default when preference storage is unavailable. */ }
+    legacyPreferences[field] = byId(id).checked;
+    if (nativePreferences) { byId(id).checked = false; byId(id).disabled = true; }
+  }
+  const automaticDownloads = () => preferencesReady && !preferencesSaving && byId('auto-download').checked;
+  function preferenceError(message = '', key = 'load') {
+    if (message) preferenceFailures.set(key, message);
+    else preferenceFailures.delete(key);
+    byId('preferences-status').textContent = [...preferenceFailures.values()].join(' ');
+    byId('preferences-status').hidden = !preferenceFailures.size;
+  }
+  async function loadPreferences() {
+    if (!nativePreferences) return;
+    try {
+      const saved = await invoke('hub_preferences_status');
+      if (saved !== null && (!saved || typeof saved !== 'object' || Array.isArray(saved)
+        || Object.keys(saved).some(key => !preferenceControls.some(([, , field]) => field === key))
+        || preferenceControls.some(([, , field]) => saved[field] !== undefined && saved[field] !== null && typeof saved[field] !== 'boolean'))) throw Error('Invalid saved Hub preferences.');
+      for (const [id, key, field] of preferenceControls) {
+        const value = typeof saved?.[field] === 'boolean' ? saved[field] : legacyPreferences[field];
+        if (typeof saved?.[field] !== 'boolean') await invoke('set_hub_preference', { key, value });
+        byId(id).checked = value;
+      }
+      preferencesReady = true;
+      preferenceError();
+    } catch (reason) {
+      for (const [id] of preferenceControls) byId(id).checked = false;
+      preferenceError(`Saved preferences could not be verified: ${String(reason)}. Automatic downloads are off. Existing records were kept.`);
+    }
+    renderState();
+  }
+  function close(restore = false) {
+    if (restore || menu.contains(document.activeElement)) trigger.focus({ preventScroll: true });
+    shell.classList.remove('suite-expanded');
+    document.body.classList.remove('suite-open');
+    menu.inert = true;
+    menu.setAttribute('aria-hidden', 'true');
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.setAttribute('aria-label', directFeatures ? 'Open Creator tools' : 'Open Creator apps');
+  }
+  function show(view, preserveError = false) {
+    if (!['hub', 'plugins', 'projects'].includes(view) && !Object.hasOwn(tools, view)) return;
+    if (directFeatures && view === 'hub') view = 'projects';
+    current = view;
+    close();
+    if (!preserveError) error.classList.add('hidden');
+    document.querySelector('#view-hub').classList.toggle('hidden', view !== 'hub');
+    byId('hub-pages').classList.toggle('hidden', !['hub', 'projects'].includes(view));
+    byId('view-projects').classList.toggle('hidden', view !== 'projects');
+    byId('unified-home-updater').classList.toggle('hidden', !directFeatures || view !== 'projects');
+    byId('check-updates').classList.toggle('hidden', view !== 'hub' && !(directFeatures && view === 'projects'));
+    document.querySelector('#hub-pages .project-actions').classList.toggle('hidden', view !== 'projects');
+    for (const item of byId('hub-pages').querySelectorAll('[data-view]')) {
+      item.classList.toggle('current', item.dataset.view === view);
+      if (item.dataset.view === view) item.setAttribute('aria-current', 'page');
+      else item.removeAttribute('aria-current');
+    }
+    if (view === 'projects') window.CreatorProjects.show();
+    const pageBrand = view === 'plugins' ? '<span>CREATOR</span> <strong>PLUGINS</strong>' : '<span>CREATOR</span> <strong>HUB</strong>';
+    shell.querySelector('.suite-brand').innerHTML = pageBrand;
+    trigger.replaceChildren(menu.querySelector(`[data-view="${view === 'plugins' ? 'plugins' : 'hub'}"] .suite-mark`).cloneNode(true));
+    document.querySelector('#view-plugins').classList.toggle('hidden', view !== 'plugins');
+    if (view === 'plugins') window.CreatorCommunity.show();
+    else window.CreatorCommunity.closePreview();
+    for (const item of menu.querySelectorAll('[data-view]')) {
+      const selected = item.dataset.view === (view === 'projects' ? 'hub' : view);
+      item.classList.toggle('current', selected);
+      if (selected) item.setAttribute('aria-current', 'page');
+      else item.removeAttribute('aria-current');
+    }
+    if (Object.hasOwn(tools, view)) {
+      const tool = tools[view];
+      document.querySelector('#tool-title').textContent = tool.title;
+      document.querySelector('#tool-letter').textContent = tool.letter;
+      document.querySelector('#tool-summary').textContent = tool.summary;
+      const facts = document.querySelector('#tool-facts');
+      facts.replaceChildren(...tool.facts.map(([label, value]) => {
+        const row = document.createElement('div');
+        const dt = document.createElement('dt');
+        const dd = document.createElement('dd');
+        dt.textContent = label; dd.textContent = value; row.append(dt, dd); return row;
+      }));
+    }
+    renderState();
+    const target = view === 'hub' || directFeatures || window.CreatorHosted.active(view) ? title : document.querySelector(view === 'projects' ? '#hub-tab-projects' : view === 'plugins' ? '#plugins-title' : appState()?.builtIn ? '#builtin-title' : '#tool-title');
+    target.tabIndex = -1;
+    target.focus();
+  }
+  const hostAttempts = new Set();
+  const hostOpening = new Set();
+  const hostFailures = new Map();
+  async function openHostedWhenReady(app) {
+    if (directFeatures) return;
+    const state = inventory?.apps?.find(item => item.app === app);
+    if (busy || inventoryError || !inventory?.supported || hostAttempts.has(app) || window.CreatorHosted.active(app)
+      || !(state?.installed && state.trusted && state.hostedPreview && state.hostedCompatible === true && !state.issue)) return;
+    hostAttempts.add(app);
+    hostOpening.add(app);
+    hostFailures.delete(app);
+    busy = true; renderState();
+    try {
+      await window.CreatorHosted.start(app);
+      if (current === app) show(app, true);
+    } catch (reason) {
+      hostFailures.set(app, String(reason));
+      if (current === app && !state.builtIn) {
+        // Companion installations retain their normal fallback controls.
+        error.textContent = String(reason);
+        error.classList.remove('hidden');
+      }
+    } finally {
+      hostOpening.delete(app);
+      busy = false;
+      renderState();
+      // A section selected during another startup must not need a second click.
+      if (current !== app && Object.hasOwn(tools, current)) void openHostedWhenReady(current);
+    }
+  }
+  function selectView(view) {
+    hostAttempts.delete(view);
+    show(view);
+    if (directFeatures) {
+      void invoke('feature_select', { feature: Object.hasOwn(tools, view) ? view : null }).catch(reason => {
+        error.textContent = `Could not remember the selected page: ${String(reason)}`;
+        error.classList.remove('hidden');
+      });
+    }
+    if (Object.hasOwn(tools, view)) void openHostedWhenReady(view);
+  }
+  for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => selectView(button.dataset.view));
+  trigger.addEventListener('click', () => {
+    if (trigger.getAttribute('aria-expanded') === 'true') return close(true);
+    shell.classList.add('suite-expanded');
+    document.body.classList.add('suite-open');
+    menu.inert = false;
+    menu.setAttribute('aria-hidden', 'false');
+    trigger.setAttribute('aria-expanded', 'true');
+    trigger.setAttribute('aria-label', directFeatures ? 'Close Creator tools' : 'Close Creator apps');
+    menu.querySelector(`[data-view="${current === 'projects' ? 'hub' : current}"]`).focus({ preventScroll: true });
+  });
+  document.addEventListener('keydown', event => {
+    if (trigger.getAttribute('aria-expanded') === 'true' && event.key === 'Escape') { event.preventDefault(); close(true); }
+  });
+  dismiss.addEventListener('click', () => close(true));
+  for (const name of ['pointerdown', 'focusin']) document.addEventListener(name, event => {
+    if (event.target !== dismiss && !shell.contains(event.target)) close();
+  });
+  menu.addEventListener('keydown', event => {
+    if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+    if (!event.target.closest('button[data-view]')) return;
+    event.preventDefault();
+    const buttons = [...menu.querySelectorAll('button[data-view]')];
+    const index = buttons.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+      : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length;
+    buttons[next].focus({ preventScroll: true });
+  });
+  async function open(resource) {
+    error.classList.add('hidden');
+    try { await invoke('open_resource', { resource }); }
+    catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
+  }
+  for (const button of document.querySelectorAll('[data-resource]')) button.addEventListener('click', () => open(button.dataset.resource));
+  document.querySelector('#source-button').addEventListener('click', () => { if (Object.hasOwn(tools, current)) open(`${current}-source`); });
+  function retryHosted(app) {
+    error.classList.add('hidden');
+    hostAttempts.delete(app);
+    void openHostedWhenReady(app);
+  }
+  for (const app of ['setup', 'mcp']) byId(`host-${app}-button`).addEventListener('click', () => retryHosted(app));
+  byId('builtin-open').addEventListener('click', () => { if (appState()?.builtIn) retryHosted(current); });
+  window.addEventListener('creator-host-closed', () => show(current, true));
+
+  function appState() { return inventory?.apps?.find(app => app.app === current); }
+  function canDisconnectForUpdate(state) {
+    return state?.app === 'mcp' && state.installed && state.trusted && !state.issue && state.updateAvailable
+      && !state.installBlocked && !state.requiredHubVersion && state.updateBlockers?.length > 0
+      && state.updateBlockers.every(blocker => blocker.kind === 'connection');
+  }
+  function acceptInventory(result) {
+    if (!result || typeof result.supported !== 'boolean' || !Array.isArray(result.apps)
+      || result.apps.some(app => !app || !Object.hasOwn(tools, app.app))) throw 'The app inventory response is unavailable.';
+    if (result.supported && (result.apps.length !== Object.keys(tools).length
+      || Object.keys(tools).some(id => result.apps.filter(app => app.app === id).length !== 1))) {
+      throw 'The app inventory is incomplete. Retry app discovery; one or more app statuses are missing.';
+    }
+    inventory = result;
+    inventoryError = '';
+  }
+  function appStatus(state) {
+    if (state?.builtIn) return state.issue ? 'Built-in module unavailable' : 'Included in Hub';
+    if (!state) return 'Status unavailable';
+    if (state.installed && !state.trusted && state.issue?.startsWith("Hub couldn't verify this app.")) return 'Installed · not in Hub catalogue';
+    if (state.issue) return 'Needs attention';
+    if (state.updateAvailable) return state.downloaded ? 'Update ready' : 'Update available';
+    if (state.installed) return `Installed ${state.installedVersion || ''}`;
+    return state.downloaded ? 'Not installed · Download ready' : `Not installed · ${state.availableVersion} available`;
+  }
+  function updateReason(state) {
+    if (inventoryError) return 'App discovery failed. Retry before updating; last-known versions are shown.';
+    if (!inventory?.supported) return `App updates are not supported on ${platformLabel()} in this build.`;
+    if (state.issue) return state.issue;
+    if (!state.trusted) return 'This installation must be verified before updating.';
+    if (state.installBlocked) return state.installBlocked;
+    if (state.requiredHubVersion) return `Update Creator Hub to ${state.requiredHubVersion} first.`;
+    if (window.CreatorHosted.active(state.app)) return 'Updating asks to close this app\'s Hub view first. Unsaved work is not closed automatically.';
+    if (canDisconnectForUpdate(state)) return 'MCP connections are running. Disconnect and update asks permission to stop only MCP\'s private runtime, then continues to installation.';
+    if (state.updateBlockers?.length) return state.updateBlockers.some(b => b.kind === 'connection')
+      ? 'Other processes are also blocking this update. Disconnect MCP only can stop the private MCP runtime after confirmation; other blockers must be resolved separately.'
+      : 'Close the listed app or disconnect its MCP connection, then Check for updates. Unrecognised processes will not be closed.';
+    return '';
+  }
+  function renderState() {
+    renderToolView();
+    const featureBusy = directFeatures && window.CreatorFeaturePages?.busy() === true;
+    byId('check-updates').disabled = busy || featureBusy;
+    byId('retry-inventory').disabled = busy;
+    byId('inventory-error').classList.toggle('hidden', !inventoryError);
+    byId('inventory-error-message').textContent = inventoryError ? `App discovery failed: ${inventoryError}${inventory ? ' Last-known versions are shown; retry before using app controls.' : ''}` : '';
+    for (const id of Object.keys(tools)) {
+      const state = inventory?.apps?.find(app => app.app === id);
+      const label = directFeatures ? state?.issue ? 'Unavailable' : 'Included in Hub'
+        : inventory?.supported === false ? 'Not supported' : !inventory && busy ? 'Checking' : appStatus(state);
+      const status = byId(`status-${id}`);
+      status.replaceChildren();
+      if ((label.startsWith('Installed') || state?.builtIn) && state?.trusted && !state.issue) {
+        const check = document.createElement('span');
+        check.className = 'icon icon-check status-indicator';
+        check.setAttribute('aria-hidden', 'true');
+        status.append(check);
+      }
+      status.append(document.createTextNode(label));
+      status.classList.toggle('not-installed', label.startsWith('Not installed'));
+      status.classList.toggle('installed', (label.startsWith('Installed') || state?.builtIn) && state?.trusted && !state.issue);
+      status.classList.toggle('unverified', label.startsWith('Installed') && !state?.trusted);
+      byId(`menu-status-${id}`).textContent = directFeatures ? label : inventory?.supported === false ? 'Not supported'
+        : inventoryError ? 'Check failed' : !inventory && busy ? 'Checking' : appStatus(state);
+      const menuDownload = byId(`menu-download-${id}`);
+      const canDownload = Boolean(!directFeatures && inventory?.supported && !inventoryError && state && !state.builtIn
+        && (!state.installed || state.updateAvailable) && !state.downloaded && !state.issue && !state.installBlocked);
+      menuDownload.classList.toggle('hidden', !canDownload);
+      menuDownload.disabled = busy;
+      menuDownload.title = state?.installed ? `Download latest ${tools[id].title} update` : `Download latest ${tools[id].title}`;
+      menuDownload.setAttribute('aria-label', menuDownload.title);
+    }
+    for (const [id] of preferenceControls) byId(id).disabled = !preferencesReady || preferencesSaving || (id === 'preview-channel' && busy);
+    byId('hub-update-button').disabled = busy || featureBusy || preferencesSaving || !hubUpdate?.availableVersion || Boolean(hubUpdate?.installBlocked);
+    byId('hub-update-status').textContent = !hubUpdate ? 'Hub update check is unavailable. Try Check for updates.'
+      : hubUpdate.availableVersion ? `Version ${hubUpdate.availableVersion}${hubUpdate.downloaded ? ' is ready to install.' : ' is available.'}`
+      : hubUpdate.warning ? 'Could not check for a Hub update.' : `You are using Hub ${hubUpdate.currentVersion}. No newer update was found.`;
+    byId('hub-update-warning').textContent = hubUpdate?.installBlocked || hubUpdate?.warning || '';
+    byId('hub-update-warning').classList.toggle('hidden', !byId('hub-update-warning').textContent);
+    for (const app of inventory?.apps || []) {
+      const update = byId(`update-${app.app}`), reason = byId(`update-reason-${app.app}`);
+      const available = Boolean(!directFeatures && app.installed && app.updateAvailable);
+      const hosted = window.CreatorHosted.active(app.app);
+      update.classList.toggle('hidden', !available);
+      update.disabled = busy || Boolean(inventoryError) || !inventory.supported || Boolean(app.issue) || !app.trusted
+        || (!app.requiredHubVersion && (Boolean(app.installBlocked) || (!hosted && Boolean(app.updateBlockers?.length) && !canDisconnectForUpdate(app))));
+      const updateLabel = app.requiredHubVersion ? 'Update Hub first' : canDisconnectForUpdate(app) ? 'Disconnect and update' : 'Update app';
+      update.querySelector('span:last-child').textContent = updateLabel;
+      update.setAttribute('aria-label', `${updateLabel}: ${tools[app.app].title}`);
+      reason.textContent = available ? updateReason(app) : '';
+      reason.classList.toggle('hidden', !reason.textContent);
+    }
+    const state = appState();
+    const mcp = inventory?.apps?.find(app => app.app === 'mcp');
+    const canDisconnect = Boolean(mcp?.installed && mcp.trusted && !mcp.issue && mcp.updateBlockers?.some(b => b.kind === 'connection'));
+    for (const id of ['disconnect-mcp-row', 'disconnect-mcp-detail']) {
+      byId(id).classList.toggle('hidden', !canDisconnect || (id.endsWith('detail') && current !== 'mcp'));
+      byId(id).disabled = busy || Boolean(inventoryError) || !inventory?.supported;
+    }
+    const hostedMismatch = state?.hostedCompatible === false;
+    const canHost = state?.installed && state.trusted && state.hostedPreview && state.hostedCompatible === true && !state.issue;
+    for (const app of ['setup', 'mcp']) {
+      const button = byId(`host-${app}-button`);
+      button.classList.toggle('hidden', current !== app || !state?.hostedPreview);
+      button.disabled = busy || Boolean(inventoryError) || !canHost;
+      button.textContent = state?.hostedPreview === 'read-only' ? 'Open in Hub (read-only)' : 'Open in Hub';
+    }
+    const blocked = busy || Boolean(inventoryError) || !inventory?.supported || !state || Boolean(state.issue);
+    const opening = state?.installed && state.trusted && !state.updateAvailable;
+    const blockers = state?.updateBlockers || [];
+    const needsRelease = !opening && state?.installBlocked;
+    byId('release-button').disabled = needsRelease ? busy || Boolean(inventoryError) : blocked || (!opening && blockers.length > 0 && !canDisconnectForUpdate(state));
+    byId('release-button').classList.toggle('hidden', Boolean(opening && canHost));
+    byId('download-button').disabled = busy || Boolean(inventoryError) || !inventory?.supported || !state || state.downloaded || Boolean(state.installBlocked);
+    byId('adopt-button').disabled = busy || Boolean(inventoryError) || !inventory?.supported || Boolean(state?.builtIn);
+    byId('adopt-button').classList.toggle('hidden', Boolean(state?.builtIn));
+    byId('open-button').disabled = blocked || !state?.trusted;
+    byId('open-button').classList.toggle('hidden', Boolean(state?.builtIn) || !state?.installed || (!state.updateAvailable && !canHost));
+    byId('open-button').textContent = canHost ? 'Open separately' : 'Open app';
+    byId('primary-label').textContent = !state ? busy ? 'Checking' : 'Unavailable' : opening ? 'Open app' : state.requiredHubVersion ? 'Update Hub first' : needsRelease ? 'Check for an update' : canDisconnectForUpdate(state) ? 'Disconnect and update' : state.updateAvailable ? 'Update app' : 'Install app';
+    byId('install-options').classList.toggle('hidden', Boolean(opening || needsRelease) || !state || !inventory?.supported);
+    byId('download-button').classList.toggle('hidden', Boolean(state?.builtIn || opening || needsRelease));
+    if (state?.builtIn) byId('release-button').classList.add('hidden');
+    if (state) {
+      const lines = [state.builtIn ? 'Included in this Creator Hub build. Updates are delivered with Hub.' : `Available version: ${state.availableVersion}`, state.builtIn ? '' : state.installed ? `Your version: ${state.installedVersion || 'not verified'}` : state.issue ? 'App needs attention' : 'Not installed',
+        state.installedPath ? `Location: ${state.installedPath}` : '',
+        state.downloaded ? 'Download ready' : '', state.running ? 'Currently in use' : '',
+        state.installerInteractive && !opening && !needsRelease ? 'This release uses its normal installer window. Keep the default folder.' : '', state.issue, state.checkWarning, state.installBlocked].filter(Boolean);
+      byId('tool-state').replaceChildren(...lines.map(text => { const p = document.createElement('p'); p.textContent = text; return p; }));
+    } else byId('tool-state').textContent = inventory?.supported === false ? `App management is not supported on ${platformLabel()} in this build.` : busy ? 'Checking installed apps and available updates...' : 'App inventory is unavailable. Use Retry app discovery above.';
+    byId('update-blockers').classList.toggle('hidden', !state || (!state.issue && !blockers.length));
+    byId('update-blockers-help').textContent = canDisconnectForUpdate(state)
+      ? 'Disconnect and update asks permission to stop only MCP\'s private runtime before installation. Finish active AI work first. AI apps, Unity and unrelated Node processes stay open.' : blockers.length
+      ? `${blockers.some(b => b.kind === 'connection') ? 'Finish active AI work, then use Disconnect MCP only to stop its private runtime, including stuck connections. You will be asked to confirm. If your client reconnects automatically, pause or disable this MCP in that client first.' : 'Finish your work, then disconnect MCP in your AI app or close the listed app.'} Check again when ready. Hub will not force-close AI apps, Unity or unrelated Node processes. Do not end unfamiliar tasks. Uninstalling is not needed.`
+      : 'Resolve the issue above, then check again. Nothing will be installed by this check.';
+    byId('recheck-app').disabled = busy;
+    byId('update-blockers-details').classList.toggle('hidden', !blockers.length);
+    byId('update-blockers-list').replaceChildren(...blockers.map(blocker => {
+      const row = document.createElement('li');
+      const name = document.createElement('strong');
+      name.textContent = `${blocker.kind === 'connection' ? 'MCP runtime in use' : blocker.kind === 'possibleConnection' ? 'Possible MCP connection' : 'Another app copy'}: ${blocker.name} (PID ${blocker.pid})`;
+      row.append(name);
+      for (const text of [blocker.executable, blocker.parent ? `Started by ${blocker.parent.name} (PID ${blocker.parent.pid})` : 'Starting app could not be identified.', blocker.parent?.executable].filter(Boolean)) {
+        const line = document.createElement('p'); line.textContent = text; row.append(line);
+      }
+      return row;
+    }));
+    const unlistedBuild = state?.installed && !state.trusted && state.issue?.startsWith("Hub couldn't verify this app.");
+    byId('compatibility-status').textContent = inventoryError ? 'App discovery needs attention' : !state ? 'Checking compatibility' : hostedMismatch ? 'Update needed for Hub' : canHost ? 'Ready to open in Hub' : state?.trusted ? 'Your app is ready' : unlistedBuild ? 'Installed outside Hub catalogue' : state?.detectedCopies?.length ? 'Choose your app' : state?.issue ? 'Check your app' : 'Get started';
+    byId('compatibility-detail').textContent = inventoryError || !state
+      ? 'Hub needs a completed app check to show installation, update and Open in Hub options.'
+      : state.builtIn
+      ? state.issue || `Included in Hub${state.hostedPreview === 'read-only' ? '; MCP controls on this platform are currently read-only' : ''}. No separate installation is needed.`
+      : hostedMismatch
+      ? `${state.requiredHubVersion ? 'Update Hub first, then check this app for updates.' : state.updateAvailable ? 'Update this app to open it inside Hub.' : 'Check for updates to get matching versions of Hub and this app.'} You can still use Open app for a separate window.`
+      : unlistedBuild
+      ? 'This installed build is not listed in Hub’s signed release catalogue. Hub will not open or update it until its exact build has a signed release entry. Keep using it separately for now.'
+      : state?.hostedPreview
+      ? `Uses your installed app and existing settings${state.hostedPreview === 'read-only' ? '; changes are disabled' : ''}. This app version asks for permission when opening in Hub. Open separately remains available.`
+      : 'This app version opens in its own window and keeps your settings. Check for updates to find a Hub-compatible version.';
+    const copies = byId('detected-copies');
+    copies.replaceChildren();
+    for (const copy of state?.detectedCopies || []) {
+      const row = document.createElement('div');
+      row.className = 'detected-copy';
+      const detail = document.createElement('div');
+      const label = document.createElement('strong');
+      label.textContent = copy.verified ? `Version ${copy.version}` : 'Copy not recognised';
+      const location = document.createElement('p');
+      location.textContent = copy.path;
+      detail.append(label, location);
+      const choose = document.createElement('button');
+      choose.type = 'button'; choose.className = 'text-button'; choose.textContent = 'Use this copy';
+      choose.disabled = busy || Boolean(inventoryError) || !copy.verified;
+      choose.addEventListener('click', () => action('use_existing_app', current, undefined, { path: copy.path }));
+      row.append(detail, choose); copies.append(row);
+    }
+  }
+
+  function renderToolView() {
+    if (directFeatures) {
+      const tool = tools[current];
+      window.CreatorHosted.show(null);
+      document.body.classList.remove('hosting-app');
+      byId('view-detail').classList.add('hidden');
+      byId('view-builtin').classList.add('hidden');
+      window.CreatorFeaturePages?.show(tool ? current : null, { load: directReady });
+      title.innerHTML = current === 'plugins' ? '<span>CREATOR</span> <strong>PLUGINS</strong>' : '<span>CREATOR</span> <strong>HUB</strong>';
+      byId('mode-description').textContent = tool?.summary || (current === 'plugins' ? 'Plugins retirement' : 'Unity tools. One place.');
+      return;
+    }
+    const state = appState();
+    const tool = tools[current];
+    const builtIn = Boolean(state?.builtIn);
+    const hosted = window.CreatorHosted.active(current);
+    window.CreatorHosted.show(hosted ? current : null);
+    document.body.classList.toggle('hosting-app', hosted);
+    byId('view-detail').classList.toggle('hidden', !tool || builtIn || hosted);
+    byId('view-builtin').classList.toggle('hidden', !builtIn || hosted);
+    title.innerHTML = hosted || builtIn
+      ? current === 'setup' ? '<span>CREATOR</span> <strong>PROJECT</strong> SETUP' : '<span>CREATOR</span> <strong>WORKS</strong> MCP'
+      : current === 'plugins' ? '<span>CREATOR</span> <strong>PLUGINS</strong>' : '<span>CREATOR</span> <strong>HUB</strong>';
+    byId('mode-description').textContent = builtIn ? tool.summary : hosted ? (current === 'setup' ? 'Unity and Creator SDK. Android + Windows.' :
+      (window.CreatorHosted.writable(current) ? 'Unity project connections and MCP setup.' : 'Unity project connections. Read-only preview.')) : current === 'plugins' ? 'Plugins retirement' : 'Unity tools. One place.';
+    if (!builtIn || hosted) return;
+    const label = current === 'setup' ? 'Project Setup' : 'Creator Works MCP';
+    const opening = hostOpening.has(current);
+    const failure = hostFailures.get(current);
+    const canHost = inventory?.supported && state.installed && state.trusted && state.hostedPreview && state.hostedCompatible === true && !state.issue;
+    byId('builtin-title').textContent = tool.title;
+    byId('builtin-status').textContent = opening ? `Opening ${label}...` : inventoryError ? 'App discovery needs attention'
+      : !canHost ? `${label} unavailable` : failure ? `Could not open ${label}` : busy ? `Waiting to open ${label}...` : `Open ${label}`;
+    byId('builtin-detail').textContent = opening ? 'Complete the permission prompt to open this built-in tool. No separate app installation is needed.'
+      : inventoryError ? 'Retry app discovery above before opening this tool.'
+      : state.issue || (!canHost ? 'This built-in tool could not be verified for this platform. Check for a Creator Hub update from Apps.'
+        : failure || (busy ? 'Another Hub operation is finishing. This section will open when it is ready.' : 'Included in Creator Hub. Updates are delivered with Hub.'));
+    byId('builtin-open').classList.toggle('hidden', opening);
+    byId('builtin-open').disabled = busy || Boolean(inventoryError) || !canHost;
+    byId('builtin-open').querySelector('span:last-child').textContent = failure ? 'Retry opening' : `Open ${label}`;
+  }
+
+  function setProgress(payload) {
+    byId('operation-progress').classList.remove('hidden');
+    byId('progress-message').textContent = payload.message;
+    byId('cancel-download').classList.toggle('hidden', !payload.cancellable);
+    byId('cancel-download').disabled = false;
+    byId('download-progress').hidden = !payload.total;
+    if (payload.total) {
+      byId('download-progress').max = payload.total;
+      byId('download-progress').value = Math.min(payload.received, payload.total);
+    }
+    byId('progress-bytes').textContent = payload.total ? `${(payload.received / 1048576).toFixed(1)} / ${(payload.total / 1048576).toFixed(1)} MB` : '';
+  }
+
+  async function refresh(check = false) {
+    if (busy) return;
+    let succeeded = false;
+    let hubChecked = false;
+    busy = true; renderState();
+    byId('catalog-status').textContent = check ? 'Checking verified releases...' : 'Checking installed apps...';
+    try {
+      const result = await invoke('app_inventory', { check: check && !directFeatures, preview: byId('preview-channel').checked });
+      acceptInventory(result);
+      byId('catalog-status').textContent = !inventory.supported ? `App management is not supported on ${platformLabel()} in this build.`
+        : inventory.apps.some(app => app.checkWarning) ? 'Some update checks failed. Last verified releases remain available.'
+        : check ? 'Update check complete. Installation always needs your approval.' : 'Installed apps checked.';
+      succeeded = true;
+    } catch (reason) { inventoryError = String(reason); byId('catalog-status').textContent = inventoryError; }
+    // A broken companion scan must not hide a Hub update that can repair it.
+    try {
+      const result = await invoke('hub_update_status', { online: check, preview: byId('preview-channel').checked });
+      if (!result || typeof result.currentVersion !== 'string') throw 'Hub update response is unavailable.';
+      hubUpdate = result;
+      hubChecked = true;
+    } catch (reason) { hubUpdate = { warning: String(reason) }; }
+    finally { busy = false; renderState(); }
+    if (!directFeatures && check && succeeded && automaticDownloads() && inventory?.supported) {
+      for (const app of [...inventory.apps]) {
+        if (!automaticDownloads()) break;
+        if (app.updateAvailable && !app.downloaded && !app.issue && !app.installBlocked) await action('download_app', app.app, app.availableVersion);
+      }
+    }
+    if (check && hubChecked && automaticDownloads() && hubUpdate?.availableVersion && !hubUpdate.downloaded && !hubUpdate.installBlocked) await hubAction('download_hub_update');
+    if (succeeded && Object.hasOwn(tools, current)) void openHostedWhenReady(current);
+    return succeeded;
+  }
+
+  async function hubAction(command) {
+    if (busy || !hubUpdate?.availableVersion || hubUpdate.installBlocked) return;
+    if (directFeatures && window.CreatorFeaturePages?.busy()) {
+      error.textContent = 'MCP or Project Setup is still working. Finish that operation before updating Hub.';
+      error.classList.remove('hidden'); return;
+    }
+    if (command === 'install_hub_update' && window.CreatorHosted.busy()) {
+      error.textContent = 'An app view is still working. Wait for it to finish, then update Hub. No views were closed.';
+      error.classList.remove('hidden'); return;
+    }
+    busy = true; renderState(); error.classList.add('hidden');
+    if (command === 'install_hub_update') window.CreatorHosted.updating(true);
+    try {
+      const message = await invoke(command, { version: hubUpdate.availableVersion, restoreViews: byId('restore-hosted-views').checked });
+      setProgress({ message, total: 0, cancellable: false });
+    } catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
+    finally {
+      byId('cancel-download').classList.add('hidden');
+      if (command === 'install_hub_update') await restoreHostedViews();
+      window.CreatorHosted.updating(false);
+      busy = false; await refresh(false);
+    }
+  }
+
+  async function restoreHostedViews() {
+    const status = byId('hosted-restore'), message = byId('hosted-restore-message'), retry = byId('retry-hosted-restore');
+    retry.disabled = true; retry.classList.add('hidden');
+    try {
+      const pending = await invoke('pending_hosted_restore');
+      if (!pending?.length) return;
+      if (!Array.isArray(pending) || pending.length > 2 || pending.some(app => !Object.hasOwn(tools, app)) || new Set(pending).size !== pending.length) throw 'Saved app views are invalid. Open the apps from Hub.';
+      status.classList.remove('hidden');
+      const failures = [];
+      for (const app of pending) {
+        if (directFeatures) {
+          try {
+            const restored = await invoke('restore_hosted_app', { app });
+            if (restored?.direct !== true || restored.app !== app) throw Error('Hub page restoration was not verified.');
+            selectView(app);
+            await invoke('complete_hosted_restore', { app });
+          } catch (reason) { failures.push(`${tools[app].title}: ${String(reason)}`); }
+          continue;
+        }
+        message.textContent = `Reopening ${tools[app].title} after the Hub update... Check for the app's permission window.`;
+        try {
+          // Native recovery records are authoritative even if the close event is delayed.
+          window.CreatorHosted.discard(app);
+          await window.CreatorHosted.start(app, true);
+        } catch (reason) { failures.push(`${tools[app].title}: ${String(reason)}`); }
+      }
+      message.textContent = failures.length ? `Some app views could not reopen. ${failures.join(' ')}`
+        : directFeatures ? 'Your Hub page has been restored.' : 'Your app views have reopened. Select an app from the menu.';
+      retry.classList.toggle('hidden', !failures.length);
+      // Reopening backends must not navigate away from Apps or interrupt a user's selection.
+      show(current, true);
+    } catch (reason) {
+      status.classList.remove('hidden'); message.textContent = `Could not restore app views: ${String(reason)}`;
+      retry.classList.remove('hidden');
+    } finally { retry.disabled = false; }
+  }
+  byId('retry-hosted-restore').addEventListener('click', async () => {
+    if (busy) return;
+    busy = true; renderState(); window.CreatorHosted.updating(true);
+    try { await restoreHostedViews(); }
+    finally { window.CreatorHosted.updating(false); busy = false; renderState(); }
+  });
+
+  async function action(command, app = current, version = appState()?.availableVersion, extra = {}) {
+    if (busy || inventoryError || !Object.hasOwn(tools, app)) return;
+    busy = true; renderState(); error.classList.add('hidden');
+    byId('operation-progress').classList.add('hidden');
+    try {
+      const args = { app, ...extra };
+      if (['download_app', 'install_app'].includes(command)) args.version = version;
+      if (command === 'install_app') { args.reopen = extra.reopen ?? byId('reopen-app').checked; args.closeRunning = extra.closeRunning ?? byId('close-running').checked; }
+      if (command === 'install_app' && canDisconnectForUpdate(inventory?.apps?.find(item => item.app === app))) {
+        setProgress({ message: 'Waiting for permission to disconnect MCP...', total: 0, cancellable: false });
+        await invoke('disconnect_mcp', { app });
+        // Keep controls locked across confirmation and recheck. Never install from
+        // the pre-disconnect snapshot or keep stopping a reconnecting client.
+        setProgress({ message: 'Checking MCP connections before installation...', total: 0, cancellable: false });
+        acceptInventory(await invoke('app_inventory', { check: false, preview: byId('preview-channel').checked }));
+        const updated = inventory.apps.find(item => item.app === app);
+        if (!inventory.supported || !updated?.installed || !updated.trusted || updated.issue
+          || !updated.updateAvailable || updated.availableVersion !== version || updated.installBlocked || updated.requiredHubVersion) {
+          throw 'Update not started. The app or available release changed; review its current status and try again.';
+        }
+        if (updated.updateBlockers?.length) throw 'Update not started. MCP is still in use or a client reconnected. Pause this MCP in your AI client, then try again. No new connections were stopped.';
+      }
+      const message = await invoke(command, args);
+      setProgress({ message, total: 0, cancellable: false });
+    } catch (reason) { byId('operation-progress').classList.add('hidden'); error.textContent = String(reason); error.classList.remove('hidden'); }
+    finally {
+      byId('cancel-download').classList.add('hidden');
+      busy = false;
+      await refresh(false);
+    }
+  }
+
+  for (const app of ['mcp', 'setup']) byId(`update-${app}`).addEventListener('click', async () => {
+    if (busy) return;
+    let state = inventory?.apps?.find(item => item.app === app);
+    if (!state?.installed || !state.updateAvailable || !inventory.supported || state.issue || !state.trusted) return;
+    if (state.requiredHubVersion) { byId('hub-update-title').focus(); return refresh(true); }
+    if (state.installBlocked) return;
+    if (window.CreatorHosted.active(app)) {
+      busy = true; renderState();
+      let closed = false;
+      try { closed = await window.CreatorHosted.close(app); }
+      finally { busy = false; renderState(); }
+      if (!closed) {
+        error.textContent = 'Update not started. The app view is still open; finish its work or approve closing it before updating.';
+        error.classList.remove('hidden'); return;
+      }
+      if (!await refresh(false)) return;
+      state = inventory?.apps?.find(item => item.app === app);
+    }
+    if (!state?.installed || !state.updateAvailable || state.issue || !state.trusted || state.installBlocked || state.requiredHubVersion
+      || (state.updateBlockers?.length && !canDisconnectForUpdate(state))) return;
+    // Row updates stay on Apps and never inherit another app's hidden close/reopen choices.
+    await action('install_app', app, state.availableVersion, { reopen: false, closeRunning: false });
+  });
+  byId('release-button').addEventListener('click', () => {
+    const state = appState();
+    if (state?.requiredHubVersion && !(state.installed && state.trusted && !state.updateAvailable)) {
+      show('hub'); byId('hub-update-title').focus();
+      return refresh(true);
+    }
+    if (state?.installBlocked && !(state.installed && state.trusted && !state.updateAvailable)) return refresh(true);
+    if (state) action(state.installed && state.trusted && !state.updateAvailable ? 'open_app' : 'install_app');
+  });
+  byId('download-button').addEventListener('click', () => action('download_app'));
+  for (const app of ['mcp', 'setup']) byId(`menu-download-${app}`).addEventListener('click', () => {
+    const state = inventory?.apps?.find(item => item.app === app);
+    if (!state || busy || inventoryError || !inventory?.supported || state.downloaded || state.issue || state.installBlocked
+      || (state.installed && !state.updateAvailable)) return;
+    void action('download_app', app, state.availableVersion);
+  });
+  byId('open-button').addEventListener('click', () => action('open_app'));
+  byId('adopt-button').addEventListener('click', () => action('use_existing_app'));
+  for (const id of ['disconnect-mcp-row', 'disconnect-mcp-detail']) byId(id).addEventListener('click', () => action('disconnect_mcp', 'mcp'));
+  byId('check-updates').addEventListener('click', () => refresh(true));
+  byId('retry-inventory').addEventListener('click', () => refresh(false));
+  byId('recheck-app').addEventListener('click', async () => {
+    if (busy) return;
+    const app = current;
+    byId('update-blockers-status').textContent = 'Checking running apps...';
+    const succeeded = await refresh(false);
+    byId('update-blockers-status').textContent = succeeded ? 'Check complete. Review the app status above.' : 'Could not check running apps. Try again.';
+    if (succeeded && app === current && !appState()?.issue && !appState()?.updateBlockers?.length) {
+      error.classList.add('hidden');
+      byId('release-button').focus();
+    }
+  });
+  byId('hub-update-button').addEventListener('click', () => hubAction('install_hub_update'));
+  window.addEventListener('creator-feature-state', () => { if (directFeatures) renderState(); });
+  byId('cancel-download').addEventListener('click', async () => {
+    byId('cancel-download').disabled = true;
+    try { await invoke('cancel_download'); } catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
+  });
+  for (const [id, key] of preferenceControls) {
+    byId(id).addEventListener('change', async () => {
+      if (nativePreferences) {
+        preferencesSaving += 1; renderState();
+        try {
+          await invoke('set_hub_preference', { key, value: byId(id).checked });
+          preferenceError('', key);
+        } catch (reason) {
+          // A failed attempt to enable automation must not silently enable it.
+          byId(id).checked = false;
+          preferenceError(`${byId(id).closest('label').textContent.trim()} could not be saved: ${String(reason)}. It is off for this session.`, key);
+        } finally { preferencesSaving -= 1; renderState(); }
+      } else {
+        try { localStorage.setItem(`creator-hub.${key}`, String(byId(id).checked)); }
+        catch (reason) { preferenceError(`This preference could not be saved: ${String(reason)}. It applies only to this session.`, key); }
+      }
+      if (id === 'preview-channel') refresh(true);
+    });
+  }
+  async function start() {
+    if (directFeatures) show(current);
+    function applyLaunch(request) {
+      if (!request || !['hub', 'mcp', 'setup'].includes(request.view) || !Number.isSafeInteger(request.revision) || request.revision <= launchRevision) return;
+      launchRevision = request.revision;
+      // Navigation keeps existing hosted views intact; it never starts an installation.
+      selectView(request.view);
+    }
+    try {
+      await window.__TAURI__.event.listen('app-progress', event => setProgress(event.payload));
+      await window.__TAURI__.event.listen('close-blocked', event => { error.textContent = event.payload; error.classList.remove('hidden'); });
+      await window.__TAURI__.event.listen('hub-launch-view', event => applyLaunch(event.payload));
+      applyLaunch(await invoke('get_launch_request'));
+    } catch (reason) { error.textContent = `Progress reporting unavailable: ${String(reason)}`; error.classList.remove('hidden'); }
+    busy = true; renderState(); window.CreatorHosted.updating(true);
+    await restoreHostedViews();
+    window.CreatorHosted.updating(false); busy = false;
+    await refresh(false);
+    await refresh(true);
+    directReady = true;
+    renderState();
+  }
+  window.CreatorUsageTerms.requireAcceptance().then(async () => {
+    await loadPreferences();
+    await window.CreatorConvergence?.run();
+    await start();
+  }).catch(reason => {
+    error.textContent = `Startup paused: ${String(reason)}. Existing apps and settings were kept.`;
+    error.classList.remove('hidden');
+  });
+})();

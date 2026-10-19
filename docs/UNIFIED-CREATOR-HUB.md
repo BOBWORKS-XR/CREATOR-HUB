@@ -19,7 +19,8 @@ development checkpoints below are historical, not additional platform claims.
 
 - Creator Hub is the one public desktop product, installer and update stream.
 - Projects, Project Setup and MCP are sections of that product.
-- Plugins has a temporary retirement notice, not an active catalogue.
+- Creator Plugins is removed from the app interface. Existing imported assets,
+  project files and historical import receipts are preserved.
 - CREATOR-HUB is the canonical repository for future development.
 - MCP and Setup remain internal modules, not independently installed products.
 - modules/mcp and modules/project-setup retain the complete Git ancestry of their

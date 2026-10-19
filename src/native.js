@@ -2,7 +2,7 @@
   const key = window.__CREATOR_SHELL_KEY__;
   delete window.__CREATOR_SHELL_KEY__;
   const invoke = window.__TAURI__.core.invoke;
-  const discovery = new Set(['project_inventory', 'app_inventory', 'hub_update_status', 'community_projects', 'pending_hosted_restore', 'restore_hosted_app', 'convergence_status']);
+  const discovery = new Set(['project_inventory', 'app_inventory', 'hub_update_status', 'pending_hosted_restore', 'restore_hosted_app', 'convergence_status']);
   const hostedReads = new Set(['get_hosted_snapshot', 'probe_environment', 'get_recipe',
     'get_onboarding_status', 'get_project_sdk_profile', 'get_unity_extension_status',
     'get_project_feedback_settings', 'get_stable_release']);
