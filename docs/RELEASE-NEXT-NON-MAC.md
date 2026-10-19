@@ -19,9 +19,9 @@ not approval of untested packages or a publication receipt.
 
 - Public 0.1.14 remains unchanged. Its qualification is Windows-only and binds
   exact previously accepted B05 assets; it cannot approve new source or Linux.
-- Never publish private 0.1.15 acceptance-fixture bytes. A fresh 0.1.16 is the
-  proposed next public candidate, subject to checking version/tag availability
-  and building/qualifying new bytes. No version bump or tag is made by this note.
+- Never publish private 0.1.15 acceptance-fixture bytes. 0.1.16 is the next source
+  candidate; its release and tag were absent when checked on 2026-10-19. The
+  version bump does not qualify package bytes. No release tag is created yet.
 - Extend finite production qualifications only from actual new evidence, with
   public Windows 0.1.14 as the incoming stable baseline. Do not repurpose the old
   receipt, relabel a test package or bypass the guarded publisher/feed budget.
@@ -41,6 +41,22 @@ not approval of untested packages or a publication receipt.
    SteamOS package. The tested Deck lacks required WebKit libraries.
 4. Publish all requested non-Mac platforms only after their final exact bytes
    pass. Preserve original failed reports and historical release assets.
+
+## Source Validation
+
+The 0.1.16 source candidate passed 375 browser tests, 947 script tests
+(135 skipped), 412 integrated Hub Rust tests (14 ignored), and
+304 MCP internal-service Rust tests (9 ignored) on Windows. Strict Clippy passed
+for integrated Hub and all release targets of MCP and Project Setup. Logs are in
+`artifacts/plugins-removal-20261019`. These checks do not qualify an installer,
+signed update, automatic restart, or production Flatpak integration.
+
+The Flatpak launcher version now follows the source candidate. Historical
+Windows 0.1.14 qualification tests use explicit 0.1.14 fixtures, and reject a
+different source version rather than authorizing new bytes with the old receipt.
+Clean Windows CI also caught an unused lifecycle idle query in its isolated
+native fixture. The fixture now checks active-workflow and completed-work idle
+states; strict release Clippy passes without suppressing the warning.
 
 ## Linux Harness Diagnosis
 

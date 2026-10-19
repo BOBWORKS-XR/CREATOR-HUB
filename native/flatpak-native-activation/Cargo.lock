@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "creator-hub-flatpak-native-activation"
-version = "0.1.14"
+version = "0.1.16"
 dependencies = [
  "gio",
  "gtk",

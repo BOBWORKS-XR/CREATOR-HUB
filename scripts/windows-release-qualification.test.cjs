@@ -225,7 +225,6 @@ test('existing source guard accepts only explicit qualification without changing
   const file = path.join(directory, 'TEST-ONLY.json'), f = fixture();
   fs.writeFileSync(file, JSON.stringify(f.value), { flag: 'wx' });
   const { assertReleaseReady } = require('./check-unified-sources.cjs'), manifest = require('../modules/suite.json');
-  assert.equal(assertReleaseReady(manifest, { receiptPath: file, version: '0.1.14', platform: 'windows-x86_64' }).version, '0.1.14');
   assert.equal(manifest.phase, 'source-consolidation');
   const root = path.join(directory, 'source'); fs.mkdirSync(path.join(root, 'src-tauri/src'), { recursive: true });
   for (const name of ['package.json', 'src-tauri/tauri.conf.json']) fs.writeFileSync(path.join(root, name), JSON.stringify({ version: '0.1.14' }));
@@ -233,6 +232,11 @@ test('existing source guard accepts only explicit qualification without changing
   for (const text of [key, key.replace(/\n/g, '\r\n')]) {
     fs.writeFileSync(path.join(root, 'src-tauri/src/catalog-key.pub'), text);
     assert.equal(assertReleaseReady(manifest, { root, receiptPath: file, version: '0.1.14', platform: 'windows-x86_64' }).version, '0.1.14');
+  }
+  for (const name of ['package.json', 'src-tauri/tauri.conf.json']) {
+    fs.writeFileSync(path.join(root, name), JSON.stringify({ version: '0.1.16' }));
+    assert.throws(() => assertReleaseReady(manifest, { root, receiptPath: file, version: '0.1.14', platform: 'windows-x86_64' }), /Publication version differs/);
+    fs.writeFileSync(path.join(root, name), JSON.stringify({ version: '0.1.14' }));
   }
   fs.writeFileSync(path.join(root, 'src-tauri/src/catalog-key.pub'), key.replace('RWT', 'RWA'));
   assert.throws(() => assertReleaseReady(manifest, { root, receiptPath: file, version: '0.1.14', platform: 'windows-x86_64' }), /descriptor key differs/);

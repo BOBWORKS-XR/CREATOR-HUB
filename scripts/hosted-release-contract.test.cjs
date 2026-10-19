@@ -4,7 +4,7 @@ const test = require('node:test');
 
 test('Windows draft qualification reuses immutable accepted bytes without rebuilding or publishing', () => {
   const workflow = fs.readFileSync('.github/workflows/release.yml', 'utf8');
-  const version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
+  const version = '0.1.14';
   assert.match(workflow, /^name: Validate Qualified Windows Draft \(No Rebuild\)/);
   assert.ok(workflow.includes(`$receipt = 'packaging/windows/${version}-qualification.json'`));
   const qualification = 'node scripts/check-unified-sources.cjs --release --version "$version" --platform windows-x86_64 --receipt "$receipt" --verify-draft';
