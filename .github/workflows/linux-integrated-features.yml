@@ -55,9 +55,10 @@ jobs:
           set -euo pipefail
           rustc --test --edition=2021 modules/mcp/launcher/src-tauri/build_payload_inputs.rs -o "$RUNNER_TEMP/mcp-build-input-tests"
           "$RUNNER_TEMP/mcp-build-input-tests"
-          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --tests --features integrated-features,experimental-flatpak-host,experimental-linux-migration,experimental-linux-portable-host -- -D warnings
-          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --tests --features integrated-features,experimental-flatpak-host,experimental-linux-migration,experimental-linux-portable-update -- -D warnings
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --features integrated-features,experimental-flatpak-host,experimental-linux-migration,experimental-linux-portable-host -- -D warnings
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --features integrated-features,experimental-flatpak-host,experimental-linux-migration,experimental-linux-portable-update -- -D warnings
           cargo clippy --locked --manifest-path src-tauri/Cargo.toml --bin creator-hub --features integrated-features,experimental-flatpak-host,linux-production-migration,experimental-linux-portable-update -- -D warnings
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --features integrated-features,experimental-flatpak-host,linux-production-migration,experimental-linux-portable-update -- -D warnings
           cargo clippy --locked --manifest-path native/linux-deb-retirement/Cargo.toml --all-targets --features production-transaction -- -D warnings
           cargo clippy --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --lib --tests -- -D warnings
           cargo clippy --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --lib --tests --features integrated-service -- -D warnings
