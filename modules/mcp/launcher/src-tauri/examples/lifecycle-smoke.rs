@@ -38,6 +38,9 @@ fn main() {
             std::thread::spawn(move || {
                 let workflow = lifecycle::LIFECYCLE.begin_workflow().unwrap();
                 let attempted = (|| -> Result<(), String> {
+                    if lifecycle::LIFECYCLE.is_idle().map_err(str::to_owned)? {
+                        return Err("Active workflow reported idle".into());
+                    }
                     let flush = || -> Result<(), String> {
                         let (send, receive) = mpsc::sync_channel(1);
                         handle
@@ -98,6 +101,9 @@ fn main() {
                         return Err("Busy command did not protect WM_CLOSE".into());
                     }
                     drop(command);
+                    if !lifecycle::LIFECYCLE.is_idle().map_err(str::to_owned)? {
+                        return Err("Finished workflow and command did not return to idle".into());
+                    }
                     Ok(())
                 })();
                 let failed = attempted.is_err();
