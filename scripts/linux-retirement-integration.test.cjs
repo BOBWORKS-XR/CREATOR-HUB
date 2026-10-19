@@ -5,6 +5,15 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const read = file => fs.readFileSync(path.join(root, file), 'utf8');
 
+function linuxRetirementCaller(source) {
+  const command = source.indexOf('pub async fn retire_convergence_apps(');
+  assert.ok(command >= 0, 'Legacy retirement command remains explicit');
+  const start = source.indexOf('if let Some(native) = plan.retirement_linux.take()', command);
+  const end = source.indexOf('finish_without_retirement(plan, |plan|', start);
+  assert.ok(start > command && end > start, 'Linux caller boundaries are ordered');
+  return source.slice(start, end);
+}
+
 test('Linux migration route is nondefault and excluded from Windows compilation', () => {
   const manifest = read('src-tauri/Cargo.toml');
   assert.match(manifest, /default = \["custom-protocol"\]/);
@@ -103,7 +112,7 @@ test('recovered completion independently inspects retained state and never repla
 
 test('Root caller keeps backup, journal, router, explicit approval and missing-GUI checks', () => {
   const source = read('src-tauri/src/convergence.rs');
-  const caller = source.slice(source.indexOf('if let Some(native) = plan.retirement_linux.take()'), source.indexOf('finish_without_retirement(plan, |plan|'));
+  const caller = linuxRetirementCaller(source);
   for (const guard of ['can_retain(plan)?', 'fresh_runtime.generation != runtime.generation', 'fresh_router.command != router.command',
     'native.recheck()?', '.blocking_show()', 'if !approved', 'if !legacy_apps()?.is_empty()', 'native.complete_review()?']) {
     assert.ok(caller.includes(guard), guard);
@@ -121,7 +130,7 @@ test('Root caller keeps backup, journal, router, explicit approval and missing-G
 
 test('Linux native review covers Setup and partial cancellation without granting release acceptance', () => {
   const source = read('src-tauri/src/convergence.rs');
-  const caller = source.slice(source.indexOf('if let Some(native) = plan.retirement_linux.take()'), source.indexOf('finish_without_retirement(plan, |plan|'));
+  const caller = linuxRetirementCaller(source);
   for (const text of ['Only exact MCP 2.7.7 and Project Setup 0.3.7 packages are eligible',
     'one fixed non-executable retirement notice', 'each unretired app',
     'Cancelling a later system prompt does not undo earlier cleanup',
@@ -131,4 +140,12 @@ test('Linux native review covers Setup and partial cancellation without granting
   assert.ok(!caller.includes('Retire the verified standalone MCP 2.7.7 DEB launcher?'));
   const helper = read('src-tauri/src/linux_retirement.rs');
   assert.ok(helper.includes('pending for manual package-state review even if the original package is still installed'));
+});
+
+test('an earlier batch completion call cannot truncate the legacy Linux caller checks', () => {
+  const source = read('src-tauri/src/convergence.rs');
+  const original = linuxRetirementCaller(source);
+  assert.equal(linuxRetirementCaller(`finish_without_retirement(plan, |plan| unrelated);\n${source}`), original);
+  assert.ok(original.includes('can_retain(plan)?'));
+  assert.ok(original.includes('Only exact MCP 2.7.7 and Project Setup 0.3.7 packages are eligible'));
 });
