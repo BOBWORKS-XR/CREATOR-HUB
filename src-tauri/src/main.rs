@@ -62,6 +62,8 @@ mod mcp_runtime;
 mod platform;
 #[path = "../../native/plugins_retirement.rs"]
 mod plugins_retirement;
+#[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+mod portable_update;
 mod preferences;
 mod projects;
 mod self_update;
@@ -332,7 +334,12 @@ fn open_resource(resource: String) -> Result<(), String> {
 }
 
 fn shell_initialization(shell_key: &str) -> String {
-    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); Object.defineProperty(window, '__CREATOR_HUB_TERMS_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_PREFERENCES_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_CONVERGENCE_PROTOCOL__', {{value: {}}}); Object.defineProperty(window, '__CREATOR_HUB_FEATURE_PROTOCOL__', {{value: {}}}); }}", shell_key, env!("CARGO_PKG_VERSION"), u8::from(builtin::enabled()), u8::from(cfg!(feature = "integrated-features")))
+    let recovery = if cfg!(all(target_os = "linux", feature = "experimental-linux-portable-update")) {
+        " Object.defineProperty(window, '__CREATOR_HUB_UPDATE_RECOVERY_PROTOCOL__', {value: 1});"
+    } else {
+        ""
+    };
+    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); Object.defineProperty(window, '__CREATOR_HUB_TERMS_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_PREFERENCES_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_CONVERGENCE_PROTOCOL__', {{value: {}}}); Object.defineProperty(window, '__CREATOR_HUB_FEATURE_PROTOCOL__', {{value: {}}});{} }}", shell_key, env!("CARGO_PKG_VERSION"), u8::from(builtin::enabled()), u8::from(cfg!(feature = "integrated-features")), recovery)
 }
 
 #[cfg(target_os = "linux")]
@@ -411,6 +418,8 @@ fn main() {
         self_update::hub_update_status,
         self_update::download_hub_update,
         self_update::install_hub_update,
+        self_update::hub_update_recovery_status,
+        self_update::review_retained_hub_update,
         hosted_restore::pending_hosted_restore,
         hosted_restore::restore_hosted_app,
         hosted_restore::complete_hosted_restore,
@@ -438,6 +447,8 @@ fn main() {
         .manage(self_update::SelfUpdate::default())
         .manage(features::Features::default())
         .setup(|app| {
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+            app.manage(portable_update::PortableUpdate::default());
             #[cfg(feature = "integrated-features")]
             creator_project_setup::service::initialize(app.handle())
                 .map_err(std::io::Error::other)?;
@@ -522,6 +533,15 @@ mod tests {
             assert!(script.contains(&format!("'{property}', {{value: 1}}")));
         }
         assert!(script.ends_with(" }"));
+    }
+
+    #[test]
+    fn portable_recovery_capability_is_linux_experimental_only() {
+        let script = shell_initialization("test-key");
+        assert_eq!(
+            script.contains("'__CREATOR_HUB_UPDATE_RECOVERY_PROTOCOL__', {value: 1}"),
+            cfg!(all(target_os = "linux", feature = "experimental-linux-portable-update"))
+        );
     }
 
     #[test]

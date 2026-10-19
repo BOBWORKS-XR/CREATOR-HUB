@@ -44,9 +44,11 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Wind
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 experimental-linux-migration = []
+linux-production-migration = ["experimental-linux-migration"]
 experimental-flatpak-host = ["dep:gio"]
 experimental-flatpak-ui = ["dep:gio"]
 experimental-linux-portable-host = ["dep:creator-hub-linux-portable-deployment", "integrated-features", "experimental-flatpak-host"]
+experimental-linux-portable-update = ["experimental-linux-portable-host", "creator-hub-linux-portable-deployment/experimental-restart"]
 integrated-features = ["dep:creator-project-setup", "dep:creator-works-mcp-launcher"]
 
 [target.'cfg(target_os = "linux")'.dependencies]

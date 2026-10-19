@@ -415,6 +415,38 @@ pub(crate) fn discover_target(
     Ok(Some((release, bytes, signature)))
 }
 
+/// Portable discovery supplies its own signed schema; native Target/Release
+/// validation remains unchanged. Asset locations never come from API URLs.
+#[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+pub(crate) fn discover_portable(
+    client: &Client,
+    baseline: &Version,
+) -> Result<Option<(Version, Vec<u8>, Vec<u8>)>, String> {
+    let url = "https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases?per_page=10";
+    let items: Vec<GithubRelease> = serde_json::from_slice(&fetch_small(client, url, 256 * 1024)?)
+        .map_err(|_| "GitHub returned invalid release metadata.")?;
+    // The portable verifier currently accepts canonical stable packages only.
+    let versions = candidate_versions_for(
+        items,
+        false,
+        baseline,
+        crate::portable_update::DESCRIPTOR_NAME,
+    );
+    let Some(version) = versions.into_iter().next() else {
+        return Ok(None);
+    };
+    let url = release_url(
+        "CREATOR-HUB",
+        &version.to_string(),
+        crate::portable_update::DESCRIPTOR_NAME,
+    );
+    Ok(Some((
+        version,
+        fetch_small(client, &url, MAX_METADATA)?,
+        fetch_small(client, &format!("{url}.minisig"), 4096)?,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
