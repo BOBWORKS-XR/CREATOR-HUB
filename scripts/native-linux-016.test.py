@@ -144,6 +144,88 @@ class Driver:
 
 
 class Pure016(unittest.TestCase):
+    def test_startup_wait_absent_empty_singleton_without_action_retry(self):
+        class X11:
+            display = 1
+            class x:
+                @staticmethod
+                def XDefaultRootWindow(display):
+                    assert display == 1
+                    return 2
+            def property(self, root, name):
+                self.asserted = (root, name)
+                return self.value
+        x11 = X11(); evidence = {"attempts": 0}; guards = []
+        for value, expected in ((None, None), ((33, 32, []), None), ((33, 32, [123]), 123)):
+            x11.value = value
+            self.assertEqual(P.startup_client_id(x11, lambda: guards.append("checked"), evidence), expected)
+            self.assertEqual(x11.asserted, (2, "_NET_CLIENT_LIST_STACKING"))
+            self.assertEqual(evidence["property"], None if value is None else
+                             {"type": 33, "format": 32, "count": len(value[2]), "data": value[2]})
+            self.assertTrue(evidence["identitiesVerified"])
+        self.assertEqual(evidence["attempts"], 3)
+        self.assertEqual(len(guards), 6)
+
+    def test_startup_wait_rejects_malformed_and_multiple_windows(self):
+        class X11:
+            display = 1
+            class x:
+                XDefaultRootWindow = staticmethod(lambda _: 2)
+            def property(self, *_):
+                return self.value
+        x11 = X11()
+        for value in ((6, 32, []), (33, 8, b"text"), (33, 32, [1, 2]), (33, 32, [1, 1]),
+                      (33, 32, [False]), (33, 32, [0]), (33, 32, [2**32]), (33, 32, (1,)),
+                      [33, 32, []], (33, 32)):
+            x11.value = value; evidence = {"attempts": 0}
+            with self.subTest(value=value), self.assertRaisesRegex(RuntimeError, "startup WM"):
+                P.startup_client_id(x11, lambda: None, evidence)
+            self.assertIn("startup WM", evidence["error"])
+            json.dumps(evidence)
+
+    def test_startup_wait_records_process_drift_and_query_refusal(self):
+        class X11:
+            display = 1
+            class x:
+                XDefaultRootWindow = staticmethod(lambda _: 2)
+            def property(self, *_):
+                if self.error:
+                    raise RuntimeError("bounded X query refused")
+                return (33, 32, [])
+        x11 = X11()
+        for fail_at in (1, 2):
+            calls = []
+            def guard():
+                calls.append(True)
+                if len(calls) == fail_at:
+                    raise RuntimeError("process identity changed")
+            x11.error = False; evidence = {"attempts": 0}
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                P.startup_client_id(x11, guard, evidence)
+            self.assertFalse(evidence["identitiesVerified"])
+            self.assertEqual(evidence["attempts"], 1)
+        x11.error = True; evidence = {"attempts": 0}
+        with self.assertRaisesRegex(RuntimeError, "X query refused"):
+            P.startup_client_id(x11, lambda: None, evidence)
+        self.assertEqual(evidence["error"], "bounded X query refused")
+        self.assertFalse(evidence["identitiesVerified"])
+
+    def test_startup_wait_deadline_keeps_last_empty_observation(self):
+        pages = load("native-linux-integrated-pages")
+        class X11:
+            display = 1
+            class x:
+                XDefaultRootWindow = staticmethod(lambda _: 2)
+            def property(self, *_):
+                return (33, 32, [])
+        evidence = {"attempts": 0}
+        with patch.object(pages.time, "monotonic", side_effect=[0, 0, 2]), patch.object(pages.time, "sleep"), \
+                self.assertRaisesRegex(RuntimeError, "readiness deadline"):
+            pages.wait(lambda: P.startup_client_id(X11(), lambda: None, evidence), 1)
+        self.assertEqual(evidence["attempts"], 1)
+        self.assertEqual(evidence["property"], {"type": 33, "format": 32, "count": 0, "data": []})
+        self.assertTrue(evidence["identitiesVerified"])
+
     def test_profile_exact_fields_modes_pins(self):
         S.profile(profile())
         for mode in ("pages", "migration-cancel"):

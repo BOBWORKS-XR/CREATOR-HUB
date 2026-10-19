@@ -68,6 +68,32 @@ def log_evidence(logs, root):
     return result
 
 
+def startup_client_id(x11, guard, evidence):
+    evidence["attempts"] += 1
+    evidence["identitiesVerified"] = False
+    try:
+        guard()
+        root = x11.x.XDefaultRootWindow(x11.display)
+        value = x11.property(root, "_NET_CLIENT_LIST_STACKING")
+        if type(value) is tuple and len(value) == 3 and type(value[2]) in (list, bytes):
+            evidence["property"] = {"type": value[0], "format": value[1], "count": len(value[2]),
+                                    "data": value[2].hex() if type(value[2]) is bytes else value[2]}
+        else:
+            evidence["property"] = None if value is None else {"unexpected": repr(value)[:2200]}
+        guard()
+        evidence["identitiesVerified"] = True
+        if value is None:
+            return None
+        require(type(value) is tuple and len(value) == 3 and value[:2] == (33, 32)
+                and type(value[2]) is list and len(value[2]) <= 1
+                and all(type(xid) is int and 0 < xid <= 0xffffffff for xid in value[2]),
+                "Malformed or unexpected startup WM client inventory")
+        return value[2][0] if value[2] else None
+    except Exception as error:
+        evidence["error"] = str(error)[:700]
+        raise
+
+
 def fixtures(root, mode):
     home = root / "home"
     for name in ("home", "home/config", "home/data", "home/cache", "runtime", "tmp"):
@@ -225,7 +251,22 @@ def session(root, home, binding, reopened=False):
         require(parent == backend and parent["executable"] == "/usr/bin/WebKitWebDriver" and parent["parentPid"] == child.pid
                 and parent["kernelImageSha256"] == native_driver["sha256"], "Native driver ownership differs")
         pidfd = os.pidfd_open(owned["pid"])
-        pages.wait(lambda: len(native.client_ids(x11)) == 1)
+        wm_identity = native.native_process(wm.pid, helper)
+        result["root"] = owned
+        readiness = {"attempts": 0, "property": None, "wm": wm_identity}
+        result["startupWindowReadiness"] = readiness
+        started = time.monotonic()
+        def startup_guard():
+            session_guard()
+            require(native.native_process(owned["pid"], helper) == owned, "Readiness Hub identity changed")
+            require(wm.poll() is None and native.native_process(wm.pid, helper) == wm_identity,
+                    "Readiness window manager exited/changed")
+        def window_ready():
+            try:
+                return startup_client_id(x11, startup_guard, readiness) is not None
+            finally:
+                readiness["elapsedMs"] = int((time.monotonic() - started) * 1000)
+        pages.wait(window_ready)
         window = native.client_ids(x11)[0]
         request = helper.Request("snapshot", owned["pid"], owned["startTime"], HUB, owned["kernelImageSha256"], window, TITLE, "FRAME")
         def guard():
