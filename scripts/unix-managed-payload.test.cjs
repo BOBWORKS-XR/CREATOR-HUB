@@ -176,6 +176,44 @@ test('only the explicit validation push can substitute for a workflow dispatch',
   } finally { cleanup(f); }
 });
 
+test('the new producer route binds Linux x86_64 and both exact 0.1.16 source identities without relabelling legacy receipts', () => {
+  const f = fixture();
+  try {
+    const ref = 'refs/heads/validation/unix-payload-016';
+    const env = { ...f.env, GITHUB_EVENT_NAME: 'push', GITHUB_REF: ref,
+      GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/.github/workflows/unix-managed-payload.yml@${ref}` };
+    for (const file of ['package.json', 'src-tauri/tauri.conf.json']) {
+      fs.writeFileSync(path.join(f.root, file), JSON.stringify({ version: '0.1.16' }));
+    }
+    for (const event of ['push', 'workflow_dispatch']) {
+      assert.equal(prepareAdmission(f.root, 'linux', 'x86_64', { ...env, GITHUB_EVENT_NAME: event }, f.execute).event, event);
+    }
+    assert.throws(() => prepareAdmission(f.root, 'macos', 'x86_64', { ...env, RUNNER_OS: 'macOS' }, f.execute), /exact Linux/);
+    assert.throws(() => prepareAdmission(f.root, 'linux', 'aarch64', { ...env, RUNNER_ARCH: 'ARM64' }, f.execute), /exact Linux/);
+    for (const file of ['package.json', 'src-tauri/tauri.conf.json']) {
+      fs.writeFileSync(path.join(f.root, file), JSON.stringify({ version: '0.1.15' }));
+      assert.throws(() => prepareAdmission(f.root, 'linux', 'x86_64', env, f.execute), /source version/);
+      fs.writeFileSync(path.join(f.root, file), JSON.stringify({ version: '0.1.16' }));
+    }
+  } finally { cleanup(f); }
+});
+
+test('the generic unsigned producer remains Linux-only with the finite 016 preflight before tools and unchanged transfer workflow identity', () => {
+  const { yaml } = require('../node_modules/playwright-core/lib/utilsBundle.js');
+  const document = yaml.parseDocument(fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-payload.yml'), 'utf8'), { uniqueKeys: true });
+  assert.deepEqual(document.errors, []);
+  const workflow = document.toJS();
+  assert.deepEqual(workflow.on.push.branches, ['validation/unix-payload-014', 'validation/unix-payload-016']);
+  assert.deepEqual(workflow.jobs.payload.strategy.matrix.os, ['ubuntu-22.04']);
+  const steps = workflow.jobs.payload.steps;
+  assert.equal(steps[1].if, "github.ref == 'refs/heads/validation/unix-payload-016'");
+  assert.match(steps[1].run, /'version'\] == '0\.1\.16'/);
+  assert.match(steps[1].run, /RUNNER_OS.*Linux.*RUNNER_ARCH.*X64/);
+  assert.ok(steps[2].uses.startsWith('actions/setup-node@'));
+  assert.match(steps.find(step => step.name?.startsWith('Prepare only')).run, /--prepare-managed-unix$/);
+  assert.doesNotMatch(JSON.stringify(workflow), /secrets\.|APPLE_|TAURI_SIGNING_|CREATOR_HUB_SIGNING_/);
+});
+
 test('dirty initial source or source/run mismatch refuses before generation or output writes', () => {
   const f = fixture();
   try {

@@ -42,7 +42,7 @@ function prepareAdmission(root, platform, arch, env, execute = execFileSync) {
   const os = { linux: 'Linux', macos: 'macOS' }[platform];
   const cpu = { x86_64: 'X64', aarch64: 'ARM64' }[arch];
   const validationPush = env.GITHUB_EVENT_NAME === 'push'
-    && env.GITHUB_REF === 'refs/heads/validation/unix-payload-014'
+    && ['refs/heads/validation/unix-payload-014', 'refs/heads/validation/unix-payload-016'].includes(env.GITHUB_REF)
     && env.GITHUB_WORKFLOW_REF === `${REPOSITORY}/${WORKFLOW}@${env.GITHUB_REF}`;
   if (!os || !cpu || env.GITHUB_ACTIONS !== 'true' || env.RUNNER_ENVIRONMENT !== 'github-hosted'
     || env.RUNNER_OS !== os || env.RUNNER_ARCH !== cpu || env.GITHUB_REPOSITORY !== REPOSITORY
@@ -69,6 +69,12 @@ function prepareAdmission(root, platform, arch, env, execute = execFileSync) {
   const sourceTree = git(root, ['rev-parse', 'HEAD^{tree}'], execute);
   if (buildCommit !== env.GITHUB_SHA || !/^[a-f0-9]{40}$/.test(sourceTree)) {
     throw Error('Checkout does not match the dispatched source commit/tree.');
+  }
+  if (env.GITHUB_REF === 'refs/heads/validation/unix-payload-016') {
+    if (platform !== 'linux' || arch !== 'x86_64'
+      || ['package.json', 'src-tauri/tauri.conf.json'].some(name => JSON.parse(fs.readFileSync(path.join(realRoot, name), 'utf8')).version !== '0.1.16')) {
+      throw Error('The 0.1.16 preparation route requires exact Linux x86_64 source version 0.1.16.');
+    }
   }
   return { repository: REPOSITORY, repositoryId: REPOSITORY_ID, workflow: WORKFLOW,
     event: env.GITHUB_EVENT_NAME, sourceCommit: buildCommit, buildCommit, sourceTree, runId, runAttempt };
