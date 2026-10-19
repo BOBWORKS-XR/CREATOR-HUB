@@ -149,3 +149,8 @@ test('an earlier batch completion call cannot truncate the legacy Linux caller c
   assert.ok(original.includes('can_retain(plan)?'));
   assert.ok(original.includes('Only exact MCP 2.7.7 and Project Setup 0.3.7 packages are eligible'));
 });
+
+test('the batch cleanup flag is mutable only on the platform that can start its cleanup', () => {
+  const source = read('src-tauri/src/convergence.rs');
+  assert.match(source, /#\[cfg\(windows\)\]\s+let mut cleanup_started = false;\s+#\[cfg\(not\(windows\)\)\]\s+let cleanup_started = false;/);
+});

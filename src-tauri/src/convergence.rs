@@ -1574,7 +1574,10 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
         }
         let mut phase = "review";
         let mut cancelled = false;
+        #[cfg(windows)]
         let mut cleanup_started = false;
+        #[cfg(not(windows))]
+        let cleanup_started = false;
         let mut journal_started = false;
         let mut approved_key = String::new();
         let mut journal = BatchJournal::open(batch_path()?)?;
