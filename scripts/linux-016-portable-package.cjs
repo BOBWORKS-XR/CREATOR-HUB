@@ -325,6 +325,29 @@ const TYPELIB_MAGIC = Buffer.from('GOBJ\nMETADATA\r\n\x1a', 'binary');
 const GIO_DIRECTORY = 'usr/lib/x86_64-linux-gnu/gio/modules';
 const GIO_TLS = `${GIO_DIRECTORY}/libgiognutls.so`;
 const GIO_PATHS = new Set([GIO_DIRECTORY, GIO_TLS]);
+const APPRUN_WRAPPED = 'AppRun.wrapped';
+const APPRUN_TOOL = 'AppRun-x86_64';
+const APPRUN_PIN = Object.freeze({ size: 31552, sha256: 'f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f' });
+const APPRUN_SOURCES = Object.freeze({
+  permissions: 'https://raw.githubusercontent.com/tauri-apps/tauri/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/linux/appimage/mod.rs',
+  copy: 'https://raw.githubusercontent.com/tauri-apps/tauri/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy.rs',
+  download: 'https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64',
+});
+function validateAppRunWrapped(name, entry, bytes, source = false) {
+  assert.equal(name, APPRUN_WRAPPED, 'Only the exact upstream AppRun.wrapped path is admitted');
+  assert.ok(entry?.kind === 'file' && entry.mode === (source ? 0o770 : 0o755), 'Upstream AppRun.wrapped type/mode differs');
+  assert.deepEqual({ size: entry.size, sha256: entry.sha256 }, APPRUN_PIN, 'Upstream AppRun.wrapped bytes differ');
+  if (bytes !== undefined) {
+    assert.ok(Buffer.isBuffer(bytes) && bytes.length === APPRUN_PIN.size, 'Bounded upstream AppRun.wrapped bytes required');
+    require('./flatpak-package.cjs').validateElf(bytes);
+    assert.deepEqual(record(bytes), APPRUN_PIN, 'Upstream AppRun.wrapped changed during inspection');
+  }
+}
+function appRunToolBinding(tools) {
+  assert.deepEqual(tools[APPRUN_TOOL], APPRUN_PIN, 'Cached upstream AppRun tool differs from the reviewed wrapper');
+  return { path: APPRUN_WRAPPED, sources: APPRUN_SOURCES, tool: { name: APPRUN_TOOL, ...tools[APPRUN_TOOL] },
+    scope: 'original-mode-0770-to-copied-transport-0755-only' };
+}
 const SCHEMA_DIRECTORY = 'usr/share/glib-2.0/schemas';
 const COMPILED_SCHEMA = `${SCHEMA_DIRECTORY}/gschemas.compiled`;
 const DATA_LIMIT = 128 * 1024;
@@ -626,12 +649,21 @@ function inventory(root, allowLinks = false) {
         s = fs.lstatSync(file);
         assert.ok(relative(rel) && !prohibited(rel) && !folded.has(rel.toLowerCase()), `Noncanonical/prohibited AppDir entry: ${rel}`);
         folded.add(rel.toLowerCase()); assert.ok(folded.size <= LIMITS.entries, `AppDir has at least ${folded.size} entries; bound ${LIMITS.entries}; coordinate with Parent`);
-        const role = metadataRole(rel);
-        assert.ok(!(s.mode & 0o7000) && (s.isSymbolicLink() || !(s.mode & 0o022) || allowLinks && role), 'Privileged/group/world-writable AppDir mode refused');
+        const role = metadataRole(rel), wrapped = rel === APPRUN_WRAPPED;
+        // Tauri 2.11.4 sets its downloaded AppRun to 0770 before copying it.
+        // Only these exact single-link executable bytes may retain that source mode.
+        assert.ok(!(s.mode & 0o7000) && (s.isSymbolicLink() || !(s.mode & 0o022)
+          || allowLinks && (role || wrapped && (s.mode & 0o7777) === 0o770)), 'Privileged/group/world-writable AppDir mode refused');
+        if (wrapped) assert.ok(s.isFile() && !s.isSymbolicLink() && s.nlink === 1 && s.size === APPRUN_PIN.size,
+          'Upstream AppRun.wrapped must be a bounded single-link regular file');
         if (role) assert.ok(!s.isSymbolicLink(), 'Metadata aliases refused');
         if (GTK_METADATA_PATHS.has(rel)) assert.ok(s.isFile() && !s.isSymbolicLink(), 'GObject typelib exception cannot be a directory or link');
         if (GIO_PATHS.has(rel)) assert.ok(!s.isSymbolicLink(), 'GIO runtime exception cannot be a link');
-        if (s.isSymbolicLink()) {
+        if (wrapped) {
+          const bytes = metadataRead(file, s);
+          entries[rel] = { kind: 'file', ...record(bytes), mode: s.mode & 0o7777 };
+          validateAppRunWrapped(rel, entries[rel], bytes, allowLinks);
+        } else if (s.isSymbolicLink()) {
           assert.ok(allowLinks, 'Transport AppDir cannot contain links');
           const link = fs.readlinkSync(file), resolved = internalTarget(root, file);
           const target = path.relative(root, resolved).split(path.sep).join('/');
@@ -842,6 +874,7 @@ function validateInventory(inv) {
     validateGtkMetadata(name, entry);
     validateGioRuntime(name, entry);
     validateMetadata(name, entry);
+    if (name === APPRUN_WRAPPED) validateAppRunWrapped(name, entry);
   }
   assert.ok(total <= LIMITS.total && total === inv.unpackedSize, 'Inventory total bound differs');
 }
@@ -925,6 +958,7 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     receipt.appImage = retainAppImage(path.join(bundles, imageName), image);
     exact(binary, p.files['creator-hub']);
     receipt.upstreamPackagingTools = toolInventory(path.join(child.XDG_CACHE_HOME, 'tauri'));
+    receipt.appRunWrapper = appRunToolBinding(receipt.upstreamPackagingTools);
     receipt.upstreamToolSource = 'https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy.rs';
     receipt.upstreamToolNote = 'Effective post-bundle cache hashes; Tauri 2.11.4 uses mutable upstream URLs and clears linuxdeploy bytes 8..10. Optional AppImage plugin absence means builtin fallback. No hermetic claim.';
     receipt.systemPackagingTools = Object.fromEntries(['/usr/bin/patchelf', '/usr/bin/readelf', '/usr/bin/file'].map(n => {
@@ -935,6 +969,8 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     receipt.metadataNormalization.hostAfterBundle = metadataEvidence(path.parse(root).root);
     receipt.metadataNormalization.originalBeforeCopy = metadataEvidence(appdir);
     const inv = inventory(appdir, true);
+    validateAppRunWrapped(APPRUN_WRAPPED, inv.entries[APPRUN_WRAPPED], undefined, true);
+    receipt.appRunWrapper.original = inv.entries[APPRUN_WRAPPED];
     for (const name of [SCHEMA_DIRECTORY, ...Object.keys(METADATA_PINS)]) assert.ok(Object.hasOwn(inv.entries, name), `Missing inspected metadata: ${name}`);
     receipt.metadataNormalization.compiledSchemaFormat = validateCompiledSchema(metadataRead(path.join(appdir, COMPILED_SCHEMA)), run);
     fs.cpSync(appdir, retained, { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false });
@@ -946,6 +982,8 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     archive.verify(path.join(appdir, 'usr/lib/Creator Hub/modules.tar.gz'), baseline.manifest, decoder, (command, args, opts) => run(command, args, opts));
     receipt.rootTransform = 'exactly one __TAURI_BUNDLE_TYPE_VAR_UNK -> APP marker; all other Root bytes identical';
     const transport = path.join(output, 'Creator Hub.AppDir'), transformation = flatten(appdir, transport);
+    validateAppRunWrapped(APPRUN_WRAPPED, transformation.flattened.entries[APPRUN_WRAPPED]);
+    receipt.appRunWrapper.transport = transformation.flattened.entries[APPRUN_WRAPPED];
     Object.assign(receipt.metadataNormalization, { originalAfterCopy: metadataEvidence(appdir), retainedOriginal: metadataEvidence(retained),
       transport: metadataEvidence(transport), copiedData: Object.fromEntries(Object.keys(METADATA_PINS).map(name => [name, {
         ...METADATA_PINS[name], originalMode: inv.entries[name].mode, transportMode: transformation.flattened.entries[name].mode }])) });
@@ -1008,7 +1046,8 @@ module.exports = { VERSION, TARGET, FEATURES, HOST_PROFILE, LIMITS, WORKFLOW, BR
   record, flags, validatePins, admission, preflight, verifyProducer, verifyPrivateProof, collect, ZIP_STAGE, stageZip, validateReceipts,
   relative, prohibited, validateGtkMetadata, validateGioRuntime, retainAppImage, internalTarget, inventory, flatten, dependencies, primaryAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
   hostProfile, verifyHostProfileInventory, attachHostProfile, SCHEMA_DIRECTORY, COMPILED_SCHEMA, METADATA_PINS, METADATA_PROBES, DATA_LIMIT,
-  metadataRole, gvdbVariants, GVDB_VARIANTS, validateCompiledSchema, validateMetadataFormat, validateMetadata, metadataRead, metadataEvidence, transportMode };
+  metadataRole, gvdbVariants, GVDB_VARIANTS, validateCompiledSchema, validateMetadataFormat, validateMetadata, metadataRead, metadataEvidence, transportMode,
+  APPRUN_WRAPPED, APPRUN_TOOL, APPRUN_PIN, APPRUN_SOURCES, validateAppRunWrapped, appRunToolBinding };
 if (require.main === module) (async () => {
   const [mode, ...args] = process.argv.slice(2);
   if (mode === 'preflight') { assert.equal(args.length, 0); preflight(); console.log(JSON.stringify({ preflightPassed: true, releaseReady: false })); }

@@ -1,4 +1,4 @@
-// Synthetic admission/transport fixtures only; no artifact or native GUI acceptance.
+// Admission/transport fixtures only; no native GUI acceptance. Upstream AppRun data is never executed.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -417,6 +417,224 @@ test('actual Unix GIO inventory refuses links and records independently checked 
   fs.chmodSync(file, 0o644); fs.writeFileSync(file, 'not ELF'); assert.throws(() => p.inventory(root, true), /GIO TLS/);
   fs.unlinkSync(file); put(root, 'target', elf()); fs.symlinkSync('../../../../../target', file);
   assert.throws(() => p.inventory(root, true), /GIO runtime/);
+});
+// Exact upstream ELF, losslessly compressed; no verifier seam or runtime pin override.
+const APPRUN_BYTES = zlib.inflateRawSync(Buffer.from([
+  '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',
+  'TdIoSggAiYWKouky253IdoWG7bvIVqawGc5KUuIvH0vSrrmJYiJSu3YqOanucw/NLiQd8NAF+9cq9o+TWrfvcQ/N/lceYIyM4Heb4yeuc8f/5h58',
+  '/VRrW/PRUfwG0H30EH4x6T56FL9XTLz5sSR91E3OkwfwCyB3Lf6POg6QK44do1HLUwhIJ7uHD3d3u9i5Hs8bTxL+298jSfyU+9B717gPnTO6uWfc',
+  'J85H8xUNWVSDXn6gNl6BX0+Nwwu3xBZJkp7hb64A4DYcJv7o+d++S2ffxS7KB486Euc/wt77TM2oe8eZaOmvLHJgO0wAyjVR7rdH8dSNV+woX7+2',
+  'Pi7Vr2mOn6lvb46/UN/WMlRRPRmg3T1Uienqlulv1PzZfegLIxpJfPEhjul3oxOZDy3xt1riZxrjUr1U+Ip78DDnnvd27C1U//UNrHsdHlZ9/vAw',
+  'c1e5Zbh0XDouHf+PHFzSt9wALq8vcmM01A9VsUi4Cp9zBKoivZ6wr2o+QeQ8VPWHQ11VEV+gu8q3yQcVkaqKCDRt8nXVYj4WCUMTPrSY71wYigW8',
+  'zmAo6uzyOv3BaMhZEbFC67o294rl7hXLmmpl9ipoaRRbmhtW1a9aJ7bWt7kpC8l2NC4WG+vb6sXG5lWrobVpVUtLcwMsXt3U1ta8fPFqcfVCd9My',
+  'Ugor28TWlvbFzcu1ShpXLG9bu6q5ralhXVvTwhWNTbU1qe55urp8kYgzuWJWxrc85GSRcXb7A76IszsUC3qtqXrwSY7T6w/7uqKh8GZSWzwoH4Yo',
+  'FvV0BnyEmSj5qrPPc6PPGYmFfc5ory/sc/ojTo8TnwI5yQMXf7DHebM/2uu8gkT4CtS4tn7V8ubli+c7GzVeObv9voDX2RXy+pwVFRVdqIiEPhYO',
+  '+4LRwGZnJNbfHwpHfV72bEDR0xzc6An4vU7vRfRZATCsrM06/cGq+TQf0RI9nj5fhFAMZcX6ZmaqAv5ORRrz/plz59An/T3BWFLRprlzxDmz0hfO',
+  'nKGl5swiFNOdQW9Gnao+RRdouiVzXR4R/ZtJ6pW5ILnPJrPKeuRerFPiCwdmJ1VWQdj4TNfrk5X0BPydlTNc1VWRrl5fnyciSycPDG3Yb4rOquoP',
+  'xHr8wcjFmiATW0roMjDOnJGpZM6sjMpvis7+cr6lZ0vjW1pG4lvaEuJbUonSDkpAV69b3da0LCWuPfjk1tPnCxOh9PxijVidVqayxlVN5Ni8gYnT',
+  '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',
+  '999EMvDvzIDfa0j/3pcfG9K/9+WJDHqez4A/AenfQ+M2pH9/zN8N6d8f84Eh/ftjzmawazOmx50Z8BkZ8EUZ8F8a0r+3Zr0x/Xtr1IVhXeFoJBrr',
+  '7nZ1gdcX9vX4I1FfWIz2iV2BUBCf9YrekNgTCHV6AqI3GgpHRE9sE3SF+voDvqjP67pq5ow56ZnI+19ETzjs2Sz6gtHwZugOe/p8ojfW17cZRFFD',
+  'kTe8JLGK4qJV9cuaxKbljaL88FzDgO+B8UZCYq8n6A34QGxct7x+WfPCZDb2jpnFy9vFJjdV525cBaLYtmwhU7y4ZUVDfYu4YtGi1U1tYlt9Q0uT',
+  'mPIOG3lVR12d9j0z+Gg/GdGvg9CV0vfgkKfHyUXy+o9kjCzP0LHRR+UpwrjAROec/KiarnjQu6l7gY/OMFmLkYzJD5f1ajRv8ulO55nu9T50tUsy',
+  'D1sLo6Iz/9F7gPrSOKgsNdF7oL4tiDzfllemJDPRZ+LJIC6E0IWUPH1PiT1ZTKNH8WF4MgauyOa+qKcTXJFoWE57Wc4fjPrC/eAKhqI+V08w5pIX',
+  'BPi9FKpvaK6MenqAlPV6Ir3g8m4ORjb3yWk0LJds9IUjuPpGS4hhcIV9AQ8y0lx/IIom/VFwRXGJiov0cFc4RLqny9dLx2WvN6xSsoQ8sGQJlvdu',
+  'Dnr6/F3g6glFyT/ZgKysMxIBV1eorw8XYbi8vs5Yj+gJe4I9vggj/cHukFLU2Rn2bWQUWahA86SSFA51sSzV9H/iKKXXcuz6Q30PpEzrr3A5HT1F',
+  '964m9b2HMl2u4zfp6Dk6eXaflqCA/tyql8f9u85IUojJs/s5M91gxEtxtn+JWSe/nO5VwuTZfV8/lR+mqUDrzuTZviJr6INZZc8vdn9INyhZoguY',
+  'Pn7X0b1ImDy7j1xCDbXo/Dfo0hvp3iaMZvebe6g829lC7z87bqExZfLsvvSYTl4fP1b/7VS+gdLs/vUcZWT7ufD0fU96+btAfVcnOZT3gsqJ/o5M',
+  '3/5xnTy7H3ZS+QFdwPN06bd18uy6Zh99Kdb91vTy7PieTp5dJzfSgaPfiUTv/z7d+FPfbyonO3VP1/Xtt18nr74/VKYX6Pj19h/TybP7+mNUvkQX',
+  'P739UbpXAtvPR3mfqCs9v1mX/gd9XxmTZ/dtzi8p/zKNPZNX3tdK5dl7WgWdHGvH/6L1Z/Lse4dzVV/O/t918sp9Hh04x/+B/Ps6eXbfcZzK69tL',
+  'P398THUxeXa9+8fq5Hrq7bPjU6pTvwMOk1+XwT5LjVyqT3hU1sip/q5dz1uQQb6Pyrsdybied2IG+V/SF+2W6TZj1PN+NYP8iUVyepZPxvW8c7n0',
+  '8TtGJ+5JGeRZujCD/TfpV9nHdTc9et7lGeQfpye+63W4njdp7tEcJfRGs4N2GNx0c1aa+duiex8jO/r7aKor1NvPzyB/sl9O1/+D8+f/Ag==',
+].join(''), 'base64'), { maxOutputLength: 31552 });
+test('39339847288 exact upstream AppRun 0770 is source-only and the complete canonical record requires 0755', () => {
+  assert.deepEqual(p.record(APPRUN_BYTES), p.APPRUN_PIN);
+  const source = { kind: 'file', ...p.record(APPRUN_BYTES), mode: 0o770 }, canonical = { ...source, mode: 0o755 };
+  p.validateAppRunWrapped(p.APPRUN_WRAPPED, source, APPRUN_BYTES, true);
+  p.validateAppRunWrapped(p.APPRUN_WRAPPED, canonical, APPRUN_BYTES);
+  assert.equal(p.transportMode(p.APPRUN_WRAPPED, source), 0o755);
+  for (const name of ['AppRun', 'apprun.wrapped', 'usr/bin/AppRun.wrapped', 'AppRun.wrapped/child'])
+    assert.throws(() => p.validateAppRunWrapped(name, source, APPRUN_BYTES, true));
+  for (const mode of [0o644, 0o750, 0o755, 0o775, 0o777, 0o4770, 0o1770])
+    assert.throws(() => p.validateAppRunWrapped(p.APPRUN_WRAPPED, { ...source, mode }, APPRUN_BYTES, true));
+  for (const kind of ['directory', 'symlink', 'fifo'])
+    assert.throws(() => p.validateAppRunWrapped(p.APPRUN_WRAPPED, { ...source, kind }, APPRUN_BYTES, true));
+  for (const changed of [{ ...source, size: source.size - 1 }, { ...source, sha256: '0'.repeat(64) }])
+    assert.throws(() => p.validateAppRunWrapped(p.APPRUN_WRAPPED, changed, APPRUN_BYTES, true));
+  for (const change of [b => b[0] = 0, b => b[4] = 1, b => b[5] = 2, b => b.writeUInt16LE(183, 18),
+    b => b.writeUInt16LE(1, 16), b => b[b.length - 1] ^= 1]) {
+    const bad = Buffer.from(APPRUN_BYTES); change(bad);
+    assert.throws(() => p.validateAppRunWrapped(p.APPRUN_WRAPPED, source, bad, true));
+  }
+  assert.throws(() => p.validateAppRunWrapped(p.APPRUN_WRAPPED, source, APPRUN_BYTES.subarray(0, -1), true));
+  const inventory = { entries: { [p.APPRUN_WRAPPED]: canonical }, links: {}, unpackedSize: APPRUN_BYTES.length };
+  p.validateInventory(inventory);
+  for (const mode of [0o644, 0o750, 0o770, 0o775, 0o777, 0o4755]) {
+    const changed = structuredClone(inventory); changed.entries[p.APPRUN_WRAPPED].mode = mode;
+    assert.throws(() => p.validateInventory(changed));
+  }
+  const changed = structuredClone(inventory); changed.entries[p.APPRUN_WRAPPED].sha256 = '0'.repeat(64);
+  assert.throws(() => p.validateInventory(changed));
+});
+test('AppRun receipt binds the actually cached tool hash to fixed Tauri 2.11.4 permission/copy sources', () => {
+  const tool = p.record(APPRUN_BYTES), binding = p.appRunToolBinding({ [p.APPRUN_TOOL]: tool });
+  assert.deepEqual(binding.tool, { name: 'AppRun-x86_64', size: 31552,
+    sha256: 'f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f' });
+  assert.equal(binding.path, 'AppRun.wrapped');
+  const base = 'https://raw.githubusercontent.com/tauri-apps/tauri/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/linux/appimage/';
+  assert.equal(binding.sources.permissions, base + 'mod.rs'); assert.equal(binding.sources.copy, base + 'linuxdeploy.rs');
+  assert.equal(binding.sources.download, 'https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64');
+  for (const changed of [{}, { [p.APPRUN_TOOL]: { ...tool, size: tool.size + 1 } },
+    { [p.APPRUN_TOOL]: { ...tool, sha256: '0'.repeat(64) } }, { 'apprun-x86_64': tool }])
+    assert.throws(() => p.appRunToolBinding(changed));
+  const text = fs.readFileSync(path.join(__dirname, 'linux-016-portable-package.cjs'), 'utf8');
+  assert.ok(text.indexOf('receipt.appRunWrapper = appRunToolBinding') < text.indexOf('const inv = inventory(appdir, true)'));
+  assert.match(text, /receipt\.appRunWrapper\.original = inv\.entries\[APPRUN_WRAPPED\]/);
+  assert.match(text, /receipt\.appRunWrapper\.transport = transformation\.flattened\.entries\[APPRUN_WRAPPED\]/);
+});
+test('actual Unix exact AppRun 0770 round-trips to 0755 TAR without source byte/mode/inode changes', async t => {
+  if (process.platform === 'win32') return t.skip('Requires actual Unix 0770 source and 0755 copied modes');
+  const root = temp(t), tree = path.join(root, 'original'), output = path.join(root, 'transport'); fs.mkdirSync(tree);
+  const file = put(tree, p.APPRUN_WRAPPED, APPRUN_BYTES, 0o770), stat = fs.lstatSync(file);
+  const before = p.inventory(tree, true);
+  assert.equal(before.entries[p.APPRUN_WRAPPED].mode, 0o770); assert.throws(() => p.inventory(tree), /writable/);
+  const result = p.flatten(tree, output);
+  assert.deepEqual(p.inventory(tree, true), before); assert.deepEqual(fs.readFileSync(file), APPRUN_BYTES);
+  for (const field of ['mode', 'dev', 'ino', 'size', 'nlink', 'mtimeMs', 'ctimeMs']) assert.equal(fs.lstatSync(file)[field], stat[field]);
+  const canonical = result.flattened.entries[p.APPRUN_WRAPPED];
+  assert.deepEqual(canonical, { kind: 'file', ...p.APPRUN_PIN, mode: 0o755 });
+  assert.deepEqual(fs.readFileSync(path.join(output, p.APPRUN_WRAPPED)), APPRUN_BYTES);
+  const tar = path.join(root, 'wrapped.tar.gz'), archive = await p.packTar(output, tar, result.flattened);
+  execFileSync(PYTHON, ['-B', '-c', VERIFY_TAR, tar], { input: JSON.stringify({ archive, entries: result.flattened.entries }) });
+  fs.chmodSync(file, 0o755); assert.throws(() => p.inventory(tree, true), /AppRun.wrapped type\/mode/);
+  fs.chmodSync(file, 0o770); fs.renameSync(file, path.join(tree, 'OtherRun.wrapped'));
+  assert.throws(() => p.inventory(tree, true), /writable/);
+});
+test('actual Unix AppRun exception refuses links, hardlinks, specials, wrong data and all other writable runtimes', t => {
+  if (process.platform === 'win32') return t.skip('Requires real Unix links, FIFO and permission bits');
+  const root = temp(t), tree = path.join(root, 'AppDir'); fs.mkdirSync(tree);
+  const file = path.join(tree, p.APPRUN_WRAPPED), target = put(root, 'tool', APPRUN_BYTES, 0o770);
+  fs.symlinkSync('../tool', file); assert.throws(() => p.inventory(tree, true), /single-link regular/); fs.unlinkSync(file);
+  fs.linkSync(target, file); assert.throws(() => p.inventory(tree, true), /single-link regular/); fs.unlinkSync(file);
+  fs.mkdirSync(file); assert.throws(() => p.inventory(tree, true), /single-link regular/); fs.rmdirSync(file);
+  execFileSync('mkfifo', [file]); assert.throws(() => p.inventory(tree, true), /single-link regular/); fs.unlinkSync(file);
+  const bad = Buffer.from(APPRUN_BYTES); bad[bad.length - 1] ^= 1; put(tree, p.APPRUN_WRAPPED, bad, 0o770);
+  assert.throws(() => p.inventory(tree, true), /AppRun.wrapped bytes differ/); fs.unlinkSync(file);
+  put(tree, p.APPRUN_WRAPPED, APPRUN_BYTES, 0o770);
+  for (const mode of [0o775, 0o777, 0o4770]) { fs.chmodSync(file, mode); assert.throws(() => p.inventory(tree, true)); }
+  fs.chmodSync(file, 0o770);
+  const runtime = put(tree, 'usr/bin/OtherRun', APPRUN_BYTES, 0o770);
+  assert.throws(() => p.inventory(tree, true), /writable/); fs.unlinkSync(runtime);
+  fs.symlinkSync(p.APPRUN_WRAPPED, path.join(tree, 'alias'));
+  assert.throws(() => p.inventory(tree, true), /Unsafe symlink target mode/);
 });
 const COPYRIGHT_NAME = 'usr/share/doc/libbz2-1.0/copyright';
 const SCHEMA_NAME = `${p.SCHEMA_DIRECTORY}/org.gnome.desktop.a11y.interface.gschema.xml`;
