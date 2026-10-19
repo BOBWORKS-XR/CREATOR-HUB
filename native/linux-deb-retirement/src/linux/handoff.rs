@@ -1,7 +1,15 @@
-#[cfg(any(feature = "experimental-transaction", test))]
+#[cfg(any(
+    feature = "experimental-transaction",
+    feature = "production-transaction",
+    test
+))]
 use super::require;
 use super::{lock, File, Result};
-#[cfg(any(feature = "experimental-transaction", test))]
+#[cfg(any(
+    feature = "experimental-transaction",
+    feature = "production-transaction",
+    test
+))]
 use std::os::fd::AsRawFd;
 
 pub(super) struct PackageLocks {
@@ -20,7 +28,11 @@ impl PackageLocks {
         })
     }
 
-    #[cfg(any(feature = "experimental-transaction", test))]
+    #[cfg(any(
+        feature = "experimental-transaction",
+        feature = "production-transaction",
+        test
+    ))]
     pub(super) fn handoff<T>(&mut self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
         let mut region: libc::flock = unsafe { std::mem::zeroed() };
         region.l_type = libc::F_UNLCK as _;

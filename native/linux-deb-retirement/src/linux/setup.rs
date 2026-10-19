@@ -1,6 +1,10 @@
 //! Fixed Setup checks. No caller-selected package, path, version or user-data access.
 use super::*;
-use crate::setup::{self as contract, PackageState};
+#[cfg(feature = "production-transaction")]
+pub(super) use crate::production::setup as contract;
+#[cfg(not(feature = "production-transaction"))]
+pub(super) use crate::setup as contract;
+use crate::setup::PackageState;
 use std::collections::BTreeSet;
 
 fn queried_state() -> Result<PackageState> {
@@ -215,7 +219,10 @@ pub(super) fn inspect(retained_only: bool) -> Result<serde_json::Value> {
     Ok(report)
 }
 
-#[cfg(feature = "experimental-transaction")]
+#[cfg(any(
+    feature = "experimental-transaction",
+    feature = "production-transaction"
+))]
 pub(super) fn prepare_locked(_held: &PackageLocks) -> Result<Prepared> {
     refuse_prior_attempt_for(Target::Setup)?;
     let metadata = metadata::Snapshot::capture_for(Target::Setup)?;
@@ -276,7 +283,10 @@ pub(super) fn prepare_locked(_held: &PackageLocks) -> Result<Prepared> {
     })
 }
 
-#[cfg(feature = "experimental-transaction")]
+#[cfg(any(
+    feature = "experimental-transaction",
+    feature = "production-transaction"
+))]
 pub(super) fn verify_candidate(candidate: &Path) -> Result<()> {
     let work = candidate
         .parent()

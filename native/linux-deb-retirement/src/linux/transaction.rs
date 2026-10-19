@@ -1,4 +1,4 @@
-//! Nondefault experimental transaction. No alternate package path, root or target.
+//! Nondefault finite transaction. No alternate package path, root or target.
 use super::*;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -49,12 +49,21 @@ fn log(path: &Path) -> Result<File> {
 
 fn mark_attempt(candidate: &Path, target: Target) -> Result<()> {
     let (package, old, new) = match target {
-        Target::Mcp => (pins::PACKAGE, pins::OLD, pins::NEW),
-        Target::Setup => (crate::setup::PACKAGE, crate::setup::OLD, crate::setup::NEW),
+        Target::Mcp => (pins::PACKAGE, pins::OLD, MCP_NEW),
+        Target::Setup => (
+            setup::contract::PACKAGE,
+            setup::contract::OLD,
+            setup::contract::NEW,
+        ),
     };
     let path = Path::new(target.private()).join(ATTEMPT);
     let mut file = log(&path)?;
-    file.write_all(format!("Experimental {package} {old} -> {new}\nStage: {}\nManual review required. No automatic retry or rollback.\n", candidate.display()).as_bytes())?;
+    let mode = if cfg!(feature = "production-transaction") {
+        "Production"
+    } else {
+        "Experimental"
+    };
+    file.write_all(format!("{mode} {package} {old} -> {new}\nStage: {}\nManual review required. No automatic retry or rollback.\n", candidate.display()).as_bytes())?;
     file.sync_all()?;
     open(
         Path::new(target.private()),
@@ -161,18 +170,23 @@ fn retire_target(target: Target) -> Result<serde_json::Value> {
         "Helper interrupted during post-verification",
     )
     .map_err(|e| manual(e, Some(true)))?;
-    let mut report = json!({ "status": "experimental-transaction-verified", "experimentalTransactionCompiled": true,
+    #[cfg(feature = "production-transaction")]
+    return Ok(crate::production::completion(target, &candidate));
+    #[cfg(not(feature = "production-transaction"))]
+    {
+        let mut report = json!({ "status": "experimental-transaction-verified", "experimentalTransactionCompiled": true,
         "installationEnabled": false, "packageTransactionStarted": true, "manualRepairRequired": false,
         "nativeAcceptance": false, "candidate": candidate,
         "version": if target == Target::Mcp { pins::NEW } else { crate::setup::NEW },
         "retainedFilesVerified": if target == Target::Mcp { 9 } else { 0 }, "omittedFilesVerified": 5,
         "retryPolicy": "attempt marker retained; no automatic retry" });
-    if target == Target::Setup {
-        report["product"] = json!("setup");
-        report["package"] = json!(crate::setup::PACKAGE);
-        report["tombstoneFilesVerified"] = json!(1);
+        if target == Target::Setup {
+            report["product"] = json!("setup");
+            report["package"] = json!(crate::setup::PACKAGE);
+            report["tombstoneFilesVerified"] = json!(1);
+        }
+        Ok(report)
     }
-    Ok(report)
 }
 
 #[cfg(test)]

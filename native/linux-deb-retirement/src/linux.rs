@@ -1,8 +1,16 @@
-use crate::{
-    archive, compatibility_listing, compatibility_state, control, copy_pinned, installed_metadata,
-    listing, md5sums, owner, paths, pins, require, retained, sha256, stage_name, state, Action,
-    ManualRepair, Result, INSTALL_REFUSAL,
+#[cfg(feature = "production-transaction")]
+use crate::production::{
+    mcp_compatibility_state as compatibility_state, mcp_control as control,
+    mcp_installed_metadata as installed_metadata, MCP_NEW,
 };
+#[cfg(not(feature = "production-transaction"))]
+use crate::INSTALL_REFUSAL;
+use crate::{
+    archive, compatibility_listing, copy_pinned, listing, md5sums, owner, paths, pins, require,
+    retained, sha256, stage_name, state, Action, ManualRepair, Result,
+};
+#[cfg(not(feature = "production-transaction"))]
+use crate::{compatibility_state, control, installed_metadata, pins::NEW as MCP_NEW};
 use serde_json::json;
 use std::{
     ffi::CString,
@@ -28,14 +36,20 @@ const INFO: &str = "/var/lib/dpkg/info";
 const LIMIT: u64 = 128 * 1024;
 const ATTEMPT: &str = "transaction-attempted";
 const METADATA_FORMAT: &str = "--showformat=${Installed-Size}\n${Maintainer}\n${Priority}\n${Depends}\n${Description}\n${Conffiles}${Triggers-Pending}${Triggers-Awaited}${Multi-Arch}${Pre-Depends}${Breaks}${Conflicts}${Replaces}${Provides}";
-#[cfg(feature = "experimental-transaction")]
+#[cfg(any(
+    feature = "experimental-transaction",
+    feature = "production-transaction"
+))]
 mod gui;
 mod handoff;
 mod metadata;
 mod setup;
 use crate::metadata::Target;
 use handoff::PackageLocks;
-#[cfg(feature = "experimental-transaction")]
+#[cfg(any(
+    feature = "experimental-transaction",
+    feature = "production-transaction"
+))]
 mod transaction;
 
 fn protected(meta: &Metadata, directory: bool) -> Result<()> {
@@ -293,7 +307,7 @@ fn installed(compatibility: bool) -> Result<()> {
         "Installed package verification differs",
     )?;
     require(
-        capture(DPKG, &["--compare-versions", pins::NEW, "gt", pins::OLD])?.is_empty(),
+        capture(DPKG, &["--compare-versions", MCP_NEW, "gt", pins::OLD])?.is_empty(),
         "Version order refused",
     )?;
     directory(Path::new(INFO))?;
@@ -647,11 +661,17 @@ pub fn run(action: Action) -> Result<serde_json::Value> {
         Action::InspectSetup => setup::inspect(false),
         Action::InspectRetainedSetup => setup::inspect(true),
         Action::RetireSetup => {
-            #[cfg(feature = "experimental-transaction")]
+            #[cfg(any(
+                feature = "experimental-transaction",
+                feature = "production-transaction"
+            ))]
             {
                 transaction::retire_setup()
             }
-            #[cfg(not(feature = "experimental-transaction"))]
+            #[cfg(not(any(
+                feature = "experimental-transaction",
+                feature = "production-transaction"
+            )))]
             {
                 Err(INSTALL_REFUSAL.into())
             }
@@ -660,11 +680,17 @@ pub fn run(action: Action) -> Result<serde_json::Value> {
             // Re-read the fixed installed state; a retained retry marker is not
             // authority for success and must not block this read-only check.
             installed(true)?;
+            #[cfg(feature = "production-transaction")]
+            return Ok(crate::production::inspection(Target::Mcp, true));
+            #[cfg(not(feature = "production-transaction"))]
             Ok(crate::retained_inspection_report())
         }
         Action::Inspect => {
             refuse_prior_attempt()?;
             baseline()?;
+            #[cfg(feature = "production-transaction")]
+            return Ok(crate::production::inspection(Target::Mcp, false));
+            #[cfg(not(feature = "production-transaction"))]
             Ok(
                 json!({ "status": "inspected-read-only", "baselineMatches": true, "snapshotAuthoritative": false,
                 "installationEnabled": false, "packageTransactionStarted": false,
@@ -674,6 +700,9 @@ pub fn run(action: Action) -> Result<serde_json::Value> {
         }
         Action::Prepare => {
             let candidate = prepare()?;
+            #[cfg(feature = "production-transaction")]
+            return Ok(crate::production::prepared(&candidate));
+            #[cfg(not(feature = "production-transaction"))]
             Ok(
                 json!({ "status": "prepared-not-installed", "candidate": candidate, "installationEnabled": false,
                 "packageTransactionStarted": false, "experimentalTransactionCompiled": cfg!(feature = "experimental-transaction"),
@@ -681,11 +710,17 @@ pub fn run(action: Action) -> Result<serde_json::Value> {
             )
         }
         Action::Retire => {
-            #[cfg(feature = "experimental-transaction")]
+            #[cfg(any(
+                feature = "experimental-transaction",
+                feature = "production-transaction"
+            ))]
             {
                 transaction::retire()
             }
-            #[cfg(not(feature = "experimental-transaction"))]
+            #[cfg(not(any(
+                feature = "experimental-transaction",
+                feature = "production-transaction"
+            )))]
             {
                 Err(INSTALL_REFUSAL.into())
             }
@@ -781,9 +816,15 @@ mod tests {
         assert!(open(&link, libc::O_RDONLY).is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
         assert!(protected(&fs::metadata(&path).unwrap(), false).is_err());
-        #[cfg(not(feature = "experimental-transaction"))]
+        #[cfg(not(any(
+            feature = "experimental-transaction",
+            feature = "production-transaction"
+        )))]
         assert!(run(Action::Retire).unwrap_err().to_string().contains("WIP"));
-        #[cfg(feature = "experimental-transaction")]
+        #[cfg(any(
+            feature = "experimental-transaction",
+            feature = "production-transaction"
+        ))]
         assert!(
             privileged_image().is_err(),
             "Fixture executable is never installed at the trusted path"

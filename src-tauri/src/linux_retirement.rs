@@ -47,9 +47,9 @@ fn command(target: Target, action: Action) -> Command {
     cmd
 }
 
-struct Capture {
-    bytes: Vec<u8>,
-    exceeded: bool,
+pub(crate) struct Capture {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) exceeded: bool,
 }
 
 fn capture(mut reader: impl Read) -> std::io::Result<Capture> {
@@ -88,6 +88,17 @@ struct Inspection {
 }
 
 fn inspect_response(target: Target, bytes: &[u8]) -> Result<(), String> {
+    #[cfg(all(target_os = "linux", feature = "linux-production-migration"))]
+    {
+        production_inspect_response(target, bytes, false)
+    }
+    #[cfg(not(all(target_os = "linux", feature = "linux-production-migration")))]
+    {
+        inspect_development_response(target, bytes)
+    }
+}
+
+fn inspect_development_response(target: Target, bytes: &[u8]) -> Result<(), String> {
     if target == Target::Setup {
         return setup_inspection_response(bytes, false);
     }
@@ -131,6 +142,17 @@ struct RetainedInspection {
 }
 
 fn retained_response(target: Target, bytes: &[u8]) -> Result<(), String> {
+    #[cfg(all(target_os = "linux", feature = "linux-production-migration"))]
+    {
+        production_inspect_response(target, bytes, true)
+    }
+    #[cfg(not(all(target_os = "linux", feature = "linux-production-migration")))]
+    {
+        retained_development_response(target, bytes)
+    }
+}
+
+fn retained_development_response(target: Target, bytes: &[u8]) -> Result<(), String> {
     if target == Target::Setup {
         return setup_inspection_response(bytes, true);
     }
@@ -255,7 +277,7 @@ struct SetupCompletion {
     retry_policy: String,
 }
 
-fn setup_completion_response(bytes: &[u8]) -> Result<Outcome, String> {
+fn setup_development_completion_response(bytes: &[u8]) -> Result<Outcome, String> {
     let value: SetupCompletion = serde_json::from_slice(bytes).map_err(|_| {
         "The Setup cleanup result is unknown. Keep recovery records; do not retry automatically."
     })?;
@@ -284,10 +306,27 @@ fn setup_completion_response(bytes: &[u8]) -> Result<Outcome, String> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     Cancelled,
+    // Historical internal name shared by the coordinators. Either protocol's
+    // success means only verified helper postchecks, never release acceptance.
     ExperimentalVerified,
 }
 
 fn retire_response(target: Target, code: Option<i32>, output: &Capture) -> Result<Outcome, String> {
+    #[cfg(all(target_os = "linux", feature = "linux-production-migration"))]
+    {
+        production_retire_response(target, code, output)
+    }
+    #[cfg(not(all(target_os = "linux", feature = "linux-production-migration")))]
+    {
+        retire_development_response(target, code, output)
+    }
+}
+
+fn retire_development_response(
+    target: Target,
+    code: Option<i32>,
+    output: &Capture,
+) -> Result<Outcome, String> {
     if code == Some(126) {
         return Ok(Outcome::Cancelled);
     }
@@ -298,7 +337,7 @@ fn retire_response(target: Target, code: Option<i32>, output: &Capture) -> Resul
         return Err("Standalone cleanup did not report a verified completion. A transaction may have started. Keep all settings, backups and retained runtimes; review the system package manager before retrying.".into());
     }
     if target == Target::Setup {
-        return setup_completion_response(&output.bytes);
+        return setup_development_completion_response(&output.bytes);
     }
     let value: Completion = serde_json::from_slice(&output.bytes)
         .map_err(|_| "The cleanup result is unknown. Keep retained files and review package state; do not automatically retry.")?;
@@ -317,6 +356,200 @@ fn retire_response(target: Target, code: Option<i32>, output: &Capture) -> Resul
         || value.retry_policy != "attempt marker retained; no automatic retry"
     {
         return Err("The helper did not verify the expected retained MCP runtime. Keep recovery records and review package state; do not automatically retry.".into());
+    }
+    Ok(Outcome::ExperimentalVerified)
+}
+
+const PRODUCTION_COHORT: &str = "creator-hub-deb-retirement-016-v1";
+
+fn production_identity(
+    protocol: u32,
+    cohort: &str,
+    mode: &str,
+    accepted: bool,
+    qualification_required: bool,
+) -> Result<(), String> {
+    if protocol != 2
+        || cohort != PRODUCTION_COHORT
+        || mode != "production"
+        || accepted
+        || !qualification_required
+    {
+        return Err("Unknown production helper cohort or self-certified acceptance. Existing apps and recovery records were kept.".into());
+    }
+    Ok(())
+}
+
+fn production_target(target: Target, retained: bool) -> (&'static str, &'static str, &'static str) {
+    match (target, retained) {
+        (Target::Mcp, false) => ("mcp", "creator-works-mcp", "2.7.7"),
+        (Target::Mcp, true) => ("mcp", "creator-works-mcp", "2.7.7-1+hub.retention016.1"),
+        (Target::Setup, false) => ("setup", "creator-project-setup", "0.3.7"),
+        (Target::Setup, true) => (
+            "setup",
+            "creator-project-setup",
+            "0.3.7-1+hub.retention016.1",
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProductionInspection {
+    protocol_version: u32,
+    cohort: String,
+    mode: String,
+    status: String,
+    native_acceptance: bool,
+    external_qualification_required: bool,
+    product: String,
+    package: String,
+    package_state: String,
+    version: String,
+    read_only: bool,
+    baseline_matches: bool,
+    compatibility_matches: bool,
+    snapshot_authoritative: bool,
+    package_transaction_started: bool,
+    retained_files_verified: u32,
+    tombstone_files_verified: u32,
+    omitted_files_verified: u32,
+}
+
+pub(crate) fn production_inspect_response(
+    target: Target,
+    bytes: &[u8],
+    retained: bool,
+) -> Result<(), String> {
+    let value: ProductionInspection = serde_json::from_slice(bytes)
+        .map_err(|_| "The installed helper did not return the strict production inspection protocol. No development fallback was used.")?;
+    production_identity(
+        value.protocol_version,
+        &value.cohort,
+        &value.mode,
+        value.native_acceptance,
+        value.external_qualification_required,
+    )?;
+    let (product, package, version) = production_target(target, retained);
+    if value.status
+        != if retained {
+            "inspected-retained-read-only"
+        } else {
+            "inspected-read-only"
+        }
+        || value.product != product
+        || value.package != package
+        || value.version != version
+        || value.package_state
+            != if retained {
+                "compatibility"
+            } else {
+                "original"
+            }
+        || !value.read_only
+        || value.baseline_matches != !retained
+        || value.compatibility_matches != retained
+        || value.snapshot_authoritative
+        || value.package_transaction_started
+        || value.retained_files_verified
+            != if retained && target == Target::Mcp {
+                9
+            } else {
+                0
+            }
+        || value.tombstone_files_verified
+            != if retained && target == Target::Setup {
+                1
+            } else {
+                0
+            }
+        || value.omitted_files_verified != if retained { 5 } else { 0 }
+    {
+        return Err("Production helper inspection did not verify the exact admitted package and postcheck counts. Apps were kept.".into());
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProductionCompletion {
+    protocol_version: u32,
+    cohort: String,
+    mode: String,
+    status: String,
+    native_acceptance: bool,
+    external_qualification_required: bool,
+    product: String,
+    package: String,
+    version: String,
+    candidate: String,
+    package_transaction_started: bool,
+    manual_repair_required: bool,
+    retained_files_verified: u32,
+    tombstone_files_verified: u32,
+    omitted_files_verified: u32,
+    retry_policy: String,
+}
+
+fn production_candidate(target: Target, candidate: &str) -> bool {
+    let (prefix, suffix) = match target {
+        Target::Mcp => (
+            "/var/lib/creator-hub-deb-retirement/mcp-2.7.7-preparation-",
+            "/runtime-only.deb",
+        ),
+        Target::Setup => (
+            "/var/lib/creator-hub-deb-retirement-setup/setup-0.3.7-preparation-",
+            "/gui-tombstone.deb",
+        ),
+    };
+    candidate
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_suffix(suffix))
+        .is_some_and(|nonce| {
+            nonce.len() == 32
+                && nonce
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        })
+}
+
+pub(crate) fn production_retire_response(
+    target: Target,
+    code: Option<i32>,
+    output: &Capture,
+) -> Result<Outcome, String> {
+    if code == Some(126) {
+        return Ok(Outcome::Cancelled);
+    }
+    if code == Some(127) {
+        return Err("System authorization was unavailable or refused. Keep the pending record for manual review; no fallback or automatic retry was opened.".into());
+    }
+    if code != Some(0) || output.exceeded {
+        return Err("Production cleanup outcome is unknown. Keep settings, retained runtime and recovery records; do not retry automatically.".into());
+    }
+    let value: ProductionCompletion = serde_json::from_slice(&output.bytes)
+        .map_err(|_| "The helper did not return the strict production postcheck protocol. No development fallback was used.")?;
+    production_identity(
+        value.protocol_version,
+        &value.cohort,
+        &value.mode,
+        value.native_acceptance,
+        value.external_qualification_required,
+    )?;
+    let (product, package, version) = production_target(target, true);
+    if value.status != "transaction-postchecked"
+        || value.product != product
+        || value.package != package
+        || value.version != version
+        || !production_candidate(target, &value.candidate)
+        || !value.package_transaction_started
+        || value.manual_repair_required
+        || value.retained_files_verified != if target == Target::Mcp { 9 } else { 0 }
+        || value.tombstone_files_verified != if target == Target::Setup { 1 } else { 0 }
+        || value.omitted_files_verified != 5
+        || value.retry_policy != "attempt marker retained; no automatic retry"
+    {
+        return Err("The production helper did not verify the exact retained package. Keep recovery records; do not replay cleanup.".into());
     }
     Ok(Outcome::ExperimentalVerified)
 }
@@ -537,6 +770,255 @@ pub use native::Plan;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{
+        inspect_development_response as inspect_response,
+        retained_development_response as retained_response,
+        retire_development_response as retire_response,
+        setup_development_completion_response as setup_completion_response,
+    };
+
+    fn production_inspection(target: Target, retained: bool) -> serde_json::Value {
+        let (product, package, version) = production_target(target, retained);
+        serde_json::json!({ "protocolVersion":2, "cohort":PRODUCTION_COHORT, "mode":"production",
+            "status":if retained { "inspected-retained-read-only" } else { "inspected-read-only" },
+            "nativeAcceptance":false, "externalQualificationRequired":true,
+            "product":product, "package":package, "version":version,
+            "packageState":if retained { "compatibility" } else { "original" },
+            "readOnly":true, "baselineMatches":!retained, "compatibilityMatches":retained,
+            "snapshotAuthoritative":false, "packageTransactionStarted":false,
+            "retainedFilesVerified":if retained && target == Target::Mcp {9} else {0},
+            "tombstoneFilesVerified":if retained && target == Target::Setup {1} else {0},
+            "omittedFilesVerified":if retained {5} else {0} })
+    }
+
+    fn production_completion(target: Target) -> serde_json::Value {
+        let (product, package, version) = production_target(target, true);
+        let candidate = match target {
+            Target::Mcp => "/var/lib/creator-hub-deb-retirement/mcp-2.7.7-preparation-0123456789abcdef0123456789abcdef/runtime-only.deb",
+            Target::Setup => "/var/lib/creator-hub-deb-retirement-setup/setup-0.3.7-preparation-0123456789abcdef0123456789abcdef/gui-tombstone.deb",
+        };
+        serde_json::json!({ "protocolVersion":2, "cohort":PRODUCTION_COHORT, "mode":"production",
+            "status":"transaction-postchecked", "nativeAcceptance":false, "externalQualificationRequired":true,
+            "product":product, "package":package, "version":version, "candidate":candidate,
+            "packageTransactionStarted":true, "manualRepairRequired":false,
+            "retainedFilesVerified":if target == Target::Mcp {9} else {0},
+            "tombstoneFilesVerified":if target == Target::Setup {1} else {0}, "omittedFilesVerified":5,
+            "retryPolicy":"attempt marker retained; no automatic retry" })
+    }
+
+    #[test]
+    fn production_protocol_cannot_adopt_development_or_cross_product_reports() {
+        for target in [Target::Mcp, Target::Setup] {
+            for retained in [false, true] {
+                let bytes = serde_json::to_vec(&production_inspection(target, retained)).unwrap();
+                production_inspect_response(target, &bytes, retained).unwrap();
+                assert!(production_inspect_response(target, &bytes, !retained).is_err());
+                let other = if target == Target::Mcp {
+                    Target::Setup
+                } else {
+                    Target::Mcp
+                };
+                assert!(production_inspect_response(other, &bytes, retained).is_err());
+                assert!(inspect_response(target, &bytes).is_err());
+                assert!(retained_response(target, &bytes).is_err());
+            }
+            let output = Capture {
+                bytes: serde_json::to_vec(&production_completion(target)).unwrap(),
+                exceeded: false,
+            };
+            assert_eq!(
+                production_retire_response(target, Some(0), &output).unwrap(),
+                Outcome::ExperimentalVerified
+            );
+            assert!(retire_response(target, Some(0), &output).is_err());
+        }
+        assert!(production_inspect_response(
+            Target::Mcp,
+            &serde_json::to_vec(&inspection()).unwrap(),
+            false
+        )
+        .is_err());
+        assert!(production_inspect_response(
+            Target::Setup,
+            &serde_json::to_vec(&setup_inspection(false)).unwrap(),
+            false
+        )
+        .is_err());
+        assert!(production_retire_response(Target::Mcp, Some(0), &completion()).is_err());
+        assert!(production_retire_response(Target::Setup, Some(0), &setup_completion()).is_err());
+    }
+
+    #[test]
+    fn production_identity_versions_counts_and_qualification_are_exact() {
+        for target in [Target::Mcp, Target::Setup] {
+            for retained in [false, true] {
+                let good = production_inspection(target, retained);
+                for (key, value) in [
+                    ("protocolVersion", serde_json::json!(1)),
+                    ("cohort", serde_json::json!("retention014")),
+                    ("mode", serde_json::json!("TEST ONLY")),
+                    ("nativeAcceptance", serde_json::json!(true)),
+                    ("externalQualificationRequired", serde_json::json!(false)),
+                    ("readOnly", serde_json::json!(false)),
+                    ("snapshotAuthoritative", serde_json::json!(true)),
+                    ("packageTransactionStarted", serde_json::json!(true)),
+                    ("version", serde_json::json!("latest")),
+                    ("retainedFilesVerified", serde_json::json!(42)),
+                    ("tombstoneFilesVerified", serde_json::json!(42)),
+                    ("omittedFilesVerified", serde_json::json!(42)),
+                    ("installationEnabled", serde_json::json!(true)),
+                ] {
+                    let mut bad = good.clone();
+                    bad[key] = value;
+                    assert!(
+                        production_inspect_response(
+                            target,
+                            &serde_json::to_vec(&bad).unwrap(),
+                            retained
+                        )
+                        .is_err(),
+                        "{key}"
+                    );
+                }
+                for key in good.as_object().unwrap().keys() {
+                    let mut bad = good.clone();
+                    bad.as_object_mut().unwrap().remove(key);
+                    assert!(
+                        production_inspect_response(
+                            target,
+                            &serde_json::to_vec(&bad).unwrap(),
+                            retained
+                        )
+                        .is_err(),
+                        "missing {key}"
+                    );
+                }
+            }
+            let good = production_completion(target);
+            for (key, value) in [
+                ("protocolVersion", serde_json::json!(3)),
+                ("cohort", serde_json::json!("unknown")),
+                ("mode", serde_json::json!("development")),
+                ("nativeAcceptance", serde_json::json!(true)),
+                ("externalQualificationRequired", serde_json::json!(false)),
+                (
+                    "status",
+                    serde_json::json!("experimental-transaction-verified"),
+                ),
+                ("version", serde_json::json!("2.7.7-1+hub.retention014.1")),
+                ("packageTransactionStarted", serde_json::json!(false)),
+                ("manualRepairRequired", serde_json::json!(true)),
+                ("retainedFilesVerified", serde_json::json!(42)),
+                ("tombstoneFilesVerified", serde_json::json!(42)),
+                ("omittedFilesVerified", serde_json::json!(42)),
+                ("retryPolicy", serde_json::json!("retry")),
+                ("candidate", serde_json::json!("/tmp/other.deb")),
+                ("experimentalTransactionCompiled", serde_json::json!(true)),
+            ] {
+                let mut bad = good.clone();
+                bad[key] = value;
+                let output = Capture {
+                    bytes: serde_json::to_vec(&bad).unwrap(),
+                    exceeded: false,
+                };
+                assert!(
+                    production_retire_response(target, Some(0), &output).is_err(),
+                    "{key}"
+                );
+            }
+            for key in good.as_object().unwrap().keys() {
+                let mut bad = good.clone();
+                bad.as_object_mut().unwrap().remove(key);
+                let output = Capture {
+                    bytes: serde_json::to_vec(&bad).unwrap(),
+                    exceeded: false,
+                };
+                assert!(
+                    production_retire_response(target, Some(0), &output).is_err(),
+                    "missing {key}"
+                );
+            }
+            let duplicate =
+                serde_json::to_string(&good)
+                    .unwrap()
+                    .replacen('{', "{\"protocolVersion\":2,", 1);
+            assert!(production_retire_response(
+                target,
+                Some(0),
+                &Capture {
+                    bytes: duplicate.into_bytes(),
+                    exceeded: false
+                }
+            )
+            .is_err());
+            let output = Capture {
+                bytes: serde_json::to_vec(&good).unwrap(),
+                exceeded: false,
+            };
+            for code in [None, Some(1), Some(2), Some(127)] {
+                assert!(production_retire_response(target, code, &output).is_err());
+            }
+            assert_eq!(
+                production_retire_response(target, Some(126), &output).unwrap(),
+                Outcome::Cancelled
+            );
+            assert!(production_retire_response(
+                target,
+                Some(0),
+                &Capture {
+                    bytes: output.bytes,
+                    exceeded: true
+                }
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn production_root_selection_is_linux_only_and_never_falls_back() {
+        let bytes = serde_json::to_vec(&production_inspection(Target::Mcp, false)).unwrap();
+        let dev = serde_json::to_vec(&inspection()).unwrap();
+        let enabled = cfg!(all(
+            target_os = "linux",
+            feature = "linux-production-migration"
+        ));
+        assert_eq!(
+            super::inspect_response(Target::Mcp, &bytes).is_ok(),
+            enabled
+        );
+        assert_eq!(super::inspect_response(Target::Mcp, &dev).is_ok(), !enabled);
+        let output = Capture {
+            bytes: serde_json::to_vec(&production_completion(Target::Mcp)).unwrap(),
+            exceeded: false,
+        };
+        assert_eq!(
+            super::retire_response(Target::Mcp, Some(0), &output).is_ok(),
+            enabled
+        );
+        assert_eq!(
+            super::retire_response(Target::Mcp, Some(0), &completion()).is_ok(),
+            !enabled
+        );
+        for target in [Target::Mcp, Target::Setup] {
+            let retained = serde_json::to_vec(&production_inspection(target, true)).unwrap();
+            assert_eq!(super::retained_response(target, &retained).is_ok(), enabled);
+            assert!(super::retained_response(target, b"{}").is_err());
+        }
+        let candidate = production_completion(Target::Mcp)["candidate"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for bad in [
+            candidate.replace("/runtime-only.deb", "/../runtime-only.deb"),
+            candidate.replace(
+                "0123456789abcdef0123456789abcdef",
+                "ABCDEF0123456789ABCDEF0123456789",
+            ),
+            candidate.clone() + "/extra",
+        ] {
+            assert!(!production_candidate(Target::Mcp, &bad));
+        }
+    }
 
     fn inspection() -> serde_json::Value {
         serde_json::json!({"status":"inspected-read-only", "baselineMatches":true,

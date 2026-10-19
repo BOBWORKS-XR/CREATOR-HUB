@@ -10,7 +10,22 @@ pub mod archive;
 pub mod linux;
 pub mod metadata;
 pub mod pins;
+pub mod production;
 pub mod setup;
+
+#[cfg(all(
+    feature = "experimental-transaction",
+    feature = "production-transaction"
+))]
+compile_error!("Development and production transaction cohorts are mutually exclusive");
+
+// Compile the actual Root parser in the small unit-test crate, without GTK.
+// Its feature belongs to Root, not this helper's Cargo feature namespace.
+// Native Plan entrypoints compile here but are not invoked by this fixture.
+#[cfg(test)]
+#[allow(unexpected_cfgs, dead_code, unused_imports)]
+#[path = "../../../src-tauri/src/linux_retirement.rs"]
+mod root_protocol;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub const INSTALL_REFUSAL: &str = "WIP: installation disabled; dpkg lock handoff, native GUI-close/approval and recovery contracts are not accepted";
@@ -34,6 +49,9 @@ impl std::error::Error for ManualRepair {}
 
 pub fn refusal(error: &(dyn std::error::Error + Send + Sync + 'static)) -> serde_json::Value {
     let manual = error.downcast_ref::<ManualRepair>();
+    #[cfg(feature = "production-transaction")]
+    return production::refusal(error, manual);
+    #[cfg(not(feature = "production-transaction"))]
     serde_json::json!({
         "status": if manual.is_some() { "manual-repair-required" } else { "refused" },
         "reason": error.to_string(), "installationEnabled": false,
@@ -83,7 +101,10 @@ pub fn action(args: &[String]) -> Result<Action> {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    all(target_os = "linux", not(feature = "production-transaction")),
+    test
+))]
 fn retained_inspection_report() -> serde_json::Value {
     serde_json::json!({ "status": "inspected-retained-read-only", "product": "mcp",
         "package": pins::PACKAGE, "packageState": "compatibility", "version": pins::NEW,

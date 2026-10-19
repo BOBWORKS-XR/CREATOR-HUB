@@ -1,10 +1,16 @@
 use creator_hub_linux_deb_retirement::{action, refusal, Result};
-#[cfg(not(feature = "experimental-transaction"))]
+#[cfg(not(any(
+    feature = "experimental-transaction",
+    feature = "production-transaction"
+)))]
 use creator_hub_linux_deb_retirement::{Action, INSTALL_REFUSAL};
 
 fn run() -> Result<serde_json::Value> {
     let action = action(&std::env::args().skip(1).collect::<Vec<_>>())?;
-    #[cfg(not(feature = "experimental-transaction"))]
+    #[cfg(not(any(
+        feature = "experimental-transaction",
+        feature = "production-transaction"
+    )))]
     if matches!(action, Action::Retire | Action::RetireSetup) {
         return Err(INSTALL_REFUSAL.into());
     }
