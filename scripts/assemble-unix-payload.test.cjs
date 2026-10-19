@@ -105,6 +105,15 @@ test('016 assembly admission requires exact source, Linux x64 and the integrated
       CREATOR_UNIX_HANDOFF_SHA256: 'b'.repeat(64), CREATOR_LINUX_INTEGRATED_CANDIDATE: '1' };
     const execute = (_, args) => args.includes('--show-toplevel') ? root : args.includes('HEAD') ? env.GITHUB_SHA : '';
     assert.equal(admission(root, 'linux', 'x86_64', env, execute).version, '0.1.16');
+    const production = { ...env, CREATOR_LINUX_INTEGRATED_CANDIDATE: '0',
+      CREATOR_LINUX_PRODUCTION_MIGRATION_016: '1', CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: '0' };
+    assert.equal(admission(root, 'linux', 'x86_64', production, execute).version, '0.1.16');
+    for (const change of [{ CREATOR_LINUX_INTEGRATED_CANDIDATE: '1' },
+      { CREATOR_LINUX_INTEGRATED_CANDIDATE: 'yes' }, { CREATOR_LINUX_PRODUCTION_MIGRATION_016: '0' },
+      { CREATOR_LINUX_PRODUCTION_MIGRATION_016: 'yes' }, { CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: '1' },
+      { CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: 'yes' }, { GITHUB_EVENT_NAME: 'push' }]) {
+      assert.throws(() => admission(root, 'linux', 'x86_64', { ...production, ...change }, execute));
+    }
     for (const change of [{ GITHUB_EVENT_NAME: 'push' }, { CREATOR_LINUX_INTEGRATED_CANDIDATE: '0' }]) {
       assert.throws(() => admission(root, 'linux', 'x86_64', { ...env, ...change }, execute));
     }

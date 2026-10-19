@@ -53,7 +53,11 @@ function admission(root, platform, arch, env, execute = execFileSync) {
   assert.equal(git(['status', '--porcelain=v1', '--untracked-files=normal']), '', 'Clean initial assembly source required');
   const version = env.GITHUB_REF === 'refs/heads/validation/linux-integrated-candidate-016' ? '0.1.16' : '0.1.14';
   if (version === '0.1.16') {
-    assert.ok(platform === 'linux' && arch === 'x86_64' && env.CREATOR_LINUX_INTEGRATED_CANDIDATE === '1', '0.1.16 assembly requires the direct Linux x86_64 profile');
+    const flags = ['CREATOR_LINUX_INTEGRATED_CANDIDATE', 'CREATOR_LINUX_PRODUCTION_MIGRATION_016',
+      'CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE'].map(name => env[name] ?? '0');
+    assert.ok(flags.every(value => value === '0' || value === '1'), 'Explicit finite Linux profile flags required');
+    assert.ok(platform === 'linux' && arch === 'x86_64' && flags[0] !== flags[1] && flags[2] === '0',
+      '0.1.16 assembly requires exactly one direct Linux x86_64 profile, not a retirement test');
     for (const name of ['package.json', 'src-tauri/tauri.conf.json']) {
       assert.equal(JSON.parse(fs.readFileSync(path.join(root, name), 'utf8')).version, version, '0.1.16 assembly source identity differs');
     }
