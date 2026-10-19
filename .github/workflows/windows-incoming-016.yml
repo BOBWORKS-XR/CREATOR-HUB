@@ -6,7 +6,7 @@ on:
     inputs:
       mode:
         type: choice
-        options: [fresh, incoming]
+        options: [fresh, guarded, incoming]
         default: fresh
       artifact_run:
         description: Completed run containing the reviewed data-only windows-016-acceptance-input artifact
@@ -86,15 +86,22 @@ jobs:
           if ($errors.Count) { throw 'Native lifecycle parse failed.' }
           node --check scripts/native-windows-016-fresh.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Fresh16 parse failed.' }
+          node --check scripts/native-windows-016-guarded.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Guarded16 parse failed.' }
       - name: Exact fresh installer/direct-page/settings preservation acceptance
         if: inputs.mode == 'fresh'
         run: node scripts/native-windows-016-fresh.cjs "${{ github.workspace }}/artifacts/incoming-016/candidate/Creator.Hub_0.1.16_x64-setup.exe"
       - name: Stage the unmodified public14 installer before trust/proxy setup
-        if: inputs.mode == 'incoming'
+        if: inputs.mode == 'incoming' || inputs.mode == 'guarded'
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri 'https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.14/Creator.Hub_0.1.14_x64-setup.exe' -OutFile artifacts/incoming-016/public14.exe -TimeoutSec 180
           if ((Get-FileHash artifacts/incoming-016/public14.exe).Hash.ToLowerInvariant() -cne '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157') { throw 'Exact public14 installer differs.' }
+      - name: Exact public14 guarded NSIS update and settings preservation (not signed updater)
+        if: inputs.mode == 'guarded'
+        env:
+          CREATOR_WINDOWS_016_GUARDED: '1'
+        run: node scripts/native-windows-016-guarded.cjs "${{ github.workspace }}/artifacts/incoming-016/candidate/Creator.Hub_0.1.16_x64-setup.exe" "${{ github.workspace }}/artifacts/incoming-016/public14.exe"
       - name: Native public14 cancellation/signed update/automatic restart into direct16
         if: inputs.mode == 'incoming'
         shell: pwsh
@@ -108,7 +115,7 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
         run: |
-          $filter = if ($env:MODE -ceq 'fresh') { 'fresh-016-report.json' } else { 'self-update-report.json' }
+          $filter = if ($env:MODE -ceq 'fresh') { 'fresh-016-report.json' } elseif ($env:MODE -ceq 'guarded') { 'guarded-016-report.json' } else { 'self-update-report.json' }
           $reports = @(Get-ChildItem -LiteralPath artifacts -Recurse -File -Filter $filter)
           if ($reports.Count -ne 1) { throw 'Expected one native acceptance receipt.' }
           node -e "const f=require('fs');require('./scripts/windows-incoming-016.cjs').checkReceipt(JSON.parse(f.readFileSync(process.argv[1],'utf8')),process.argv[2])" $reports[0].FullName $env:MODE
@@ -126,3 +133,4 @@ jobs:
             artifacts/native-suite-*/*.png
             artifacts/native-016-fresh-*/*.json
             artifacts/native-016-fresh-*/*.png
+            artifacts/native-016-guarded-*/*.json

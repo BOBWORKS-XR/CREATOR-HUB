@@ -42,7 +42,7 @@ test('local and foreign-proxy refusal precedes configuration, installer or crede
   assert.doesNotMatch(result.stderr, /ENOENT|MUST-NOT-INSPECT/);
 });
 
-const candidatePath = [path.join(root, 'artifacts/unified/windows-016-20261019/installer.exe'),
+const candidatePath = [path.join(root, 'artifacts/unified/windows-016-setup-repair-20261019/installer.exe'),
   path.join(root, 'artifacts/incoming-016/candidate', incoming.TARGET.asset)].find(file => fs.existsSync(file));
 test('actual pinned NSIS binds the new public14 five-route contract, not source-only or synthetic installer bytes', { skip: !candidatePath }, () => {
   incoming.installer(candidatePath);
@@ -105,7 +105,7 @@ test('fresh CDP must belong to the exact owned Hub process tree, never a foreign
 
 test('new native lane is explicit/manual, read-only, data-bound and tests before native execution', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/windows-incoming-016.yml'), 'utf8');
-  assert.match(workflow, /workflow_dispatch:/); assert.match(workflow, /options: \[fresh, incoming\]/);
+  assert.match(workflow, /workflow_dispatch:/); assert.match(workflow, /options: \[fresh, guarded, incoming\]/);
   assert.match(workflow, /push:\s+branches: \[validation\/windows-incoming-016\]/);
   assert.match(workflow, /acceptance:\s+if: github\.repository == 'BOBWORKS-XR\/CREATOR-HUB' && github\.event_name == 'workflow_dispatch'/);
   assert.doesNotMatch(workflow, /contents: write|pull_request:|macos|cargo |build:unified|signer sign|gh release|TAURI_SIGNING|rejectUnauthorized|ignore-certificate/);
@@ -128,9 +128,39 @@ test('fresh driver keeps real install/hash/terms/direct-service/normal-close/pre
     'direct.checkPages', 'direct.settingsSnapshot', 'runtime.exitCode, null', "native('close')", 'child.exitCode, 0',
     'migrationAccepted: false', 'signedUpdateAccepted: false', 'releaseReady: false', "policy('Restore')", "flag: 'wx'"]) assert.ok(source.includes(contract));
   assert.doesNotMatch(source, /taskkill|Stop-Process|\.kill\(|rejectUnauthorized|ignore-certificate|auth\.json/);
+});
+
+test('native lifecycle parses in an available bounded PowerShell process', t => {
   const file = path.join(__dirname, 'native-self-update-lab.ps1').replaceAll("'", "''");
   const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
     `$t=$null;$e=$null;[void][Management.Automation.Language.Parser]::ParseFile('${file}',[ref]$t,[ref]$e);if($e.Count){$e|Out-String;exit 1}`],
-  { encoding: 'utf8', windowsHide: true });
-  if (result.error?.code !== 'ENOENT') assert.equal(result.status, 0, result.stdout + result.stderr);
+  { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  if (['ENOENT', 'ETIMEDOUT'].includes(result.error?.code)) return t.skip(`PowerShell parser unavailable: ${result.error.code}; native parse is not accepted`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('current finite target refuses the superseded development16 bytes', () => {
+  assert.equal(incoming.TARGET.productSource, 'f9f0e1e5cb27b3ae5178c8aac16429e83ba34593');
+  assert.equal(incoming.TARGET.bytes, 37980864);
+  assert.throws(() => incoming.validatePins({ ...pins(), installer: '7229cfcf919dc3a9e27a459fd482cbbe059fd54caa9ad379b2a75c8baa113a20',
+    executable: '7ef27351edefe4545d3e530e8d5c51e7eb3092e7cc7b20498591bfe7456c2389' }));
+});
+
+test('guarded installer receipt cannot stand in for GUI, signed updater or migration acceptance', () => {
+  const report = { passed: true, releaseReady: false, scope: 'exact-public14-to-direct16-guarded-nsis-only',
+    installerScope: 'guarded-nsis-update-default-location-no-msi', from: incoming.BASELINE,
+    installerSha256: incoming.TARGET.installer, executableSha256: incoming.TARGET.exe,
+    settingsPreserved: true, guardedInstallerAccepted: true, nativeGuiAccepted: false, migrationAccepted: false, signedUpdateAccepted: false };
+  incoming.checkReceipt(report, 'guarded');
+  for (const field of ['settingsPreserved', 'guardedInstallerAccepted']) assert.throws(() => incoming.checkReceipt({ ...report, [field]: false }, 'guarded'));
+  for (const field of ['nativeGuiAccepted', 'migrationAccepted', 'signedUpdateAccepted']) assert.throws(() => incoming.checkReceipt({ ...report, [field]: true }, 'guarded'));
+  assert.throws(() => incoming.checkReceipt(report, 'incoming'));
+  const source = fs.readFileSync(path.join(__dirname, 'native-windows-016-guarded.cjs'), 'utf8');
+  assert.ok(source.indexOf('explicit disposable GitHub-hosted Windows lane') < source.indexOf("require('node:fs')"));
+  for (const required of ["['/UPDATE', '/S', '/NS']", 'candidate.BASELINE.exe', 'candidate.TARGET.exe', 'assert.deepEqual(registrations()', 'flag: \'wx\'']) assert.ok(source.includes(required));
+  assert.doesNotMatch(source, /taskkill|Stop-Process|\.kill\(|rejectUnauthorized|auth\.json/);
+  const result = spawnSync(process.execPath, [path.join(__dirname, 'native-windows-016-guarded.cjs'), 'MUST-NOT-READ'],
+    { env: { ...process.env, GITHUB_ACTIONS: 'false' }, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /explicit disposable GitHub-hosted Windows lane/);
+  assert.doesNotMatch(result.stderr, /ENOENT|MUST-NOT-READ/);
 });

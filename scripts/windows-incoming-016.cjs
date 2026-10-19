@@ -7,9 +7,10 @@ const KIND = 'public14-incoming-direct16';
 const BASELINE = Object.freeze({ version: '0.1.14',
   installer: '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157',
   exe: 'cd5e3fd2829727d06444c0f3266b178798d1b55c63df651be12eb38ac4523a86' });
-const TARGET = Object.freeze({ version: '0.1.16', asset: 'Creator.Hub_0.1.16_x64-setup.exe', bytes: 37839600,
-  installer: '7229cfcf919dc3a9e27a459fd482cbbe059fd54caa9ad379b2a75c8baa113a20',
-  exe: '7ef27351edefe4545d3e530e8d5c51e7eb3092e7cc7b20498591bfe7456c2389' });
+const TARGET = Object.freeze({ version: '0.1.16', asset: 'Creator.Hub_0.1.16_x64-setup.exe', bytes: 37980864,
+  productSource: 'f9f0e1e5cb27b3ae5178c8aac16429e83ba34593',
+  installer: 'f0092e056f7b4245d10350b7954c3dbe5e5356f2e340143d0aefb80078672bc7',
+  exe: '8e140ba93190bb717ea30587dbb9dcf4e1c40bf7c1d08ca06b2da947e3b6d30b' });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const feed = () => require('./self-update-lab-feed.cjs');
 
@@ -81,7 +82,17 @@ function checkBaseline(contract, baseline, executable) {
   assertBaselineBytes(feed().readBounded(baseline, feed().LIMITS.installer), feed().readBounded(executable, feed().LIMITS.installer));
 }
 function checkReceipt(receipt, mode) {
-  assert.equal(receipt.passed, true); assert.equal(receipt.releaseReady, false); assert.equal(receipt.policyRestored, true);
+  assert.equal(receipt.passed, true); assert.equal(receipt.releaseReady, false);
+  if (mode === 'guarded') {
+    assert.equal(receipt.installerScope, 'guarded-nsis-update-default-location-no-msi');
+    assert.equal(receipt.scope, 'exact-public14-to-direct16-guarded-nsis-only');
+    assert.equal(receipt.installerSha256, TARGET.installer); assert.equal(receipt.executableSha256, TARGET.exe);
+    assert.deepEqual(receipt.from, BASELINE); assert.equal(receipt.settingsPreserved, true);
+    assert.equal(receipt.guardedInstallerAccepted, true); assert.equal(receipt.migrationAccepted, false);
+    assert.equal(receipt.signedUpdateAccepted, false); assert.equal(receipt.nativeGuiAccepted, false);
+    return;
+  }
+  assert.equal(receipt.policyRestored, true);
   if (mode === 'fresh') {
     assert.equal(receipt.freshInstallAccepted, true); assert.equal(receipt.installerSha256, TARGET.installer);
     assert.equal(receipt.executableSha256, TARGET.exe); assert.equal(receipt.migrationAccepted, false);
@@ -121,7 +132,7 @@ module.exports = { KIND, BASELINE, TARGET, hash, keys, validatePins, validateInp
 if (require.main === module) {
   try {
     const [mode, directory, pinsText] = process.argv.slice(2);
-    assert.ok(['fresh', 'incoming'].includes(mode)); assert.ok(path.isAbsolute(directory));
+    assert.ok(['fresh', 'guarded', 'incoming'].includes(mode)); assert.ok(path.isAbsolute(directory));
     installer(path.join(directory, TARGET.asset));
     if (mode === 'incoming') {
       const config = { schemaVersion: 1, kind: KIND, baselineVersion: BASELINE.version, targetVersion: TARGET.version,
