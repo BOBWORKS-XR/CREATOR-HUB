@@ -97,7 +97,7 @@ pub(crate) fn metadata(
     Ok(info)
 }
 
-fn same(first: &Metadata, last: &Metadata) -> bool {
+pub(crate) fn same(first: &Metadata, last: &Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -229,6 +229,40 @@ pub(crate) fn sync_dir(path: &Path) -> Result<()> {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
+}
+
+/// No fallback to an overwriting rename. Used only for a complete private
+/// bootstrap directory and fixed native store name, with held parent handles.
+#[cfg(target_os = "linux")]
+pub(crate) fn publish_directory_noreplace(
+    source_parent: &File,
+    source_name: &std::ffi::OsStr,
+    target_parent: &File,
+    target_name: &std::ffi::OsStr,
+) -> Result<()> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+    let component = |name: &std::ffi::OsStr| -> Result<std::ffi::CString> {
+        let bytes = name.as_bytes();
+        require(
+            !bytes.is_empty() && bytes != b"." && bytes != b".." && !bytes.contains(&b'/'),
+            "Only fixed single-component bootstrap names accepted",
+        )?;
+        std::ffi::CString::new(bytes).map_err(|_| refused("Invalid bootstrap publication name"))
+    };
+    let source = component(source_name)?;
+    let target = component(target_name)?;
+    require(
+        unsafe {
+            libc::renameat2(
+                source_parent.as_raw_fd(),
+                source.as_ptr(),
+                target_parent.as_raw_fd(),
+                target.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        } == 0,
+        "Bootstrap directory not published; existing target kept or no-replace rename unavailable",
+    )
 }
 
 pub(crate) fn lock(path: &Path) -> Result<File> {

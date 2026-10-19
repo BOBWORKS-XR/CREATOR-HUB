@@ -4,6 +4,11 @@ mod archive;
 mod filesystem;
 mod store;
 
+pub use store::bootstrap::{
+    apply_bootstrap, recover_bootstrap, review_bootstrap, review_bootstrap_recovery,
+    BootstrapOutcome, BootstrapRecoveryChoice, BootstrapRecoveryOutcome, BootstrapRecoveryReview,
+    BootstrapReview, ReviewedBootstrapChoice,
+};
 pub use store::host::{
     HostSession, InstallChoice, InstallOutcome, InstallReview, LaunchLease, HOST_MARKER,
     HOST_PROFILE,

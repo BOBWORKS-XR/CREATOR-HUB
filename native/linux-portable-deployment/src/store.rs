@@ -14,6 +14,8 @@ use std::{
 const MARKER: &[u8] = b"creator-hub-linux-portable-deployment-v1\n";
 const RECORD_LIMIT: u64 = 16384;
 
+#[path = "bootstrap.rs"]
+pub(crate) mod bootstrap;
 #[path = "host.rs"]
 pub(crate) mod host;
 #[path = "registration.rs"]
@@ -87,11 +89,23 @@ impl Store {
     }
 
     fn create_inner(root: &Path) -> Result<Self> {
+        Self::create_checkpointed(root, &|_| Ok(()))
+    }
+
+    pub(super) fn create_checkpointed(
+        root: &Path,
+        checkpoint: &dyn Fn(&str) -> Result<()>,
+    ) -> Result<Self> {
         disk::create_dir(root)?;
+        checkpoint("bootstrap-directory-created")?;
         disk::write_new(&root.join("store.id"), MARKER, 0o600)?;
+        checkpoint("bootstrap-marker-written")?;
         disk::write_new(&root.join("transaction.lock"), b"", 0o600)?;
+        checkpoint("bootstrap-lock-written")?;
         disk::create_dir(&root.join("generations"))?;
+        checkpoint("bootstrap-generations-created")?;
         disk::create_dir(&root.join("history"))?;
+        checkpoint("bootstrap-history-created")?;
         disk::sync_dir(root)?;
         disk::sync_dir(
             root.parent()
