@@ -211,7 +211,9 @@ function verifyMerged(f, currentBytes, legacyBytes, server) {
 
 function verifyClient(f, item, document, router) {
   const actual = item.id === 'codex' ? document.mcp_servers['creator-works'] : document.mcpServers['creator-works'];
-  assert.deepEqual(actual, { ...item.entry, command: router, args: [] }, 'Only reviewed command/args may change');
+  assert.deepEqual(actual, { ...item.entry, command: router, args: [],
+    env: { ...item.entry.env, CREATOR_WORKS_CONFIG_OWNER: 'creator-hub-v1' } },
+  'Only reviewed command/args and the exact Hub ownership marker may change');
   if (item.id === 'codex') {
     assert.deepEqual(document, { model: 'keep', future_root: 'untouched', mcp_servers: {
       other: { command: 'unrelated-server', args: ['keep'] }, 'creator-works': actual } });

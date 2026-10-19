@@ -175,18 +175,22 @@ test('content-addressed backup names bind exact original bytes including line en
 });
 
 function changedClient(item, router) {
-  const entry = { ...item.entry, command: router, args: [] };
+  const entry = { ...item.entry, command: router, args: [],
+    env: { ...item.entry.env, CREATOR_WORKS_CONFIG_OWNER: 'creator-hub-v1' } };
   if (item.id === 'codex') return { model: 'keep', future_root: 'untouched', mcp_servers: {
     other: { command: 'unrelated-server', args: ['keep'] }, 'creator-works': entry } };
   const document = JSON.parse(item.bytes); document.mcpServers['creator-works'] = entry; return document;
 }
 
-test('three client oracles accept only the reviewed router command/args transition', () => {
+test('three client oracles accept only the reviewed route and exact source-defined ownership marker', () => {
+  const ownership = fs.readFileSync(path.join(__dirname, '../modules/mcp/launcher/src-tauri/src/client_ownership.rs'), 'utf8');
+  assert.ok(ownership.includes('OWNER_KEY: &str = "CREATOR_WORKS_CONFIG_OWNER"'));
+  assert.ok(ownership.includes('OWNER: &str = "creator-hub-v1"'));
   const data = f(), router = 'C:\\managed\\creator-hub-mcp-router.exe';
   for (const item of data.clients) {
     const expected = changedClient(item, router);
     driver.verifyClient(data, item, expected, router);
-    for (const mutation of ['root', 'other', 'project', 'timeout', 'env', 'args']) {
+    for (const mutation of ['root', 'other', 'project', 'timeout', 'env', 'args', 'missing-owner', 'foreign-owner', 'extra-env']) {
       const changed = clone(expected), servers = changed.mcp_servers || changed.mcpServers;
       if (mutation === 'root') delete changed[item.id === 'codex' ? 'future_root' : 'futureRoot'];
       if (mutation === 'other') delete servers.other;
@@ -194,6 +198,9 @@ test('three client oracles accept only the reviewed router command/args transiti
       if (mutation === 'timeout') servers['creator-works'].timeout = 1;
       if (mutation === 'env') delete servers['creator-works'].env.CUSTOM_SETTING;
       if (mutation === 'args') servers['creator-works'].args = [data.oldServer];
+      if (mutation === 'missing-owner') delete servers['creator-works'].env.CREATOR_WORKS_CONFIG_OWNER;
+      if (mutation === 'foreign-owner') servers['creator-works'].env.CREATOR_WORKS_CONFIG_OWNER = 'foreign';
+      if (mutation === 'extra-env') servers['creator-works'].env.UNREVIEWED = 'not allowed';
       assert.throws(() => driver.verifyClient(data, item, changed, router), `${item.id}: ${mutation}`);
     }
   }
