@@ -624,10 +624,13 @@ def successor_ui(record, old_xid, b, c, p, helper, x11, atspi, bus, glib, captur
             if not windows:
                 continue
             native = windows[0]
-            require(native["window"] != old_xid and native["title"] == b.TITLE, "Fresh phase15 main window required")
+            require(native["title"] == b.TITLE, "Exact phase15 main window title required")
+            last.update(previousWindowResourceId=old_xid, windowResourceIdReused=native["window"] == old_xid)
             if owner is None:
                 request = helper.Request("snapshot", record["pid"], record["startTime"], EXE, Phase15().digest, native["window"], b.TITLE, "FRAME")
-                owner = b.RootOwnership(request, helper, x11, record, helper.bound_window(request, x11), system_file, references=refs)
+                xres = helper.bound_window(request, x11)
+                require(xres["pid"] == record["pid"], "Phase15 window must have fresh new-process XRes ownership")
+                owner = b.RootOwnership(request, helper, x11, record, xres, system_file, references=refs)
             require(native["window"] == request.window, "Phase15 window replacement refused")
             apps, observed_pids = fresh_ax_applications(atspi, helper, record["pid"])
             last.update(stage="accessibility", desktopApplicationPids=observed_pids, matchingApplications=len(apps))

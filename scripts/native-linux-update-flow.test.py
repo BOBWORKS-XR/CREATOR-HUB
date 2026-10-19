@@ -1177,11 +1177,24 @@ class FreshUiTests(unittest.TestCase):
         self.assertIs(bus, f.bus)
         f.bus.close_sync.assert_not_called()
 
-    def test_old_xid_foreign_bus_changed_pid_or_multiple_windows_refuse(self):
-        for change in ("xid", "bus", "process", "multiple", "renderer"):
+    def test_reused_xid_requires_independently_bound_new_process_and_renderer(self):
+        f = self.fixture()
+        f.c.owned_windows.return_value[0]["window"] = 77
+        observation = {}
+        request, owner, _bus, _snapshot = self.invoke(f, observation)
+        self.assertEqual(request.window, 77)
+        self.assertEqual(request.pid, 42)
+        self.assertEqual(request.sha256, p.Phase15().digest)
+        self.assertIs(owner, f.owner)
+        self.assertTrue(observation["windowResourceIdReused"])
+        self.assertEqual(f.b.RootOwnership.call_args.args[4]["pid"], 42)
+
+    def test_foreign_xres_bus_changed_pid_or_multiple_windows_refuse(self):
+        for change in ("xres", "bus", "process", "multiple", "renderer"):
             f = self.fixture()
-            if change == "xid":
+            if change == "xres":
                 f.c.owned_windows.return_value[0]["window"] = 77
+                f.helper.bound_window.return_value["pid"] = 41
             elif change == "bus":
                 f.polkit.bus_identity.return_value["pid"] = 99
             elif change == "process":
