@@ -112,6 +112,238 @@ def hardening_fixture(uid=0):
         yield fixture
 
 
+@contextmanager
+def metadata_fixture(*, diversions=None, overrides=None):
+    if diversions is None:
+        diversions = b"/usr/share/dict/words\n/usr/share/dict/words.pre-dictionaries-common\ndictionaries-common\n"
+    if overrides is None:
+        overrides = b"root root 4755 /unrelated/bin/tool\n"
+    fixture = SimpleNamespace(nodes={}, bodies={}, links={}, fds={}, reads=[], opened=[], counter=100000,
+                              on_read=None, on_stat=None, on_link=None, on_open=None)
+    def put(path, kind=M.stat.S_IFDIR, mode=0o755, uid=0, gid=0, body=b"", target=None):
+        fixture.nodes[path] = SimpleNamespace(st_dev=1, st_ino=len(fixture.nodes) + 1, st_mode=kind | mode,
+                                             st_uid=uid, st_gid=gid, st_nlink=2 if kind == M.stat.S_IFDIR else 1,
+                                             st_size=len(body), st_mtime_ns=2, st_ctime_ns=3)
+        if kind == M.stat.S_IFREG:
+            fixture.bodies[path] = body
+        if target is not None:
+            fixture.links[path] = target
+        return fixture.nodes[path]
+    fixture.put = put
+    for path in ("/", "/var", "/var/lib", "/var/lib/dpkg", "/usr", "/usr/share", "/usr/share/dict",
+                 "/unrelated", "/unrelated/bin"):
+        put(path, mode=0o777 if path == "/usr/share/dict" else 0o755)
+    put("/unrelated/bin/tool", M.stat.S_IFREG, 0o4755)
+    for path, body in zip(M.METADATA_DATABASES, (diversions, overrides)):
+        if body is not None:
+            put(path, M.stat.S_IFREG, 0o644, body=body)
+    def path_for(name, parent):
+        return str(name) if parent is None else str(M.PurePosixPath(fixture.fds[parent][0]) / name)
+    def named(name, *, dir_fd=None, follow_symlinks=False):
+        assert not follow_symlinks
+        path = path_for(name, dir_fd)
+        if fixture.on_stat:
+            fixture.on_stat(path)
+        if path not in fixture.nodes:
+            raise FileNotFoundError(2, "Synthetic absent metadata endpoint", path)
+        return copy.copy(fixture.nodes[path])
+    def opened(name, flags, *, dir_fd=None):
+        path = path_for(name, dir_fd)
+        assert flags & M.os.O_NOFOLLOW and flags & M.os.O_CLOEXEC and flags & M.os.O_NONBLOCK
+        info = named(name, dir_fd=dir_fd)
+        if M.stat.S_ISLNK(info.st_mode) or (flags & M.os.O_DIRECTORY and not M.stat.S_ISDIR(info.st_mode)):
+            raise OSError(40, "Synthetic no-follow/type refusal", path)
+        assert M.stat.S_ISDIR(info.st_mode) or path in M.METADATA_DATABASES, "No non-database file may be opened"
+        fixture.counter += 1
+        fd = fixture.counter
+        fixture.fds[fd] = [path, fixture.nodes[path], fixture.bodies.get(path), 0]
+        fixture.opened.append(path)
+        if fixture.on_open:
+            fixture.on_open(path)
+        return fd
+    def read(fd, count):
+        path, _, body, offset = fixture.fds[fd]
+        assert path in M.METADATA_DATABASES and 0 < count <= 65536
+        fixture.reads.append(path)
+        if fixture.on_read:
+            fixture.on_read(path)
+        result = body[offset:offset + count]
+        fixture.fds[fd][3] += len(result)
+        return result
+    def readlink(name, *, dir_fd):
+        path = path_for(name, dir_fd)
+        result = fixture.links[path]
+        if fixture.on_link:
+            fixture.on_link(path)
+        return result
+    with ExitStack() as stack:
+        stack.enter_context(patch.multiple(M.os, O_PATH=0x100000, O_DIRECTORY=0x200000, O_NOFOLLOW=0x400000,
+                                          O_CLOEXEC=0x800000, O_NONBLOCK=0x1000000, create=True))
+        for key, callback in (("open", opened), ("stat", named), ("lstat", named), ("read", read), ("readlink", readlink),
+                              ("fstat", lambda fd: copy.copy(fixture.fds[fd][1])), ("close", lambda fd: fixture.fds.pop(fd))):
+            stack.enter_context(patch.object(M.os, key, callback))
+        for key in ("scandir", "listdir", "walk", "chmod", "fchmod"):
+            stack.enter_context(patch.object(M.os, key, side_effect=AssertionError("No scan or permission changes"), create=True))
+        stack.enter_context(patch.object(M.subprocess, "run", side_effect=AssertionError("No command execution")))
+        stack.enter_context(patch.object(M, "read_file", side_effect=AssertionError("Only fixed database FD reads")))
+        yield fixture
+        assert not fixture.fds, "Diagnostic leaked an FD"
+
+
+class MetadataTests(unittest.TestCase):
+    def test_all_record_paths_capture_unrelated_unsafe_parents_without_validation_authority(self):
+        with metadata_fixture() as f:
+            before = {name: M.metadata_stamp(info) for name, info in f.nodes.items()}
+            graph = M.helper_metadata()
+            self.assertEqual(before, {name: M.metadata_stamp(info) for name, info in f.nodes.items()})
+            self.assertEqual(set(f.reads), set(M.METADATA_DATABASES))
+            self.assertEqual(set(f.opened) - set(M.METADATA_DATABASES), {"/", "/var", "/var/lib", "/var/lib/dpkg",
+                                                                 "/usr", "/usr/share", "/usr/share/dict", "/unrelated", "/unrelated/bin"})
+        self.assertTrue(graph["complete"])
+        self.assertFalse(graph["validationAuthority"])
+        self.assertTrue(graph["readOnly"])
+        self.assertEqual(len(graph["records"]), 3)
+        self.assertTrue(all(row["complete"] for row in graph["records"]))
+        nodes = {row["path"]: row for row in graph["nodes"]}
+        self.assertFalse(nodes["/usr/share/dict"]["parentPredicateMatches"])
+        self.assertEqual(nodes["/usr/share/dict"]["mode"], 0o777)
+        self.assertTrue(nodes["/usr/share/dict/words"]["absentFinal"])
+        self.assertNotIn("parentPredicateMatches", nodes["/unrelated/bin/tool"])
+        for row in graph["databases"]:
+            self.assertEqual(row["sha256"], M.digest(f.bodies[row["path"]]))
+        self.assertLess(len(json.dumps(graph).encode()), M.METADATA_GRAPH_BYTES)
+
+    def test_relative_absolute_and_dotdot_aliases_are_explicit_bounded_graph_edges(self):
+        with metadata_fixture(diversions=b"/alias/relative/words\n/absolute/other\nfixture\n") as f:
+            f.put("/alias", M.stat.S_IFLNK, 0o777, target="usr/share")
+            f.put("/usr/share/relative", M.stat.S_IFLNK, 0o777, target="./dict/../dict")
+            f.put("/absolute", M.stat.S_IFLNK, 0o777, target="//usr/share/dict")
+            graph = M.helper_metadata()
+        self.assertTrue(graph["complete"], graph["issues"])
+        self.assertEqual([row["resolved"] for row in graph["records"][:2]], ["/usr/share/dict/words", "/usr/share/dict/other"])
+        aliases = {row["path"]: row["target"] for row in graph["nodes"] if "alias" in row["roles"]}
+        self.assertEqual(aliases, {"/alias": "usr/share", "/usr/share/relative": "./dict/../dict", "/absolute": "//usr/share/dict"})
+
+    def test_unresolved_looping_untrusted_and_changed_aliases_are_incomplete(self):
+        for kind in ("missing", "loop", "foreign", "race", "control", "nonutf8"):
+            with self.subTest(kind=kind), metadata_fixture(diversions=b"/alias/words\n/usr/share/dict/other\nfixture\n") as f:
+                if kind != "missing":
+                    f.put("/alias", M.stat.S_IFLNK, 0o777, uid=1 if kind == "foreign" else 0,
+                          target={"loop": "alias", "control": "bad\nname", "nonutf8": "bad\udcff"}.get(kind, "/usr/share/dict"))
+                if kind == "race":
+                    def changed(path):
+                        f.nodes[path] = copy.copy(f.nodes[path]); f.nodes[path].st_ino += 1
+                    f.on_link = changed
+                graph = M.helper_metadata()
+                self.assertFalse(graph["complete"])
+                self.assertFalse(graph["validationAuthority"])
+                self.assertTrue(graph["issues"])
+                self.assertFalse(graph["records"][0]["complete"])
+                self.assertTrue(graph["records"][1]["complete"])
+
+    def test_missing_fixed_database_is_observed_but_appearance_is_incomplete(self):
+        with metadata_fixture() as f:
+            del f.nodes[M.METADATA_DATABASES[0]]
+            graph = M.helper_metadata()
+            self.assertTrue(graph["complete"])
+            self.assertTrue(graph["databases"][0]["absent"])
+        with metadata_fixture() as f:
+            missing = M.METADATA_DATABASES[0]
+            original = f.nodes.pop(missing)
+            def appeared(path):
+                if path == "/unrelated/bin/tool":
+                    f.nodes[missing] = original
+            f.on_stat = appeared
+            graph = M.helper_metadata()
+            self.assertFalse(graph["complete"])
+            self.assertTrue(any("appeared" in row["reason"] for row in graph["issues"]))
+
+    def test_database_replacement_disappearance_and_namespace_alias_refuse_content_reads(self):
+        for kind in ("before", "vanished-on-open", "during", "after", "disappeared", "parent-alias", "oversize", "special"):
+            with self.subTest(kind=kind), metadata_fixture() as f:
+                source = M.METADATA_DATABASES[0]
+                def replace(path):
+                    if path == source:
+                        f.nodes[path] = copy.copy(f.nodes[path]); f.nodes[path].st_ino += 1
+                if kind == "before":
+                    f.on_open = replace
+                elif kind == "vanished-on-open":
+                    f.on_open = lambda path: f.nodes.pop(path, None) if path == source else None
+                elif kind == "during":
+                    f.on_read = replace
+                elif kind == "after":
+                    f.on_stat = lambda path: replace(source) if path == "/usr/share/dict" else None
+                elif kind == "disappeared":
+                    f.on_read = lambda path: f.nodes.pop(path, None) if path == source else None
+                elif kind == "parent-alias":
+                    f.put("/var/lib/dpkg", M.stat.S_IFLNK, 0o777, target="/elsewhere")
+                elif kind == "oversize":
+                    f.nodes[source].st_size = M.METADATA_BYTES + 1
+                else:
+                    f.nodes[source].st_mode = M.stat.S_IFIFO | 0o644
+                graph = M.helper_metadata()
+                self.assertFalse(graph["complete"])
+                self.assertFalse(graph["validationAuthority"])
+                self.assertTrue(graph["issues"])
+                if kind in ("before", "vanished-on-open", "parent-alias", "oversize", "special"):
+                    self.assertNotIn(source, f.reads)
+
+    def test_database_read_growth_and_path_graph_limits_return_bounded_incomplete_receipts(self):
+        with metadata_fixture() as f:
+            f.nodes[M.METADATA_DATABASES[0]].st_size = 0
+            graph = M.helper_metadata()
+            self.assertFalse(graph["complete"])
+        with metadata_fixture() as f:
+            path = M.METADATA_DATABASES[0]
+            f.bodies[path] = b"x" * (M.METADATA_BYTES + 1)
+            f.nodes[path].st_size = M.METADATA_BYTES
+            graph = M.helper_metadata()
+            self.assertFalse(graph["complete"])
+            self.assertTrue(any("read limit" in row["reason"] for row in graph["issues"]))
+        rows = b"".join(f"/different-{i}/a\n/different-{i}/b\nfixture\n".encode() for i in range(40))
+        with metadata_fixture(diversions=rows, overrides=b"") as f, patch.object(M, "METADATA_GRAPH_BYTES", 8192):
+            for i in range(40):
+                f.put("/different-" + str(i))
+            graph = M.helper_metadata()
+            self.assertFalse(graph["complete"])
+            self.assertLessEqual(len(json.dumps(graph, ensure_ascii=False, allow_nan=False).encode()), 8192)
+            self.assertTrue(any(row["type"] == "MetadataCaptureLimit" for row in graph["issues"]))
+
+    def test_overlong_alias_and_source_per_record_step_bound_are_incomplete(self):
+        for target in ("x" * 4096, "/" + "../" * 1025 + "words"):
+            with metadata_fixture(diversions=b"/alias/words\n/usr/share/dict/other\nfixture\n") as f:
+                f.put("/alias", M.stat.S_IFLNK, 0o777, target=target)
+                graph = M.helper_metadata()
+                self.assertFalse(graph["complete"])
+                self.assertFalse(graph["records"][0]["complete"])
+                self.assertTrue(graph["records"][1]["complete"])
+
+    def test_source_bound_parser_rejects_malformed_truncated_oversize_and_noncanonical_records(self):
+        for raw in (b"/a\n/b\nfixture", b"/a\n", b"/a\n/b\nA_BAD_PACKAGE\n", b"/a//b\n/c\nfixture\n",
+                    b"/a/../b\n/c\nfixture\n", b"/a\n/b\nfixture\x00\n", b"\xff\n/b\nfixture\n", b"x" * (M.METADATA_BYTES + 1)):
+            with self.subTest(raw=raw[:40]), self.assertRaises((RuntimeError, UnicodeError)):
+                list(M.metadata_paths(M.METADATA_DATABASES[0], raw))
+        for raw in (b"root root 755\n", b"#01 root 755 /x\n", b"#4294967295 root 755 /x\n", b"root root 888 /x\n",
+                    b"root root 755 relative\n", b"root root 755 /a\tb\n"):
+            with self.subTest(raw=raw), self.assertRaises(RuntimeError):
+                list(M.metadata_paths(M.METADATA_DATABASES[1], raw))
+        self.assertEqual(list(M.metadata_paths(M.METADATA_DATABASES[1], b"#0 _chrony 0755 /path with spaces\n"))[0]["path"], "/path with spaces")
+        with self.assertRaises(RuntimeError):
+            list(M.metadata_paths("/etc/other", b""))
+
+    def test_fixed_database_list_and_parser_match_source_fixtures_without_nss_or_execution(self):
+        root = HERE.parent / "native/linux-deb-retirement"
+        source = (root / "src/linux/metadata.rs").read_text()
+        declaration = re.search(r"const DATABASES:.*?= \[(.*?)\];", source).group(1)
+        self.assertEqual(tuple(re.findall(r'"([^"]+)"', declaration)), M.METADATA_DATABASES)
+        parsed = []
+        for database, suffix in zip(M.METADATA_DATABASES, ("diversions", "statoverride")):
+            raw = (root / "tests/fixtures" / ("38655921324." + suffix)).read_bytes()
+            parsed.extend(M.metadata_paths(database, raw))
+        self.assertTrue(any(row["path"] == "/usr/share/dict/words" for row in parsed))
+        self.assertEqual(len(parsed), 30)
+
+
 class ControllerTests(unittest.TestCase):
     def test_fixed_ci_directory_hardening_is_fd_bound_outer_first_with_bounded_pre_post_proofs(self):
         with hardening_fixture() as f:
@@ -222,8 +454,11 @@ class ControllerTests(unittest.TestCase):
         events = []
         snapshots = iter(({"entries": [{"path": "/usr/share", "mode": 0o755}]},
                           {"entries": [{"path": "/usr/share", "mode": 0o777}]}))
+        metadata = iter(({"complete": True, "validationAuthority": False}, {"complete": False, "validationAuthority": False}))
         def snapshot():
             events.append("stat"); return next(snapshots)
+        def graph():
+            events.append("metadata"); return next(metadata)
         def execute(*args, **kwargs):
             events.append("helper"); return subprocess.CompletedProcess(args[0], 2, b'{"reason":"synthetic"}', b"")
         parse = M.P.parse
@@ -233,15 +468,19 @@ class ControllerTests(unittest.TestCase):
             events.append("image"); return {"path": M.HELPER}
         with tempfile.TemporaryDirectory() as temporary, patch.object(M, "BASE", Path(temporary).resolve()) as root, \
              patch.object(M, "helper_namespace", side_effect=snapshot), patch.object(M.subprocess, "run", side_effect=execute), \
+             patch.object(M, "helper_metadata", side_effect=graph), \
              patch.object(M.P, "parse", side_effect=reason), patch.object(M, "helper_identity", side_effect=image), \
              patch.multiple(M.os, getuid=Mock(return_value=0), geteuid=Mock(return_value=0),
                             getgid=Mock(return_value=0), getegid=Mock(return_value=0), create=True):
             with self.assertRaises(RuntimeError):
                 M.tool([M.HELPER, "inspect"], helper_pin={"size": 64, "sha256": "a" * 64})
             receipt = json.loads((root / "helper-inspection-failure.json").read_bytes())
-        self.assertEqual(events, ["stat", "helper", "stat", "reason", "image"])
+        self.assertEqual(events, ["stat", "metadata", "helper", "stat", "metadata", "reason", "image"])
         self.assertEqual(receipt["namespaceBefore"]["entries"][0]["mode"], 0o755)
         self.assertEqual(receipt["namespaceAfter"]["entries"][0]["mode"], 0o777)
+        self.assertTrue(receipt["metadataBefore"]["complete"])
+        self.assertFalse(receipt["metadataAfter"]["complete"])
+        self.assertEqual(receipt["reasonExcerpt"], "synthetic")
 
     def test_helper_inspection_failure_is_saved_before_throw_even_before_user_creation(self):
         actions = ("inspect", "inspect-retained-mcp-2.7.7", "inspect-setup-0.3.7", "inspect-retained-setup-0.3.7")
@@ -259,6 +498,7 @@ class ControllerTests(unittest.TestCase):
                     result = subprocess.CompletedProcess([M.HELPER, action], 2, stdout, stderr)
                     with patch.object(M, "BASE", root), patch.object(M, "helper_identity", return_value=actual), \
                          patch.object(M, "helper_namespace", return_value={"entries": []}), \
+                         patch.object(M, "helper_metadata", return_value={"complete": False, "validationAuthority": False}), \
                          patch.multiple(M.os, getuid=Mock(return_value=uid), geteuid=Mock(return_value=uid),
                                         getgid=Mock(return_value=uid), getegid=Mock(return_value=uid), create=True), \
                          patch.object(M.subprocess, "run", return_value=result) as run:
@@ -288,20 +528,23 @@ class ControllerTests(unittest.TestCase):
                              ([M.HELPER], {"helper_pin": pin}), ([M.HELPER, "inspect"], {}),
                              ([M.HELPER, "inspect"], {"helper_pin": pin, "allowed": (0, 2)})):
             with self.subTest(args=args, kwargs=kwargs), patch.object(M.subprocess, "run") as run, \
-                 patch.object(M, "helper_identity") as identity, patch.object(M, "helper_namespace") as namespace, self.assertRaises(RuntimeError):
+                 patch.object(M, "helper_identity") as identity, patch.object(M, "helper_namespace") as namespace, \
+                 patch.object(M, "helper_metadata") as metadata, self.assertRaises(RuntimeError):
                 M.tool(args, **kwargs)
-            run.assert_not_called(); identity.assert_not_called(); namespace.assert_not_called()
+            run.assert_not_called(); identity.assert_not_called(); namespace.assert_not_called(); metadata.assert_not_called()
 
     def test_successful_helper_inspections_remain_read_only_and_oversized_output_still_refuses(self):
         pin = {"size": 64, "sha256": "a" * 64}
         for action in ("inspect", "inspect-retained-mcp-2.7.7", "inspect-setup-0.3.7", "inspect-retained-setup-0.3.7"):
             with patch.object(M.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"{}", b"")) as run, \
-                 patch.object(M, "save") as save, patch.object(M, "helper_namespace", return_value={"entries": []}):
+                 patch.object(M, "save") as save, patch.object(M, "helper_namespace", return_value={"entries": []}), \
+                 patch.object(M, "helper_metadata", return_value={"complete": False, "validationAuthority": False}):
                 self.assertEqual(M.tool([M.HELPER, action], helper_pin=pin), b"{}")
                 run.assert_called_once(); save.assert_not_called()
         with tempfile.TemporaryDirectory() as temporary, patch.object(M, "BASE", Path(temporary).resolve()) as root, \
              patch.object(M, "helper_identity", return_value={"unavailable": "OSError"}), \
              patch.object(M, "helper_namespace", return_value={"entries": []}), \
+             patch.object(M, "helper_metadata", return_value={"complete": False, "validationAuthority": False}), \
              patch.multiple(M.os, getuid=Mock(return_value=0), geteuid=Mock(return_value=0),
                             getgid=Mock(return_value=0), getegid=Mock(return_value=0), create=True), \
              patch.object(M.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"x" * 262145, b"")):
@@ -311,6 +554,24 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(receipt["stdout"]["bytes"], 262145)
             self.assertEqual(len(receipt["stdout"]["excerpt"]), 2048)
             self.assertEqual(receipt["helperActual"], {"unavailable": "OSError"})
+
+    def test_two_maximum_graph_budgets_preserve_original_reason_inside_existing_export_limit(self):
+        graph = {"complete": False, "validationAuthority": False, "evidence": "x" * (M.METADATA_GRAPH_BYTES - 256)}
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, "BASE", Path(temporary).resolve()) as root, \
+             patch.object(M, "helper_identity", return_value={"path": M.HELPER}), \
+             patch.object(M, "helper_namespace", return_value={"entries": [{"path": "/fixed-" + str(i), "mode": 0o755} for i in range(55)]}), \
+             patch.object(M, "helper_metadata", return_value=graph), \
+             patch.multiple(M.os, getuid=Mock(return_value=0), geteuid=Mock(return_value=0),
+                            getgid=Mock(return_value=0), getegid=Mock(return_value=0), create=True), \
+             patch.object(M.subprocess, "run", return_value=subprocess.CompletedProcess([], 2, b'{"reason":"Original helper refusal"}', b"")):
+            with self.assertRaisesRegex(RuntimeError, "Finite native inspection refused; no retry"):
+                M.tool([M.HELPER, "inspect"], helper_pin={"size": 64, "sha256": "a" * 64})
+            file = root / "helper-inspection-failure.json"
+            receipt = json.loads(file.read_bytes())
+            self.assertLessEqual(file.stat().st_size, 1048576)
+            self.assertEqual(receipt["reasonExcerpt"], "Original helper refusal")
+            self.assertEqual(receipt["metadataBefore"], graph)
+            self.assertEqual(receipt["metadataAfter"], graph)
 
     def test_helper_identity_is_observed_from_the_fixed_image_not_from_the_expected_pin(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -64,6 +64,9 @@ HELPER_INSPECTION_DIRS = ("/var/lib/dpkg/info", "/var/lib/dpkg/updates",
 CI_SHARED_DIRECTORIES = ("/usr/share/applications", "/usr/share/icons", "/usr/share/icons/hicolor",
                          "/usr/share/icons/hicolor/128x128", "/usr/share/icons/hicolor/128x128/apps",
                          "/usr/share/icons/hicolor/32x32", "/usr/share/icons/hicolor/32x32/apps")
+METADATA_DATABASES = ("/var/lib/dpkg/diversions", "/var/lib/dpkg/statoverride")
+METADATA_BYTES = 4 * 1024 * 1024
+METADATA_GRAPH_BYTES = 384 * 1024
 POLICY = "/usr/share/polkit-1/actions/com.creatorworks.hub.deb-retirement.policy"
 TITLE = "Creator Hub - Development Preview"
 CONFIG = "config/creator-works-mcp/launcher-config.json"
@@ -293,6 +296,252 @@ def helper_namespace():
     return {"scope": "fixed-helper-inspection-paths-only", "observedAtNs": time.time_ns(), "entries": entries}
 
 
+def metadata_stamp(info):
+    return tuple(getattr(info, key) for key in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"))
+
+
+def metadata_row(path, info):
+    return {"path": path, "type": {stat.S_IFDIR: "directory", stat.S_IFREG: "file", stat.S_IFLNK: "symlink"}.get(stat.S_IFMT(info.st_mode), "other"),
+            "uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode), "nlink": info.st_nlink,
+            "dev": info.st_dev, "ino": info.st_ino, "size": info.st_size, "mtimeNs": info.st_mtime_ns, "ctimeNs": info.st_ctime_ns}
+
+
+def metadata_paths(database, raw):
+    # Match metadata.rs's bounded record grammar, not translated dpkg --list output.
+    require(database in METADATA_DATABASES and len(raw) <= METADATA_BYTES, "Unknown/oversized metadata database")
+    text = raw.decode("utf-8")
+    require(not text or text.endswith("\n"), "Truncated metadata database")
+    lines = text[:-1].split("\n") if text else []
+    require(len(lines) <= 24576 and all(line and len(line.encode()) <= 4095
+            and not any(ord(c) < 32 or ord(c) == 127 for c in line) for line in lines), "Malformed/oversized metadata record")
+    def endpoint(index, field, value):
+        require(value.startswith("/") and len(value.encode()) <= 4095
+                and (value == "/" or all(part not in ("", ".", "..") for part in value[1:].split("/"))), "Noncanonical metadata path")
+        return {"database": database, "record": index, "field": field, "path": value}
+    if database == METADATA_DATABASES[0]:
+        require(len(lines) % 3 == 0, "Incomplete diversion triple")
+        for index in range(0, len(lines), 3):
+            require(lines[index + 2] == ":" or re.fullmatch(r"[a-z0-9][a-z0-9+.-]{1,254}", lines[index + 2]), "Invalid diversion package label")
+            yield endpoint(index // 3, "from", lines[index])
+            yield endpoint(index // 3, "to", lines[index + 1])
+    else:
+        for index, line in enumerate(lines):
+            fields = line.split(" ", 3)
+            require(len(fields) == 4, "Incomplete statoverride record")
+            for value in fields[:2]:
+                if value.startswith("#"):
+                    require(re.fullmatch(r"0|[1-9][0-9]{0,9}", value[1:]) and int(value[1:]) < 0xffffffff, "Invalid numeric metadata identity")
+                else:
+                    require(re.fullmatch(r"[a-z_][a-z0-9_-]{0,254}", value), "Unsupported metadata identity")
+            require(re.fullmatch(r"[0-7]{1,4}", fields[2]), "Invalid statoverride mode")
+            yield endpoint(index, "path", fields[3])
+
+
+class MetadataCaptureLimit(RuntimeError):
+    pass
+
+
+def helper_metadata():
+    graph = {"scope": "whole-dpkg-metadata-parent-graph", "readOnly": True, "validationAuthority": False,
+             "complete": True, "observedAtNs": time.time_ns(), "databases": [], "records": [], "nodes": [], "issues": []}
+    database_handles, absent_databases, observed = [], [], {}
+    steps = 0
+    def issue(error, record=None):
+        graph["complete"] = False
+        graph["issues"].append({"record": record, "type": type(error).__name__, "reason": str(error)[:256]})
+        budget()
+    def budget():
+        if len(graph["nodes"]) > 1024 or len(graph["records"]) > 1024 or len(graph["issues"]) > 64 or steps > 16384 \
+                or len(json.dumps(graph, ensure_ascii=False, allow_nan=False).encode()) > METADATA_GRAPH_BYTES:
+            raise MetadataCaptureLimit("Metadata diagnostic graph budget exceeded")
+    def named(parent, name):
+        return os.lstat("/") if parent is None else os.stat(name, dir_fd=parent, follow_symlinks=False)
+    def opened(name, parent, flags, handles):
+        fd = os.open(name, flags | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, **({"dir_fd": parent} if parent is not None else {}))
+        try:
+            info = os.fstat(fd)
+            try:
+                name_info = named(parent, name)
+            except OSError as error:
+                raise RuntimeError("Metadata FD pathname unavailable after opening") from error
+            require(metadata_stamp(info) == metadata_stamp(name_info), "Metadata FD/name identity changed")
+            handles.append((fd, parent, name, metadata_stamp(info)))
+            return fd, info
+        except Exception:
+            os.close(fd)
+            raise
+    def stable(handles):
+        for fd, parent, name, before in handles:
+            require(metadata_stamp(os.fstat(fd)) == before == metadata_stamp(named(parent, name)), "Metadata namespace changed/replaced")
+    def close(handles):
+        for fd, _, _, _ in reversed(handles):
+            os.close(fd)
+    def node(path, info, role):
+        identity = metadata_stamp(info) if info is not None else None
+        if path in observed:
+            index, before = observed[path]
+            require(before == identity, "Metadata path changed between records")
+            row = graph["nodes"][index]
+        else:
+            index = len(graph["nodes"])
+            row = metadata_row(path, info) if info is not None else {"path": path, "absentFinal": True}
+            row["roles"] = []
+            graph["nodes"].append(row)
+            observed[path] = index, identity
+        if role not in row["roles"]:
+            row["roles"].append(role)
+        if role == "parent":
+            row["parentPredicateMatches"] = stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and info.st_mode & 0o7022 == 0
+        budget()
+        return index
+    def walk(record):
+        nonlocal steps
+        handles, checks = [], []
+        try:
+            current = PurePosixPath("/")
+            fd, root = opened("/", None, os.O_PATH | os.O_DIRECTORY, handles)
+            directories = {"/": fd}
+            record["walk"] = [node("/", root, "parent")]
+            pending, links, count = list(PurePosixPath(record["path"]).parts), 0, 0
+            while pending:
+                count += 1
+                steps += 1
+                budget()
+                require(count <= 1024, "Metadata parent walk too long")
+                part = pending.pop(0)
+                if part == "/":
+                    current, fd = PurePosixPath("/"), directories["/"]
+                    continue
+                if part == ".":
+                    continue
+                if part == "..":
+                    current = current.parent
+                    fd = directories[str(current)]
+                    continue
+                path, last = str(current / part), not pending
+                try:
+                    info = os.stat(part, dir_fd=fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    require(last, "Missing intermediate metadata parent")
+                    record["walk"].append(node(path, None, "endpoint"))
+                    checks.append((fd, part, None))
+                    record["resolved"] = path
+                    break
+                checks.append((fd, part, metadata_stamp(info)))
+                role = "alias" if stat.S_ISLNK(info.st_mode) else "endpoint" if last else "parent"
+                index = node(path, info, role)
+                record["walk"].append(index)
+                if role == "alias":
+                    links += 1
+                    target = os.readlink(part, dir_fd=fd)
+                    require(target and len(target.encode("utf-8")) <= 4095
+                            and not any(ord(c) < 32 or ord(c) == 127 for c in target), "Unsupported metadata alias target")
+                    row = graph["nodes"][index]
+                    if "target" in row:
+                        require(row["target"] == target, "Metadata alias changed")
+                    row["target"] = target
+                    budget()
+                    require(links <= 40 and info.st_uid == 0 and info.st_nlink == 1, "Untrusted/looping metadata alias")
+                    expanded = list(PurePosixPath(target).parts)
+                    if target.startswith("/"):
+                        expanded[0] = "/"
+                    elif target == "." or target.startswith("./"):
+                        expanded.insert(0, ".")
+                    pending = expanded + pending
+                    continue
+                require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode), "Unsupported metadata target type")
+                current = PurePosixPath(path)
+                if pending:
+                    fd, opened_info = opened(part, fd, os.O_PATH | os.O_DIRECTORY, handles)
+                    require(metadata_stamp(opened_info) == metadata_stamp(info), "Metadata parent replaced before opening")
+                    directories[path] = fd
+                else:
+                    record["resolved"] = path
+            record.setdefault("resolved", str(current))
+            stable(handles)
+            for parent, name, before in checks:
+                try:
+                    after = metadata_stamp(os.stat(name, dir_fd=parent, follow_symlinks=False))
+                except FileNotFoundError:
+                    after = None
+                require(before == after, "Metadata entry changed/replaced during walk")
+            record["complete"] = True
+            budget()
+        finally:
+            close(handles)
+    try:
+        raw_databases = []
+        for path in METADATA_DATABASES:
+            entry = {"path": path}
+            graph["databases"].append(entry)
+            try:
+                fd, info = opened("/", None, os.O_PATH | os.O_DIRECTORY, database_handles)
+                for part in PurePosixPath(path).parts[1:-1]:
+                    require(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0 and info.st_mode & 0o7022 == 0, "Unprotected metadata database parent")
+                    fd, info = opened(part, fd, os.O_PATH | os.O_DIRECTORY, database_handles)
+                require(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0 and info.st_mode & 0o7022 == 0, "Unprotected metadata database parent")
+                try:
+                    source, info = opened(PurePosixPath(path).name, fd, os.O_RDONLY, database_handles)
+                except FileNotFoundError:
+                    entry["absent"] = True
+                    absent_databases.append((fd, PurePosixPath(path).name))
+                    raw_databases.append((path, b""))
+                    continue
+                entry["identity"] = metadata_row(path, info)
+                require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == info.st_gid == 0
+                        and info.st_mode & 0o7022 == 0 and 0 <= info.st_size <= METADATA_BYTES, "Unprotected/oversized metadata database")
+                chunks, size = [], 0
+                while True:
+                    chunk = os.read(source, min(65536, METADATA_BYTES + 1 - size))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    require(size <= METADATA_BYTES, "Metadata database read limit exceeded")
+                raw = b"".join(chunks)
+                require(len(raw) == info.st_size, "Metadata database size changed during read")
+                stable(database_handles)
+                entry.update(bytes=len(raw), sha256=digest(raw))
+                raw_databases.append((path, raw))
+            except MetadataCaptureLimit:
+                raise
+            except Exception as error:
+                issue(error)
+        for path, raw in raw_databases:
+            try:
+                for record in metadata_paths(path, raw):
+                    record["complete"] = False
+                    graph["records"].append(record)
+                    budget()
+                    try:
+                        walk(record)
+                    except MetadataCaptureLimit:
+                        raise
+                    except Exception as error:
+                        issue(error, len(graph["records"]) - 1)
+            except MetadataCaptureLimit:
+                raise
+            except Exception as error:
+                issue(error)
+        stable(database_handles)
+        for parent, name in absent_databases:
+            try:
+                os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            raise RuntimeError("Absent metadata database appeared during capture")
+    except MetadataCaptureLimit as error:
+        graph.update(complete=False, nodes=[], records=[], issues=[{"type": type(error).__name__, "reason": str(error)}])
+    except Exception as error:
+        graph["complete"] = False
+        graph["issues"].append({"type": type(error).__name__, "reason": str(error)[:256]})
+    finally:
+        close(database_handles)
+    if len(json.dumps(graph, ensure_ascii=False, allow_nan=False).encode()) > METADATA_GRAPH_BYTES:
+        graph.update(complete=False, nodes=[], records=[], issues=[{"type": "MetadataCaptureLimit", "reason": "Metadata diagnostic graph budget exceeded"}])
+    return graph
+
+
 def helper_identity():
     observed = {"path": HELPER}
     try:
@@ -321,11 +570,13 @@ def tool(args, *, allowed=(0,), helper_pin=None):
     else:
         require(helper_pin is None, "Helper diagnostics cannot capture another command")
     namespace_before = helper_namespace() if helper else None
+    metadata_before = helper_metadata() if helper else None
     result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"}, check=False)
     accepted = len(result.stdout) <= 262144 and len(result.stderr) <= 262144 and result.returncode in allowed
     if helper and not accepted:
         namespace_after = helper_namespace()
+        metadata_after = helper_metadata()
         def output(raw):
             return {"bytes": len(raw), "sha256": digest(raw), "excerpt": raw[:2048].decode("utf-8", "replace"), "truncated": len(raw) > 2048}
         reason = None
@@ -341,6 +592,7 @@ def tool(args, *, allowed=(0,), helper_pin=None):
         save(destination / "helper-inspection-failure.json", {"schemaVersion": 1, "readOnly": True, "retryPermitted": False,
              "argv": args, "exitCode": result.returncode, "caller": caller,
              "namespaceBefore": namespace_before, "namespaceAfter": namespace_after,
+             "metadataBefore": metadata_before, "metadataAfter": metadata_after,
              "helperExpected": {"path": HELPER, **helper_pin, "mode": 0o755, "uid": 0, "gid": 0},
              "helperActual": helper_identity(), "stdout": output(result.stdout), "stderr": output(result.stderr), "reasonExcerpt": reason})
     require(accepted, "Finite native inspection refused; no retry: " + args[0])
