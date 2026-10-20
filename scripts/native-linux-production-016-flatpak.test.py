@@ -167,6 +167,205 @@ class DriverReadiness(unittest.TestCase):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_verifier_reuses_exact_example_and_lock_without_dependencies_or_key_override(self):
+        root = HERE.parent
+        manifest = (root / M.VERIFIER_CRATE / 'Cargo.toml').read_text()
+        self.assertIn('[[example]]\nname = "verify-package-input"\npath = "../../src-tauri/examples/verify-package-input.rs"', manifest)
+        for name, expected in M.VERIFIER_PINS.items():
+            raw = (root / name).read_bytes()
+            if name == M.VERIFIER_KEY and sys.platform == 'win32':
+                raw = raw.replace(b'\r\n', b'\n')  # Git's canonical key bytes, not a production normalization.
+            self.assertEqual(pin(raw), expected)
+        source = (root / M.VERIFIER_SOURCE).read_text()
+        self.assertIn('key.verify(&bytes, &signature, false)?', source)
+        self.assertIn('bounded(Path::new(&args[0]), 128 * 1024)', source)
+        self.assertIn('include_str!("../src/catalog-key.pub")', source)
+        self.assertEqual(M.VERIFIER_LIMIT, 128 * 1024)
+
+    def verifier_input_fixture(self, root):
+        repo, work = root / 'checkout', root / 'build'
+        values = {M.VERIFIER_SOURCE: b'unchanged example', M.VERIFIER_KEY: b'compiled key',
+                  M.VERIFIER_CRATE + '/Cargo.lock': b'locked dependencies', M.VERIFIER_CRATE + '/Cargo.toml': b'fixed example entry',
+                  M.VERIFIER_CRATE + '/src/lib.rs': b'fixed native library'}
+        inputs = {}
+        for name, raw in values.items():
+            original, copied = repo / name, work / 'source' / name
+            for file in (original, copied):
+                file.parent.mkdir(parents=True, exist_ok=True); file.write_bytes(raw)
+            inputs[name] = {'pin': pin(raw), 'originalStamp': list(M.P.stamp(original.lstat())), 'copyStamp': list(M.P.stamp(copied.lstat()))}
+        pins = {name: pin(values[name]) for name in M.VERIFIER_PINS}
+        return repo, work, inputs, pins
+
+    def test_verifier_snapshot_rechecks_exact_inputs_identity_unknown_files_and_single_links(self):
+        for mutation in ('bytes', 'replacement', 'hardlink', 'extra', 'key-pin', 'missing-lib'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                repo, work, inputs, pins = self.verifier_input_fixture(Path(directory).resolve())
+                copied = work / 'source' / M.VERIFIER_SOURCE
+                uid = copied.lstat().st_uid
+                with patch.object(M, 'HERE', repo / 'scripts'), patch.object(M, 'VERIFIER_PINS', pins), \
+                        patch.object(M.os, 'getuid', return_value=uid, create=True):
+                    M.verifier_inputs(work, inputs)
+                    if mutation == 'bytes':
+                        copied.write_bytes(b'changed source')
+                    elif mutation == 'replacement':
+                        replacement = work / 'replacement'; replacement.write_bytes(copied.read_bytes()); os.replace(replacement, copied)
+                    elif mutation == 'hardlink':
+                        os.link(copied, work / 'linked-source')
+                    elif mutation == 'extra':
+                        (work / 'source/unreviewed').write_bytes(b'unknown')
+                    elif mutation == 'key-pin':
+                        inputs[M.VERIFIER_KEY]['pin'] = pin(b'changed key')
+                    else:
+                        del inputs[M.VERIFIER_CRATE + '/src/lib.rs']
+                    with self.assertRaises(RuntimeError):
+                        M.verifier_inputs(work, inputs)
+
+    def test_compiler_binding_requires_199_native_host_and_unchanged_images(self):
+        compilers = {name: {'path': '/fixture/1.99.0-x86_64-unknown-linux-gnu/bin/' + name,
+            'record': {'known': name}, 'stamp': [1], 'version': name + ' 1.99.0 (reviewed)\n' + (
+                'release: 1.99.0\nhost: x86_64-unknown-linux-gnu\n' if name == 'rustc' else '')} for name in ('cargo', 'rustc')}
+        with patch.object(M.P, 'record', side_effect=lambda file: {'known': file.name}), patch.object(Path, 'lstat', return_value=None), \
+                patch.object(M.P, 'stamp', return_value=(1,)):
+            M.verifier_compilers(compilers)
+            for field, value in (('path', '/fixture/1.98.0-x86_64-unknown-linux-gnu/bin/rustc'), ('version', 'rustc 1.98.0'), ('stamp', [2])):
+                changed = copy.deepcopy(compilers); changed['rustc'][field] = value
+                with self.subTest(field=field), self.assertRaises(RuntimeError):
+                    M.verifier_compilers(changed)
+
+    def test_mocked_build_captures_real_two_link_cargo_output_into_strict_fresh_verifier(self):
+        for mutation in ('none', 'during-read', 'destination-occupied'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve(); repo, work = root / 'checkout', root / 'verifier'
+                values = {M.VERIFIER_SOURCE: b'unchanged example', M.VERIFIER_KEY: b'compiled key',
+                          M.VERIFIER_CRATE + '/Cargo.lock': b'locked dependencies', M.VERIFIER_CRATE + '/Cargo.toml': b'fixed example entry',
+                          M.VERIFIER_CRATE + '/src/lib.rs': b'fixed library'}
+                for name, raw in values.items():
+                    file = repo / name; file.parent.mkdir(parents=True, exist_ok=True); file.write_bytes(raw)
+                toolchain = root / '1.99.0-x86_64-unknown-linux-gnu/bin'; toolchain.mkdir(parents=True)
+                for name in ('cargo', 'rustc'):
+                    (toolchain / name).write_bytes(b'compiler fixture ' + name.encode())
+                compiled = work / 'target/debug/examples/verify-package-input'
+                alias = work / 'target/debug/examples/verify_package_input-hash'
+                copied = work / 'verify-package-input'
+                cargo_bytes = b'OWNED CARGO OUTPUT; this structural test never executes it'
+                build_calls = []
+                def command(args, **kwargs):
+                    if args[:3] == ['/usr/bin/git', 'ls-tree', '-r']:
+                        return ('\0'.join(sorted(values)) + '\0').encode()
+                    if args[:2] == ['/usr/bin/git', 'show']:
+                        return values[args[2].split(':', 1)[1]]
+                    if args == ['/usr/bin/which', 'rustup']:
+                        return str(root / 'rustup').encode() + b'\n'
+                    if args[1:4] == ['which', '--toolchain', '1.99.0']:
+                        return str(toolchain / args[-1]).encode() + b'\n'
+                    if args[-1] == '-Vv':
+                        name = Path(args[0]).name
+                        return (name + ' 1.99.0 (fixture)\n' + ('release: 1.99.0\nhost: x86_64-unknown-linux-gnu\n' if name == 'rustc' else '')).encode()
+                    self.assertEqual(args[:3], [str(toolchain / 'cargo'), 'build', '--locked'])
+                    self.assertEqual(kwargs['cwd'], work / 'source')
+                    build_calls.append(args)
+                    compiled.parent.mkdir(parents=True); compiled.write_bytes(cargo_bytes); compiled.chmod(0o755)
+                    os.link(compiled, alias)
+                    self.assertEqual(original_lstat(compiled).st_nlink, 2)
+                    if mutation == 'destination-occupied':
+                        copied.write_bytes(b'unknown preexisting output')
+                    return b''
+                original_lstat, original_fstat, original_read, original_open = Path.lstat, M.os.fstat, M.os.read, M.os.open
+                def native_open(file, flags, *args, **kwargs):
+                    # Model Linux byte reads; Windows CRT otherwise translates saved JSON CRLFs.
+                    return original_open(file, flags | (getattr(os, 'O_BINARY', 0) if sys.platform == 'win32' else 0), *args, **kwargs)
+                def native_mode(value, path):
+                    if sys.platform != 'win32':
+                        return value
+                    # NTFS lacks POSIX executable bits. Only mode is adapted; IDs, links and bytes are real.
+                    mode = 0o700 if path == work else 0o755 if path in (compiled, alias, copied) else 0o600 if path == work / 'receipt.json' else None
+                    if mode is None:
+                        return value
+                    fields = ('st_dev', 'st_ino', 'st_size', 'st_uid', 'st_gid', 'st_nlink', 'st_mtime_ns', 'st_ctime_ns')
+                    return SimpleNamespace(**{name: getattr(value, name) for name in fields},
+                                           st_mode=(stat.S_IFDIR if path == work else stat.S_IFREG) | mode)
+                def lstat(path):
+                    return native_mode(original_lstat(path), path)
+                def fstat(fd):
+                    value = original_fstat(fd)
+                    for path in (compiled, copied, work / 'receipt.json'):
+                        try:
+                            if original_lstat(path).st_ino == value.st_ino:
+                                return native_mode(value, path)
+                        except FileNotFoundError:
+                            pass
+                    return value
+                def read(fd, size):
+                    data = original_read(fd, size)
+                    if mutation == 'during-read' and data and compiled.exists() and original_fstat(fd).st_ino == original_lstat(compiled).st_ino:
+                        with alias.open('ab') as stream:
+                            stream.write(b'changed while held')
+                    return data
+                uid = original_lstat(repo).st_uid
+                with patch.object(M, 'HERE', repo / 'scripts'), patch.object(M, 'verifier_root', return_value=work), \
+                        patch.object(M, 'VERIFIER_PINS', {name: pin(values[name]) for name in M.VERIFIER_PINS}), \
+                        patch.object(M, 'command', side_effect=command), patch.dict(M.os.environ, {'GITHUB_SHA': 'a' * 40, 'HOME': str(repo)}), \
+                        patch.object(M.os, 'getuid', return_value=uid, create=True), patch.object(Path, 'lstat', lstat), \
+                        patch.object(M.os, 'fstat', side_effect=fstat), patch.object(M.os, 'read', side_effect=read), \
+                        patch.object(M.os, 'open', side_effect=native_open):
+                    if mutation == 'none':
+                        M.build_signature_verifier()
+                        self.assertEqual(M.signature_verifier(), copied)
+                        self.assertEqual(M.regular(copied, 64 * 1024 * 1024, 0o755), cargo_bytes)
+                        self.assertEqual(original_lstat(copied).st_nlink, 1)
+                        self.assertNotEqual(original_lstat(copied).st_ino, original_lstat(compiled).st_ino)
+                        self.assertEqual(original_lstat(compiled).st_nlink, 2)
+                        with self.assertRaises(RuntimeError):
+                            M.regular(compiled, 64 * 1024 * 1024, 0o755)
+                        alias.write_bytes(b'original aliases can change without changing the fresh copy')
+                        self.assertEqual(M.regular(copied, 64 * 1024 * 1024, 0o755), cargo_bytes)
+                    else:
+                        with self.assertRaises((RuntimeError, FileExistsError)):
+                            M.build_signature_verifier()
+                        self.assertFalse((work / 'receipt.json').exists())
+                        if mutation == 'destination-occupied':
+                            self.assertEqual(copied.read_bytes(), b'unknown preexisting output')
+                        else:
+                            self.assertFalse(copied.exists())
+                self.assertEqual(len(build_calls), 1)
+
+    def test_signature_call_is_fixed_bounded_repeated_and_refuses_uncertain_or_changed_inputs(self):
+        for outcome in ('valid', 'tool-refused', 'wrong-answer', 'metadata-changed', 'tool-changed', 'oversized'):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve(); metadata, signature = root / 'metadata', root / 'metadata.minisig'
+                raw = b'signed metadata' if outcome != 'oversized' else b'x' * (M.VERIFIER_LIMIT + 1)
+                metadata.write_bytes(raw); signature.write_bytes(b'plain signature')
+                tool, calls, checks = root / 'fixed-verifier', [], []
+                def verifier():
+                    checks.append('checked')
+                    M.require(outcome != 'tool-changed' or len(checks) == 1, 'Verifier executable identity changed')
+                    return tool
+                def command(args, **kwargs):
+                    calls.append(args)
+                    self.assertEqual(args, [str(tool), str(metadata), str(signature)])
+                    if outcome == 'tool-refused':
+                        raise RuntimeError('Signature refused')
+                    if outcome == 'metadata-changed':
+                        metadata.write_bytes(b'changed after verification')
+                    return b'wrong bytes' if outcome == 'wrong-answer' else (
+                        'Verified trusted package signature: ' + hashlib.sha256(raw).hexdigest() + '. No activation or client changes.\n').encode()
+                with patch.object(M, 'signature_verifier', side_effect=verifier), patch.object(M, 'command', side_effect=command), \
+                        patch.object(M.os, 'getuid', return_value=metadata.lstat().st_uid, create=True):
+                    if outcome == 'valid':
+                        M.verify_catalogue_signature(metadata, signature)
+                        self.assertEqual(len(checks), 2)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            M.verify_catalogue_signature(metadata, signature)
+                self.assertEqual(len(calls), 0 if outcome == 'oversized' else 1)
+
+    def test_missing_verifier_receipt_stops_before_tool_execution(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(M, 'verifier_root', return_value=Path(directory).resolve()), \
+                patch.object(M, 'command') as command:
+            with self.assertRaises(FileNotFoundError):
+                M.signature_verifier()
+            command.assert_not_called()
+
     def test_exact_native_dispatch_only_and_no_inherited_trust_or_runtime_override(self):
         M.admission(ENV, "linux", "x86_64", 1001)
         for key in ENV:
@@ -535,8 +734,9 @@ class ControllerTests(unittest.TestCase):
         tree = ast.parse(Path(M.__file__).read_text())
         functions = {node.name: ast.get_source_segment(Path(M.__file__).read_text(), node) for node in tree.body if isinstance(node, ast.FunctionDef)}
         stage = functions['stage']
-        self.assertLess(stage.index('node("verify-staged")'), stage.index('"/usr/bin/minisign"'))
-        self.assertLess(stage.index('"/usr/bin/minisign"'), stage.index('verify_tar('))
+        self.assertLess(stage.index('node("verify-staged")'), stage.index('build_signature_verifier('))
+        self.assertLess(stage.index('build_signature_verifier('), stage.index('verify_catalogue_signature('))
+        self.assertLess(stage.index('verify_catalogue_signature('), stage.index('verify_tar('))
         self.assertNotIn('flatpak", "--user", "install', stage)
         session = functions['session']
         boundaries = ['EXECUTION_REQUEST', 'verified_review(',
@@ -545,8 +745,13 @@ class ControllerTests(unittest.TestCase):
         for value in boundaries:
             cursor = session.index(value, cursor + 1)
         review = functions['verified_review']
-        self.assertLess(review.index('node("verify-staged"'), review.index('"/usr/bin/minisign"'))
-        self.assertLess(review.index('"/usr/bin/minisign"'), review.index('verify_tar('))
+        self.assertLess(review.index('node("verify-staged"'), review.index('verify_catalogue_signature('))
+        self.assertLess(review.index('verify_catalogue_signature('), review.index('verify_tar('))
+        build = functions['build_signature_verifier']
+        for required in ('"ls-tree"', 'commit + ":" + name', 'verifier_inputs(work, inputs)', 'verifier_compilers(compilers)',
+                         '"--locked"', '"--no-default-features"', '"CARGO_HOME"', '"RUSTC"', '"--example", "verify-package-input"', 'cwd=source'):
+            self.assertIn(required, build)
+        self.assertNotIn('cargo install', build)
         run = functions['run_session']
         self.assertLess(run.index('verified_review('), run.index('Session(root, review)'))
         source = Path(M.__file__).read_text()
@@ -564,7 +769,10 @@ class ControllerTests(unittest.TestCase):
         self.assertLess(workflow.index('.cjs preflight'), workflow.index('await lane.collect('))
         self.assertLess(workflow.index('.py stage'), workflow.index('cargo install tauri-driver'))
         self.assertLess(workflow.index('.py stage'), workflow.index('.py session'))
-        self.assertEqual(workflow.count("if: inputs.execution_request == '" + M.REQUEST + "'"), 5)
+        self.assertEqual(workflow.count("if: inputs.execution_request == '" + M.REQUEST + "'"), 4)
+        self.assertEqual(workflow.count('dtolnay/rust-toolchain@1.99.0'), 1)
+        self.assertLess(workflow.index('dtolnay/rust-toolchain@1.99.0'), workflow.index('.py stage'))
+        self.assertNotIn('--no-install-recommends minisign', workflow)
         self.assertLess(workflow.index('.py stage'), workflow.index('node --test scripts/linux-update-lab-feed.test.cjs'))
         self.assertIn('if: always()\n        run: /usr/bin/python3 -B scripts/native-linux-production-016-flatpak.py tls-cleanup', workflow)
         self.assertLess(workflow.index('.py tls-cleanup'), workflow.index('actions/upload-artifact'))

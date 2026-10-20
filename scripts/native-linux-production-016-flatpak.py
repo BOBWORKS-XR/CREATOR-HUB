@@ -44,6 +44,15 @@ MANIFEST = "creator-hub-linux-x86_64-0.1.16.portable-manifest.json"
 ARCHIVE = "creator-hub-linux-x86_64-0.1.16.appdir.tar.gz"
 BOOTSTRAP_PREFIX = '/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.16/'
 KEY = {"size": 119, "sha256": "23b3eee2d1c8cb7d705120953cda67ff94a722a207d5be1679c250be8ca90308"}
+VERIFIER_CRATE = "native/linux-portable-deployment"
+VERIFIER_SOURCE = "src-tauri/examples/verify-package-input.rs"
+VERIFIER_KEY = "src-tauri/src/catalog-key.pub"
+VERIFIER_PINS = {
+    VERIFIER_SOURCE: {"size": 2266, "sha256": "81207a9e6b17a288c9ee95acf9c400ed9b047cfa319a3a1fed33df320f6fb135"},
+    VERIFIER_CRATE + "/Cargo.lock": {"size": 10486, "sha256": "e41ae1db82e4a5d63e007cf3e45424ba511ecc194cf6a62359bd4863839f267f"},
+    VERIFIER_KEY: KEY,
+}
+VERIFIER_LIMIT = 128 * 1024
 TLS_DESTINATION = Path('/usr/local/share/ca-certificates/creator-production-bootstrap016.crt')
 TLS_CONFIGURATION = (b'[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN=api.github.com\n'
     b'[ext]\nsubjectAltName=DNS:api.github.com,DNS:github.com\nbasicConstraints=critical,CA:TRUE\n'
@@ -147,7 +156,7 @@ def stage_zip(raw, expected, destination):
         output(destination / name, data)
 
 
-def command(args, *, env=None, timeout=60, input=None, limit=2 * 1024 * 1024):
+def command(args, *, env=None, timeout=60, input=None, limit=2 * 1024 * 1024, cwd=None):
     require(type(args) is list and args and Path(args[0]).is_absolute() and all(type(v) is str for v in args), "Fixed argv tool required")
     require(input is None, "No command-string/stdin relay")
     evidence = locations() / "evidence"
@@ -161,7 +170,7 @@ def command(args, *, env=None, timeout=60, input=None, limit=2 * 1024 * 1024):
     try:
         _, native = P.helpers()
         child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 env=env, cwd=HERE.parent)
+                                 env=env, cwd=HERE.parent if cwd is None else cwd)
         receipt['pid'] = child.pid
         capture = native.Capture(child, evidence, label)
         deadline = time.monotonic() + timeout
@@ -253,6 +262,140 @@ def json_bytes(value):
     return (json.dumps(value, ensure_ascii=False, indent=2, separators=(",", ": ")) + "\n").encode()
 
 
+def verifier_root():
+    return locations().with_name("native-linux-production-016-verifier")
+
+
+def verifier_inputs(work, inputs):
+    require(type(inputs) is dict and 3 < len(inputs) <= 64 and set(VERIFIER_PINS).issubset(inputs)
+            and {VERIFIER_CRATE + "/Cargo.toml", VERIFIER_CRATE + "/src/lib.rs"}.issubset(inputs), "Complete verifier source binding required")
+    require({file.relative_to(work / "source").as_posix() for file in (work / "source").rglob("*") if not file.is_dir()} == set(inputs),
+            "Verifier snapshot inventory changed")
+    for name, value in inputs.items():
+        require(name in (*VERIFIER_PINS, VERIFIER_CRATE + "/Cargo.toml") or (
+            name.startswith(VERIFIER_CRATE + "/src/") and name.endswith(".rs")
+            and all(p not in ("", ".", "..") for p in name.split("/"))), "Unexpected verifier source")
+        require(set(value) == {"pin", "originalStamp", "copyStamp"}, "Exact verifier input evidence required")
+        if name in VERIFIER_PINS:
+            require(value["pin"] == VERIFIER_PINS[name], "Verifier source, key or lock changed")
+        for file, stamp in ((HERE.parent / name, value["originalStamp"]), (work / "source" / name, value["copyStamp"])):
+            bound(file, value["pin"], 2 * 1024 * 1024)
+            require(list(P.stamp(file.lstat())) == stamp, "Verifier input identity changed")
+
+
+def verifier_compilers(compilers):
+    require(set(compilers) == {"cargo", "rustc"}, "Exact pinned compiler pair required")
+    for name, value in compilers.items():
+        require(set(value) == {"path", "record", "stamp", "version"}, "Exact compiler evidence required")
+        file = Path(value["path"])
+        require(file.name == name and file.parent.name == "bin"
+                and file.parent.parent.name == "1.99.0-x86_64-unknown-linux-gnu", "Fixed native Rust 1.99 toolchain required")
+        require(P.record(file) == value["record"] and list(P.stamp(file.lstat())) == value["stamp"], "Compiler image changed")
+        require(value["version"].startswith(name + " 1.99.0 "), "Compiler version differs")
+        if name == "rustc":
+            require("\nrelease: 1.99.0\n" in value["version"] and "\nhost: x86_64-unknown-linux-gnu\n" in value["version"], "Compiler release/host differs")
+
+
+def copy_cargo_verifier(work):
+    require(work == verifier_root() and work.resolve(strict=True) == work, "Fixed fresh verifier build directory required")
+    file, copied = work / "target/debug/examples/verify-package-input", work / "verify-package-input"
+    for parent in (file.parent, *file.parent.parents):
+        value = parent.lstat()
+        require(stat.S_ISDIR(value.st_mode) and not parent.is_symlink() and value.st_uid == os.getuid(), "Owned Cargo output ancestry required")
+        if parent == work:
+            require(stat.S_IMODE(value.st_mode) == 0o700, "Private fresh verifier build required")
+            break
+    before = file.lstat()
+    require(stat.S_ISREG(before.st_mode) and not file.is_symlink() and before.st_uid == os.getuid()
+            and before.st_nlink >= 1 and stat.S_IMODE(before.st_mode) == 0o755
+            and 0 < before.st_size <= 64 * 1024 * 1024, "Owned bounded Cargo executable required")
+    # Cargo may hardlink its named example to a hashed output. Only this fixed build output permits it.
+    identity = lambda value: (P.stamp(value), value.st_nlink)
+    fd = os.open(file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        require(identity(os.fstat(fd)) == identity(before), "Cargo executable changed during open")
+        chunks, total = [], 0
+        while total <= before.st_size:
+            part = os.read(fd, min(1024 * 1024, before.st_size + 1 - total))
+            if not part:
+                break
+            chunks.append(part); total += len(part)
+        require(total == before.st_size and identity(os.fstat(fd)) == identity(before)
+                and identity(file.lstat()) == identity(before), "Cargo executable changed during capture")
+        raw = b"".join(chunks)
+        output(copied, raw, 0o755)
+        require(regular(copied, 64 * 1024 * 1024, 0o755) == raw and identity(os.fstat(fd)) == identity(before)
+                and identity(file.lstat()) == identity(before), "Fresh verifier copy or Cargo executable changed")
+        return copied, raw
+    finally:
+        os.close(fd)
+
+
+def build_signature_verifier():
+    work = verifier_root(); work.mkdir(mode=0o700)
+    source = work / "source"; source.mkdir(mode=0o700)
+    commit = os.environ["GITHUB_SHA"]
+    names = command(["/usr/bin/git", "ls-tree", "-r", "--name-only", "-z", commit, "--",
+                     VERIFIER_CRATE + "/Cargo.toml", VERIFIER_CRATE + "/Cargo.lock", VERIFIER_CRATE + "/src",
+                     VERIFIER_SOURCE, VERIFIER_KEY], limit=65536).decode("utf8").split("\0")
+    require(names[-1] == "" and 3 < len(names) - 1 <= 64 and len(set(names)) == len(names), "Bounded complete verifier source inventory required")
+    inputs = {}
+    for name in names[:-1]:
+        require(name in (*VERIFIER_PINS, VERIFIER_CRATE + "/Cargo.toml") or (
+            name.startswith(VERIFIER_CRATE + "/src/") and name.endswith(".rs")
+            and all(p not in ("", ".", "..") for p in name.split("/"))), "Unexpected compiler input")
+        raw = command(["/usr/bin/git", "show", commit + ":" + name], limit=2 * 1024 * 1024)
+        expected = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        original = HERE.parent / name; bound(original, expected, 2 * 1024 * 1024)
+        destination = source / name; destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        output(destination, raw, 0o644)
+        inputs[name] = {"pin": expected, "originalStamp": list(P.stamp(original.lstat())), "copyStamp": list(P.stamp(destination.lstat()))}
+    verifier_inputs(work, inputs)
+    rustup = command(["/usr/bin/which", "rustup"], limit=4096).decode().strip()
+    require(Path(rustup).is_absolute(), "Workflow Rust toolchain resolver required")
+    compilers = {}
+    for name in ("cargo", "rustc"):
+        file = Path(command([rustup, "which", "--toolchain", "1.99.0", name], limit=4096).decode().strip())
+        compilers[name] = {"path": str(file), "record": P.record(file), "stamp": list(P.stamp(file.lstat())),
+                           "version": command([str(file), "-Vv"], limit=16384).decode("utf8")}
+    verifier_compilers(compilers)
+    cargo_home = work / "cargo-home"; cargo_home.mkdir(mode=0o700)
+    env = {"HOME": os.environ["HOME"], "PATH": str(Path(compilers["cargo"]["path"]).parent) + ":/usr/bin:/bin",
+           "CARGO_HOME": str(cargo_home), "RUSTC": compilers["rustc"]["path"]}
+    command([compilers["cargo"]["path"], "build", "--locked", "--no-default-features", "--jobs", "2",
+             "--manifest-path", str(source / VERIFIER_CRATE / "Cargo.toml"), "--example", "verify-package-input",
+             "--target-dir", str(work / "target")], env=env, timeout=180, cwd=source)
+    verifier_inputs(work, inputs); verifier_compilers(compilers)
+    file, raw = copy_cargo_verifier(work)
+    save(work / "receipt.json", {"schemaVersion": 1, "scope": "ci-only-offline-signature-verifier", "harnessSource": commit,
+         "inputs": inputs, "compilers": compilers, "tool": {"pin": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+         "stamp": list(P.stamp(file.lstat()))}, "releaseReady": False})
+
+
+def signature_verifier():
+    work = verifier_root()
+    receipt = parse(regular(work / "receipt.json", 128 * 1024, 0o600))
+    require(set(receipt) == {"schemaVersion", "scope", "harnessSource", "inputs", "compilers", "tool", "releaseReady"}
+            and receipt["schemaVersion"] == 1 and receipt["scope"] == "ci-only-offline-signature-verifier"
+            and receipt["harnessSource"] == os.environ["GITHUB_SHA"] and receipt["releaseReady"] is False, "Source-bound verifier receipt required")
+    verifier_inputs(work, receipt["inputs"]); verifier_compilers(receipt["compilers"])
+    file = work / "verify-package-input"
+    bound(file, receipt["tool"]["pin"], 64 * 1024 * 1024)
+    require(stat.S_IMODE(file.lstat().st_mode) == 0o755 and list(P.stamp(file.lstat())) == receipt["tool"]["stamp"], "Verifier executable identity changed")
+    return file
+
+
+def verify_catalogue_signature(metadata, signature):
+    raw, sig = regular(metadata, VERIFIER_LIMIT), regular(signature, 4096)
+    before = (P.stamp(metadata.lstat()), P.stamp(signature.lstat()))
+    verifier = signature_verifier()
+    answer = command([str(verifier), str(metadata), str(signature)], limit=4096)
+    require(answer == ("Verified trusted package signature: " + hashlib.sha256(raw).hexdigest()
+                       + ". No activation or client changes.\n").encode(), "Offline verifier did not confirm these exact bytes")
+    require(signature_verifier() == verifier and before == (P.stamp(metadata.lstat()), P.stamp(signature.lstat()))
+            and regular(metadata, VERIFIER_LIMIT) == raw and regular(signature, 4096) == sig, "Signature input/tool changed during verification")
+
+
 def stage(root):
     require(set(p.name for p in root.iterdir()) == {"flatpak.zip", "portable.zip", "signed.zip", "profile.json", "signed-input.json", "api-binding.json"},
             "Fresh exact input directory required; no partial-stage adoption")
@@ -277,9 +420,9 @@ def stage(root):
         destination = source / name; destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True); output(destination, data)
     review = parse(node("verify-staged"))
     public_key = source / "src-tauri/src/catalog-key.pub"; bound(public_key, KEY, 4096)
+    build_signature_verifier()
     for name in (DESCRIPTOR, MANIFEST):
-        command(["/usr/bin/minisign", "-Vm", str(stage_root / "signed" / name), "-x", str(stage_root / "signed" / (name + ".minisig")),
-                 "-p", str(public_key), "-q"])
+        verify_catalogue_signature(stage_root / "signed" / name, stage_root / "signed" / (name + ".minisig"))
     manifest_bytes = regular(stage_root / "signed" / MANIFEST, 2 * 1024 * 1024)
     manifest = parse(manifest_bytes)
     review["archiveVerification"] = verify_tar(regular(stage_root / "portable" / ARCHIVE), manifest)
@@ -1052,9 +1195,9 @@ def verified_review(root, review, *, headless=False):
     # Source and byte admission is repeated; a report alone never grants authority.
     fresh = parse(node("verify-staged", headless=headless))
     require(fresh["portable"] == review["portable"] and fresh["flatpak"] == review["flatpak"] and fresh["signed"] == review["signed"], "Reviewed inputs drifted")
+    bound(root / "stage/source/src-tauri/src/catalog-key.pub", KEY, 4096)
     for name in (DESCRIPTOR, MANIFEST):
-        command(["/usr/bin/minisign", "-Vm", str(root / "stage/signed" / name), "-x", str(root / "stage/signed" / (name + ".minisig")),
-                 "-p", str(root / "stage/source/src-tauri/src/catalog-key.pub"), "-q"])
+        verify_catalogue_signature(root / "stage/signed" / name, root / "stage/signed" / (name + ".minisig"))
     manifest_bytes = regular(root / "stage/signed" / MANIFEST, 2 * 1024 * 1024)
     verify_tar(regular(root / "stage/portable" / ARCHIVE), parse(manifest_bytes))
     require(hashlib.sha256(manifest_bytes).hexdigest() == review["generation"], "Reviewed generation changed")

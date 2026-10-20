@@ -24,3 +24,7 @@ tempfile = "=3.27.0"
 libc = "=0.2.190"
 
 [workspace]
+
+[[example]]
+name = "verify-package-input"
+path = "../../src-tauri/examples/verify-package-input.rs"

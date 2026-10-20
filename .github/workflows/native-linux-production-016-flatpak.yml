@@ -66,11 +66,8 @@ jobs:
             await lane.collect(github, context);
       - name: Install locked inspection dependencies without npm hooks
         run: npm ci --ignore-scripts
-      - name: Provision only the offline signature verification tool
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends minisign
-      - name: Inspect complete original inputs and verify real catalogue signatures and TAR inventory
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Inspect original inputs; build only the locked offline verifier; verify real signatures and TAR inventory
         run: /usr/bin/python3 -B scripts/native-linux-production-016-flatpak.py stage
       - name: Provision disposable GUI test tools only after the separate execution request
         if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
@@ -85,8 +82,6 @@ jobs:
         run: |
           node --check scripts/linux-update-lab-feed.cjs
           node --test scripts/linux-update-lab-feed.test.cjs
-      - uses: dtolnay/rust-toolchain@1.99.0
-        if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
       - name: Build only the locked external UI driver, never Root or launcher
         if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
         run: |
@@ -116,4 +111,5 @@ jobs:
             ${{ runner.temp }}/native-linux-production-016-flatpak/portal-capture.json
             ${{ runner.temp }}/native-linux-production-016-flatpak/*-gtk.json
             ${{ runner.temp }}/native-linux-production-016-flatpak/evidence/*.json
+            ${{ runner.temp }}/native-linux-production-016-verifier/receipt.json
             ${{ runner.temp }}/native-linux-production-016-flatpak/warm-surface/*.png
