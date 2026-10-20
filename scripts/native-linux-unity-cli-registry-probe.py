@@ -1,0 +1,364 @@
+"""Finite beta.9 execution probe; no nonempty-registry or discovery acceptance."""
+import hashlib
+from functools import partial
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import stat
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+sys.dont_write_bytecode = True
+HERE = Path(__file__).resolve().parent
+REPO = "BOBWORKS-XR/CREATOR-HUB"
+REPO_ID = "1364807512"
+BRANCH = "refs/heads/validation/linux-unity-registry-probe"
+WORKFLOW = REPO + "/.github/workflows/linux-unity-registry-probe.yml@" + BRANCH
+REQUEST = "execute-readonly-beta9"
+VERSION = "1.0.0-beta.9"
+ASSET = {"filename": "unity-linux-x64", "size": 23515432,
+         "sha256": "8c0d6e2435449c8be7f0e6b2ce6330bfc5f17a98aec4b659c859940455dd0fe5"}
+URL = "https://public-cdn.cloud.unity3d.com/hub/prod/cli/" + VERSION + "/" + ASSET["filename"]
+MANIFEST = "modules/project-setup/src-tauri/src/unity-cli-release.json"
+SOURCES = ("scripts/" + Path(__file__).name, "scripts/native-linux-unity-cli-registry-probe.test.py",
+           ".github/workflows/linux-unity-registry-probe.yml", MANIFEST, "src-tauri/src/projects.rs")
+COMMANDS = (
+    ("version", ("--version",)),
+    ("help", ("--help",)),
+    ("projects-help", ("projects", "--help")),
+    ("list-help", ("projects", "list", "--help")),
+    ("add-help-only", ("projects", "add", "--help")),
+    ("list", ("projects", "list", "--json", "--non-interactive", "--no-banner", "--no-pager")),
+)
+FALSE = dict.fromkeys(("nonemptyRegistryAccepted", "automaticDiscoveryAccepted", "unityEditorAccepted",
+                       "hubUiFixtureAccepted", "releaseReady"), False)
+STDOUT_LIMIT, STDERR_LIMIT, COMMAND_SECONDS = 128 * 1024, 64 * 1024, 45
+
+
+def require(value, message):
+    if not value:
+        raise RuntimeError(message)
+
+
+def pin(raw):
+    return {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def verified_elf(raw):
+    require(pin(raw) == {key: ASSET[key] for key in ("size", "sha256")}
+            and len(raw) >= 64 and raw[:7] == b"\x7fELF\x02\x01\x01"
+            and int.from_bytes(raw[16:18], "little") in (2, 3) and raw[18:20] == b"\x3e\x00",
+            "Pinned ordinary x86_64 ELF required")
+
+
+def identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def read_regular(path, limit, expected=None):
+    before = path.lstat()
+    require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_size <= limit,
+            "Bounded single-link ordinary file required")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        require(identity(os.fstat(fd)) == identity(before), "File changed during open")
+        raw = bytearray()
+        while len(raw) <= limit:
+            part = os.read(fd, min(65536, limit + 1 - len(raw)))
+            if not part:
+                break
+            raw.extend(part)
+        require(len(raw) == before.st_size and identity(os.fstat(fd)) == identity(before)
+                and identity(path.lstat()) == identity(before), "File changed or exceeded its bound")
+    finally:
+        os.close(fd)
+    raw = bytes(raw)
+    require(expected is None or pin(raw) == expected, "Fixed file bytes differ")
+    return raw
+
+
+def protected_parent(path, uid):
+    require(path.is_absolute() and len(str(path)) <= 4096 and ".." not in path.parts
+            and path.resolve(strict=True) == path, "Canonical existing parent required")
+    for ancestor in (path, *path.parents):
+        info = ancestor.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, uid)
+                and (not info.st_mode & 0o022 or info.st_uid == 0 and info.st_mode & stat.S_ISVTX),
+                "Protected directory ancestry required; no permission repair")
+
+
+def private_directory(path, uid):
+    os.mkdir(path, 0o700)
+    info = path.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == uid and stat.S_IMODE(info.st_mode) == 0o700
+            and path.resolve(strict=True) == path, "New private directory creation failed")
+
+
+def admission(env, system=None, machine=None, uid=None, euid=None):
+    system = platform.system() if system is None else system
+    machine = platform.machine() if machine is None else machine
+    uid = getattr(os, "getuid", lambda: -1)() if uid is None else uid
+    euid = getattr(os, "geteuid", lambda: -1)() if euid is None else euid
+    require(system == "Linux" and machine == "x86_64" and type(uid) is int and uid > 0 and uid == euid,
+            "Unprivileged native Linux x86_64 runner required")
+    expected = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": REPO, "GITHUB_REPOSITORY_ID": REPO_ID,
+                "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": BRANCH, "GITHUB_WORKFLOW_REF": WORKFLOW,
+                "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
+                "UNITY_REGISTRY_PROBE_REQUEST": REQUEST}
+    require(all(env.get(key) == value for key, value in expected.items()), "Exact manual probe context required")
+    require(re.fullmatch(r"[a-f0-9]{40}", env.get("GITHUB_SHA", ""))
+            and all(re.fullmatch(r"[1-9][0-9]*", env.get(key, "")) for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
+            "Exact source and run identity required")
+    forbidden = r"^(LD_|DYLD_|PYTHONPATH$|PYTHONHOME$|SSL_CERT_|CURL_CA_BUNDLE$|REQUESTS_CA_BUNDLE$|UNITY_|HUB_)"
+    require(not any((re.match(forbidden, key) and key != "UNITY_REGISTRY_PROBE_REQUEST")
+                    or key.lower().endswith("proxy") for key in env), "Inherited injection/trust/Unity overrides refused")
+    return uid
+
+
+def child_environment(root):
+    home = root / "home"
+    return {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1", "TERM": "dumb",
+            "UNITY_NO_CONSENT_PROMPT": "1",
+            "HOME": str(home), "XDG_CONFIG_HOME": str(home / "config"), "XDG_DATA_HOME": str(home / "data"),
+            "XDG_CACHE_HOME": str(home / "cache"), "XDG_RUNTIME_DIR": str(root / "runtime"), "TMPDIR": str(root / "tmp")}
+
+
+def source_binding(workspace):
+    require(workspace == HERE.parent and workspace.resolve(strict=True) == workspace, "Exact checked-out probe source required")
+    files = {name: pin(read_regular(workspace / name, 2 * 1024 * 1024)) for name in SOURCES}
+    manifest = json.loads(read_regular(workspace / MANIFEST, 16384))
+    require(manifest["version"] == VERSION and manifest["binaries"]["linux-x64"] == ASSET,
+            "Repository's exact beta.9 Linux asset manifest required")
+    return files
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RuntimeError("Unity download redirect refused")
+
+
+def download(path):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    deadline, size, digest = time.monotonic() + 120, 0, hashlib.sha256()
+    with opener.open(URL, timeout=30) as response:
+        require(response.status == 200 and response.geturl() == URL, "Exact HTTPS asset response required")
+        length = response.headers.get("Content-Length")
+        require(length is None or length == str(ASSET["size"]), "Asset response size differs")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o500)
+        try:
+            while True:
+                require(time.monotonic() <= deadline, "Asset download deadline")
+                block = response.read(min(65536, ASSET["size"] + 1 - size))
+                if not block:
+                    break
+                size += len(block)
+                require(size <= ASSET["size"], "Asset response exceeded fixed size")
+                digest.update(block)
+                view = memoryview(block)
+                while view:
+                    count = os.write(fd, view)
+                    require(count > 0, "Short asset write")
+                    view = view[count:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    require({"size": size, "sha256": digest.hexdigest()} == {key: ASSET[key] for key in ("size", "sha256")},
+            "Downloaded asset differs from pinned beta.9")
+
+
+class HeldBinary:
+    def __init__(self, path, uid):
+        self.path, self.uid, self.fd = path, uid, None
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == uid
+                and stat.S_IMODE(info.st_mode) == 0o500 and info.st_size == ASSET["size"], "Protected fixed helper required")
+        self.fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            self.before = info
+            self.check()
+        except Exception:
+            self.close()
+            raise
+
+    def check(self):
+        require(identity(os.fstat(self.fd)) == identity(self.before)
+                and identity(self.path.lstat()) == identity(self.before), "Held helper identity changed")
+        os.lseek(self.fd, 0, os.SEEK_SET)
+        raw = bytearray()
+        while len(raw) <= ASSET["size"]:
+            block = os.read(self.fd, min(65536, ASSET["size"] + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        verified_elf(raw)
+        require(identity(os.fstat(self.fd)) == identity(self.before)
+                and identity(self.path.lstat()) == identity(self.before), "Helper changed during verification")
+        return raw
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd); self.fd = None
+
+
+class SealedImage:
+    def __init__(self, source, uid):
+        import fcntl
+        self.source, self.uid, self.fd, self.control = source, uid, None, fcntl
+        raw = source.check()
+        verified_elf(raw)
+        self.seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+        self.fd = os.memfd_create("creator-unity-registry", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        try:
+            view = memoryview(raw)
+            while view:
+                count = os.write(self.fd, view)
+                require(count > 0, "Short memfd image write")
+                view = view[count:]
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            # This is our newly created anonymous image, never the downloaded source.
+            os.fchmod(self.fd, 0o700)
+            fcntl.fcntl(self.fd, fcntl.F_ADD_SEALS, self.seals)
+            self.before = os.fstat(self.fd)
+            self.check()
+        except Exception:
+            self.close()
+            raise
+
+    def check(self):
+        self.source.check()
+        info = os.fstat(self.fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 0 and info.st_uid == self.uid
+                and stat.S_IMODE(info.st_mode) == 0o700 and identity(info) == identity(self.before)
+                and not os.get_inheritable(self.fd)
+                and self.control.fcntl(self.fd, self.control.F_GET_SEALS) == self.seals,
+                "Owned immutable close-on-exec memfd required")
+        os.lseek(self.fd, 0, os.SEEK_SET)
+        raw = bytearray()
+        while len(raw) <= ASSET["size"]:
+            block = os.read(self.fd, min(65536, ASSET["size"] + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        verified_elf(raw)
+        require(identity(os.fstat(self.fd)) == identity(self.before), "Sealed image changed during readback")
+        self.source.check()
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd); self.fd = None
+
+
+def child_limits(executable_fd):
+    import resource
+    # CPython makes pass_fds inheritable before preexec_fn. Restore Root's CLOEXEC
+    # lifetime: available for exec path resolution, closed in the resulting ELF.
+    os.set_inheritable(executable_fd, False)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (STDOUT_LIMIT, STDOUT_LIMIT))
+
+
+def validate_output(role, raw):
+    text = raw.decode("utf-8", errors="strict")
+    require(not re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text), "Unexpected control characters in helper output")
+    if role == "version":
+        require(text.strip() == VERSION, "Actual helper version did not match beta.9")
+    elif role in ("help", "projects-help", "list-help", "add-help-only"):
+        command = {"help": "unity", "projects-help": r"unity\s+projects", "list-help": r"unity\s+projects\s+list",
+                   "add-help-only": r"unity\s+projects\s+add"}[role]
+        require(re.search(r"\bUsage:\s*" + command + r"\b", text, re.I), "Expected command-specific help was not returned")
+        if role == "help":
+            require(re.search(r"\bprojects\b", text), "Projects command absent from actual help")
+        if role == "projects-help":
+            require(all(re.search(r"\b" + name + r"\b", text) for name in ("list", "add")), "Required project commands absent")
+    else:
+        require(role == "list", "Unknown helper output role")
+        value = json.loads(text)
+        require(type(value) is dict and value.get("success") is True and type(value.get("data")) is list
+                and value["data"] == [], "Fresh isolated HOME must return a successful empty list; nonempty fixture deferred")
+
+
+def run_fixed(tool, specification, root):
+    require(specification in COMMANDS, "Only the six fixed help/read-only commands may execute")
+    role, args = specification
+    tool.check()
+    evidence = root / "evidence"
+    paths = [evidence / (role + suffix) for suffix in (".stdout", ".stderr")]
+    handles = []
+    try:
+        for path in paths:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            handles.append(os.fdopen(fd, "wb"))
+        executable = "/proc/self/fd/" + str(tool.fd)
+        child = subprocess.Popen([executable, *args], executable=executable, shell=False, pass_fds=(tool.fd,), close_fds=True,
+                                 stdin=subprocess.DEVNULL, stdout=handles[0], stderr=handles[1], env=child_environment(root),
+                                 cwd=root / "home", preexec_fn=partial(child_limits, tool.fd))
+        pid = child.pid
+        try:
+            code = child.wait(timeout=COMMAND_SECONDS)
+        except subprocess.TimeoutExpired:
+            child.kill(); child.wait(timeout=5)
+            raise RuntimeError("Owned helper deadline; no retry or other process was signalled") from None
+        tool.check()
+    finally:
+        for handle in handles:
+            handle.close()
+    stdout = read_regular(paths[0], STDOUT_LIMIT)
+    stderr = read_regular(paths[1], STDERR_LIMIT)
+    require(code == 0, "Fixed helper command failed: " + role)
+    validate_output(role, stdout)
+    return {"role": role, "pid": pid, "exitCode": code, "stdout": pin(stdout), "stderr": pin(stderr)}
+
+
+def execute(env):
+    uid = admission(env)
+    workspace = Path(env["GITHUB_WORKSPACE"])
+    sources = source_binding(workspace)
+    parent = Path(env["RUNNER_TEMP"])
+    protected_parent(parent, uid)
+    root = parent / "linux-unity-registry-probe"
+    private_directory(root, uid)
+    for name in ("evidence", "home", "home/config", "home/data", "home/cache", "runtime", "tmp", "tool"):
+        private_directory(root / name, uid)
+    report = {"schemaVersion": 1, "scope": "isolated-official-beta9-help-and-empty-list-only", "source": env["GITHUB_SHA"],
+              "runId": env["GITHUB_RUN_ID"], "runAttempt": env["GITHUB_RUN_ATTEMPT"], "sources": sources,
+              "version": VERSION, "asset": ASSET, "url": URL, "commands": [], "probeCompleted": False,
+              "genuineNonemptyFixture": "deferred", **FALSE}
+    source, tool = None, None
+    try:
+        binary = root / "tool" / ASSET["filename"]
+        download(binary)
+        source = HeldBinary(binary, uid)
+        tool = SealedImage(source, uid)
+        report["tool"] = {"sourceDev": source.before.st_dev, "sourceIno": source.before.st_ino,
+                          "dev": tool.before.st_dev, "ino": tool.before.st_ino, "uid": tool.before.st_uid,
+                          "mode": stat.S_IMODE(tool.before.st_mode), "seals": tool.seals,
+                          "execution": "sealed-memfd-cloexec", "sourceRetained": True,
+                          **{key: ASSET[key] for key in ("size", "sha256")}}
+        for specification in COMMANDS:
+            report["commands"].append(run_fixed(tool, specification, root))
+        require(source_binding(workspace) == sources, "Checked-out source changed during probe")
+        report["probeCompleted"] = True
+    except Exception as error:
+        report["refusal"] = type(error).__name__
+        raise
+    finally:
+        if tool is not None:
+            tool.close()
+        if source is not None:
+            source.close()
+        raw = (json.dumps(report, sort_keys=True, indent=2) + "\n").encode()
+        require(len(raw) <= 16384, "Bounded probe receipt required")
+        fd = os.open(root / "evidence/report.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+
+
+if __name__ == "__main__":
+    require(sys.argv == [sys.argv[0], "probe"], "Only the fixed manual probe phase exists")
+    execute(os.environ)
