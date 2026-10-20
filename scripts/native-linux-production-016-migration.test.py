@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack, contextmanager
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
@@ -53,7 +54,132 @@ def records(session, commands, ids):
     return [{"session": session * 64, "id": number, "command": name, "outcome": "returned-ok"} for name, number in zip(commands, ids)]
 
 
+@contextmanager
+def hardening_fixture(uid=0):
+    with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+        root = Path(temporary).resolve()
+        env = {**environment(), "GITHUB_WORKSPACE": str(HERE.parent)}
+        paths = {str(q) for name in M.CI_SHARED_DIRECTORIES for q in (M.PurePosixPath(name), *M.PurePosixPath(name).parents)}
+        def info(inode, mode=0o755):
+            return SimpleNamespace(st_mode=M.stat.S_IFDIR | mode, st_uid=0, st_gid=0, st_dev=1, st_ino=inode, st_nlink=3)
+        fixture = SimpleNamespace(root=root, env=env, directories={name: info(i + 1, 0o777 if name in M.CI_SHARED_DIRECTORIES else 0o755)
+                                  for i, name in enumerate(sorted(paths))}, base=info(100), fds={}, changes=[], race=None, raced=False)
+        real_lstat, real_stat = os.lstat, os.stat
+        def copied(meta):
+            return SimpleNamespace(**vars(meta))
+        def lstat(path, *args, **kwargs):
+            if str(path) == str(root): return copied(fixture.base)
+            if str(path) in fixture.directories: return copied(fixture.directories[str(path)])
+            return real_lstat(path, *args, **kwargs)
+        def name(part, fd=None):
+            return "/" if fd is None else str(M.PurePosixPath(fixture.fds[fd][0]) / part)
+        def opened(part, flags, *, dir_fd=None):
+            self_path = name(part, dir_fd)
+            assert flags & M.os.O_DIRECTORY and flags & M.os.O_NOFOLLOW and flags & M.os.O_CLOEXEC
+            meta = fixture.directories[self_path]
+            if not M.stat.S_ISDIR(meta.st_mode): raise OSError(40, "Synthetic alias or non-directory")
+            fd = 10000 + len(fixture.fds)
+            fixture.fds[fd] = (self_path, meta)
+            return fd
+        def named(part, *, dir_fd=None, follow_symlinks=True):
+            if dir_fd is None:
+                return lstat(part) if str(part) == str(root) or str(part) in fixture.directories else real_stat(part, follow_symlinks=follow_symlinks)
+            assert follow_symlinks is False
+            self_path = name(part, dir_fd)
+            if self_path == fixture.race and not fixture.raced:
+                replacement = copied(fixture.directories[self_path]); replacement.st_ino += 1000
+                fixture.directories[self_path] = replacement; fixture.raced = True
+            return copied(fixture.directories[self_path])
+        def changed(fd, mode):
+            self_path, meta = fixture.fds[fd]
+            assert self_path in M.CI_SHARED_DIRECTORIES and mode == 0o755
+            assert (root / "fixture-directory-hardening-before.json").is_file()
+            fixture.changes.append(self_path); meta.st_mode = M.stat.S_IFDIR | mode
+        for attr, value in (("BASE", root),): stack.enter_context(patch.object(M, attr, value))
+        stack.enter_context(patch.object(M.sys, "platform", "linux"))
+        stack.enter_context(patch.multiple(M.os, getuid=Mock(return_value=uid), geteuid=Mock(return_value=uid),
+                                          getgid=Mock(return_value=uid), getegid=Mock(return_value=uid), create=True))
+        stack.enter_context(patch.multiple(M.os, O_DIRECTORY=0x10000, O_NOFOLLOW=0x20000, O_CLOEXEC=0x40000, create=True))
+        raw = json.dumps(binding()).encode()
+        request = M.execution_request(env, raw)
+        proofs = {str(root / "binding.json"): raw, str(root / "execution-request.json"): json.dumps(request).encode(),
+                  str(root / "source-binding.json"): json.dumps({"harnessSource": env["GITHUB_SHA"], "files": dict.fromkeys(M.SOURCES, {})}).encode()}
+        stack.enter_context(patch.object(M, "read_file", side_effect=lambda path, *a, **k: proofs[str(path)]))
+        for attr, value in (("lstat", lstat), ("stat", named), ("open", opened),
+                            ("fstat", lambda fd: copied(fixture.fds[fd][1])), ("fchmod", changed),
+                            ("close", lambda fd: fixture.fds.pop(fd))):
+            stack.enter_context(patch.object(M.os, attr, value, create=True))
+        yield fixture
+
+
 class ControllerTests(unittest.TestCase):
+    def test_fixed_ci_directory_hardening_is_fd_bound_outer_first_with_bounded_pre_post_proofs(self):
+        with hardening_fixture() as f:
+            f.directories[M.CI_SHARED_DIRECTORIES[0]].st_mode = M.stat.S_IFDIR | 0o755
+            inodes = {path: row.st_ino for path, row in f.directories.items()}
+            M.harden_fixture_directories(f.env)
+            self.assertEqual(f.changes, list(M.CI_SHARED_DIRECTORIES[1:]))
+            self.assertFalse(f.fds)
+            self.assertEqual(inodes, {path: row.st_ino for path, row in f.directories.items()})
+            for phase in ("before", "after"):
+                file = f.root / ("fixture-directory-hardening-" + phase + ".json")
+                proof = json.loads(file.read_bytes())
+                self.assertEqual([row["path"] for row in proof["directories"]], list(M.CI_SHARED_DIRECTORIES))
+                self.assertTrue(all(proof[key] is False for key in M.FLAGS))
+                self.assertLess(file.stat().st_size, 16384)
+            after = json.loads((f.root / "fixture-directory-hardening-after.json").read_bytes())
+            self.assertTrue(after["completed"])
+            self.assertTrue(all(row["mode"] == 0o755 for row in after["directories"]))
+
+    def test_ci_directory_hardening_rejects_unexpected_owner_modes_and_redirects_without_chmod(self):
+        for failure in ("owner", "group", "mode", "symlink", "ancestor"):
+            with self.subTest(failure=failure), hardening_fixture() as f:
+                first = f.directories[M.CI_SHARED_DIRECTORIES[0]]
+                if failure == "owner": first.st_uid = 1001
+                if failure == "group": first.st_gid = 1001
+                if failure == "mode": first.st_mode = M.stat.S_IFDIR | 0o775
+                if failure == "symlink": first.st_mode = M.stat.S_IFLNK | 0o777
+                if failure == "ancestor": f.directories["/usr/share"].st_mode = M.stat.S_IFLNK | 0o777
+                with self.assertRaises((RuntimeError, OSError)):
+                    M.harden_fixture_directories(f.env)
+                self.assertEqual(f.changes, []); self.assertFalse(f.fds)
+                self.assertFalse(json.loads((f.root / "fixture-directory-hardening-after.json").read_bytes())["completed"])
+
+    def test_ci_directory_hardening_rejects_changed_path_inode_and_retains_original_fd_identity(self):
+        with hardening_fixture() as f:
+            f.race = M.CI_SHARED_DIRECTORIES[0]
+            with self.assertRaises(RuntimeError): M.harden_fixture_directories(f.env)
+            self.assertTrue(f.raced); self.assertEqual(f.changes, []); self.assertFalse(f.fds)
+            before = json.loads((f.root / "fixture-directory-hardening-before.json").read_bytes())
+            after = json.loads((f.root / "fixture-directory-hardening-after.json").read_bytes())
+            self.assertNotEqual(before["directories"][0]["ino"], after["directories"][0]["ino"])
+            self.assertFalse(after["completed"])
+
+    def test_ci_directory_hardening_refuses_other_roles_phases_and_extra_paths_before_permission_changes(self):
+        for failure in ("nonroot", "push", "reused", "extra-path"):
+            with self.subTest(failure=failure), hardening_fixture(uid=M.UID if failure == "nonroot" else 0) as f:
+                kwargs = {}
+                if failure == "push": f.env["GITHUB_EVENT_NAME"] = "push"
+                if failure == "reused": (f.root / "fixture-directory-hardening-before.json").write_bytes(b"original")
+                if failure == "extra-path": kwargs["paths"] = (*M.CI_SHARED_DIRECTORIES, "/home/runner")
+                with self.assertRaises(RuntimeError): M.harden_fixture_directories(f.env, **kwargs)
+                self.assertEqual(f.changes, []); self.assertFalse(f.fds)
+                self.assertFalse((f.root / "fixture-directory-hardening-after.json").exists())
+
+    def test_ci_hardening_is_before_any_original_deb_install_and_exports_only_two_fixed_proofs(self):
+        source = ast.parse((HERE / "native-linux-production-016-migration.py").read_text())
+        install = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "install_fixture")
+        calls = [node for node in ast.walk(install) if isinstance(node, ast.Call)]
+        harden = next(node.lineno for node in calls if isinstance(node.func, ast.Name) and node.func.id == "harden_fixture_directories")
+        dpkg = next(node.lineno for node in calls if isinstance(node.func, ast.Name) and node.func.id == "tool" and isinstance(node.args[0], ast.List)
+                    and [getattr(value, "value", None) for value in node.args[0].elts[:2]] == ["/usr/bin/dpkg", "--install"])
+        self.assertLess(harden, dpkg)
+        workflow = (HERE.parent / ".github/workflows/native-linux-production-016-migration.yml").read_text()
+        assignment = next(line.strip() for line in workflow.splitlines() if line.lstrip().startswith("names = ["))
+        names = ast.literal_eval(assignment.partition(" = ")[2])
+        self.assertEqual([name for name in names if "directory-hardening" in name],
+                         ["fixture-directory-hardening-before.json", "fixture-directory-hardening-after.json"])
+
     def test_helper_namespace_is_the_exact_compiled_inspection_files_and_their_finite_parents(self):
         rust = HERE.parent / "native/linux-deb-retirement/src"
         mcp = re.findall(r'pin!\(\s*"([^"]+)"', (rust / "pins.rs").read_text())

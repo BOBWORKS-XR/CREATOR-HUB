@@ -61,6 +61,9 @@ HELPER_INSPECTION_FILES = (
 )
 HELPER_INSPECTION_DIRS = ("/var/lib/dpkg/info", "/var/lib/dpkg/updates",
                           "/var/lib/creator-hub-deb-retirement", "/var/lib/creator-hub-deb-retirement-setup")
+CI_SHARED_DIRECTORIES = ("/usr/share/applications", "/usr/share/icons", "/usr/share/icons/hicolor",
+                         "/usr/share/icons/hicolor/128x128", "/usr/share/icons/hicolor/128x128/apps",
+                         "/usr/share/icons/hicolor/32x32", "/usr/share/icons/hicolor/32x32/apps")
 POLICY = "/usr/share/polkit-1/actions/com.creatorworks.hub.deb-retirement.policy"
 TITLE = "Creator Hub - Development Preview"
 CONFIG = "config/creator-works-mcp/launcher-config.json"
@@ -1272,6 +1275,85 @@ def protected_sources(env):
                     "Controller ancestor is not root-protected")
 
 
+def fixture_directory_row(path, info):
+    return {"path": path, "uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode),
+            "type": "directory" if stat.S_ISDIR(info.st_mode) else "other", "dev": info.st_dev,
+            "ino": info.st_ino, "nlink": info.st_nlink}
+
+
+def harden_fixture_directory(path, original):
+    require(path in CI_SHARED_DIRECTORIES, "Only fixed CI shared directories may be hardened")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    handles = []
+    try:
+        parent = None
+        for part in ("/", *PurePosixPath(path).parts[1:]):
+            fd = os.open(part, flags, **({"dir_fd": parent} if parent is not None else {}))
+            try:
+                current = os.fstat(fd)
+            except Exception:
+                os.close(fd)
+                raise
+            handles.append((fd, parent, part, current))
+            parent = fd
+        leaf = handles[-1][3]
+        require((leaf.st_dev, leaf.st_ino) == (original.st_dev, original.st_ino), "CI directory inode changed before opening")
+        def verify(mode):
+            for index, (fd, parent, part, before) in enumerate(handles):
+                current = os.fstat(fd)
+                named = os.stat(part, dir_fd=parent, follow_symlinks=False) if parent is not None else os.lstat("/")
+                require(stat.S_ISDIR(current.st_mode) and stat.S_ISDIR(named.st_mode)
+                        and current.st_uid == current.st_gid == named.st_uid == named.st_gid == 0
+                        and (current.st_dev, current.st_ino) == (before.st_dev, before.st_ino) == (named.st_dev, named.st_ino)
+                        and stat.S_IMODE(current.st_mode) == stat.S_IMODE(named.st_mode) == (mode if index == len(handles) - 1 else 0o755),
+                        "CI directory alias, ownership, mode or inode changed")
+        verify(stat.S_IMODE(original.st_mode))
+        if stat.S_IMODE(original.st_mode) == 0o777:
+            os.fchmod(handles[-1][0], 0o755)
+        verify(0o755)
+    finally:
+        for fd, _, _, _ in reversed(handles):
+            os.close(fd)
+
+
+def harden_fixture_directories(env, *, paths=CI_SHARED_DIRECTORIES):
+    require(type(paths) is tuple and paths == CI_SHARED_DIRECTORIES, "No CI directory path overrides")
+    admission(env)
+    require(os.getuid() == os.geteuid() == os.getgid() == os.getegid() == 0
+            and HERE == Path(env["GITHUB_WORKSPACE"]) / "scripts", "Exact root checkout fixture broker required")
+    base = BASE.lstat()
+    require(BASE.resolve() == BASE and stat.S_ISDIR(base.st_mode) and base.st_uid == base.st_gid == 0
+            and stat.S_IMODE(base.st_mode) == 0o755, "Fresh protected CI fixture base required")
+    before_file, after_file = BASE / "fixture-directory-hardening-before.json", BASE / "fixture-directory-hardening-after.json"
+    require(not any(os.path.lexists(file) for file in (before_file, after_file, BASE / "result")), "CI hardening cannot reuse an existing fixture phase")
+    raw = read_file(BASE / "binding.json", 1048576, uid=0, mode=0o644)
+    check_request(P.parse(read_file(BASE / "execution-request.json", 16384, uid=0, mode=0o644)), env, raw)
+    source = P.parse(read_file(BASE / "source-binding.json", 32768, uid=0, mode=0o644))
+    require(source["harnessSource"] == env["GITHUB_SHA"] and set(source["files"]) == set(SOURCES), "Fresh CI source binding required")
+    originals = {path: os.lstat(path) for path in paths}
+    proof = {"schemaVersion": 1, "scope": "disposable-ci-shared-directory-hardening-only", "harnessSource": env["GITHUB_SHA"], **FLAGS}
+    save(before_file, {**proof, "directories": [fixture_directory_row(path, info) for path, info in originals.items()]})
+    completed, failure = [], None
+    try:
+        require(all(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0
+                    and stat.S_IMODE(info.st_mode) in (0o755, 0o777) for info in originals.values()), "Unknown CI shared-directory type, owner or mode")
+        for path in paths:
+            harden_fixture_directory(path, originals[path])
+            completed.append(path)
+    except Exception as error:
+        failure = error
+        raise
+    finally:
+        rows = []
+        for path in paths:
+            try:
+                rows.append(fixture_directory_row(path, os.lstat(path)))
+            except OSError as error:
+                rows.append({"path": path, "error": type(error).__name__, "errno": error.errno})
+        save(after_file, {**proof, "completed": failure is None and len(completed) == len(paths), "completedPaths": completed,
+                          "failureType": type(failure).__name__ if failure else None, "directories": rows})
+
+
 def install_fixture(env):
     require(os.getuid() == os.geteuid() == 0 and HERE == Path(env["GITHUB_WORKSPACE"]) / "scripts", "Root broker must start in the exact checked-out source")
     temp = Path(env["RUNNER_TEMP"])
@@ -1331,6 +1413,7 @@ def install_fixture(env):
     # No maintainer scripts are added by this harness. The inspected Hub and
     # independently pinned original public DEBs are installed once, in order.
     save(BASE / "legacy-files.json", {product: legacy_inventory(BASE / "inputs" / (product + ".deb"), product) for product in ("mcp", "setup")}, 0o644)
+    harden_fixture_directories(env)
     tool(["/usr/bin/dpkg", "--install", str(BASE / "inputs/mcp.deb"), str(BASE / "inputs/setup.deb"), str(BASE / "inputs/hub.deb")])
     installed(binding)
     import pwd
