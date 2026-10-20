@@ -124,12 +124,12 @@ not approval of untested packages or a publication receipt.
   browser duplicate suffixes) selects restricted setup; that hint grants no
   installation authority. Its alias must be byte-identical to the ordinary
   AppImage and both launch roles need real native acceptance.
-- Production Root assembly `39345920645` at `c13cb9e` is running after the native
-  feature pass; it reuses the original signed 0.1.16 private payload. No build
-  success or installer acceptance is inferred. Production input/staging gates
-  separately bind raw Root, packaged ELF, source tree, helper/policy/service,
-  resources and both build proofs before execution. Their inspection workflow
-  cannot install apps or claim migration/update/Flatpak acceptance.
+- Production Root assembly `39345920645` at `c13cb9e` succeeded, reusing the
+  original signed 0.1.16 private payload. Data-only inspection `39348205069`
+  independently passed the complete production DEB, raw/packaged Root transform,
+  source tree, helper/policy/service, resources and both build proofs. This is
+  not installation or migration acceptance. The production Flatpak producer
+  `39348943839` is running; runtime and lifecycle qualification remain open.
 - Clean source CI `39329938286` passed all six non-Mac jobs. The existing public
   Windows release and user installation remain unchanged. The existing private
   validation draft is transport only and was not published; no Mac job or new
