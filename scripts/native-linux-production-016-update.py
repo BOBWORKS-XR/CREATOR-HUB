@@ -975,8 +975,10 @@ class Surface:
                    "toolkit": attrs.get("toolkit"), "role": int(node.get_role()), "name": name,
                    **{s.lower(): states.contains(getattr(self.atspi.StateType, s)) for s in ("SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY")}}
             row["pressed"] = states.contains(self.atspi.StateType.PRESSED)
-            if not protected and row["showing"] and node.get_role() in (self.atspi.Role.LABEL, self.atspi.Role.TEXT, self.atspi.Role.STATIC, self.atspi.Role.PARAGRAPH, 72):
+            if not protected and row["showing"] and node.get_role() in (self.atspi.Role.LABEL, self.atspi.Role.TEXT, self.atspi.Role.STATIC, self.atspi.Role.PARAGRAPH, self.atspi.Role.STATUS_BAR, 72):
                 text = node.get_text_iface()
+                if node.get_role() == self.atspi.Role.STATUS_BAR:
+                    row["textInterfaceAvailable"] = bool(text)
                 if text:
                     count = text.get_character_count(); require(type(count) is int and 0 <= count <= 4096, "Bounded UI text")
                     row["text"] = text.get_text(0, count)
@@ -1303,10 +1305,21 @@ def startup_ui(surface, home, *, first):
     surface.click("convergence-later", actions)
     wait(lambda: surface.source("convergence-dialog", optional=True) is None)
     wait(lambda: surface.source("projects-home-title", optional=True))
-    wait(lambda: (status := surface.source("project-status", optional=True))
-         and (status[0].get("text") or status[0]["name"]) == "2 known projects. SDK labels reflect package declarations, not build validation."
-         and (refresh := surface.source("refresh-projects", optional=True))
-         and refresh[0]["enabled"] and refresh[0]["sensitive"] and not refresh[0]["busy"])
+    def projects_ready():
+        rows, _ = surface.snapshot()
+        for name in ("Open selected-project", "Open other-project"):
+            matches = [row for row in rows if row["name"] == name]
+            require(len(matches) <= 1, "Duplicate fixture project Open control")
+            if not matches:
+                return False
+            row = matches[0]
+            require(row["role"] == int(surface.atspi.Role.PUSH_BUTTON) and row["tag"] == "button"
+                    and row["toolkit"] == "WebKitGTK", "Fixture project Open control differs")
+            if not all(row[key] for key in ("showing", "enabled", "sensitive")) or row["busy"] or row["defunct"]:
+                return False
+        refresh = surface.source("refresh-projects", optional=True)
+        return bool(refresh and refresh[0]["enabled"] and refresh[0]["sensitive"] and not refresh[0]["busy"])
+    wait(projects_ready)
     require(parse(read(home / PREFS))["autoDownload"] is False, "Automatic download must remain disabled")
     return actions
 
@@ -1355,6 +1368,83 @@ def observe_successor(old, expected, executable, parent, baseline, native, helpe
     return wait(ready, 60), observed
 
 
+def portable_ancestry_metadata():
+    require(BASE == Path("/opt/creator-polkit-fixture"), "Fixed diagnostic fixture required")
+    names = ("/", "/opt", BASE.as_posix(), (BASE / "result").as_posix(), (BASE / "result/home").as_posix(), (BASE / "result/home/data").as_posix(),
+             (BASE / "result/home/data/CreatorHub").as_posix(), (BASE / "result/home/data/CreatorHub/hub-portable-updates").as_posix(),
+             (BASE / "result/home/data/creator-hub-portable").as_posix())
+    handles, observed, entries = {}, {}, []
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        for name in names:
+            parent, leaf = os.path.split(name)
+            if name != "/" and parent not in handles:
+                entries.append({"path": name, "unavailable": "AncestorNotDirectory"}); continue
+            try:
+                info = os.stat(name, follow_symlinks=False) if name == "/" else os.stat(leaf, dir_fd=handles[parent], follow_symlinks=False)
+            except FileNotFoundError:
+                entries.append({"path": name, "present": False}); continue
+            observed[name] = info
+            entries.append({"path": name, "present": True, "directory": stat.S_ISDIR(info.st_mode),
+                            "uid": info.st_uid, "gid": info.st_gid, "mode": format(stat.S_IMODE(info.st_mode), "04o"),
+                            "dev": info.st_dev, "ino": info.st_ino})
+            if stat.S_ISDIR(info.st_mode):
+                fd = os.open(name, flags) if name == "/" else os.open(leaf, flags, dir_fd=handles[parent])
+                handles[name] = fd
+                require(stamp(os.fstat(fd)) == stamp(info), "Diagnostic directory changed during open")
+        for name, before in observed.items():
+            parent, leaf = os.path.split(name)
+            now = os.stat(name, follow_symlinks=False) if name == "/" else os.stat(leaf, dir_fd=handles[parent], follow_symlinks=False)
+            require(stamp(now) == stamp(before) and (name not in handles or stamp(os.fstat(handles[name])) == stamp(before)),
+                    "Diagnostic directory identity changed")
+        return entries
+    finally:
+        for fd in reversed(tuple(handles.values())):
+            os.close(fd)
+
+
+def owned_process_umask(process, native, helper):
+    require(type(process["pid"]) is int and process["pid"] > 1 and process["uids"] == [UID] * 4
+            and kernel_record(process["pid"], native, helper) == process, "Owned diagnostic process identity required")
+    path = Path(f'/proc/{process["pid"]}/status')
+    before = path.lstat(); require(stat.S_ISREG(before.st_mode), "Bounded process status required")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        require(stamp(os.fstat(fd)) == stamp(before), "Diagnostic status changed during open")
+        raw = bytearray()
+        while len(raw) <= 16384:
+            part = os.read(fd, 16385 - len(raw))
+            if not part:
+                break
+            raw.extend(part)
+        require(len(raw) <= 16384 and stamp(os.fstat(fd)) == stamp(before)
+                and stamp(path.lstat()) == stamp(before), "Diagnostic process status changed or oversized")
+    finally:
+        os.close(fd)
+    values = re.findall(rb"^Umask:[ \t]+([0-7]{4})$", raw, re.M)
+    require(len(values) == 1 and kernel_record(process["pid"], native, helper) == process, "Owned process umask unavailable or changed")
+    return {"pid": process["pid"], "startTime": process["startTime"], "umask": values[0].decode("ascii")}
+
+
+def capture_portable_ancestry(phase, process, native, helper):
+    require(phase in ("before-launch", "after-refusal"), "Finite portable diagnostic phase required")
+    result = {"schemaVersion": 1, "phase": phase, "readOnly": True, "qualified": False, **FALSE}
+    try:
+        result["entries"] = portable_ancestry_metadata()
+    except Exception as error:
+        result["ancestryUnavailable"] = type(error).__name__
+    try:
+        result["process"] = owned_process_umask(process, native, helper)
+    except Exception as error:
+        result["processUnavailable"] = type(error).__name__
+    require(len(json.dumps(result).encode()) <= 8192, "Bounded portable ancestry diagnostic required")
+    try:
+        save(BASE / "result" / ("portable-ancestry-" + phase + ".json"), result)
+    except Exception:
+        pass
+    return result
+
+
 def capture_bootstrap_failure(surface, actions):
     result = {"schemaVersion": 1, "readOnly": True, "qualified": False, "root": surface.record, "actions": list(actions)}
     try:
@@ -1365,6 +1455,10 @@ def capture_bootstrap_failure(surface, actions):
         result["bitmap"] = phase_bitmap(surface, "bootstrap-failure-bitmap")
     except Exception as error:
         result["bitmapRefused"] = type(error).__name__
+    try:
+        capture_portable_ancestry("after-refusal", surface.record, surface.native, surface.helper)
+    except Exception:
+        pass
     try:
         save(BASE / "result/bootstrap-failure-ui.json", result)
     except Exception:
@@ -1523,6 +1617,7 @@ def native_session(env):
             endpoint = wait(lambda: polkit.agent_bus_identity(system, agent_record, GLib))
         generation_dir = manifest = None
         if portable:
+            capture_portable_ancestry("before-launch", parent, native, helper)
             report["bootstrap"] = bootstrap16(folder, profile, review, app_env, helper, native, Atspi, x11)
             generation_dir = portable_state(home, review, "16")
             manifest = review["portable"]["16"]["manifest"]
@@ -2480,7 +2575,8 @@ def export_evidence(env):
     destination.mkdir(mode=0o700); os.chown(destination, owner, owner)
     names = ("broker.json", "request.json", "review.json", "result/report.json", "result/original-ui.json", "result/successor-ui.json", "session.stdout", "session.stderr",
              "result/initial-bitmap/root-window.png", "result/successor-bitmap/root-window.png", "result/bootstrap-failure-ui.json",
-             "result/bootstrap-failure-bitmap/root-window.png", "result/transport-diagnostic.json")
+             "result/bootstrap-failure-bitmap/root-window.png", "result/transport-diagnostic.json",
+             "result/portable-ancestry-before-launch.json", "result/portable-ancestry-after-refusal.json")
     diagnostics = sorted((*BASE.glob("public-tool-failure-*.json"), *BASE.glob("tls-restore-failure-*.json")))
     require(len(diagnostics) <= 8 and all(re.fullmatch(r"(?:public-tool-failure-(baseline-dpkg-install|update-ca-certificates)|tls-restore-failure)-[1-9][0-9]*\.json", file.name)
                                         and file.lstat().st_uid == 0 for file in diagnostics), "Unknown public tool evidence refused")

@@ -197,7 +197,7 @@ def offline_verifier_inputs(folder):
 
 
 class Pure(unittest.TestCase):
-    def startup_surface(self, *, guide=True, first=True, closes=True, later_name="Not now", delayed_guide=False, inventory_completes=True):
+    def startup_surface(self, *, guide=True, first=True, closes=True, later_name="Not now", delayed_guide=False, inventory_completes=True, inventory_count=2):
         offered = "before-guide" if delayed_guide else "guide"
         state = SimpleNamespace(phase="terms" if first else offered if guide else "home", actions=[], reads=[], closing_reads=0,
                                 offer_reads=0, inventory_reads=0)
@@ -225,7 +225,7 @@ class Pure(unittest.TestCase):
             row = {"name": later_name if source_id == "convergence-later" else source_id,
                    "enabled": state.phase == "home", "sensitive": True, "busy": False}
             if source_id == "project-status":
-                row["text"] = ("2 known projects. SDK labels reflect package declarations, not build validation."
+                row["text"] = (f"{inventory_count} known projects. SDK labels reflect package declarations, not build validation."
                                if state.phase == "home" else "Reading known project locations..." if state.phase == "home-loading" else "")
             return (row, None)
         def click(source_id, actions):
@@ -242,7 +242,16 @@ class Pure(unittest.TestCase):
                 if result:
                     return result
             raise RuntimeError("Test readiness deadline; no repeated input")
-        return SimpleNamespace(source=source, click=click), state, bounded_wait
+        def snapshot():
+            if state.phase == "home-loading":
+                state.inventory_reads += 1
+                if state.inventory_reads == 3 and inventory_completes:
+                    state.phase = "home"
+            rows = [] if state.phase != "home" else [{"name": name, "role": 43, "tag": "button", "toolkit": "WebKitGTK",
+                    "showing": True, "enabled": True, "sensitive": True, "busy": False, "defunct": False}
+                    for name in ("Open selected-project", "Open other-project")]
+            return rows, []
+        return SimpleNamespace(source=source, click=click, snapshot=snapshot, atspi=SimpleNamespace(Role=SimpleNamespace(PUSH_BUTTON=43))), state, bounded_wait
 
     def test_startup_defers_observed_modal_once_before_waiting_for_inert_home(self):
         surface, state, waiting = self.startup_surface()
@@ -294,6 +303,87 @@ class Pure(unittest.TestCase):
         self.assertEqual(state.phase, "home-loading")
         read.assert_not_called()
 
+    def test_startup_uses_exact_fixture_open_controls_without_live_region_text_or_filter_changes(self):
+        for first in (True, False):
+            with self.subTest(first=first):
+                surface, state, waiting = self.startup_surface(first=first)
+                source = surface.source
+                def default_sdk_source(source_id, *, optional=False):
+                    self.assertNotIn(source_id, ("project-sdk", "project-status"), "Do not change filters or depend on uncaptured live-region text")
+                    return source(source_id, optional=optional)
+                surface.source = default_sdk_source
+                with patch.object(M, "wait", side_effect=waiting), patch.object(M, "read", return_value=b'{"autoDownload":false}'):
+                    actions = M.startup_ui(surface, Path("/fixture/home"), first=first)
+                self.assertEqual(actions, (["usage-terms-checkbox", "usage-terms-continue"] if first else []) + ["convergence-later"])
+                self.assertEqual(state.actions, actions)
+                self.assertEqual(state.phase, "home")
+
+    def test_startup_requires_unique_ready_source_bound_fixture_open_controls_and_refresh(self):
+        for case in ("missing", "unrelated", "duplicate", "foreign-toolkit", "wrong-role", "hidden", "disabled", "insensitive", "busy", "defunct", "refresh-disabled"):
+            with self.subTest(case=case):
+                surface, state, waiting = self.startup_surface(first=False)
+                snapshot, source = surface.snapshot, surface.source
+                def changed_snapshot():
+                    rows, nodes = snapshot()
+                    if rows:
+                        if case == "missing": rows.pop()
+                        elif case == "unrelated": rows[0]["name"] = "Open unrelated-project"
+                        elif case == "duplicate": rows.append(dict(rows[0]))
+                        elif case == "foreign-toolkit": rows[0]["toolkit"] = "foreign"
+                        elif case == "wrong-role": rows[0]["role"] = 29
+                        elif case == "hidden": rows[0]["showing"] = False
+                        elif case == "disabled": rows[0]["enabled"] = False
+                        elif case == "insensitive": rows[0]["sensitive"] = False
+                        elif case in ("busy", "defunct"): rows[0][case] = True
+                    return rows, nodes
+                def changed_source(source_id, **kwargs):
+                    value = source(source_id, **kwargs)
+                    if case == "refresh-disabled" and source_id == "refresh-projects" and value:
+                        value[0]["enabled"] = False
+                    return value
+                surface.snapshot, surface.source = changed_snapshot, changed_source
+                with patch.object(M, "wait", side_effect=waiting), patch.object(M, "read") as read:
+                    with self.assertRaisesRegex(RuntimeError, "Test readiness deadline|Duplicate fixture|Fixture project Open control differs"):
+                        M.startup_ui(surface, Path("/fixture/home"), first=False)
+                self.assertEqual(state.actions, ["convergence-later"])
+                read.assert_not_called()
+
+    def test_snapshot_reads_observed_status_role_with_existing_text_bounds_and_protection(self):
+        roles = SimpleNamespace(PASSWORD_TEXT=75, LABEL=29, TEXT=61, STATIC=116, PARAGRAPH=73, STATUS_BAR=54)
+        states = SimpleNamespace(**{name: name.lower() for name in ("EDITABLE", "SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY", "PRESSED")})
+        for case in ("project-status", "hub-update-status", "native-support-status", "no-interface", "editable", "hidden", "oversize", "changed"):
+            with self.subTest(case=case):
+                body = ("1 known projects. SDK labels reflect package declarations, not build validation."
+                        if case == "project-status" else "Version 0.1.17 is available.")
+                lengths, calls = [], []
+                def count():
+                    lengths.append(True)
+                    return 4097 if case == "oversize" else len(body) + (1 if case == "changed" and len(lengths) > 1 else 0)
+                def text_iface():
+                    calls.append(True)
+                    return None if case == "no-interface" else SimpleNamespace(get_character_count=count, get_text=lambda start, end: body[start:end])
+                state = SimpleNamespace(contains=lambda name: name in ("enabled", "sensitive")
+                                        or name == "showing" and case != "hidden" or name == "editable" and case == "editable")
+                node = SimpleNamespace(get_role=lambda: 54, get_state_set=lambda: state,
+                                       get_attributes=lambda: {"id": case, "tag": "p", "toolkit": "WebKitGTK"},
+                                       get_name=lambda: "", get_text_iface=text_iface)
+                surface = object.__new__(M.Surface)
+                surface.atspi = SimpleNamespace(Role=roles, StateType=states)
+                surface.references = SimpleNamespace(identity=lambda n, owner: (":1.4", "/org/a11y/fixture"))
+                surface.walk = lambda: [node]
+                if case in ("oversize", "changed"):
+                    with self.assertRaisesRegex(RuntimeError, "Bounded UI text|UI text changed"):
+                        surface.snapshot()
+                else:
+                    rows, _ = surface.snapshot()
+                    if case in ("editable", "hidden"):
+                        self.assertNotIn("text", rows[0]); self.assertEqual(calls, [])
+                    elif case == "no-interface":
+                        self.assertFalse(rows[0]["textInterfaceAvailable"]); self.assertNotIn("text", rows[0])
+                    else:
+                        self.assertTrue(rows[0]["textInterfaceAvailable"])
+                        self.assertEqual(rows[0]["text"], body); self.assertEqual(calls, [True])
+
     def test_startup_preserves_auto_download_guard_after_reviewed_deferral(self):
         for auto_download in (False, True):
             surface, state, waiting = self.startup_surface(first=False)
@@ -314,6 +404,151 @@ class Pure(unittest.TestCase):
                     M.startup_ui(surface, Path("/fixture/home"), first=False)
             self.assertEqual(state.actions, [])
             read.assert_not_called()
+
+    @contextmanager
+    def ancestry_diagnostic_fixture(self, change=None):
+        names = ("/", "/opt", "/opt/creator-polkit-fixture", "/opt/creator-polkit-fixture/result",
+                 "/opt/creator-polkit-fixture/result/home", "/opt/creator-polkit-fixture/result/home/data",
+                 "/opt/creator-polkit-fixture/result/home/data/CreatorHub",
+                 "/opt/creator-polkit-fixture/result/home/data/CreatorHub/hub-portable-updates",
+                 "/opt/creator-polkit-fixture/result/home/data/creator-hub-portable")
+        nodes = {name: SimpleNamespace(st_dev=1, st_ino=index + 1, st_mode=stat.S_IFDIR | (0o775 if name.endswith("hub-portable-updates") else 0o755),
+                                      st_uid=0 if index < 3 else M.UID, st_gid=0 if index < 3 else M.UID,
+                                      st_nlink=1, st_size=0, st_mtime_ns=1, st_ctime_ns=1) for index, name in enumerate(names)}
+        creator = names[6]
+        if change == "link": nodes[creator].st_mode = stat.S_IFLNK | 0o777
+        if change == "missing": del nodes[creator]
+        handles, opened, counts = {}, [], {}
+        def named(name, *, dir_fd=None, follow_symlinks):
+            self.assertFalse(follow_symlinks)
+            path = name if dir_fd is None else handles[dir_fd].rstrip("/") + "/" + name
+            counts[path] = counts.get(path, 0) + 1
+            if path not in nodes: raise FileNotFoundError(path)
+            value = copy.copy(nodes[path])
+            if change == "replaced" and path == "/" and counts[path] > 1: value.st_ino += 100
+            return value
+        def open_dir(name, flags, *, dir_fd=None):
+            self.assertEqual(flags, M.os.O_RDONLY | M.os.O_DIRECTORY | M.os.O_NOFOLLOW | M.os.O_CLOEXEC)
+            path = name if dir_fd is None else handles[dir_fd].rstrip("/") + "/" + name
+            self.assertTrue(stat.S_ISDIR(nodes[path].st_mode)); opened.append(path)
+            fd = 10000 + len(opened); handles[fd] = path; return fd
+        with ExitStack() as stack:
+            for name, value in (("O_DIRECTORY", 0x100000), ("O_NOFOLLOW", 0x200000), ("O_CLOEXEC", 0x400000)):
+                stack.enter_context(patch.object(M.os, name, value, create=True))
+            stack.enter_context(patch.object(M.os, "stat", side_effect=named))
+            stack.enter_context(patch.object(M.os, "open", side_effect=open_dir))
+            stack.enter_context(patch.object(M.os, "fstat", side_effect=lambda fd: copy.copy(nodes[handles[fd]])))
+            stack.enter_context(patch.object(M.os, "close", side_effect=lambda fd: handles.pop(fd)))
+            stack.enter_context(patch.object(M.os, "readlink", side_effect=AssertionError("No link targets may be read")))
+            for name in ("chmod", "chown", "umask"):
+                stack.enter_context(patch.object(M.os, name, side_effect=AssertionError("Diagnostics cannot modify permissions"), create=True))
+            yield nodes, opened
+        self.assertEqual(handles, {}, "Diagnostic directory FDs leaked")
+
+    def test_portable_ancestry_captures_exact_mode_uid_inode_chains_without_permission_changes(self):
+        with self.ancestry_diagnostic_fixture() as (nodes, opened):
+            before = copy.deepcopy(nodes)
+            result = M.portable_ancestry_metadata()
+            self.assertEqual(nodes, before)
+        self.assertEqual([row["path"] for row in result], list(nodes))
+        self.assertEqual(opened, list(nodes))
+        cache = next(row for row in result if row["path"].endswith("hub-portable-updates"))
+        self.assertEqual(cache["mode"], "0775")
+        self.assertEqual(set(cache), {"path", "present", "directory", "uid", "gid", "mode", "dev", "ino"})
+
+    def test_portable_ancestry_does_not_follow_missing_linked_or_replaced_ancestors(self):
+        for change in ("missing", "link", "replaced"):
+            with self.subTest(change=change), self.ancestry_diagnostic_fixture(change) as (_, opened):
+                if change == "replaced":
+                    with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                        M.portable_ancestry_metadata()
+                else:
+                    result = M.portable_ancestry_metadata()
+                    cache = next(row for row in result if row["path"].endswith("hub-portable-updates"))
+                    self.assertEqual(cache["unavailable"], "AncestorNotDirectory")
+                    self.assertFalse(any(path.endswith("hub-portable-updates") for path in opened))
+
+    def test_owned_process_umask_reads_only_bounded_status_and_rechecks_identity(self):
+        process = {"pid": 42, "startTime": "7", "uids": [M.UID] * 4}
+        for case in ("valid", "missing", "duplicate", "oversize", "reused", "replaced"):
+            raw = b"Name:\tDO-NOT-RETAIN\nUmask:\t0002\n"
+            if case == "missing": raw = b"Name:\tDO-NOT-RETAIN\n"
+            if case == "duplicate": raw += b"Umask:\t0022\n"
+            if case == "oversize": raw += b"x" * 16385
+            chunks = [raw[:4], raw[4:], b""]
+            info = SimpleNamespace(st_dev=1, st_ino=1, st_mode=stat.S_IFREG | 0o444, st_uid=M.UID, st_gid=M.UID,
+                                   st_nlink=1, st_size=0, st_mtime_ns=1, st_ctime_ns=1)
+            replacement = copy.copy(info); replacement.st_ino = 2
+            def open_status(path, flags):
+                self.assertEqual(path.as_posix(), "/proc/42/status")
+                self.assertEqual(flags, M.os.O_RDONLY | M.os.O_NOFOLLOW | M.os.O_NONBLOCK | M.os.O_CLOEXEC)
+                return 10000
+            with self.subTest(case=case), ExitStack() as stack:
+                for name, value in (("O_NOFOLLOW", 0x100000), ("O_NONBLOCK", 0x200000), ("O_CLOEXEC", 0x400000)):
+                    stack.enter_context(patch.object(M.os, name, value, create=True))
+                stack.enter_context(patch.object(M, "kernel_record", side_effect=[process, {**process, "startTime": "8"}] if case == "reused" else None, return_value=process))
+                stack.enter_context(patch.object(Path, "lstat", side_effect=[info, replacement] if case == "replaced" else None, return_value=info))
+                stack.enter_context(patch.object(M.os, "open", side_effect=open_status))
+                stack.enter_context(patch.object(M.os, "fstat", return_value=info))
+                def read_status(fd, limit):
+                    self.assertEqual(fd, 10000); self.assertLessEqual(limit, 16385)
+                    value = chunks.pop(0); part, rest = value[:limit], value[limit:]
+                    if rest: chunks.insert(0, rest)
+                    return part
+                stack.enter_context(patch.object(M.os, "read", side_effect=read_status))
+                closed = stack.enter_context(patch.object(M.os, "close"))
+                if case == "valid":
+                    result = M.owned_process_umask(process, None, None)
+                    self.assertEqual(result, {"pid": 42, "startTime": "7", "umask": "0002"})
+                    self.assertNotIn("DO-NOT-RETAIN", json.dumps(result))
+                else:
+                    with self.assertRaises(RuntimeError): M.owned_process_umask(process, None, None)
+                closed.assert_called_once_with(10000)
+
+    def test_portable_ancestry_diagnostic_is_independent_false_and_cannot_mask_failure(self):
+        with patch.object(M, "portable_ancestry_metadata", side_effect=PermissionError("DO-NOT-RETAIN")), \
+                patch.object(M, "owned_process_umask", return_value={"pid": 42, "startTime": "7", "umask": "0002"}), patch.object(M, "save", side_effect=FileExistsError):
+            result = M.capture_portable_ancestry("after-refusal", {}, None, None)
+        self.assertEqual(result["ancestryUnavailable"], "PermissionError")
+        self.assertEqual(result["process"]["umask"], "0002")
+        self.assertTrue(result["readOnly"]); self.assertFalse(result["qualified"])
+        self.assertTrue(all(result[name] is False for name in M.FALSE))
+        self.assertNotIn("DO-NOT-RETAIN", json.dumps(result))
+        with patch.object(M, "portable_ancestry_metadata", return_value=[]), patch.object(M, "owned_process_umask", side_effect=RuntimeError("secret")), patch.object(M, "save") as save:
+            result = M.capture_portable_ancestry("before-launch", {}, None, None)
+        self.assertEqual(result["processUnavailable"], "RuntimeError")
+        save.assert_called_once_with(M.BASE / "result/portable-ancestry-before-launch.json", result)
+
+    def test_portable_ancestry_capture_hooks_and_export_are_fixed_and_after_refusal_has_owned_root(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        session = ast.unparse(next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session"))
+        self.assertLess(session.index("capture_portable_ancestry('before-launch', parent, native, helper)"), session.index("bootstrap16("))
+        exporter = ast.unparse(next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "export_evidence"))
+        for name in ("before-launch", "after-refusal"):
+            self.assertIn("result/portable-ancestry-" + name + ".json", exporter)
+        surface = SimpleNamespace(record={"pid": 42}, native=object(), helper=object(), snapshot=lambda: ([], []))
+        with patch.object(M, "capture_portable_ancestry") as capture, patch.object(M, "phase_bitmap"), patch.object(M, "save"):
+            M.capture_bootstrap_failure(surface, [])
+        capture.assert_called_once_with("after-refusal", surface.record, surface.native, surface.helper)
+
+    @unittest.skipUnless(os.name == "posix", "Real directory FDs and proc status require Unix")
+    def test_unix_portable_ancestry_held_fd_capture_preserves_writable_fixture_mode_and_reads_own_umask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            cache = root / "opt/creator-polkit-fixture/result/home/data/CreatorHub/hub-portable-updates"
+            cache.mkdir(parents=True); cache.chmod(0o775)
+            original_open, original_stat = os.open, os.stat
+            def opened(name, flags, **kwargs):
+                return original_open(root if name == "/" else name, flags, **kwargs)
+            def named(name, **kwargs):
+                return original_stat(root if name == "/" else name, **kwargs)
+            with patch.object(M.os, "open", side_effect=opened), patch.object(M.os, "stat", side_effect=named):
+                result = M.portable_ancestry_metadata()
+            self.assertEqual(next(row for row in result if row["path"].endswith("hub-portable-updates"))["mode"], "0775")
+            self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o775)
+            process = {"pid": os.getpid(), "startTime": "unit", "uids": [os.getuid()] * 4}
+            with patch.object(M, "UID", os.getuid()), patch.object(M, "kernel_record", return_value=process):
+                self.assertRegex(M.owned_process_umask(process, None, None)["umask"], r"^[0-7]{4}$")
 
     def test_bootstrap_failure_capture_is_owned_bounded_and_independent_without_new_input(self):
         rows = [{"id": "native-support-status", "text": "Synthetic download refused", "showing": True}]
