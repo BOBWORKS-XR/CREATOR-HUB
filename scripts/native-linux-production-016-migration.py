@@ -75,6 +75,18 @@ TITLE = "Creator Hub - Development Preview"
 CONFIG = "config/creator-works-mcp/launcher-config.json"
 LEGACY = "config/banter-mcp/launcher-config.json"
 JOURNAL = "config/creator-works-mcp/hosted-operation-outcomes.json"
+JOURNAL_COMMANDS = frozenset((
+    "begin_ui_operation", "finish_ui_operation", "load_config", "save_config", "product_settings_status",
+    "review_product_settings", "review_convergence_server", "discover_unity_projects", "get_onboarding_status",
+    "add_project", "one_click_setup", "review_existing_client_connection", "review_existing_client_connections",
+    "pending_client_recovery", "recover_client_connection", "get_project_sdk_profile", "get_unity_extension_status",
+    "update_configured_unity_extensions", "update_codex_mcp_config", "update_claude_mcp_config",
+    "update_claude_desktop_mcp_config", "remove_claude_desktop_mcp_config", "update_antigravity_mcp_config",
+    "update_opencode_mcp_config", "remove_codex_mcp_config", "remove_claude_mcp_config", "remove_antigravity_mcp_config",
+    "remove_opencode_mcp_config", "install_unity_extension", "set_unity_custom_scripts", "set_unity_allow_all_tests",
+    "get_project_feedback_settings", "set_project_feedback_settings",
+))
+JOURNAL_OUTCOMES = frozenset(("accepted", "returned-ok", "returned-error", "unknown-acknowledged"))
 TERMS = "data/CreatorHub/consent/hub-usage-terms.json"
 MCP_VERSION, SETUP_VERSION = "2.7.7-1+hub.retention016.1", "0.3.7-1+hub.retention016.1"
 OLD_NODE = "/usr/lib/Creator Works MCP/server/runtime/node"
@@ -236,6 +248,48 @@ def journal_delta(previous, current, *, transferred=False):
     if not transferred:
         require([r["id"] for r in tail] == [3, 4], "New Root's two read operation IDs differ")
     return current
+
+
+def observed_journal_delta(previous, home, report, phase, *, transferred=False):
+    require(phase in ("first", "reopened"), "Finite journal observation phase required")
+    raw = read_file(home / JOURNAL, 65536, uid=UID)
+    capture = {"diagnosticOnly": True, "validationAuthority": False,
+               "file": {"size": len(raw), "sha256": digest(raw)}}
+    report.setdefault("operationJournals", {})[phase] = capture
+    current = P.parse(raw)
+
+    def public_name(value, allowed):
+        if type(value) is str and value in allowed:
+            return value
+        return {"redacted": True, **({"sha256": digest(value.encode("utf-8", "surrogatepass"))} if type(value) is str else {})}
+
+    def summary(value):
+        value = value if type(value) is dict else {}
+        revision, rows = value.get("revision"), value.get("records")
+        result = {"revision": revision if type(revision) is int and 0 <= revision <= 0xffffffff else None,
+                  "count": len(rows) if type(rows) is list else None, "records": [],
+                  "omittedRecords": max(0, len(rows) - 32) if type(rows) is list else 0}
+        for record in rows[:32] if type(rows) is list else []:
+            if type(record) is not dict:
+                result["records"].append({"shapeValid": False})
+                continue
+            session, identifier = record.get("session"), record.get("id")
+            result["records"].append({
+                "shapeValid": set(record) == {"session", "id", "command", "outcome"},
+                "session": session if type(session) is str and re.fullmatch(r"[a-f0-9]{64}", session) else None,
+                "id": identifier if type(identifier) is int and 0 < identifier <= 9_007_199_254_740_991 else None,
+                "command": public_name(record.get("command"), JOURNAL_COMMANDS),
+                "outcome": public_name(record.get("outcome"), JOURNAL_OUTCOMES),
+            })
+        return result
+
+    old = previous.get("records") if type(previous) is dict else None
+    new = current.get("records") if type(current) is dict else None
+    lists = type(old) is list and type(new) is list
+    capture.update(previous=summary(previous), current=summary(current),
+                   prefixEqual=new[:len(old)] == old if lists else None,
+                   appendCount=len(new) - len(old) if lists else None)
+    return journal_delta(previous, current, transferred=transferred)
 
 
 def retention_state(scenario):
@@ -2302,7 +2356,7 @@ def run_session(env):
                          lambda: session.review_connections(home, before, binding))
         report["authorization"] = authorizer.records
         finish_ui(session, scenario)
-        current = journal_delta(baseline, journal(home), transferred=scenario != SCENARIOS[0])
+        current = observed_journal_delta(baseline, home, report, "first", transferred=scenario != SCENARIOS[0])
         preserved(home, before, transferred=scenario != SCENARIOS[0], binding=binding); batch_outcome(home, scenario)
         installed(binding, retention_state(scenario))
         report["oldRuntimeAfterMigration"] = old_sdk.check()
@@ -2315,7 +2369,7 @@ def run_session(env):
         require(read_file(home / TERMS) == terms and session.owned["pid"] != report["first"]["root"]["pid"], "Normal reopen or terms retention failed")
         pages.wait(lambda: session.d.read("#usage-terms-dialog", "attribute/open") is None)
         finish_ui(session, scenario, reopened=True)
-        journal_delta(current, journal(home))
+        observed_journal_delta(current, home, report, "reopened")
         for name, raw in expected_after.items():
             require(read_file(home / name) == raw, "Reopen repeated migration or changed settings: " + name)
         preserved(home, before, transferred=scenario != SCENARIOS[0], binding=binding); batch_outcome(home, scenario)

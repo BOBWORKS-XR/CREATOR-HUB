@@ -1769,6 +1769,98 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(p.session.call_count, 30)
         password.get_editable_text_iface.return_value.set_text_contents.assert_called_once(); action.do_action.assert_called_once_with(0)
 
+    def test_observed_journal_delta_retains_both_refusals_in_existing_failure_report_before_assertion(self):
+        first = {"revision": 1, "records": records("a", ["load_config", "discover_unity_projects"], [3, 4])}
+        for phase, previous in (("first", {"revision": 1, "records": []}), ("reopened", first)):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary).resolve()
+                report, raw = {"scenarioPassed": False, **M.FLAGS}, json.dumps(previous).encode()
+                original = M.journal_delta
+                def check(old, current, **kwargs):
+                    captured = report["operationJournals"][phase]
+                    self.assertEqual(captured["file"], {"size": len(raw), "sha256": M.digest(raw)})
+                    self.assertEqual(captured["previous"]["count"], len(previous["records"]))
+                    self.assertEqual(captured["current"]["count"], len(previous["records"]))
+                    self.assertTrue(captured["prefixEqual"]); self.assertEqual(captured["appendCount"], 0)
+                    return original(old, current, **kwargs)
+                with patch.object(M, "read_file", return_value=raw) as read, patch.object(M, "journal_delta", side_effect=check):
+                    with self.assertRaisesRegex(RuntimeError, "Unexpected operation journal append count"):
+                        try:
+                            M.observed_journal_delta(previous, home, report, phase)
+                        finally:
+                            M.save(home / "report.json", report)
+                read.assert_called_once_with(home / M.JOURNAL, 65536, uid=M.UID)
+                self.assertEqual(json.loads((home / "report.json").read_bytes()), report)
+                self.assertFalse(report["scenarioPassed"])
+                self.assertTrue(all(report[key] is False for key in M.FLAGS))
+
+    def test_observed_journal_delta_redacts_unknown_metadata_and_bounds_records_without_exporting_payloads(self):
+        previous = {"revision": 1, "records": []}
+        rows = records("a", ["save_config"] * 40, list(range(1, 41)))
+        rows[0].update(outcome="accepted", args={"privateArgument": "argument-secret"}, result="result-secret")
+        rows[1].update(session="session-secret", id=True, command="command-secret", outcome="outcome-secret")
+        rows[2] = "record-secret"
+        rows[3].update(id=9_007_199_254_740_992)
+        current = {"revision": 1, "records": rows, "client-secret": {"tls": "tls-secret"}}
+        raw, report = json.dumps(current).encode(), {}
+        with patch.object(M, "read_file", return_value=raw):
+            with self.assertRaises(RuntimeError):
+                M.observed_journal_delta(previous, Path("/synthetic/home"), report, "first")
+        captured = report["operationJournals"]["first"]
+        self.assertEqual((captured["current"]["count"], len(captured["current"]["records"]), captured["current"]["omittedRecords"]), (40, 32, 8))
+        self.assertEqual(captured["appendCount"], 40); self.assertTrue(captured["prefixEqual"])
+        known, unknown, invalid, oversized = captured["current"]["records"][:4]
+        self.assertEqual((known["command"], known["outcome"], known["session"], known["id"]), ("save_config", "accepted", "a" * 64, 1))
+        self.assertFalse(known["shapeValid"]); self.assertEqual(invalid, {"shapeValid": False})
+        self.assertIsNone(unknown["session"]); self.assertIsNone(unknown["id"]); self.assertIsNone(oversized["id"])
+        for key in ("command", "outcome"):
+            self.assertEqual(unknown[key], {"redacted": True, "sha256": M.digest((key + "-secret").encode())})
+        encoded = json.dumps(report)
+        for secret in ("argument-secret", "result-secret", "session-secret", "command-secret", "outcome-secret", "record-secret", "client-secret", "tls-secret", "privateArgument"):
+            self.assertNotIn(secret, encoded)
+        self.assertLess(len(encoded), 32768); self.assertTrue(captured["diagnosticOnly"])
+        self.assertFalse(captured["validationAuthority"])
+
+    def test_observed_journal_delta_keeps_exact_success_and_does_not_swallow_any_oracle_refusal(self):
+        previous = {"revision": 1, "records": records("a", ["load_config", "discover_unity_projects"], [3, 4])}
+        good = {"revision": 1, "records": previous["records"] + records("b", ["load_config", "discover_unity_projects"], [3, 4])}
+        cases = [good, previous, {"revision": 1, "records": good["records"] + records("b", ["save_config"], [5])}]
+        for key, value in (("id", 5), ("command", "save_config"), ("outcome", "returned-error"), ("session", "a" * 64)):
+            bad = copy.deepcopy(good); bad["records"][-1][key] = value; cases.append(bad)
+        bad = copy.deepcopy(good); bad["records"][0]["outcome"] = "returned-error"; cases.append(bad)
+        for index, current in enumerate(cases):
+            with self.subTest(index=index), patch.object(M, "read_file", return_value=json.dumps(current).encode()):
+                report = {}
+                if index == 0:
+                    self.assertEqual(M.observed_journal_delta(previous, Path("/synthetic/home"), report, "reopened"), good)
+                else:
+                    with self.assertRaises(RuntimeError) as expected: M.journal_delta(previous, current)
+                    with self.assertRaises(RuntimeError) as actual: M.observed_journal_delta(previous, Path("/synthetic/home"), report, "reopened")
+                    self.assertEqual(str(actual.exception), str(expected.exception))
+                self.assertEqual(report["operationJournals"]["reopened"]["prefixEqual"], current["records"][:len(previous["records"])] == previous["records"])
+
+    def test_journal_diagnostic_allowlists_are_only_the_typed_public_command_and_outcome_names(self):
+        source = HERE.parent / "modules/mcp/launcher/src-tauri/src"
+        commands = (source / "hosted_commands.rs").read_text(encoding="utf-8").split("pub const COMMANDS: &[&str] = &[", 1)[1].split("];", 1)[0]
+        self.assertEqual(M.JOURNAL_COMMANDS, frozenset(re.findall(r'"([a-z_]+)"', commands)))
+        outcomes = (source / "hosted_journal.rs").read_text(encoding="utf-8").split("enum Outcome {", 1)[1].split("}", 1)[0]
+        expected = {re.sub(r"(?<!^)([A-Z])", r"-\1", value).lower() for value in re.findall(r"\b([A-Z][A-Za-z]+),", outcomes)}
+        self.assertEqual(M.JOURNAL_OUTCOMES, frozenset(expected))
+
+    def test_run_session_captures_both_deltas_inside_the_existing_failure_report_finally(self):
+        tree = ast.parse((HERE / "native-linux-production-016-migration.py").read_text(encoding="utf-8"))
+        run = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_session")
+        owner = next(node for node in run.body if isinstance(node, ast.Try) and node.finalbody)
+        calls = [node for node in ast.walk(owner) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "observed_journal_delta"]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([node.args[3].value for node in calls], ["first", "reopened"])
+        self.assertEqual([ast.unparse(node.args[0]) for node in calls], ["baseline", "current"])
+        self.assertTrue(all(ast.unparse(node.args[1]) == "home" and ast.unparse(node.args[2]) == "report" for node in calls))
+        self.assertFalse(any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "journal_delta" for node in ast.walk(run)))
+        saved = [node for statement in owner.finalbody for node in ast.walk(statement)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "save"]
+        self.assertEqual([(ast.unparse(node.args[0]), ast.unparse(node.args[1])) for node in saved], [("root / 'report.json'", "report")])
+
     def test_guide_cancel_allows_only_two_completed_reads_per_new_root_and_preserves_prefix(self):
         empty = {"revision": 1, "records": []}
         first = {"revision": 1, "records": records("a", ["load_config", "discover_unity_projects"], [3, 4])}
