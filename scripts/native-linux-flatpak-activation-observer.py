@@ -1175,15 +1175,15 @@ class InvocationImage:
     """Held fixed system package image, never a request-supplied executable."""
     def __init__(self, kind, budget):
         _foreign_stage = 'image-kind'
-        require(kind in ('python', 'sudo'))
+        require(kind in ('python', 'sudo', 'fusermount3'))
         self.kind, self.budget, self.fd, self.parents = kind, budget, None, []
-        self.alias = Path('/usr/bin/python3' if kind == 'python' else '/usr/bin/sudo')
+        self.alias = Path({'python': '/usr/bin/python3', 'sudo': '/usr/bin/sudo', 'fusermount3': '/usr/bin/fusermount3'}[kind])
         _foreign_stage = 'image-alias'
         self.alias_identity = ProxyAssociationProc.stamp(self.alias.lstat())
         require(self.alias_identity[3] == self.alias_identity[4] == 0)
         _foreign_stage = 'image-path'
         self.path = self.alias.resolve(strict=True)
-        require(self.path.parent == Path('/usr/bin') and (self.path == self.alias if kind == 'sudo'
+        require(self.path.parent == Path('/usr/bin') and (self.path == self.alias if kind != 'python'
                 else re.fullmatch(r'python3\.[0-9]{1,2}', self.path.name)))
         try:
             parent = None
@@ -1225,7 +1225,7 @@ class InvocationImage:
         _foreign_stage = 'image-file'
         info = os.fstat(self.fd)
         require(stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0 and info.st_nlink >= 1
-                and stat.S_IMODE(info.st_mode) == (0o4755 if self.kind == 'sudo' else 0o755)
+                and stat.S_IMODE(info.st_mode) == (0o755 if self.kind == 'python' else 0o4755)
                 and 0 < info.st_size <= 64 * 1024**2 and ProxyAssociationProc.stamp(info) == self.identity
                 == (_f_named_image := ProxyAssociationProc.stamp(os.stat(self.path.name, dir_fd=self.parents[-1][2], follow_symlinks=False))))
 
@@ -1307,6 +1307,7 @@ class InvocationChain:
                     uids=[int(uid) for uid in ids[0]], executable=executable)
 
     def retain(self, pid, kind, *, caller):
+        require(kind in ('python', 'sudo'))
         require(pid not in self.held and type(pid) is int and 1 < pid < 2**31)
         hop = probe_hop_detail(pid); hop['expectedKind'] = kind; self.detail['hops'].append(hop)
         held = self.held[pid] = dict(fds=[], hop=hop, kind=kind, caller=caller)
@@ -1392,14 +1393,15 @@ class InvocationChain:
 
 
 class ForeignSudoObservations:
-    """Observed inventory rows only: never invocation members, proxy candidates or input authority."""
+    """Fixed sudo/FUSE inventory rows only: never invocation members, proxy candidates or input authority."""
     MAX_ROWS = 4
 
     def __init__(self, invocation, budget):
         self.invocation, self.budget = invocation, budget
-        self.held, self.image, self.closed = {}, None, False
+        self.held, self.images, self.image, self.closed = {}, {}, None, False
 
     def identity(self, pid, held):
+        self.image = self.images[held['kind']]
         _foreign_stage = 'budget-before'
         self.budget()
         _foreign_stage = 'live-before'
@@ -1456,9 +1458,15 @@ class ForeignSudoObservations:
             _foreign_stage = 'proc-type'
             info = os.fstat(held['directory']); require(stat.S_ISDIR(info.st_mode))
             held['proc'] = ProxyAssociationProc.stamp(info)
-            if self.image is None:
-                _foreign_stage = 'protected-image'
-                self.image = InvocationImage('sudo', self.budget)
+            _foreign_stage = 'protected-image'
+            self.image = None
+            _f_executable = os.readlink('exe', dir_fd=held['directory'])
+            kinds = {'/usr/bin/sudo': 'sudo', '/usr/bin/fusermount3': 'fusermount3'}
+            require((_f_executable_match := _f_executable in kinds))
+            kind = held['kind'] = kinds[_f_executable]
+            if kind not in self.images:
+                self.images[kind] = InvocationImage(kind, self.budget)
+            self.image = self.images[kind]
             _foreign_stage = 'kernel-open'
             held['kernel'] = os.open('exe', os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=held['directory'])
             held['fds'].append(held['kernel'])
@@ -1471,14 +1479,16 @@ class ForeignSudoObservations:
     def recheck(self):
         _foreign_stage = 'budget-before'
         self.budget(); require(not self.closed)
-        if self.image is not None:
+        for image in self.images.values():
+            self.image = image
             _foreign_stage = 'image-before'
             self.image.snapshot()
         for pid, held in self.held.items():
             _foreign_stage = 'row-recheck'
             require((_f_unheld_invocation := pid not in self.invocation.held)
                     and (_f_row_match := (_f_current := self.identity(pid, held)) == held['row']))
-        if self.image is not None:
+        for image in self.images.values():
+            self.image = image
             _foreign_stage = 'image-after'
             self.image.snapshot()
         _foreign_stage = 'budget-after'
@@ -1493,12 +1503,13 @@ class ForeignSudoObservations:
             for fd in reversed(held['fds']):
                 try: os.close(fd)
                 except Exception as error: failure = failure or error
-        if self.image is not None:
+        for image in self.images.values():
+            self.image = image
             try: self.image.close()
             except Exception as error: failure = failure or error
         if failure is not None:
             capture_foreign_failure(failure)
-        self.held, self.image = {}, None
+        self.held, self.images, self.image = {}, {}, None
         if failure is not None:
             failure.invocation_cleanup_failed = True
             raise failure

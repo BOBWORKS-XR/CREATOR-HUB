@@ -756,18 +756,24 @@ class MixedPostFailureTests(unittest.TestCase):
 
 class ForeignSudoTests(unittest.TestCase):
     @contextmanager
-    def fixture(self):
+    def fixture(self, kind='sudo'):
         caller = dict(pid=2490, parentPid=2484, startTime='4537', uids=[1001] * 4, executable='/usr/bin/python3.10')
-        record = dict(pid=1629, parentPid=1616, startTime='1515', uids=[1001, 0, 0, 0], executable='/usr/bin/sudo', state='S')
+        record = dict(pid=1629, parentPid=1616, startTime='1515', uids=[1001, 0, 0, 0], executable='/usr/bin/' + kind, state='S')
         state = SimpleNamespace(rows={1629: record}, exited=set(), replaced=set(), proc_replaced=set(), missing=set(),
-            reads=[], links=[], closes=[], scans=0, clock=99, image_bad=False, close_bad=False, on_scan=None)
-        system = invocation_stat(4887, stat.S_IFREG | 0o4755, 232416)
+            reads=[], links=[], closes=[], scans=0, clock=99, image_bad=False, close_bad=False, on_scan=None,
+            kernel_kinds={1629: kind}, fd_rows={})
+        systems = {'sudo': invocation_stat(4887, stat.S_IFREG | 0o4755, 232416),
+                   'fusermount3': invocation_stat(4888, stat.S_IFREG | 0o4755, 35128)}
         directory = invocation_stat(8726, stat.S_IFDIR | 0o555, 0)
         def budget(): M.require(state.clock < 100)
-        def snapshot():
-            budget(); M.require(not state.image_bad); return '5b0e68c5523dff0c71aec912775d66fe8bc885f4778978489b2adc04c51ea715'
-        image = SimpleNamespace(path='/usr/bin/sudo', identity=M.ProxyAssociationProc.stamp(system),
-            digest=snapshot(), snapshot=Mock(side_effect=snapshot), close=Mock())
+        images = {}
+        for image_kind, system in systems.items():
+            def snapshot(image_kind=image_kind):
+                budget(); M.require(not state.image_bad)
+                return ('5b0e68c5523dff0c71aec912775d66fe8bc885f4778978489b2adc04c51ea715'
+                        if image_kind == 'sudo' else 'f' * 64)
+            images[image_kind] = SimpleNamespace(path='/usr/bin/' + image_kind, identity=M.ProxyAssociationProc.stamp(system),
+                digest=snapshot(), snapshot=Mock(side_effect=snapshot), close=Mock())
         owned = {2492: dict(pid=2492, parentPid=2491, startTime='4546', uids=[0] * 4, executable='/usr/bin/python3.10', state='R'),
                  2491: dict(pid=2491, parentPid=2490, startTime='4545', uids=[1001, 0, 0, 0], executable='/usr/bin/sudo', state='S'),
                  2490: {**caller, 'state': 'S'}}
@@ -777,15 +783,20 @@ class ForeignSudoTests(unittest.TestCase):
         invocation.mixed_process = Mock(side_effect=lambda pid, ids: chain_class.mixed_process(invocation, pid, ids))
         invocation.receipt = Mock(return_value=[{**{k: owned[pid][k] for k in ('pid', 'parentPid', 'startTime', 'uids', 'state')},
             'executableKind': kind, 'imageSha256': ('a' if kind == 'python' else 'b') * 64} for pid, kind in ((2492, 'python'), (2491, 'sudo'))])
-        state.invocation, state.caller, state.image, state.budget = invocation, caller, image, budget
+        state.invocation, state.caller, state.image, state.budget = invocation, caller, images[kind], budget
+        state.images = images
         def opened(name, flags, **kw):
-            if name == 'exe': return kw['dir_fd'] + 10000
-            self.assertTrue(str(name).startswith('/proc/')); return 10000 + int(str(name).rsplit('/', 1)[1])
+            if name == 'exe':
+                pid = state.fd_rows[kw['dir_fd']][0]; fd = 20000 + pid
+                state.fd_rows[fd] = (pid, True); return fd
+            self.assertTrue(str(name).startswith('/proc/'))
+            pid = int(str(name).rsplit('/', 1)[1]); fd = 10000 + pid
+            state.fd_rows[fd] = (pid, False); return fd
         def fstat(fd):
-            pid = fd - (20000 if fd >= 20000 else 10000)
+            pid, kernel = state.fd_rows[fd]
             if pid in state.missing: raise FileNotFoundError('PRIVATE_PROC')
-            value = system if fd >= 20000 else directory
-            return invocation_stat(999, value.st_mode, value.st_size) if fd >= 20000 and pid in state.replaced else value
+            value = systems[state.kernel_kinds.get(pid, kind)] if kernel else directory
+            return invocation_stat(999, value.st_mode, value.st_size) if kernel and pid in state.replaced else value
         def named(name, **kw):
             if name == 'exe': return fstat(kw['dir_fd'] + 10000)
             pid = int(str(name).rsplit('/', 1)[1])
@@ -811,7 +822,7 @@ class ForeignSudoTests(unittest.TestCase):
         with ExitStack() as stack:
             for name in ('O_DIRECTORY', 'O_NOFOLLOW', 'O_CLOEXEC', 'O_NONBLOCK'):
                 stack.enter_context(patch.object(M.os, name, 0, create=True))
-            state.factory = stack.enter_context(patch.object(M, 'InvocationImage', return_value=image))
+            state.factory = stack.enter_context(patch.object(M, 'InvocationImage', side_effect=lambda image_kind, budget: images[image_kind]))
             state.pidfd = stack.enter_context(patch.object(M.os, 'pidfd_open', side_effect=lambda pid: 30000 + pid, create=True))
             state.opens = stack.enter_context(patch.object(M.os, 'open', side_effect=opened))
             stack.enter_context(patch.object(M.os, 'fstat', side_effect=fstat))
@@ -826,6 +837,141 @@ class ForeignSudoTests(unittest.TestCase):
             stack.enter_context(patch.object(M, 'root_uid_tuple', side_effect=lambda pid: owned[pid]['uids'] if pid in owned else state.rows[pid]['uids']))
             stack.enter_context(patch.object(M, 'root_process', side_effect=lambda pid: copy.deepcopy(caller if pid == 2490 else {k: v for k, v in state.rows[pid].items() if k != 'state'})))
             yield state
+
+    def test_recorded_fusermount3_is_counted_but_never_invocation_proxy_or_input_authority(self):
+        with self.fixture('fusermount3') as state:
+            state.rows = {12585: dict(pid=12585, parentPid=12580, startTime='14649', state='S',
+                uids=[1001, 0, 0, 0], executable='/usr/bin/fusermount3'),
+                40: dict(pid=40, parentPid=1, startTime='40', state='S', uids=[1001] * 4, executable='/usr/bin/xdg-dbus-proxy')}
+            self.assertEqual(M.hashlib.sha256(state.rows[12585]['executable'].encode()).hexdigest(),
+                '8d282fa1bb15ebecf8211d9592a3daeba380ac27fd9264f98b9ca0fad41fe8c1')
+            owned = copy.deepcopy(state.invocation.held)
+            with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                candidates, rows = M.complete_uid_inventory(state.budget, invocation=state.invocation, foreign=foreign)
+                self.assertEqual(candidates, [40]); self.assertIn(12585, rows); self.assertEqual(state.scans, 2)
+                self.assertEqual(rows[12585], {k: v for k, v in state.rows[12585].items() if k != 'state'})
+                self.assertEqual(state.invocation.held, owned); self.assertEqual(set(foreign.held), {12585})
+                state.factory.assert_called_once_with('fusermount3', state.budget)
+                with self.assertRaises(ValueError): state.invocation.mixed_process(12585, [1001, 0, 0, 0])
+            state.image.close.assert_called_once()
+        state = RootAssociationTests().fixture()
+        state.data['proxy']['executable'] = '/usr/bin/fusermount3'
+        with self.assertRaises(ValueError): state.build_associated()
+
+    def test_sudo_and_fuse_share_the_same_cap_and_hold_distinct_protected_images(self):
+        with self.fixture() as state:
+            state.rows[12585] = {**state.rows[1629], 'pid': 12585, 'executable': '/usr/bin/fusermount3'}
+            state.kernel_kinds[12585] = 'fusermount3'
+            with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                candidates, rows = M.complete_uid_inventory(state.budget, invocation=state.invocation, foreign=foreign)
+                self.assertEqual(candidates, []); self.assertEqual(set(rows), {2490, 2491, 1629, 12585})
+                self.assertEqual(set(foreign.held), {1629, 12585}); self.assertEqual(foreign.MAX_ROWS, 4)
+                self.assertEqual([call.args[0] for call in state.factory.call_args_list], ['sudo', 'fusermount3'])
+            for image in state.images.values(): image.close.assert_called_once()
+
+    def test_combined_sudo_fuse_cap_cannot_be_doubled_and_closes_both_images(self):
+        with self.fixture() as state:
+            with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                for pid, kind in ((1629, 'sudo'), (1630, 'fusermount3'), (1631, 'sudo'), (1632, 'fusermount3')):
+                    state.rows[pid] = {**state.rows[1629], 'pid': pid, 'executable': '/usr/bin/' + kind}
+                    state.kernel_kinds[pid] = kind
+                    foreign.observe(pid, [1001, 0, 0, 0])
+                opened = state.opens.call_count
+                with self.assertRaises(ValueError): foreign.observe(1633, [1001, 0, 0, 0])
+                self.assertEqual(state.opens.call_count, opened); self.assertEqual(len(foreign.held), 4)
+            self.assertEqual(len(state.closes), 12)
+            for image in state.images.values(): image.close.assert_called_once()
+
+    def test_fuse_image_cleanup_uncertainty_keeps_the_original_error_and_closes_sudo(self):
+        for original in (None, ValueError('PRIVATE_ORIGINAL')):
+            with self.subTest(original=original), self.fixture() as state:
+                state.rows[1630] = {**state.rows[1629], 'pid': 1630, 'executable': '/usr/bin/fusermount3'}
+                state.kernel_kinds[1630] = 'fusermount3'
+                state.images['fusermount3'].close.side_effect = OSError('PRIVATE_CLOSE')
+                with self.assertRaises(OSError if original is None else ValueError) as caught:
+                    with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                        foreign.observe(1629, [1001, 0, 0, 0]); foreign.observe(1630, [1001, 0, 0, 0])
+                        if original is not None: raise original
+                if original is not None: self.assertIs(caught.exception, original)
+                self.assertTrue(caught.exception.invocation_cleanup_failed)
+                detail = getattr(caught.exception, 'proxy_foreign_diagnostic', None)
+                if detail is not None: self.assertIsNot(detail['cleanupConfirmed'], True)
+                self.assertEqual(len(state.closes), 6)
+                for image in state.images.values(): image.close.assert_called_once()
+
+    def test_fuse_path_cannot_substitute_sudo_or_an_unverified_kernel_image(self):
+        for failure in ('sudo-image', 'replaced', 'selection-race'):
+            with self.subTest(failure=failure), self.fixture('fusermount3') as state:
+                if failure == 'sudo-image': state.kernel_kinds[1629] = 'sudo'
+                if failure == 'replaced': state.replaced.add(1629)
+                linked = M.os.readlink.side_effect
+                calls = []
+                def changed(name, **kw):
+                    calls.append(name)
+                    return '/usr/bin/sudo' if len(calls) > 1 else linked(name, **kw)
+                with patch.object(M.os, 'readlink', side_effect=changed) if failure == 'selection-race' else ExitStack():
+                    with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                        with self.assertRaises(ValueError): foreign.observe(1629, [1001, 0, 0, 0])
+                state.image.close.assert_called_once(); state.invocation.mixed_process.assert_not_called()
+
+    def test_fuse_second_scan_and_final_recheck_refuse_drift_without_skipping(self):
+        for failure in ('uid', 'parent', 'start', 'path', 'kernel', 'proc-name', 'exit', 'gone', 'zombie', 'package', 'deadline'):
+            for boundary in ('scan-two', 'final-recheck'):
+                with self.subTest(failure=failure, boundary=boundary), self.fixture('fusermount3') as state:
+                    def change():
+                        if failure == 'uid': state.rows[1629]['uids'] = [1001] * 4
+                        if failure == 'parent': state.rows[1629]['parentPid'] += 1
+                        if failure == 'start': state.rows[1629]['startTime'] = '999'
+                        if failure == 'path': state.rows[1629]['executable'] = '/usr/bin/sudo'
+                        if failure == 'kernel': state.replaced.add(1629)
+                        if failure == 'proc-name': state.proc_replaced.add(1629)
+                        if failure == 'exit': state.exited.add(1629)
+                        if failure == 'gone': state.missing.add(1629)
+                        if failure == 'zombie': state.rows[1629]['state'] = 'Z'
+                        if failure == 'package': state.image_bad = True
+                        if failure == 'deadline': state.clock = 100
+                    with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                        if boundary == 'scan-two':
+                            state.on_scan = lambda number: change() if number == 2 else None
+                            with self.assertRaises((ValueError, FileNotFoundError)):
+                                M.complete_uid_inventory(state.budget, invocation=state.invocation, foreign=foreign)
+                        else:
+                            M.complete_uid_inventory(state.budget, invocation=state.invocation, foreign=foreign)
+                            change()
+                            with self.assertRaises((ValueError, FileNotFoundError)): foreign.recheck()
+                    state.image.close.assert_called_once()
+
+    def test_fixed_foreign_image_selection_never_opens_an_unknown_package_or_alias(self):
+        for path in ('/usr/bin/false', '/bin/fusermount3', '/usr/bin/fusermount3 (deleted)', '/PRIVATE/fusermount3'):
+            with self.subTest(path=path), self.fixture('fusermount3') as state:
+                state.rows[1629]['executable'] = path
+                with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                    with self.assertRaises(ValueError): foreign.observe(1629, [1001, 0, 0, 0])
+                state.factory.assert_not_called()
+                self.assertEqual(state.closes, [11629, 31629])
+
+    def test_fuse_does_not_expand_invocation_kinds_or_start_sender_authority(self):
+        with invocation_fixture() as state:
+            chain = M.InvocationChain.__new__(M.InvocationChain)
+            with self.assertRaises(ValueError): chain.retain(1629, 'fusermount3', caller=False)
+            self.assertEqual(state.reads, []); self.assertEqual(state.events, [])
+        state = RootAssociationTests().fixture(); baseline = state.build_associated(); baseline.begin_input()
+        try:
+            value = baseline.observe(':1.40', lambda name: dict(name=name, pid=12585, uid=1001), budget=lambda: None)
+            self.assertFalse(value['stable']); self.assertFalse(value['inputPermitted']); self.assertFalse(value['qualified'])
+            self.assertEqual(value['failureStage'], 'live-sender-credentials')
+        finally: baseline.close()
+
+    def test_fuse_probe_receipt_remains_non_authorizing_and_excludes_foreign_invocation(self):
+        with self.fixture('fusermount3') as state, patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'), patch.object(M, 'InvocationChain') as chain:
+            chain.return_value.__enter__.return_value = state.invocation
+            request = dict(schemaVersion=1, operation=M.PROBE_OPERATION, harnessSource='a' * 40, codeSha256='b' * 64,
+                sequence=1, nonce='c' * 64, expiresNs=100, caller=state.caller)
+            value = M.inventory_probe(request, clock=lambda: state.clock)
+            M.validate_probe(value, request)
+            self.assertEqual(value['candidateCount'], 0); self.assertEqual(value['scopedProcessCount'], 3)
+            self.assertEqual([r['pid'] for r in value['invocation']], [2492, 2491])
+            for key in ('inputPermitted', 'authorityGranted', 'releaseReady'): self.assertIs(value[key], False)
 
     def test_recorded_foreign_sudo_is_fully_counted_but_never_invocation_candidate_or_authority(self):
         with self.fixture() as state:
@@ -965,26 +1111,30 @@ class ForeignSudoTests(unittest.TestCase):
 
     def test_real_fixed_image_constructor_and_full_hash_checks_are_used_without_foreign_content_reads(self):
         image_class = M.InvocationImage
-        with self.fixture() as state:
-            proc_open, proc_fstat, proc_stat, proc_close = M.os.open.side_effect, M.os.fstat.side_effect, M.os.stat.side_effect, M.os.close.side_effect
-            with InvocationImageTests().fixture() as package:
-                package_open, package_fstat, package_stat, package_read = M.os.open.side_effect, M.os.fstat.side_effect, M.os.stat.side_effect, M.os.pread.side_effect
-                def opened(name, flags, **kw):
-                    return (proc_open if name == 'exe' or str(name).startswith('/proc/') else package_open)(name, flags, **kw)
-                def fstat(fd): return package.file if fd == 21629 else proc_fstat(fd) if fd >= 10000 else package_fstat(fd)
-                def named(name, **kw):
-                    return package.file if name == 'exe' else proc_stat(name, **kw) if str(name).startswith('/proc/') else package_stat(name, **kw)
-                def read(fd, count, offset): self.assertEqual(fd, 4); return package_read(fd, count, offset)
-                package.close.side_effect = lambda fd: proc_close(fd) if fd >= 10000 else None
-                with patch.object(M, 'InvocationImage', image_class), patch.object(M.os, 'open', side_effect=opened), \
-                        patch.object(M.os, 'fstat', side_effect=fstat), patch.object(M.os, 'stat', side_effect=named), \
-                        patch.object(M.os, 'pread', side_effect=read):
-                    with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
-                        foreign.observe(1629, [1001, 0, 0, 0]); foreign.recheck()
-                        self.assertIsInstance(foreign.image, image_class)
-                        self.assertEqual(foreign.image.digest, M.hashlib.sha256(package.raw).hexdigest())
-                self.assertGreater(len(package.reads), 2); self.assertEqual(state.closes, [21629, 11629, 31629])
-                self.assertEqual([c.args[0] for c in package.close.call_args_list], [21629, 11629, 31629, 4, 3, 2, 1])
+        for kind in ('sudo', 'fusermount3'):
+            with self.subTest(kind=kind), self.fixture(kind) as state:
+                self.real_fixed_foreign_image(state, kind, image_class)
+
+    def real_fixed_foreign_image(self, state, kind, image_class):
+        proc_open, proc_fstat, proc_stat, proc_close = M.os.open.side_effect, M.os.fstat.side_effect, M.os.stat.side_effect, M.os.close.side_effect
+        with InvocationImageTests().fixture(kind) as package:
+            package_open, package_fstat, package_stat, package_read = M.os.open.side_effect, M.os.fstat.side_effect, M.os.stat.side_effect, M.os.pread.side_effect
+            def opened(name, flags, **kw):
+                return (proc_open if name == 'exe' or str(name).startswith('/proc/') else package_open)(name, flags, **kw)
+            def fstat(fd): return package.file if fd == 21629 else proc_fstat(fd) if fd >= 10000 else package_fstat(fd)
+            def named(name, **kw):
+                return package.file if name == 'exe' else proc_stat(name, **kw) if str(name).startswith('/proc/') else package_stat(name, **kw)
+            def read(fd, count, offset): self.assertEqual(fd, 4); return package_read(fd, count, offset)
+            package.close.side_effect = lambda fd: proc_close(fd) if fd >= 10000 else None
+            with patch.object(M, 'InvocationImage', image_class), patch.object(M.os, 'open', side_effect=opened), \
+                    patch.object(M.os, 'fstat', side_effect=fstat), patch.object(M.os, 'stat', side_effect=named), \
+                    patch.object(M.os, 'pread', side_effect=read):
+                with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                    foreign.observe(1629, [1001, 0, 0, 0]); foreign.recheck()
+                    self.assertIsInstance(foreign.image, image_class)
+                    self.assertEqual(foreign.image.digest, M.hashlib.sha256(package.raw).hexdigest())
+            self.assertGreater(len(package.reads), 2); self.assertEqual(state.closes, [21629, 11629, 31629])
+            self.assertEqual([c.args[0] for c in package.close.call_args_list], [21629, 11629, 31629, 4, 3, 2, 1])
 
     def test_no_retry_signals_command_environment_or_candidate_content_reads_in_foreign_holder(self):
         source = Path(M.__file__).read_text(); tree = ast.parse(source)
@@ -993,7 +1143,8 @@ class ForeignSudoTests(unittest.TestCase):
         self.assertFalse(any(isinstance(n, ast.While) for n in ast.walk(node)))
         for forbidden in ('os.read(', 'os.pread(', 'subprocess', 'cmdline', 'environ', 'sleep(', 'kill(', '.retain(', 'mixed_post_failure('):
             self.assertNotIn(forbidden, text)
-        self.assertIn("InvocationImage('sudo', self.budget)", text)
+        self.assertIn("kinds = {'/usr/bin/sudo': 'sudo', '/usr/bin/fusermount3': 'fusermount3'}", text)
+        self.assertIn("InvocationImage(kind, self.budget)", text)
 
     def test_foreign_cap_diagnostic_has_exact_count_member_uid_and_no_unreached_image_claim(self):
         with self.fixture() as state:
@@ -1013,7 +1164,7 @@ class ForeignSudoTests(unittest.TestCase):
             self.assertTrue(Path(M.__file__).read_text().splitlines()[detail['line'] - 1].strip().startswith('require((_f_count'))
 
     def test_foreign_diagnostic_distinguishes_kernel_proc_live_and_process_failures_without_extra_reads(self):
-        cases = (('exe', 'kernel-identity'), ('kernel', 'kernel-identity'), ('proc', 'proc-before'),
+        cases = (('exe', 'protected-image'), ('kernel', 'kernel-identity'), ('proc', 'proc-before'),
                  ('exit', 'pidfd-live'), ('zombie', 'process-shape'), ('uid', 'process-shape'), ('permission', 'stat-read'))
         for case, stage in cases:
             with self.subTest(case=case), self.fixture() as state:
@@ -1033,9 +1184,9 @@ class ForeignSudoTests(unittest.TestCase):
                 self.assertEqual(detail['stage'], stage); self.assertTrue(detail['cleanupConfirmed'])
                 self.assertEqual(detail['subject']['pid'], 1629)
                 self.assertNotIn('PRIVATE', M.json.dumps(detail))
-                self.assertEqual(state.opens.call_count, 0 if case == 'exit' else 2)
-                self.assertEqual(state.reads, [] if case in ('proc', 'exit', 'permission') else [(1629, 'stat'), (1629, 'status')])
-                self.assertEqual(state.links, [1629] if case in ('exe', 'kernel') else [])
+                self.assertEqual(state.opens.call_count, 0 if case == 'exit' else 1 if case == 'exe' else 2)
+                self.assertEqual(state.reads, [] if case in ('proc', 'exit', 'permission', 'exe') else [(1629, 'stat'), (1629, 'status')])
+                self.assertEqual(state.links, [] if case == 'exit' else [1629, 1629] if case == 'kernel' else [1629])
                 if case == 'exe':
                     self.assertFalse(detail['checks']['executable_match'])
                     self.assertEqual(detail['subject']['executableKind'], 'other')
@@ -1087,7 +1238,7 @@ class ForeignSudoTests(unittest.TestCase):
                     M.complete_uid_inventory(state.budget, invocation=state.invocation, foreign=foreign)
             self.assertFalse(hasattr(caught.exception, 'proxy_foreign_diagnostic'))
             self.assertEqual(caught.exception.proxy_inventory_diagnostic['entryPid'], 1629)
-            self.assertEqual(state.reads, [(1629, 'stat'), (1629, 'status')]); self.assertEqual(state.links, [])
+        self.assertEqual(state.reads, [(1629, 'stat'), (1629, 'status')]); self.assertEqual(state.links, [1629])
 
     def test_foreign_original_probe_budget_boundary_uses_one_existing_clock_read(self):
         with self.fixture() as state, patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'), patch.object(M, 'InvocationChain') as chain:
@@ -1130,7 +1281,7 @@ class ForeignSudoTests(unittest.TestCase):
                     self.assertNotEqual(detail['stamps']['protectedImage'], detail['stamps']['protectedNamed'])
                     self.assertEqual(detail['stamps']['fileObserved'], detail['stamps']['protectedImage'])
                     self.assertEqual(detail['cleanupConfirmed'], not cleanup_fails)
-                    self.assertEqual(package.reads, []); self.assertEqual(state.reads, []); self.assertEqual(state.links, [])
+                    self.assertEqual(package.reads, []); self.assertEqual(state.reads, []); self.assertEqual(state.links, [1629])
                     self.assertEqual(state.closes, [11629, 31629]); self.assertNotIn('PRIVATE', M.json.dumps(detail))
 
     def test_foreign_refusal_root_serialization_keeps_original_context_and_all_cached_metadata(self):
@@ -1158,13 +1309,15 @@ class ForeignSudoTests(unittest.TestCase):
         self.assertFalse(value['foreignFailure']['authorityGranted']); self.assertNotIn('PRIVATE', output.getvalue())
         self.assertLess(len(output.getvalue().encode()), 16384)
 
-    def test_foreign_instrumentation_preserves_original_guard_ast_read_order_and_bounds(self):
-        # Hashes of ASTs from the independently retained immutable 29515016 native source.
-        expected = {'ForeignSudoObservations': '0504c22b2cd742fc3c871e7c64a1d0f39f2f52470ee078d8424d48683bd5f453',
-            'InvocationImage': 'e8062ed6adaa921ff9a21c1091b39e1e8a7284a81d35d714a92b950cae6fc953',
-            'inventory_probe': '561d4966cb785c874b19291a1340a4c58b7d67560c3c35b10913b1f963b4e822',
+    def test_foreign_policy_preserves_shared_inventory_and_diagnostic_read_contracts(self):
+        # Unchanged inventory/association ASTs remain bound to the retained 29515016 source.
+        # The fixed sudo/FUSE image policy is exercised separately, not falsely asserted unchanged.
+        expected = {'inventory_probe': '561d4966cb785c874b19291a1340a4c58b7d67560c3c35b10913b1f963b4e822',
             'association_snapshot': '4077170e6a6c843f1b391fcfdc2a70fd52c76bd01229fa6b105f121708288780',
             'association_snapshot_held': 'cc7be1fd9217d87afbc0d387b75f330968cb997e6bdf8688beaaaa35ed8d0231'}
+        expected_policy = {'ForeignSudoObservations': '8e7e6ab5649082fe6d346d4deed633a0892e059b5957b8e1307a07016fb94aff',
+            'InvocationImage': '0ea708e4bf5feb3f99092f4f8d9923054b4e00e83f60666938ecdea36682290a',
+            'InvocationChain': '35cf24dfaf4121d41da107abd6a0a8b014b9fa02794e0276c2816d566cee94f0'}
         class StripDiagnostic(ast.NodeTransformer):
             def visit_Assign(self, node):
                 if all(isinstance(n, ast.Name) and n.id == '_foreign_stage' for n in node.targets): return None
@@ -1181,7 +1334,7 @@ class ForeignSudoTests(unittest.TestCase):
                 node = self.generic_visit(node)
                 return node if node.body else None
         tree = ast.parse(Path(M.__file__).read_text(), feature_version=(3, 10))
-        for name, digest in expected.items():
+        for name, digest in {**expected, **expected_policy}.items():
             node = StripDiagnostic().visit(next(n for n in tree.body if getattr(n, 'name', None) == name))
             self.assertEqual(M.hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest(), digest, name)
         for name in ('capture_foreign_failure', 'foreign_diagnostic', 'finish_foreign_cleanup'):
@@ -1195,7 +1348,7 @@ class InvocationImageTests(unittest.TestCase):
     @contextmanager
     def fixture(self, kind='sudo'):
         state = SimpleNamespace(raw=b'ELF' + b'x' * 61, replacement=False, alias_changed=False, reads=[])
-        state.file = invocation_stat(10, stat.S_IFREG | (0o4755 if kind == 'sudo' else 0o755))
+        state.file = invocation_stat(10, stat.S_IFREG | (0o755 if kind == 'python' else 0o4755))
         state.alias = invocation_stat(11, stat.S_IFLNK | 0o777) if kind == 'python' else state.file
         dirs = {fd: invocation_stat(fd, stat.S_IFDIR | 0o755, 4096) for fd in (1, 2, 3)}
         class FixedPath:
@@ -1206,12 +1359,12 @@ class InvocationImageTests(unittest.TestCase):
             def parent(self): return FixedPath(self.path.rsplit('/', 1)[0])
             @property
             def name(self): return self.path.rsplit('/', 1)[1]
-            def resolve(self, **kwargs): return FixedPath('/usr/bin/python3.10' if kind == 'python' else '/usr/bin/sudo')
+            def resolve(self, **kwargs): return FixedPath('/usr/bin/python3.10' if kind == 'python' else '/usr/bin/' + kind)
             def lstat(self):
                 if state.alias_changed: return invocation_stat(999, state.alias.st_mode)
                 return state.alias
         def opened(name, flags, **kwargs):
-            return {'/': 1, 'usr': 2, 'bin': 3, 'sudo': 4, 'python3.10': 4}[name]
+            return {'/': 1, 'usr': 2, 'bin': 3, 'sudo': 4, 'fusermount3': 4, 'python3.10': 4}[name]
         def named(name, **kwargs):
             fd = opened(name, 0)
             if fd in dirs: return dirs[fd]
@@ -1226,36 +1379,38 @@ class InvocationImageTests(unittest.TestCase):
             yield state
 
     def test_fixed_package_bytes_and_named_identity_are_held_and_rechecked(self):
-        for kind in ('python', 'sudo'):
+        for kind in ('python', 'sudo', 'fusermount3'):
             with self.subTest(kind=kind), self.fixture(kind) as state:
                 image = M.InvocationImage(kind, lambda: None)
                 self.assertEqual(image.snapshot(), M.hashlib.sha256(state.raw).hexdigest())
-                self.assertEqual(str(image.path), '/usr/bin/python3.10' if kind == 'python' else '/usr/bin/sudo')
+                self.assertEqual(str(image.path), '/usr/bin/python3.10' if kind == 'python' else '/usr/bin/' + kind)
                 self.assertTrue(all(count <= 65536 for count, offset in state.reads))
                 image.close(); self.assertEqual(state.close.call_count, 4)
 
     def test_foreign_writable_special_wrong_mode_oversized_package_never_admitted(self):
-        for defect in ('uid', 'gid', 'write', 'special', 'not-setuid', 'oversize'):
-            with self.subTest(defect=defect), self.fixture() as state:
-                if defect == 'uid': state.file.st_uid = 1001
-                if defect == 'gid': state.file.st_gid = 1001
-                if defect == 'write': state.file.st_mode |= 0o020
-                if defect == 'special': state.file.st_mode = stat.S_IFIFO | 0o4755
-                if defect == 'not-setuid': state.file.st_mode = stat.S_IFREG | 0o755
-                if defect == 'oversize': state.file.st_size = 64 * 1024**2 + 1
-                with self.assertRaises(ValueError): M.InvocationImage('sudo', lambda: None)
-                self.assertEqual(state.reads, [])
+        for kind in ('sudo', 'fusermount3'):
+            for defect in ('uid', 'gid', 'write', 'special', 'not-setuid', 'oversize'):
+                with self.subTest(kind=kind, defect=defect), self.fixture(kind) as state:
+                    if defect == 'uid': state.file.st_uid = 1001
+                    if defect == 'gid': state.file.st_gid = 1001
+                    if defect == 'write': state.file.st_mode |= 0o020
+                    if defect == 'special': state.file.st_mode = stat.S_IFIFO | 0o4755
+                    if defect == 'not-setuid': state.file.st_mode = stat.S_IFREG | 0o755
+                    if defect == 'oversize': state.file.st_size = 64 * 1024**2 + 1
+                    with self.assertRaises(ValueError): M.InvocationImage(kind, lambda: None)
+                    self.assertEqual(state.reads, [])
 
     def test_same_path_replacement_alias_or_same_stamp_byte_mutation_refuses(self):
-        for defect in ('named', 'alias', 'bytes'):
-            with self.subTest(defect=defect), self.fixture() as state:
-                image = M.InvocationImage('sudo', lambda: None)
-                try:
-                    if defect == 'named': state.replacement = True
-                    if defect == 'alias': state.alias_changed = True
-                    if defect == 'bytes': state.raw = b'changed' + state.raw[7:]
-                    with self.assertRaises(ValueError): image.snapshot()
-                finally: image.close()
+        for kind in ('sudo', 'fusermount3'):
+            for defect in ('named', 'alias', 'bytes'):
+                with self.subTest(kind=kind, defect=defect), self.fixture(kind) as state:
+                    image = M.InvocationImage(kind, lambda: None)
+                    try:
+                        if defect == 'named': state.replacement = True
+                        if defect == 'alias': state.alias_changed = True
+                        if defect == 'bytes': state.raw = b'changed' + state.raw[7:]
+                        with self.assertRaises(ValueError): image.snapshot()
+                    finally: image.close()
 
 
 class TranscriptTests(unittest.TestCase):
