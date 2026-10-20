@@ -43,6 +43,17 @@ const record = neutral.record;
 const read = (file, limit = neutral.LIMITS.file) => require('./flatpak-package.cjs').read(file, limit);
 // Only the version-neutral snapshot primitive is reused, never016 producer admission.
 const imageSnapshot = neutral.production016().imageSnapshot;
+function verifyBundlerWorkcopyRestored(before, after) {
+  assert.deepEqual(after.pin, before.pin, 'Bundling changed the supplied actual017 Root bytes');
+  const stableIdentity = snapshot => {
+    assert.equal(snapshot.identity.length, 8, 'Exact strict image snapshot required');
+    const [dev, ino, mode, nlink, size, , birthtimeNs] = snapshot.identity;
+    return { dev, ino, mode, nlink, size, birthtimeNs };
+  };
+  // Tauri 2.11.4 bundle.rs patches then restores this owned copy in place.
+  // Only its mtime/ctime may change across that one bundle call.
+  assert.deepEqual(stableIdentity(after), stableIdentity(before), 'Bundling replaced or changed the actual017 Root workcopy identity');
+}
 function keys(value, names) { assert.ok(value && typeof value === 'object' && !Array.isArray(value)); assert.deepEqual(Object.keys(value).sort(), [...names].sort()); }
 function sha(value, length = 64) { assert.ok(typeof value === 'string' && new RegExp(`^[a-f0-9]{${length}}$`).test(value)); }
 function id(value) { assert.ok(Number.isSafeInteger(value) && value > 0); }
@@ -276,12 +287,15 @@ async function produce({ root, input, output, profileSha256 }, services = {}) {
     assert.equal(String(run(process.execPath, [path.join(root, 'node_modules/@tauri-apps/cli/tauri.js'), '--version'])).trim(), 'tauri-cli 2.11.4');
     receipt.cliInputs = Object.fromEntries(['package-lock.json', 'node_modules/@tauri-apps/cli/tauri.js', 'node_modules/@tauri-apps/cli-linux-x64-gnu/cli.linux-x64-gnu.node'].map(name => [name, record(read(path.join(root, name)))]));
     receipt.metadataNormalization = { hostBeforeBundle: neutral.metadataEvidence(path.parse(root).root) };
+    assert.deepEqual(imageSnapshot(binary), rawIdentity, 'Actual017 Root workcopy changed before bundling');
     run(process.execPath, bundleArgs(root, path.join(output, 'portable-overlay.json')), { stdio: 'inherit', timeout: 900000 });
+    const restoredRawIdentity = imageSnapshot(binary);
     const bundles = path.join(release, 'bundle/appimage'); assert.deepEqual(fs.readdirSync(bundles).filter(name => name.endsWith('.AppImage')), [IMAGE]);
     receipt.appImage = neutral.retainAppImage(path.join(bundles, IMAGE), path.join(output, IMAGE));
     fs.copyFileSync(path.join(output, IMAGE), path.join(output, ALIAS), fs.constants.COPYFILE_EXCL);
     assert.deepEqual(imageSnapshot(path.join(output, ALIAS)).pin, receipt.appImage);
-    assert.deepEqual(imageSnapshot(binary), rawIdentity, 'Bundling rewrote the supplied actual017 Root');
+    verifyBundlerWorkcopyRestored(rawIdentity, restoredRawIdentity);
+    assert.deepEqual(imageSnapshot(binary), restoredRawIdentity, 'Actual017 Root workcopy changed after bundling');
     receipt.packagingTools = neutral.toolInventory(path.join(child.XDG_CACHE_HOME, 'tauri'));
     receipt.hostBaseline = neutral.hostBaselineEvidence(receipt.packagingTools); receipt.appRunWrapper = neutral.appRunToolBinding(receipt.packagingTools);
     const appdir = path.join(bundles, 'Creator Hub.AppDir'), retained = path.join(output, 'Creator Hub.original.AppDir');
@@ -307,7 +321,7 @@ async function produce({ root, input, output, profileSha256 }, services = {}) {
     const binding = await neutral.packTar(transport, path.join(output, ARCHIVE), finalInventory), portable = manifest(finalInventory, binding);
     write('portable-manifest.unsigned.json', json(portable)); receipt.archive = binding; receipt.manifest = record(json(portable));
     assert.deepEqual(neutral.inventory(appdir, true), inv); assert.deepEqual(neutral.inventory(retained, true), inv);
-    assert.deepEqual(imageSnapshot(binary), rawIdentity); assert.deepEqual(imageSnapshot(path.join(output, IMAGE)).pin, receipt.appImage);
+    assert.deepEqual(imageSnapshot(binary), restoredRawIdentity); assert.deepEqual(imageSnapshot(path.join(output, IMAGE)).pin, receipt.appImage);
     assert.deepEqual(imageSnapshot(path.join(output, ALIAS)).pin, receipt.appImage);
     for (const [name, expected] of Object.entries(receipt.cliInputs)) assert.deepEqual(record(read(path.join(root, name))), expected);
     recheck(); sourceCheck(env, call); receipt.packagingCompleted = true; write('package-receipt.json', json(receipt)); return receipt;
@@ -319,7 +333,7 @@ async function produce({ root, input, output, profileSha256 }, services = {}) {
   }
 }
 module.exports = { VERSION, TARGET, PROFILE, BRANCH, WORKFLOW, SOURCE, FEATURES, IMAGE, ALIAS, ARCHIVE, HOST, SELECTOR, ROLES, LEGACY_NAMES, SCOPE_PATHS,
-  flags, json, validateProfile, admission, assemblyAPI, collect, fixedTools, sourceCheck, selectorSources, validateAssembly, overlay, bundleArgs, hostProfile, manifest, produce };
+  flags, json, verifyBundlerWorkcopyRestored, validateProfile, admission, assemblyAPI, collect, fixedTools, sourceCheck, selectorSources, validateAssembly, overlay, bundleArgs, hostProfile, manifest, produce };
 if (require.main === module) Promise.resolve().then(() => {
   const args = process.argv.slice(2); assert.equal(args.length, 8); assert.deepEqual(args.filter((_, i) => i % 2 === 0), ['--root', '--input', '--profile-sha256', '--output']);
   return produce({ root: args[1], input: args[3], profileSha256: args[5], output: args[7] });

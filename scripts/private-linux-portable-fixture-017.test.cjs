@@ -216,6 +216,60 @@ test('bundle arguments are fixed bundle-only/no-sign; host profile permits only 
   assert.deepEqual(p.overlay('/owned/modules.tar.gz').bundle.resources, { '/owned/modules.tar.gz': 'modules.tar.gz' });
   assert.equal(p.overlay('/owned/modules.tar.gz').build.beforeBundleCommand, null);
 });
+test('39356760488: 16 checks reproduce Tauri patch/restore and restrict the owned workcopy transition', t => {
+  const root = owned(t), binary = path.join(root, 'creator-hub'), previous = path.join(root, 'previous'), link = path.join(root, 'linked');
+  const raw = Buffer.concat([elf('owned bundler workcopy'), Buffer.from('__TAURI_BUNDLE_TYPE_VAR_UNK')]);
+  const app = Buffer.from(raw); app.write('APP', app.length - 3, 'ascii');
+  const snapshot = neutral.production016().imageSnapshot;
+  const stable = value => value.identity.filter((_, index) => index !== 5 && index !== 7);
+  const checks = [], check = (name, action) => { action(); checks.push(name); };
+  fs.writeFileSync(binary, raw, { flag: 'wx', mode: 0o755 }); fs.chmodSync(binary, 0o755);
+  fs.utimesSync(binary, new Date('2000-01-01T00:00:00Z'), new Date('2000-01-01T00:00:00Z'));
+  const before = snapshot(binary);
+  // Pinned Tauri 2.11.4 bundle.rs patches with fs::write, then restores through
+  // OpenOptions(write + truncate) and io::copy. This is not a native CLI run.
+  fs.writeFileSync(binary, app);
+  const fd = fs.openSync(binary, 'w'); try { fs.writeFileSync(fd, raw); } finally { fs.closeSync(fd); }
+  const restored = snapshot(binary);
+  check('old strict comparison rejects the real timestamp transition', () => {
+    assert.throws(() => assert.deepEqual(restored, before));
+    assert.notEqual(restored.identity[5], before.identity[5]); assert.notEqual(restored.identity[7], before.identity[7]);
+  });
+  check('full bytes and size match', () => assert.deepEqual(restored.pin, before.pin));
+  check('all non-time identities match', () => assert.deepEqual(stable(restored), stable(before)));
+  check('only the scoped transition accepts restored bytes', () => p.verifyBundlerWorkcopyRestored(before, restored));
+  const changed = Buffer.from(raw); changed[40] ^= 1;
+  fs.writeFileSync(binary, changed);
+  check('unrelated raw-byte change is refused', () => assert.throws(() => p.verifyBundlerWorkcopyRestored(before, snapshot(binary))));
+  fs.writeFileSync(binary, app);
+  check('unrestored APP marker is refused', () => assert.throws(() => p.verifyBundlerWorkcopyRestored(before, snapshot(binary))));
+  fs.writeFileSync(binary, raw); fs.renameSync(binary, previous); fs.writeFileSync(binary, raw, { flag: 'wx', mode: 0o755 }); fs.chmodSync(binary, 0o755);
+  check('same-byte replacement inode is refused', () => assert.throws(() => p.verifyBundlerWorkcopyRestored(before, snapshot(binary))));
+  fs.unlinkSync(binary); fs.renameSync(previous, binary); fs.linkSync(binary, link);
+  check('hardlinks remain refused by the unchanged snapshot reader', () => assert.throws(() => snapshot(binary)));
+  fs.unlinkSync(link);
+  const modeBaseline = snapshot(binary); fs.chmodSync(binary, 0o444);
+  check('mode change is refused', () => assert.throws(() => p.verifyBundlerWorkcopyRestored(modeBaseline, snapshot(binary))));
+  fs.chmodSync(binary, 0o755);
+  for (const [index, name] of [[0, 'device'], [1, 'inode'], [2, 'mode'], [3, 'link count'], [4, 'size'], [6, 'birthtime']]) {
+    const different = { identity: [...restored.identity], pin: { ...restored.pin } }; different.identity[index] += 1n;
+    check(`independent ${name} identity change is refused`, () => assert.throws(() => p.verifyBundlerWorkcopyRestored(restored, different)));
+  }
+  const renewed = snapshot(binary);
+  fs.utimesSync(binary, new Date('2001-01-01T00:00:00Z'), new Date('2001-01-01T00:00:00Z'));
+  check('strict renewed baseline refuses later timestamps', () => assert.throws(() => assert.deepEqual(snapshot(binary), renewed)));
+  assert.equal(checks.length, 16);
+});
+test('workcopy timestamp transition is bounded by the bundle call; later checks use the strict restored baseline', () => {
+  const body = p.produce.toString();
+  assert.match(body, /assert\.deepEqual\(imageSnapshot\(binary\), rawIdentity[^\n]*\);\s*run\(process\.execPath, bundleArgs\([^\n]+\);\s*const restoredRawIdentity = imageSnapshot\(binary\);/);
+  assert.equal((body.match(/verifyBundlerWorkcopyRestored\(/g) || []).length, 1);
+  assert.match(body, /verifyBundlerWorkcopyRestored\(rawIdentity, restoredRawIdentity\);\s*assert\.deepEqual\(imageSnapshot\(binary\), restoredRawIdentity/);
+  assert.ok(body.indexOf('receipt.appImage = neutral.retainAppImage(') < body.indexOf('verifyBundlerWorkcopyRestored('));
+  assert.equal((body.match(/assert\.deepEqual\(imageSnapshot\(binary\), restoredRawIdentity/g) || []).length, 2);
+  assert.match(body, /function recheck\(\) \{ for \(const \[file, \{ expected, cargo \}\] of held\) assert\.deepEqual\(capture\(file, expected.size, cargo\), expected,/);
+  assert.doesNotMatch(p.verifyBundlerWorkcopyRestored.toString(), /utimes|chmod|write|unlink|rename/);
+});
 test('explicit017 manifest and false gates do not mutate or select the production016 policy', () => {
   const bytes = elf('synthetic inventory entry'), entries = { AppRun: { kind: 'file', ...neutral.record(bytes), mode: 0o755 },
     usr: { kind: 'directory', mode: 0o755 }, 'usr/bin': { kind: 'directory', mode: 0o755 }, 'usr/libexec': { kind: 'directory', mode: 0o755 },
