@@ -57,6 +57,7 @@ jobs:
         run: |
           node --check scripts/native-linux-production-016-flatpak.cjs
           node --test scripts/native-linux-production-016-flatpak.test.cjs
+          python3 -B scripts/native-linux-flatpak-dialog-input.test.py
           python3 -B scripts/native-linux-production-016-flatpak.test.py
       - name: Bind actual source and successful API artifacts; download data only
         uses: actions/github-script@v8

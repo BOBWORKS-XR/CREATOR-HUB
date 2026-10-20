@@ -167,6 +167,309 @@ class DriverReadiness(unittest.TestCase):
         self.assertIn("self.driver.guard = setup_guard", ast.get_source_segment(source, setup))
 
 
+class LauncherKeyboardTests(unittest.TestCase):
+    @staticmethod
+    def process(pid, parent, executable, full=True):
+        record = {'pid': pid, 'parentPid': parent, 'startTime': str(pid), 'uids': [1001] * 4, 'executable': executable,
+                  'image': {key: str(value) for key, value in dict(st_dev=1, st_ino=pid, st_size=64, st_mode=0o100755,
+                            st_uid=0, st_gid=0, st_mtime_ns=5, st_ctime_ns=6).items()}}
+        if full:
+            record['kernelImageSha256'] = ('c' if pid == 14 else 'b') * 64
+        return record
+
+    def receipt(self, sequence, client, origin, window, *, partial=False):
+        launch = self.process(origin['pid'], origin['parentPid'], '/usr/bin/bwrap')
+        rows = [{'keycode': {'Escape': 9, 'Enter': 36, 'ShiftTabSpace': 23}[sequence] if index < 2 else 65,
+                 'modifiers': modifiers, 'pressed': pressed, 'submissionAttempted': True, 'returnObserved': True,
+                 'submitted': True, 'synchronized': True}
+                for index, (_, modifiers, pressed) in enumerate((symbol, modifiers, pressed)
+                    for symbol, modifiers in M.K.SEQUENCES[sequence] for pressed in (True, False))]
+        result = {'schemaVersion': 1, 'mechanism': 'exact-xid-keyboard', 'pid': client['pid'], 'startTime': client['startTime'],
+                  'window': window, 'intent': sequence, 'candidateAction': {'Escape': 'decline-or-close', 'Enter': 'default-open',
+                    'ShiftTabSpace': 'get-native-hub'}[sequence], 'delivery': rows[:1] if partial else rows,
+                  'deliveryComplete': not partial, 'launchProvenance': {'readOnly': True,
+                    'popen': {key: origin[key] for key in M.K.CONTINUITY_FIELDS}, 'admittedLaunch': launch,
+                    'systemImage': {'path': '/usr/bin/bwrap', 'image': launch['image'],
+                                    'kernelImageSha256': launch['kernelImageSha256'], 'protectedRootOwned': True}},
+                  'widgetFocusVerified': False, 'outcomeVerified': False, 'nativeVerificationRequired': True, 'releaseReady': False}
+        if partial:
+            result['refusal'] = 'Owned process exited after synchronized key press'
+        return result
+
+    @contextmanager
+    def fixture(self, action='Cancel', phase='disclosure-cancel', missing=False, *, partial=None,
+                changed_receipt=None, capture_failure=None, wrong_exit=None, preservation_failure=False,
+                wrong_window=False, first_pre_exec=False):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = (HERE.parent / 'native/flatpak-native-activation/src/linux.rs').read_bytes()
+            state = SimpleNamespace(code=None, captures=[], sends=[], closed=0, outcomes=[], origin_reads=0)
+            session = object.__new__(M.Session)
+            session.root, session.helper, session.x11 = root, SimpleNamespace(), object()
+            launch = self.process(10, 9, '/usr/bin/bwrap')
+            client = self.process(14, 13, '/app/bin/creator-hub-flatpak-activate')
+            native_root = self.process(40, 1, str(root / 'home/data/creator-hub-portable/generations' / ('e' * 64) / 'AppDir/usr/bin/creator-hub'))
+            rows = {10: launch, 13: self.process(13, 10, '/usr/bin/bwrap'), 14: client, 40: native_root}
+            def native_process(pid, helper, full=True):
+                value = copy.deepcopy(rows[pid])
+                if pid == 10:
+                    state.origin_reads += 1
+                    if first_pre_exec and state.origin_reads == 1:
+                        value['executable'] = '/usr/bin/flatpak'
+                if not full:
+                    value.pop('kernelImageSha256', None)
+                return value
+            session.native = SimpleNamespace(native_process=native_process)
+            session.review = {'flatpak': {'files': {'creator-hub-flatpak-activate': {'sha256': 'c' * 64}},
+                'source': {'files': {'native/flatpak-native-activation/src/linux.rs': pin(source)}}},
+                'portable': {'root': {'sha256': 'b' * 64}}, 'generation': 'e' * 64}
+            child = SimpleNamespace(pid=10, poll=lambda: state.code, wait=lambda: state.code)
+            session.children = []
+            def launch_child(args, label):
+                self.assertEqual(args, ['/usr/bin/flatpak', 'run', '--user', M.REF])
+                self.assertEqual(label, phase)
+                session.children.append(child)
+                return child
+            session.launch = launch_child
+            session.helper = SimpleNamespace(parse_start=lambda *_: '10', Proc=lambda: SimpleNamespace(stat=lambda _: 'fixture-stat'))
+            session.wait = lambda check, seconds=30: self.assertTrue(check(), 'Read-only readiness condition was not reached')
+            session.disclosure = lambda: 'authenticated disclosure'
+            session.click_dialog = Mock(side_effect=AssertionError('Launcher must never reach AX input'))
+            session.host_owner = lambda: {'pid': 40, 'name': ':1.42'} if phase in ('cold', 'warm') and state.code is not None else None
+            def dialog_window(): return 101 if missing and state.sends == ['Enter'] else 100
+            session.windows = lambda: [200] if phase in ('cold', 'warm') and state.code is not None else [] if state.code is not None else (
+                [200, dialog_window()] if phase == 'warm' else [dialog_window()])
+            session.x11 = SimpleNamespace(inspect=lambda window: {'pid': 40 if window == 200 else 14})
+            session.owned_window = lambda process, title: 200 if process['pid'] == 40 else 999 if wrong_window else dialog_window()
+            def preserved():
+                if preservation_failure:
+                    raise RuntimeError('Preserved fixture changed')
+                state.outcomes.append('preserved')
+                return {'retained': True}
+            session.snapshot_preserved = preserved
+            session.report = {'coldRoot': native_root}
+            session.portal_calls = [{'url': M.PORTAL_URL, 'browserOpened': False, 'downloadAttempted': False, 'senderUid': 1001}]
+            def capture(helper, native, x11, observed, origin, guard, window):
+                state.captures.append(window)
+                guard()
+                self.assertEqual(observed, client)
+                if capture_failure:
+                    raise RuntimeError(capture_failure)
+                M.require(window == dialog_window(), 'Wrong exact window')
+                M.require(session.windows() == [window], 'Sole visible managed dialog required')
+                def send(sequence):
+                    state.sends.append(sequence)
+                    guard()
+                    record = self.receipt(sequence, client, origin, window, partial=partial == sequence)
+                    if changed_receipt:
+                        changed_receipt(record)
+                    if not missing or sequence == 'Escape':
+                        state.code = wrong_exit if wrong_exit is not None else 1 if missing else 0
+                    if partial == sequence:
+                        raise M.K.InputRefused('terminal candidate', record)
+                    return record
+                def close(): state.closed += 1
+                return SimpleNamespace(send=send, close=close)
+            tree = {pid: {k: v for k, v in row.items() if k != 'kernelImageSha256'} for pid, row in rows.items() if pid != 40}
+            with patch.object(M, 'bound', return_value=source) as source_read, patch.object(M.K, 'capture', side_effect=capture), \
+                    patch.object(M.P, 'subtree', return_value=tree), patch.object(M.os, 'getuid', return_value=1001, create=True), \
+                    patch.object(M.os, 'getpid', return_value=9), patch.object(M.os, 'readlink', return_value='mnt:[1]'):
+                yield session, state, source_read
+            session.click_dialog.assert_not_called()
+
+    def test_source_button_mapping_is_finite_and_default_response_is_explicit(self):
+        source = (HERE.parent / 'native/flatpak-native-activation/src/linux.rs').read_text()
+        for question, action, sequence in (('disclosure', 'Cancel', 'Escape'),
+                ('disclosure', 'Open Creator Hub', 'Enter'), ('disclosure', 'Get Native Hub', 'ShiftTabSpace'),
+                ('missing', 'Close', 'Escape')):
+            with self.subTest(question=question, action=action):
+                mapping = M.launcher_button_mapping(source, question, action)
+                self.assertEqual(mapping['sequence'], sequence)
+                self.assertFalse(mapping['widgetFocusVerified'])
+        for changed in (source.replace('ResponseType::Accept);', 'ResponseType::Cancel);'),
+                        source.replace('("Get Native Hub", gtk::ResponseType::Other(1))', '("Other", gtk::ResponseType::Other(1))')):
+            with self.assertRaises(RuntimeError):
+                M.launcher_button_mapping(changed, 'disclosure', 'Open Creator Hub')
+        with self.assertRaises(RuntimeError):
+            M.launcher_button_mapping(source, 'missing', 'Get Native Hub')
+
+    def test_complete_sequences_use_keyboard_only_then_independent_phase_outcomes(self):
+        for action, phase, missing, sequences in (('Cancel', 'disclosure-cancel', False, ['Escape']),
+                ('Open Creator Hub', 'missing-host', True, ['Enter', 'Escape']),
+                ('Get Native Hub', 'portal-only', False, ['ShiftTabSpace']),
+                ('Open Creator Hub', 'cold', False, ['Enter'])):
+            with self.subTest(phase=phase), self.fixture(action, phase, missing) as (session, state, source_read):
+                session.flatpak(action, phase, missing)
+                self.assertEqual(state.sends, sequences)
+                self.assertEqual(state.closed, len(sequences))
+                self.assertEqual(source_read.call_count, len(sequences))
+                for record in session.launcher_keys:
+                    self.assertTrue(record['outcomeVerified']); self.assertTrue(record['preservedDataVerified'])
+                    self.assertFalse(record['actionReturned']); self.assertFalse(record['releaseReady'])
+                    self.assertFalse(record['keyboard']['widgetFocusVerified'])
+                    self.assertEqual(record['ownedPhaseExit']['exitCode'], 1 if missing else 0)
+                    original = M.parse((session.root / (record['phase'] + '-gtk.json')).read_bytes())
+                    self.assertFalse(original['outcomeVerified']); self.assertNotIn('ownedPhaseExit', original)
+                    self.assertEqual(original['keyboard'], record['keyboard'])
+                expected_source = session.root / 'stage/source/native/flatpak-native-activation/src/linux.rs'
+                self.assertTrue(all(call.args[0] == expected_source for call in source_read.call_args_list))
+
+    def test_synced_terminal_escape_or_enter_partial_requires_separate_exit_and_state_proof(self):
+        for action, phase, missing, partial in (('Cancel', 'disclosure-cancel', False, 'Escape'),
+                ('Open Creator Hub', 'cold', False, 'Enter'), ('Open Creator Hub', 'missing-host', True, 'Escape')):
+            with self.subTest(phase=phase), self.fixture(action, phase, missing, partial=partial) as (session, state, _):
+                session.flatpak(action, phase, missing)
+                last = session.launcher_keys[-1]
+                self.assertTrue(last['outcomeVerified']); self.assertTrue(last['preservedDataVerified'])
+                self.assertFalse(last['keyboard']['deliveryComplete'])
+                self.assertEqual(last['deliveryClassification'], 'terminal-press-pending-owned-exit')
+                self.assertEqual(state.sends.count(partial), 1)
+                self.assertIn('refusal', last['keyboard'])
+
+    def test_unknown_shift_tab_partial_and_intermediate_enter_never_retry_or_send_next_dialog(self):
+        for action, phase, missing, partial in (('Get Native Hub', 'portal-only', False, 'ShiftTabSpace'),
+                ('Open Creator Hub', 'missing-host', True, 'Enter')):
+            with self.subTest(phase=phase), self.fixture(action, phase, missing, partial=partial) as (session, state, _):
+                with self.assertRaises(RuntimeError):
+                    session.flatpak(action, phase, missing)
+                self.assertEqual(state.sends, [partial]); self.assertEqual(state.closed, 1)
+                record = M.parse((session.root / (phase + '-outcome-gtk.json')).read_bytes())
+                self.assertFalse(record['outcomeVerified']); self.assertFalse(record['keyboard']['deliveryComplete'])
+
+    def test_partial_terminal_press_without_sync_or_owned_exit_stays_unknown(self):
+        for flag in ('submissionAttempted', 'returnObserved', 'submitted', 'synchronized'):
+            with self.subTest(flag=flag), self.fixture(partial='Escape',
+                    changed_receipt=lambda record: record['delivery'][0].update({flag: False})) as (session, state, _):
+                with self.assertRaises(RuntimeError):
+                    session.flatpak('Cancel', 'disclosure-cancel')
+                self.assertEqual(state.sends, ['Escape'])
+                self.assertFalse(session.launcher_keys[0]['outcomeVerified'])
+        with self.fixture(partial='Escape') as (session, state, _):
+            def wait(check, seconds=30):
+                if state.sends:
+                    state.code = None
+                M.require(check(), 'Owned Popen did not exit; no retry')
+            session.wait = wait
+            with self.assertRaisesRegex(RuntimeError, 'did not exit'):
+                session.flatpak('Cancel', 'disclosure-cancel')
+            record = M.parse((session.root / 'disclosure-cancel-outcome-gtk.json').read_bytes())
+            self.assertFalse(record['outcomeVerified']); self.assertNotIn('ownedPhaseExit', record)
+            self.assertEqual(state.sends, ['Escape'])
+
+    def test_wrong_exit_and_changed_preserved_data_never_qualify_partial_or_complete_input(self):
+        for partial in (None, 'Escape'):
+            for failure in ('exit', 'preserved'):
+                with self.subTest(partial=partial, failure=failure), self.fixture(partial=partial,
+                        wrong_exit=2 if failure == 'exit' else None, preservation_failure=failure == 'preserved') as (session, state, _):
+                    with self.assertRaises(RuntimeError):
+                        session.flatpak('Cancel', 'disclosure-cancel')
+                    record = M.parse((session.root / 'disclosure-cancel-outcome-gtk.json').read_bytes())
+                    self.assertFalse(record['outcomeVerified']); self.assertIn('phaseFailure', record)
+                    self.assertEqual(state.sends, ['Escape'])
+                    self.assertEqual(record['ownedPhaseExit']['exitCode'], 2 if failure == 'exit' else 0)
+
+    def test_wrong_window_or_focus_refuses_before_delivery_and_retains_receipt(self):
+        for failure in ('window', 'focus'):
+            with self.subTest(failure=failure), self.fixture(wrong_window=failure == 'window',
+                    capture_failure='Exact focus changed' if failure == 'focus' else None) as (session, state, _):
+                with self.assertRaises(RuntimeError):
+                    session.flatpak('Cancel', 'disclosure-cancel')
+                self.assertEqual(state.sends, [])
+                record = M.parse((session.root / 'disclosure-cancel-outcome-gtk.json').read_bytes())
+                self.assertFalse(record['actionAttempted']); self.assertFalse(record['outcomeVerified'])
+                self.assertIn('refusal', record)
+
+    def test_empty_wrong_target_unsynced_or_falsely_complete_receipt_never_reaches_outcome(self):
+        changes = (lambda r: r.clear(), lambda r: r.update(window=999), lambda r: r.update(pid=99),
+                   lambda r: r.update(delivery=[]), lambda r: r['delivery'][0].update(synchronized=False),
+                   lambda r: r['delivery'].pop(), lambda r: r.update(widgetFocusVerified=True),
+                   lambda r: r['launchProvenance']['systemImage'].update(protectedRootOwned=False))
+        for change in changes:
+            with self.subTest(change=change), self.fixture(changed_receipt=change) as (session, state, _):
+                with self.assertRaises(RuntimeError):
+                    session.flatpak('Cancel', 'disclosure-cancel')
+                self.assertEqual(state.sends, ['Escape'])
+                record = M.parse((session.root / 'disclosure-cancel-outcome-gtk.json').read_bytes())
+                self.assertIn('keyboard', record); self.assertFalse(record['outcomeVerified'])
+                self.assertNotIn('ownedPhaseExit', record)
+
+    def test_original_pre_exec_continuity_is_retained_without_path_only_admission(self):
+        with self.fixture(first_pre_exec=True) as (session, state, _):
+            session.flatpak('Cancel', 'disclosure-cancel')
+            self.assertEqual(session.flatpak_origin['executable'], '/usr/bin/flatpak')
+            self.assertGreater(state.origin_reads, 1)
+            self.assertEqual(session.launcher_keys[0]['keyboard']['launchProvenance']['admittedLaunch']['executable'], '/usr/bin/bwrap')
+        for field, changed in (('startTime', '999'), ('parentPid', 99), ('uids', [1002] * 4)):
+            with self.subTest(field=field), self.fixture() as (session, state, _):
+                original = session.native.native_process(10, None, False)
+                session.flatpak_origin = original
+                session.flatpak_child = SimpleNamespace(pid=10, poll=lambda: None)
+                session.children = [session.flatpak_child]
+                session.flatpak_origin = {**original, field: changed}
+                with self.assertRaises(RuntimeError):
+                    session.flatpak_guard()
+                self.assertEqual(state.sends, [])
+
+    def test_exit_without_expected_portal_or_native_host_is_not_action_success(self):
+        for phase in ('portal-only', 'cold'):
+            action = 'Get Native Hub' if phase == 'portal-only' else 'Open Creator Hub'
+            with self.subTest(phase=phase), self.fixture(action, phase) as (session, state, _):
+                if phase == 'portal-only':
+                    session.portal_calls = []
+                elif phase == 'cold':
+                    session.host_owner = lambda: None
+                    session.wait = lambda check, seconds=30: M.require(check(), 'Expected read-only host outcome absent')
+                with self.assertRaises(RuntimeError):
+                    session.flatpak(action, phase)
+                self.assertEqual(len(state.sends), 1)
+                self.assertFalse(session.launcher_keys[0]['outcomeVerified'])
+
+    def test_warm_dialog_stops_before_input_under_the_unchanged_single_window_helper(self):
+        with self.fixture('Open Creator Hub', 'warm') as (session, state, _):
+            with self.assertRaisesRegex(RuntimeError, 'Sole visible managed dialog'):
+                session.flatpak('Open Creator Hub', 'warm')
+            self.assertEqual(state.sends, [])
+            record = M.parse((session.root / 'warm-outcome-gtk.json').read_bytes())
+            self.assertFalse(record['actionAttempted']); self.assertFalse(record['outcomeVerified'])
+
+    def test_warm_outcome_requires_the_original_signed_root_even_if_exit_was_observed(self):
+        with self.fixture('Open Creator Hub', 'warm') as (session, state, _):
+            state.code = 0
+            self.assertEqual(session.launcher_outcome('Open Creator Hub', 'warm', False), 'same-owned-native-root')
+            session.report['coldRoot'] = {'different': 'instance'}
+            with self.assertRaisesRegex(RuntimeError, 'replaced'):
+                session.launcher_outcome('Open Creator Hub', 'warm', False)
+
+    def test_helper_preflight_is_mandatory_before_any_download(self):
+        workflow = (HERE.parent / M.WORKFLOW).read_text()
+        command = 'python3 -B scripts/native-linux-flatpak-dialog-input.test.py'
+        self.assertEqual(workflow.count(command), 1)
+        self.assertLess(workflow.index(command), workflow.index('await lane.collect('))
+        self.assertIn('native-linux-flatpak-dialog-input.py', Path(M.__file__).read_text())
+
+    def test_unverified_launcher_source_or_wrong_signed_client_never_reaches_input(self):
+        for failure in ('source', 'client', 'phase'):
+            with self.subTest(failure=failure), self.fixture() as (session, state, source_read):
+                if failure == 'source':
+                    source_read.side_effect = RuntimeError('Source blob differs from producer pin')
+                elif failure == 'client':
+                    session.review['flatpak']['files']['creator-hub-flatpak-activate']['sha256'] = 'd' * 64
+                with self.assertRaises(RuntimeError):
+                    session.flatpak('Cancel', 'disclosure-cancel' if failure != 'phase' else 'arbitrary-phase')
+                self.assertEqual(state.sends, [])
+                self.assertEqual(state.captures, [])
+
+    def test_native_root_dialog_still_has_direct_ax_pid_guard_and_no_keyboard_fallback(self):
+        source = Path(M.__file__).read_text()
+        session = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef) and n.name == 'Session')
+        ax = ast.get_source_segment(source, next(n for n in session.body if isinstance(n, ast.FunctionDef) and n.name == 'click_dialog'))
+        launcher = ast.get_source_segment(source, next(n for n in session.body if isinstance(n, ast.FunctionDef) and n.name == 'flatpak'))
+        self.assertIn('ax_identity(peer, node.get_process_id(), process, ids, os.getuid())', ax)
+        self.assertIn('interface.do_action(0)', ax)
+        self.assertNotIn('K.capture', ax)
+        self.assertNotIn('self.click_dialog', launcher)
+
+
 class ControllerTests(unittest.TestCase):
     def test_verifier_reuses_exact_example_and_lock_without_dependencies_or_key_override(self):
         root = HERE.parent
@@ -1200,6 +1503,37 @@ class DiagnosticTests(unittest.TestCase):
         invocation.return_dbus_error.assert_called_once_with('org.freedesktop.DBus.Error.AccessDenied', 'Portal sender is not the bound signed launcher')
         self.assertTrue(session.report['portalAttribution']['stable']); self.assertFalse(session.report['portalAttribution']['inputPermitted'])
         self.assertFalse(session.report['portalAttribution']['qualified']); self.assertFalse(session.report['portalAttribution']['peerPairingProven'])
+        capture = session.report['portalSenderRefusal']
+        self.assertEqual(capture['failureStage'], 'sender-binding')
+        self.assertEqual(capture['sender']['pid'], 12); self.assertEqual(capture['expectedClient']['pid'], 14)
+        self.assertEqual(capture['observedSender']['executable'], '/usr/bin/xdg-dbus-proxy')
+        self.assertTrue(capture['stable']); self.assertFalse(capture['authorityGranted']); self.assertFalse(capture['inputPermitted'])
+
+    def test_portal_diagnostic_denied_or_replaced_image_is_unknown_and_does_not_grant_authority(self):
+        for failure in ('denied', 'replaced', 'oversized'):
+            session, rows, client, peer = self.proxy_fixture()
+            session.portal_client = client
+            native = session.native.native_process
+            calls = []
+            def observed(pid, helper, full=True):
+                if pid == peer['pid']:
+                    calls.append(full)
+                    if failure == 'denied':
+                        raise PermissionError('/private/DO-NOT-RETAIN')
+                value = native(pid, helper, full)
+                if pid == peer['pid'] and failure == 'oversized':
+                    value['image']['st_size'] = str(64 * 1024 * 1024 + 1)
+                if pid == peer['pid'] and failure == 'replaced' and len(calls) >= 3:
+                    value['startTime'] = '999'
+                return value
+            session.native.native_process = observed
+            with self.subTest(failure=failure), patch.object(M.os, 'getuid', return_value=1001, create=True):
+                result = session.portal_sender_refusal(peer, 'sender-binding')
+            self.assertFalse(result['stable']); self.assertFalse(result['authorityGranted']); self.assertFalse(result['inputPermitted'])
+            self.assertIn('unavailable', result); self.assertNotIn('DO-NOT-RETAIN', json.dumps(result))
+            self.assertLess(len(M.json_bytes(result)), 16384)
+            if failure == 'oversized':
+                self.assertEqual(calls, [False], 'Oversized peer image was hashed')
 
 
 class AliasCleanupTests(unittest.TestCase):

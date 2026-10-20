@@ -30,6 +30,9 @@ HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("production_flatpak_neutral", HERE / "native-linux-integrated-pages.py")
 P = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(P)
+KEYBOARD_SPEC = importlib.util.spec_from_file_location("production_flatpak_keyboard", HERE / "native-linux-flatpak-dialog-input.py")
+K = importlib.util.module_from_spec(KEYBOARD_SPEC)
+KEYBOARD_SPEC.loader.exec_module(K)
 require, parse, save = P.require, P.parse, P.save
 PROFILE = "production-flatpak-host-016"
 BRANCH = "refs/heads/validation/native-linux-production-016-flatpak"
@@ -1038,6 +1041,75 @@ def dialog_target(rows, labels, buttons, action):
     return result[0]
 
 
+def launcher_button_mapping(source, question, action):
+    require(type(source) is str and len(source.encode()) <= 262144, "Bounded authenticated launcher source required")
+    expected = {'dialog': [('Cancel', 'Cancel'), ('Get Native Hub', 'Other(1)'), ('Open Creator Hub', 'Accept')],
+                'error': [('Close', 'Close'), ('Get Native Hub', 'Other(1)')]}
+    for variable, entries in expected.items():
+        bodies = re.findall(r'\b' + variable + r'\.add_buttons\(\s*&\[(.*?)\]\s*\);', source, re.S)
+        require(len(bodies) == 1, "One source-defined launcher button set required")
+        pattern = r'\(\s*("(?:[^"\\]|\\.)*")\s*,\s*gtk::ResponseType::(Cancel|Close|Accept|Other\(1\))\s*\)\s*,'
+        actual = [(parse(label), response) for label, response in re.findall(pattern, bodies[0])]
+        require(actual == entries and not re.sub(pattern, '', bodies[0]).strip(), "Launcher source button order/response changed")
+    defaults = re.findall(r'\b(?:dialog|error)\.set_default_response\((.*?)\);', source)
+    require(defaults == ['gtk::ResponseType::Accept'], "Source-defined default Accept response required")
+    require('if choice == gtk::ResponseType::Other(1)' in source and 'return installer_page();' in source
+            and 'if choice != gtk::ResponseType::Accept' in source and 'return Ok(());' in source
+            and 'return Err(message);' in source, "Launcher response branches changed")
+    choices = {('disclosure', 'Cancel'): 'Escape', ('disclosure', 'Open Creator Hub'): 'Enter',
+               ('disclosure', 'Get Native Hub'): 'ShiftTabSpace', ('missing', 'Close'): 'Escape'}
+    require((question, action) in choices, "Only finite source-bound launcher decisions are allowed")
+    return {'question': question, 'action': action, 'sequence': choices[question, action],
+            'buttons': expected['dialog' if question == 'disclosure' else 'error'],
+            'defaultResponse': 'Accept' if question == 'disclosure' else None,
+            'widgetFocusVerified': False, 'nativeOutcomeRequired': True}
+
+
+def keyboard_delivery(receipt, sequence, process, window, origin):
+    fields = {'schemaVersion', 'mechanism', 'pid', 'startTime', 'window', 'intent', 'candidateAction', 'delivery',
+              'deliveryComplete', 'launchProvenance', 'widgetFocusVerified', 'outcomeVerified', 'nativeVerificationRequired', 'releaseReady'}
+    require(type(receipt) is dict and set(receipt) in (fields, fields | {'refusal'}) and len(json_bytes(receipt)) <= 16384,
+            "One bounded complete helper receipt required")
+    require(type(receipt['schemaVersion']) is int and receipt['schemaVersion'] == 1
+            and receipt['mechanism'] == 'exact-xid-keyboard' and type(receipt['pid']) is int and receipt['pid'] == process['pid']
+            and receipt['startTime'] == process['startTime'] and type(receipt['window']) is int and receipt['window'] == window
+            and receipt['intent'] == sequence and receipt['candidateAction'] == {
+                'Escape': 'decline-or-close', 'Enter': 'default-open', 'ShiftTabSpace': 'get-native-hub'}[sequence]
+            and receipt['widgetFocusVerified'] is False and receipt['outcomeVerified'] is False
+            and receipt['nativeVerificationRequired'] is True and receipt['releaseReady'] is False,
+            "Helper receipt target/intent/authority differs")
+    provenance = receipt['launchProvenance']
+    require(type(provenance) is dict and set(provenance) == {'readOnly', 'popen', 'admittedLaunch', 'systemImage'}
+            and provenance['readOnly'] is True and provenance['popen'] == {key: origin[key] for key in K.CONTINUITY_FIELDS},
+            "Independent owned Popen provenance required")
+    admitted, system = provenance['admittedLaunch'], provenance['systemImage']
+    K.validate_process(admitted, full=True)
+    require(admitted['executable'] == '/usr/bin/bwrap' and all(admitted[key] == origin[key] for key in K.CONTINUITY_FIELDS)
+            and type(system) is dict and set(system) == {'path', 'image', 'kernelImageSha256', 'protectedRootOwned'}
+            and system['path'] == '/usr/bin/bwrap' and system['protectedRootOwned'] is True
+            and system['image'] == admitted['image'] and system['kernelImageSha256'] == admitted['kernelImageSha256'],
+            "Protected post-exec system image provenance differs")
+    strokes = [(modifiers, pressed) for _, modifiers in K.SEQUENCES[sequence] for pressed in (True, False)]
+    rows = receipt['delivery']
+    require(type(rows) is list and 0 < len(rows) <= len(strokes) and type(receipt['deliveryComplete']) is bool,
+            "Empty or unbounded keyboard delivery is unknown")
+    for index, row in enumerate(rows):
+        require(type(row) is dict and set(row) == {'keycode', 'modifiers', 'pressed', 'submissionAttempted', 'returnObserved', 'submitted', 'synchronized'}
+                and type(row['keycode']) is int and 8 <= row['keycode'] <= 255 and type(row['modifiers']) is int
+                and (row['modifiers'], row['pressed']) == strokes[index]
+                and all(type(row[key]) is bool for key in ('pressed', 'submissionAttempted', 'returnObserved', 'submitted', 'synchronized')),
+                "Malformed keyboard delivery prefix")
+        require(index % 2 == 0 or row['keycode'] == rows[index - 1]['keycode'], "Key release differs from its key press")
+    synchronized = all(all(row[key] is True for key in ('submissionAttempted', 'returnObserved', 'submitted', 'synchronized')) for row in rows)
+    if receipt['deliveryComplete'] is True:
+        require(len(rows) == len(strokes) and synchronized and 'refusal' not in receipt, "Complete keyboard delivery not proven")
+        return 'complete'
+    require(sequence in ('Escape', 'Enter') and len(rows) == 1 and synchronized
+            and type(receipt.get('refusal')) is str and 0 < len(receipt['refusal']) <= 256,
+            "Incomplete keyboard delivery is unknown; no retry")
+    return 'terminal-press-pending-owned-exit'
+
+
 class Session:
     def __init__(self, root, review):
         self.root, self.review = root, review
@@ -1049,6 +1121,7 @@ class Session:
         self.portal_client = None
         self.flatpak_launch = None
         self.flatpak_popen = None
+        self.flatpak_origin, self.flatpak_child, self.launcher_keys, self.portal_calls = None, None, [], None
         self.bootstrap_proxy = None
         self.report = {"schemaVersion": 1, "profile": PROFILE, "phase": "starting", **GATES}
 
@@ -1240,6 +1313,97 @@ class Session:
         finally:
             diagnostic["rows"] = rows; save(self.root / (phase + "-gtk.json"), diagnostic); bus.close_sync(None)
 
+    def flatpak_guard(self):
+        child, origin = self.flatpak_child, self.flatpak_origin
+        require(child is not None and origin is not None and any(child is owned for owned in self.children)
+                and child.pid == origin['pid'] and child.poll() is None, "Original owned Flatpak Popen is no longer live")
+        current = self.native.native_process(child.pid, self.helper, False)
+        require(all(current[key] == origin[key] for key in K.CONTINUITY_FIELDS)
+                and current['uids'] == [os.getuid()] * 4, "Original Flatpak PID/start/parent/UID changed")
+
+    def launcher_keyboard(self, client, question, action, phase, *, terminal):
+        diagnostic = {'phase': phase, 'client': client, 'mechanism': 'exact-xid-keyboard', 'actionAttempted': False,
+                      'actionReturned': False, 'outcomeVerified': False, 'releaseReady': False}
+        self.launcher_keys.append(diagnostic)
+        attempt = None
+        try:
+            require(client['executable'] == '/app/bin/creator-hub-flatpak-activate'
+                    and client['kernelImageSha256'] == self.review['flatpak']['files']['creator-hub-flatpak-activate']['sha256'],
+                    "Only the exact signed Flatpak launcher can use keyboard decisions")
+            name = 'native/flatpak-native-activation/src/linux.rs'
+            source = bound(self.root / 'stage/source' / name, self.review['flatpak']['source']['files'][name], 262144)
+            mapping = launcher_button_mapping(source.decode('utf8'), question, action)
+            diagnostic['sourceDialogButtonMapping'] = {**mapping, 'sourceFile': name, 'sourceSha256': hashlib.sha256(source).hexdigest()}
+            self.flatpak_guard(); self.stable(client)
+            window = self.owned_window(client, 'Creator Hub')
+            attempt = K.capture(self.helper, self.native, self.x11, client, self.flatpak_origin, self.flatpak_guard, window)
+            try:
+                receipt = attempt.send(mapping['sequence'])
+            except K.InputRefused as error:
+                receipt = error.receipt
+            diagnostic['keyboard'] = receipt
+            diagnostic['actionAttempted'] = type(receipt) is dict and type(receipt.get('delivery')) is list and any(
+                type(row) is dict and row.get('submissionAttempted') is True for row in receipt['delivery'])
+            delivery = keyboard_delivery(receipt, mapping['sequence'], client, window, self.flatpak_origin)
+            diagnostic['deliveryClassification'] = delivery
+            require(delivery == 'complete' or terminal, "Intermediate dialog delivery incomplete; no further input")
+            return diagnostic
+        except Exception as error:
+            diagnostic['refusal'] = str(error)[:512]
+            raise
+        finally:
+            try:
+                if attempt is not None:
+                    attempt.close()
+            finally:
+                save(self.root / (phase + '-gtk.json'), diagnostic)
+
+    def launcher_outcome(self, action, phase, missing):
+        if action == 'Cancel' or missing:
+            self.absent_installation()
+            return 'native-support-absent'
+        if action == 'Get Native Hub':
+            require(type(self.portal_calls) is list and len(self.portal_calls) == 1
+                    and self.portal_calls[0] == {'url': PORTAL_URL, 'browserOpened': False, 'downloadAttempted': False, 'senderUid': os.getuid()}
+                    and not self.windows(), "Exact guarded portal capture and no new window required")
+            return 'guarded-portal-capture-only'
+        self.wait(lambda: self.host_owner() is not None and len(self.windows()) == 1)
+        owner = self.host_owner()
+        require(owner is not None, "Expected native Host1 activation was not observed")
+        native = self.process(owner['pid'], self.review['portable']['root']['sha256'])
+        expected = self.root / 'home/data/creator-hub-portable/generations' / self.review['generation'] / 'AppDir/usr/bin/creator-hub'
+        require(native['executable'] == str(expected) and os.readlink(f'/proc/{native["pid"]}/ns/mnt') == os.readlink('/proc/self/ns/mnt'),
+                "Activated Root is not the exact signed native generation")
+        window = self.owned_window(native, P.TITLE)
+        require(self.windows() == [window], "Activation must have one owned native Hub window")
+        if phase == 'warm':
+            require(native == self.report['coldRoot'], "Warm activation replaced the original native Hub")
+        self.stable(native)
+        require(self.host_owner() == owner, "Native Host1 owner changed during outcome observation")
+        return 'same-owned-native-root' if phase == 'warm' else 'signed-native-root-activated'
+
+    def portal_sender_refusal(self, peer, stage):
+        result = {'readOnly': True, 'inputPermitted': False, 'authorityGranted': False, 'stable': False,
+                  'failureStage': stage, 'sender': dict(peer), 'expectedClient': proxy_process_snapshot(self.portal_client)}
+        try:
+            require(peer['uid'] == os.getuid() and type(peer['pid']) is int and 1 < peer['pid'] < 2**31,
+                    "Only exact same-user portal sender diagnostics")
+            before = self.native.native_process(peer['pid'], self.helper, False)
+            require(before['uids'] == [os.getuid()] * 4 and 0 < int(before['image']['st_size']) <= 64 * 1024 * 1024,
+                    "Bounded ordinary portal sender diagnostic")
+            observed = self.native.native_process(peer['pid'], self.helper)
+            result['observedSender'] = proxy_process_snapshot(observed)
+            require({k: v for k, v in observed.items() if k != 'kernelImageSha256'} == before,
+                    "Portal sender changed during diagnostic capture")
+            self.stable(self.portal_client)
+            require(self.native.native_process(peer['pid'], self.helper) == observed, "Portal sender changed during recheck")
+            result['stable'] = True
+        except Exception as error:
+            result['unavailable'] = type(error).__name__ if type(error) in (
+                RuntimeError, PermissionError, FileNotFoundError, ProcessLookupError, ValueError, KeyError, TypeError, OSError) else 'OtherError'
+        require(len(json_bytes(result)) <= 16384, "Portal diagnostic output exceeds bound")
+        return result
+
     def host_owner(self):
         from gi.repository import Gio, GLib
         bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -1267,10 +1431,17 @@ class Session:
         self.snapshot_preserved()
 
     def flatpak(self, action, phase, missing=False):
-        require(action in ("Cancel", "Open Creator Hub", "Get Native Hub"), "Finite launcher action")
+        require((action, phase, missing) in (('Cancel', 'disclosure-cancel', False), ('Open Creator Hub', 'missing-host', True),
+                ('Get Native Hub', 'portal-only', False), ('Open Creator Hub', 'cold', False), ('Open Creator Hub', 'warm', False)),
+                "Finite source-bound launcher action/phase required")
         child = self.launch(["/usr/bin/flatpak", "run", "--user", REF], phase)
         start = self.helper.parse_start(self.helper.Proc().stat(child.pid), child.pid)
         self.flatpak_popen = {'pid': child.pid, 'startTime': start}
+        origin = self.native.native_process(child.pid, self.helper, False)
+        require(origin['pid'] == child.pid and origin['startTime'] == start and origin['parentPid'] == os.getpid()
+                and origin['uids'] == [os.getuid()] * 4 and origin['executable'] in ('/usr/bin/flatpak', '/usr/bin/bwrap'),
+                "Original independently owned Flatpak Popen identity required")
+        self.flatpak_origin, self.flatpak_child, self.launcher_keys = origin, child, []
         found = {}
         def discover():
             nonlocal found
@@ -1283,20 +1454,32 @@ class Session:
         client = self.process(row["pid"], self.review["flatpak"]["files"]["creator-hub-flatpak-activate"]["sha256"])
         require(client["parentPid"] in found and int(client["startTime"]) >= int(start), "Launcher left this exact owned Flatpak launch")
         self.flatpak_launch = dict(found[child.pid])
-        disclosure = self.disclosure()
+        self.disclosure()
         self.wait(lambda: any(self.x11.inspect(window)["pid"] == client["pid"] for window in self.windows()))
         self.portal_client = client if action == "Get Native Hub" else None
-        self.click_dialog(client, ["Open native Creator Hub?", disclosure], ["Cancel", "Get Native Hub", "Open Creator Hub"], action, phase)
-        if missing:
-            message = ("Native Hub support is unavailable or did not confirm activation. Choose Get Native Hub for the dedicated Creator Hub Native Support setup AppImage, "
-                       "not the ordinary Hub AppImage. Close Hub normally and open the setup download to review native support setup. Then close setup and reopen this Flatpak. "
-                       "This launcher did not install software or change host settings.")
-            self.wait(lambda: any(self.x11.inspect(window)["pid"] == client["pid"] for window in self.windows()))
-            self.click_dialog(client, ["Native Hub support is required", message], ["Close", "Get Native Hub"], "Close", phase + "-missing")
-        self.wait(lambda: child.poll() is not None)
-        require(child.wait() == (1 if missing else 0), "Launcher outcome differs")
-        self.portal_client = None
-        self.snapshot_preserved()
+        try:
+            self.launcher_keyboard(client, 'disclosure', action, phase, terminal=not missing)
+            if missing:
+                self.wait(lambda: any(self.x11.inspect(window)["pid"] == client["pid"] for window in self.windows()))
+                self.launcher_keyboard(client, 'missing', 'Close', phase + '-missing', terminal=True)
+            self.wait(lambda: child.poll() is not None)
+            code = child.wait()
+            for diagnostic in self.launcher_keys:
+                diagnostic['ownedPhaseExit'] = {**self.flatpak_popen, 'exitCode': code, 'expectedExitCode': 1 if missing else 0}
+            require(type(code) is int and code == (1 if missing else 0), "Launcher outcome differs")
+            self.snapshot_preserved()
+            proof = self.launcher_outcome(action, phase, missing)
+            for diagnostic in self.launcher_keys:
+                diagnostic.update(preservedDataVerified=True, outcomeVerified=True, outcomeProof=proof)
+        except Exception as error:
+            for diagnostic in self.launcher_keys:
+                diagnostic['phaseFailure'] = str(error)[:512]
+            raise
+        finally:
+            self.portal_client = None
+            for diagnostic in self.launcher_keys:
+                # Delivery evidence is immutable; phase outcome is a separate record.
+                save(self.root / (diagnostic['phase'] + '-outcome-gtk.json'), diagnostic)
 
     def disclosure(self):
         file = self.root / "stage/source/native/flatpak-native-activation/src/lib.rs"
@@ -1449,22 +1632,32 @@ def portal_capture(session):
                           GLib.Variant("(su)", ("org.freedesktop.portal.Desktop", 4)), GLib.VariantType.new("(u)"), Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
     require(result == 1, "Fresh private portal name required; no replacement")
     calls = []
+    session.portal_calls = calls
     def method(connection, sender, path, interface, name, parameters, invocation):
         uid, pid = None, None
+        stage = 'request-shape'
         try:
             require(name == "OpenURI" and len(calls) == 0 and re.fullmatch(r":[0-9]+\.[0-9]+", sender), "Only one fixed portal capture")
             parent, uri, options = parameters.unpack()
             require(parent == "" and uri == PORTAL_URL and options == {}, "Only the source-bound setup URL may be captured")
+            stage = 'sender-uid'
             uid = connection.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetConnectionUnixUser",
                                       GLib.Variant("(s)", (sender,)), GLib.VariantType.new("(u)"), Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+            stage = 'sender-pid'
             pid = connection.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetConnectionUnixProcessID",
                                       GLib.Variant("(s)", (sender,)), GLib.VariantType.new("(u)"), Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+            stage = 'sender-binding'
             require(uid == os.getuid() and session.portal_client is not None and pid == session.portal_client["pid"], "Portal sender is not the bound signed launcher")
             session.stable(session.portal_client)
             calls.append({"url": uri, "browserOpened": False, "downloadAttempted": False, "senderUid": uid})
             invocation.return_value(GLib.Variant("(o)", ("/org/freedesktop/portal/desktop/request/production_016/captured",)))
         except Exception as error:
             if uid == os.getuid() and type(pid) is int and session.portal_client is not None and 'portalAttribution' not in session.report:
+                try:
+                    session.report['portalSenderRefusal'] = session.portal_sender_refusal({'owner': sender, 'pid': pid, 'uid': uid}, stage)
+                except Exception:
+                    session.report['portalSenderRefusal'] = {'readOnly': True, 'inputPermitted': False, 'authorityGranted': False,
+                                                            'failureStage': stage, 'unavailable': 'DiagnosticRefused'}
                 try:
                     session.report['portalAttribution'] = session.proxy_attribution(session.portal_client, {'owner': sender, 'pid': pid, 'uid': uid})
                 except Exception:
