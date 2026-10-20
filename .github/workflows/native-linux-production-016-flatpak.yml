@@ -1,0 +1,107 @@
+name: Production 016 Flatpak bootstrap and native activation (not release acceptance)
+
+on:
+  push:
+    branches: [validation/native-linux-production-016-flatpak]
+  workflow_dispatch:
+    inputs:
+      controller_profile:
+        description: Exact successful production portable run/job/source/tree/artifact and all seven output size/SHA pins. No prototype defaults.
+        type: string
+        required: true
+      signed_input:
+        description: Data-only artifact run/source/ZIP and four exact signed portable descriptor/manifest size/SHA pins. Real catalogue signatures are mandatory.
+        type: string
+        required: true
+      execution_request:
+        description: Inspect-only is the default. Native installation/input requires this separate fixed request after data and signature verification. Public fixed URLs must already return the reviewed signed bytes; no private CA or feed override.
+        type: choice
+        options:
+          - inspect-only
+          - execute-production-bootstrap-activation-016
+        default: inspect-only
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  bootstrap:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/native-linux-production-016-flatpak'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      CONTROLLER_PROFILE: ${{ inputs.controller_profile }}
+      SIGNED_INPUT: ${{ inputs.signed_input }}
+      EXECUTION_REQUEST: ${{ inputs.execution_request }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Bind the exact installed test-tool executable without invoking candidate code
+        run: printf 'CONTROLLER_NODE=%s\n' "$(command -v node)" >> "$GITHUB_ENV"
+      - name: Standard-library admission before any download or installation
+        run: node scripts/native-linux-production-016-flatpak.cjs preflight
+      - name: Provision the mandatory native workflow parser
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml
+      - name: Pure refusal, namespace, sequence and workflow checks before downloads
+        run: |
+          node --check scripts/native-linux-production-016-flatpak.cjs
+          node --test scripts/native-linux-production-016-flatpak.test.cjs
+          python3 -B scripts/native-linux-production-016-flatpak.test.py
+      - name: Bind actual source and successful API artifacts; download data only
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const lane = require(require('node:path').join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-production-016-flatpak.cjs'));
+            await lane.collect(github, context);
+      - name: Install locked inspection dependencies without npm hooks
+        run: npm ci --ignore-scripts
+      - name: Provision only the offline signature verification tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+      - name: Inspect complete original inputs and verify real catalogue signatures and TAR inventory
+        run: /usr/bin/python3 -B scripts/native-linux-production-016-flatpak.py stage
+      - name: Provision disposable GUI test tools only after the separate execution request
+        if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
+        run: |
+          sudo apt-get install -y --no-install-recommends flatpak ostree build-essential pkg-config \
+            libgtk-3-dev libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libxdo3 libxres1 librsvg2-2 \
+            python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core libatk-adaptor \
+            webkit2gtk-driver dbus-x11 xvfb xauth openbox fonts-dejavu-core
+      - uses: dtolnay/rust-toolchain@1.99.0
+        if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
+      - name: Build only the locked external UI driver, never Root or launcher
+        if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
+        run: |
+          cargo install tauri-driver --version 2.1.0 --locked \
+            --root "$RUNNER_TEMP/native-linux-production-016-flatpak/tools"
+      - name: Separately requested isolated install and native UI scenarios
+        if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
+        run: /usr/bin/python3 -B scripts/native-linux-production-016-flatpak.py session
+      - name: Retain bounded evidence only, never private HOME or package archives
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-production-016-flatpak-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/native-linux-production-016-flatpak/api-binding.json
+            ${{ runner.temp }}/native-linux-production-016-flatpak/stage-review.json
+            ${{ runner.temp }}/native-linux-production-016-flatpak/installed-flatpak.json
+            ${{ runner.temp }}/native-linux-production-016-flatpak/report.json
+            ${{ runner.temp }}/native-linux-production-016-flatpak/portal-capture.json
+            ${{ runner.temp }}/native-linux-production-016-flatpak/*-gtk.json
+            ${{ runner.temp }}/native-linux-production-016-flatpak/evidence/*.json
+            ${{ runner.temp }}/native-linux-production-016-flatpak/warm-surface/*.png
