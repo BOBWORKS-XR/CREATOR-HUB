@@ -594,19 +594,30 @@ class RootAssociationTests(unittest.TestCase):
                     patch.object(M, 'complete_uid_inventory', side_effect=PermissionError() if failure == 'permission' else None,
                                  return_value=([], {19: {} if failure == 'caller' else caller})):
                 clock = Mock(side_effect=[1_000_000_000, 3_000_000_000]) if failure == 'expired' else lambda: 1_000_000_000
-                with self.assertRaises((ValueError, PermissionError)): M.inventory_probe(request, clock=clock)
+                with self.assertRaises((ValueError, PermissionError)) as caught: M.inventory_probe(request, clock=clock)
+                if failure == 'exit':
+                    self.assertEqual(caught.exception.proxy_snapshot_stage, 'probe-caller-chain')
+                    self.assertEqual(caught.exception.proxy_caller_diagnostic, dict(predicate='caller-pidfd-live',
+                        hops=[dict(pid=19, parentPid=None, startTime=None, uids=None, state=None,
+                                   expectedKind='python', executableKind='unread')]))
 
     def test_probe_invocation_only_follows_fixed_sudo_parent_chain_to_actual_caller(self):
         caller = dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10')
-        for failure in (None, 'foreign-exe', 'mixed-uid', 'caller-replaced'):
+        for failure in (None, 'foreign-exe', 'mixed-uid', 'sudo-mixed-uid', 'caller-replaced', 'permission', 'zombie'):
+            reads, links = [], []
+            original = PermissionError('PRIVATE_PROC_FAILURE')
             def read(directory, name, maximum):
+                reads.append((directory, name))
+                if failure == 'permission': raise original
                 if name == 'stat':
                     parent = 20 if directory == 21 else 19
-                    return (f'{directory} (fixed) R {parent} ' + '0 ' * 17 + f'{directory}\n').encode(), []
-                ids = b'1001 0 0 0' if failure == 'mixed-uid' else b'0 0 0 0'
+                    state = 'Z' if failure == 'zombie' else 'R'
+                    return (f'{directory} (fixed) {state} {parent} ' + '0 ' * 17 + f'{directory}\n').encode(), []
+                ids = b'1001 0 0 0' if failure == 'mixed-uid' or failure == 'sudo-mixed-uid' and directory == 20 else b'0 0 0 0'
                 return b'Uid:\t' + ids + b'\n', []
             def executable(name, *, dir_fd):
-                return '/usr/bin/python3.10' if dir_fd == 21 else ('/tmp/foreign' if failure == 'foreign-exe' else '/usr/bin/sudo')
+                links.append(dir_fd)
+                return '/usr/bin/python3.10' if dir_fd == 21 else ('/PRIVATE_FOREIGN_EXECUTABLE' if failure == 'foreign-exe' else '/usr/bin/sudo')
             with self.subTest(failure=failure), patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'), \
                     patch.object(M.os, 'O_DIRECTORY', 0, create=True), patch.object(M.os, 'O_NOFOLLOW', 0, create=True), \
                     patch.object(M.os, 'O_CLOEXEC', 0, create=True), \
@@ -617,8 +628,75 @@ class RootAssociationTests(unittest.TestCase):
                     patch.object(M, 'root_process', return_value={**caller, 'startTime': '99'} if failure == 'caller-replaced' else caller):
                 if failure is None:
                     self.assertEqual([r['pid'] for r in M.probe_caller_chain(caller)], [21, 20])
+                    self.assertEqual(reads, [(21, 'stat'), (21, 'status'), (20, 'stat'), (20, 'status')])
+                    self.assertEqual(links, [21, 20])
                 else:
-                    with self.assertRaises(ValueError): M.probe_caller_chain(caller)
+                    with self.assertRaises((ValueError, PermissionError)) as caught: M.probe_caller_chain(caller)
+                    detail = caught.exception.proxy_caller_diagnostic
+                    self.assertLessEqual(len(M.json.dumps(detail)), 4096)
+                    self.assertNotIn('PRIVATE', M.json.dumps(detail))
+                    hop = detail['hops'][-1]
+                    if failure in ('mixed-uid', 'sudo-mixed-uid'):
+                        self.assertEqual(detail['predicate'], 'hop-credentials')
+                        self.assertEqual(hop['uids'], [1001, 0, 0, 0])
+                        self.assertEqual(hop['state'], 'R'); self.assertEqual(hop['executableKind'], 'unread')
+                        self.assertEqual(hop['pid'], 21 if failure == 'mixed-uid' else 20)
+                        self.assertEqual(hop['parentPid'], 20 if failure == 'mixed-uid' else 19)
+                        self.assertEqual(hop['startTime'], str(hop['pid']))
+                        self.assertEqual(links, [] if failure == 'mixed-uid' else [21])
+                    elif failure == 'foreign-exe':
+                        self.assertEqual(detail['predicate'], 'hop-executable')
+                        self.assertEqual((hop['expectedKind'], hop['executableKind']), ('sudo', 'other'))
+                    elif failure == 'caller-replaced':
+                        self.assertEqual(detail['predicate'], 'caller-identity'); self.assertEqual(hop['pid'], 19)
+                    elif failure == 'permission':
+                        self.assertIs(caught.exception, original)
+                        self.assertEqual(detail['predicate'], 'hop-read'); self.assertIsNone(hop['state'])
+                        self.assertEqual(reads, [(21, 'stat')]); self.assertEqual(links, [])
+                    else:
+                        self.assertEqual(detail['predicate'], 'hop-process-shape'); self.assertEqual(hop['state'], 'Z')
+                        self.assertEqual(links, [])
+
+    def test_optional_caller_proc_metadata_uses_only_existing_identity_reads(self):
+        pid = 19
+        raw = (f'{pid} (PRIVATE_NAME) S 18 ' + '0 ' * 17 + '19\n').encode()
+        for attach in (False, True):
+            row = M.probe_hop_detail(pid); reads = []
+            def read(directory, name, maximum):
+                reads.append(name)
+                return (raw if name == 'stat' else b'Uid:\t1001 1001 1001 1001\n'), []
+            with patch.object(M.os, 'O_DIRECTORY', 0, create=True), patch.object(M.os, 'O_NOFOLLOW', 0, create=True), \
+                    patch.object(M.os, 'O_CLOEXEC', 0, create=True), patch.object(M.os, 'open', return_value=7), \
+                    patch.object(M.os, 'close'), patch.object(M.os, 'readlink', return_value='/usr/bin/python3.10') as links, \
+                    patch.object(M.ProxyAssociationProc, 'read_at', side_effect=read):
+                value = M.root_process(pid, **({'probe_diagnostic': row} if attach else {}))
+            self.assertEqual(value, dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10'))
+            self.assertEqual(reads, ['stat', 'status', 'stat', 'status']); self.assertEqual(links.call_count, 2)
+            if attach:
+                self.assertEqual(row['state'], 'S'); self.assertEqual(row['uids'], [1001] * 4)
+                self.assertNotIn('PRIVATE', M.json.dumps(row))
+
+    def test_probe_hop_metadata_is_bounded_and_never_contains_raw_state_or_names(self):
+        value = M.probe_hop_detail(19, ['PRIVATE_STATE', '1' * 100] + ['0'] * 17 + ['2' * 100], [(b'1' * 5000,) * 4])
+        self.assertEqual(value['state'], 'other'); self.assertIsNone(value['uids'])
+        self.assertIsNone(value['parentPid']); self.assertIsNone(value['startTime'])
+        self.assertNotIn('PRIVATE', M.json.dumps(value)); self.assertLess(len(M.json.dumps(value)), 512)
+
+    def test_failed_caller_identity_retains_same_read_state_and_uids_without_executable_reads(self):
+        for state, ids in (('Z', [1001] * 4), ('S', [1001, 0, 0, 0])):
+            row = M.probe_hop_detail(19)
+            raw = (f'19 (PRIVATE_NAME) {state} 18 ' + '0 ' * 17 + '19\n').encode()
+            with self.subTest(state=state), patch.object(M.os, 'O_DIRECTORY', 0, create=True), \
+                    patch.object(M.os, 'O_NOFOLLOW', 0, create=True), patch.object(M.os, 'O_CLOEXEC', 0, create=True), \
+                    patch.object(M.os, 'open', return_value=7), patch.object(M.os, 'close'), \
+                    patch.object(M.os, 'readlink') as links, \
+                    patch.object(M.ProxyAssociationProc, 'read_at', side_effect=[(raw, []),
+                        (('Uid:\t' + ' '.join(str(uid) for uid in ids) + '\n').encode(), [])]) as reads:
+                with self.assertRaises(ValueError): M.root_process(19, probe_diagnostic=row)
+                self.assertEqual(reads.call_count, 2); links.assert_not_called()
+            self.assertEqual(row, dict(pid=19, parentPid=18, startTime='19', state=state,
+                                       uids=ids, executableKind='unread'))
+            self.assertNotIn('PRIVATE', M.json.dumps(row))
 
     def test_root_watchdog_is_armed_before_any_stdin_read_and_exits_only_itself(self):
         state, events = self.fixture(), []
@@ -656,6 +734,35 @@ class RootAssociationTests(unittest.TestCase):
             validate.assert_called_once(); probe.assert_called_once_with(request)
             self.assertEqual(code.call_count, 2)
             self.assertEqual(M.json.loads(out.getvalue())['snapshot'], {'candidateCount': 0})
+
+    def test_root_probe_original_refusal_transports_only_bounded_caller_operands(self):
+        detail = dict(predicate='hop-credentials', hops=[dict(pid=21, parentPid=20, startTime='21',
+            uids=[1001, 0, 0, 0], state='S', expectedKind='python', executableKind='unread')])
+        for oversized in (False, True):
+            error = ValueError('PRIVATE_ORIGINAL_ERROR')
+            error.proxy_snapshot_stage = 'probe-caller-chain'
+            error.proxy_caller_diagnostic = detail if not oversized else {'unknown': 'PRIVATE' * 1000}
+            request = dict(operation=M.PROBE_OPERATION, codeSha256='b' * 64)
+            out = io.StringIO()
+            with self.subTest(oversized=oversized), patch.object(M.signal, 'SIGALRM', 14, create=True), \
+                    patch.object(M.signal, 'ITIMER_REAL', 0, create=True), patch.object(M.signal, 'signal'), \
+                    patch.object(M.signal, 'setitimer', create=True), \
+                    patch.object(M.os, 'getuid', return_value=0, create=True), patch.object(M.os, 'geteuid', return_value=0, create=True), \
+                    patch.dict(M.os.environ, {'SUDO_UID': '1001'}), patch.object(M, 'PROXY_TOOL', Path(M.__file__)), \
+                    patch.object(M.sys, 'argv', ['observer.py', 'root-inventory-probe']), \
+                    patch.object(M.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(M.json.dumps(request).encode()))), \
+                    patch.object(M.sys, 'stdout', out), patch.object(M, 'protected_tool') as code, \
+                    patch.object(M, 'probe_request'), patch.object(M, 'inventory_probe', side_effect=error), \
+                    patch.object(M, 'association_snapshot', side_effect=AssertionError('No association')):
+                with self.assertRaises(SystemExit) as caught: M.root_snapshot_main()
+                self.assertEqual(caught.exception.code, 1)
+                self.assertIs(caught.exception.__context__, error)
+                code.assert_called_once_with('b' * 64)
+            value = M.json.loads(out.getvalue())
+            expected = dict(ok=False, unavailable='ValueError', stage='probe-caller-chain')
+            if not oversized: expected['probeCaller'] = detail
+            self.assertEqual(value, expected)
+            self.assertNotIn('PRIVATE', out.getvalue()); self.assertLess(len(out.getvalue()), 4096)
 
     def test_private_instance_readback_replacement_and_size_are_guarded_without_writes(self):
         # Real Linux fd/proc coverage is separate; this checks the held instance

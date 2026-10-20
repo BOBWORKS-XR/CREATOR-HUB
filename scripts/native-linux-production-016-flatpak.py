@@ -7,6 +7,7 @@ disposable-CI-only; no signing, command relay, automatic recovery or forced app 
 import hashlib
 import base64
 import ctypes
+import copy
 from contextlib import contextmanager
 import importlib.util
 import io
@@ -1233,7 +1234,7 @@ ROOT_WORKERS_UNKNOWN = []
 
 def root_worker_refusal(answer):
     error = RuntimeError('Complete protected root snapshot unavailable; no input')
-    if type(answer) is dict and answer.get('ok') is False and set(answer) <= {'ok', 'unavailable', 'stage', 'pid'}:
+    if type(answer) is dict and answer.get('ok') is False and set(answer) <= {'ok', 'unavailable', 'stage', 'pid', 'probeCaller'}:
         value = dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
         if answer.get('unavailable') in ('ValueError', 'KeyError', 'TypeError', 'RuntimeError', 'PermissionError',
                                         'FileNotFoundError', 'ProcessLookupError', 'OSError'):
@@ -1244,6 +1245,25 @@ def root_worker_refusal(answer):
             value['stage'] = answer['stage']
         if type(answer.get('pid')) is int and 1 < answer['pid'] < 2**31:
             value['pid'] = answer['pid']
+        detail = answer.get('probeCaller')
+        try:
+            require(type(detail) is dict and set(detail) == {'predicate', 'hops'} and len(json_bytes(detail)) <= 4096
+                    and detail['predicate'] in ('hop-read', 'hop-process-shape', 'hop-credentials', 'hop-executable',
+                        'caller-read', 'caller-identity', 'caller-pidfd-live', 'chain-limit')
+                    and type(detail['hops']) is list and 0 < len(detail['hops']) <= 5, 'Typed caller diagnostics required')
+            for hop in detail['hops']:
+                require(type(hop) is dict and set(hop) == {'pid', 'parentPid', 'startTime', 'uids', 'state', 'expectedKind', 'executableKind'}
+                        and type(hop['pid']) is int and 1 < hop['pid'] < 2**31
+                        and (hop['parentPid'] is None or type(hop['parentPid']) is int and 0 <= hop['parentPid'] < 2**31)
+                        and (hop['startTime'] is None or type(hop['startTime']) is str and re.fullmatch(r'[0-9]{1,20}', hop['startTime']))
+                        and (hop['uids'] is None or type(hop['uids']) is list and len(hop['uids']) == 4
+                             and all(type(uid) is int and 0 <= uid < 2**32 for uid in hop['uids']))
+                        and hop['state'] in (None, 'R', 'S', 'D', 'Z', 'X', 'x', 'T', 't', 'K', 'W', 'P', 'I', 'other')
+                        and hop['expectedKind'] in ('python', 'sudo') and hop['executableKind'] in ('python', 'sudo', 'other', 'unread'),
+                        'Bounded caller hop required')
+            value['probeCaller'] = copy.deepcopy(detail)
+        except Exception:
+            pass
         error.root_proxy_diagnostic = value
     return error
 

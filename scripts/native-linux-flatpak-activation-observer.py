@@ -628,7 +628,25 @@ def root_request(value, now):
                 and parent['kernelImageSha256'] == value['original']['kernelImageSha256'])
 
 
-def root_process(pid, full=False):
+def probe_hop_detail(pid, tail=(), ids=()):
+    value = dict(pid=pid, parentPid=None, startTime=None, uids=None, state=None, executableKind='unread')
+    try:
+        if len(tail) >= 20:
+            if re.fullmatch(r'[0-9]{1,10}', tail[1]) and int(tail[1]) < 2**31:
+                value['parentPid'] = int(tail[1])
+            if re.fullmatch(r'[0-9]{1,20}', tail[19]):
+                value['startTime'] = tail[19]
+            value['state'] = tail[0] if tail[0] in ('R', 'S', 'D', 'Z', 'X', 'x', 'T', 't', 'K', 'W', 'P', 'I') else 'other'
+        if len(ids) == 1:
+            observed = [int(uid) for uid in ids[0]]
+            if len(observed) == 4 and all(0 <= uid < 2**32 for uid in observed):
+                value['uids'] = observed
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return value
+
+
+def root_process(pid, full=False, *, probe_diagnostic=None):
     """Read kernel proc identity only; no cmdline, environment or candidate imports."""
     require(type(pid) is int and 1 < pid < 2**31)
     directory = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -637,8 +655,11 @@ def root_process(pid, full=False):
             raw, _ = ProxyAssociationProc.read_at(directory, 'stat', 4096)
             status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
             text = raw.decode('utf-8'); tail = text[text.rfind(')') + 2:].split()
-            require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and tail[0] not in ('Z', 'X'))
             ids = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
+            if probe_diagnostic is not None:
+                kind = probe_diagnostic['executableKind']
+                probe_diagnostic.update(probe_hop_detail(pid, tail, ids), executableKind=kind)
+            require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and tail[0] not in ('Z', 'X'))
             require(len(ids) == 1 and [int(x) for x in ids[0]] == [PROXY_UID] * 4)
             return dict(pid=pid, parentPid=int(tail[1]), startTime=tail[19], uids=[PROXY_UID] * 4)
         before = identity()
@@ -735,25 +756,48 @@ def probe_request(value, now):
 def probe_caller_chain(caller):
     # Only this worker's fixed sudo/python invocation ancestry, never an app ancestry claim.
     pid, chain = os.getpid(), []
-    for _ in range(5):
-        if pid == caller['pid']:
-            require(root_process(pid) == caller and chain)
-            return chain
-        directory = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    detail = dict(predicate='chain-limit', hops=[])
+    try:
+        for _ in range(5):
+            hop = probe_hop_detail(pid)
+            hop['expectedKind'] = 'python' if not chain or pid == caller['pid'] else 'sudo'
+            detail['hops'].append(hop)
+            if pid == caller['pid']:
+                detail['predicate'] = 'caller-read'
+                actual = root_process(pid, probe_diagnostic=hop)
+                hop['executableKind'] = 'python' if actual['executable'] == caller['executable'] else 'other'
+                detail['predicate'] = 'caller-identity'
+                require(actual == caller and chain)
+                return chain
+            detail['predicate'] = 'hop-read'
+            directory = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                raw, _ = ProxyAssociationProc.read_at(directory, 'stat', 4096)
+                status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
+                text = raw.decode('utf-8'); tail = text[text.rfind(')') + 2:].split()
+                ids = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
+                hop.update(probe_hop_detail(pid, tail, ids))
+                detail['predicate'] = 'hop-process-shape'
+                require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and tail[0] not in ('Z', 'X') and len(ids) == 1)
+                detail['predicate'] = 'hop-credentials'
+                require([int(v) for v in ids[0]] == [0] * 4)
+                executable = os.readlink('exe', dir_fd=directory)
+                detail['predicate'] = 'hop-executable'
+                expected = str(Path('/usr/bin/python3').resolve(strict=True)) if not chain else '/usr/bin/sudo'
+                hop['executableKind'] = hop['expectedKind'] if executable == expected else 'other'
+                require(executable == expected)
+                chain.append(dict(pid=pid, parentPid=int(tail[1]), startTime=tail[19], state=tail[0], uids=[0] * 4))
+                pid = int(tail[1])
+            finally:
+                os.close(directory)
+        detail['predicate'] = 'chain-limit'
+        raise ValueError('Fixed invoking caller chain unavailable')
+    except Exception as error:
         try:
-            raw, _ = ProxyAssociationProc.read_at(directory, 'stat', 4096)
-            status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
-            text = raw.decode('utf-8'); tail = text[text.rfind(')') + 2:].split()
-            ids = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
-            require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and tail[0] not in ('Z', 'X')
-                    and len(ids) == 1 and [int(v) for v in ids[0]] == [0] * 4)
-            executable = os.readlink('exe', dir_fd=directory)
-            require(executable == (str(Path('/usr/bin/python3').resolve(strict=True)) if not chain else '/usr/bin/sudo'))
-            chain.append(dict(pid=pid, parentPid=int(tail[1]), startTime=tail[19], state=tail[0], uids=[0] * 4))
-            pid = int(tail[1])
-        finally:
-            os.close(directory)
-    raise ValueError('Fixed invoking caller chain unavailable')
+            error.proxy_caller_diagnostic = copy.deepcopy(bounded(detail, 4096))
+        except Exception:
+            pass
+        raise
 
 
 def inventory_probe(request, *, clock=time.monotonic_ns):
@@ -764,7 +808,13 @@ def inventory_probe(request, *, clock=time.monotonic_ns):
     stage = 'probe-caller-chain'
     try:
         chain = probe_caller_chain(request['caller'])
-        require(not select.select([fd], [], [], 0)[0])
+        try:
+            require(not select.select([fd], [], [], 0)[0])
+        except Exception as error:
+            hop = probe_hop_detail(request['caller']['pid'])
+            hop['expectedKind'] = 'python'
+            error.proxy_caller_diagnostic = dict(predicate='caller-pidfd-live', hops=[hop])
+            raise
         stage = 'complete-uid-inventory'
         proxies, rows = complete_uid_inventory(budget)
         require(rows.get(request['caller']['pid']) == request['caller'])
@@ -915,6 +965,12 @@ def root_snapshot_main():
         pid = getattr(error, 'proxy_snapshot_pid', None)
         if type(pid) is int and 1 < pid < 2**31:
             refusal['pid'] = pid
+        detail = getattr(error, 'proxy_caller_diagnostic', None)
+        if type(detail) is dict:
+            try:
+                refusal['probeCaller'] = bounded(detail, 4096)
+            except Exception:
+                pass
         sys.stdout.write(json.dumps(refusal))
         raise SystemExit(1)
 

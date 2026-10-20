@@ -942,6 +942,46 @@ class RootInventoryPreflightTests(unittest.TestCase):
             self.assertEqual(state.reports[0][1]['workerCleanup'], dict(readOnly=True, inputPermitted=False,
                 authorityGranted=False, releaseReady=False, type='PermissionError', stage='complete-uid-inventory', pid=925))
 
+    def test_root_probe_caller_refusal_retains_same_read_operands_without_passing_or_retry(self):
+        detail = dict(predicate='hop-credentials', hops=[dict(pid=21, parentPid=20, startTime='21',
+            uids=[1001, 0, 0, 0], state='S', expectedKind='python', executableKind='unread')])
+        with self.fixture() as state:
+            state.worker.side_effect = None
+            state.worker.return_value = SimpleNamespace(returncode=1, stderr=b'', stdout=M.json_bytes(
+                dict(ok=False, unavailable='ValueError', stage='probe-caller-chain', probeCaller=detail)))
+            with self.assertRaisesRegex(RuntimeError, 'no input'): M.root_inventory_preflight(Path('/fixed'))
+            self.assertEqual(state.worker.call_count, 1)
+            report = state.reports[0][1]
+            self.assertFalse(report['inventoryProbed']); self.assertNotIn('inventory', report)
+            self.assertEqual(report['workerCleanup'], dict(readOnly=True, inputPermitted=False,
+                authorityGranted=False, releaseReady=False, type='ValueError', stage='probe-caller-chain', probeCaller=detail))
+            for name in M.GATES: self.assertIs(report[name], False)
+
+    def test_caller_diagnostic_schema_is_closed_bounded_and_detached_from_worker_record(self):
+        detail = dict(predicate='hop-executable', hops=[dict(pid=21, parentPid=20, startTime='21',
+            uids=[0] * 4, state='S', expectedKind='python', executableKind='other')])
+        answer = dict(ok=False, unavailable='ValueError', stage='probe-caller-chain', probeCaller=detail)
+        error = M.root_worker_refusal(answer)
+        self.assertEqual(error.root_proxy_diagnostic['probeCaller'], detail)
+        detail['hops'][0]['pid'] = 99
+        self.assertEqual(error.root_proxy_diagnostic['probeCaller']['hops'][0]['pid'], 21)
+        changes = (
+            lambda d: d.update(extra='PRIVATE'), lambda d: d.update(predicate='PRIVATE'),
+            lambda d: d.update(hops=[]), lambda d: d.update(hops=d['hops'] * 6),
+            lambda d: d['hops'][0].update(extra='PRIVATE'), lambda d: d['hops'][0].update(pid=True),
+            lambda d: d['hops'][0].update(parentPid=True), lambda d: d['hops'][0].update(startTime='1' * 5000),
+            lambda d: d['hops'][0].update(uids=[True] * 4), lambda d: d['hops'][0].update(uids=[2**32] * 4),
+            lambda d: d['hops'][0].update(state='PRIVATE'), lambda d: d['hops'][0].update(expectedKind='PRIVATE'),
+            lambda d: d['hops'][0].update(executableKind='PRIVATE'))
+        for change in changes:
+            changed = copy.deepcopy(detail); change(changed)
+            with self.subTest(change=change):
+                refused = M.root_worker_refusal({**answer, 'probeCaller': changed})
+                self.assertEqual(refused.root_proxy_diagnostic, dict(readOnly=True, inputPermitted=False,
+                    authorityGranted=False, releaseReady=False, type='ValueError', stage='probe-caller-chain'))
+                self.assertNotIn('PRIVATE', str(refused.root_proxy_diagnostic))
+                self.assertIn('no input', str(refused))
+
     def test_probe_accepts_only_before_expiry_including_after_final_protected_source_check(self):
         for delta in (-1, 0, 1, 'protected-check'):
             with self.subTest(delta=delta), self.fixture() as state:
