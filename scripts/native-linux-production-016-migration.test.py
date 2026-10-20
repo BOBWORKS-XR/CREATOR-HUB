@@ -1936,6 +1936,97 @@ class ExitDiagnosticsTests(unittest.TestCase):
         self.assertIn("while child.poll() is None and time.monotonic() < deadline:", source)
 
 
+class JournalPhaseTests(unittest.TestCase):
+    @staticmethod
+    def captured():
+        # Exact decoded journal fields retained from run 39474005200 (25 members).
+        return {"revision": 1, "records": [
+            {"session": "a2495e7d2be84d5287df98fb5cd561b909c8ddd3ad21442587233e45c133a79c", "id": 2,
+             "command": "review_existing_client_connections", "outcome": "returned-ok"},
+            {"session": "a2495e7d2be84d5287df98fb5cd561b909c8ddd3ad21442587233e45c133a79c", "id": 3,
+             "command": "review_convergence_server", "outcome": "returned-ok"}]}
+
+    def test_actual_two_review_journal_passes_migration_projects_without_inventing_mcp_reads(self):
+        captured = self.captured()
+        self.assertEqual(M.journal_delta({"revision": 1, "records": []}, captured, phase="migration-projects"), captured)
+        self.assertEqual(M.journal_delta(captured, copy.deepcopy(captured), phase="projects-only"), captured)
+        with patch.object(M, "read_file", return_value=json.dumps(captured).encode()):
+            report = {}
+            self.assertEqual(M.observed_journal_delta({"revision": 1, "records": []}, Path("/synthetic/home"), report, "first"), captured)
+        self.assertEqual(report["operationJournals"]["first"]["expectedPhase"], "migration-projects")
+        self.assertEqual(report["operationJournals"]["first"]["expectedCommands"], ["review_existing_client_connections", "review_convergence_server"])
+
+    def test_migration_missing_changed_extra_pending_or_mixed_session_records_still_refuse(self):
+        original = self.captured()
+        cases = []
+        for index in range(2):
+            for key, value in (("command", "load_config"), ("outcome", "pending"), ("outcome", "unknown"),
+                               ("outcome", "returned-error"), ("session", "b" * 64), ("session", "invalid"),
+                               ("id", True), ("id", 0), ("id", 65)):
+                bad = copy.deepcopy(original); bad["records"][index][key] = value; cases.append(bad)
+            bad = copy.deepcopy(original); bad["records"].pop(index); cases.append(bad)
+            bad = copy.deepcopy(original); bad["records"][index]["extra"] = "unapproved"; cases.append(bad)
+        cases.append({"revision": 1, "records": list(reversed(original["records"]))})
+        cases.append({"revision": 1, "records": original["records"] + records("b", ["save_config"], [4])})
+        cases.append({"revision": 1, "records": original["records"] + records("b", ["load_config", "discover_unity_projects"], [3, 4])})
+        for bad in cases:
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                M.journal_delta({"revision": 1, "records": []}, bad, phase="migration-projects")
+
+    def test_existing_prefix_and_old_session_cannot_be_rewritten_or_reused(self):
+        previous = {"revision": 1, "records": records("a", ["save_config"], [1])}
+        current = {"revision": 1, "records": previous["records"] + self.captured()["records"]}
+        self.assertEqual(M.journal_delta(previous, current, phase="migration-projects"), current)
+        for key, value in (("id", 2), ("command", "load_config"), ("outcome", "unknown"), ("session", "b" * 64)):
+            bad = copy.deepcopy(current); bad["records"][0][key] = value
+            with self.assertRaisesRegex(RuntimeError, "Earlier operation records changed"):
+                M.journal_delta(previous, bad, phase="migration-projects")
+        reused = {"revision": 1, "records": self.captured()["records"][:1]}
+        replay = {"revision": 1, "records": reused["records"] + self.captured()["records"]}
+        with self.assertRaisesRegex(RuntimeError, "Operation session reused/changed"):
+            M.journal_delta(reused, replay, phase="migration-projects")
+
+    def test_projects_reopen_refuses_every_extra_read_or_write_and_any_prefix_change(self):
+        previous = self.captured()
+        for command in sorted(M.JOURNAL_COMMANDS):
+            extra = {"revision": 1, "records": previous["records"] + records("b", [command], [1])}
+            with self.subTest(command=command), self.assertRaisesRegex(RuntimeError, "Unexpected operation journal append count"):
+                M.journal_delta(previous, extra, phase="projects-only")
+        for key, value in (("command", "load_config"), ("outcome", "pending"), ("session", "b" * 64), ("id", 7)):
+            changed = copy.deepcopy(previous); changed["records"][0][key] = value
+            with self.assertRaisesRegex(RuntimeError, "Earlier operation records changed"):
+                M.journal_delta(previous, changed, phase="projects-only")
+        with patch.object(M, "read_file", return_value=json.dumps(previous).encode()):
+            report = {}
+            M.observed_journal_delta(previous, Path("/synthetic/home"), report, "reopened")
+        self.assertEqual(report["operationJournals"]["reopened"]["expectedPhase"], "projects-only")
+        self.assertEqual(report["operationJournals"]["reopened"]["expectedCommands"], [])
+
+    def test_only_explicit_mcp_page_phase_accepts_the_exact_original_read_pair(self):
+        reads = {"revision": 1, "records": records("b", ["load_config", "discover_unity_projects"], [3, 4])}
+        empty = {"revision": 1, "records": []}
+        self.assertEqual(M.journal_delta(empty, reads, phase="mcp-page"), reads)
+        for phase in ("projects-only", "migration-projects"):
+            with self.assertRaises(RuntimeError): M.journal_delta(empty, reads, phase=phase)
+        for phase in ("first", "reopened", "all", "", None, True, [], {}):
+            with self.subTest(phase=phase), self.assertRaises(RuntimeError): M.journal_delta(empty, reads, phase=phase)
+
+    def test_closed_phases_match_lazy_product_navigation_and_migration_source(self):
+        self.assertEqual(M.JOURNAL_PHASE_COMMANDS, {
+            "migration-projects": ("review_existing_client_connections", "review_convergence_server"),
+            "projects-only": (), "mcp-page": ("load_config", "discover_unity_projects")})
+        src = HERE.parent / "src"
+        app, features, mcp, projects = [(src / name).read_text() for name in ("app.js", "feature-pages.js", "features/mcp.js", "projects.js")]
+        self.assertIn("current = 'projects';", app)
+        self.assertIn("window.CreatorFeaturePages?.show(tool ? current : null, { load: directReady });", app)
+        self.assertIn("if (feature == null) { window.CreatorFeaturePages.hide(); return false; }", features)
+        self.assertIn("page.initialized = await page.initialize();", features)
+        self.assertIn("config = await page.call('load_config');", mcp)
+        self.assertIn("const discovered = await page.call('discover_unity_projects');", mcp)
+        self.assertIn("else void run('project_inventory');", projects)
+        self.assertNotIn("load_config", projects); self.assertNotIn("discover_unity_projects", projects)
+
+
 class SessionProgressTests(unittest.TestCase):
     class Stall(BaseException):
         pass
@@ -2736,18 +2827,19 @@ class ControllerTests(unittest.TestCase):
         password.get_editable_text_iface.return_value.set_text_contents.assert_called_once(); action.do_action.assert_called_once_with(0)
 
     def test_observed_journal_delta_retains_both_refusals_in_existing_failure_report_before_assertion(self):
-        first = {"revision": 1, "records": records("a", ["load_config", "discover_unity_projects"], [3, 4])}
+        first = JournalPhaseTests.captured()
         for phase, previous in (("first", {"revision": 1, "records": []}), ("reopened", first)):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
                 home = Path(temporary).resolve()
-                report, raw = {"scenarioPassed": False, **M.FLAGS}, json.dumps(previous).encode()
+                current = previous if phase == "first" else {"revision": 1, "records": previous["records"] + records("b", ["load_config"], [3])}
+                report, raw = {"scenarioPassed": False, **M.FLAGS}, json.dumps(current).encode()
                 original = M.journal_delta
                 def check(old, current, **kwargs):
                     captured = report["operationJournals"][phase]
                     self.assertEqual(captured["file"], {"size": len(raw), "sha256": M.digest(raw)})
                     self.assertEqual(captured["previous"]["count"], len(previous["records"]))
-                    self.assertEqual(captured["current"]["count"], len(previous["records"]))
-                    self.assertTrue(captured["prefixEqual"]); self.assertEqual(captured["appendCount"], 0)
+                    self.assertEqual(captured["current"]["count"], len(current["records"]))
+                    self.assertTrue(captured["prefixEqual"]); self.assertEqual(captured["appendCount"], 0 if phase == "first" else 1)
                     return original(old, current, **kwargs)
                 with patch.object(M, "read_file", return_value=raw) as read, patch.object(M, "journal_delta", side_effect=check):
                     with self.assertRaisesRegex(RuntimeError, "Unexpected operation journal append count"):
@@ -2788,9 +2880,10 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(captured["validationAuthority"])
 
     def test_observed_journal_delta_keeps_exact_success_and_does_not_swallow_any_oracle_refusal(self):
-        previous = {"revision": 1, "records": records("a", ["load_config", "discover_unity_projects"], [3, 4])}
-        good = {"revision": 1, "records": previous["records"] + records("b", ["load_config", "discover_unity_projects"], [3, 4])}
-        cases = [good, previous, {"revision": 1, "records": good["records"] + records("b", ["save_config"], [5])}]
+        previous = JournalPhaseTests.captured()
+        good = copy.deepcopy(previous)
+        cases = [good, {"revision": 1, "records": previous["records"] + records("b", ["load_config", "discover_unity_projects"], [3, 4])},
+                 {"revision": 1, "records": good["records"] + records("b", ["save_config"], [5])}]
         for key, value in (("id", 5), ("command", "save_config"), ("outcome", "returned-error"), ("session", "a" * 64)):
             bad = copy.deepcopy(good); bad["records"][-1][key] = value; cases.append(bad)
         bad = copy.deepcopy(good); bad["records"][0]["outcome"] = "returned-error"; cases.append(bad)
@@ -2800,7 +2893,7 @@ class ControllerTests(unittest.TestCase):
                 if index == 0:
                     self.assertEqual(M.observed_journal_delta(previous, Path("/synthetic/home"), report, "reopened"), good)
                 else:
-                    with self.assertRaises(RuntimeError) as expected: M.journal_delta(previous, current)
+                    with self.assertRaises(RuntimeError) as expected: M.journal_delta(previous, current, phase="projects-only")
                     with self.assertRaises(RuntimeError) as actual: M.observed_journal_delta(previous, Path("/synthetic/home"), report, "reopened")
                     self.assertEqual(str(actual.exception), str(expected.exception))
                 self.assertEqual(report["operationJournals"]["reopened"]["prefixEqual"], current["records"][:len(previous["records"])] == previous["records"])
@@ -2821,6 +2914,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual([node.args[3].value for node in calls], ["first", "reopened"])
         self.assertEqual([ast.unparse(node.args[0]) for node in calls], ["baseline", "current"])
+        self.assertTrue(all(not node.keywords for node in calls))
         self.assertTrue(all(ast.unparse(node.args[1]) == "home" and ast.unparse(node.args[2]) == "report" for node in calls))
         self.assertFalse(any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "journal_delta" for node in ast.walk(run)))
         saved = [node for statement in owner.finalbody for node in ast.walk(statement)
@@ -2884,11 +2978,11 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(ast.unparse(other[0].args[0]), previous)
             self.assertEqual(other[0].args[3].value, phase)
 
-    def test_guide_cancel_allows_only_two_completed_reads_per_new_root_and_preserves_prefix(self):
+    def test_explicit_mcp_page_allows_only_two_completed_reads_per_new_root_and_preserves_prefix(self):
         empty = {"revision": 1, "records": []}
         first = {"revision": 1, "records": records("a", ["load_config", "discover_unity_projects"], [3, 4])}
         second = {"revision": 1, "records": first["records"] + records("b", ["load_config", "discover_unity_projects"], [3, 4])}
-        M.journal_delta(empty, first); M.journal_delta(first, second)
+        M.journal_delta(empty, first, phase="mcp-page"); M.journal_delta(first, second, phase="mcp-page")
         mutations = [lambda v: v["records"].pop(), lambda v: v["records"].append(dict(v["records"][-1])),
                      lambda v: v["records"][0].update(command="apply_client_config"),
                      lambda v: v["records"][0].update(outcome="unknown"), lambda v: v["records"][0].update(id=True),
@@ -2896,21 +2990,21 @@ class ControllerTests(unittest.TestCase):
                      lambda v: v.update(revision=True), lambda v: v.update(extra=1)]
         for mutate in mutations:
             bad = copy.deepcopy(first); mutate(bad)
-            with self.assertRaises(RuntimeError): M.journal_delta(empty, bad)
+            with self.assertRaises(RuntimeError): M.journal_delta(empty, bad, phase="mcp-page")
         bad = copy.deepcopy(second); bad["records"][0]["outcome"] = "returned-error"
-        with self.assertRaises(RuntimeError): M.journal_delta(first, bad)
+        with self.assertRaises(RuntimeError): M.journal_delta(first, bad, phase="mcp-page")
         repeated = {"revision": 1, "records": first["records"] * 2}
-        with self.assertRaises(RuntimeError): M.journal_delta(first, repeated)
+        with self.assertRaises(RuntimeError): M.journal_delta(first, repeated, phase="mcp-page")
 
-    def test_transfer_journal_has_only_source_defined_completed_commands_then_exact_reopen_reads(self):
-        names = ["review_existing_client_connections", "review_convergence_server", "load_config", "discover_unity_projects"]
-        first = {"revision": 1, "records": records("a", names, [2, 3, 7, 8])}
-        M.journal_delta({"revision": 1, "records": []}, first, transferred=True)
-        second = {"revision": 1, "records": first["records"] + records("b", names[-2:], [3, 4])}
-        M.journal_delta(first, second)
-        for index in range(4):
+    def test_transfer_journal_has_only_source_defined_completed_reviews_then_unchanged_projects_reopen(self):
+        names = ["review_existing_client_connections", "review_convergence_server"]
+        first = {"revision": 1, "records": records("a", names, [2, 3])}
+        M.journal_delta({"revision": 1, "records": []}, first, phase="migration-projects")
+        second = copy.deepcopy(first)
+        M.journal_delta(first, second, phase="projects-only")
+        for index in range(2):
             bad = copy.deepcopy(first); bad["records"][index]["command"] = "unexpected"
-            with self.assertRaises(RuntimeError): M.journal_delta({"revision": 1, "records": []}, bad, transferred=True)
+            with self.assertRaises(RuntimeError): M.journal_delta({"revision": 1, "records": []}, bad, phase="migration-projects")
 
     def test_scenario_package_states_do_not_treat_partial_cleanup_as_rollback_or_completion(self):
         self.assertEqual([M.retention_state(s) for s in M.SCENARIOS], [(False, False), (False, False), (True, False), (True, True)])
@@ -3240,7 +3334,7 @@ class ControllerTests(unittest.TestCase):
             home = root / "home"
             M.preserved(home, before, transferred=False)
             (home / M.JOURNAL).write_text(json.dumps({"revision": 1, "records": records("a", ["load_config", "discover_unity_projects"], [3, 4])}))
-            M.journal_delta(M.P.parse(before[M.JOURNAL]), M.P.parse(M.read_file(home / M.JOURNAL)))
+            M.journal_delta(M.P.parse(before[M.JOURNAL]), M.P.parse(M.read_file(home / M.JOURNAL)), phase="mcp-page")
             M.preserved(home, before, transferred=False)
             target = home / M.CONFIG; target.write_text("changed")
             with self.assertRaises(RuntimeError): M.preserved(home, before, transferred=False)

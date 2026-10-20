@@ -225,7 +225,15 @@ def check_request(request, env, binding_raw):
     return request["scenario"]
 
 
-def journal_delta(previous, current, *, transferred=False):
+JOURNAL_PHASE_COMMANDS = {
+    "migration-projects": ("review_existing_client_connections", "review_convergence_server"),
+    "projects-only": (),
+    "mcp-page": ("load_config", "discover_unity_projects"),
+}
+
+
+def journal_delta(previous, current, *, phase):
+    require(type(phase) is str and phase in JOURNAL_PHASE_COMMANDS, "Finite journal navigation phase required")
     for value in (previous, current):
         keys(value, ("revision", "records"))
         require(type(value["revision"]) is int and value["revision"] == 1 and type(value["records"]) is list
@@ -233,7 +241,7 @@ def journal_delta(previous, current, *, transferred=False):
     old = previous["records"]
     require(current["records"][:len(old)] == old, "Earlier operation records changed")
     tail = current["records"][len(old):]
-    expected = (["review_existing_client_connections", "review_convergence_server"] if transferred else []) + ["load_config", "discover_unity_projects"]
+    expected = JOURNAL_PHASE_COMMANDS[phase]
     require(len(tail) == len(expected), "Unexpected operation journal append count")
     session = None
     last = 0
@@ -245,7 +253,7 @@ def journal_delta(previous, current, *, transferred=False):
         session = session or record["session"]
         require(record["session"] == session and not any(r["session"] == session for r in old), "Operation session reused/changed")
         last = record["id"]
-    if not transferred:
+    if phase == "mcp-page":
         require([r["id"] for r in tail] == [3, 4], "New Root's two read operation IDs differ")
     return current
 
@@ -292,9 +300,12 @@ def observe_journal(previous, home, report, phase):
     return current, raw
 
 
-def observed_journal_delta(previous, home, report, phase, *, transferred=False):
+def observed_journal_delta(previous, home, report, phase):
     current, _raw = observe_journal(previous, home, report, phase)
-    return journal_delta(previous, current, transferred=transferred)
+    # Projects navigation does not initialize the lazily mounted MCP page.
+    expected_phase = "migration-projects" if phase == "first" else "projects-only"
+    report["operationJournals"][phase].update(expectedPhase=expected_phase, expectedCommands=list(JOURNAL_PHASE_COMMANDS[expected_phase]))
+    return journal_delta(previous, current, phase=expected_phase)
 
 
 def observed_cancel_journal(baseline, original_raw, home, report, phase):
@@ -2804,7 +2815,7 @@ def run_session(env):
         if scenario == SCENARIOS[0]:
             current = observed_cancel_journal(baseline, before[JOURNAL], home, report, "first")
         else:
-            current = observed_journal_delta(baseline, home, report, "first", transferred=scenario != SCENARIOS[0])
+            current = observed_journal_delta(baseline, home, report, "first")
         preserved(home, before, transferred=scenario != SCENARIOS[0], binding=binding); batch_outcome(home, scenario)
         installed(binding, retention_state(scenario))
         report["oldRuntimeAfterMigration"] = old_sdk.check()
