@@ -122,7 +122,7 @@ jobs:
           out = Path(os.environ['RUNNER_TEMP']) / 'native-linux-production-016-migration-result'
           assert out.parent.resolve() == out.parent and not os.path.lexists(out)
           out.mkdir(mode=0o700); uid = int(os.environ['RUNNER_UID']); os.chown(out, uid, uid)
-          names = ['broker.json', 'ancestry.json', 'execution-request.json', 'source-binding.json', 'result/report.json', 'result/before.json', 'session.stdout', 'session.stderr']
+          names = ['broker.json', 'ancestry.json', 'execution-request.json', 'source-binding.json', 'result/report.json', 'result/before.json', 'session.stdout', 'session.stderr', 'helper-inspection-failure.json', 'result/helper-inspection-failure.json']
           for folder in ['first', 'reopened']:
               names += ['result/' + folder + '/' + f for f in ['session.json', 'driver.stdout', 'driver.stderr', 'home.png']]
           for folder in ['old-sdk', 'legacy-reconnect', 'managed-reconnect']:

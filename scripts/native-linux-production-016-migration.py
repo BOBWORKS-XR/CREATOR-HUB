@@ -245,11 +245,54 @@ def policy_question(raw):
     return question
 
 
-def tool(args, *, allowed=(0,)):
+def helper_identity():
+    observed = {"path": HELPER}
+    try:
+        file = Path(HELPER)
+        info = file.lstat()
+        fields = ("st_dev", "st_ino", "st_size", "st_mode", "st_nlink", "st_uid", "st_gid", "st_mtime_ns", "st_ctime_ns")
+        observed.update(size=info.st_size, mode=stat.S_IMODE(info.st_mode), uid=info.st_uid, gid=info.st_gid,
+                        dev=info.st_dev, ino=info.st_ino, nlink=info.st_nlink)
+        raw = read_file(file, 256 * 1024 * 1024)
+        after = file.lstat()
+        require(all(getattr(info, key) == getattr(after, key) for key in fields), "Helper identity changed during diagnostic read")
+        observed["sha256"] = digest(raw)
+    except Exception as error:
+        observed["unavailable"] = type(error).__name__
+    return observed
+
+
+def tool(args, *, allowed=(0,), helper_pin=None):
+    helper = bool(args) and args[0] == HELPER
+    if helper:
+        require(len(args) == 2 and args[1] in ("inspect", "inspect-retained-mcp-2.7.7", "inspect-setup-0.3.7", "inspect-retained-setup-0.3.7")
+                and allowed == (0,), "Only fixed read-only helper inspections with successful exit required")
+        keys(helper_pin, ("size", "sha256"))
+        require(type(helper_pin["size"]) is int and 0 < helper_pin["size"] <= 256 * 1024 * 1024
+                and type(helper_pin["sha256"]) is str and re.fullmatch(r"[a-f0-9]{64}", helper_pin["sha256"]), "Exact helper byte pin required")
+    else:
+        require(helper_pin is None, "Helper diagnostics cannot capture another command")
     result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"}, check=False)
-    require(len(result.stdout) <= 262144 and len(result.stderr) <= 262144 and result.returncode in allowed,
-            "Finite native inspection refused; no retry: " + args[0])
+    accepted = len(result.stdout) <= 262144 and len(result.stderr) <= 262144 and result.returncode in allowed
+    if helper and not accepted:
+        def output(raw):
+            return {"bytes": len(raw), "sha256": digest(raw), "excerpt": raw[:2048].decode("utf-8", "replace"), "truncated": len(raw) > 2048}
+        reason = None
+        try:
+            if len(result.stdout) <= 262144:
+                report = P.parse(result.stdout)
+                if type(report) is dict and type(report.get("reason")) is str:
+                    reason = report["reason"][:1024]
+        except Exception:
+            pass
+        caller = dict(uid=os.getuid(), euid=os.geteuid(), gid=os.getgid(), egid=os.getegid())
+        destination = BASE if caller["euid"] == 0 else BASE / "result"
+        save(destination / "helper-inspection-failure.json", {"schemaVersion": 1, "readOnly": True, "retryPermitted": False,
+             "argv": args, "exitCode": result.returncode, "caller": caller,
+             "helperExpected": {"path": HELPER, **helper_pin, "mode": 0o755, "uid": 0, "gid": 0},
+             "helperActual": helper_identity(), "stdout": output(result.stdout), "stderr": output(result.stderr), "reasonExcerpt": reason})
+    require(accepted, "Finite native inspection refused; no retry: " + args[0])
     return result.stdout
 
 
@@ -265,7 +308,7 @@ def installed(binding, retained=(False, False)):
         require(not tool(["/usr/bin/dpkg", "--verify", package]), "Installed package integrity differs")
     for product, keep in zip(("mcp", "setup"), retained):
         action = ("inspect-retained-mcp-2.7.7" if keep else "inspect") if product == "mcp" else ("inspect-retained-setup-0.3.7" if keep else "inspect-setup-0.3.7")
-        inspection(P.parse(tool([HELPER, action])), product, keep)
+        inspection(P.parse(tool([HELPER, action], helper_pin=binding["profile"]["pins"]["helper"])), product, keep)
     original = P.parse(read_file(BASE / "legacy-files.json", 65536, uid=0, mode=0o644))
     for product, keep in zip(("mcp", "setup"), retained):
         for name, pin in original[product].items():
@@ -833,7 +876,7 @@ def observe_request(value, context, binding, helper, native, polkit):
     helper_raw = read_file(Path(HELPER), 256 * 1024 * 1024, uid=0, mode=0o755)
     require(digest(helper_raw) == binding["profile"]["pins"]["helper"]["sha256"], "Production helper changed before native input")
     if value["target"] == "setup":
-        inspection(P.parse(tool([HELPER, "inspect-retained-mcp-2.7.7"])), "mcp", True)
+        inspection(P.parse(tool([HELPER, "inspect-retained-mcp-2.7.7"], helper_pin=binding["profile"]["pins"]["helper"])), "mcp", True)
     children = set()
     for task in Path(f"/proc/{root['pid']}/task").iterdir():
         try:

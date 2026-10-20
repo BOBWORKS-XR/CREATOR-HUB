@@ -52,6 +52,94 @@ def records(session, commands, ids):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_helper_inspection_failure_is_saved_before_throw_even_before_user_creation(self):
+        actions = ("inspect", "inspect-retained-mcp-2.7.7", "inspect-setup-0.3.7", "inspect-retained-setup-0.3.7")
+        pin = {"size": 64, "sha256": "a" * 64}
+        actual = {"path": M.HELPER, **pin, "mode": 0o755, "uid": 0, "gid": 0, "dev": 1, "ino": 2, "nlink": 1}
+        stdout = json.dumps({"status": "refused", "reason": "r" * 6000}).encode()
+        stderr = b"synthetic native diagnostic\n" * 1000
+        for uid in (0, M.UID):
+            for action in actions:
+                with self.subTest(uid=uid, action=action), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary).resolve()
+                    if uid:
+                        (root / "result").mkdir()
+                    destination = root / ("result/helper-inspection-failure.json" if uid else "helper-inspection-failure.json")
+                    result = subprocess.CompletedProcess([M.HELPER, action], 2, stdout, stderr)
+                    with patch.object(M, "BASE", root), patch.object(M, "helper_identity", return_value=actual), \
+                         patch.multiple(M.os, getuid=Mock(return_value=uid), geteuid=Mock(return_value=uid),
+                                        getgid=Mock(return_value=uid), getegid=Mock(return_value=uid), create=True), \
+                         patch.object(M.subprocess, "run", return_value=result) as run:
+                        with self.assertRaisesRegex(RuntimeError, "Finite native inspection refused; no retry"):
+                            M.tool([M.HELPER, action], helper_pin=pin)
+                    self.assertTrue(destination.is_file())
+                    receipt = json.loads(destination.read_bytes())
+                    self.assertEqual(receipt["argv"], [M.HELPER, action])
+                    self.assertEqual(receipt["exitCode"], 2)
+                    self.assertEqual(receipt["caller"], dict(uid=uid, euid=uid, gid=uid, egid=uid))
+                    self.assertEqual(receipt["helperExpected"], {"path": M.HELPER, **pin, "mode": 0o755, "uid": 0, "gid": 0})
+                    self.assertEqual(receipt["helperActual"], actual)
+                    self.assertEqual(receipt["reasonExcerpt"], "r" * 1024)
+                    for name, raw in (("stdout", stdout), ("stderr", stderr)):
+                        self.assertEqual(receipt[name], {"bytes": len(raw), "sha256": M.digest(raw),
+                                         "excerpt": raw[:2048].decode(), "truncated": True})
+                    self.assertLess(destination.stat().st_size, 16384)
+                    run.assert_called_once_with([M.HELPER, action], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                                stderr=subprocess.PIPE, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"}, check=False)
+                    if not uid:
+                        self.assertFalse((root / "result").exists(), "Pre-user evidence must not need a synthetic home/result directory")
+
+    def test_helper_inspection_diagnostics_never_admit_unknown_actions_or_exit_codes(self):
+        pin = {"size": 64, "sha256": "a" * 64}
+        for args, kwargs in (([M.HELPER, "retire-mcp-2.7.7"], {"helper_pin": pin}),
+                             ([M.HELPER, "inspect", "extra"], {"helper_pin": pin}),
+                             ([M.HELPER], {"helper_pin": pin}), ([M.HELPER, "inspect"], {}),
+                             ([M.HELPER, "inspect"], {"helper_pin": pin, "allowed": (0, 2)})):
+            with self.subTest(args=args, kwargs=kwargs), patch.object(M.subprocess, "run") as run, \
+                 patch.object(M, "helper_identity") as identity, self.assertRaises(RuntimeError):
+                M.tool(args, **kwargs)
+            run.assert_not_called(); identity.assert_not_called()
+
+    def test_successful_helper_inspections_remain_read_only_and_oversized_output_still_refuses(self):
+        pin = {"size": 64, "sha256": "a" * 64}
+        for action in ("inspect", "inspect-retained-mcp-2.7.7", "inspect-setup-0.3.7", "inspect-retained-setup-0.3.7"):
+            with patch.object(M.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"{}", b"")) as run, \
+                 patch.object(M, "save") as save:
+                self.assertEqual(M.tool([M.HELPER, action], helper_pin=pin), b"{}")
+                run.assert_called_once(); save.assert_not_called()
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, "BASE", Path(temporary).resolve()) as root, \
+             patch.object(M, "helper_identity", return_value={"unavailable": "OSError"}), \
+             patch.multiple(M.os, getuid=Mock(return_value=0), geteuid=Mock(return_value=0),
+                            getgid=Mock(return_value=0), getegid=Mock(return_value=0), create=True), \
+             patch.object(M.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"x" * 262145, b"")):
+            with self.assertRaises(RuntimeError):
+                M.tool([M.HELPER, "inspect"], helper_pin=pin)
+            receipt = json.loads((root / "helper-inspection-failure.json").read_bytes())
+            self.assertEqual(receipt["stdout"]["bytes"], 262145)
+            self.assertEqual(len(receipt["stdout"]["excerpt"]), 2048)
+            self.assertEqual(receipt["helperActual"], {"unavailable": "OSError"})
+
+    def test_helper_identity_is_observed_from_the_fixed_image_not_from_the_expected_pin(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            file = Path(temporary).resolve() / "helper"
+            file.write_bytes(b"synthetic never-executed helper")
+            info = file.stat()
+            with patch.object(M, "HELPER", str(file)):
+                identity = M.helper_identity()
+            self.assertEqual(identity["sha256"], M.digest(file.read_bytes()))
+            self.assertEqual(identity["size"], info.st_size)
+            self.assertEqual(identity["mode"], M.stat.S_IMODE(info.st_mode))
+            self.assertEqual(identity["uid"], info.st_uid)
+            self.assertEqual(identity["gid"], info.st_gid)
+
+    def test_helper_failure_export_is_two_exact_files_without_wildcard_or_directory_capture(self):
+        workflow = (HERE.parent / ".github/workflows/native-linux-production-016-migration.yml").read_text()
+        assignment = next(line.strip() for line in workflow.splitlines() if line.lstrip().startswith("names = ["))
+        names = ast.literal_eval(assignment.partition(" = ")[2])
+        self.assertEqual([name for name in names if "helper-inspection" in name],
+                         ["helper-inspection-failure.json", "result/helper-inspection-failure.json"])
+        self.assertTrue(all("*" not in name and ".." not in Path(name).parts for name in names))
+
     def test_manual_exact_workflow_optin_is_independent_of_inspection_mode(self):
         for scenario in M.SCENARIOS:
             self.assertEqual(M.admission(environment(scenario), system="linux", uid=1001), scenario)
