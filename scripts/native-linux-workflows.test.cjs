@@ -64,7 +64,15 @@ test('direct Hub libraries compile natively only after real payload preparation,
   assert.match(commands, /node --test scripts\/build-unified.test.cjs scripts\/linux-016-portable-package.test.cjs/);
   assert.match(commands, /modules\/mcp\/launcher\/src-tauri\/Cargo.toml --lib --tests --features integrated-service/);
   assert.match(commands, /cargo test --locked --manifest-path src-tauri\/Cargo.toml --features integrated-features/);
-  assert.doesNotMatch(commands, /--ignored|tauri build|gh release|--publish|signing|auth\.json|--privileged/);
+  assert.doesNotMatch(commands, /tauri build|gh release|--publish|signing|auth\.json|--privileged/);
+  const live = job.steps.find(step => step.name === 'Verify actual unchanged Setup helper preparation in isolated permission fixtures');
+  assert.ok(live);
+  assert.match(commands, /python3-yaml acl/);
+  assert.match(live.run, /command -v setfacl\ncommand -v getfacl/);
+  const ignored = commands.split('\n').filter(line => line.includes('--ignored'));
+  assert.deepEqual(ignored, ['umask_002', 'default_acl'].map(name =>
+    `cargo test --locked --manifest-path src-tauri/Cargo.toml --features integrated-features,experimental-flatpak-host,linux-production-migration,experimental-linux-portable-update projects::tests::live_linux_helper_preparation_${name} -- --exact --ignored --test-threads=1 --nocapture`));
+  assert.ok(ignored.every(line => live.run.includes(line)));
   assert.equal(job.steps.find(step => step.uses === 'actions/checkout@v6').with['persist-credentials'], false);
 });
 

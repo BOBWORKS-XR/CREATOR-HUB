@@ -1459,10 +1459,14 @@ mod tests {
         feature = "integrated-features"
     ))]
     fn live_linux_helper_preparation(test_name: &str, default_acl: bool) {
-        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         const CHILD: &str = "CREATOR_TEST_REGISTRY_PREPARATION_ROOT";
         let Some(root) = std::env::var_os(CHILD).map(PathBuf::from) else {
-            let root = tempfile::tempdir().unwrap();
+            let root = tempfile::Builder::new()
+                .prefix("creator-hub-registry-preparation-")
+                .permissions(fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
