@@ -18,5 +18,5 @@
     "allow-queue-community-import", "allow-community-import-status",
     "allow-open-app", "allow-cancel-download", "allow-use-existing-app", "allow-get-launch-request", "allow-start-hosted-app",
     "allow-hosted-app-call", "allow-stop-hosted-app", "allow-abort-hosted-app",
-    "allow-project-inventory", "allow-add-project-folder", "allow-remove-project-folder", "allow-open-unity-project"]
+    "allow-project-inventory", "allow-prepare-project-registry", "allow-add-project-folder", "allow-remove-project-folder", "allow-open-unity-project"]
 }

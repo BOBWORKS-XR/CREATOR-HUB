@@ -180,12 +180,7 @@ fn require_current_descriptor(descriptor: SignedDescriptor) -> Result<SignedDesc
 }
 
 pub(crate) fn cache_root() -> Result<PathBuf, String> {
-    let path = dirs::data_local_dir()
-        .ok_or("Local app data is unavailable.")?
-        .join("CreatorHub")
-        .join("hub-portable-updates");
-    platform::reject_links(&path)?;
-    Ok(path)
+    manager::linux_update_cache_path(manager::LinuxUpdateCache::Portable)
 }
 
 pub(crate) fn regular(path: &Path, maximum: u64) -> Result<Vec<u8>, String> {
@@ -356,7 +351,10 @@ fn fetch_download(
     destination: &Path,
 ) -> Result<VerifiedDownload, String> {
     let release = &descriptor.0;
-    let root = manager::child_dir("hub-portable-updates")?;
+    let root = manager::prepare_linux_update_cache(manager::LinuxUpdateCache::Portable)?;
+    if destination.parent() != Some(root.as_path()) {
+        return Err("Portable download cache location changed.".into());
+    }
     let cancel = handle.state::<manager::Manager>();
     if cancel.cancellation().load(Ordering::SeqCst) {
         return Err("Portable download cancelled.".into());

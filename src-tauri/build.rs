@@ -76,6 +76,7 @@ fn main() {
             "cancel_download",
             "use_existing_app",
             "project_inventory",
+            "prepare_project_registry",
             "add_project_folder",
             "remove_project_folder",
             "open_unity_project",

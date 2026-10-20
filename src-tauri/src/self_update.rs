@@ -82,7 +82,11 @@ fn view_notice(views: &[crate::hosted_restore::View], restore_views: bool) -> St
 }
 
 fn cache_path(release: &Release) -> Result<PathBuf, String> {
-    Ok(manager::child_dir("downloads")?.join(format!(
+    #[cfg(target_os = "linux")]
+    let directory = manager::linux_update_cache_path(manager::LinuxUpdateCache::Deb)?;
+    #[cfg(not(target_os = "linux"))]
+    let directory = manager::child_dir("downloads")?;
+    Ok(directory.join(format!(
         "hub-{}{}",
         release.sha256,
         Target::native()?.extension
@@ -249,14 +253,20 @@ fn check(handle: &tauri::AppHandle, online: bool, preview: bool) -> Result<State
     }
     let _operation = handle.state::<Manager>().begin()?;
     let target = Target::native()?;
-    let dir = manager::child_dir("hub-updates")?;
-    let dir = if target.platform == "windows" {
+    #[cfg(target_os = "linux")]
+    let dir = manager::prepare_linux_update_cache(manager::LinuxUpdateCache::DebRecords)?;
+    #[cfg(not(target_os = "linux"))]
+    let dir = {
+        let dir = manager::child_dir("hub-updates")?;
+        let dir = if target.platform == "windows" {
+            dir
+        } else {
+            dir.join(target.updater_key())
+        };
+        platform::reject_links(&dir)?;
+        fs::create_dir_all(&dir).map_err(|_| "Cannot prepare Hub update records.")?;
         dir
-    } else {
-        dir.join(target.updater_key())
     };
-    platform::reject_links(&dir)?;
-    fs::create_dir_all(&dir).map_err(|_| "Cannot prepare Hub update records.")?;
     let mut warning = None;
     if online {
         let result = catalog::client().and_then(|client| {
@@ -331,6 +341,13 @@ fn download(handle: &tauri::AppHandle, release: &Release) -> Result<PathBuf, Str
     let path = cache_path(release)?;
     if cached(release) {
         return Ok(path);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let directory = manager::prepare_linux_update_cache(manager::LinuxUpdateCache::Deb)?;
+        if path.parent() != Some(directory.as_path()) {
+            return Err("Hub download cache location changed.".into());
+        }
     }
     platform::reject_links(&path)?;
     if fs2::available_space(path.parent().unwrap()).map_err(|_| "Cannot check free disk space.")?
@@ -529,6 +546,35 @@ pub async fn install_hub_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cache_routing_is_linux_only_and_non_linux_paths_keep_the_legacy_layout() {
+        let text = include_str!("self_update.rs").replace("\r\n", "\n");
+        let source = text.split("\n#[cfg(test)]").next().unwrap();
+        let download = source
+            .split("fn cache_path(")
+            .nth(1)
+            .unwrap()
+            .split("fn cached(")
+            .next()
+            .unwrap();
+        assert!(download.contains("#[cfg(target_os = \"linux\")]\n    let directory = manager::linux_update_cache_path(manager::LinuxUpdateCache::Deb)?;"));
+        assert!(download.contains("#[cfg(not(target_os = \"linux\"))]\n    let directory = manager::child_dir(\"downloads\")?;"));
+        assert!(download.contains("\"hub-{}{}\""));
+        let check = source.split("fn check(").nth(1).unwrap();
+        assert!(check.contains("#[cfg(target_os = \"linux\")]\n    let dir = manager::prepare_linux_update_cache(manager::LinuxUpdateCache::DebRecords)?;"));
+        let legacy = check
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .nth(1)
+            .unwrap()
+            .split("let mut warning")
+            .next()
+            .unwrap();
+        assert!(legacy.contains("manager::child_dir(\"hub-updates\")?"));
+        assert!(legacy.contains("if target.platform == \"windows\""));
+        assert!(legacy.contains("dir.join(target.updater_key())"));
+        assert!(!legacy.contains("linux_update_cache"));
+    }
+
     #[test]
     fn stable_only_capability_is_explicit_without_changing_native_update_payloads() {
         let mut state = State {

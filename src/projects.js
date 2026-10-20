@@ -19,6 +19,9 @@
   function render() {
     byId('refresh-projects').disabled = busy;
     byId('add-project').disabled = busy;
+    const prepare = byId('prepare-project-registry');
+    prepare.classList.toggle('hidden', snapshot?.registryHelperPreparationAvailable !== true);
+    prepare.disabled = busy;
     byId('view-projects').setAttribute('aria-busy', String(busy));
     const query = byId('project-search').value.trim().toLowerCase();
     const filter = byId('project-sdk').value;
@@ -82,7 +85,7 @@
     if (busy) return;
     const requestedRevision = revision;
     busy = true; render();
-    byId('project-status').textContent = command === 'project_inventory' ? 'Reading known project locations...' : command === 'open_unity_project' ? 'Checking Unity version and project lock...' : 'Updating saved list...';
+    byId('project-status').textContent = command === 'project_inventory' ? 'Reading known project locations...' : command === 'prepare_project_registry' ? 'Preparing verified Unity registry discovery...' : command === 'open_unity_project' ? 'Checking Unity version and project lock...' : 'Updating saved list...';
     try {
       const result = await window.CreatorHubNative.invoke(command, args);
       if (result && typeof result === 'object') {
@@ -100,6 +103,7 @@
     }
   }
   byId('refresh-projects').addEventListener('click', () => run('project_inventory'));
+  byId('prepare-project-registry').addEventListener('click', () => run('prepare_project_registry'));
   byId('add-project').addEventListener('click', () => run('add_project_folder'));
   byId('project-search').addEventListener('input', render);
   byId('project-sdk').addEventListener('change', render);
