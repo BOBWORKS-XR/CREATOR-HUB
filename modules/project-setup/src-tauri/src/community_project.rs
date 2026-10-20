@@ -268,7 +268,16 @@ fn helper_contents(destination: &Path, allow_unity_metadata: bool) -> Result<&'s
     }
     Ok(if current { "installed" } else { "outdated" })
 }
-fn editor_open(root: &Path) -> Result<bool, String> {
+#[cfg(any(windows, test))]
+fn editor_lock_open_result(opened: std::io::Result<fs::File>) -> bool {
+    match opened {
+        Ok(file) => !file.metadata().is_ok_and(|info| info.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
+}
+
+pub(crate) fn editor_open(root: &Path) -> Result<bool, String> {
     let path = root.join("Temp/UnityLockfile");
     reject_links(&path)?;
     #[cfg(windows)]
@@ -276,11 +285,9 @@ fn editor_open(root: &Path) -> Result<bool, String> {
         use std::os::windows::fs::OpenOptionsExt;
         // Unity denies sharing while the Editor owns this file. A stale,
         // unlocked file is not evidence of a running Editor. Never delete it.
-        match fs::OpenOptions::new().read(true).share_mode(0).open(path) {
-            Ok(_) => Ok(false),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(_) => Ok(true), // Sharing/access failures remain fail-closed.
-        }
+        Ok(editor_lock_open_result(
+            fs::OpenOptions::new().read(true).share_mode(0).open(path),
+        ))
     }
     #[cfg(unix)]
     {
@@ -1114,6 +1121,22 @@ fn status(target: &Target, request_id: &str) -> Result<Outcome, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn editor_lock_open_failures_stay_blocked_without_deletion() {
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(editor_lock_open_result(Err(std::io::Error::new(
+                kind,
+                "fixture refusal"
+            ))));
+        }
+        assert!(!editor_lock_open_result(Err(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        ))));
+    }
+
     #[test]
     fn grid_helper_gallery_upgrade_backs_up_and_rejects_user_edits() {
         let old: &[(&str, &[u8])] = &[

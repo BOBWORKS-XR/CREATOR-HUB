@@ -1,20 +1,19 @@
 const { test, expect } = require('@playwright/test');
 
-for (const width of [980, 390]) test(`Plugins retirement keeps the Setup draft at ${width}px`, async ({ page }) => {
+for (const width of [980, 390]) test(`removed Plugins stay absent and keep the Setup draft at ${width}px`, async ({ page }) => {
   await page.setViewportSize({ width, height: 760 });
   await page.clock.install({ time: new Date('2026-10-19T23:59:00Z') });
   await setup(page);
   await page.locator('#project-name').fill('Keep this project draft');
-  await page.locator('#suite-trigger').click(); await page.locator('#suite-plugins').click();
-  await expect(page.locator('#view-plugins')).toContainText('20 October 2026');
-  await expect(page.getByRole('button', { name: 'Visit creatorplugins.store' })).toBeVisible();
+  await page.locator('#suite-trigger').click();
+  await expect(page.locator('#suite-plugins, #view-plugins')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Visit creatorplugins.store' })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await page.locator('#suite-trigger').click(); await page.locator('#suite-current').click();
+  await page.locator('#suite-current').click();
   await expect(page.locator('#project-name')).toHaveValue('Keep this project draft');
-  await page.locator('#suite-trigger').click(); await page.locator('#suite-plugins').click();
   await page.clock.runFor(60_000);
-  await expect(page.locator('#view-plugins')).toContainText('has been retired');
-  await expect(page.locator('#view-plugins button, #view-plugins a')).toHaveCount(0);
+  await page.locator('#suite-trigger').click();
+  await expect(page.locator('#suite-plugins, #view-plugins')).toHaveCount(0);
   expect(await page.evaluate(() => window.calls.some(c => /community/.test(c.command)))).toBe(false);
 });
 
@@ -278,6 +277,7 @@ async function setup(page, options = {}) {
     } }, core: { invoke: async (command, args) => {
       window.calls.push({ command, args });
       if (command === 'open_plugins_website') return;
+      if (command === 'probe_environment' && window.options.pendingProbe) await new Promise((resolve, reject) => { window.finishProbe = resolve; window.rejectProbe = reject; });
       if (command === 'probe_environment' && window.options.probeError) throw window.options.probeError;
       if (command === 'probe_environment') return {
         platform: window.options.platform || 'windows', ready: !window.options.missingUnity, hubInstalled: !window.options.missingHub, unityCliInstalled: false,
@@ -315,6 +315,31 @@ async function setup(page, options = {}) {
   if (options.missingUnity && options.platform && options.platform !== 'windows') await expect(page.locator('#create-button')).toBeDisabled();
   else await expect(page.locator('#create-button')).toBeEnabled();
 }
+
+for (const failure of [false, true]) test(`existing-project controls cannot collide with a pending requirements check (${failure ? 'failure' : 'success'})`, async ({ page }) => {
+  await setup(page);
+  await page.locator('#existing-mode').click();
+  await page.locator('#existing-path').fill('F:\\UnityTest\\Existing');
+  await page.locator('#inspect-button').click();
+  await page.locator('#existing-approval').check();
+  await page.evaluate(() => { window.options.pendingProbe = true; });
+  await page.locator('#refresh-button').click();
+  await page.waitForFunction(() => window.finishProbe);
+  for (const selector of ['#existing-path', '#existing-browse', '#existing-approval', '#inspect-button', '#repair-button', '#validate-button']) {
+    await expect(page.locator(selector)).toBeDisabled();
+  }
+  await page.locator('#inspect-button').dispatchEvent('click');
+  await page.locator('#repair-button').dispatchEvent('click');
+  await page.locator('#validate-button').dispatchEvent('click');
+  await page.locator('#existing-browse').dispatchEvent('click');
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'inspect_project').length)).toBe(1);
+  expect(await page.evaluate(() => window.calls.filter(call => ['run_existing_project', 'pick_parent_folder'].includes(call.command)))).toEqual([]);
+  await page.evaluate(failure => { window.options.pendingProbe = false; failure ? window.rejectProbe('Fixture requirements check failed') : window.finishProbe(); }, failure);
+  await expect(page.locator('#inspect-button')).toBeEnabled();
+  await expect(page.locator('#existing-path')).toHaveValue('F:\\UnityTest\\Existing');
+  await page.locator('#inspect-button').click();
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'inspect_project').length)).toBe(2);
+});
 
 test('first launch requires saved terms acceptance before environment checks', async ({ page }) => {
   await setup(page, { freshTerms: true });
@@ -703,21 +728,20 @@ test('app switcher supports keyboard, outside dismissal and bounded links', asyn
   await expect(trigger).toBeFocused();
   await trigger.click();
   await page.keyboard.press('End');
-  await expect(page.locator('#suite-plugins')).toBeFocused();
+  await expect(page.locator('#suite-current')).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(page.locator('#suite-menu')).toBeHidden();
   expect(await page.evaluate(() => window.calls.every(call => ['probe_environment', 'open_official_url'].includes(call.command)))).toBe(true);
 });
 
-test('Plugins retirement preserves a running project workflow', async ({ page }) => {
+test('menu navigation preserves a running project workflow without Plugins', async ({ page }) => {
   await setup(page, { pending: true });
   await page.locator('#create-button').click();
-  await page.locator('#suite-trigger').click(); await page.locator('#suite-plugins').click();
-  await expect(page.locator('#plugins-title')).toBeFocused();
-  await expect(page.locator('#view-plugins')).toContainText('Existing imported assets');
-  await expect(page.locator('#setup-workspace')).toBeHidden();
+  await page.locator('#suite-trigger').click();
+  await expect(page.locator('#suite-plugins, #view-plugins')).toHaveCount(0);
+  await expect(page.locator('#setup-workspace')).toBeVisible();
   await page.evaluate(() => window.progressCallback({ payload: { step: 3, detail: 'Compiling while browsing' } }));
-  await page.locator('#suite-trigger').click(); await page.locator('#suite-current').click();
+  await page.locator('#suite-current').click();
   await expect(page.locator('#activity-message')).toHaveText('Compiling while browsing');
   await expect(page.locator('#create-button')).toBeDisabled();
   await page.evaluate(() => window.finishCreate());
@@ -736,12 +760,13 @@ test('external link failures are visible and do not claim installation', async (
   await expect(page.locator('#suite-trigger')).toBeFocused();
 });
 
-test('standalone Setup opens only the retirement website, without catalogue or imports', async ({ page }) => {
+test('standalone Setup cannot open the removed Plugins website, catalogue or imports', async ({ page }) => {
   await page.clock.install({ time: new Date('2026-10-08T12:00:00Z') });
   await setup(page);
-  await page.locator('#suite-trigger').click(); await page.locator('#suite-plugins').click();
-  await page.getByRole('button', { name: 'Visit creatorplugins.store' }).click();
-  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'open_plugins_website').length)).toBe(1);
+  await page.locator('#suite-trigger').click();
+  await expect(page.locator('#suite-plugins, #view-plugins')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Visit creatorplugins.store' })).toHaveCount(0);
+  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'open_plugins_website').length)).toBe(0);
   expect(await page.evaluate(() => window.calls.some(c => /community/.test(c.command)))).toBe(false);
 });
 
@@ -761,7 +786,7 @@ for (const width of [980, 720, 560, 390]) {
     await page.locator('#suite-trigger').click();
     await expect(page.locator('#suite-menu')).toBeVisible();
     await expect(page.locator('#suite-shell')).toHaveCSS('width', '224px');
-    await expect(page.locator('#suite-shell')).toHaveCSS('height', '352px');
+    await expect(page.locator('#suite-shell')).toHaveCSS('height', '294px');
     await expect(page.locator('.app-header .title-block')).toHaveCSS('opacity', '0');
     await expect(page.locator('.suite-brand')).toHaveCSS('opacity', '1');
     await expect(page.locator('.suite-brand')).toHaveCSS('visibility', 'visible');
@@ -779,7 +804,7 @@ test('drawer morphs from the tab without moving page content', async ({ page }, 
   const closed = await page.locator('#suite-trigger').boundingBox();
   await page.locator('#suite-trigger').click();
   await expect(page.locator('#suite-shell')).toHaveCSS('width', '224px');
-  await expect(page.locator('#suite-shell')).toHaveCSS('height', '352px');
+  await expect(page.locator('#suite-shell')).toHaveCSS('height', '294px');
   await expect(page.locator('.app-header .title-block')).toHaveCSS('opacity', '0');
   const expanded = await page.locator('#suite-trigger').boundingBox();
   expect(expanded.x - closed.x).toBe(169);

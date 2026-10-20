@@ -129,6 +129,29 @@ fn checked_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn editor_open(root: &Path) -> Result<bool, String> {
+    let path = checked_path(root, "Temp/UnityLockfile")?;
+    match fs::symlink_metadata(&path) {
+        Ok(info) if !info.is_file() => {
+            return Err(
+                "Unity lock marker is not an ordinary file. It was kept for review.".into(),
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("Cannot inspect Unity lock marker: {error}")),
+    }
+    #[cfg(windows)]
+    {
+        crate::community_project::editor_open(root)
+    }
+    #[cfg(not(windows))]
+    {
+        // Unity's Unix locking primitive is not established by the synthetic fs2 tests.
+        Ok(true)
+    }
+}
+
 fn read(root: &Path, relative: &str) -> Result<Option<Vec<u8>>, String> {
     let path = checked_path(root, relative)?;
     match File::open(&path) {
@@ -350,12 +373,16 @@ pub fn inspect(path: &Path) -> Result<Inspection, String> {
             },
         ),
     );
-    let locked = checked_path(&root, "Temp/UnityLockfile")?.exists();
+    let locked = editor_open(&root)?;
     if locked {
         findings.push(finding(
             "blocked",
-            "Project is open",
-            "Close this Unity project, then inspect again.",
+            "Project lock needs review",
+            if cfg!(windows) {
+                "Unity may still be closing, or the lock could not be verified. Close the project and inspect again; if it persists, reopen and close it normally in Unity. The lock file has not been removed."
+            } else {
+                "A Unity lock file is present; this platform cannot verify whether Unity still owns it. Close the project and inspect again; if it persists, reopen and close it normally in Unity. The lock file has not been removed."
+            },
         ));
     }
     if checked_path(&root, ".creator-project-setup/operation.lock")?.exists() {
@@ -563,11 +590,7 @@ fn held_bytes(file: &mut File) -> Result<Vec<u8>, String> {
 }
 
 fn review_unchanged(root: &Path, inspection: &Inspection) -> Result<(), String> {
-    if checked_path(root, "Temp/UnityLockfile")?
-        .try_exists()
-        .map_err(|e| e.to_string())?
-        || fingerprint(root)? != inspection.fingerprint
-    {
+    if editor_open(root)? || fingerprint(root)? != inspection.fingerprint {
         return Err(
             "Project opened or changed after backup. Inspect again; later edits were kept.".into(),
         );
@@ -767,9 +790,7 @@ pub fn run(
         }
     }
     write_json(&backup.join("review.json"), &inspection)?;
-    if checked_path(&root, "Temp/UnityLockfile")?.exists()
-        || fingerprint(&root)? != inspection.fingerprint
-    {
+    if editor_open(&root)? || fingerprint(&root)? != inspection.fingerprint {
         return Err(format!(
             "Project opened or changed during backup. Nothing was repaired. Backup: {}",
             display_path(&backup)
@@ -1630,14 +1651,220 @@ mod tests {
         assert!(!temp.path().join(".creator-project-setup").exists());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn editor_lock_stale_held_and_released_preserves_marker() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = fixture();
+        fs::create_dir(temp.path().join("Temp")).unwrap();
+        let lock = temp.path().join("Temp/UnityLockfile");
+        fs::write(&lock, b"retained stale marker").unwrap();
+        let before = fingerprint(&fs::canonicalize(temp.path()).unwrap()).unwrap();
+        assert!(!inspect(temp.path()).unwrap().locked);
+        let held = File::options()
+            .read(true)
+            .share_mode(0)
+            .open(&lock)
+            .unwrap();
+        assert!(inspect(temp.path()).unwrap().locked);
+        drop(held);
+        assert!(!inspect(temp.path()).unwrap().locked);
+        assert_eq!(fs::read(&lock).unwrap(), b"retained stale marker");
+        assert_eq!(
+            fingerprint(&fs::canonicalize(temp.path()).unwrap()).unwrap(),
+            before
+        );
+        assert!(!temp.path().join(".creator-project-setup").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn editor_lock_release_keeps_reported_sdk_and_visual_scripting_mismatches_blocked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = fixture();
+        let manifest_path = temp.path().join("Packages/manifest.json");
+        let mut packages = manifest();
+        packages["dependencies"]["com.sidequest.creator-sdk"] = json!("4.0.22");
+        packages["dependencies"]["com.unity.visualscripting"] = json!("1.9.12");
+        write_json(&manifest_path, &packages).unwrap();
+        let before = fs::read(&manifest_path).unwrap();
+        fs::create_dir(temp.path().join("Temp")).unwrap();
+        let lock = temp.path().join("Temp/UnityLockfile");
+        fs::write(&lock, b"retained reported marker").unwrap();
+        let assert_blocked = |locked| {
+            let report = inspect(temp.path()).unwrap();
+            assert_eq!(report.locked, locked);
+            assert!(!report.can_repair && !report.can_validate);
+            for (title, actual, tested) in [
+                ("Creator SDK", "4.0.22", "4.0.14"),
+                ("Visual Scripting package", "1.9.12", "1.9.1"),
+            ] {
+                assert!(report.findings.iter().any(|finding| finding.title == title
+                    && finding.status == "blocked"
+                    && finding.detail.contains(actual)
+                    && finding.detail.contains(&format!("tested {tested}."))));
+            }
+            assert_eq!(fs::read(&manifest_path).unwrap(), before);
+            assert!(!temp.path().join(".creator-project-setup").exists());
+        };
+        assert_blocked(false);
+        let held = File::options()
+            .read(true)
+            .share_mode(0)
+            .open(&lock)
+            .unwrap();
+        assert_blocked(true);
+        drop(held);
+        assert_blocked(false);
+        assert_eq!(fs::read(lock).unwrap(), b"retained reported marker");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn editor_lock_acquired_after_inspection_blocks_before_any_repair() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = fixture();
+        fs::create_dir(temp.path().join("Temp")).unwrap();
+        let lock = temp.path().join("Temp/UnityLockfile");
+        fs::write(&lock, b"keep marker").unwrap();
+        let inspection = inspect(temp.path()).unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        assert!(review_unchanged(&root, &inspection).is_ok());
+        let held = File::options()
+            .read(true)
+            .share_mode(0)
+            .open(&lock)
+            .unwrap();
+        assert!(review_unchanged(&root, &inspection).is_err());
+        let error = run(
+            ExistingRequest {
+                project_path: inspection.project_path.clone(),
+                fingerprint: inspection.fingerprint.clone(),
+                repair: true,
+                approved: true,
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(error.contains("blocked by the inspection findings"));
+        assert!(!temp.path().join(".creator-project-setup").exists());
+        drop(held);
+        assert!(review_unchanged(&root, &inspection).is_ok());
+        assert_eq!(fs::read(lock).unwrap(), b"keep marker");
+    }
+
+    #[test]
+    fn editor_lock_nonregular_marker_is_retained_and_refused() {
+        let temp = fixture();
+        fs::create_dir_all(temp.path().join("Temp/UnityLockfile")).unwrap();
+        let lock = temp.path().join("Temp/UnityLockfile");
+        fs::write(lock.join("owner.txt"), b"keep").unwrap();
+        assert!(inspect(temp.path())
+            .unwrap_err()
+            .contains("not an ordinary file"));
+        assert_eq!(fs::read(lock.join("owner.txt")).unwrap(), b"keep");
+        assert!(!temp.path().join(".creator-project-setup").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editor_lock_symlink_is_retained_and_refused() {
+        let temp = fixture();
+        let external = tempfile::NamedTempFile::new().unwrap();
+        fs::create_dir(temp.path().join("Temp")).unwrap();
+        let lock = temp.path().join("Temp/UnityLockfile");
+        std::os::unix::fs::symlink(external.path(), &lock).unwrap();
+        assert!(inspect(temp.path())
+            .unwrap_err()
+            .contains("Linked files or folders"));
+        assert!(fs::symlink_metadata(lock).unwrap().file_type().is_symlink());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn editor_lock_junction_ancestor_is_retained_and_refused() {
+        use std::os::windows::process::CommandExt;
+        use wait_timeout::ChildExt;
+        let temp = fixture();
+        let external = tempfile::tempdir().unwrap();
+        fs::write(
+            external.path().join("UnityLockfile"),
+            b"keep external marker",
+        )
+        .unwrap();
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/v:off", "/c"])
+            .raw_arg("mklink /J \"%CREATOR_TEST_JUNCTION%\" \"%CREATOR_TEST_JUNCTION_TARGET%\"")
+            .env("CREATOR_TEST_JUNCTION", temp.path().join("Temp"))
+            .env("CREATOR_TEST_JUNCTION_TARGET", external.path())
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = child
+            .wait_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        if status.is_none() {
+            child
+                .kill()
+                .expect("stop only the owned junction test helper");
+            assert!(child
+                .wait_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .is_some());
+            panic!("junction test helper exceeded its deadline");
+        }
+        assert!(status.unwrap().success());
+        assert!(inspect(temp.path())
+            .unwrap_err()
+            .contains("Linked files or folders"));
+        assert_eq!(
+            fs::read(external.path().join("UnityLockfile")).unwrap(),
+            b"keep external marker"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn editor_lock_unheld_marker_stays_blocked_without_a_proven_native_protocol() {
+        let temp = fixture();
+        fs::create_dir(temp.path().join("Temp")).unwrap();
+        let lock = temp.path().join("Temp/UnityLockfile");
+        fs::write(&lock, b"retained marker").unwrap();
+        assert!(inspect(temp.path()).unwrap().locked);
+        assert_eq!(fs::read(lock).unwrap(), b"retained marker");
+    }
+
     #[test]
     fn open_project_and_unsupported_editor_block_operations() {
         let temp = fixture();
         fs::create_dir(temp.path().join("Temp")).unwrap();
         fs::write(temp.path().join("Temp/UnityLockfile"), "").unwrap();
+        #[cfg(windows)]
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            File::options()
+                .read(true)
+                .share_mode(0)
+                .open(temp.path().join("Temp/UnityLockfile"))
+                .unwrap()
+        };
         let report = inspect(temp.path()).unwrap();
         assert!(report.locked);
         assert!(!report.can_repair && !report.can_validate);
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.title == "Project lock needs review")
+            .unwrap();
+        assert!(finding
+            .detail
+            .contains("The lock file has not been removed."));
+        assert!(!finding.detail.contains("Project is open"));
+        #[cfg(windows)]
+        drop(held);
         fs::remove_file(temp.path().join("Temp/UnityLockfile")).unwrap();
         fs::write(
             temp.path().join("ProjectSettings/ProjectVersion.txt"),
