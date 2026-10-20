@@ -196,6 +196,36 @@ Source anchors refer to the inspected working tree; line numbers may move.
   opened or modified. These disposable results cannot authorize release or
   establish multiplayer behavior.
 
+### Typed Reload Diagnostic
+
+Native disposable run `953b944a400747fba973fbceb9ecbe79` compiled and captured
+the fixed graph before save, after reload and before recovery. All three typed
+snapshots and the clone preview were deeply equal: 15 units, seven control
+connections and four value connections, including GUIDs, configurations,
+defaults, layout, settings and persistent references. The original fingerprint
+assertion still refused the edit; no comparison was weakened.
+
+Structured inspection of the captured serialization found the same 26 element
+GUIDs. Changes were collection order, 11 serializer `$id` labels and 21 endpoint
+`$ref` labels; all 22 endpoint references resolved to the same unit GUIDs.
+Reordering the original element substrings and relabelling those references
+reconstructed the complete reloaded JSON. Package `Graph.OnAfterDependenciesDeserialized`
+sorts elements by dependency order without a GUID tie-breaker, consistent with
+this observed result. This establishes the captured difference, not a general
+semantic comparator or support for arbitrary graphs.
+
+The run retained its primary error, reported 24 attempted live operations and
+verified recovery without a recovery or diagnostic exception. Independent
+post-exit hashes matched all four asset/meta backups; all 3,864 package files
+matched in the original cache and disposable copy. Twenty-three pure diagnostic
+tests and independent review passed. This does not resolve the earlier
+`File.Replace` recovery failure or prove interruption/crash safety.
+Successful commit, committed-edit Undo/Redo
+and a separate Editor reopening the final edited graph remain untested. Empty
+variable/group/graph-port collections and small persistent local IDs do not
+qualify their nonempty or large-64-bit cases. No runtime, SDK guard, multiplayer,
+product-tool or release acceptance follows from these results.
+
 ## Primary API References
 
 Verified documentation on 2026-10-20; not an executed compatibility matrix. The

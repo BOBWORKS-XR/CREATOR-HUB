@@ -46,6 +46,29 @@ not approval of untested packages or a publication receipt.
 
 ### Current Evidence, 2026-10-20
 
+- Warm-window harness correction `35a9349` binds the exact qualified cold Root
+  record rather than hardcoding a different title. Its 73 input-guard tests,
+  125 controller tests, eight data-admission tests and independent review passed;
+  signature-only run `39414991375` passed without executing the candidate.
+  Actual old-host run `39415230270` then passed that binding but refused an
+  incomplete release-event receipt during warm activation. Both Enter events
+  were submitted; only the press synchronized. No input was retried. The run
+  lacks terminal activation proof and is not a warm/update/restart acceptance.
+  Cancellation also exits successfully, so exit code plus an existing Root
+  window is insufficient: a separately attributed activation acknowledgement is
+  needed. Temporary lab trust cleanup passed; newer Root bytes stay unqualified.
+- Diagnostic capture `39415291998` retained unchanged process/XID/XRes/mapped
+  state at teardown, but a changed title. The exact hashes match vendor-source
+  literals `Unity Hub` and `Unity Hub 3.22.3`, a normal startup title transition.
+  This does not establish identity at an earlier failed observation or prove
+  rendered pixels; the retained first frame is blank. A finite terminal-title
+  binding remains subject to review and native testing. No sandbox override,
+  sign-in bypass or account state was introduced.
+- Pinned beta9 environment probe `39416141205` passed against its sealed image
+  in a fresh profile. Its actual `env` output resolves the native configuration
+  root to `$XDG_CONFIG_HOME/unityhub`. All discovery/nonempty/release acceptance
+  flags remain false. Native helper interoperability with a genuine current
+  Hub-generated registry and the separate Flathub profile remain open gates.
 - Read-only publication audit confirms public Windows 0.1.14 skips release rows
   without both Windows descriptor/signature assets. A future Linux-only release
   must not add Windows metadata or replace public Windows bytes just to satisfy
