@@ -1184,12 +1184,76 @@ class RootGlobalInventoryTests(unittest.TestCase):
                     self.assertEqual(len(answer["processes"]), 63); self.assertEqual(len(answer["terminalProcesses"]), 1)
 
 
+def captured_connection_review_graph(question):
+    # Redacted topology from native 39447694176: title and secondary text share node 4.
+    fields = [(None, 2, "Warning"), (0, 20, ""), (1, 20, ""), (2, 26, "Warning"), (2, 20, ""),
+              (4, 29, "Review unverified MCP connections"), (4, 29, question), (1, 20, ""), (7, 20, ""),
+              (8, 43, "Move reviewed connections"), (8, 43, "Keep existing")]
+    return [{"reference": [":1.2", str(i)], "parent": [":1.2", "app" if parent is None else str(parent)],
+             "pid": 123, "role": role, "name": name, "ready": True} for i, (parent, role, name) in enumerate(fields)]
+
+
+class ConnectionReviewHeadingTests(unittest.TestCase):
+    def test_captured_native_graph_exact_829_byte_question_and_primary_heading_are_accepted(self):
+        home = "/opt/creator-polkit-fixture/result/home"
+        router = home + "/data/creator-hub/mcp-route-v1/linux-x86_64/router-v1/creator-hub-mcp-router"
+        details = [f"{client}\nCommand: {M.OLD_NODE}\nServer: {M.OLD_SERVER}\nProject kept: {home}/current-project"
+                   for client in ("Codex", "Claude Code")]
+        question = ("These existing connections could not be publisher-verified:\n\n" + "\n\n".join(details)
+                    + f"\n\nMove them to the verified Hub router at {router}? Names and ownership markers are not proof. Continue only for your Creator Works connections. Exact backups, client options and other servers are kept. Cancel stops migration before changing any of these clients.")
+        self.assertEqual(len(question.encode()), 829)
+        self.assertEqual(M.digest(question.encode()), "2fea05922d3e65117e9ac66776ea14ef556276f7a91b18b20be702b22f233192")
+        graph = captured_connection_review_graph(question)
+        record = {}
+        M.connection_review_graph_contract(graph, pid=123, question=question, record=record)
+        self.assertEqual(record, {})
+
+    def test_missing_changed_unknown_or_duplicate_primary_and_secondary_labels_refuse(self):
+        graph = captured_connection_review_graph("exact question")
+        for mutate in (lambda g: g[5].update(name="Changed heading"), lambda g: g.pop(5),
+                       lambda g: g[6].update(name="Changed question"), lambda g: g.pop(6),
+                       lambda g: g.append({**g[5], "reference": [":1.2", "extra"]}),
+                       lambda g: g.append({**g[6], "reference": [":1.2", "extra"]}),
+                       lambda g: g.append({**g[6], "reference": [":1.2", "extra"], "name": "Unknown text"}),
+                       lambda g: (g[5].update(name="exact question"), g[6].update(name=M.CONNECTION_REVIEW_TITLE))):
+            bad = copy.deepcopy(graph); mutate(bad)
+            with self.subTest(graph=bad), self.assertRaises(RuntimeError):
+                M.graph_contract(bad, pid=123, title="Warning", question="exact question", connection_review=True)
+
+    def test_parent_divergence_missing_parent_or_non_container_shared_parent_refuses(self):
+        graph = captured_connection_review_graph("exact question")
+        for mutate in (lambda g: g[6].update(parent=[":1.2", "8"]), lambda g: g[5].update(parent=[":1.2", "8"]),
+                       lambda g: g[6].update(parent=[":1.2", "missing"]),
+                       lambda g: (g[5].update(parent=[":1.2", "0"]), g[6].update(parent=[":1.2", "0"])),
+                       lambda g: g[4].update(role=21)):
+            bad = copy.deepcopy(graph); mutate(bad)
+            with self.subTest(graph=bad), self.assertRaises(RuntimeError):
+                M.graph_contract(bad, pid=123, title="Warning", question="exact question", connection_review=True)
+
+    def test_connection_ownership_buttons_references_and_readiness_checks_are_unchanged(self):
+        graph = captured_connection_review_graph("exact question")
+        for mutate in (lambda g: g[6].update(pid=999), lambda g: g[9].update(name="Other action"),
+                       lambda g: g[10].update(reference=g[9]["reference"]), lambda g: g[5].update(ready=False),
+                       lambda g: g[0].update(name="Information")):
+            bad = copy.deepcopy(graph); mutate(bad)
+            with self.subTest(graph=bad), self.assertRaises(RuntimeError):
+                M.graph_contract(bad, pid=123, title="Warning", question="exact question", connection_review=True)
+
+    def test_password_and_generic_dialogs_do_not_require_connection_review_labels(self):
+        for password in (False, True):
+            values = [(2, "Information"), (29, "other question")]
+            if password: values += [(40, None)]
+            values += [(43, "Cancel" if password else "Move to Hub"), (43, "Authenticate" if password else "Not now")]
+            graph = [{"reference": [":1.2", str(i)], "parent": [":1.2", "app" if i == 0 else "0"], "pid": 123,
+                      "role": role, "name": name, "ready": True} for i, (role, name) in enumerate(values)]
+            M.graph_contract(graph, pid=123, title="Information", question="other question", password=password)
+
+
 class ConnectionReviewGraphCaptureTests(unittest.TestCase):
     def graph(self, extra="Warning"):
         question = "Command: /synthetic/client-node\nServer: /synthetic/server.mjs\nPRIVATE_CONFIG_ARGUMENT"
-        rows = [{"reference": [":1.2", str(i)], "parent": [":1.2", "app" if i == 0 else "0"], "pid": 123,
-                 "role": role, "name": name, "ready": True} for i, (role, name) in enumerate(
-                     [(2, "Warning"), (29, question), (43, "Move reviewed connections"), (43, "Keep existing"), (29, extra)])]
+        rows = captured_connection_review_graph(question)
+        rows.append({**rows[6], "reference": [":1.2", "11"], "name": extra})
         return question, rows
 
     def check(self, rows, question, record):
@@ -1203,10 +1267,10 @@ class ConnectionReviewGraphCaptureTests(unittest.TestCase):
             self.check(rows, question, record)
         capture = record["refusedGraph"]
         self.assertEqual(rows, original_rows)
-        self.assertEqual(capture["questionIndexes"], [1]); self.assertEqual(capture["extraLabelIndexes"], [4])
-        self.assertEqual(capture["nodes"][4]["name"], {"kind": "known", "text": "Warning"})
-        self.assertEqual(capture["nodes"][4]["parentIndex"], 0)
-        self.assertEqual(capture["nodes"][1]["name"]["kind"], "expected-question")
+        self.assertEqual(capture["questionIndexes"], [6]); self.assertEqual(capture["extraLabelIndexes"], [5, 11])
+        self.assertEqual(capture["nodes"][11]["name"], {"kind": "known", "text": "Warning"})
+        self.assertEqual(capture["nodes"][11]["parentIndex"], 4)
+        self.assertEqual(capture["nodes"][6]["name"]["kind"], "expected-question")
         self.assertNotIn("PRIVATE_CONFIG_ARGUMENT", json.dumps(capture)); self.assertNotIn("/synthetic/", json.dumps(capture))
         self.assertLessEqual(len(json.dumps(capture).encode()), 32768)
         for key in ("inputPermitted", "authorityGranted", "releaseReady"): self.assertIs(capture[key], False)
@@ -1218,7 +1282,7 @@ class ConnectionReviewGraphCaptureTests(unittest.TestCase):
         question, rows = self.graph(extra)
         record = {}
         with self.assertRaisesRegex(RuntimeError, "Unexpected extra connection-review text"): self.check(rows, question, record)
-        name = record["refusedGraph"]["nodes"][4]["name"]
+        name = record["refusedGraph"]["nodes"][11]["name"]
         self.assertEqual(name, {"kind": "redacted", "chars": len(extra), "utf8Bytes": len(extra.encode()), "sha256": M.digest(extra.encode())})
         raw = json.dumps(record["refusedGraph"])
         for secret in ("SECRET_VALUE", "other-client", "PRIVATE", "client.json", "command"): self.assertNotIn(secret, raw)
@@ -1226,8 +1290,8 @@ class ConnectionReviewGraphCaptureTests(unittest.TestCase):
     def test_success_and_other_refusals_have_no_diagnostic_and_matcher_stays_strict(self):
         question, rows = self.graph()
         record = {}; self.check(rows[:-1], question, record); self.assertEqual(record, {})
-        for mutate in (lambda g: g[1].update(name="wrong question"), lambda g: g[0].update(pid=999),
-                       lambda g: g[2].update(name="wrong action")):
+        for mutate in (lambda g: g[6].update(name="wrong question"), lambda g: g[0].update(pid=999),
+                       lambda g: g[9].update(name="wrong action")):
             bad = copy.deepcopy(rows); mutate(bad); record = {}
             with patch.object(M, "connection_review_graph_diagnostic") as capture, self.assertRaises(RuntimeError):
                 self.check(bad, question, record)
@@ -1245,9 +1309,9 @@ class ConnectionReviewGraphCaptureTests(unittest.TestCase):
 
     def test_capture_limits_and_malformed_or_foreign_rows_do_not_mask_original_refusal(self):
         question, rows = self.graph()
-        for mutate in (lambda g: g.extend(copy.deepcopy(g) * 13), lambda g: g[4].update(name="x" * 4097),
-                       lambda g: g[4].update(pid=999), lambda g: g[4].update(reference=g[1]["reference"]),
-                       lambda g: g[4].update(parent=[":1.2", "foreign"]), lambda g: g[4].update(ready="yes")):
+        for mutate in (lambda g: g.extend(copy.deepcopy(g) * 13), lambda g: g[11].update(name="x" * 4097),
+                       lambda g: g[11].update(pid=999), lambda g: g[11].update(reference=g[6]["reference"]),
+                       lambda g: g[11].update(parent=[":1.2", "foreign"]), lambda g: g[11].update(ready="yes")):
             bad = copy.deepcopy(rows); mutate(bad)
             with self.assertRaises(RuntimeError): M.connection_review_graph_diagnostic(bad, pid=123, question=question)
         class DifferentRuntimeError(RuntimeError): pass
@@ -1286,7 +1350,7 @@ class ConnectionReviewGraphCaptureTests(unittest.TestCase):
                 session.retain_failure(error)
             value = json.loads((root / "session.json").read_bytes())
             self.assertEqual(value["firstFailure"]["message"], "Unexpected extra connection-review text")
-            self.assertEqual(value["connectionReview"]["refusedGraph"]["extraLabelIndexes"], [4])
+            self.assertEqual(value["connectionReview"]["refusedGraph"]["extraLabelIndexes"], [5, 11])
             self.assertEqual(list(root.iterdir()), [root / "session.json"])
             self.assertNotIn("PRIVATE_CONFIG_ARGUMENT", json.dumps(value))
 
@@ -1994,16 +2058,14 @@ class ControllerTests(unittest.TestCase):
 
     def test_unverified_native_graph_refuses_other_clients_router_text_buttons_owner_and_extra_labels(self):
         question = "Exact two-client before-images and verified router"
-        graph = [{"reference": [":1.2", str(i)], "parent": [":1.2", "app" if i == 0 else "0"], "pid": 123,
-                  "role": role, "name": name, "ready": True} for i, (role, name) in enumerate(
-                      [(2, "Warning"), (29, question), (43, "Move reviewed connections"), (43, "Keep existing")])]
+        graph = captured_connection_review_graph(question)
         check = lambda value: M.graph_contract(value, pid=123, title="Warning", question=question, connection_review=True)
         check(graph)
-        for mutate in (lambda g: g[1].update(name=question + "\nExtra client"), lambda g: g[1].update(name="Different router"),
-                       lambda g: g[0].update(name="Information"), lambda g: g[2].update(name="Move to Hub"),
-                       lambda g: g[2].update(pid=999), lambda g: g[2].update(ready=False),
-                       lambda g: g.append({**g[1], "reference": [":1.2", "extra"], "name": "Unexpected text"}),
-                       lambda g: g.append({**g[2], "reference": [":1.2", "extra"], "name": "Extra action"})):
+        for mutate in (lambda g: g[6].update(name=question + "\nExtra client"), lambda g: g[6].update(name="Different router"),
+                       lambda g: g[0].update(name="Information"), lambda g: g[9].update(name="Move to Hub"),
+                       lambda g: g[9].update(pid=999), lambda g: g[9].update(ready=False),
+                       lambda g: g.append({**g[6], "reference": [":1.2", "extra"], "name": "Unexpected text"}),
+                       lambda g: g.append({**g[9], "reference": [":1.2", "extra"], "name": "Extra action"})):
             bad = copy.deepcopy(graph); mutate(bad)
             with self.assertRaises(RuntimeError): check(bad)
 

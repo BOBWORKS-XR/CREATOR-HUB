@@ -863,7 +863,11 @@ def graph_contract(rows, *, pid, title, question, password=False, connection_rev
     expected_buttons = {"Move reviewed connections", "Keep existing"} if connection_review else {"Cancel", "Authenticate"} if password else {"Move to Hub", "Not now"}
     require(len(buttons) == 2 and set(buttons) == expected_buttons, "Unexpected native action set")
     if connection_review:
-        require(labels == [question], "Unexpected extra connection-review text")
+        require(labels == [CONNECTION_REVIEW_TITLE, question], "Unexpected extra connection-review text")
+        primary, secondary = [row for row in rows if row["role"] == 29]
+        parent = next(row for row in rows if tuple(row["reference"]) == tuple(primary["parent"]))
+        require(tuple(primary["parent"]) == tuple(secondary["parent"]) and parent["role"] == 20,
+                "Connection-review heading and question must share their native container")
     protected = [row for row in rows if row["role"] == 40]
     require(len(protected) == (1 if password else 0) and all(row["name"] is None for row in protected), "Password must never be read")
     require(all(row["ready"] for row in rows if row["role"] in (2, 16, 29, 40, 43)), "Native controls are not ready")
