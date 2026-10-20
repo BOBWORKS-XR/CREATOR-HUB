@@ -40,6 +40,7 @@ COMMANDS = (
     ("projects-help", ("projects", "--help")),
     ("list-help", ("projects", "list", "--help")),
     ("add-help-only", ("projects", "add", "--help")),
+    ("env", ("env", "--non-interactive", "--no-banner", "--no-pager")),
     ("list", ("projects", "list", "--json", "--non-interactive", "--no-banner", "--no-pager")),
 )
 FALSE = dict.fromkeys(("nonemptyRegistryAccepted", "automaticDiscoveryAccepted", "unityEditorAccepted",
@@ -397,6 +398,9 @@ def validate_output(role, raw):
             require(re.search(r"\bprojects\b", text), "Projects command absent from actual help")
         if role == "projects-help":
             require(all(re.search(r"\b" + name + r"\b", text) for name in ("list", "add")), "Required project commands absent")
+    elif role == "env":
+        # Its actual output schema/path choices are not yet observed; retain text, not discovery acceptance.
+        require(0 < len(raw) <= STDOUT_LIMIT and text.strip(), "Bounded nonempty env diagnostic required")
     else:
         require(role == "list", "Unknown helper output role")
         value = json.loads(text)
@@ -405,10 +409,17 @@ def validate_output(role, raw):
 
 
 def run_fixed(tool, specification, root):
-    require(specification in COMMANDS, "Only the six fixed help/read-only commands may execute")
+    require(specification in COMMANDS, "Only the seven fixed help/read-only commands may execute")
+    if specification[0] == "env":
+        help_raw = read_regular(root / "evidence/help.stdout", STDOUT_LIMIT)
+        validate_output("help", help_raw)
+        require(re.search(r"^\s+env\s+Print Unity Hub environment paths and version\s*$", help_raw.decode("utf-8"), re.M),
+                "Actual pinned help must advertise the read-only env command")
     record, stdout = _run_command(tool, specification, root)
     require(record["exitCode"] == 0, "Fixed helper command failed: " + record["role"])
     validate_output(record["role"], stdout)
+    if record["role"] == "env":
+        record["diagnosticOnly"] = True
     return record
 
 
@@ -464,10 +475,10 @@ def execute(env):
     private_directory(root, uid)
     for name in ("evidence", "home", "home/config", "home/data", "home/cache", "runtime", "tmp", "tool"):
         private_directory(root / name, uid)
-    report = {"schemaVersion": 1, "scope": "isolated-official-beta9-help-and-empty-list-only", "source": env["GITHUB_SHA"],
+    report = {"schemaVersion": 1, "scope": "isolated-official-beta9-help-env-and-empty-list-diagnostic-only", "source": env["GITHUB_SHA"],
               "runId": env["GITHUB_RUN_ID"], "runAttempt": env["GITHUB_RUN_ATTEMPT"], "sources": sources,
               "version": VERSION, "asset": ASSET, "url": URL, "commands": [], "probeCompleted": False,
-              "genuineNonemptyFixture": "deferred", **FALSE}
+              "genuineNonemptyFixture": "deferred", "envOutputDiagnosticOnly": True, **FALSE}
     source, tool = None, None
     try:
         binary = root / "tool" / ASSET["filename"]

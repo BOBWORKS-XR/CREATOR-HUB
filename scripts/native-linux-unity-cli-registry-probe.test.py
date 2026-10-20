@@ -21,6 +21,10 @@ SPEC = importlib.util.spec_from_file_location("unity_registry_probe", HERE / "na
 M = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(M)
 ROOT = HERE.parent
+# Public env description from pinned beta.9 run 39392221889; full help SHA-256
+# a66d694e4119658465f6975f51c8f4b026daea9a921a232920f936a109d2be3c.
+ENV_HELP = b"Usage: unity [options] [command]\n  env Print Unity Hub environment paths and version\n  projects Manage Unity projects\n"
+ENV_COMMAND = ("env", ("env", "--non-interactive", "--no-banner", "--no-pager"))
 
 
 def environment():
@@ -97,11 +101,16 @@ class Authority(unittest.TestCase):
         self.assertEqual(M.ASSET["sha256"], "8c0d6e2435449c8be7f0e6b2ce6330bfc5f17a98aec4b659c859940455dd0fe5")
         self.assertEqual(M.URL, "https://public-cdn.cloud.unity3d.com/hub/prod/cli/1.0.0-beta.9/unity-linux-x64")
 
-    def test_only_six_finite_read_commands(self):
+    def test_only_seven_finite_read_commands_with_one_env_and_unchanged_registration_slices(self):
         self.assertEqual(M.COMMANDS, (("version", ("--version",)), ("help", ("--help",)),
                          ("projects-help", ("projects", "--help")), ("list-help", ("projects", "list", "--help")),
                          ("add-help-only", ("projects", "add", "--help")),
+                          ENV_COMMAND,
                          ("list", ("projects", "list", "--json", "--non-interactive", "--no-banner", "--no-pager"))))
+        self.assertEqual(sum(role == "env" for role, _args in M.COMMANDS), 1)
+        self.assertEqual([role for role, _args in M.COMMANDS[:5]],
+                         ["version", "help", "projects-help", "list-help", "add-help-only"])
+        self.assertEqual(M.COMMANDS[-1][0], "list")
 
     def test_all_acceptance_claims_stay_false(self):
         self.assertEqual(M.FALSE, {"nonemptyRegistryAccepted": False, "automaticDiscoveryAccepted": False,
@@ -144,6 +153,12 @@ class Output(unittest.TestCase):
         for role, value in (("unknown", b"ok"), ("list", b"not JSON"), ("help", b"\xff"), ("help", b"\x1b[0m")):
             with self.subTest(role=role, value=value), self.assertRaises((RuntimeError, ValueError)):
                 M.validate_output(role, value)
+
+    def test_env_is_bounded_text_diagnostic_not_a_guessed_path_or_registry_schema(self):
+        self.assertIsNone(M.validate_output("env", b"Unqualified vendor path output: /synthetic/private/home\n"))
+        for raw in (b"", b" \n\t", b"x" * (M.STDOUT_LIMIT + 1), b"\xff", b"\x1b[0m", b"\0"):
+            with self.subTest(size=len(raw)), self.assertRaises((RuntimeError, ValueError)):
+                M.validate_output("env", raw)
 
 
 class Response(io.BytesIO):
@@ -484,6 +499,79 @@ class Execution(unittest.TestCase):
         self.assertEqual(resource.setrlimit.call_args_list[1].args, (1, (M.STDOUT_LIMIT, M.STDOUT_LIMIT)))
 
 
+class EnvCommand(unittest.TestCase):
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            portable_flags(stack)
+            root = Path(temporary)
+            (root / "home").mkdir()
+            (root / "evidence").mkdir()
+            (root / "evidence/help.stdout").write_bytes(ENV_HELP)
+            yield root
+
+    def test_env_reuses_held_memfd_limits_closed_profile_and_retains_actual_output_only(self):
+        raw = b"Unity Hub environment paths: /synthetic/private/home\n"
+        with self.fixture() as root:
+            tool, child = Mock(fd=412), Mock(pid=42)
+            child.wait.return_value = 0
+            def launch(*_args, **kwargs):
+                kwargs["stdout"].write(raw)
+                kwargs["stderr"].write(b"")
+                return child
+            with patch.object(M.subprocess, "Popen", side_effect=launch) as popen:
+                record = M.run_fixed(tool, ENV_COMMAND, root)
+            call = popen.call_args
+            self.assertEqual(call.args, (["/proc/self/fd/412", *ENV_COMMAND[1]],))
+            self.assertEqual(call.kwargs["executable"], "/proc/self/fd/412")
+            self.assertEqual(call.kwargs["pass_fds"], (412,))
+            self.assertFalse(call.kwargs["shell"])
+            self.assertTrue(call.kwargs["close_fds"])
+            self.assertEqual(call.kwargs["env"], M.child_environment(root))
+            self.assertEqual(call.kwargs["cwd"], root / "home")
+            self.assertEqual(call.kwargs["stdin"], M.subprocess.DEVNULL)
+            self.assertIs(call.kwargs["preexec_fn"].func, M.child_limits)
+            child.wait.assert_called_once_with(timeout=M.COMMAND_SECONDS)
+            child.kill.assert_not_called()
+            self.assertEqual(tool.check.call_count, 2)
+            self.assertTrue(record["diagnosticOnly"])
+            self.assertEqual(record["stdout"], M.pin(raw))
+            self.assertEqual(record["stderr"], M.pin(b""))
+            self.assertEqual((root / "evidence/env.stdout").read_bytes(), raw)
+            self.assertEqual((root / "evidence/env.stderr").read_bytes(), b"")
+            self.assertEqual(set((root / "home").iterdir()), set())
+            self.assertTrue(all(value is False for value in M.FALSE.values()))
+
+    def test_actual_help_must_advertise_exact_read_only_env_before_execution(self):
+        with self.fixture() as root, patch.object(M, "_run_command") as command:
+            for raw in (b"Usage: unity\n projects\n", ENV_HELP.replace(b"paths and version", b"settings and credentials"),
+                        ENV_HELP.replace(b"  env ", b"  other "), b"\xff", b"x" * (M.STDOUT_LIMIT + 1)):
+                (root / "evidence/help.stdout").write_bytes(raw)
+                with self.subTest(raw_size=len(raw)), self.assertRaises((RuntimeError, ValueError)):
+                    M.run_fixed(Mock(), ENV_COMMAND, root)
+            (root / "evidence/help.stdout").unlink()
+            with self.assertRaises(FileNotFoundError):
+                M.run_fixed(Mock(), ENV_COMMAND, root)
+            command.assert_not_called()
+
+    def test_env_variants_and_auth_commands_are_refused_before_reads_or_spawn(self):
+        for specification in (("env", ("env",)), ("env", (*ENV_COMMAND[1], "--json")),
+                              ("env", ("env", "/foreign/profile")), ("env", ("auth", "status")),
+                              ("foreign", ENV_COMMAND[1])):
+            with self.subTest(specification=specification), patch.object(M, "read_regular") as read, \
+                    patch.object(M, "_run_command") as command, self.assertRaises(RuntimeError):
+                M.run_fixed(Mock(), specification, Path("unused"))
+            read.assert_not_called()
+            command.assert_not_called()
+
+    def test_nonzero_env_exit_is_fatal_and_never_retried(self):
+        with self.fixture() as root, patch.object(M, "_run_command", return_value=(
+                {"role": "env", "exitCode": 1}, b"vendor refusal")) as command:
+            with self.assertRaisesRegex(RuntimeError, "Fixed helper command failed: env"):
+                M.run_fixed(Mock(), ENV_COMMAND, root)
+            command.assert_called_once()
+
+
 class Files(unittest.TestCase):
     def test_bounded_regular_read_and_foreign_hash_refusal(self):
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
@@ -588,6 +676,7 @@ class Orchestration(unittest.TestCase):
             report = json.loads((Path(temporary) / "linux-unity-registry-probe/evidence/report.json").read_bytes())
             self.assertEqual(report["probeCompleted"], failure is None)
             self.assertEqual(report["genuineNonemptyFixture"], "deferred")
+            self.assertTrue(report["envOutputDiagnosticOnly"])
             for name in M.FALSE:
                 self.assertIs(report[name], False)
             self.assertEqual(report["tool"]["execution"], "sealed-memfd-cloexec")
@@ -599,6 +688,7 @@ class Orchestration(unittest.TestCase):
             for call in run.call_args_list:
                 self.assertIs(call.args[0], image)
             self.assertEqual(run.call_count, len(M.COMMANDS) if failure is None else 1)
+            self.assertEqual([call.args[1] for call in run.call_args_list], list(M.COMMANDS) if failure is None else [M.COMMANDS[0]])
             self.assertLess(len(json.dumps(report)), 16384)
 
     def test_complete_mock_stage_requires_sealed_image_not_source_file_fd(self):
@@ -782,7 +872,7 @@ class Registration(unittest.TestCase):
                    ("register", ("projects", "add", *paths[:-1], paths[0], *flags)),
                    ("register", ("projects", "add", *paths[:-1], paths[-1] + "/../foreign", *flags)),
                    ("register", ("projects", "add", *paths, *flags, "--force")),
-                   ("hub-help", ("hub", "install")), ("list-all", ("projects", "list", "--watch")))
+                    ("hub-help", ("hub", "install")), ("list-all", ("projects", "list", "--watch")), ENV_COMMAND)
             for specification in bad:
                 with self.subTest(specification=specification), self.assertRaises(RuntimeError):
                     M.run_registration_fixed(Mock(), specification, root)
