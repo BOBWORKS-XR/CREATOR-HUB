@@ -215,6 +215,89 @@ test('native runner admission binds exact repo, branch, event, non-root OS and r
   await assert.rejects(lab.startLabProxy(null, null, {}));
 });
 
+const bootstrapRunner = () => ({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
+  GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
+  GITHUB_REF: lab.BOOTSTRAP_BRANCH, GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/${lab.BOOTSTRAP_WORKFLOW}@${lab.BOOTSTRAP_BRANCH}`,
+  EXECUTION_REQUEST: lab.BOOTSTRAP_REQUEST, GITHUB_SHA: 'a'.repeat(40), GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: os.tmpdir() });
+
+test('bootstrap016 is a distinct closed manual native profile, never an alias for the historical guarded runner', async () => {
+  const env = bootstrapRunner(); lab.assertBootstrapRunner(env, 'linux', 'x64', 1001, 1001);
+  for (const name of Object.keys(env)) {
+    const value = { ...env }; delete value[name]; assert.throws(() => lab.assertBootstrapRunner(value, 'linux', 'x64', 1001, 1001), name);
+  }
+  for (const change of [{ GITHUB_EVENT_NAME: 'push' }, { EXECUTION_REQUEST: 'inspect-only' }, { GITHUB_REF: lab.BRANCH },
+    { FLATPAK_ID: 'foreign' }, ...['HTTPS_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'NODE_EXTRA_CA_CERTS', 'PYTHONPATH', 'BASH_ENV',
+      'APPIMAGE', 'LD_PRELOAD', 'CREATOR_HUB_SIGNING_KEY_PATH'].map(name => ({ [name]: 'forbidden' }))]) {
+    assert.throws(() => lab.assertBootstrapRunner({ ...env, ...change }, 'linux', 'x64', 1001, 1001));
+  }
+  for (const tuple of [['win32', 'x64', 1001, 1001], ['linux', 'arm64', 1001, 1001], ['linux', 'x64', 0, 0], ['linux', 'x64', 1001, 0]]) {
+    assert.throws(() => lab.assertBootstrapRunner(env, ...tuple));
+  }
+  assert.throws(() => lab.assertRunner(env, 'linux', 'x64', 1001, 1001));
+  assert.throws(() => lab.assertBootstrapRunner(runner(), 'linux', 'x64', 1001, 1001));
+  await assert.rejects(lab.startBootstrap016Proxy(lab.createContract(input()), null, {}));
+  assert.ok(lab.startBootstrap016Proxy.toString().includes('contract.profile === BOOTSTRAP_PROFILE'));
+});
+
+test('bootstrap016 routes and original ZIP are independently fixed; no feed, latest JSON, alias download or arbitrary route', () => {
+  assert.equal(lab.BOOTSTRAP_PROFILE, '016-bootstrap');
+  assert.equal(lab.BOOTSTRAP_FILES['creator-hub-linux-x86_64-0.1.16.portable-manifest.json'].size, 68007);
+  assert.equal(lab.BOOTSTRAP_FILES['creator-hub-linux-x86_64-0.1.16.appdir.tar.gz'].sha256, '06f934ca6afd1c04d91f89a651d356535049ca303ee37884090cad65f0645fa2');
+  assert.equal(lab.BOOTSTRAP_ZIP.sha256, '2de3e4ab845de60d46c52c03f73fd2941da889b1464271335f4b8d49aa0e29e5');
+  assert.equal(Object.keys(lab.BOOTSTRAP_FILES).length, 5);
+  assert.ok(Object.isFrozen(lab.BOOTSTRAP_FILES) && Object.isFrozen(lab.BOOTSTRAP_ZIP));
+  for (const [name, pin] of Object.entries(lab.BOOTSTRAP_FILES)) {
+    assert.ok(Object.isFrozen(pin)); assert.match(name, /^[a-z0-9_.-]+$/);
+    assert.ok(pin.size > 0); assert.match(pin.sha256, /^[a-f0-9]{64}$/);
+    assert.ok(!name.includes('latest') && !name.includes('AppImage'));
+  }
+  assert.equal(lab.BOOTSTRAP_PREFIX, '/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.16/');
+  assert.ok(lab.loadBootstrap016.toString().includes("host: 'github.com'"));
+  assert.ok(!lab.loadBootstrap016.toString().includes('FEED_PATH'));
+  assert.equal(lab.FROM, '0.1.14'); assert.equal(lab.TO, '0.1.15');
+  assert.equal(lab.loadContract.toString().includes('BOOTSTRAP'), false);
+});
+
+test('historical contract, admission and neutral TLS engine retain their reviewed source exactly', () => {
+  const originalFunctions = ['createContract', 'loadContract', 'reviewedTargetPins', 'assertRunner',
+    'resolveRequest', 'tlsContext', 'startLoopbackTransport', 'startLabProxy'];
+  const normalized = source.replace(/\r\n/g, '\n');
+  const bodies = originalFunctions.map(name => {
+    const start = normalized.indexOf(`function ${name}(`), end = normalized.indexOf('\n}\n', start);
+    assert.ok(start >= 0 && end > start); return normalized.slice(start, end + 3);
+  });
+  assert.equal(hash(Buffer.from(bodies.join('\n'))), '2d25eca0c463d67a022f61c05a2a4d30a9dac59176a1a85340656e1abf4ff2cc');
+});
+
+test('bootstrap016 input refusal precedes any output or transport and refuses changed original ZIP', t => {
+  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bootstrap016-refuse-')));
+  t.after(() => { fs.unlinkSync(path.join(directory, 'portable.zip')); fs.rmdirSync(directory); });
+  fs.writeFileSync(path.join(directory, 'portable.zip'), 'not the independently reviewed ZIP', { flag: 'wx' });
+  assert.throws(() => lab.loadBootstrap016(directory));
+  assert.deepEqual(fs.readdirSync(directory), ['portable.zip']);
+  assert.throws(() => lab.loadBootstrap016('.'));
+});
+
+test('bootstrap016 CLI cannot run on a local machine or inspect-only dispatch, before touching input/control', () => {
+  for (const mode of ['bootstrap-016', 'bootstrap-016-inspect']) {
+    const result = spawnSync(process.execPath, [require.resolve('./linux-update-lab-feed.cjs'), mode, 'never-read'], {
+      encoding: 'utf8', input: 'DO-NOT-LOG-TLS-CONTROL', timeout: 10000, windowsHide: true,
+      env: { ...process.env, GITHUB_ACTIONS: 'false', EXECUTION_REQUEST: 'inspect-only' } });
+    assert.notEqual(result.status, 0); assert.equal(result.stdout, ''); assert.ok(!result.stderr.includes('DO-NOT-LOG'));
+  }
+  assert.ok(source.includes('fs.fstatSync(0).isFIFO()'));
+  assert.ok(source.includes("closed.equals(Buffer.from('close'))"));
+  assert.ok(source.includes("process.stdin.destroy()"));
+});
+
+test('retained actual signed bootstrap016 metadata matches all four fixed byte pins without key access', t => {
+  const directory = path.resolve(__dirname, '../artifacts/signed-private-portable016-39352300183');
+  if (!fs.existsSync(directory)) { t.skip('Actual metadata is supplied later by the signature-verified native lane'); return; }
+  for (const [name, pin] of Object.entries(lab.BOOTSTRAP_FILES).filter(([name]) => !name.endsWith('.tar.gz'))) {
+    const bytes = fs.readFileSync(path.join(directory, name)); assert.deepEqual({ size: bytes.length, sha256: hash(bytes) }, pin);
+  }
+});
+
 test('loading exact fixed input files is bounded and read-only, never follows a linked input', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-linux-feed-input-'));
   const data = input();

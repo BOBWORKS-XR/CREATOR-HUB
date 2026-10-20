@@ -1,5 +1,5 @@
 'use strict';
-// Linux DEB 14 -> acceptance-only 15 transport, NOT signing/native acceptance.
+// Linux DEB 14 -> acceptance-only 15 and closed 016 bootstrap transport, NOT native acceptance.
 // CONFIG: {schemaVersion:1,targetVersion:'0.1.15',directory,pins:{descriptor,
 // descriptorSignature,installer,manifest,executable}}. External review supplies
 // hashes of immutable already-signed inputs; this harness never authenticates them.
@@ -38,6 +38,21 @@ const LIMITS = Object.freeze({ metadata: 32768, signature: 4096, installer: 512 
   idleMs: 15000, durationMs: 600000, tls: 65536 });
 const PIN_NAMES = ['descriptor', 'descriptorSignature', 'installer', 'manifest', 'executable'];
 const HOSTS = ['api.github.com', 'github.com'];
+const BOOTSTRAP_PROFILE = '016-bootstrap';
+const BOOTSTRAP_BRANCH = 'refs/heads/validation/native-linux-production-016-flatpak';
+const BOOTSTRAP_WORKFLOW = '.github/workflows/native-linux-production-016-flatpak.yml';
+const BOOTSTRAP_REQUEST = 'execute-production-bootstrap-activation-016';
+const BOOTSTRAP_PREFIX = '/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.16/';
+// Independently reviewed producer39352300183 and its two real catalogue signatures.
+// These are transport restrictions, not signature or native-install acceptance.
+const BOOTSTRAP_FILES = Object.freeze(Object.fromEntries(Object.entries({
+  'creator-hub-linux-x86_64-portable.json': { size: 702, sha256: 'a70f34c60820cfef1dd6b55e9ba4370fdaa91edef1e96ab2c52321b2b5f14606' },
+  'creator-hub-linux-x86_64-portable.json.minisig': { size: 305, sha256: '6c73f75f7d24490a77d070a7b08694ae29be8cbd5e517dbb76de2ad5e38c726b' },
+  'creator-hub-linux-x86_64-0.1.16.portable-manifest.json': { size: 68007, sha256: '12185b46a19314a3d578de036f17c73ed142aca6a7bd6f6f6d50b4036e12d8ee' },
+  'creator-hub-linux-x86_64-0.1.16.portable-manifest.json.minisig': { size: 305, sha256: '54518e9cca1eaaa8b5ff10c83575a272d539db3e47ef42301a28d32bb7990163' },
+  'creator-hub-linux-x86_64-0.1.16.appdir.tar.gz': { size: 164407254, sha256: '06f934ca6afd1c04d91f89a651d356535049ca303ee37884090cad65f0645fa2' },
+}).map(([name, value]) => [name, Object.freeze(value)])));
+const BOOTSTRAP_ZIP = Object.freeze({ size: 451643263, sha256: '2de3e4ab845de60d46c52c03f73fd2941da889b1464271335f4b8d49aa0e29e5' });
 const contracts = new WeakMap();
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -145,6 +160,65 @@ function reviewedTargetPins(pins, byteLength, profile = 'legacy') {
   for (const key of profile === 'legacy' ? ['installer', 'executable'] : PIN_NAMES) assert.equal(pins[key], expected[key], `Exact reviewed Linux15 ${key} pin required`);
 }
 
+function assertBootstrapRunner(env = process.env, platform = process.platform, arch = process.arch,
+  uid = process.getuid?.(), euid = process.geteuid?.()) {
+  assert.equal(platform, 'linux'); assert.equal(arch, 'x64');
+  assert.ok(Number.isInteger(uid) && uid > 0 && uid === euid, 'Unprivileged disposable native user required');
+  for (const [name, value] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
+    RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64', GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512',
+    GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: BOOTSTRAP_BRANCH,
+    GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/${BOOTSTRAP_WORKFLOW}@${BOOTSTRAP_BRANCH}`,
+    EXECUTION_REQUEST: BOOTSTRAP_REQUEST })) assert.equal(env[name], value, name);
+  assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/);
+  for (const name of ['GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT']) assert.match(env[name] || '', /^[1-9][0-9]*$/);
+  assert.ok(path.isAbsolute(env.RUNNER_TEMP || '') && path.resolve(env.RUNNER_TEMP) === env.RUNNER_TEMP);
+  assert.ok(!env.FLATPAK_ID);
+  for (const name of Object.keys(env)) assert.ok(!/^(LD_|DYLD_|TAURI_|WEBKIT_|APPIMAGE$|APPDIR$|PYTHON|NODE_OPTIONS$|NODE_EXTRA_CA_CERTS$|NODE_TLS_REJECT_UNAUTHORIZED$|SSL_CERT_|CURL_CA_BUNDLE$|BASH_ENV$|ENV$|CREATOR_HUB_SIGNING_)/.test(name)
+    && !name.toLowerCase().endsWith('proxy'), 'Inherited runtime, trust, proxy or signing override refused');
+}
+
+function bootstrapFile(file, expected, retain = true) {
+  assert.ok(path.isAbsolute(file) && path.resolve(file) === file);
+  for (let name = file;; name = path.dirname(name)) {
+    assert.equal(fs.lstatSync(name).isSymbolicLink(), false, 'Redirected bootstrap input');
+    if (path.dirname(name) === name) break;
+  }
+  const before = fs.lstatSync(file, { bigint: true });
+  assert.ok(before.isFile() && before.nlink === 1n && before.size === BigInt(expected.size));
+  if (process.getuid) assert.equal(before.uid, BigInt(process.getuid()));
+  const identity = value => [value.dev, value.ino, value.mode, value.nlink, value.size, value.mtimeNs, value.birthtimeNs];
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+  try {
+    const opened = fs.fstatSync(fd, { bigint: true }); assert.deepEqual(identity(opened), identity(before));
+    const digest = crypto.createHash('sha256'), block = Buffer.alloc(65536), chunks = []; let size = 0;
+    for (let count; (count = fs.readSync(fd, block)) > 0;) {
+      size += count; assert.ok(size <= expected.size); digest.update(block.subarray(0, count));
+      if (retain) chunks.push(Buffer.from(block.subarray(0, count)));
+    }
+    assert.deepEqual({ size, sha256: digest.digest('hex') }, expected, 'Exact reviewed bootstrap bytes required');
+    assert.deepEqual(identity(fs.fstatSync(fd, { bigint: true })), identity(opened));
+    const after = fs.lstatSync(file, { bigint: true });
+    assert.deepEqual(identity(after), identity(before)); assert.equal(after.ctimeNs, before.ctimeNs);
+    return retain ? Buffer.concat(chunks) : undefined;
+  } finally { fs.closeSync(fd); }
+}
+
+function loadBootstrap016(root) {
+  assert.ok(path.isAbsolute(root) && path.resolve(root) === root);
+  const folder = fs.lstatSync(root); assert.ok(folder.isDirectory() && !folder.isSymbolicLink());
+  bootstrapFile(path.join(root, 'portable.zip'), BOOTSTRAP_ZIP, false);
+  const routes = Object.entries(BOOTSTRAP_FILES).map(([name, expected]) => {
+    const directory = name.endsWith('.tar.gz') ? 'portable' : 'signed';
+    const bytes = bootstrapFile(path.join(root, 'stage', directory, name), expected);
+    return { host: 'github.com', path: BOOTSTRAP_PREFIX + name, bytes, sha256: expected.sha256,
+      type: name.endsWith('.tar.gz') ? 'application/octet-stream' : name.endsWith('.minisig') ? 'text/plain; charset=utf-8' : 'application/json' };
+  });
+  const contract = Object.freeze({ profile: BOOTSTRAP_PROFILE, fromVersion: '0.1.16', targetVersion: '0.1.16',
+    pins: Object.freeze({ originalZip: BOOTSTRAP_ZIP, files: BOOTSTRAP_FILES }),
+    routes: Object.freeze(routes.map(({ host, path: routePath, sha256 }) => Object.freeze({ host, path: routePath, sha256 }))) });
+  contracts.set(contract, routes); return contract;
+}
+
 function assertRunner(env = process.env, platform = process.platform, arch = process.arch,
   uid = process.getuid?.(), euid = process.geteuid?.()) {
   assert.equal(platform, 'linux', 'Native Linux runner required'); assert.equal(arch, 'x64');
@@ -208,7 +282,9 @@ function resolveRequest(contract, host, req, state) {
 }
 function labReport(contract, state) {
   assert.ok(contracts.has(contract));
-  return { schemaVersion: 1, scope: 'linux-deb-outgoing-14-to-acceptance-only-15-lab-transport', fromVersion: FROM, targetVersion: TO,
+  const bootstrap = contract.profile === BOOTSTRAP_PROFILE;
+  return { schemaVersion: 1, scope: bootstrap ? 'linux-portable-016-bootstrap-lab-transport' : 'linux-deb-outgoing-14-to-acceptance-only-15-lab-transport',
+    fromVersion: contract.fromVersion, targetVersion: contract.targetVersion,
     labDiscovery: true, publicDiscovery: false, nativeAcceptanceTested: false, baselineActuallyTested: false,
     signaturesVerifiedByHarness: false, signedUpdateAccepted: false, migrationAccepted: false,
     restartAccepted: false, restoredViewsAccepted: false, liveAiAcceptance: false, releaseReady: false,
@@ -346,6 +422,53 @@ async function startLabProxy(contract, options, env = process.env) {
     env.GITHUB_REF === INTEGRATED_BRANCH ? 'integrated-39134454264' : 'legacy');
   return startLoopbackTransport(contract, options);
 }
+async function startBootstrap016Proxy(contract, options, env = process.env) {
+  assertBootstrapRunner(env);
+  assert.ok(!fs.existsSync('/.flatpak-info') && contracts.has(contract) && contract.profile === BOOTSTRAP_PROFILE);
+  return startLoopbackTransport(contract, options);
+}
+function saveLabReport(reportFile, value) {
+  fs.writeFileSync(reportFile, `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+}
+
+async function bootstrapMain() {
+  assertBootstrapRunner();
+  assert.equal(process.argv.length, 4);
+  const inspect = process.argv[2] === 'bootstrap-016-inspect';
+  assert.ok(inspect || process.argv[2] === 'bootstrap-016');
+  const root = path.join(process.env.RUNNER_TEMP, 'native-linux-production-016-flatpak');
+  assert.equal(process.argv[3], root);
+  const folder = fs.lstatSync(root);
+  assert.ok(folder.isDirectory() && folder.uid === process.getuid() && (folder.mode & 0o7777) === 0o700);
+  const contract = loadBootstrap016(root);
+  if (inspect) { console.log(JSON.stringify(labReport(contract, newState()))); return; }
+  assert.ok(fs.fstatSync(0).isFIFO(), 'Inherited private pipe required');
+  const iterator = process.stdin[Symbol.asyncIterator](); let pending = Buffer.alloc(0);
+  async function line(maximum, timeout) {
+    let timer;
+    try {
+      return await Promise.race([(async () => {
+        while (!pending.includes(10)) {
+          const next = await iterator.next(); if (next.done) return null;
+          pending = Buffer.concat([pending, next.value]); assert.ok(pending.length <= maximum);
+        }
+        const at = pending.indexOf(10), result = pending.subarray(0, at); pending = pending.subarray(at + 1); return result;
+      })(), new Promise((_, reject) => { timer = setTimeout(() => reject(Error('Private control deadline')), timeout); })]);
+    } finally { clearTimeout(timer); }
+  }
+  const control = json(bounded(await line(2 * LIMITS.tls, LIMITS.handshakeMs), 2 * LIMITS.tls, 'TLS control'));
+  keys(control, ['key', 'cert'], 'ephemeral TLS control');
+  const key = canonicalBase64(control.key, LIMITS.tls), cert = canonicalBase64(control.cert, LIMITS.tls);
+  const proxy = await startBootstrap016Proxy(contract, { key, cert }); key.fill(0);
+  console.log(JSON.stringify({ kind: 'bootstrap-016-ready', pid: process.pid, proxyUrl: proxy.proxyUrl, publicDiscovery: false, releaseReady: false }));
+  try {
+    const closed = await Promise.race([line(32, LIMITS.durationMs), proxy.closed.then(() => null)]);
+    assert.ok(closed === null || closed.equals(Buffer.from('close')));
+  } finally {
+    await proxy.close(); process.stdin.destroy();
+    saveLabReport(path.join(root, 'lab-transport.json'), proxy.report());
+  }
+}
 function inside(root, file) {
   const relative = path.relative(root, file);
   assert.ok(path.isAbsolute(file) && path.resolve(file) === file && relative && relative !== '..'
@@ -378,13 +501,15 @@ async function main() {
   console.log(JSON.stringify({ kind: 'linux-lab-feed-ready', proxyUrl: proxy.proxyUrl, labDiscovery: true, publicDiscovery: false, releaseReady: false }));
   try { await Promise.race([proxy.closed, stopped]); }
   finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); await proxy.close(); }
-  fs.writeFileSync(reportFile, `${JSON.stringify(proxy.report(), null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+  saveLabReport(reportFile, proxy.report());
 }
 
 module.exports = { FROM, TO, BRANCH, INTEGRATED_BRANCH, INTEGRATED_TARGET, DESCRIPTOR, PLATFORM, ASSET, REVIEWED_TARGET, FEED_PATH, LIMITS, createContract, loadContract, reviewedTargetPins,
   readBounded, assertRunner, connectHost, headersAllowed, newState, resolveRequest, labReport, startLabProxy,
+  BOOTSTRAP_PROFILE, BOOTSTRAP_BRANCH, BOOTSTRAP_WORKFLOW, BOOTSTRAP_REQUEST, BOOTSTRAP_PREFIX, BOOTSTRAP_FILES, BOOTSTRAP_ZIP,
+  assertBootstrapRunner, loadBootstrap016, startBootstrap016Proxy,
   testing: Object.freeze({ startLoopbackTransport }) };
-if (require.main === module) main().catch(() => {
+if (require.main === module) (['bootstrap-016', 'bootstrap-016-inspect'].includes(process.argv[2]) ? bootstrapMain() : main()).catch(() => {
   // Never log TLS material, HTTP headers, file contents, or parser exceptions.
   console.error('Linux lab transport refused or failed; no native/public acceptance established.'); process.exitCode = 1;
 });

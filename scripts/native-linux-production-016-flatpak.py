@@ -1,10 +1,12 @@
 """Finite production 016 bootstrap/activation controller, never a release gate.
 
 Stage is data-only. Session requires separately requested execution, successful
-production receipts and real catalogue signatures. No custom trust, signing,
-command relay, app remote, automatic recovery or forced process shutdown.
+production receipts and real catalogue signatures. Temporary lab TLS trust is
+disposable-CI-only; no signing, command relay, automatic recovery or forced app shutdown.
 """
 import hashlib
+import base64
+from contextlib import contextmanager
 import importlib.util
 import io
 import json
@@ -17,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.request
 import zipfile
@@ -39,7 +42,22 @@ PORTAL_URL = "https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.
 DESCRIPTOR = "creator-hub-linux-x86_64-portable.json"
 MANIFEST = "creator-hub-linux-x86_64-0.1.16.portable-manifest.json"
 ARCHIVE = "creator-hub-linux-x86_64-0.1.16.appdir.tar.gz"
+BOOTSTRAP_PREFIX = '/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.16/'
 KEY = {"size": 119, "sha256": "23b3eee2d1c8cb7d705120953cda67ff94a722a207d5be1679c250be8ca90308"}
+TLS_DESTINATION = Path('/usr/local/share/ca-certificates/creator-production-bootstrap016.crt')
+TLS_CONFIGURATION = (b'[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN=api.github.com\n'
+    b'[ext]\nsubjectAltName=DNS:api.github.com,DNS:github.com\nbasicConstraints=critical,CA:TRUE\n'
+    b'keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign\nextendedKeyUsage=serverAuth\n')
+# Fixed root-owned destination and public certificate only; no privileged read of caller paths.
+TLS_PUBLISH = ('import base64,os,sys; b=base64.b64decode(sys.argv[2],validate=True); '
+    'assert 0<len(b)<=65536; f=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o644); '
+    'os.fchmod(f,0o644); n=os.write(f,b); assert n==len(b); os.fsync(f); os.close(f)')
+TLS_REMOVE = ('import hashlib,os,stat,sys; p=sys.argv[1]; s=os.lstat(p); '
+    'assert stat.S_ISREG(s.st_mode) and s.st_uid==s.st_gid==0 and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==0o644; '
+    'f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW); h=os.fstat(f); assert (s.st_dev,s.st_ino,s.st_size)==(h.st_dev,h.st_ino,h.st_size); '
+    'b=os.read(f,65537); assert 0<len(b)<=65536 and hashlib.sha256(b).hexdigest()==sys.argv[2]; '
+    'identity=lambda x:(x.st_dev,x.st_ino,x.st_mode,x.st_uid,x.st_gid,x.st_nlink,x.st_size,x.st_mtime_ns,x.st_ctime_ns); '
+    'assert identity(os.lstat(p))==identity(s) and identity(os.fstat(f))==identity(h); os.unlink(p); os.close(f)')
 GATES = dict.fromkeys(("candidateExecuted", "flatpakInstalled", "disclosureCancelAccepted", "missingHostAccepted",
                       "portalCaptureAccepted", "setupCancelAccepted", "bootstrapAccepted", "typedResumeAccepted",
                       "coldActivationAccepted", "warmActivationAccepted", "settingsPreserved", "signedUpdateAccepted",
@@ -136,13 +154,16 @@ def command(args, *, env=None, timeout=60, input=None, limit=2 * 1024 * 1024):
     if not evidence.exists():
         evidence.mkdir(mode=0o700)
     require(evidence.resolve(strict=True) == evidence and evidence.lstat().st_uid == os.getuid(), "Owned tool evidence directory")
-    label = "tool-" + str(len(list(evidence.glob('*.json'))))
-    _, native = P.helpers()
-    child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             env=env, cwd=HERE.parent)
-    capture = native.Capture(child, evidence, label)
-    receipt = {"tool": Path(args[0]).name, "pid": child.pid, "exitCode": None}
+    descriptor, receipt_path = tempfile.mkstemp(prefix='tool-', suffix='.json', dir=evidence)
+    label = Path(receipt_path).stem
+    capture = None
+    receipt = {"tool": Path(args[0]).name, "pid": None, "exitCode": None}
     try:
+        _, native = P.helpers()
+        child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env=env, cwd=HERE.parent)
+        receipt['pid'] = child.pid
+        capture = native.Capture(child, evidence, label)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             capture.pump(0.02)
@@ -155,7 +176,12 @@ def command(args, *, env=None, timeout=60, input=None, limit=2 * 1024 * 1024):
                 for row in capture.metadata().values()), "Bounded tool failed: " + Path(args[0]).name)
         return bytes(capture.items['stdout']['kept'])
     finally:
-        capture.close(); save(evidence / (label + '.json'), receipt)
+        try:
+            if capture is not None:
+                capture.close()
+        finally:
+            with os.fdopen(descriptor, 'w', encoding='utf8') as stream:
+                json.dump(receipt, stream, indent=2, allow_nan=False)
 
 
 def node(mode, *, headless=False):
@@ -272,16 +298,257 @@ def clean_environment(root):
             "FLATPAK_USER_DIR": str(root / "installation"), "GDK_BACKEND": "x11", "NO_AT_BRIDGE": "0"}
 
 
-def public_transport_ready(root, review):
-    # No private CA, redirect override or unpublished-download success is invented.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def lab_environment(root):
+    result = clean_environment(root)
+    for name in ('GITHUB_ACTIONS', 'GITHUB_REPOSITORY', 'GITHUB_REPOSITORY_ID', 'GITHUB_EVENT_NAME', 'GITHUB_REF',
+                 'GITHUB_WORKFLOW_REF', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'RUNNER_ENVIRONMENT',
+                 'RUNNER_OS', 'RUNNER_ARCH', 'RUNNER_TEMP', 'EXECUTION_REQUEST', 'CONTROLLER_NODE', 'CONTROLLER_PROFILE', 'SIGNED_INPUT'):
+        if name in os.environ:
+            result[name] = os.environ[name]
+    return result
+
+
+def bootstrap_inspect(root):
+    # The unchanged data/provenance/signature review must precede this closed byte admission.
+    return parse(command([os.environ['CONTROLLER_NODE'], str(HERE / 'linux-update-lab-feed.cjs'),
+                          'bootstrap-016-inspect', str(root)], env=lab_environment(root)))
+
+
+def loopback_proxy(value):
+    require(type(value) is str and re.fullmatch(r'http://127\.0\.0\.1:[1-9][0-9]{0,4}', value)
+            and int(value.rsplit(':', 1)[1]) <= 65535, 'Internally created IPv4 loopback proxy required')
+    return value
+
+
+def bootstrap_transport_ready(root, review, proxy):
+    # Normal system chain/hostname validation, unchanged production URLs, no public-discovery claim.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({'https': loopback_proxy(proxy)}))
     prefix = "https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.16/"
     for name in (DESCRIPTOR, DESCRIPTOR + ".minisig", MANIFEST, MANIFEST + ".minisig"):
         expected = review["signed"]["files"][name]
         with opener.open(prefix + name, timeout=30) as response:
-            require(response.status == 200 and response.url.startswith(("https://github.com/", "https://release-assets.githubusercontent.com/")), "Fixed production transport refused")
+            require(response.status == 200 and response.url == prefix + name, "Exact lab transport refused")
             raw = response.read(expected["size"] + 1)
-        require(len(raw) == expected["size"] and hashlib.sha256(raw).hexdigest() == expected["sha256"], "Fixed public URL differs from reviewed signed input")
+        require(len(raw) == expected["size"] and hashlib.sha256(raw).hexdigest() == expected["sha256"], "Lab URL differs from reviewed signed input")
+
+
+def protected_trust_parent(path):
+    for parent in (path, *path.parents):
+        value = parent.lstat()
+        require(stat.S_ISDIR(value.st_mode) and not parent.is_symlink() and value.st_uid == value.st_gid == 0
+                and not value.st_mode & 0o022, 'Protected native CI trust ancestry required')
+
+
+def trust_view():
+    result = {}
+    for prefix, directory in (('local', TLS_DESTINATION.parent), ('system', Path('/etc/ssl/certs'))):
+        protected_trust_parent(directory)
+        paths = sorted(directory.rglob('*')) if prefix == 'local' else sorted(directory.iterdir())
+        require(len(paths) <= 4096, 'Bounded CI certificate inventory required')
+        for file in paths:
+            row = file.lstat(); name = prefix + '/' + file.relative_to(directory).as_posix()
+            require(row.st_uid == row.st_gid == 0, 'Foreign CI certificate entry')
+            if stat.S_ISLNK(row.st_mode):
+                require(prefix == 'system', 'Redirected local CA source refused')
+                result[name] = {'link': os.readlink(file)}
+            elif stat.S_ISDIR(row.st_mode):
+                require(not row.st_mode & 0o022, 'Writable CI certificate directory')
+                result[name] = {'directory': True, 'mode': stat.S_IMODE(row.st_mode)}
+            else:
+                require(not row.st_mode & 0o022, 'Writable CI certificate file')
+                result[name] = P.record(file, 2 * 1024 * 1024)
+    require(len(json_bytes(result)) <= 512 * 1024, 'Bounded trust before-image required')
+    return result
+
+
+def tls_arm(root):
+    raw = regular(root / 'lab-tls/armed.json', 512 * 1024, 0o600)
+    arm = parse(raw)
+    require(set(arm) == {'schemaVersion', 'profile', 'certificate', 'before'}
+            and arm['schemaVersion'] == 1 and arm['profile'] == '016-bootstrap', 'Exact cleanup authority required')
+    bound(root / 'lab-tls/public.crt', arm['certificate'], 65536)
+    return arm, raw
+
+
+@contextmanager
+def tls_lock(root, seconds=0):
+    import fcntl
+    path = root / 'lab-tls/cleanup.lock'
+    regular(path, 16, 0o600)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        require(P.stamp(os.fstat(fd)) == P.stamp(path.lstat()), 'Cleanup lock identity changed')
+        end = time.monotonic() + seconds
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+            except BlockingIOError:
+                require(time.monotonic() < end, 'TLS cleanup is still owned; no concurrent publication/removal')
+                time.sleep(0.1)
+        yield
+    finally:
+        os.close(fd)
+
+
+def cleanup_owned_tls(root, arm, armed_bytes):
+    require(regular(root / 'lab-tls/armed.json', 512 * 1024, 0o600) == armed_bytes, 'Cleanup authority changed')
+    bound(root / 'lab-tls/public.crt', arm['certificate'], 65536)
+    protected_trust_parent(TLS_DESTINATION.parent)
+    if os.path.lexists(TLS_DESTINATION):
+        row = TLS_DESTINATION.lstat()
+        require(stat.S_ISREG(row.st_mode) and row.st_uid == row.st_gid == 0 and row.st_nlink == 1
+                and stat.S_IMODE(row.st_mode) == 0o644 and row.st_size == arm['certificate']['size']
+                and hashlib.sha256(TLS_DESTINATION.read_bytes()).hexdigest() == arm['certificate']['sha256'],
+                'Foreign/replaced CI certificate retained; cleanup outcome unknown')
+        command(['/usr/bin/sudo', '-n', '/usr/bin/python3', '-B', '-c', TLS_REMOVE,
+                 str(TLS_DESTINATION), arm['certificate']['sha256']], env=lab_environment(root))
+        command(['/usr/bin/sudo', '-n', '/usr/sbin/update-ca-certificates'], env=lab_environment(root))
+    require(not os.path.lexists(TLS_DESTINATION) and trust_view() == arm['before'], 'CI trust before-image was not restored')
+    result = {'schemaVersion': 1, 'profile': '016-bootstrap', 'cleanupVerified': True,
+              'publicDiscovery': False, 'releaseReady': False, 'scope': 'disposable-github-ci-only'}
+    receipt = root / 'tls-cleanup.json'
+    if receipt.exists():
+        require(parse(regular(receipt, 4096, 0o600)) == result, 'Existing cleanup evidence differs')
+    else:
+        save(receipt, result)
+    return result
+
+
+class LabChild:
+    def __init__(self, root, argv, label):
+        self.root = root
+        _, native = P.helpers()
+        self.child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      env=lab_environment(root), cwd=HERE.parent)
+        self.capture = native.Capture(self.child, root, label)
+        self.lines = 0
+
+    def send(self, raw):
+        require(type(raw) is bytes and 0 < len(raw) <= 131072 and raw.endswith(b'\n'), 'Bounded fixed lab control required')
+        self.child.stdin.write(raw); self.child.stdin.flush()
+
+    def expect(self, kind, seconds=30):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            self.capture.pump(0.02)
+            output = bytes(self.capture.items['stdout']['kept'])
+            rows = output.split(b'\n')[:-1]
+            require(len(rows) <= self.lines + 1 and len(output) <= 8192, 'Unexpected lab control output')
+            if len(rows) > self.lines:
+                value = parse(rows[self.lines]); self.lines += 1
+                require(value.get('kind') == kind and value.get('pid') == self.child.pid and self.child.poll() is None,
+                        'Lab child readiness differs')
+                return value
+            require(self.child.poll() is None, 'Owned lab child exited before readiness')
+        raise RuntimeError('Owned lab readiness deadline; no native app input authorized')
+
+    def finish(self):
+        try:
+            if not self.child.stdin.closed:
+                self.child.stdin.close()
+            end = time.monotonic() + 60
+            while time.monotonic() < end:
+                self.capture.pump(0.02)
+                if self.child.poll() is not None and all(row['eof'] for row in self.capture.metadata().values()):
+                    break
+            require(self.child.poll() == 0 and all(row['eof'] and not row['truncated'] and row['bytes'] <= 8192
+                    for row in self.capture.metadata().values()), 'Lab close/cleanup outcome unknown; disposable teardown required')
+            self.child.wait(timeout=0)
+        finally:
+            self.capture.close()
+
+
+def prepare_tls(root, review):
+    verified_review(root, review)
+    bootstrap_inspect(root)
+    require(not os.path.lexists(TLS_DESTINATION), 'Existing CI trust entry refused')
+    folder = root / 'lab-tls'; folder.mkdir(mode=0o700)
+    output(folder / 'tls.cnf', TLS_CONFIGURATION)
+    command(['/usr/bin/openssl', 'req', '-new', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+             '-config', str(folder / 'tls.cnf'), '-keyout', str(folder / 'private.pem'), '-out', str(folder / 'public.crt')], env=lab_environment(root))
+    for name in ('private.pem', 'public.crt'):
+        os.chmod(folder / name, 0o600); regular(folder / name, 65536, 0o600)
+    certificate = regular(folder / 'public.crt', 65536, 0o600)
+    arm = {'schemaVersion': 1, 'profile': '016-bootstrap', 'certificate': {'size': len(certificate),
+           'sha256': hashlib.sha256(certificate).hexdigest()}, 'before': trust_view()}
+    output(folder / 'cleanup.lock', b'owned')
+    with (folder / 'armed.json').open('xb') as stream:
+        os.chmod(folder / 'armed.json', 0o600); stream.write(json_bytes(arm)); stream.flush(); os.fsync(stream.fileno())
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    # Only this retained pipe owner can request publication. EOF/crash runs cleanup.
+    guard = LabChild(root, ['/usr/bin/python3', '-B', str(Path(__file__).resolve()), '_tls_guard'], 'tls-guard')
+    try:
+        guard.expect('tls-cleanup-armed')
+        guard.send(b'install\n'); guard.expect('tls-installed', 60)
+        return guard
+    except Exception:
+        guard.finish()
+        raise
+
+
+def tls_guard(root):
+    require(os.environ.get('EXECUTION_REQUEST') == REQUEST and stat.S_ISFIFO(os.fstat(0).st_mode), 'Private CI cleanup lease required')
+    with tls_lock(root):
+        arm, raw = tls_arm(root)
+        require(not os.path.lexists(TLS_DESTINATION) and trust_view() == arm['before'], 'Initial CI trust state changed')
+        print(json.dumps({'kind': 'tls-cleanup-armed', 'pid': os.getpid()}), flush=True)
+        try:
+            require(select.select([0], [], [], 30)[0] and os.read(0, 32) == b'install\n', 'No fixed install request')
+            protected_trust_parent(TLS_DESTINATION.parent)
+            require(not os.path.lexists(TLS_DESTINATION), 'Foreign CI trust entry appeared')
+            cert = bound(root / 'lab-tls/public.crt', arm['certificate'], 65536)
+            command(['/usr/bin/sudo', '-n', '/usr/bin/python3', '-B', '-c', TLS_PUBLISH,
+                     str(TLS_DESTINATION), base64.b64encode(cert).decode('ascii')], env=lab_environment(root))
+            command(['/usr/bin/sudo', '-n', '/usr/sbin/update-ca-certificates'], env=lab_environment(root))
+            print(json.dumps({'kind': 'tls-installed', 'pid': os.getpid()}), flush=True)
+            require(select.select([0], [], [], 900)[0] and os.read(0, 32) == b'', 'Cleanup lease ended unexpectedly')
+        finally:
+            cleanup_owned_tls(root, arm, raw)
+
+
+def verify_tls_cleanup(root):
+    armed = root / 'lab-tls/armed.json'
+    if not armed.exists():
+        require(not os.path.lexists(TLS_DESTINATION), 'Unowned CI trust entry retained; no cleanup authority')
+        return
+    require(os.environ.get('EXECUTION_REQUEST') == REQUEST, 'No cleanup adoption from another mode')
+    with tls_lock(root, 60):
+        arm, raw = tls_arm(root)
+        cleanup_owned_tls(root, arm, raw)
+
+
+def bootstrap_feed(root):
+    bootstrap_inspect(root)
+    arm, _ = tls_arm(root)
+    cert = bound(root / 'lab-tls/public.crt', arm['certificate'], 65536)
+    key = regular(root / 'lab-tls/private.pem', 65536, 0o600)
+    child = LabChild(root, [os.environ['CONTROLLER_NODE'], str(HERE / 'linux-update-lab-feed.cjs'), 'bootstrap-016', str(root)], 'lab-feed')
+    try:
+        child.send(json.dumps({'key': base64.b64encode(key).decode('ascii'), 'cert': base64.b64encode(cert).decode('ascii')},
+                              separators=(',', ':')).encode('ascii') + b'\n')
+        ready = child.expect('bootstrap-016-ready')
+        require(set(ready) == {'kind', 'pid', 'proxyUrl', 'publicDiscovery', 'releaseReady'}
+                and ready['publicDiscovery'] is ready['releaseReady'] is False, 'Lab scope differs')
+        child.proxy = loopback_proxy(ready['proxyUrl'])
+        return child
+    except Exception:
+        child.finish()
+        raise
+
+
+def finish_bootstrap_feed(feed, root, review):
+    feed.send(b'close\n'); feed.finish()
+    report = parse(regular(root / 'lab-transport.json', 16384, 0o600))
+    expected = {BOOTSTRAP_PREFIX + name: pin['sha256'] for name, pin in review['signed']['files'].items()}
+    expected[BOOTSTRAP_PREFIX + ARCHIVE] = review['portable']['manifest']['archive']['sha256']
+    require(report['scope'] == 'linux-portable-016-bootstrap-lab-transport' and report['publicDiscovery'] is False
+            and report['releaseReady'] is False and report['closeReason'] == 'caller'
+            and {row['path']: row['sha256'] for row in report['requests'] if row['host'] == 'github.com'} == expected,
+            'Every fixed bootstrap asset must have been served by the owned lab; no public acceptance')
 
 
 def namespace_ids(raw, pid):
@@ -346,10 +613,11 @@ class Session:
         self.x11, self.driver = self.helper.X11(), P.Driver()
         self.children, self.captures, self.fds = [], [], []
         self.portal_client = None
+        self.bootstrap_proxy = None
         self.report = {"schemaVersion": 1, "profile": PROFILE, "phase": "starting", **GATES}
 
-    def launch(self, args, label):
-        child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.app_env)
+    def launch(self, args, label, *, env=None):
+        child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.app_env if env is None else env)
         self.children.append(child); self.captures.append(self.native.Capture(child, self.root, label))
         return child
 
@@ -527,8 +795,46 @@ class Session:
         require(match is not None, "Source-bound disclosure missing")
         return parse(match[1])
 
+    def driver_ready(self, child, driver_hash, webkit_hash):
+        identity = self.process(child.pid, driver_hash)
+        backend = None
+
+        def driver_guard():
+            require(child.poll() is None, "Owned WebDriver exited")
+            self.stable(identity)
+
+        def sockets_ready():
+            nonlocal backend
+            driver_guard()
+            peers = [row for row in P.subtree(child.pid, self.helper, self.native).values()
+                     if row["executable"] == "/usr/bin/WebKitWebDriver" and row["parentPid"] == child.pid]
+            require(len(peers) <= 1 and (backend is None or len(peers) == 1), "Owned system driver disappeared or duplicated")
+            if not peers:
+                return False
+            current = self.process(peers[0]["pid"], webkit_hash)
+            require(current["parentPid"] == child.pid, "System driver parent differs")
+            require(backend is None or current == backend, "System driver identity changed during startup")
+            backend = current
+            ready = P.listener(child.pid, 4444) and P.listener(backend["pid"], 4445)
+            driver_guard()
+            return ready
+
+        # The pinned 2.1.0 intermediary forwards /status before WebKit has necessarily bound.
+        # https://github.com/tauri-apps/tauri/blob/tauri-driver-v2.1.0/crates/tauri-driver/src/server.rs
+        self.wait(sockets_ready)
+
+        def backend_guard():
+            driver_guard()
+            self.stable(backend)
+            require(P.listener(child.pid, 4444) and P.listener(backend["pid"], 4445), "Bound driver socket changed")
+
+        self.driver.guard = backend_guard
+        self.wait(lambda: self.driver.request("GET", "/status")["ready"] is True)
+        self.report["setupTools"] = {"driver": identity, "systemDriver": backend}
+
     def setup(self):
-        public_transport_ready(self.root, self.review)
+        proxy = loopback_proxy(self.bootstrap_proxy)
+        bootstrap_transport_ready(self.root, self.review, proxy)
         root_hash = self.review["portable"]["root"]["sha256"]
         setup_name = "Creator.Hub.Native.Support_0.1.16_amd64.AppImage"
         original = self.root / "stage/portable" / setup_name
@@ -536,9 +842,13 @@ class Session:
         raw = bound(original, profile["portable"]["files"][setup_name])
         launch_dir = self.root / "setup"; launch_dir.mkdir(mode=0o700)
         executable = launch_dir / setup_name; output(executable, raw, 0o755)
-        driver = self.launch([str(self.root / "tools/bin/tauri-driver"), "--native-driver", "/usr/bin/WebKitWebDriver"], "webdriver")
-        self.wait(lambda: P.listener(driver.pid, 4444))
-        require(self.driver.request("GET", "/status")["ready"] is True, "Owned WebDriver not ready")
+        driver_file = P.record(self.root / "tools/bin/tauri-driver")
+        webkit_file = P.record("/usr/bin/WebKitWebDriver")
+        require(driver_file["uid"] == os.getuid() and driver_file["gid"] == os.getgid() and driver_file["mode"] == 0o755
+                and webkit_file["uid"] == webkit_file["gid"] == 0 and webkit_file["mode"] == 0o755, "Unprotected WebDriver tooling")
+        driver = self.launch([str(self.root / "tools/bin/tauri-driver"), "--native-driver", "/usr/bin/WebKitWebDriver"], "webdriver",
+                             env={**self.app_env, 'HTTPS_PROXY': proxy, 'NO_PROXY': '127.0.0.1,localhost,::1'})
+        self.driver_ready(driver, driver_file["sha256"], webkit_file["sha256"])
         # Documented AppImage runtime operation, no forged APPIMAGE/APPDIR or restart hint.
         # https://docs.appimage.org/user-guide/troubleshooting/fuse.html#extract-and-run-type-2-appimages
         value = self.driver.request("POST", "/session", {"capabilities": {"alwaysMatch": {
@@ -554,7 +864,11 @@ class Session:
         root = self.process(row["pid"], root_hash)
         self.wait(lambda: any(self.x11.inspect(window)["pid"] == root["pid"] for window in self.windows()))
         window = self.owned_window(root, P.TITLE)
-        self.driver.guard = lambda: self.owned_window(root, P.TITLE)
+        tooling_guard = self.driver.guard
+        def setup_guard():
+            tooling_guard()
+            self.owned_window(root, P.TITLE)
+        self.driver.guard = setup_guard
         self.wait(lambda: self.driver.read("#usage-terms-dialog", "attribute/open") is not None)
         self.driver.click("#usage-terms-checkbox"); self.driver.click("#usage-terms-continue")
         self.wait(lambda: self.driver.read("#usage-terms-dialog", "attribute/open") is None)
@@ -653,8 +967,10 @@ def run_session(root, review):
     verified_review(root, review, headless=True)
     Gdk.init([])
     session = Session(root, review)
-    wm, portal_bus, portal_id = None, None, None
+    wm, portal_bus, portal_id, feed = None, None, None, None
     try:
+        feed = bootstrap_feed(root)
+        session.bootstrap_proxy = feed.proxy
         wm = session.launch(["/usr/bin/openbox", "--sm-disable"], "wm")
         session.wait(lambda: session.x11.property(session.x11.x.XDefaultRootWindow(session.x11.display), "_NET_SUPPORTING_WM_CHECK"))
         require(not session.windows() and session.host_owner() is None, "Fresh session already has an app/Host1")
@@ -705,12 +1021,19 @@ def run_session(root, review):
         session.close(cold, window); session.wait(lambda: session.host_owner() is None)
         require(not session.windows(), "Native normal close left another visible app")
         session.snapshot_preserved()
+        finish_bootstrap_feed(feed, root, review); feed = None
         session.report.update(settingsPreserved=True, phase="complete", normalCloseObserved=True)
         command(["/usr/bin/openbox", "--exit"]); wm.wait(timeout=10)
     except Exception as error:
         session.report["error"] = str(error)[:1500]
         raise
     finally:
+        if feed is not None:
+            try:
+                feed.finish()
+            except Exception as error:
+                session.report['labCloseError'] = str(error)[:500]
+                session.report['labTeardownUnknown'] = True
         session.report["disposableTeardownRequired"] = session.report.get("phase") != "complete" or any(child.poll() is None for child in session.children)
         session.report["logs"] = [capture.metadata() for capture in session.captures]
         save(root / "report.json", session.report)
@@ -782,21 +1105,37 @@ def session(root):
         "GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_WORKFLOW_REF", "GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
         "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH", "RUNNER_TEMP", "EXECUTION_REQUEST", "CONTROLLER_NODE",
         "CONTROLLER_PROFILE", "SIGNED_INPUT")}
-    command(["/usr/bin/xvfb-run", "-a", "-s", "-screen 0 1280x1000x24", "/usr/bin/dbus-run-session", "--",
-             "/usr/bin/python3", "-B", str(Path(__file__).resolve()), "_run"], env={**env, **context}, timeout=600)
+    guard = prepare_tls(root, review)
+    try:
+        command(["/usr/bin/xvfb-run", "-a", "-s", "-screen 0 1280x1000x24", "/usr/bin/dbus-run-session", "--",
+                 "/usr/bin/python3", "-B", str(Path(__file__).resolve()), "_run"], env={**env, **context}, timeout=600)
+    finally:
+        try:
+            guard.finish()
+        finally:
+            verify_tls_cleanup(root)
+    report = parse(regular(root / 'report.json', 32768, 0o600))
+    require(report['phase'] == 'complete' and report['settingsPreserved'] is True, 'Native session did not complete')
+    report['tlsCleanupVerified'] = True
+    save(root / 'final-report.json', report)
 
 
 def main():
     admission(os.environ, sys.platform, platform.machine() if sys.platform == "linux" else "", os.getuid() if hasattr(os, "getuid") else None)
     require(os.getuid() == os.geteuid(), "No privileged identity transition")
-    require(len(sys.argv) == 2 and sys.argv[1] in ("stage", "session", "_run"), "Only fixed stage or separately requested session")
-    root = locations(); before = root.lstat()
+    require(len(sys.argv) == 2 and sys.argv[1] in ("stage", "session", "_run", "_tls_guard", "tls-cleanup"), "Only fixed native controller modes")
+    root = locations()
+    if sys.argv[1] == 'tls-cleanup':
+        verify_tls_cleanup(root); return
+    before = root.lstat()
     require(root.resolve(strict=True) == root and stat.S_ISDIR(before.st_mode) and before.st_uid == os.getuid()
             and stat.S_IMODE(before.st_mode) == 0o700, "Owned private input root required")
     if sys.argv[1] == "stage":
         stage(root)
     elif sys.argv[1] == "session":
         session(root)
+    elif sys.argv[1] == '_tls_guard':
+        tls_guard(root)
     else:
         require(os.environ.get("EXECUTION_REQUEST") == REQUEST and os.environ.get("HOME") == str(root / "home")
                 and os.environ.get("XDG_RUNTIME_DIR") == str(root / "runtime") and os.environ.get("DISPLAY")

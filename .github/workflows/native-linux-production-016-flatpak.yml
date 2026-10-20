@@ -14,7 +14,7 @@ on:
         type: string
         required: true
       execution_request:
-        description: Inspect-only is the default. Native installation/input requires this separate fixed request after data and signature verification. Public fixed URLs must already return the reviewed signed bytes; no private CA or feed override.
+        description: Inspect-only is the default. Native installation/input requires this separate fixed request after data and signature verification. Uses the bounded 016 CI-only TLS lab, not public download acceptance.
         type: choice
         options:
           - inspect-only
@@ -76,9 +76,15 @@ jobs:
         if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
         run: |
           sudo apt-get install -y --no-install-recommends flatpak ostree build-essential pkg-config \
+            openssl ca-certificates \
             libgtk-3-dev libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libxdo3 libxres1 librsvg2-2 \
             python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core libatk-adaptor \
             webkit2gtk-driver dbus-x11 xvfb xauth openbox fonts-dejavu-core
+      - name: Check the finite 016 transport and historical refusal profiles after real signature admission
+        if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
+        run: |
+          node --check scripts/linux-update-lab-feed.cjs
+          node --test scripts/linux-update-lab-feed.test.cjs
       - uses: dtolnay/rust-toolchain@1.99.0
         if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
       - name: Build only the locked external UI driver, never Root or launcher
@@ -89,6 +95,9 @@ jobs:
       - name: Separately requested isolated install and native UI scenarios
         if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
         run: /usr/bin/python3 -B scripts/native-linux-production-016-flatpak.py session
+      - name: Unconditionally verify or finish only the owned CI TLS cleanup
+        if: always()
+        run: /usr/bin/python3 -B scripts/native-linux-production-016-flatpak.py tls-cleanup
       - name: Retain bounded evidence only, never private HOME or package archives
         if: always()
         uses: actions/upload-artifact@v4
@@ -101,6 +110,9 @@ jobs:
             ${{ runner.temp }}/native-linux-production-016-flatpak/stage-review.json
             ${{ runner.temp }}/native-linux-production-016-flatpak/installed-flatpak.json
             ${{ runner.temp }}/native-linux-production-016-flatpak/report.json
+            ${{ runner.temp }}/native-linux-production-016-flatpak/final-report.json
+            ${{ runner.temp }}/native-linux-production-016-flatpak/tls-cleanup.json
+            ${{ runner.temp }}/native-linux-production-016-flatpak/lab-transport.json
             ${{ runner.temp }}/native-linux-production-016-flatpak/portal-capture.json
             ${{ runner.temp }}/native-linux-production-016-flatpak/*-gtk.json
             ${{ runner.temp }}/native-linux-production-016-flatpak/evidence/*.json
