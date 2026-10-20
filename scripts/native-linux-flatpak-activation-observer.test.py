@@ -277,6 +277,204 @@ class InvocationGuardTests(unittest.TestCase):
                 with self.assertRaises(ValueError): M.validate_probe(changed, {'caller': state.caller})
 
 
+class InventoryFailureTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self, *, failure='zombie', second=False):
+        state = SimpleNamespace(events=[], scans=0, error=None)
+        def active(): return not second or state.scans == 2
+        def read(directory, name, maximum):
+            state.events.append(('read', name))
+            if failure == 'permission' and active(): raise state.error
+            if name == 'stat':
+                kind = 'Z' if failure == 'zombie' and active() else 'S'
+                return (f'1912 (PRIVATE_COMM) {kind} 18 ' + '0 ' * 17 + '123\n').encode(), []
+            if failure == 'uid-record' and active(): return b'PRIVATE_STATUS\n', []
+            ids = [1001, 0, 0, 0] if failure == 'process-uids' and active() else [1001] * 4
+            if failure == 'uid-range' and active(): ids = [1001, 2**31, 0, 0]
+            return ('Uid:\t' + ' '.join(map(str, ids)) + '\n').encode(), []
+        @contextmanager
+        def scan(path):
+            state.scans += 1; state.events.append(('scan', path))
+            yield [SimpleNamespace(name='1912', stat=lambda **kw: SimpleNamespace(st_mode=stat.S_IFDIR | 0o555))]
+        def linked(name, **kw):
+            state.events.append(('link', name))
+            return '/PRIVATE/EXECUTABLE (deleted)' if failure == 'executable' and active() else '/usr/bin/python3.10'
+        state.error = PermissionError('PRIVATE_ORIGINAL_MESSAGE')
+        with patch.object(M.os, 'O_DIRECTORY', 0, create=True), patch.object(M.os, 'O_NOFOLLOW', 0, create=True), \
+                patch.object(M.os, 'O_CLOEXEC', 0, create=True), patch.object(M.os, 'open', return_value=7), \
+                patch.object(M.os, 'close', side_effect=lambda fd: state.events.append(('close', fd))), \
+                patch.object(M.os, 'scandir', side_effect=scan), patch.object(M.os, 'readlink', side_effect=linked), \
+                patch.object(M.ProxyAssociationProc, 'read_at', side_effect=read):
+            yield state
+
+    def test_first_failed_state_predicate_retains_exact_source_and_same_read_metadata(self):
+        with self.fixture() as state:
+            with self.assertRaises(ValueError) as caught: M.complete_uid_inventory(lambda: None)
+        value = caught.exception.proxy_inventory_diagnostic
+        self.assertEqual((value['scan'], value['entryPid'], value['entryUids']), (1, 1912, [1001] * 4))
+        self.assertEqual((value['function'], value['predicate'], value['field']),
+                         ('root_process.identity', 'process-shape', 'stat'))
+        self.assertEqual(value['subject'], dict(pid=1912, parentPid=18, startTime='123', uids=[1001] * 4,
+                                               state='Z', executableKind='unread'))
+        self.assertTrue(Path(M.__file__).read_text().splitlines()[value['line'] - 1].lstrip().startswith('require(text.startswith'))
+        self.assertEqual(state.events, [('scan', '/proc'), ('read', 'status'), ('close', 7),
+                                       ('read', 'stat'), ('read', 'status'), ('close', 7)])
+        self.assertNotIn('PRIVATE', M.json.dumps(value)); self.assertLess(len(M.json.dumps(value)), 2048)
+        self.assertTrue(value['readOnly'])
+        for field in ('inputPermitted', 'authorityGranted', 'releaseReady'): self.assertIs(value[field], False)
+
+    def test_uid_shape_range_and_executable_refusals_keep_original_order_and_unreached_fields(self):
+        for failure, predicate in (('uid-record', 'uid-record'), ('uid-range', 'uid-range'), ('executable', 'executable-shape')):
+            with self.subTest(failure=failure), self.fixture(failure=failure) as state:
+                with self.assertRaises(ValueError) as caught: M.complete_uid_inventory(lambda: None)
+            value = caught.exception.proxy_inventory_diagnostic
+            self.assertEqual(value['predicate'], predicate); self.assertEqual(value['subject']['pid'], 1912)
+            self.assertIsNone(value['subject']['state']); self.assertIsNone(value['subject']['parentPid'])
+            self.assertIsNone(value['subject']['startTime']); self.assertNotIn('PRIVATE', M.json.dumps(value))
+            self.assertEqual(value['subject']['executableKind'], 'other' if failure == 'executable' else 'unread')
+            if failure != 'executable':
+                self.assertIsNone(value['entryUids'])
+                self.assertEqual(state.events, [('scan', '/proc'), ('read', 'status'), ('close', 7)])
+            else:
+                self.assertEqual(state.events.count(('link', 'exe')), 1)
+
+    def test_permission_keeps_original_exception_and_does_not_read_executable_or_retry(self):
+        with self.fixture(failure='permission') as state:
+            with self.assertRaises(PermissionError) as caught: M.complete_uid_inventory(lambda: None)
+        self.assertIs(caught.exception, state.error)
+        value = caught.exception.proxy_inventory_diagnostic
+        self.assertEqual((value['scan'], value['entryPid'], value['subject']['pid']), (1, 1912, 1912))
+        self.assertEqual(value['function'], 'root_uid_tuple'); self.assertEqual(value['field'], 'status')
+        self.assertIsNone(value['entryUids']); self.assertIsNone(value['subject']['uids'])
+        self.assertEqual(state.events, [('scan', '/proc'), ('read', 'status'), ('close', 7)])
+        self.assertNotIn('PRIVATE', M.json.dumps(value))
+
+    def test_real_read_at_failure_reports_only_fixed_field_without_additional_open(self):
+        original = PermissionError('PRIVATE_PATH_AND_MESSAGE')
+        @contextmanager
+        def scan(path): yield [SimpleNamespace(name='1912', stat=lambda **kw: SimpleNamespace(st_mode=stat.S_IFDIR))]
+        with patch.object(M.os, 'O_DIRECTORY', 0, create=True), patch.object(M.os, 'O_NOFOLLOW', 0, create=True), \
+                patch.object(M.os, 'O_CLOEXEC', 0, create=True), patch.object(M.os, 'O_NONBLOCK', 0, create=True), \
+                patch.object(M.os, 'scandir', side_effect=scan), patch.object(M.os, 'open', return_value=7) as opens, \
+                patch.object(M.os, 'close') as closes, patch.object(M.os, 'stat', side_effect=original) as stats:
+            with self.assertRaises(PermissionError) as caught: M.complete_uid_inventory(lambda: None)
+        self.assertIs(caught.exception, original)
+        value = original.proxy_inventory_diagnostic
+        self.assertEqual((value['function'], value['predicate'], value['field']), ('ProxyAssociationProc.read_at', 'proc-read', 'status'))
+        self.assertEqual(value['subject']['pid'], 1912); self.assertIsNone(value['subject']['uids'])
+        self.assertEqual((opens.call_count, closes.call_count, stats.call_count), (1, 1, 1))
+
+    def test_second_scan_failure_and_success_have_no_extra_proc_reads_or_retries(self):
+        with self.fixture(second=True) as state:
+            with self.assertRaises(ValueError) as caught: M.complete_uid_inventory(lambda: None)
+        self.assertEqual(caught.exception.proxy_inventory_diagnostic['scan'], 2)
+        self.assertEqual(state.scans, 2); self.assertEqual(state.events.count(('link', 'exe')), 2)
+        with self.fixture(failure=None) as state, patch.object(M, 'inventory_failure') as diagnostic:
+            self.assertEqual(M.complete_uid_inventory(lambda: None)[0], [])
+            diagnostic.assert_not_called()
+        self.assertEqual(state.scans, 2); self.assertEqual(state.events.count(('link', 'exe')), 4)
+        self.assertEqual(state.events.count(('read', 'status')), 6)
+
+    def test_entry_uid_metadata_is_not_inherited_from_the_previous_process(self):
+        original = PermissionError('PRIVATE_SECOND_ENTRY')
+        @contextmanager
+        def scan(path):
+            yield [SimpleNamespace(name=str(pid), stat=lambda **kw: SimpleNamespace(st_mode=stat.S_IFDIR)) for pid in (1911, 1912)]
+        with patch.object(M.os, 'scandir', side_effect=scan), \
+                patch.object(M, 'root_uid_tuple', side_effect=[[1002] * 4, original]) as reads, \
+                patch.object(M, 'root_process') as processes:
+            with self.assertRaises(PermissionError) as caught: M.complete_uid_inventory(lambda: None)
+        self.assertIs(caught.exception, original); self.assertEqual(reads.call_count, 2); processes.assert_not_called()
+        value = original.proxy_inventory_diagnostic
+        self.assertEqual(value['entryPid'], 1912); self.assertIsNone(value['entryUids']); self.assertIsNone(value['subject'])
+
+    def test_diagnostic_capture_and_validator_have_no_proc_io_or_authority_calls(self):
+        source = Path(M.__file__).read_text()
+        functions = {node.name: node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)}
+        for name in ('inventory_failure', 'inventory_diagnostic'):
+            text = ast.get_source_segment(source, functions[name])
+            for forbidden in ('os.', 'sys.', 'Path(', 'read_at(', 'readlink(', 'open(', 'pidfd', 'subprocess', 'time.', 'print('):
+                self.assertNotIn(forbidden, text)
+        self.assertIn('row[0] is trace.tb_frame.f_code', ast.get_source_segment(source, functions['inventory_failure']))
+
+    def test_nested_held_recheck_subject_is_not_replaced_with_scanned_entry(self):
+        with invocation_fixture() as state, M.InvocationChain(state.caller) as held:
+            @contextmanager
+            def scan(path): yield [SimpleNamespace(name='20', stat=lambda **kw: SimpleNamespace(st_mode=stat.S_IFDIR))]
+            def ids(pid):
+                state.rows[19]['startTime'] = '999'
+                return [1001, 0, 0, 0]
+            with patch.object(M.os, 'scandir', side_effect=scan), patch.object(M, 'root_uid_tuple', side_effect=ids):
+                with self.assertRaises(ValueError) as caught: M.complete_uid_inventory(lambda: None, invocation=held)
+            value = caught.exception.proxy_inventory_diagnostic
+            self.assertEqual((value['entryPid'], value['entryUids']), (20, [1001, 0, 0, 0]))
+            self.assertEqual((value['function'], value['predicate']), ('InvocationChain.recheck', 'invocation-identity'))
+            self.assertEqual(value['subject'], dict(pid=19, parentPid=18, startTime='999', uids=[1001] * 4,
+                                                   state='S', executableKind='python'))
+            self.assertFalse(hasattr(caught.exception, 'proxy_snapshot_pid'))
+
+    def test_unknown_mixed_process_still_refuses_with_same_read_unverified_kind(self):
+        with invocation_fixture() as state, M.InvocationChain(state.caller) as held:
+            @contextmanager
+            def scan(path): yield [SimpleNamespace(name='1912', stat=lambda **kw: SimpleNamespace(st_mode=stat.S_IFDIR))]
+            with patch.object(M.os, 'scandir', side_effect=scan), \
+                    patch.object(M, 'root_uid_tuple', return_value=[1001, 0, 0, 0]):
+                with self.assertRaises(ValueError) as caught: M.complete_uid_inventory(lambda: None, invocation=held)
+            value = caught.exception.proxy_inventory_diagnostic
+            self.assertEqual((value['function'], value['predicate']), ('InvocationChain.mixed_process', 'mixed-membership'))
+            self.assertEqual(value['subject']['pid'], 1912); self.assertEqual(value['subject']['uids'], [1001, 0, 0, 0])
+            self.assertEqual(value['subject']['executableKind'], 'unread'); self.assertNotIn(1912, state.links)
+
+    def test_first_failure_is_detached_and_serialization_failure_never_masks_or_retries(self):
+        with self.fixture() as state:
+            with self.assertRaises(ValueError) as caught: M.complete_uid_inventory(lambda: None)
+        original, value = caught.exception, copy.deepcopy(caught.exception.proxy_inventory_diagnostic)
+        M.inventory_failure(original, 2, 99, [0] * 4)
+        self.assertEqual(original.proxy_inventory_diagnostic, value)
+        for failure in (OSError('PRIVATE_SERIALIZATION'), ValueError('PRIVATE_SERIALIZATION')):
+            with self.subTest(failure=type(failure)), self.fixture(failure='permission') as state, \
+                    patch.object(M, 'inventory_diagnostic', side_effect=failure) as serialize:
+                with self.assertRaises(PermissionError) as caught: M.complete_uid_inventory(lambda: None)
+                self.assertIs(caught.exception, state.error); serialize.assert_called_once()
+                self.assertFalse(hasattr(caught.exception, 'proxy_inventory_diagnostic'))
+                self.assertEqual(state.scans, 1)
+
+    def test_root_refusal_transports_only_valid_bounded_inventory_metadata_and_preserves_original(self):
+        with self.fixture():
+            with self.assertRaises(ValueError) as caught: M.complete_uid_inventory(lambda: None)
+        detail = caught.exception.proxy_inventory_diagnostic
+        for invalid in (None, 'extra', 'path', 'oversize', 'serialize'):
+            error = ValueError('PRIVATE_ORIGINAL_MESSAGE')
+            error.proxy_snapshot_stage = 'complete-uid-inventory'
+            value = copy.deepcopy(detail)
+            if invalid == 'extra': value['argv'] = 'PRIVATE'
+            if invalid == 'path': value['subject']['executableKind'] = '/PRIVATE/EXECUTABLE'
+            if invalid == 'oversize': value['subject']['startTime'] = '1' * 4096
+            error.proxy_inventory_diagnostic = value
+            out = io.StringIO()
+            with self.subTest(invalid=invalid), ExitStack() as stack:
+                for name in ('SIGALRM', 'ITIMER_REAL'): stack.enter_context(patch.object(M.signal, name, 0, create=True))
+                for name in ('signal', 'setitimer'): stack.enter_context(patch.object(M.signal, name, create=True))
+                for name in ('getuid', 'geteuid'): stack.enter_context(patch.object(M.os, name, return_value=0, create=True))
+                stack.enter_context(patch.dict(M.os.environ, {'SUDO_UID': '1001'}))
+                stack.enter_context(patch.object(M, 'PROXY_TOOL', Path(M.__file__)))
+                stack.enter_context(patch.object(M.sys, 'argv', ['observer.py', 'root-inventory-probe']))
+                stack.enter_context(patch.object(M.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(
+                    M.json.dumps({'codeSha256': 'b' * 64}).encode()))))
+                stack.enter_context(patch.object(M.sys, 'stdout', out))
+                stack.enter_context(patch.object(M, 'probe_request'))
+                stack.enter_context(patch.object(M, 'protected_tool'))
+                probe = stack.enter_context(patch.object(M, 'inventory_probe', side_effect=error))
+                if invalid == 'serialize':
+                    stack.enter_context(patch.object(M, 'inventory_diagnostic', side_effect=OSError('PRIVATE')))
+                with self.assertRaises(SystemExit) as raised: M.root_snapshot_main()
+                self.assertIs(raised.exception.__context__, error); probe.assert_called_once()
+            receipt = M.json.loads(out.getvalue())
+            self.assertEqual(receipt['ok'], False); self.assertEqual(receipt['stage'], 'complete-uid-inventory')
+            self.assertEqual(receipt.get('inventoryFailure'), detail if invalid is None else None)
+            self.assertNotIn('PRIVATE', out.getvalue()); self.assertLess(len(out.getvalue()), 2300)
+
+
 class InvocationImageTests(unittest.TestCase):
     @contextmanager
     def fixture(self, kind='sudo'):

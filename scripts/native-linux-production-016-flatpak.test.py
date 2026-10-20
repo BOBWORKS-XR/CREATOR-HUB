@@ -1020,6 +1020,67 @@ class RootInventoryPreflightTests(unittest.TestCase):
                 self.assertNotIn('PRIVATE', str(refused.root_proxy_diagnostic))
                 self.assertIn('no input', str(refused))
 
+    def inventory_failure(self):
+        return dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False,
+            phase='complete-uid-inventory', scan=1, entryPid=1912, entryUids=[1001, 0, 0, 0],
+            function='InvocationChain.recheck', predicate='invocation-identity', field='invocation', line=1001,
+            subject=dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, state='S', executableKind='python'))
+
+    def test_inventory_refusal_retains_distinct_entry_and_subject_without_authority_or_retry(self):
+        detail = self.inventory_failure()
+        with self.fixture() as state:
+            state.worker.side_effect = None
+            state.worker.return_value = SimpleNamespace(returncode=1, stderr=b'', stdout=M.json_bytes(
+                dict(ok=False, unavailable='ValueError', stage='complete-uid-inventory', inventoryFailure=detail)))
+            with self.assertRaisesRegex(RuntimeError, 'no input'): M.root_inventory_preflight(Path('/fixed'))
+            state.worker.assert_called_once()
+            report = state.reports[0][1]
+            self.assertFalse(report['inventoryProbed']); self.assertNotIn('inventory', report)
+            value = report['workerCleanup']['inventoryFailure']
+            self.assertEqual(value, detail); self.assertEqual((value['entryPid'], value['subject']['pid']), (1912, 19))
+            for name in M.GATES: self.assertIs(report[name], False)
+            for name in ('inputPermitted', 'authorityGranted', 'releaseReady'): self.assertIs(value[name], False)
+
+    def test_inventory_diagnostic_whitelist_is_closed_typed_bounded_and_copied(self):
+        detail = self.inventory_failure()
+        answer = dict(ok=False, unavailable='ValueError', stage='complete-uid-inventory', inventoryFailure=detail)
+        error = M.root_worker_refusal(answer)
+        detail['subject']['pid'] = 99; detail['entryUids'][0] = 0
+        self.assertEqual(error.root_proxy_diagnostic['inventoryFailure']['subject']['pid'], 19)
+        self.assertEqual(error.root_proxy_diagnostic['inventoryFailure']['entryUids'], [1001, 0, 0, 0])
+        changes = (
+            lambda d: d.update(extra='PRIVATE'), lambda d: d.update(function='PRIVATE'),
+            lambda d: d.update(predicate='PRIVATE'), lambda d: d.update(field='PRIVATE'),
+            lambda d: d.update(phase='PRIVATE'), lambda d: d.update(scan=True), lambda d: d.update(scan=3),
+            lambda d: d.update(entryPid=True), lambda d: d.update(entryPid=2**31),
+            lambda d: d.update(entryUids=[True] * 4), lambda d: d.update(entryUids=[2**32] * 4),
+            lambda d: d.update(line=True), lambda d: d.update(line=100000),
+            lambda d: d.update(readOnly=False), lambda d: d.update(inputPermitted=True),
+            lambda d: d.update(authorityGranted=0), lambda d: d.update(releaseReady=True),
+            lambda d: d['subject'].update(extra='PRIVATE'), lambda d: d['subject'].update(pid=True),
+            lambda d: d['subject'].update(parentPid=True), lambda d: d['subject'].update(startTime='1' * 4096),
+            lambda d: d['subject'].update(uids=[True] * 4), lambda d: d['subject'].update(state='PRIVATE'),
+            lambda d: d['subject'].update(executableKind='PRIVATE'))
+        for change in changes:
+            changed = self.inventory_failure(); change(changed)
+            with self.subTest(change=change):
+                error = M.root_worker_refusal({**answer, 'inventoryFailure': changed})
+                self.assertEqual(error.root_proxy_diagnostic, dict(readOnly=True, inputPermitted=False,
+                    authorityGranted=False, releaseReady=False, type='ValueError', stage='complete-uid-inventory'))
+                self.assertNotIn('PRIVATE', str(error.root_proxy_diagnostic)); self.assertIn('no input', str(error))
+        unavailable = self.inventory_failure()
+        unavailable.update(scan=2, entryPid=None, entryUids=None, subject=None)
+        self.assertEqual(M.root_worker_refusal({**answer, 'inventoryFailure': unavailable}).root_proxy_diagnostic['inventoryFailure'], unavailable)
+
+    def test_inventory_diagnostic_serialization_failure_keeps_original_refusal_and_existing_metadata(self):
+        answer = dict(ok=False, unavailable='PermissionError', stage='complete-uid-inventory', pid=1912,
+                      inventoryFailure=self.inventory_failure())
+        with patch.object(M, 'json_bytes', side_effect=OSError('PRIVATE_SERIALIZATION')):
+            error = M.root_worker_refusal(answer)
+        self.assertEqual(error.root_proxy_diagnostic, dict(readOnly=True, inputPermitted=False, authorityGranted=False,
+            releaseReady=False, type='PermissionError', stage='complete-uid-inventory', pid=1912))
+        self.assertIn('no input', str(error)); self.assertNotIn('PRIVATE', str(error.root_proxy_diagnostic))
+
     def test_probe_accepts_only_before_expiry_including_after_final_protected_source_check(self):
         for delta in (-1, 0, 1, 'protected-check'):
             with self.subTest(delta=delta), self.fixture() as state:

@@ -647,12 +647,91 @@ def probe_hop_detail(pid, tail=(), ids=()):
     return value
 
 
+def inventory_failure(error, scan, entry_pid=None, entry_uids=None):
+    """Retain the first failure's fixed code location and explicitly typed existing operands only."""
+    try:
+        if getattr(error, 'proxy_inventory_attempted', False):
+            return
+        error.proxy_inventory_attempted = True
+        frames, trace, count = [], error.__traceback__, 0
+        while trace is not None and count < 32:
+            count += 1
+            match = next((row for row in INVENTORY_FAILURE_FUNCTIONS if row[0] is trace.tb_frame.f_code), None)
+            if match is not None:
+                frames.append((match, trace.tb_frame.f_locals, trace.tb_lineno))
+            trace = trace.tb_next
+        if trace is not None or not frames:
+            return
+        (unused, function, predicate, field), operands, line = frames[-1]
+        predicate = operands.get('_inventory_predicate', predicate)
+        field = {'process-shape': 'stat', 'process-uids': 'status', 'executable-read': 'exe',
+                 'executable-shape': 'exe', 'entry-directory': 'proc', 'uid-read': 'status'}.get(predicate, field)
+        if function == 'ProxyAssociationProc.read_at':
+            field = operands.get('name') if operands.get('name') in ('stat', 'status') else 'unavailable'
+        subject = None
+        for (unused, name, _, _), local, _ in reversed(frames):
+            if name not in ('root_process', 'root_process.identity', 'root_uid_tuple',
+                            'InvocationChain.identity', 'InvocationChain.recheck', 'InvocationChain.mixed_process'):
+                continue
+            pid = local.get('pid')
+            if type(pid) is not int or not 1 < pid < 2**31:
+                continue
+            subject = probe_hop_detail(pid, local.get('tail', ()), local.get('ids', ()))
+            row = local.get('row') if name == 'InvocationChain.recheck' else None
+            if type(row) is dict and row.get('pid') == pid:
+                for key in ('parentPid', 'startTime', 'uids', 'state'):
+                    subject[key] = row.get(key)
+            ids = local.get('ids')
+            if type(ids) is list and len(ids) == 4 and all(type(uid) is int and 0 <= uid < 2**32 for uid in ids):
+                subject['uids'] = list(ids)
+            executable = row.get('executable') if type(row) is dict else local.get('executable')
+            if type(executable) is str:
+                subject['executableKind'] = ('python' if re.fullmatch(r'/usr/bin/python3\.[0-9]{1,2}', executable)
+                    else {'/usr/bin/sudo': 'sudo', '/usr/bin/bwrap': 'bwrap', '/usr/bin/xdg-dbus-proxy': 'proxy',
+                          '/app/bin/creator-hub-flatpak-activate': 'launcher'}.get(executable, 'other'))
+            break
+        value = dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False,
+            phase='complete-uid-inventory', scan=scan, entryPid=entry_pid, entryUids=entry_uids,
+            function=function, predicate=predicate, field=field, line=line, subject=subject)
+        error.proxy_inventory_diagnostic = inventory_diagnostic(value)
+    except Exception:
+        pass  # Diagnostics must never replace the original refusal, including serialization failures.
+
+
+def inventory_diagnostic(value):
+    require(type(value) is dict and set(value) == {'readOnly', 'inputPermitted', 'authorityGranted', 'releaseReady',
+        'phase', 'scan', 'entryPid', 'entryUids', 'function', 'predicate', 'field', 'line', 'subject'}
+        and value['readOnly'] is True and all(value[k] is False for k in ('inputPermitted', 'authorityGranted', 'releaseReady'))
+        and value['phase'] == 'complete-uid-inventory' and type(value['scan']) is int and value['scan'] in (1, 2)
+        and (value['entryPid'] is None or type(value['entryPid']) is int and 1 < value['entryPid'] < 2**31)
+        and value['function'] in tuple(row[1] for row in INVENTORY_FAILURE_FUNCTIONS)
+        and value['predicate'] in ('proc-read', 'uid-record', 'uid-range', 'process-read', 'process-shape', 'process-uids',
+            'executable-read', 'executable-shape', 'process-stability', 'image-read', 'image-identity', 'image-bytes',
+            'invocation-recheck', 'invocation-identity', 'mixed-membership', 'mixed-identity', 'scan-open', 'scan-budget',
+            'entry-directory', 'uid-read', 'mixed-invocation', 'proxy-count', 'scan-equality', 'deadline')
+        and value['field'] in ('stat', 'status', 'exe', 'proc', 'invocation', 'inventory', 'clock', 'unavailable')
+        and type(value['line']) is int and 0 < value['line'] < 100000)
+    def uids(ids):
+        return ids is None or type(ids) is list and len(ids) == 4 and all(type(uid) is int and 0 <= uid < 2**32 for uid in ids)
+    require(uids(value['entryUids']))
+    subject = value['subject']
+    if subject is not None:
+        require(type(subject) is dict and set(subject) == {'pid', 'parentPid', 'startTime', 'uids', 'state', 'executableKind'}
+            and type(subject['pid']) is int and 1 < subject['pid'] < 2**31
+            and (subject['parentPid'] is None or type(subject['parentPid']) is int and 0 <= subject['parentPid'] < 2**31)
+            and (subject['startTime'] is None or type(subject['startTime']) is str and re.fullmatch(r'[0-9]{1,20}', subject['startTime']))
+            and uids(subject['uids']) and subject['state'] in (None, 'R', 'S', 'D', 'Z', 'X', 'x', 'T', 't', 'K', 'W', 'P', 'I', 'other')
+            and subject['executableKind'] in ('unread', 'other', 'python', 'sudo', 'bwrap', 'proxy', 'launcher'))
+    return bounded(value, 2048)
+
+
 def root_process(pid, full=False, *, probe_diagnostic=None):
     """Read kernel proc identity only; no cmdline, environment or candidate imports."""
     require(type(pid) is int and 1 < pid < 2**31)
     directory = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         def identity():
+            _inventory_predicate = 'process-read'
             raw, _ = ProxyAssociationProc.read_at(directory, 'stat', 4096)
             status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
             text = raw.decode('utf-8'); tail = text[text.rfind(')') + 2:].split()
@@ -660,13 +739,18 @@ def root_process(pid, full=False, *, probe_diagnostic=None):
             if probe_diagnostic is not None:
                 kind = probe_diagnostic['executableKind']
                 probe_diagnostic.update(probe_hop_detail(pid, tail, ids), executableKind=kind)
+            _inventory_predicate = 'process-shape'
             require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and tail[0] not in ('Z', 'X'))
+            _inventory_predicate = 'process-uids'
             require(len(ids) == 1 and [int(x) for x in ids[0]] == [PROXY_UID] * 4)
             return dict(pid=pid, parentPid=int(tail[1]), startTime=tail[19], uids=[PROXY_UID] * 4)
         before = identity()
+        _inventory_predicate = 'executable-read'
         executable = os.readlink('exe', dir_fd=directory)
+        _inventory_predicate = 'executable-shape'
         require(0 < len(executable) <= 4096 and not executable.endswith(' (deleted)'))
         if not full:
+            _inventory_predicate = 'process-stability'
             require(identity() == before and os.readlink('exe', dir_fd=directory) == executable)
             return {**before, 'executable': executable}
         require(executable in ('/usr/bin/bwrap', '/usr/bin/xdg-dbus-proxy', '/app/bin/creator-hub-flatpak-activate'))
@@ -697,8 +781,10 @@ def root_uid_tuple(pid):
     try:
         status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
         ids = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
+        _inventory_predicate = 'uid-record'
         require(len(ids) == 1)
         result = [int(v) for v in ids[0]]
+        _inventory_predicate = 'uid-range'
         require(all(0 <= uid < 2**31 for uid in result))
         return result
     finally:
@@ -706,35 +792,51 @@ def root_uid_tuple(pid):
 
 
 def complete_uid_inventory(budget, *, invocation=None):
-    def scan():
+    def scan(number):
+        _inventory_predicate = 'invocation-recheck'
         if invocation is not None:
             invocation.recheck()
         rows, count = {}, 0
+        _inventory_predicate = 'scan-open'
         with os.scandir('/proc') as entries:
             for entry in entries:
                 if not re.fullmatch(r'[1-9][0-9]{0,9}', entry.name):
                     continue
+                _inventory_predicate = 'scan-budget'
                 count += 1; budget(); require(count <= ProxyAssociationProc.MAX_PIDS)
+                entry_uids = None
                 try:
+                    _inventory_predicate = 'entry-directory'
                     info = entry.stat(follow_symlinks=False)
                     require(stat.S_ISDIR(info.st_mode))
                     # proc_pid(5): non-dumpable processes' proc entries can be root-owned.
-                    ids = root_uid_tuple(int(entry.name))
+                    _inventory_predicate = 'uid-read'
+                    ids = root_uid_tuple(int(entry.name)); entry_uids = ids
                     if PROXY_UID in ids:
                         if ids == [PROXY_UID] * 4:
+                            _inventory_predicate = 'process-read'
                             rows[int(entry.name)] = root_process(int(entry.name))
                         else:
+                            _inventory_predicate = 'mixed-invocation'
                             require(invocation is not None)
                             rows[int(entry.name)] = invocation.mixed_process(int(entry.name), ids)
                 except Exception as error:
-                    error.proxy_snapshot_pid = int(entry.name)
+                    inventory_failure(error, number, int(entry.name), entry_uids)
                     raise
+        _inventory_predicate = 'invocation-recheck'
         if invocation is not None:
             invocation.recheck()
         return rows
-    first = scan(); proxies = sorted(pid for pid, row in first.items() if row['executable'] == '/usr/bin/xdg-dbus-proxy')
-    require(len(proxies) <= 4)
-    require(scan() == first)  # No skipped, opaque, zombie or disappeared process is adopted.
+    number = 1
+    try:
+        first = scan(number); proxies = sorted(pid for pid, row in first.items() if row['executable'] == '/usr/bin/xdg-dbus-proxy')
+        _inventory_predicate = 'proxy-count'
+        require(len(proxies) <= 4)
+        number = 2; _inventory_predicate = 'scan-equality'
+        require(scan(number) == first)  # No skipped, opaque, zombie or disappeared process is adopted.
+    except Exception as error:
+        inventory_failure(error, number)
+        raise
     return proxies, first
 
 
@@ -867,6 +969,7 @@ class InvocationChain:
         return {key: row[key] for key in ('pid', 'parentPid', 'startTime', 'uids', 'executable')}
 
     def identity(self, pid, directory, hop):
+        _inventory_predicate = 'process-read'
         self.detail['predicate'] = 'hop-read'; self.budget()
         raw, _ = ProxyAssociationProc.read_at(directory, 'stat', 4096)
         status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
@@ -874,9 +977,11 @@ class InvocationChain:
         ids = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
         hop.update(probe_hop_detail(pid, tail, ids))
         self.detail['predicate'] = 'hop-process-shape'
+        _inventory_predicate = 'process-shape'
         require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and tail[0] not in ('Z', 'X')
                 and len(ids) == 1 and hop['parentPid'] is not None and hop['startTime'] is not None)
         self.detail['predicate'] = 'hop-executable'
+        _inventory_predicate = 'executable-read'
         executable = os.readlink('exe', dir_fd=directory)
         return dict(pid=pid, parentPid=int(tail[1]), startTime=tail[19], state=tail[0],
                     uids=[int(uid) for uid in ids[0]], executable=executable)
@@ -909,21 +1014,27 @@ class InvocationChain:
         return row
 
     def recheck(self):
+        _inventory_predicate = 'invocation-recheck'
         require(self.caller['pid'] in self.held and self.images and 1 <= len(self.rows) <= 4)
         for pid, held in self.held.items():
+            _inventory_predicate = 'process-read'
             row = self.identity(pid, held['directory'], held['hop']); image = self.images[held['kind']]
             held['hop']['executableKind'] = held['kind'] if row['executable'] == str(image.path) else 'other'
+            _inventory_predicate = 'invocation-identity'
             require({k: v for k, v in row.items() if k != 'state'} == {k: v for k, v in held['row'].items() if k != 'state'}
                     and ProxyAssociationProc.stamp(os.fstat(held['kernel'])) == image.identity
                     == ProxyAssociationProc.stamp(os.stat('exe', dir_fd=held['directory']))
                     and not select.select([held['pidfd']], [], [], 0)[0])
+            _inventory_predicate = 'image-bytes'
             image.snapshot()
         self.budget()
 
     def mixed_process(self, pid, ids):
+        _inventory_predicate = 'mixed-membership'
         require(type(pid) is int and pid in self.held and self.held[pid]['kind'] == 'sudo'
                 and type(ids) is list and all(type(uid) is int for uid in ids) and ids == [PROXY_UID, 0, 0, 0])
         self.recheck()
+        _inventory_predicate = 'mixed-identity'
         row = self.held[pid]['row']; require(row['uids'] == ids)
         return self.process(row)
 
@@ -1110,6 +1221,26 @@ def protected_tool(expected=None):
         os.close(directory)
 
 
+# Only these exact code objects may supply a diagnostic location or selected operands.
+INVENTORY_FAILURE_FUNCTIONS = (
+    (ProxyAssociationProc.read_at.__func__.__code__, 'ProxyAssociationProc.read_at', 'proc-read', 'unavailable'),
+    (root_process.__code__, 'root_process', 'process-read', 'proc'),
+    (root_uid_tuple.__code__, 'root_uid_tuple', 'uid-read', 'status'),
+    (complete_uid_inventory.__code__, 'complete_uid_inventory', 'scan-open', 'inventory'),
+    (InvocationChain.identity.__code__, 'InvocationChain.identity', 'process-read', 'proc'),
+    (InvocationChain.recheck.__code__, 'InvocationChain.recheck', 'invocation-recheck', 'invocation'),
+    (InvocationChain.mixed_process.__code__, 'InvocationChain.mixed_process', 'mixed-membership', 'invocation'),
+    (InvocationImage.check.__code__, 'InvocationImage.check', 'image-identity', 'exe'),
+    (InvocationImage.snapshot.__code__, 'InvocationImage.snapshot', 'image-bytes', 'exe'),
+    *((next(code for code in owner.__code__.co_consts if getattr(code, 'co_name', None) == nested),
+       label, predicate, field) for owner, nested, label, predicate, field in (
+        (root_process, 'identity', 'root_process.identity', 'process-read', 'proc'),
+        (complete_uid_inventory, 'scan', 'complete_uid_inventory.scan', 'scan-open', 'inventory'),
+        (inventory_probe, 'budget', 'inventory_probe.budget', 'deadline', 'clock'),
+        (association_snapshot_held, 'budget', 'association_snapshot_held.budget', 'deadline', 'clock'))),
+)
+
+
 def root_snapshot_main():
     # This sole root entry point imports only stdlib and reads only fixed proc/runtime paths.
     # A missing stdin EOF cannot leave a privileged helper alive indefinitely.
@@ -1141,6 +1272,12 @@ def root_snapshot_main():
         if type(detail) is dict:
             try:
                 refusal['probeCaller'] = bounded(detail, 4096)
+            except Exception:
+                pass
+        detail = getattr(error, 'proxy_inventory_diagnostic', None)
+        if type(detail) is dict:
+            try:
+                refusal['inventoryFailure'] = inventory_diagnostic(detail)
             except Exception:
                 pass
         sys.stdout.write(json.dumps(refusal))

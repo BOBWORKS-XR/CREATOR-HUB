@@ -1234,7 +1234,7 @@ ROOT_WORKERS_UNKNOWN = []
 
 def root_worker_refusal(answer):
     error = RuntimeError('Complete protected root snapshot unavailable; no input')
-    if type(answer) is dict and answer.get('ok') is False and set(answer) <= {'ok', 'unavailable', 'stage', 'pid', 'probeCaller'}:
+    if type(answer) is dict and answer.get('ok') is False and set(answer) <= {'ok', 'unavailable', 'stage', 'pid', 'probeCaller', 'inventoryFailure'}:
         value = dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
         if answer.get('unavailable') in ('ValueError', 'KeyError', 'TypeError', 'RuntimeError', 'PermissionError',
                                         'FileNotFoundError', 'ProcessLookupError', 'OSError'):
@@ -1262,6 +1262,39 @@ def root_worker_refusal(answer):
                         and hop['expectedKind'] in ('python', 'sudo') and hop['executableKind'] in ('python', 'sudo', 'other', 'unread'),
                         'Bounded caller hop required')
             value['probeCaller'] = copy.deepcopy(detail)
+        except Exception:
+            pass
+        detail = answer.get('inventoryFailure')
+        try:
+            require(type(detail) is dict and set(detail) == {'readOnly', 'inputPermitted', 'authorityGranted', 'releaseReady',
+                'phase', 'scan', 'entryPid', 'entryUids', 'function', 'predicate', 'field', 'line', 'subject'}
+                and detail['readOnly'] is True and all(detail[k] is False for k in ('inputPermitted', 'authorityGranted', 'releaseReady'))
+                and detail['phase'] == 'complete-uid-inventory' and type(detail['scan']) is int and detail['scan'] in (1, 2)
+                and (detail['entryPid'] is None or type(detail['entryPid']) is int and 1 < detail['entryPid'] < 2**31)
+                and detail['function'] in ('ProxyAssociationProc.read_at', 'root_process', 'root_process.identity', 'root_uid_tuple',
+                    'complete_uid_inventory', 'complete_uid_inventory.scan', 'InvocationChain.identity', 'InvocationChain.recheck',
+                    'InvocationChain.mixed_process', 'InvocationImage.check', 'InvocationImage.snapshot', 'inventory_probe.budget',
+                    'association_snapshot_held.budget')
+                and detail['predicate'] in ('proc-read', 'uid-record', 'uid-range', 'process-read', 'process-shape', 'process-uids',
+                    'executable-read', 'executable-shape', 'process-stability', 'image-read', 'image-identity', 'image-bytes',
+                    'invocation-recheck', 'invocation-identity', 'mixed-membership', 'mixed-identity', 'scan-open', 'scan-budget',
+                    'entry-directory', 'uid-read', 'mixed-invocation', 'proxy-count', 'scan-equality', 'deadline')
+                and detail['field'] in ('stat', 'status', 'exe', 'proc', 'invocation', 'inventory', 'clock', 'unavailable')
+                and type(detail['line']) is int and 0 < detail['line'] < 100000, 'Typed inventory failure required')
+            for ids in (detail['entryUids'], detail['subject']['uids'] if type(detail['subject']) is dict else None):
+                require(ids is None or type(ids) is list and len(ids) == 4
+                    and all(type(uid) is int and 0 <= uid < 2**32 for uid in ids), 'Numeric observed UIDs required')
+            subject = detail['subject']
+            require(subject is None or type(subject) is dict
+                and set(subject) == {'pid', 'parentPid', 'startTime', 'uids', 'state', 'executableKind'}
+                and type(subject['pid']) is int and 1 < subject['pid'] < 2**31
+                and (subject['parentPid'] is None or type(subject['parentPid']) is int and 0 <= subject['parentPid'] < 2**31)
+                and (subject['startTime'] is None or type(subject['startTime']) is str and re.fullmatch(r'[0-9]{1,20}', subject['startTime']))
+                and subject['state'] in (None, 'R', 'S', 'D', 'Z', 'X', 'x', 'T', 't', 'K', 'W', 'P', 'I', 'other')
+                and subject['executableKind'] in ('unread', 'other', 'python', 'sudo', 'bwrap', 'proxy', 'launcher'),
+                'Bounded observed process required')
+            require(len(json_bytes(detail)) <= 2048, 'Bounded inventory failure required')
+            value['inventoryFailure'] = copy.deepcopy(detail)
         except Exception:
             pass
         error.root_proxy_diagnostic = value
