@@ -1894,7 +1894,7 @@ class Session:
             if type(failure) is dict:
                 try:
                     raw = json_bytes(failure)
-                    require(len(raw) <= 2048, 'Bounded root snapshot refusal')
+                    require(len(raw) <= 32768, 'Bounded root snapshot refusal')
                     state['record']['rootProxySnapshotRefusal'] = parse(raw)
                 except Exception:
                     pass  # Never replace the original ownership refusal.

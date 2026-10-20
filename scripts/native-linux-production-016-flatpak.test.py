@@ -1658,6 +1658,46 @@ class WarmLineageWiringTests(unittest.TestCase):
                     self.assertEqual(len(connections), connections_before)
                     self.assertNotIn('PRIVATE ROOT', M.json_bytes(refused['record']).decode())
                     self.assertNotIn('externalProxyDiagnostic', refused['record'])
+                # A valid cached worker refusal can exceed the old warm-consumer 2 KiB bound.
+                original_root = session.root
+                session.root = original_root / 'worker-refusal'
+                session.root.mkdir(mode=0o700)
+                rows[13]['image'] = copy.deepcopy(rows[10]['image'])
+                rows[13]['kernelImageSha256'] = rows[10]['kernelImageSha256']
+                tree[13] = {key: value for key, value in rows[13].items() if key != 'kernelImageSha256'}
+                foreign = RootInventoryPreflightTests().foreign_failure()
+                image = [66305, 31801, stat.S_IFREG | 0o4755, 0, 0, 1, 72160,
+                         1789675994000000000, 1792532012480071348]
+                foreign['stamps'] = {name: list(image) for name in foreign['stamps']}
+                foreign['cleanupConfirmed'] = False
+                answer = dict(ok=False, unavailable='ValueError', stage='complete-uid-inventory',
+                    inventoryFailure=RootInventoryPreflightTests().inventory_failure(), foreignFailure=foreign)
+                expected = M.root_worker_refusal(answer).root_proxy_diagnostic
+                self.assertGreater(len(M.json_bytes(expected)), 2048)
+                self.assertLessEqual(len(M.json_bytes(expected)), 32768)
+                def captured_root_source(code, namespace):
+                    builtins.exec(code, namespace)
+                    namespace['PROXY_RUNTIME'] = session.root / 'runtime'
+                    namespace['protected_tool'] = Mock()
+                    namespace['root_process'] = Mock(return_value=dict(pid=19, parentPid=18, startTime='19',
+                        uids=[1001] * 4, executable='/usr/bin/python3.10'))
+                with patch.object(M, 'exec', side_effect=captured_root_source, create=True), \
+                        patch.object(M, 'regular', side_effect=regular), \
+                        patch.object(M, 'root_exchange', return_value=SimpleNamespace(returncode=1,
+                            stdout=M.json_bytes(answer), stderr=b'')) as worker:
+                    refused = M.Session.start_warm_activation_diagnostic(session, rows[14], attempt)
+                worker.assert_called_once()
+                self.assertEqual(refused['record']['setupFailureStage'], 'pre-input-lineage-create')
+                self.assertEqual(refused['record']['preInputBaseline']['failureStage'], 'association-root-snapshot')
+                self.assertEqual(refused['record']['unavailable'], 'RuntimeError')
+                self.assertEqual(refused['record']['rootProxySnapshotRefusal'], expected)
+                M.Session.finish_warm_activation_diagnostic(session, refused)
+                saved = M.parse((session.root / 'warm-activation-observer-gtk.json').read_bytes())
+                self.assertEqual(saved['rootProxySnapshotRefusal']['foreignFailure'], foreign)
+                self.assertFalse(saved['rootProxySnapshotRefusal']['foreignFailure']['cleanupConfirmed'])
+                self.assertFalse(saved['observation']['armed']); self.assertFalse(saved['observation']['inputStarted'])
+                self.assertEqual(state.sends, []); self.assertLessEqual(len(M.json_bytes(saved)), 32768)
+                session.root = original_root
                 tree[12] = proxy
                 def arm_refusal(*_): raise ValueError('PRIVATE ARM ERROR')
                 gio.DBusConnection.new_for_address_sync = arm_refusal
@@ -1669,7 +1709,7 @@ class WarmLineageWiringTests(unittest.TestCase):
                 self.assertNotIn('PRIVATE ARM ERROR', M.json_bytes(refused['record']).decode())
             self.assertCountEqual(closed, opened)
             self.assertTrue(all(item.close.call_count == 1 for item in held))
-            self.assertEqual(system.close.call_count, 3)  # Both external-adapter refusals precede image opening.
+            self.assertEqual(system.close.call_count, 4)  # Constructor refusals precede image opening; worker refusal closes it.
 
 
 class LauncherReadinessDiagnosticTests(unittest.TestCase):
