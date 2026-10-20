@@ -411,13 +411,21 @@ class Pure(unittest.TestCase):
                  "/opt/creator-polkit-fixture/result/home", "/opt/creator-polkit-fixture/result/home/data",
                  "/opt/creator-polkit-fixture/result/home/data/CreatorHub",
                  "/opt/creator-polkit-fixture/result/home/data/CreatorHub/hub-portable-updates",
-                 "/opt/creator-polkit-fixture/result/home/data/creator-hub-portable")
-        nodes = {name: SimpleNamespace(st_dev=1, st_ino=index + 1, st_mode=stat.S_IFDIR | (0o775 if name.endswith("hub-portable-updates") else 0o755),
+                 "/opt/creator-polkit-fixture/result/home/data/creator-hub-portable",
+                 "/opt/creator-polkit-fixture/result/home/data/creator-hub-update-cache",
+                 "/opt/creator-polkit-fixture/result/home/data/creator-hub-update-cache/portable",
+                 "/opt/creator-polkit-fixture/result/home/data/creator-hub-update-cache/portable/records",
+                 "/opt/creator-polkit-fixture/result/home/data/creator-hub-update-cache/deb",
+                 "/opt/creator-polkit-fixture/result/home/data/creator-hub-update-cache/deb/records")
+        nodes = {name: SimpleNamespace(st_dev=1, st_ino=index + 1,
+                                       st_mode=stat.S_IFDIR | (0o700 if index >= 9 else 0o777 if index in (6, 7) else 0o755),
                                       st_uid=0 if index < 3 else M.UID, st_gid=0 if index < 3 else M.UID,
                                       st_nlink=1, st_size=0, st_mtime_ns=1, st_ctime_ns=1) for index, name in enumerate(names)}
-        creator = names[6]
+        creator, private_cache = names[6], names[9]
         if change == "link": nodes[creator].st_mode = stat.S_IFLNK | 0o777
         if change == "missing": del nodes[creator]
+        if change == "new-link": nodes[private_cache].st_mode = stat.S_IFLNK | 0o777
+        if change == "new-missing": del nodes[private_cache]
         handles, opened, counts = {}, [], {}
         def named(name, *, dir_fd=None, follow_symlinks):
             self.assertFalse(follow_symlinks)
@@ -426,22 +434,27 @@ class Pure(unittest.TestCase):
             if path not in nodes: raise FileNotFoundError(path)
             value = copy.copy(nodes[path])
             if change == "replaced" and path == "/" and counts[path] > 1: value.st_ino += 100
+            if change == "new-replaced" and path == private_cache and counts[path] > 1: value.st_ino += 100
             return value
         def open_dir(name, flags, *, dir_fd=None):
             self.assertEqual(flags, M.os.O_RDONLY | M.os.O_DIRECTORY | M.os.O_NOFOLLOW | M.os.O_CLOEXEC)
             path = name if dir_fd is None else handles[dir_fd].rstrip("/") + "/" + name
             self.assertTrue(stat.S_ISDIR(nodes[path].st_mode)); opened.append(path)
             fd = 10000 + len(opened); handles[fd] = path; return fd
+        def held(fd):
+            value = copy.copy(nodes[handles[fd]])
+            if change == "new-open-replaced" and handles[fd] == private_cache: value.st_ino += 100
+            return value
         with ExitStack() as stack:
             for name, value in (("O_DIRECTORY", 0x100000), ("O_NOFOLLOW", 0x200000), ("O_CLOEXEC", 0x400000)):
                 stack.enter_context(patch.object(M.os, name, value, create=True))
             stack.enter_context(patch.object(M.os, "stat", side_effect=named))
             stack.enter_context(patch.object(M.os, "open", side_effect=open_dir))
-            stack.enter_context(patch.object(M.os, "fstat", side_effect=lambda fd: copy.copy(nodes[handles[fd]])))
+            stack.enter_context(patch.object(M.os, "fstat", side_effect=held))
             stack.enter_context(patch.object(M.os, "close", side_effect=lambda fd: handles.pop(fd)))
             stack.enter_context(patch.object(M.os, "readlink", side_effect=AssertionError("No link targets may be read")))
-            for name in ("chmod", "chown", "umask"):
-                stack.enter_context(patch.object(M.os, name, side_effect=AssertionError("Diagnostics cannot modify permissions"), create=True))
+            for name in ("chmod", "chown", "umask", "mkdir", "makedirs"):
+                stack.enter_context(patch.object(M.os, name, side_effect=AssertionError("Diagnostics cannot create directories or modify permissions"), create=True))
             yield nodes, opened
         self.assertEqual(handles, {}, "Diagnostic directory FDs leaked")
 
@@ -452,9 +465,14 @@ class Pure(unittest.TestCase):
             self.assertEqual(nodes, before)
         self.assertEqual([row["path"] for row in result], list(nodes))
         self.assertEqual(opened, list(nodes))
+        self.assertEqual(len(result), 14)
         cache = next(row for row in result if row["path"].endswith("hub-portable-updates"))
-        self.assertEqual(cache["mode"], "0775")
+        self.assertEqual(cache["mode"], "0777")
         self.assertEqual(set(cache), {"path", "present", "directory", "uid", "gid", "mode", "dev", "ino"})
+        for row in result[9:]:
+            self.assertEqual(row["mode"], "0700")
+            self.assertEqual((row["uid"], row["gid"]), (M.UID, M.UID))
+            self.assertEqual(set(row), set(cache))
 
     def test_portable_ancestry_does_not_follow_missing_linked_or_replaced_ancestors(self):
         for change in ("missing", "link", "replaced"):
@@ -467,6 +485,38 @@ class Pure(unittest.TestCase):
                     cache = next(row for row in result if row["path"].endswith("hub-portable-updates"))
                     self.assertEqual(cache["unavailable"], "AncestorNotDirectory")
                     self.assertFalse(any(path.endswith("hub-portable-updates") for path in opened))
+                    self.assertTrue(all(row["mode"] == "0700" for row in result[9:]))
+
+    def test_portable_ancestry_missing_new_cache_is_observed_without_creation_or_scope_promotion(self):
+        with self.ancestry_diagnostic_fixture("new-missing") as (nodes, opened), \
+                patch.object(M, "owned_process_umask", return_value={"pid": 42, "startTime": "7", "umask": "0002"}), patch.object(M, "save"):
+            before = copy.deepcopy(nodes)
+            result = M.capture_portable_ancestry("before-launch", {}, None, None)
+            self.assertEqual(nodes, before)
+        rows = result["entries"]
+        self.assertEqual(len(rows), 14)
+        self.assertEqual(rows[9], {"path": "/opt/creator-polkit-fixture/result/home/data/creator-hub-update-cache", "present": False})
+        self.assertTrue(all(row["unavailable"] == "AncestorNotDirectory" for row in rows[10:]))
+        self.assertFalse(any("/creator-hub-update-cache" in path for path in opened))
+        self.assertTrue(result["readOnly"]); self.assertFalse(result["qualified"])
+        self.assertTrue(all(result[name] is False for name in M.FALSE))
+        self.assertLessEqual(len(json.dumps(result).encode()), 8192)
+
+    def test_portable_ancestry_new_cache_links_and_replacements_are_not_followed_or_adopted(self):
+        for change in ("new-link", "new-replaced", "new-open-replaced"):
+            with self.subTest(change=change), self.ancestry_diagnostic_fixture(change) as (nodes, opened):
+                before = copy.deepcopy(nodes)
+                if change == "new-link":
+                    result = M.portable_ancestry_metadata()
+                    self.assertFalse(result[9]["directory"])
+                    self.assertTrue(all(row["unavailable"] == "AncestorNotDirectory" for row in result[10:]))
+                    self.assertFalse(any("/creator-hub-update-cache" in path for path in opened))
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "changed"):
+                        M.portable_ancestry_metadata()
+                    if change == "new-open-replaced":
+                        self.assertFalse(any(path.endswith("creator-hub-update-cache/portable") for path in opened))
+                self.assertEqual(nodes, before)
 
     def test_owned_process_umask_reads_only_bounded_status_and_rechecks_identity(self):
         process = {"pid": 42, "startTime": "7", "uids": [M.UID] * 4}
@@ -543,9 +593,19 @@ class Pure(unittest.TestCase):
             def named(name, **kwargs):
                 return original_stat(root if name == "/" else name, **kwargs)
             with patch.object(M.os, "open", side_effect=opened), patch.object(M.os, "stat", side_effect=named):
+                absent = M.portable_ancestry_metadata()
+            private_cache = root / "opt/creator-polkit-fixture/result/home/data/creator-hub-update-cache"
+            self.assertFalse(private_cache.exists())
+            self.assertEqual(absent[9], {"path": "/opt/creator-polkit-fixture/result/home/data/creator-hub-update-cache", "present": False})
+            for name in ("", "portable", "portable/records", "deb", "deb/records"):
+                (private_cache / name).mkdir(mode=0o700)
+            with patch.object(M.os, "open", side_effect=opened), patch.object(M.os, "stat", side_effect=named):
                 result = M.portable_ancestry_metadata()
+            self.assertEqual(len(result), 14)
+            self.assertTrue(all(row["mode"] == "0700" for row in result[9:]))
             self.assertEqual(next(row for row in result if row["path"].endswith("hub-portable-updates"))["mode"], "0775")
             self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o775)
+            self.assertFalse((private_cache.parent / "creator-hub-portable").exists())
             process = {"pid": os.getpid(), "startTime": "unit", "uids": [os.getuid()] * 4}
             with patch.object(M, "UID", os.getuid()), patch.object(M, "kernel_record", return_value=process):
                 self.assertRegex(M.owned_process_umask(process, None, None)["umask"], r"^[0-7]{4}$")

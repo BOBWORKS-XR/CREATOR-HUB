@@ -1387,7 +1387,12 @@ def portable_ancestry_metadata():
     require(BASE == Path("/opt/creator-polkit-fixture"), "Fixed diagnostic fixture required")
     names = ("/", "/opt", BASE.as_posix(), (BASE / "result").as_posix(), (BASE / "result/home").as_posix(), (BASE / "result/home/data").as_posix(),
              (BASE / "result/home/data/CreatorHub").as_posix(), (BASE / "result/home/data/CreatorHub/hub-portable-updates").as_posix(),
-             (BASE / "result/home/data/creator-hub-portable").as_posix())
+             (BASE / "result/home/data/creator-hub-portable").as_posix(),
+             (BASE / "result/home/data/creator-hub-update-cache").as_posix(),
+             (BASE / "result/home/data/creator-hub-update-cache/portable").as_posix(),
+             (BASE / "result/home/data/creator-hub-update-cache/portable/records").as_posix(),
+             (BASE / "result/home/data/creator-hub-update-cache/deb").as_posix(),
+             (BASE / "result/home/data/creator-hub-update-cache/deb/records").as_posix())
     handles, observed, entries = {}, {}, []
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
