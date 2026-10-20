@@ -597,6 +597,80 @@ class LauncherKeyboardTests(unittest.TestCase):
         self.assertNotIn('self.click_dialog', launcher)
 
 
+class WarmPassiveDiagnosticTests(unittest.TestCase):
+    @staticmethod
+    def actual_partial(record):
+        record['deliveryComplete'] = False
+        record['delivery'][1]['synchronized'] = False
+        record['refusal'] = 'Owned X resource query was refused'
+
+    def test_actual_two_row_refusal_is_unchanged_and_observer_is_armed_before_single_input(self):
+        with LauncherKeyboardTests().fixture('Open Creator Hub', 'warm', changed_receipt=self.actual_partial) as (session, state, _):
+            events = []
+            value = dict(readOnly=True, qualified=False, inputPermitted=False, authorityGranted=False,
+                         releaseReady=False, callReplyMatched=True)
+            capture = SimpleNamespace(close=lambda: events.append('closed') or value)
+            def start(client):
+                self.assertEqual(state.sends, []); events.append('armed')
+                return dict(capture=capture, record=dict(readOnly=True, qualified=False, inputPermitted=False,
+                                                       authorityGranted=False, releaseReady=False))
+            with patch.object(session, 'start_warm_activation_diagnostic', side_effect=start):
+                with self.assertRaisesRegex(RuntimeError, 'Incomplete keyboard delivery is unknown; no retry'):
+                    session.flatpak('Open Creator Hub', 'warm')
+            self.assertEqual(state.sends, ['Enter']); self.assertEqual(events, ['armed', 'closed'])
+            original = M.parse((session.root / 'warm-gtk.json').read_bytes())
+            self.assertFalse(original['keyboard']['deliveryComplete']); self.assertFalse(original['outcomeVerified'])
+            self.assertNotIn('ownedPhaseExit', original)
+            self.assertEqual([row['synchronized'] for row in original['keyboard']['delivery']], [True, False])
+            saved = M.parse((session.root / 'warm-activation-observer-gtk.json').read_bytes())
+            self.assertTrue(saved['observation']['callReplyMatched']); self.assertFalse(saved['qualified'])
+
+    def test_cleanup_error_or_forged_authority_never_masks_primary_refusal(self):
+        for failure in ('close', 'authority'):
+            with self.subTest(failure=failure), LauncherKeyboardTests().fixture('Open Creator Hub', 'warm',
+                    changed_receipt=self.actual_partial) as (session, state, _):
+                capture = Mock()
+                capture.close.side_effect = RuntimeError('PRIVATE ERROR') if failure == 'close' else None
+                capture.close.return_value = dict(readOnly=True, qualified=True, inputPermitted=False,
+                                                 authorityGranted=False, releaseReady=False)
+                context = dict(capture=capture, record=dict(readOnly=True, qualified=False, inputPermitted=False,
+                                                          authorityGranted=False, releaseReady=False))
+                with patch.object(session, 'start_warm_activation_diagnostic', return_value=context):
+                    with self.assertRaisesRegex(RuntimeError, 'Incomplete keyboard delivery is unknown; no retry'):
+                        session.flatpak('Open Creator Hub', 'warm')
+                value = (session.root / 'warm-activation-observer-gtk.json').read_text()
+                self.assertNotIn('PRIVATE ERROR', value)
+                record = M.parse(value)
+                self.assertFalse(record['qualified']); self.assertIn('captureUnavailable', record)
+                self.assertEqual(state.sends, ['Enter']); capture.close.assert_called_once()
+
+    def test_nonwarm_does_not_arm_observer_or_add_an_input_path(self):
+        with LauncherKeyboardTests().fixture('Open Creator Hub', 'cold') as (session, state, _):
+            with patch.object(session, 'start_warm_activation_diagnostic') as start:
+                session.flatpak('Open Creator Hub', 'cold')
+            start.assert_not_called(); self.assertEqual(state.sends, ['Enter'])
+
+    def test_missing_independent_harness_inventory_does_not_import_new_helper(self):
+        with LauncherKeyboardTests().fixture('Open Creator Hub', 'warm') as (session, state, _):
+            binding = dict(harnessSource='a' * 40, profile=M.PROFILE, **M.GATES)
+            with patch.dict(M.os.environ, {'GITHUB_SHA': 'a' * 40}), patch.object(M, 'regular', return_value=M.json_bytes(binding)), \
+                    patch.object(M.importlib.util, 'module_from_spec') as load:
+                result = session.start_warm_activation_diagnostic(LauncherKeyboardTests.process(14, 13, '/app/bin/creator-hub-flatpak-activate'))
+            self.assertIsNone(result['capture']); self.assertIn('unavailable', result['record'])
+            load.assert_not_called(); self.assertEqual(state.sends, [])
+
+    def test_source_binding_uses_exact_captured_bytes_and_preserves_old_classifier(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        session = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Session')
+        start = next(node for node in session.body if isinstance(node, ast.FunctionDef) and node.name == 'start_warm_activation_diagnostic')
+        source = ast.get_source_segment(Path(M.__file__).read_text(), start)
+        self.assertIn("set(binding['harnessFiles']) == set(names)", source)
+        self.assertIn("compile(sources[name], module.__file__, 'exec')", source)
+        self.assertNotIn('exec_module', source)
+        classifier = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'keyboard_delivery')
+        self.assertIn('len(rows) == 1', ast.get_source_segment(Path(M.__file__).read_text(), classifier))
+
+
 class LauncherReadinessDiagnosticTests(unittest.TestCase):
     @contextmanager
     def fixture(self, *, map_state=0, override=0, foreign=False, query_failure=False):

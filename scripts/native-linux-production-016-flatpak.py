@@ -1367,11 +1367,65 @@ class Session:
         except Exception:
             pass  # Preserve the original refusal even when diagnostics are unavailable.
 
+    def start_warm_activation_diagnostic(self, client):
+        state = {'capture': None, 'record': {'schemaVersion': 1, 'phase': 'warm', 'readOnly': True,
+                 'qualified': False, 'inputPermitted': False, 'authorityGranted': False, 'releaseReady': False}}
+        try:
+            # New imports need independent current-harness pins, never the frozen product inventory.
+            names = ('scripts/native-linux-production-016-flatpak.py', 'scripts/native-linux-production-016-flatpak.test.py',
+                     'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py')
+            binding = parse(regular(self.root / 'api-binding.json', 32768, 0o600))
+            require(binding['harnessSource'] == os.environ.get('GITHUB_SHA')
+                    and re.fullmatch(r'[a-f0-9]{40}', binding['harnessSource'])
+                    and binding['profile'] == PROFILE and all(binding[k] is False for k in GATES)
+                    and set(binding['harnessFiles']) == set(names), 'Exact independently bound diagnostic harness sources required')
+            sources = {name: bound(HERE.parent / name, binding['harnessFiles'][name], 1024 * 1024) for name in names}
+            state['record'].update(harnessSource=binding['harnessSource'], harnessFiles=binding['harnessFiles'])
+            spec = importlib.util.spec_from_loader('owned_flatpak_activation_diagnostic', loader=None)
+            module = importlib.util.module_from_spec(spec)
+            name = names[2]
+            module.__file__ = str(HERE.parent / name)
+            exec(compile(sources[name], module.__file__, 'exec'), module.__dict__)
+            cold, owner = self.report['coldRoot'], self.report['coldHost1Owner']
+            require(self.report['coldActivationAccepted'] is True and owner['pid'] == cold['pid'], 'Qualified cold Root required')
+            def target_guard():
+                self.stable(cold)
+                actual = self.host_owner()
+                require(actual == owner, 'Diagnostic cold Host1 owner changed')
+                return actual
+            capture = module.PassiveCapture(owner, self.flatpak_launch, client,
+                lambda pid, full=False: self.native.native_process(pid, self.helper, full), proxy_process_snapshot,
+                target_guard, os.environ.get('DBUS_SESSION_BUS_ADDRESS'), os.getuid())
+            state['capture'] = capture
+            capture.arm()
+        except Exception as error:
+            state['record']['unavailable'] = type(error).__name__
+        return state
+
+    def finish_warm_activation_diagnostic(self, state):
+        # Neither cleanup nor capture failure may replace the original input/outcome refusal.
+        record = state['record']
+        try:
+            if state['capture'] is not None:
+                value = state['capture'].close()
+                require(type(value) is dict and len(json_bytes(value)) <= 32768
+                        and value.get('readOnly') is True
+                        and all(value.get(key) is False for key in ('qualified', 'inputPermitted', 'authorityGranted', 'releaseReady')),
+                        'Only passive diagnostic evidence may be retained')
+                record['observation'] = value
+        except Exception as error:
+            record['captureUnavailable'] = type(error).__name__
+        try:
+            require(len(json_bytes(record)) <= 32768, 'Bounded passive diagnostic receipt required')
+            save(self.root / 'warm-activation-observer-gtk.json', record)
+        except Exception:
+            pass
+
     def launcher_keyboard(self, client, question, action, phase, *, terminal):
         diagnostic = {'phase': phase, 'client': client, 'mechanism': 'exact-xid-keyboard', 'actionAttempted': False,
                       'actionReturned': False, 'outcomeVerified': False, 'releaseReady': False}
         self.launcher_keys.append(diagnostic)
-        attempt, companion = None, None
+        attempt, companion, passive = None, None, None
         try:
             require(client['executable'] == '/app/bin/creator-hub-flatpak-activate'
                     and client['kernelImageSha256'] == self.review['flatpak']['files']['creator-hub-flatpak-activate']['sha256'],
@@ -1395,6 +1449,8 @@ class Session:
                 require(companion.evidence['xres'] == self.report['coldRootXres'], "Cold Root XRes owner changed before warm input")
             options = {} if companion is None else {'warm_companion': companion}
             attempt = K.capture(self.helper, self.native, self.x11, client, self.flatpak_origin, self.flatpak_guard, window, **options)
+            if phase == 'warm':
+                passive = self.start_warm_activation_diagnostic(client)
             try:
                 receipt = attempt.send(mapping['sequence'])
             except K.InputRefused as error:
@@ -1413,14 +1469,18 @@ class Session:
             raise
         finally:
             try:
-                if attempt is not None:
-                    attempt.close()
+                if passive is not None:
+                    self.finish_warm_activation_diagnostic(passive)
             finally:
                 try:
-                    if companion is not None:
-                        companion.close()
+                    if attempt is not None:
+                        attempt.close()
                 finally:
-                    save(self.root / (phase + '-gtk.json'), diagnostic)
+                    try:
+                        if companion is not None:
+                            companion.close()
+                    finally:
+                        save(self.root / (phase + '-gtk.json'), diagnostic)
 
     def launcher_outcome(self, action, phase, missing):
         if action == 'Cancel' or missing:

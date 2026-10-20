@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
+const crypto = require('node:crypto');
 const c = require('./native-linux-production-016-flatpak.cjs');
 const p = require('./flatpak-native-production-016.cjs');
 const ROOT = path.resolve(__dirname, '..');
@@ -42,6 +43,63 @@ function flatpakProof() {
   return proof({ ...c.FIXED, branch: p.BRANCH.slice('refs/heads/'.length), workflow: p.WORKFLOW,
     artifactName: `linux-016-production-flatpak-${c.FIXED.runId}-${c.FIXED.runAttempt}` });
 }
+
+function harnessFixture(actual = false) {
+  const bytes = Object.fromEntries(c.HARNESS_FILES.map(name => [name,
+    actual ? fs.readFileSync(path.join(ROOT, name)) : Buffer.from(`synthetic diagnostic source ${name}\n`)]));
+  const contents = Object.fromEntries(c.HARNESS_FILES.map(name => {
+    const raw = bytes[name];
+    return [name, { type: 'file', encoding: 'base64', path: name, name: path.posix.basename(name), size: raw.length,
+      sha: crypto.createHash('sha1').update(`blob ${raw.length}\0`).update(raw).digest('hex'), content: raw.toString('base64') + '\n' }];
+  }));
+  return { contents, bytes };
+}
+
+test('diagnostic imports require the closed four-file inventory and independently matching remote bytes', () => {
+  assert.deepEqual(c.HARNESS_FILES, ['scripts/native-linux-production-016-flatpak.py', 'scripts/native-linux-production-016-flatpak.test.py',
+    'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py']);
+  const { contents, bytes } = harnessFixture(), pins = c.harnessPins(contents, bytes);
+  assert.deepEqual(pins, Object.fromEntries(c.HARNESS_FILES.map(name => [name, c.pin(bytes[name])])));
+  assert.deepEqual(c.verifyHarness(pins, bytes), pins);
+  const first = c.HARNESS_FILES[0];
+  for (const mutate of [value => { delete value[first]; }, value => { value['scripts/foreign.py'] = value[first]; }]) {
+    const values = structuredClone(contents); mutate(values); assert.throws(() => c.harnessPins(values, bytes));
+    const values2 = structuredClone(pins); mutate(values2); assert.throws(() => c.verifyHarness(values2, bytes));
+  }
+  assert.throws(() => c.verifyHarness(pins, { ...bytes, [first]: Buffer.from('changed local source') }));
+  assert.throws(() => c.verifyHarness({ ...pins, [first]: { ...pins[first], size: 1024 * 1024 + 1 } }, bytes));
+});
+
+test('contents admission rejects aliases, metadata drift, corrupt base64, large files and wrong blob identities', () => {
+  const { contents, bytes } = harnessFixture(), first = c.HARNESS_FILES[0];
+  for (const mutate of [v => { v.type = 'symlink'; }, v => { v.encoding = 'none'; }, v => { v.path = 'other.py'; },
+    v => { v.name = 'other.py'; }, v => { v.size++; }, v => { v.size = 1024 * 1024 + 1; }, v => { v.sha = 'f'.repeat(40); },
+    v => { v.target = 'foreign.py'; }, v => { v.submodule_git_url = 'https://example.invalid/repo'; },
+    v => { v.content += '!'; }, v => { v.content = 'YQ'; }, v => { v.content = 'A'.repeat(1500001); }]) {
+    const changed = structuredClone(contents); mutate(changed[first]); assert.throws(() => c.harnessPins(changed, bytes));
+  }
+});
+
+test('harness collection requests only exact immutable commit refs and never download URLs', async () => {
+  const { contents } = harnessFixture(true), calls = [], commit = 'a'.repeat(40);
+  const get = async (api, args) => { calls.push({ api, args }); return contents[args.path]; };
+  const pins = await c.collectHarness(get, commit);
+  assert.deepEqual(Object.keys(pins), c.HARNESS_FILES);
+  assert.deepEqual(calls, c.HARNESS_FILES.map(name => ({ api: ['repos', 'getContent'], args: { path: name, ref: commit } })));
+  let requests = 0;
+  await assert.rejects(c.collectHarness(async () => { requests++; return {}; }, 'HEAD'));
+  assert.equal(requests, 0);
+  await assert.rejects(c.collectHarness(async () => { requests++; throw Error('API unavailable'); }, commit));
+  assert.equal(requests, 1);
+});
+
+test('native observer checks are mandatory before immutable data collection or native execution', () => {
+  const workflow = fs.readFileSync(path.join(ROOT, c.WORKFLOW), 'utf8');
+  const command = 'python3 -B scripts/native-linux-flatpak-activation-observer.test.py';
+  assert.equal(workflow.split(command).length, 2);
+  assert.ok(workflow.indexOf(command) < workflow.indexOf('await lane.collect('));
+  assert.ok(workflow.indexOf(command) < workflow.indexOf('flatpak.py session'));
+});
 test('controller admits only one manual unprivileged native branch and refuses environment injection', () => {
   c.admission(ENV, 'linux', 'x64', 1001);
   for (const key of Object.keys(ENV)) assert.throws(() => c.admission({ ...ENV, [key]: 'wrong' }, 'linux', 'x64', 1001));

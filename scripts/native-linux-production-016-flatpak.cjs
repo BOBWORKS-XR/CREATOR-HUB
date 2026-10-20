@@ -29,6 +29,8 @@ const FALSE_GATES = Object.freeze(Object.fromEntries(['candidateExecuted', 'flat
   'steamDeckAccepted', 'publicDiscoveryAccepted', 'publisherSignatureAccepted', 'releaseReady'].map(k => [k, false])));
 const SIGNED_FILES = Object.freeze(['creator-hub-linux-x86_64-portable.json', 'creator-hub-linux-x86_64-portable.json.minisig',
   'creator-hub-linux-x86_64-0.1.16.portable-manifest.json', 'creator-hub-linux-x86_64-0.1.16.portable-manifest.json.minisig']);
+const HARNESS_FILES = Object.freeze(['scripts/native-linux-production-016-flatpak.py', 'scripts/native-linux-production-016-flatpak.test.py',
+  'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py']);
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const pin = bytes => ({ size: bytes.length, sha256: hash(bytes) });
 function keys(value, names) {
@@ -42,6 +44,39 @@ function filePin(value, maximum = 256 * 1024 * 1024) {
 }
 function bound(bytes, expected) {
   assert.ok(Buffer.isBuffer(bytes)); assert.deepEqual(pin(bytes), expected, 'Independent input byte pin differs'); return bytes;
+}
+function verifyHarness(pins, bytes) {
+  keys(pins, HARNESS_FILES); keys(bytes, HARNESS_FILES);
+  for (const name of HARNESS_FILES) { filePin(pins[name], 1024 * 1024); bound(bytes[name], pins[name]); }
+  return pins;
+}
+function harnessPins(contents, bytes) {
+  keys(contents, HARNESS_FILES); keys(bytes, HARNESS_FILES);
+  const pins = {};
+  for (const name of HARNESS_FILES) {
+    const entry = contents[name];
+    assert.ok(entry && !Array.isArray(entry) && typeof entry === 'object');
+    assert.equal(entry.type, 'file'); assert.equal(entry.encoding, 'base64'); assert.equal(entry.path, name);
+    assert.equal(entry.name, path.posix.basename(name));
+    id(entry.size); assert.ok(entry.size <= 1024 * 1024); sha(entry.sha, 40);
+    assert.ok(!entry.target && !entry.submodule_git_url && typeof entry.content === 'string'
+      && entry.content.length <= 1500000 && /^[A-Za-z0-9+/=\n]+$/.test(entry.content));
+    const encoded = entry.content.replace(/\n/g, ''), remote = Buffer.from(encoded, 'base64');
+    assert.equal(remote.toString('base64'), encoded); assert.equal(remote.length, entry.size);
+    assert.equal(crypto.createHash('sha1').update(`blob ${remote.length}\0`).update(remote).digest('hex'), entry.sha);
+    pins[name] = pin(remote);
+  }
+  return verifyHarness(pins, bytes);
+}
+async function collectHarness(get, commit) {
+  sha(commit, 40);
+  const contents = {}, bytes = {};
+  for (const name of HARNESS_FILES) {
+    // Contents API ref is immutable; download_url and caller-selected paths are not used.
+    contents[name] = await get(['repos', 'getContent'], { path: name, ref: commit });
+    bytes[name] = producer.read(path.join(__dirname, '..', name), 1024 * 1024);
+  }
+  return harnessPins(contents, bytes);
 }
 function admission(env, platform, arch, uid) {
   assert.equal(platform, 'linux'); assert.equal(arch, 'x64'); assert.ok(Number.isSafeInteger(uid) && uid > 0);
@@ -176,6 +211,7 @@ async function collect(github, context, env = process.env) {
   assert.equal(context.sha, env.GITHUB_SHA); assert.equal(context.ref, BRANCH); assert.equal(context.eventName, 'workflow_dispatch');
   assert.equal(`${context.repo.owner}/${context.repo.repo}`, producer.REPO);
   const get = async (name, args) => (await github.rest[name[0]][name[1]]({ ...repo, ...args })).data;
+  const harnessFiles = await collectHarness(get, context.sha);
   const proof = async (runId, artifactId, sourceCommit, jobId) => {
     const run = await get(['actions', 'getWorkflowRun'], { run_id: runId });
     const artifact = await get(['actions', 'getArtifact'], { artifact_id: artifactId });
@@ -212,6 +248,7 @@ async function collect(github, context, env = process.env) {
   }
   write('profile.json', env.CONTROLLER_PROFILE); write('signed-input.json', env.SIGNED_INPUT);
   write('api-binding.json', JSON.stringify({ schemaVersion: 1, profile: PROFILE, harnessSource: context.sha,
+    harnessFiles,
     flatpak: flatpakAPI(flatpak), portable: portableAPI(portable, request.profile), signedCarrier: request.signed,
     source: { commit: source.sha, tree: source.tree.sha }, ...FALSE_GATES }));
 }
@@ -267,8 +304,10 @@ function staged(env = process.env) {
   assert.deepEqual(JSON.parse(producer.read(path.join(work, 'profile.json'), 16384)), request.profile);
   assert.deepEqual(JSON.parse(producer.read(path.join(work, 'signed-input.json'), 16384)), request.signed);
   const binding = JSON.parse(producer.read(path.join(work, 'api-binding.json'), 32768));
-  keys(binding, ['schemaVersion', 'profile', 'harnessSource', 'flatpak', 'portable', 'signedCarrier', 'source', ...Object.keys(FALSE_GATES)]);
+  keys(binding, ['schemaVersion', 'profile', 'harnessSource', 'harnessFiles', 'flatpak', 'portable', 'signedCarrier', 'source', ...Object.keys(FALSE_GATES)]);
   assert.equal(binding.schemaVersion, 1); assert.equal(binding.profile, PROFILE); assert.equal(binding.harnessSource, env.GITHUB_SHA);
+  verifyHarness(binding.harnessFiles, Object.fromEntries(HARNESS_FILES.map(name =>
+    [name, producer.read(path.join(__dirname, '..', name), 1024 * 1024)])));
   assert.deepEqual(binding.signedCarrier, request.signed);
   assert.deepEqual(binding.source, { commit: FIXED.sourceCommit, tree: FIXED.sourceTree });
   for (const key of Object.keys(FALSE_GATES)) assert.equal(binding[key], false);
@@ -307,7 +346,8 @@ function runtimeUnavailable() {
   throw Error('Runtime controller is not enabled: signed production portable admission, isolated transport and native GUI ownership must be reviewed first. No candidate has been executed.');
 }
 
-module.exports = { PROFILE, BRANCH, WORKFLOW, FEATURES, FIXED, FALSE_GATES, SIGNED_FILES, hash, pin, keys, filePin, bound,
+module.exports = { PROFILE, BRANCH, WORKFLOW, FEATURES, FIXED, FALSE_GATES, SIGNED_FILES, HARNESS_FILES, hash, pin, keys, filePin, bound,
+  verifyHarness, harnessPins, collectHarness,
   admission, validateProfile, api, flatpakAPI, portableAPI, flatpakFiles, signedInput, preflight, carrier, collect,
   portableFiles, staged, runtimeUnavailable };
 if (require.main === module) {
