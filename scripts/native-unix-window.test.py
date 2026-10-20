@@ -393,6 +393,61 @@ class XResTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(RuntimeError):
                 x.inspect(456)
 
+    def test_visibility_refusal_retains_same_error_and_only_original_numeric_attributes(self):
+        for map_state, override, kind in ((0, 0, 1), (1, 0, 1), (2, 1, 1), (0, 1, 2)):
+            with self.subTest(map_state=map_state, override=override):
+                x, destroyed = self.native_fixture()
+                calls, errors = [], []
+                def attrs(display, window, pointer):
+                    calls.append(('attributes', window))
+                    value = C.cast(pointer, C.POINTER(h.WindowAttributes)).contents
+                    value.map_state, value.override_redirect, value.class_ = map_state, override, kind
+                    return 1
+                def forbidden(*_): raise AssertionError('Visibility refusal must not query XRes or content')
+                x.x.XGetWindowAttributes = attrs
+                x.res.XResQueryClientIds = x.property = forbidden
+                original_require = h.require
+                def checked(value, message):
+                    try:
+                        original_require(value, message)
+                    except RuntimeError as error:
+                        errors.append(error)
+                        raise
+                with patch.object(h, 'require', side_effect=checked), self.assertRaisesRegex(
+                        RuntimeError, '^Owned X window is not a managed visible window$') as raised:
+                    x.inspect(456)
+                self.assertIs(raised.exception, errors[0])
+                self.assertIs(type(raised.exception), RuntimeError)
+                self.assertEqual(raised.exception.window_visibility_refusal,
+                    {'window': 456, 'map_state': map_state, 'override_redirect': override, 'class': kind})
+                self.assertIs(raised.exception._visibility_diagnostic_origin, h._VISIBILITY_DIAGNOSTIC_ORIGIN)
+                self.assertTrue(all(type(value) is int for value in raised.exception.window_visibility_refusal.values()))
+                self.assertEqual(calls, [('attributes', 456)]); self.assertEqual(destroyed, [])
+
+    def test_invalid_metadata_window_never_masks_or_adds_content_to_visibility_refusal(self):
+        for window in (True, -1, 2**32, 'PRIVATE'):
+            with self.subTest(window=window):
+                x, _ = self.native_fixture()
+                def attrs(display, candidate, pointer):
+                    C.cast(pointer, C.POINTER(h.WindowAttributes)).contents.map_state = 0
+                    return 1
+                x.x.XGetWindowAttributes = attrs
+                with self.assertRaisesRegex(RuntimeError, '^Owned X window is not a managed visible window$') as raised:
+                    x.inspect(window)
+                self.assertFalse(hasattr(raised.exception, 'window_visibility_refusal'))
+                self.assertFalse(hasattr(raised.exception, '_visibility_diagnostic_origin'))
+
+    def test_metadata_capture_failure_does_not_replace_visibility_refusal(self):
+        class PartialAttributes(C.Structure):
+            _fields_ = [('map_state', C.c_int), ('override_redirect', C.c_int)]
+        x, _ = self.native_fixture()
+        x.x.XGetWindowAttributes = lambda *_: 1
+        with patch.object(h, 'WindowAttributes', PartialAttributes), self.assertRaisesRegex(
+                RuntimeError, '^Owned X window is not a managed visible window$') as raised:
+            x.inspect(456)
+        self.assertIs(type(raised.exception), RuntimeError)
+        self.assertFalse(hasattr(raised.exception, 'window_visibility_refusal'))
+
     def test_normal_close_requires_wm_and_delete_protocol_never_kill_fallback(self):
         x = object.__new__(h.X11)
         x.display, x.x = 1, types.SimpleNamespace(XDefaultRootWindow=lambda _: 1)

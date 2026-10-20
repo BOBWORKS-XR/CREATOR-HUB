@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 MAX_NODES, MAX_CHILDREN, MAX_DEPTH = 512, 128, 32
 REQUIRED_SEALS = 0x0f
+# Diagnostic producer identity only; this never authorizes a window or action.
+_VISIBILITY_DIAGNOSTIC_ORIGIN = object()
 ROOT_CLOSE_TITLE = "Close hosted app?"
 ROOT_CLOSE_BODY = ("Close this hosted app view? Unsaved form entries in this view will be discarded. "
                    "Project files and the standalone app are unchanged.")
@@ -719,7 +721,18 @@ class X11:
         attrs = WindowAttributes()
         require(self.x.XGetWindowAttributes(self.display, window, C.byref(attrs)), "Owned X window is unavailable")
         self.sync()
-        require(attrs.map_state == 2 and not attrs.override_redirect, "Owned X window is not a managed visible window")
+        try:
+            require(attrs.map_state == 2 and not attrs.override_redirect, "Owned X window is not a managed visible window")
+        except RuntimeError as error:
+            try:
+                raw = {'window': window, 'map_state': attrs.map_state, 'override_redirect': attrs.override_redirect, 'class': attrs.class_}
+                if type(window) is int and 0 <= window < 2**32 and all(
+                        type(raw[key]) is int and -(2**31) <= raw[key] < 2**31 for key in ('map_state', 'override_redirect', 'class')):
+                    error.window_visibility_refusal = raw
+                    error._visibility_diagnostic_origin = _VISIBILITY_DIAGNOSTIC_ORIGIN
+            except Exception:
+                pass  # Preserve the same visibility refusal if metadata cannot be attached.
+            raise
         count, values = C.c_long(), C.POINTER(ClientValue)()
         spec = ClientSpec(window, 2)
         status = self.res.XResQueryClientIds(self.display, 1, C.byref(spec), C.byref(count), C.byref(values))

@@ -17,7 +17,7 @@ import unittest
 from unittest.mock import Mock, patch
 import zipfile
 import warnings
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
@@ -581,6 +581,242 @@ class LauncherKeyboardTests(unittest.TestCase):
         self.assertIn('interface.do_action(0)', ax)
         self.assertNotIn('K.capture', ax)
         self.assertNotIn('self.click_dialog', launcher)
+
+
+class LauncherReadinessDiagnosticTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self, *, map_state=0, override=0, foreign=False, query_failure=False):
+        with LauncherKeyboardTests().fixture() as (session, state, source_read):
+            original = RuntimeError('Owned X window is not a managed visible window')
+            observations = {'stack': (33, 32, [100]), 'map': map_state, 'override': override, 'reads': 0}
+            inspect = Mock(side_effect=original)
+            session.x11.inspect = inspect
+            session.x11.x = SimpleNamespace(XDefaultRootWindow=lambda _: 50)
+            session.x11.display = 99
+            session.x11.property = lambda window, name: copy.deepcopy(observations['stack']) if name == '_NET_CLIENT_LIST_STACKING' else (33, 32, [100 if name == '_NET_ACTIVE_WINDOW' else 60])
+            def attributes(window):
+                self.assertEqual(window, 100)
+                observations['reads'] += 1
+                if query_failure: raise PermissionError('PRIVATE QUERY ERROR')
+                return SimpleNamespace(map_state=observations['map'], override_redirect=observations['override'], class_=1, root=50)
+            queries = SimpleNamespace(attributes=Mock(side_effect=attributes),
+                xres_identity=Mock(return_value={'pid': 99 if foreign else 14, 'client': 900}),
+                submit=Mock(side_effect=AssertionError('No diagnostic input')),
+                snapshot=Mock(side_effect=AssertionError('No managed/title query in diagnostic')))
+            with patch.object(M.K, 'NativeWindow', return_value=queries) as constructor:
+                yield session, state, original, inspect, observations, queries, constructor
+
+    def failed(self, session, original):
+        with self.assertRaises(RuntimeError) as raised:
+            session.flatpak('Cancel', 'disclosure-cancel')
+        self.assertIs(raised.exception, original)
+        return M.parse((session.root / 'disclosure-cancel-readiness-gtk.json').read_bytes())
+
+    def test_initial_visibility_refusal_retains_bounded_raw_observations_without_input_or_retry(self):
+        with self.fixture() as (session, state, original, inspect, observations, queries, constructor):
+            with patch.object(session, 'stable', wraps=session.stable) as stable, \
+                    patch.object(session, 'flatpak_guard', wraps=session.flatpak_guard) as guard:
+                record = self.failed(session, original)
+            self.assertEqual(stable.call_count, 4); self.assertEqual(guard.call_count, 4)
+            self.assertEqual(record['failingXid'], 100); self.assertEqual(record['originalCandidates'], [100])
+            self.assertEqual(record['expectedClient']['pid'], 14)
+            self.assertEqual(record['before']['candidate']['attributes'], {'map_state': 0, 'override_redirect': 0, 'class': 1, 'root': 50})
+            self.assertEqual(record['before'], record['after'])
+            self.assertEqual(record['before']['candidate']['xres'], {'pid': 14, 'client': 900})
+            self.assertTrue(record['complete']); self.assertTrue(record['stable'])
+            self.assertTrue(record['observationsAfterRefusal']); self.assertFalse(record['refusalAttributesCaptured'])
+            for flag in ('inputPermitted', 'authorityGranted', 'readinessAccepted', 'actionAttempted', 'releaseReady'):
+                self.assertIs(record[flag], False)
+            self.assertEqual(state.sends, []); self.assertEqual(state.captures, [])
+            inspect.assert_called_once_with(100); constructor.assert_called_once()
+            self.assertEqual(observations['reads'], 2)
+            queries.submit.assert_not_called(); queries.snapshot.assert_not_called()
+            self.assertFalse((session.root / 'disclosure-cancel-gtk.json').exists())
+
+    def test_original_query_error_types_are_never_caught_as_readiness_or_retried(self):
+        for error in (RuntimeError('Owned X window is unavailable'), PermissionError('original query denied'), OSError('original query failed')):
+            with self.subTest(kind=type(error).__name__), self.fixture() as (session, state, _, inspect, observations, queries, _):
+                inspect.side_effect = error
+                with self.assertRaises(type(error)) as raised: session.flatpak('Cancel', 'disclosure-cancel')
+                self.assertIs(raised.exception, error)
+                record = M.parse((session.root / 'disclosure-cancel-readiness-gtk.json').read_bytes())
+                self.assertEqual(record['originalExceptionType'], type(error).__name__)
+                self.assertFalse(record['readinessAccepted']); self.assertFalse(record['inputPermitted'])
+                self.assertEqual(state.sends, []); inspect.assert_called_once()
+                queries.submit.assert_not_called()
+
+    def test_unviewable_override_redirect_and_query_unknown_remain_fatal(self):
+        for map_state, override, failure in ((0, 0, False), (1, 0, False), (2, 1, False), (2, 0, True)):
+            with self.subTest(map_state=map_state, override=override, failure=failure), self.fixture(
+                    map_state=map_state, override=override, query_failure=failure) as (session, state, original, inspect, _, queries, _):
+                record = self.failed(session, original)
+                self.assertEqual(record['complete'], not failure)
+                self.assertFalse(record['readinessAccepted']); self.assertEqual(state.sends, [])
+                self.assertNotIn('PRIVATE', json.dumps(record)); inspect.assert_called_once()
+                queries.submit.assert_not_called()
+
+    def test_foreign_candidate_exports_raw_xres_but_never_process_or_window_content(self):
+        with self.fixture(foreign=True) as (session, state, original, inspect, _, queries, _):
+            native = session.native.native_process
+            with patch.object(session.native, 'native_process', wraps=native) as reads:
+                record = self.failed(session, original)
+            self.assertEqual(record['before']['candidate']['xres'], {'pid': 99, 'client': 900})
+            self.assertTrue(record['before']['candidate']['processRedacted'])
+            self.assertNotIn('process', record['before']['candidate'])
+            self.assertFalse(record['stable'])
+            self.assertNotIn(99, [call.args[0] for call in reads.call_args_list])
+            inspect.assert_called_once_with(100); queries.snapshot.assert_not_called()
+
+    def test_failed_diagnostic_or_receipt_write_preserves_original_refusal(self):
+        for stage in ('constructor', 'capture', 'write'):
+            with self.subTest(stage=stage), self.fixture() as (session, state, original, inspect, _, queries, constructor):
+                if stage == 'constructor': constructor.side_effect = RuntimeError('PRIVATE CONSTRUCTOR')
+                if stage == 'capture': queries.xres_identity.side_effect = PermissionError('PRIVATE XRES')
+                with patch.object(M, 'save', side_effect=OSError('PRIVATE WRITE')) if stage == 'write' else nullcontext():
+                    with self.assertRaises(RuntimeError) as raised: session.flatpak('Cancel', 'disclosure-cancel')
+                self.assertIs(raised.exception, original)
+                self.assertEqual(state.sends, []); inspect.assert_called_once()
+                if stage != 'write':
+                    record = M.parse((session.root / 'disclosure-cancel-readiness-gtk.json').read_bytes())
+                    self.assertFalse(record['complete']); self.assertFalse(record['stable'])
+                    self.assertNotIn('PRIVATE', json.dumps(record))
+
+    def test_wm_map_or_xres_drift_is_evidence_not_readiness_or_authority(self):
+        with self.fixture() as (session, state, original, inspect, observations, queries, _):
+            initial = queries.attributes.side_effect
+            def changed(window):
+                attrs = initial(window)
+                observations.update(map=2, stack=(33, 32, [100, 101]))
+                return attrs
+            queries.attributes.side_effect = changed
+            record = self.failed(session, original)
+            self.assertEqual(record['before']['candidate']['attributes']['map_state'], 0)
+            self.assertEqual(record['after']['candidate']['attributes']['map_state'], 2)
+            self.assertNotEqual(record['before']['wm'], record['after']['wm'])
+            self.assertFalse(record['stable']); self.assertFalse(record['inputPermitted'])
+            self.assertEqual(state.sends, []); inspect.assert_called_once()
+
+    def test_expected_process_drift_and_bounds_stop_diagnostics_without_masking_refusal(self):
+        for failure in ('process', 'popen', 'bounds'):
+            with self.subTest(failure=failure), self.fixture() as (session, state, original, inspect, observations, queries, _):
+                if failure == 'process':
+                    session.stable = Mock(side_effect=RuntimeError('PRIVATE IDENTITY'))
+                if failure == 'popen': session.flatpak_guard = Mock(side_effect=RuntimeError('PRIVATE POPEN'))
+                if failure == 'bounds': session.windows = lambda: list(range(100, 109))
+                record = self.failed(session, original)
+                self.assertFalse(record['complete']); self.assertFalse(record['stable'])
+                self.assertFalse(record['inputPermitted']); self.assertNotIn('PRIVATE', json.dumps(record))
+                self.assertEqual(state.sends, []); inspect.assert_called_once()
+
+    def test_late_identity_change_is_unknown_and_existing_evidence_is_never_overwritten(self):
+        with self.fixture() as (session, state, original, inspect, _, queries, _):
+            stable, calls = session.stable, []
+            def changed(client):
+                calls.append(None)
+                if len(calls) == 4: raise RuntimeError('PRIVATE LATE IDENTITY')
+                return stable(client)
+            session.stable = changed
+            record = self.failed(session, original)
+            self.assertFalse(record['complete']); self.assertFalse(record['stable'])
+            self.assertTrue(record['after']['expectedClientVerifiedBefore'])
+            self.assertFalse(record['after']['expectedClientVerifiedAfter'])
+            self.assertEqual(state.sends, []); inspect.assert_called_once()
+        with self.fixture() as (session, state, original, inspect, _, queries, _):
+            receipt = session.root / 'disclosure-cancel-readiness-gtk.json'
+            receipt.write_bytes(b'original retained evidence')
+            with self.assertRaises(RuntimeError) as raised: session.flatpak('Cancel', 'disclosure-cancel')
+            self.assertIs(raised.exception, original)
+            self.assertEqual(receipt.read_bytes(), b'original retained evidence')
+            self.assertEqual(state.sends, []); inspect.assert_called_once()
+
+
+class LauncherOriginalVisibilityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location('shared_visibility_guard_tests', HERE / 'native-unix-window.test.py')
+        cls.shared = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.shared)
+
+    def refused(self, map_state=0, override=0, *, alter=None, helper_origin=True, diagnostic_failure=None, foreign=False):
+        source, _ = self.shared.XResTests().native_fixture()
+        raw_reads, errors = [], []
+        def attributes(display, window, pointer):
+            raw_reads.append(window)
+            attrs = self.shared.C.cast(pointer, self.shared.C.POINTER(self.shared.h.WindowAttributes)).contents
+            attrs.map_state, attrs.override_redirect, attrs.class_ = map_state, override, 1
+            return 1
+        source.x.XGetWindowAttributes = attributes
+        with LauncherReadinessDiagnosticTests().fixture(map_state=2, override=0, foreign=foreign,
+                query_failure=diagnostic_failure == 'query') as (session, state, _, inspect, observations, queries, constructor):
+            if helper_origin:
+                session.helper._VISIBILITY_DIAGNOSTIC_ORIGIN = self.shared.h._VISIBILITY_DIAGNOSTIC_ORIGIN
+            def exact_guard(window):
+                try:
+                    source.inspect(window)
+                except RuntimeError as error:
+                    errors.append(error)
+                    if alter is not None: alter(error)
+                    raise
+            inspect.side_effect = exact_guard
+            if diagnostic_failure == 'constructor': constructor.side_effect = RuntimeError('PRIVATE DIAGNOSTIC')
+            with self.assertRaises(RuntimeError) as raised:
+                session.flatpak('Cancel', 'disclosure-cancel')
+            self.assertIs(raised.exception, errors[0])
+            record = M.parse((session.root / 'disclosure-cancel-readiness-gtk.json').read_bytes())
+            self.assertEqual(raw_reads, [100]); inspect.assert_called_once_with(100)
+            self.assertEqual(state.sends, []); self.assertEqual(state.captures, [])
+            for flag in ('inputPermitted', 'authorityGranted', 'readinessAccepted', 'actionAttempted', 'releaseReady'):
+                self.assertIs(record[flag], False)
+            self.assertNotIn('PRIVATE', json.dumps(record))
+            return record, raised.exception
+
+    def test_exact_original_unmapped_or_override_attributes_are_separate_from_later_healthy_observations(self):
+        for map_state, override in ((0, 0), (1, 0), (2, 1)):
+            with self.subTest(map_state=map_state, override=override):
+                record, error = self.refused(map_state, override)
+                self.assertEqual(str(error), 'Owned X window is not a managed visible window')
+                self.assertTrue(record['refusalAttributesCaptured'])
+                self.assertEqual(record['originalRefusalAttributes'],
+                    {'window': 100, 'map_state': map_state, 'override_redirect': override, 'class': 1})
+                self.assertEqual(record['before']['candidate']['attributes']['map_state'], 2)
+                self.assertEqual(record['before']['candidate']['attributes']['override_redirect'], 0)
+                self.assertTrue(record['observationsAfterRefusal'])
+
+    def test_original_attributes_survive_post_refusal_capture_failure(self):
+        for failure in ('constructor', 'query'):
+            with self.subTest(failure=failure):
+                record, error = self.refused(diagnostic_failure=failure)
+                self.assertTrue(record['refusalAttributesCaptured'])
+                self.assertEqual(record['originalRefusalAttributes'], error.window_visibility_refusal)
+                self.assertFalse(record['complete'])
+                self.assertEqual(str(error), 'Owned X window is not a managed visible window')
+
+    def test_missing_forged_or_inconsistent_metadata_is_ignored_without_masking_original_error(self):
+        changes = (lambda e: delattr(e, 'window_visibility_refusal'), lambda e: delattr(e, '_visibility_diagnostic_origin'),
+                   lambda e: setattr(e, '_visibility_diagnostic_origin', object()),
+                   lambda e: e.window_visibility_refusal.update(window=101),
+                   lambda e: e.window_visibility_refusal.update(map_state=2, override_redirect=0),
+                   lambda e: e.window_visibility_refusal.update(inputPermitted=1),
+                   lambda e: e.window_visibility_refusal.update(map_state=False),
+                   lambda e: e.window_visibility_refusal.update(**{'class': 'PRIVATE'}),
+                   lambda e: e.window_visibility_refusal.update(**{'class': 2**31}),
+                   lambda e: setattr(e, 'args', ('Owned X window is unavailable',)))
+        for change in changes:
+            with self.subTest(change=change):
+                record, _ = self.refused(alter=change)
+                self.assertFalse(record['refusalAttributesCaptured'])
+                self.assertNotIn('originalRefusalAttributes', record)
+                self.assertTrue(record['complete'])
+        record, _ = self.refused(helper_origin=False)
+        self.assertFalse(record['refusalAttributesCaptured'])
+        self.assertNotIn('originalRefusalAttributes', record)
+
+    def test_original_attribute_capture_never_claims_foreign_window_ownership(self):
+        record, _ = self.refused(foreign=True)
+        self.assertTrue(record['refusalAttributesCaptured'])
+        self.assertTrue(record['before']['candidate']['processRedacted'])
+        self.assertFalse(record['before']['candidate']['matchesExpectedPid'])
+        self.assertFalse(record['stable'])
 
 
 class ControllerTests(unittest.TestCase):

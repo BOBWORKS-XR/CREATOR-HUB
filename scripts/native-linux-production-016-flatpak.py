@@ -1469,6 +1469,71 @@ class Session:
         require(self.host_owner() is None, "Cancellation acquired Host1")
         self.snapshot_preserved()
 
+    def record_launcher_readiness_refusal(self, client, window, candidates, phase, error):
+        require(phase in ('disclosure-cancel', 'missing-host', 'portal-only', 'cold', 'warm'), 'Finite readiness diagnostic phase required')
+        known_errors = (RuntimeError, PermissionError, FileNotFoundError, ProcessLookupError, ValueError, KeyError, TypeError, OSError)
+        result = {'schemaVersion': 1, 'phase': phase, 'failureStage': 'initial-window-readiness', 'readOnly': True,
+                  'authorityGranted': False, 'inputPermitted': False, 'readinessAccepted': False, 'actionAttempted': False,
+                  'releaseReady': False, 'complete': False, 'stable': False, 'observationsAfterRefusal': True,
+                  'refusalAttributesCaptured': False,
+                  'originalExceptionType': type(error).__name__ if type(error) in known_errors else 'OtherError'}
+        try:
+            result['failingXid'] = K.xid(window)
+            try:
+                origin = getattr(self.helper, '_VISIBILITY_DIAGNOSTIC_ORIGIN', None)
+                raw = getattr(error, 'window_visibility_refusal', None)
+                if origin is not None and getattr(error, '_visibility_diagnostic_origin', None) is origin \
+                        and type(error) is RuntimeError and str(error) == 'Owned X window is not a managed visible window' \
+                        and type(raw) is dict and set(raw) == {'window', 'map_state', 'override_redirect', 'class'} \
+                        and type(raw['window']) is int and raw['window'] == window \
+                        and all(type(raw[key]) is int and -(2**31) <= raw[key] < 2**31 for key in ('map_state', 'override_redirect', 'class')) \
+                        and not (raw['map_state'] == 2 and not raw['override_redirect']):
+                    result['originalRefusalAttributes'] = parse(json_bytes(raw))
+                    result['refusalAttributesCaptured'] = True
+            except Exception:
+                pass  # Missing or inconsistent original metadata is never substituted from later observations.
+            require(type(candidates) is list and len(candidates) <= 8 and window in candidates
+                    and len(set(candidates)) == len(candidates), 'Bounded original readiness candidates required')
+            for candidate in candidates:
+                K.xid(candidate)
+            result['originalCandidates'] = list(candidates)
+            K.validate_process(client, full=True)
+            require(client['executable'] == '/app/bin/creator-hub-flatpak-activate' and client['uids'] == [os.getuid()] * 4
+                    and client['kernelImageSha256'] == self.review['flatpak']['files']['creator-hub-flatpak-activate']['sha256'],
+                    'Only the independently verified launcher may be a diagnostic expectation')
+            result['expectedClient'] = parse(json_bytes(client))
+            root = K.xid(self.x11.x.XDefaultRootWindow(self.x11.display))
+            queries = K.NativeWindow(self.helper, self.x11)
+            for label in ('before', 'after'):
+                self.flatpak_guard(); self.stable(client)
+                view = {'expectedClientVerifiedBefore': True, 'expectedClientVerifiedAfter': False, 'wm': {}}
+                result[label] = view
+                for name, limit in (('_NET_CLIENT_LIST_STACKING', 8), ('_NET_ACTIVE_WINDOW', 1), ('_NET_SUPPORTING_WM_CHECK', 1)):
+                    value = self.x11.property(root, name)
+                    require(value is None or type(value) is tuple and len(value) == 3 and value[:2] == (33, 32)
+                            and type(value[2]) is list and len(value[2]) <= limit
+                            and all(type(v) is int and 0 <= v < 2**32 for v in value[2]), 'Bounded diagnostic WM state required')
+                    view['wm'][name] = value
+                row = {'xid': window, 'processRedacted': True}
+                view['candidate'] = row
+                attrs = queries.attributes(window)
+                row['attributes'] = {name: getattr(attrs, field) for name, field in
+                                     (('map_state', 'map_state'), ('override_redirect', 'override_redirect'), ('class', 'class_'), ('root', 'root'))}
+                require(all(type(v) is int and -(2**31) <= v < 2**32 for v in row['attributes'].values()), 'Bounded raw window attributes required')
+                xres = queries.xres_identity(window)
+                require(type(xres) is dict and set(xres) == {'pid', 'client'}
+                        and type(xres['pid']) is int and 1 < xres['pid'] < 2**31
+                        and type(xres['client']) is int and 0 < xres['client'] < 2**32, 'Bounded raw XRes identity required')
+                row.update(xres=xres, matchesExpectedPid=xres['pid'] == client['pid'], processRedacted=xres['pid'] != client['pid'])
+                self.stable(client); self.flatpak_guard()
+                view['expectedClientVerifiedAfter'] = True
+            result['complete'] = True
+            result['stable'] = result['before'] == result['after'] and result['before']['candidate']['matchesExpectedPid'] is True
+        except Exception as diagnostic_error:
+            result['unavailable'] = type(diagnostic_error).__name__ if type(diagnostic_error) in known_errors else 'OtherError'
+        require(len(json_bytes(result)) <= 16384, 'Bounded readiness diagnostic output required')
+        save(self.root / (phase + '-readiness-gtk.json'), result)
+
     def flatpak(self, action, phase, missing=False):
         require((action, phase, missing) in (('Cancel', 'disclosure-cancel', False), ('Open Creator Hub', 'missing-host', True),
                 ('Get Native Hub', 'portal-only', False), ('Open Creator Hub', 'cold', False), ('Open Creator Hub', 'warm', False)),
@@ -1494,7 +1559,21 @@ class Session:
         require(client["parentPid"] in found and int(client["startTime"]) >= int(start), "Launcher left this exact owned Flatpak launch")
         self.flatpak_launch = dict(found[child.pid])
         self.disclosure()
-        self.wait(lambda: any(self.x11.inspect(window)["pid"] == client["pid"] for window in self.windows()))
+        def initial_window_ready():
+            candidates = self.windows()
+            for window in candidates:
+                try:
+                    owned = self.x11.inspect(window)['pid'] == client['pid']
+                except Exception as error:
+                    try:
+                        self.record_launcher_readiness_refusal(client, window, candidates, phase, error)
+                    except Exception:
+                        pass  # Diagnostic failures cannot mask or retry the original refusal.
+                    raise
+                if owned:
+                    return True
+            return False
+        self.wait(initial_window_ready)
         self.portal_client = client if action == "Get Native Hub" else None
         try:
             self.launcher_keyboard(client, 'disclosure', action, phase, terminal=not missing)
