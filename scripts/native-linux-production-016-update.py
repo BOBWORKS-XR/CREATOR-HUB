@@ -374,6 +374,26 @@ def run_tool(argv, *, input=None, allowed=(0,), timeout=90, env=None, limit=2 * 
         return raw
 
 
+def build_offline_verifier(env):
+    shared = load("native-linux-production-016-flatpak")
+    parent = Path(env["RUNNER_TEMP"]) / "native-linux-production-016-flatpak"
+    work = Path(env["RUNNER_TEMP"]) / "native-linux-production-016-verifier"
+    require(shared.locations() == parent and shared.verifier_root() == work
+            and parent.parent.resolve(strict=True) == parent.parent and os.getuid() == os.geteuid(), "Fixed verifier/evidence locations and caller required")
+    require(not os.path.lexists(parent) and not os.path.lexists(work), "Fresh verifier/evidence parents required; no adoption or ownership repair")
+    # The shared collector normally creates this parent. NEW3 reuses only its
+    # builder, whose command recorder creates the evidence child, not its parent.
+    parent.mkdir(mode=0o700)
+    info = parent.lstat()
+    require(parent.resolve(strict=True) == parent and stat.S_ISDIR(info.st_mode)
+            and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700, "Owned private tool-evidence parent required")
+    shared.build_signature_verifier()
+    shared_tool = shared.signature_verifier()  # builder-UID check only here, before elevation
+    tool, evidence = offline_verifier(env)
+    require(tool == shared_tool == work / "verify-package-input", "Shared and NEW3 verifier receipts must identify the same tool")
+    return tool, evidence
+
+
 def offline_verifier(env):
     """Recheck the shared builder's source/key/compiler and fresh tool evidence.
 
@@ -2125,8 +2145,7 @@ def main():
         unpack_carrier(root, os.environ)
     elif mode == "verifier":
         # Reuse only the shared locked verifier builder, not Flatpak admission.
-        load("native-linux-production-016-flatpak").build_signature_verifier()
-        offline_verifier(os.environ)
+        build_offline_verifier(os.environ)
     elif mode == "stock-policy":
         verify_stock_sources()
     elif mode == "session":

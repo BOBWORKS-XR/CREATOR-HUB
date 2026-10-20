@@ -7,9 +7,10 @@ import importlib.util
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -161,6 +162,32 @@ def portable_stage_inputs(folder):
         item["zip"] = M.pin((folder / (role + ".zip")).read_bytes())
     M.save(folder / "profile.json", p); M.save(folder / "api.json", {})
     return p, old, new
+
+
+def offline_verifier_inputs(folder):
+    pages = M.load("native-linux-integrated-pages")
+    workspace = folder / "workspace"; work = folder / "native-linux-production-016-verifier"
+    workspace.mkdir(); work.mkdir(mode=0o700); (work / "source").mkdir()
+    names = (*M.VERIFIER_PINS, "native/linux-portable-deployment/Cargo.toml", "native/linux-portable-deployment/src/lib.rs")
+    inputs = {}
+    for name in names:
+        raw = (HERE.parent / name).read_bytes().replace(b"\r\n", b"\n")
+        if name in M.VERIFIER_PINS:
+            if M.pin(raw) != M.VERIFIER_PINS[name]: raise AssertionError("Frozen public verifier input changed")
+        original, copied = workspace / name, work / "source" / name
+        for file in (original, copied):
+            file.parent.mkdir(parents=True, exist_ok=True); file.write_bytes(raw)
+        inputs[name] = {"pin": M.pin(raw), "originalStamp": list(pages.stamp(original.lstat())), "copyStamp": list(pages.stamp(copied.lstat()))}
+    compilers = {}
+    for name in ("cargo", "rustc"):
+        file = folder / "toolchains/1.99.0-x86_64-unknown-linux-gnu/bin" / name
+        file.parent.mkdir(parents=True, exist_ok=True); file.write_bytes((name + " fixture bytes; never executed").encode()); file.chmod(0o755)
+        compilers[name] = {"path": str(file), "record": pages.record(file), "stamp": list(pages.stamp(file.lstat())), "version": name + " 1.99.0 (unit-only)"}
+    tool = work / "verify-package-input"; tool.write_bytes(b"\x7fELFfixture tool; never executed"); tool.chmod(0o755)
+    receipt = {"schemaVersion": 1, "scope": "ci-only-offline-signature-verifier", "harnessSource": "a" * 40, "inputs": inputs,
+               "compilers": compilers, "tool": {"pin": M.pin(tool.read_bytes()), "stamp": list(pages.stamp(tool.lstat()))}, "releaseReady": False}
+    M.save(work / "receipt.json", receipt)
+    return tool, receipt, {**environment(), "RUNNER_TEMP": str(folder), "GITHUB_WORKSPACE": str(workspace)}
 
 
 class Pure(unittest.TestCase):
@@ -386,7 +413,97 @@ class Pure(unittest.TestCase):
         self.assertIn("/usr/bin/python3 -I -S", commands)
         self.assertNotIn("pip install", commands)
         source = (HERE / "native-linux-production-016-update.py").read_text()
-        self.assertIn('load("native-linux-production-016-flatpak").build_signature_verifier()', source)
+        self.assertIn('load("native-linux-production-016-flatpak")', source)
+
+    def test_main_verifier_real_shared_builder_and_command_create_fresh_tool_evidence(self):
+        shared = M.load("native-linux-production-016-flatpak")
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp).resolve(); parent = folder / "native-linux-production-016-flatpak"
+            calls = []
+            class Captured:
+                def __init__(self, child, evidence, label):
+                    self.items = {"stdout": {"kept": bytearray()}, "stderr": {"kept": bytearray()}}
+                    self.evidence = evidence; calls.append((evidence, label))
+                def pump(self, *args): pass
+                def metadata(self): return {key: {"eof": True, "truncated": False, "bytes": 0} for key in self.items}
+                def close(self): pass
+            child = SimpleNamespace(pid=42, poll=lambda: 0, wait=lambda **kw: 0)
+            real_lstat = Path.lstat
+            def lstat(path, *a, **k):
+                info = real_lstat(path, *a, **k)
+                # Windows does not report POSIX mkdir(0700) mode bits. Native
+                # Linux runs the same regression with real owner/mode checks.
+                if os.name == "nt" and path == parent:
+                    return SimpleNamespace(st_uid=info.st_uid, st_mode=stat.S_IFDIR | 0o700)
+                return info
+            with patch.dict(os.environ, {**environment(), "RUNNER_TEMP": str(folder)}, clear=True), \
+                 patch.object(sys, "argv", [str(HERE / "native-linux-production-016-update.py"), "verifier"]), \
+                 patch.object(M, "admission", return_value="deb-native-cancel"), patch.object(M, "load", return_value=shared), \
+                 patch.object(M.os, "getuid", return_value=folder.stat().st_uid, create=True), \
+                 patch.object(M.os, "geteuid", return_value=folder.stat().st_uid, create=True), patch.object(Path, "lstat", lstat), \
+                 patch.object(shared, "Path", side_effect=lambda p: PurePosixPath(p) if p == "/usr/bin/git" else Path(p)), \
+                 patch.object(shared.P, "helpers", return_value=(None, SimpleNamespace(Capture=Captured))), \
+                 patch.object(shared.subprocess, "Popen", return_value=child) as spawn:
+                self.assertFalse(parent.exists())
+                # Real builder -> real command -> in-memory child/capture. The
+                # empty mock Git result is refused; no Git/Cargo/native runs.
+                with self.assertRaisesRegex(RuntimeError, "Bounded complete verifier source inventory required"):
+                    M.main()
+                self.assertTrue(parent.is_dir()); self.assertTrue((parent / "evidence").is_dir())
+                self.assertEqual(len(calls), 1); self.assertEqual(calls[0][0], parent / "evidence")
+                self.assertEqual(spawn.call_args.args[0][0:2], ["/usr/bin/git", "ls-tree"])
+                receipts = list((parent / "evidence").glob("tool-*.json")); self.assertEqual(len(receipts), 1)
+                self.assertEqual(M.parse(receipts[0].read_bytes())["exitCode"], 0)
+
+    def test_verifier_setup_refuses_existing_or_redirected_parent_without_chown(self):
+        shared = M.load("native-linux-production-016-flatpak")
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp).resolve(); parent = folder / "native-linux-production-016-flatpak"; parent.mkdir()
+            with patch.dict(os.environ, {"RUNNER_TEMP": str(folder)}), patch.object(M, "load", return_value=shared), \
+                 patch.object(M.os, "getuid", return_value=folder.stat().st_uid, create=True), \
+                 patch.object(M.os, "geteuid", return_value=folder.stat().st_uid, create=True), \
+                 patch.object(shared, "build_signature_verifier", side_effect=AssertionError("No build on pre-existing state")), \
+                 patch.object(M.os, "chown", side_effect=AssertionError("No ownership repair"), create=True):
+                with self.assertRaises(RuntimeError): M.build_offline_verifier(os.environ)
+            self.assertEqual(list(parent.iterdir()), [])
+
+    def test_readonly_verifier_receipt_reused_by_runner_and_root_without_owner_repair(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp).resolve(); tool, receipt, env = offline_verifier_inputs(folder)
+            real_load, real_read = M.load, M.read
+            def load(name):
+                self.assertEqual(name, "native-linux-integrated-pages")
+                return real_load(name)
+            def read(file, maximum=262144, **kwargs):
+                if os.name == "nt": kwargs.pop("mode", None)
+                return real_read(file, maximum, **kwargs)
+            before = M.pin((tool.parent / "receipt.json").read_bytes())
+            answers = []
+            with patch.object(M, "load", side_effect=load), patch.object(M, "read", side_effect=read), \
+                 patch.object(M.os, "chown", side_effect=AssertionError("No chown of builder-owned verifier state"), create=True):
+                for uid in (folder.stat().st_uid, 0):
+                    with patch.object(M.os, "getuid", return_value=uid, create=True), patch.object(M.os, "geteuid", return_value=uid, create=True):
+                        answers.append(M.offline_verifier(env))
+            self.assertEqual(answers[0], answers[1]); self.assertEqual(answers[0][0], tool)
+            self.assertEqual(answers[0][1], {"receipt": before, "tool": receipt["tool"]})
+            self.assertEqual(M.pin((tool.parent / "receipt.json").read_bytes()), before)
+            tool.write_bytes(b"\x7fELFforeign replacement")
+            with patch.object(M, "read", side_effect=read), self.assertRaises(RuntimeError): M.offline_verifier(env)
+
+    def test_builder_and_shared_reader_must_agree_with_new3_tool_location(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp).resolve(); parent = folder / "native-linux-production-016-flatpak"
+            tool = folder / "native-linux-production-016-verifier/verify-package-input"
+            shared = SimpleNamespace(locations=lambda: parent, verifier_root=lambda: tool.parent,
+                                     build_signature_verifier=lambda: None, signature_verifier=lambda: tool)
+            real_lstat = Path.lstat
+            def lstat(path, *a, **k):
+                info = real_lstat(path, *a, **k)
+                return SimpleNamespace(st_uid=info.st_uid, st_mode=stat.S_IFDIR | 0o700) if os.name == "nt" and path == parent else info
+            with patch.object(M, "load", return_value=shared), patch.object(M, "offline_verifier", return_value=(folder / "foreign-tool", {})), \
+                 patch.object(M.os, "getuid", return_value=folder.stat().st_uid, create=True), \
+                 patch.object(M.os, "geteuid", return_value=folder.stat().st_uid, create=True), patch.object(Path, "lstat", lstat):
+                with self.assertRaisesRegex(RuntimeError, "same tool"): M.build_offline_verifier({"RUNNER_TEMP": str(folder)})
 
     def test_neutral_dependency_import_closure(self):
         script = ("import runpy; m=runpy.run_path(" + repr(str(HERE / "native-linux-production-016-update.py"))
