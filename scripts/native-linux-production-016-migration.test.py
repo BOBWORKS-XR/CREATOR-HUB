@@ -608,6 +608,290 @@ class FailedProcessAttributionTests(unittest.TestCase):
             self.assertIn("failedProcessAttribution", record)
 
 
+@contextmanager
+def inventory_rpc_fixture():
+    with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+        root = Path(temporary).resolve(); (root / "result").mkdir()
+        actor = [M.UID]
+        fixture = SimpleNamespace(root=root, actor=actor, state={"sequence": 1, "nonces": set()}, record={}, waits=0,
+                                  before_service=None, after_service=None, missing=False)
+        stack.enter_context(patch.object(M, "BASE", root))
+        stack.enter_context(patch.multiple(M.os, getuid=lambda: actor[0], geteuid=lambda: actor[0], create=True))
+        stack.enter_context(patch.object(M, "inventory_channel"))
+        fixture.inventory = stack.enter_context(patch.object(M, "native_process_inventory", return_value=[
+            {"pid": 12, "startTime": "120", "executable": "/usr/bin/creator-hub", "argvSha256": "a" * 64, "legacyBackend": False}]))
+        real_read = M.read_file
+        def read(file, limit, *, uid, mode):
+            is_request = file.parent == root / "result"
+            assert file.name.startswith("inventory-request-" if is_request else "inventory-response-")
+            assert (uid, mode, limit) == ((M.UID, 0o600, 512) if is_request else (0, 0o644, 524288))
+            return real_read(file, limit)
+        stack.enter_context(patch.object(M, "read_file", side_effect=read))
+        def serve():
+            actor[0] = 0
+            try:
+                return M.serve_inventory(fixture.state, fixture.record, "f" * 40, M.SCENARIOS[0], Mock(), Mock())
+            finally:
+                actor[0] = M.UID
+        fixture.serve = serve
+        def wait(predicate):
+            fixture.waits += 1
+            if fixture.missing: raise TimeoutError("Missing fresh root inventory response")
+            if fixture.before_service: fixture.before_service(fixture)
+            serve()
+            if fixture.after_service: fixture.after_service(fixture)
+            assert predicate(), "Broker did not publish a response"
+        fixture.wait = wait
+        fixture.client = M.InventoryClient("f" * 40, M.SCENARIOS[0])
+        yield fixture
+
+
+class InventoryRpcTests(unittest.TestCase):
+    def test_fresh_global_samples_use_one_monotonic_channel_across_reopened_sessions(self):
+        with inventory_rpc_fixture() as f:
+            first = f.client.sample(f.wait); reopened = f.client.sample(f.wait)
+            self.assertEqual([first["request"]["sequence"], reopened["request"]["sequence"]], [1, 2])
+            self.assertNotEqual(first["request"]["nonce"], reopened["request"]["nonce"])
+            self.assertEqual(f.inventory.call_count, 2)
+            self.assertEqual(f.state["sequence"], 3); self.assertEqual(f.record["inventorySamples"], 2)
+            self.assertEqual(f.record["lastInventory"], reopened)
+            self.assertFalse(f.serve())
+            self.assertEqual(f.inventory.call_count, 2, "Old request files must not replay")
+            for answer in (first, reopened):
+                self.assertEqual(answer["request"]["operation"], "global-uid-inventory")
+                self.assertEqual(answer["request"]["harnessSource"], "f" * 40)
+                self.assertEqual(answer["request"]["scenario"], M.SCENARIOS[0])
+                self.assertEqual(set(answer), {"request", "ok", "processes"})
+            self.assertLess(len(json.dumps(reopened).encode()), 524288)
+
+    def test_unknown_existing_response_missing_response_and_failed_channel_never_allow_input_or_retry(self):
+        for failure in ("preseed", "missing", "wrong-nonce", "wrong-source", "wrong-scenario", "old-sequence", "extra", "false-ok"):
+            with self.subTest(failure=failure), inventory_rpc_fixture() as f:
+                if failure == "preseed": (f.root / "inventory-response-1.json").write_text("{}")
+                if failure == "missing": f.missing = True
+                def alter(state):
+                    file = state.root / "inventory-response-1.json"; value = json.loads(file.read_bytes())
+                    if failure == "wrong-nonce": value["request"]["nonce"] = "0" * 64
+                    if failure == "wrong-source": value["request"]["harnessSource"] = "0" * 40
+                    if failure == "wrong-scenario": value["request"]["scenario"] = M.SCENARIOS[1]
+                    if failure == "old-sequence": value["request"]["sequence"] = 0
+                    if failure == "extra": value["command"] = "unreviewed"
+                    if failure == "false-ok": value["ok"] = False
+                    file.write_text(json.dumps(value))
+                if failure not in ("preseed", "missing"): f.after_service = alter
+                with self.assertRaises((RuntimeError, TimeoutError)): f.client.sample(f.wait)
+                calls = f.inventory.call_count
+                with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+                self.assertEqual(f.inventory.call_count, calls)
+
+    def test_root_request_admission_rejects_arbitrary_selection_replay_wrong_binding_and_oversize(self):
+        mutations = (lambda v: v.update(pid=123), lambda v: v.update(path="/tmp/anything"),
+                     lambda v: v.update(command=["anything"]), lambda v: v.update(sequence=True),
+                     lambda v: v.update(sequence=2), lambda v: v.update(nonce="x"),
+                     lambda v: v.update(harnessSource="0" * 40), lambda v: v.update(scenario=M.SCENARIOS[1]),
+                     lambda v: v.update(operation="execute"), lambda v: v.update(nonce="0" * 600))
+        for mutate in mutations:
+            with self.subTest(mutate=mutate), inventory_rpc_fixture() as f:
+                def alter(state):
+                    file = state.root / "result/inventory-request-1.json"; value = json.loads(file.read_bytes())
+                    mutate(value); file.write_text(json.dumps(value))
+                f.before_service = alter
+                with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+                f.inventory.assert_not_called()
+        with inventory_rpc_fixture() as f:
+            f.client.sample(f.wait)
+            with patch.object(M.secrets, "token_hex", return_value=next(iter(f.state["nonces"]))):
+                with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+            self.assertEqual(f.inventory.call_count, 1)
+
+    def test_root_inventory_failure_preserves_original_refusal_and_permission_diagnostic(self):
+        with inventory_rpc_fixture() as f:
+            original = PermissionError(13, "synthetic", "/proc/12/exe")
+            f.inventory.side_effect = original
+            with patch.object(M, "inventory_permission_capture", return_value={"pid": 12, "stable": True}) as capture:
+                with self.assertRaises(PermissionError) as raised: f.client.sample(f.wait)
+                self.assertIs(raised.exception, original); capture.assert_called_once()
+            self.assertEqual(f.record["inventoryRefusal"]["processInventoryRefusal"], {"pid": 12, "stable": True})
+            self.assertFalse((f.root / "inventory-response-1.json").exists())
+
+    def test_concurrent_native_consent_guards_are_serialized_not_exempted(self):
+        with inventory_rpc_fixture() as f, M.concurrent.futures.ThreadPoolExecutor(max_workers=2) as worker:
+            answers = list(worker.map(lambda _: f.client.sample(f.wait), range(2)))
+            self.assertEqual(sorted(value["request"]["sequence"] for value in answers), [1, 2])
+            self.assertEqual(f.inventory.call_count, 2)
+
+    def test_both_sides_enforce_nonce_and_sequence_bounds_independently(self):
+        with inventory_rpc_fixture() as f:
+            value = f.client.sample(f.wait)
+            f.client.nonces.clear()  # Prove the root observer does not rely on client replay protection.
+            with patch.object(M.secrets, "token_hex", return_value=value["request"]["nonce"]):
+                with self.assertRaisesRegex(RuntimeError, "nonce replay"): f.client.sample(f.wait)
+            self.assertEqual(f.inventory.call_count, 1)
+        with inventory_rpc_fixture() as f:
+            f.client.sequence = M.INVENTORY_MAX_SAMPLES + 1
+            with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+            f.inventory.assert_not_called()
+
+    def test_protected_channel_rejects_redirected_unowned_or_writable_ancestors(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(); (root / "result").mkdir()
+            real_resolve = Path.resolve
+            for failure in (None, "owner", "group", "mode", "symlink", "request-owner", "request-mode", "redirected"):
+                def info(path):
+                    request = path == root / "result"
+                    value = SimpleNamespace(st_uid=M.UID if request else 0, st_gid=M.UID if request else 0,
+                                            st_mode=M.stat.S_IFDIR | (0o700 if request else 0o755))
+                    if path == root:
+                        if failure == "owner": value.st_uid = M.UID
+                        if failure == "group": value.st_gid = M.UID
+                        if failure == "mode": value.st_mode = M.stat.S_IFDIR | 0o775
+                        if failure == "symlink": value.st_mode = M.stat.S_IFLNK | 0o777
+                    if request:
+                        if failure == "request-owner": value.st_uid = 0
+                        if failure == "request-mode": value.st_mode = M.stat.S_IFDIR | 0o755
+                    return value
+                def resolve(path, *args, **kwargs):
+                    return root / "unexpected" if path == root and failure == "redirected" else real_resolve(path, *args, **kwargs)
+                with self.subTest(failure=failure), patch.object(M, "BASE", root), patch.object(Path, "lstat", info), patch.object(Path, "resolve", resolve):
+                    if failure:
+                        with self.assertRaises(RuntimeError): M.inventory_channel()
+                    else:
+                        M.inventory_channel()
+
+    def test_actual_process_guard_samples_fresh_and_rechecks_ownership_after_wait_before_input(self):
+        for failure in (None, "missing", "driver", "root", "backend", "stale-response"):
+            with self.subTest(failure=failure), inventory_rpc_fixture() as f:
+                rows = {pid: {"pid": pid, "startTime": str(pid), "parentPid": pid - 1, "kernelImageSha256": str(pid) * 32} for pid in (11, 12, 13)}
+                s = object.__new__(M.Session)
+                s.evidence, s.inventory, s.helper = {}, f.client, Mock()
+                s.logs = Mock(); s.logs.metadata.return_value = {"stderr": {"truncated": False}}
+                s.child = Mock(pid=11); s.child.poll.return_value = None
+                s.driver_identity, s.backend, s.owned = [copy.deepcopy(rows[pid]) for pid in (11, 12, 13)]
+                s.native = SimpleNamespace(native_process=lambda pid, _: copy.deepcopy(rows[pid]))
+                s.pages = SimpleNamespace(listener=lambda *_: True, wait=f.wait)
+                action = Mock()
+                if failure == "missing": f.missing = True
+                if failure in ("driver", "root", "backend"):
+                    f.after_service = lambda _: rows[{"driver": 11, "backend": 12, "root": 13}[failure]].update(startTime="replacement")
+                if failure == "stale-response":
+                    def stale(state):
+                        file = state.root / "inventory-response-1.json"
+                        answer = json.loads(file.read_bytes()); answer["request"]["nonce"] = "0" * 64
+                        file.write_text(json.dumps(answer))
+                    f.after_service = stale
+                def input_once():
+                    s.process_guard(); action()
+                if failure:
+                    with self.assertRaises((RuntimeError, TimeoutError)): input_once()
+                    action.assert_not_called()
+                else:
+                    input_once(); input_once()
+                    self.assertEqual(action.call_count, 2); self.assertEqual(f.inventory.call_count, 2)
+                    self.assertEqual(s.evidence["lastInventoryRequest"]["sequence"], 2)
+
+    def test_production_wiring_uses_only_the_broker_loop_and_one_client_for_both_sessions(self):
+        source = ast.parse((HERE / "native-linux-production-016-migration.py").read_text())
+        functions = {node.name: node for node in source.body if isinstance(node, ast.FunctionDef)}
+        callers = {node.name for node in source.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+                   and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "native_process_inventory" for call in ast.walk(node))}
+        self.assertEqual(callers, {"serve_inventory"})
+        loop = next(node for node in ast.walk(functions["broker"]) if isinstance(node, ast.While))
+        served = [i for i, node in enumerate(loop.body) if any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                                                            and call.func.id == "serve_inventory" for call in ast.walk(node))]
+        proof = next(i for i, node in enumerate(loop.body) if isinstance(node, ast.If))
+        self.assertEqual(len(served), 1); self.assertLess(served[0], proof)
+        calls = [node for node in ast.walk(functions["run_session"]) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
+        self.assertEqual(sum(call.func.id == "InventoryClient" for call in calls), 1)
+        sessions = [call for call in calls if call.func.id == "Session"]
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual([next(value.value.id for value in call.keywords if value.arg == "inventory") for call in sessions], ["inventory", "inventory"])
+
+    def test_root_answer_malformed_records_request_mutation_and_transport_metadata_fail_closed(self):
+        for failure in ("extra-record", "pid-duplicate", "too-many", "true-legacy", "changed-request", "response-owner"):
+            with self.subTest(failure=failure), inventory_rpc_fixture() as f:
+                row = copy.deepcopy(f.inventory.return_value[0])
+                if failure == "extra-record": f.inventory.return_value = [{**row, "args": "not-returnable"}]
+                if failure == "pid-duplicate": f.inventory.return_value = [row, row]
+                if failure == "too-many": f.inventory.return_value = [{**row, "pid": i + 1} for i in range(65)]
+                if failure == "true-legacy": f.inventory.return_value = [{**row, "legacyBackend": True}]
+                if failure == "changed-request":
+                    def change(*_):
+                        file = f.root / "result/inventory-request-1.json"
+                        value = json.loads(file.read_bytes()); value["nonce"] = "0" * 64
+                        file.write_text(json.dumps(value)); return [row]
+                    f.inventory.side_effect = change
+                if failure == "response-owner":
+                    original = M.read_file
+                    def read(file, *args, **kwargs):
+                        if file.parent == f.root: raise RuntimeError("Bounded ordinary input metadata differs")
+                        return original(file, *args, **kwargs)
+                    with patch.object(M, "read_file", side_effect=read), self.assertRaises(RuntimeError): f.client.sample(f.wait)
+                else:
+                    with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+
+
+@contextmanager
+def global_inventory_fixture(rows, changed=None):
+    original, real_path = M.native_process_inventory, M.Path
+    calls = []
+    class Candidate:
+        def __init__(self, pid): self.name = str(pid)
+        def stat(self): return SimpleNamespace(st_uid=M.UID)
+        def __truediv__(self, leaf):
+            assert leaf == "cmdline"
+            return Path(f"/proc/{self.name}/cmdline")
+    def path(value):
+        return SimpleNamespace(iterdir=lambda: [Candidate(pid) for pid in rows]) if value == "/proc" else real_path(value)
+    def process(pid, helper, full):
+        assert full is False
+        if M.os.getuid() != 0: raise PermissionError(13, "synthetic", f"/proc/{pid}/exe")
+        calls.append(pid)
+        row = rows[pid]
+        value = {"pid": pid, "parentPid": 1, "uids": [M.UID] * 4, "startTime": str(pid), "executable": row[0]}
+        if changed and calls.count(pid) > 1: value.update(changed)
+        return value
+    def command(file, limit):
+        assert limit == 8192 and file.name == "cmdline"
+        return rows[int(file.parent.name)][1]
+    with patch.object(M, "Path", side_effect=path), patch.object(M, "proc_bytes", side_effect=command):
+        native, helper = SimpleNamespace(native_process=process), Mock()
+        yield SimpleNamespace(sample=lambda: original(native, helper), calls=calls)
+
+
+class RootGlobalInventoryTests(unittest.TestCase):
+    def test_permission_protected_non_legacy_process_is_freshly_inspected_by_root_not_skipped(self):
+        rows = {5075: ("/usr/lib/systemd/systemd", b"synthetic-system-process\0"), 6000: (M.OLD_NODE, b"node\0server.mjs\0")}
+        with global_inventory_fixture(rows) as g, inventory_rpc_fixture() as f:
+            f.inventory.side_effect = lambda *_: g.sample()
+            first, second = f.client.sample(f.wait), f.client.sample(f.wait)
+            self.assertEqual([row["pid"] for row in first["processes"]], [5075, 6000])
+            self.assertEqual(g.calls.count(5075), 4); self.assertEqual(g.calls.count(6000), 4)
+            self.assertNotEqual(first["request"]["nonce"], second["request"]["nonce"])
+
+    def test_out_of_tree_legacy_gui_or_host_backend_and_same_pid_changes_never_get_an_answer(self):
+        for image, command, changed in (("/usr/bin/creator-project-setup", b"setup\0", None),
+                                        ("/usr/bin/creator-works-mcp-launcher", b"mcp\0", None),
+                                        (M.OLD_NODE, b"node\0--creator-hub-host\0", None),
+                                        ("/usr/bin/creator-hub", b"hub\0", {"startTime": "reused"}),
+                                        ("/usr/bin/creator-hub", b"hub\0", {"executable": "/changed-executable"})):
+            with self.subTest(image=image, changed=changed), global_inventory_fixture({7000: (image, command)}, changed) as g, inventory_rpc_fixture() as f:
+                f.inventory.side_effect = lambda *_: g.sample()
+                with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+                self.assertFalse((f.root / "inventory-response-1.json").exists())
+                self.assertEqual(f.record["inventoryRefusal"]["sequence"], 1)
+
+    def test_existing_global_uid_64_process_limit_is_retained(self):
+        for count in (64, 65):
+            rows = {pid: (M.OLD_NODE, b"node\0server.mjs\0") for pid in range(1, count + 1)}
+            with self.subTest(count=count), global_inventory_fixture(rows) as g, inventory_rpc_fixture() as f:
+                f.inventory.side_effect = lambda *_: g.sample()
+                if count == 65:
+                    with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+                    self.assertFalse((f.root / "inventory-response-1.json").exists())
+                else:
+                    self.assertEqual(len(f.client.sample(f.wait)["processes"]), 64)
+
+
 class DriverReadinessTests(unittest.TestCase):
     def startup(self, *, driver_at=1, backend_at=3, appears_at=1, statuses=(True,), change=None, transport_error=False):
         state = SimpleNamespace(tick=0, requests=[], statuses=iter(statuses), rows={}, closed=set())
@@ -776,14 +1060,15 @@ class PermissionCaptureTests(unittest.TestCase):
                     session.driver_identity, session.owned = {"pid": 11}, {"pid": 13}
                     session.child = Mock(pid=11); session.child.poll.return_value = None
                     session.native = SimpleNamespace(native_process=lambda pid, helper: session.driver_identity if pid == 11 else session.owned)
-                    session.pages = SimpleNamespace(listener=lambda *args: True)
+                    session.pages = SimpleNamespace(listener=lambda *args: True, wait=Mock())
                     session.backend_guard = lambda: None
                     session.evidence["root"] = session.owned
                     session.process_guard()
                 options = {"side_effect": capture} if isinstance(capture, Exception) else {"return_value": capture}
-                with patch.object(M.Session, "start", start), patch.object(M, "native_process_inventory", side_effect=original), \
+                inventory = SimpleNamespace(sample=Mock(side_effect=original))
+                with patch.object(M.Session, "start", start), patch.object(M, "native_process_inventory", side_effect=AssertionError("No unprivileged global scan")), \
                      patch.object(M, "inventory_permission_capture", **options), self.assertRaises(PermissionError) as raised:
-                    M.Session(Path(temporary).resolve(), binding())
+                    M.Session(Path(temporary).resolve(), binding(), inventory=inventory)
                 self.assertIs(raised.exception, original)
                 file = Path(temporary) / "session.json"
                 receipt = json.loads(file.read_bytes())

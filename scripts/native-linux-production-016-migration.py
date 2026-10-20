@@ -22,6 +22,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 import io
 import time
 import xml.etree.ElementTree as ET
@@ -845,8 +846,9 @@ def ax_graph(atspi, helper, native, refs, owner, frame, *, protected=None):
 
 
 class Session:
-    def __init__(self, root, binding, *, reopened=False):
+    def __init__(self, root, binding, *, reopened=False, inventory=None):
         self.root, self.binding = root, binding
+        self.inventory = inventory
         self.dialogs = set()
         self.logs = None
         self.evidence = {"normalCloseObserved": False, "reopened": reopened}
@@ -946,7 +948,15 @@ class Session:
         self.backend_guard()
         self.evidence["processSamples"] = self.evidence.get("processSamples", 0) + 1
         try:
-            self.evidence["lastNativeProcesses"] = native_process_inventory(self.native, self.helper)
+            require(self.inventory is not None, "Fresh root inventory channel required")
+            answer = self.inventory.sample(self.pages.wait)
+            self.logs.pump()
+            require(not any(row["truncated"] for row in self.logs.metadata().values()), "Driver logs exceeded capture bound")
+            require(self.child.poll() is None and self.native.native_process(self.child.pid, self.helper) == self.driver_identity
+                    and self.native.native_process(self.owned["pid"], self.helper) == self.owned and self.pages.listener(self.child.pid, 4444), "Owned process/socket changed")
+            self.backend_guard()
+            self.evidence["lastNativeProcesses"] = answer["processes"]
+            self.evidence["lastInventoryRequest"] = answer["request"]
         except PermissionError as error:
             try:
                 self.evidence["processInventoryRefusal"] = inventory_permission_capture(error, self.helper)
@@ -1075,9 +1085,9 @@ class Session:
             self.pages.wait(lambda: bool(select.select([backend_fd], [], [], 0)[0]), 10)
 
 
-def publish(file, value):
+def publish(file, value, mode=0o600):
     temporary = file.with_name(file.name + ".new")
-    save(temporary, value)
+    save(temporary, value, mode)
     require(not os.path.lexists(file), "One-shot receipt already exists")
     temporary.rename(file)
 
@@ -1117,6 +1127,114 @@ def native_process_inventory(native, helper):
         found.append({"pid": identity["pid"], "startTime": identity["startTime"], "executable": identity["executable"],
                       "argvSha256": digest(command), "legacyBackend": False})
     return sorted(found, key=lambda row: row["pid"])
+
+
+INVENTORY_MAX_SAMPLES = 2048
+
+
+def inventory_channel():
+    for path in (BASE, *BASE.parents):
+        info = path.lstat()
+        require(path.resolve() == path and stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0
+                and not info.st_mode & 0o7022, "Inventory response ancestor is not root-protected")
+    path = BASE / "result"
+    info = path.lstat()
+    require(path.resolve() == path and stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == UID
+            and stat.S_IMODE(info.st_mode) == 0o700, "Inventory request directory is not the private fixture directory")
+
+
+def inventory_request(value, harness, scenario, sequence):
+    keys(value, ("schemaVersion", "operation", "harnessSource", "scenario", "sequence", "nonce"))
+    require(type(harness) is str and re.fullmatch(r"[a-f0-9]{40}", harness) and scenario in SCENARIOS
+            and type(sequence) is int and 1 <= sequence <= INVENTORY_MAX_SAMPLES
+            and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+            and value["operation"] == "global-uid-inventory" and value["harnessSource"] == harness
+            and value["scenario"] == scenario and type(value["sequence"]) is int and value["sequence"] == sequence
+            and type(value["nonce"]) is str and re.fullmatch(r"[a-f0-9]{64}", value["nonce"]), "Fresh finite inventory request differs")
+
+
+def inventory_answer(value, request):
+    keys(value, ("request", "ok", "processes"))
+    inventory_request(value["request"], request["harnessSource"], request["scenario"], request["sequence"])
+    require(value["request"] == request and value["ok"] is True and type(value["processes"]) is list
+            and len(value["processes"]) <= 64, "Fresh root inventory answer refused")
+    previous = 0
+    for row in value["processes"]:
+        keys(row, ("pid", "startTime", "executable", "argvSha256", "legacyBackend"))
+        require(type(row["pid"]) is int and previous < row["pid"] <= 2147483647
+                and type(row["startTime"]) is str and re.fullmatch(r"[0-9]{1,20}", row["startTime"])
+                and type(row["executable"]) is str and row["executable"].startswith("/")
+                and len(row["executable"].encode("utf-8")) <= 4096 and not re.search(r"[\x00-\x1f\x7f]", row["executable"])
+                and type(row["argvSha256"]) is str and re.fullmatch(r"[a-f0-9]{64}", row["argvSha256"])
+                and row["legacyBackend"] is False, "Invalid root inventory record")
+        previous = row["pid"]
+
+
+class InventoryClient:
+    def __init__(self, harness, scenario):
+        self.harness, self.scenario, self.sequence = harness, scenario, 1
+        self.nonces, self.blocked, self.lock = set(), False, threading.Lock()
+
+    def sample(self, wait):
+        # Native consent and its initiating WebDriver call can guard concurrently.
+        with self.lock:
+            require(not self.blocked, "Unresolved inventory request cannot be retried")
+            self.blocked = True
+            require(os.getuid() == os.geteuid() == UID, "Only the fixture may request an inventory")
+            inventory_channel()
+            value = {"schemaVersion": 1, "operation": "global-uid-inventory", "harnessSource": self.harness,
+                     "scenario": self.scenario, "sequence": self.sequence, "nonce": secrets.token_hex(32)}
+            inventory_request(value, self.harness, self.scenario, self.sequence)
+            require(value["nonce"] not in self.nonces, "Inventory nonce reused")
+            self.nonces.add(value["nonce"])
+            request = BASE / f"result/inventory-request-{self.sequence}.json"
+            response = BASE / f"inventory-response-{self.sequence}.json"
+            require(not any(os.path.lexists(path) for file in (request, response) for path in (file, file.with_name(file.name + ".new"))),
+                    "Existing inventory transport cannot be adopted")
+            publish(request, value)
+            wait(lambda: os.path.lexists(response))
+            inventory_channel()
+            answer = P.parse(read_file(response, 524288, uid=0, mode=0o644))
+            inventory_answer(answer, value)
+            self.sequence += 1
+            self.blocked = False
+            return answer
+
+
+def serve_inventory(state, record, harness, scenario, native, helper):
+    require(os.getuid() == os.geteuid() == 0, "Root-only global inventory observer")
+    inventory_channel()
+    sequence = state["sequence"]
+    response = BASE / f"inventory-response-{sequence}.json"
+    require(not any(os.path.lexists(path) for path in (response, response.with_name(response.name + ".new"))),
+            "Unknown root inventory response exists")
+    request = BASE / f"result/inventory-request-{sequence}.json"
+    if not os.path.lexists(request):
+        return False
+    try:
+        raw = read_file(request, 512, uid=UID, mode=0o600)
+        value = P.parse(raw)
+        inventory_request(value, harness, scenario, sequence)
+        require(value["nonce"] not in state["nonces"], "Inventory nonce replay refused")
+        state["nonces"].add(value["nonce"])
+        answer = {"request": value, "ok": True, "processes": native_process_inventory(native, helper)}
+        inventory_answer(answer, value)
+        require(len(json.dumps(answer, ensure_ascii=False, allow_nan=False).encode()) <= 524288, "Root inventory response exceeds bound")
+        require(read_file(request, 512, uid=UID, mode=0o600) == raw, "Inventory request changed during observation")
+        inventory_channel()
+        publish(response, answer, mode=0o644)
+        state["sequence"] += 1
+        record["inventorySamples"] = record.get("inventorySamples", 0) + 1
+        record["lastInventory"] = answer
+        return True
+    except Exception as error:
+        record["inventoryRefusal"] = {"sequence": sequence, "type": type(error).__name__, "message": str(error)[:1000]}
+        if isinstance(error, PermissionError):
+            try:
+                record["inventoryRefusal"]["processInventoryRefusal"] = inventory_permission_capture(error, helper)
+            except Exception as capture_error:
+                record["inventoryRefusal"]["processInventoryRefusal"] = {"stable": False, "unavailable": type(capture_error).__name__}
+        raise
 
 
 def inventory_permission_capture(error, helper):
@@ -1916,6 +2034,7 @@ def broker(env):
     record = {"scope": "production-016-disposable-migration", "scenario": scenario, "harnessSource": env["GITHUB_SHA"],
               "inputProofs": 0, "fixtureRelocked": False, "scenarioPassed": False, **FLAGS}
     context, relock, failure = {}, False, None
+    inventory_state = {"sequence": 1, "nonces": set()}
     try:
         if scenario in SCENARIOS[2:]:
             secret = bytearray(secrets.token_hex(32).encode("ascii"))
@@ -1934,6 +2053,7 @@ def broker(env):
         while child.poll() is None and time.monotonic() < deadline:
             logs.pump()
             require(not any(row["truncated"] for row in logs.metadata().values()), "Session diagnostic capture exceeded bound")
+            serve_inventory(inventory_state, record, env["GITHUB_SHA"], scenario, native, helper)
             request = BASE / f"result/input-{index}.json"
             if request.exists():
                 value = P.parse(read_file(request, 256, uid=UID, mode=0o600))
@@ -2046,7 +2166,8 @@ def run_session(env):
         sdk_dir = root / "old-sdk"; sdk_dir.mkdir(mode=0o700)
         old_sdk = SDK(sdk_dir, Path(OLD_NODE), [OLD_SERVER], sdk_env)
         first = root / "first"; first.mkdir(mode=0o700)
-        session = Session(first, binding)
+        inventory = InventoryClient(env["GITHUB_SHA"], scenario)
+        session = Session(first, binding, inventory=inventory)
         publish(root / "root.json", session.owned)
         require(polkit.session(system, session.owned["pid"], GLib)["object"] == session_identity["object"], "Root is not in the synthetic authentication session")
         pages.wait(lambda: session.d.read("#usage-terms-dialog", "attribute/open") is not None)
@@ -2090,7 +2211,7 @@ def run_session(env):
         report["oldRuntimeAfterClose"] = old_sdk.check()
         expected_after = {name: read_file(home / name) for name in before if name != JOURNAL}
         second = root / "reopened"; second.mkdir(mode=0o700)
-        session = Session(second, binding, reopened=True)
+        session = Session(second, binding, reopened=True, inventory=inventory)
         require(read_file(home / TERMS) == terms and session.owned["pid"] != report["first"]["root"]["pid"], "Normal reopen or terms retention failed")
         pages.wait(lambda: session.d.read("#usage-terms-dialog", "attribute/open") is None)
         finish_ui(session, scenario, reopened=True)
