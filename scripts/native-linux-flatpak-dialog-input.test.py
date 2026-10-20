@@ -871,6 +871,128 @@ class FocusDiagnosticTests(unittest.TestCase):
         self.assertEqual(api.x11.res.XResClientIdsDestroy.call_count, 4)
 
 
+class XErrorSubmissionDiagnosticTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location('x_error_fixture_helper',
+            Path(__file__).with_name('native-unix-window.py'))
+        cls.h = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = cls.h
+        spec.loader.exec_module(cls.h)
+
+    def fixture(self, *, foreign=False, serial=101, diagnostic_failure=False):
+        M._ATTEMPTS.clear()
+        x = object.__new__(self.h.X11)
+        x.display, x.error = 4096, False
+        sent, syncs = [], []
+        def sync(*args):
+            syncs.append(args)
+            if len(sent) == 2:
+                event = self.h.XErrorEvent(0, 8192 if foreign else 4096, 456, serial, 3, 25, 0)
+                x._error(8192 if foreign else 4096, C.byref(event))
+            return 0
+        x.x = SimpleNamespace(XDefaultRootWindow=lambda _: 50, XSync=sync)
+        api = object.__new__(M.NativeWindow)
+        api.x11 = x
+        api.next_request = Mock(side_effect=[100, 101])
+        api.snapshot = Window().snapshot
+        api.keycode = lambda _: 36
+        api.focus_diagnostic = Mock(side_effect=AssertionError('No focus capture after submission'))
+        def send(display, window, propagate, mask, pointer):
+            event = C.cast(pointer, C.POINTER(M.KeyEnvelope)).contents.key
+            sent.append((display, window, propagate, mask, event.type))
+            return 1
+        api.send_event = send
+        if diagnostic_failure:
+            api.error_diagnostic = Mock(side_effect=RuntimeError('PRIVATE DIAGNOSTIC ERROR'))
+        return api, x, sent, syncs
+
+    def test_actual_two_row_release_refusal_attaches_retained_metadata_without_requery_or_retry(self):
+        api, x, sent, syncs = self.fixture()
+        attempt = M.KeyboardAttempt(Binding(), api, 456)
+        with self.assertRaisesRegex(M.InputRefused, '^Owned X resource query was refused$') as raised:
+            attempt.send('Enter')
+        error, value = raised.exception, raised.exception.focus_diagnostic
+        self.assertEqual(sent, [(4096, 456, 0, 0, 2), (4096, 456, 0, 0, 3)])
+        self.assertEqual(syncs, [(4096, 0)] * 2)
+        self.assertEqual(api.next_request.call_args_list, [unittest.mock.call(4096)] * 2)
+        self.assertEqual([row['synchronized'] for row in error.receipt['delivery']], [True, False])
+        self.assertNotIn('focusDiagnostic', error.receipt)
+        self.assertFalse(error.receipt['deliveryComplete'])
+        self.assertEqual([row['nextRequest'] for row in value['submissions']], [100, 101])
+        self.assertEqual([row['latchBeforeSubmit'] for row in value['submissions']], [False, False])
+        self.assertEqual([row['latchAfterSync'] for row in value['submissions']], [False, True])
+        self.assertEqual(value['events'][0]['stage'], 'release-sync')
+        self.assertEqual(value['events'][0]['serial'], value['submissions'][1]['nextRequest'])
+        self.assertTrue(value['events'][0]['sameDisplay'])
+        self.assertTrue(all(value[key] is False for key in ('inputPermitted', 'authorityGranted', 'releaseReady')))
+        self.assertLessEqual(len(json.dumps(value)), 8192)
+        before = copy.deepcopy(value)
+        x.error_events.clear()
+        self.assertEqual(error.focus_diagnostic, before)
+        with self.assertRaisesRegex(M.InputRefused, 'already reserved'):
+            attempt.send('Enter')
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(len(syncs), 2)
+        api.focus_diagnostic.assert_not_called()
+
+    def test_foreign_and_earlier_request_errors_are_recorded_without_relaxing_refusal(self):
+        for foreign, serial in ((True, 101), (False, 90)):
+            with self.subTest(foreign=foreign, serial=serial):
+                api, _x, sent, _syncs = self.fixture(foreign=foreign, serial=serial)
+                with self.assertRaises(M.InputRefused) as raised:
+                    M.KeyboardAttempt(Binding(), api, 456).send('Enter')
+                value = raised.exception.focus_diagnostic
+                self.assertEqual(value['events'][0]['sameDisplay'], not foreign)
+                self.assertEqual(value['events'][0]['serial'], serial)
+                self.assertFalse(raised.exception.receipt['deliveryComplete'])
+                self.assertEqual(len(sent), 2)
+
+    def test_failed_retention_does_not_mask_release_refusal_or_add_focus_reads(self):
+        api, _x, sent, syncs = self.fixture(diagnostic_failure=True)
+        with self.assertRaisesRegex(M.InputRefused, '^Owned X resource query was refused$') as raised:
+            M.KeyboardAttempt(Binding(), api, 456).send('Enter')
+        self.assertFalse(hasattr(raised.exception, 'focus_diagnostic'))
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(len(syncs), 2)
+        api.focus_diagnostic.assert_not_called()
+
+    def test_local_serial_capture_failure_does_not_prevent_or_repeat_existing_input(self):
+        api, _x, sent, syncs = self.fixture()
+        api.next_request = Mock(side_effect=RuntimeError('PRIVATE SERIAL ERROR'))
+        with self.assertRaisesRegex(M.InputRefused, '^Owned X resource query was refused$') as raised:
+            M.KeyboardAttempt(Binding(), api, 456).send('Enter')
+        value = raised.exception.focus_diagnostic
+        self.assertTrue(value['submissionCaptureUnavailable'])
+        self.assertEqual(len(value['submissions']), 2)
+        self.assertTrue(all('nextRequest' not in row for row in value['submissions']))
+        self.assertNotIn('PRIVATE SERIAL ERROR', json.dumps(value))
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(len(syncs), 2)
+        api.focus_diagnostic.assert_not_called()
+
+    def test_local_serial_is_sampled_before_each_original_send_and_diagnostics_remain_bounded(self):
+        api, x, sent, _syncs = self.fixture()
+        operations = []
+        original_send = api.send_event
+        def sample(display):
+            operations.append(('next', display))
+            return 100 + len(sent)
+        def send(*args):
+            operations.append(('send', args[1]))
+            return original_send(*args)
+        api.next_request, api.send_event = sample, send
+        x.x.XSync = lambda *_: operations.append(('sync', None))
+        api.keycode = lambda symbol: {0xff09: 23, 0x20: 65}[symbol]
+        value = M.KeyboardAttempt(Binding(), api, 456).send('ShiftTabSpace')
+        self.assertTrue(value['deliveryComplete'])
+        self.assertEqual(operations, [('next', 4096), ('send', 456), ('sync', None)] * 4)
+        self.assertEqual(len(api.error_diagnostic()['submissions']), 4)
+        api.submit(456, 36, 0, True)
+        self.assertEqual(len(api.error_diagnostic()['submissions']), 4)
+        self.assertTrue(api.error_diagnostic()['submissionCaptureUnavailable'])
+
+
 class WarmCompanionTests(unittest.TestCase):
     def setUp(self):
         M._ATTEMPTS.clear()

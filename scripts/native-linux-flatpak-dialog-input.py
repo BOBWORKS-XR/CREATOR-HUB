@@ -358,6 +358,10 @@ class NativeWindow:
         self.to_code = function("XKeysymToKeycode", C.c_ubyte, C.c_void_p, C.c_ulong)
         self.to_symbol = function("XKeycodeToKeysym", C.c_ulong, C.c_void_p, C.c_ubyte, C.c_int)
         self.send_event = function("XSendEvent", C.c_int, C.c_void_p, C.c_ulong, C.c_int, C.c_long, C.POINTER(KeyEnvelope))
+        try:
+            self.next_request = function("XNextRequest", C.c_ulong, C.c_void_p)
+        except Exception:
+            self.next_request = None
 
     def attributes(self, window):
         value = self.helper.WindowAttributes()
@@ -507,6 +511,7 @@ class NativeWindow:
         return result
 
     def snapshot(self, window):
+        self.x11.x_error_stage = "target-guard"
         xid(window)
         root = self.x11.x.XDefaultRootWindow(self.x11.display)
         require(window != root, "Desktop root is not a dialog")
@@ -573,6 +578,7 @@ class NativeWindow:
         return result
 
     def keycode(self, symbol):
+        self.x11.x_error_stage = "keycode"
         require(type(symbol) is int and symbol in {key for sequence in SEQUENCES.values() for key, _modifiers in sequence},
                 "Only fixed dialog key symbols are supported")
         code = self.to_code(self.x11.display, symbol)
@@ -592,12 +598,57 @@ class NativeWindow:
         event.key.send_event, event.key.window = 1, window
         event.key.root = root
         event.key.keycode, event.key.state, event.key.same_screen = code, modifiers, 1
+        try:
+            self.x11.x_error_stage = "press-submit" if pressed else "release-submit"
+            if not hasattr(self, "_x_submissions"):
+                self._x_submissions = []
+            self._x_pending = None
+            if len(self._x_submissions) < 4:
+                row = dict(window=window, keycode=code, modifiers=modifiers, pressed=pressed,
+                           latchBeforeSubmit=getattr(self.x11, "error", False) is True)
+                self._x_submissions.append(row)
+                self._x_pending = row
+                # XNextRequest reads local Xlib state; it does not send an X request.
+                serial = self.next_request(self.x11.display)
+                require(type(serial) is int and 0 <= serial < 2**64, "Diagnostic request serial unavailable")
+                row["nextRequest"] = serial
+            else:
+                self._x_diagnostic_unavailable = True
+        except Exception:
+            self._x_diagnostic_unavailable = True
         # Xlib mask=0 delivers only to the creating client; never InputFocus,
         # PointerWindow, the desktop root, an ancestor, or a desktop-global device.
         return self.send_event(self.x11.display, window, 0, 0, C.byref(event))
 
     def sync(self):
-        self.x11.sync()
+        row = getattr(self, "_x_pending", None)
+        if row is not None:
+            try:
+                self.x11.x_error_stage = "press-sync" if row["pressed"] else "release-sync"
+                row["latchBeforeSync"] = getattr(self.x11, "error", False) is True
+            except Exception:
+                self._x_diagnostic_unavailable = True
+        returned = False
+        try:
+            self.x11.sync()
+            returned = True
+        finally:
+            try:
+                if row is not None:
+                    row.update(latchAfterSync=getattr(self.x11, "error", False) is True, syncReturned=returned)
+                self._x_pending = None
+            except Exception:
+                self._x_diagnostic_unavailable = True
+
+    def error_diagnostic(self):
+        # Only retained callback/send operands; never query a possibly destroyed target.
+        value = self.x11.error_diagnostic()
+        value.update(kind="x11-keyboard-refusal", submissions=copy.deepcopy(getattr(self, "_x_submissions", [])[:4]),
+                     submissionCaptureUnavailable=getattr(self, "_x_diagnostic_unavailable", False))
+        require(value.get("readOnly") is True and all(value.get(key) is False
+                for key in ("inputPermitted", "authorityGranted", "releaseReady"))
+                and len(json.dumps(value, allow_nan=False).encode()) <= 8192, "Bounded retained X error diagnostic required")
+        return value
 
 
 def validate_target(value, process, window, *, warm_companion=None):
@@ -722,6 +773,11 @@ class KeyboardAttempt:
             refused = InputRefused(str(error), self.receipt)
             if not self._receipt['delivery']:
                 retain_focus_diagnostic(refused, self.binding, self.api, self.window)
+            else:
+                try:
+                    refused.focus_diagnostic = self.api.error_diagnostic()
+                except Exception:
+                    pass  # Keep the original refusal and never requery after submission.
             raise refused from error
 
     def close(self):

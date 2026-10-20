@@ -407,6 +407,71 @@ class BoundWindowDiagnosticTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_EXTRA", json.dumps(record))
 
 
+class XErrorDiagnosticTests(unittest.TestCase):
+    def fixture(self):
+        x = object.__new__(h.X11)
+        x.display, x.error = 4096, False
+        x.x = types.SimpleNamespace(XSync=lambda *_: 0)
+        return x
+
+    def event(self, display=4096, serial=101, resource=12582915):
+        return h.XErrorEvent(0, display, resource, serial, 3, 25, 0)
+
+    def test_lp64_callback_copies_numeric_fields_without_queries_or_pointer_output(self):
+        self.assertEqual(C.sizeof(h.XErrorEvent), 40)
+        self.assertEqual([getattr(h.XErrorEvent, name).offset for name in
+                          ('display', 'resourceid', 'serial', 'error_code', 'request_code', 'minor_code')],
+                         [8, 16, 24, 32, 33, 34])
+        x, event = self.fixture(), self.event(serial=2**40 + 101)
+        x.x_error_stage = 'release-sync'
+        self.assertEqual(x._error(4096, C.byref(event)), 0)
+        event.serial = 999
+        value = x.error_diagnostic()
+        self.assertTrue(x.error)
+        self.assertEqual(value['events'], [dict(errorCode=3, requestCode=25, minorCode=0,
+            serial=2**40 + 101, resourceId=12582915, sameDisplay=True, stage='release-sync')])
+        self.assertTrue(value['readOnly'])
+        self.assertTrue(all(value[key] is False for key in ('inputPermitted', 'authorityGranted', 'releaseReady')))
+        self.assertNotIn('4096', json.dumps(value))
+
+    def test_foreign_display_and_earlier_serial_are_retained_not_exempted(self):
+        for callback_display, event_display in ((8192, 8192), (4096, 8192)):
+            x, event = self.fixture(), self.event(display=event_display, serial=90)
+            x._error(callback_display, C.byref(event))
+            with self.assertRaisesRegex(RuntimeError, 'Owned X resource query was refused') as raised:
+                x.sync()
+            value = raised.exception.focus_diagnostic
+            self.assertFalse(value['events'][0]['sameDisplay'])
+            self.assertEqual(value['events'][0]['serial'], 90)
+            self.assertTrue(value['latchSet'])
+
+    def test_null_event_and_overflow_keep_latch_and_bounded_retained_snapshot(self):
+        x = self.fixture()
+        x._error(4096, None)
+        self.assertTrue(x.error_diagnostic()['captureUnavailable'])
+        event = self.event()
+        for _ in range(20):
+            x._error(4096, C.byref(event))
+        value = x.error_diagnostic()
+        self.assertEqual(len(value['events']), 8)
+        self.assertTrue(value['truncated'])
+        self.assertLess(len(json.dumps(value)), 4096)
+        value['events'].clear()
+        self.assertEqual(len(x.error_diagnostic()['events']), 8)
+        self.assertTrue(x.error)
+
+    def test_sync_attachment_failure_preserves_original_refusal_and_one_sync(self):
+        x, calls = self.fixture(), []
+        x.error = True
+        x.x.XSync = lambda *args: calls.append(args)
+        x.error_diagnostic = lambda: (_ for _ in ()).throw(RuntimeError('PRIVATE DIAGNOSTIC ERROR'))
+        with self.assertRaisesRegex(RuntimeError, '^Owned X resource query was refused$') as raised:
+            x.sync()
+        self.assertFalse(hasattr(raised.exception, 'focus_diagnostic'))
+        self.assertEqual(calls, [(4096, 0)])
+        self.assertTrue(x.error)
+
+
 class XResTests(unittest.TestCase):
     def test_native_library_soname_is_case_sensitive(self):
         loaded = []

@@ -1373,7 +1373,9 @@ class Session:
         try:
             # New imports need independent current-harness pins, never the frozen product inventory.
             names = ('scripts/native-linux-production-016-flatpak.py', 'scripts/native-linux-production-016-flatpak.test.py',
-                     'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py')
+                     'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py',
+                     'scripts/native-linux-flatpak-dialog-input.py', 'scripts/native-linux-flatpak-dialog-input.test.py',
+                     'scripts/native-unix-window.py', 'scripts/native-unix-window.test.py')
             binding = parse(regular(self.root / 'api-binding.json', 32768, 0o600))
             require(binding['harnessSource'] == os.environ.get('GITHUB_SHA')
                     and re.fullmatch(r'[a-f0-9]{40}', binding['harnessSource'])

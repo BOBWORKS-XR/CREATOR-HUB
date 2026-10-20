@@ -30,7 +30,9 @@ const FALSE_GATES = Object.freeze(Object.fromEntries(['candidateExecuted', 'flat
 const SIGNED_FILES = Object.freeze(['creator-hub-linux-x86_64-portable.json', 'creator-hub-linux-x86_64-portable.json.minisig',
   'creator-hub-linux-x86_64-0.1.16.portable-manifest.json', 'creator-hub-linux-x86_64-0.1.16.portable-manifest.json.minisig']);
 const HARNESS_FILES = Object.freeze(['scripts/native-linux-production-016-flatpak.py', 'scripts/native-linux-production-016-flatpak.test.py',
-  'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py']);
+  'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py',
+  'scripts/native-linux-flatpak-dialog-input.py', 'scripts/native-linux-flatpak-dialog-input.test.py',
+  'scripts/native-unix-window.py', 'scripts/native-unix-window.test.py']);
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const pin = bytes => ({ size: bytes.length, sha256: hash(bytes) });
 function keys(value, names) {

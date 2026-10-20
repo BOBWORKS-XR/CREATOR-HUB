@@ -673,6 +673,16 @@ class Event(C.Union):
     _fields_ = [("message", Message), ("padding", C.c_long * 24)]
 
 
+class XErrorEvent(C.Structure):
+    # Xlib.h's LP64 layout; fixed-width longs also let pure fixtures verify the ABI on Windows.
+    _fields_ = [("type", C.c_int), ("display", C.c_void_p), ("resourceid", C.c_uint64),
+                ("serial", C.c_uint64), ("error_code", C.c_ubyte),
+                ("request_code", C.c_ubyte), ("minor_code", C.c_ubyte)]
+
+
+X_ERROR_STAGES = ("unmarked", "target-guard", "keycode", "press-submit", "release-submit", "press-sync", "release-sync")
+
+
 class X11:
     def __init__(self):
         require(re.fullmatch(r":[0-9]{1,5}(?:\.[0-9]{1,2})?", os.environ.get("DISPLAY", "")), "Local runner DISPLAY required")
@@ -703,6 +713,8 @@ class X11:
         self.display = self.x.XOpenDisplay(None)
         require(self.display, "Cannot open runner X display")
         self.error = False
+        self.error_events, self.error_events_truncated, self.error_capture_unavailable = [], False, False
+        self.x_error_stage = "unmarked"
         self.handler = C.CFUNCTYPE(C.c_int, C.c_void_p, C.c_void_p)(self._error)
         self.previous_handler = self.x.XSetErrorHandler(C.cast(self.handler, C.c_void_p))
         try:
@@ -718,11 +730,46 @@ class X11:
 
     def _error(self, _display, _event):
         self.error = True
+        try:
+            if not hasattr(self, "error_events"):
+                self.error_events = []
+            if len(self.error_events) >= 8:
+                self.error_events_truncated = True
+                return 0
+            require(_event and C.sizeof(XErrorEvent) == 40
+                    and [getattr(XErrorEvent, name).offset for name in
+                         ("display", "resourceid", "serial", "error_code", "request_code", "minor_code")]
+                    == [8, 16, 24, 32, 33, 34], "Diagnostic XErrorEvent ABI unavailable")
+            event = C.cast(_event, C.POINTER(XErrorEvent)).contents
+            stage = getattr(self, "x_error_stage", "unmarked")
+            self.error_events.append(dict(errorCode=int(event.error_code), requestCode=int(event.request_code),
+                minorCode=int(event.minor_code), serial=int(event.serial), resourceId=int(event.resourceid),
+                sameDisplay=_display == self.display and event.display == self.display,
+                stage=stage if stage in X_ERROR_STAGES else "unmarked"))
+        except Exception:
+            self.error_capture_unavailable = True
         return 0
+
+    def error_diagnostic(self):
+        value = dict(schemaVersion=1, kind="x11-protocol-error", readOnly=True, inputPermitted=False,
+            authorityGranted=False, releaseReady=False, latchSet=self.error is True,
+            events=getattr(self, "error_events", [])[:8],
+            truncated=getattr(self, "error_events_truncated", False),
+            captureUnavailable=getattr(self, "error_capture_unavailable", False))
+        raw = json.dumps(value, allow_nan=False)
+        require(len(raw.encode()) <= 4096, "Bounded X error diagnostic required")
+        return json.loads(raw)
 
     def sync(self):
         self.x.XSync(self.display, 0)
-        require(not self.error, "Owned X resource query was refused")
+        try:
+            require(not self.error, "Owned X resource query was refused")
+        except RuntimeError as error:
+            try:
+                error.focus_diagnostic = self.error_diagnostic()
+            except Exception:
+                pass
+            raise
 
     def atom(self, name):
         return self.x.XInternAtom(self.display, name.encode("ascii"), 1)

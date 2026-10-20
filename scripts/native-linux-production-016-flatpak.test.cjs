@@ -57,7 +57,9 @@ function harnessFixture(actual = false) {
 
 test('diagnostic imports require the closed four-file inventory and independently matching remote bytes', () => {
   assert.deepEqual(c.HARNESS_FILES, ['scripts/native-linux-production-016-flatpak.py', 'scripts/native-linux-production-016-flatpak.test.py',
-    'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py']);
+    'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py',
+    'scripts/native-linux-flatpak-dialog-input.py', 'scripts/native-linux-flatpak-dialog-input.test.py',
+    'scripts/native-unix-window.py', 'scripts/native-unix-window.test.py']);
   const { contents, bytes } = harnessFixture(), pins = c.harnessPins(contents, bytes);
   assert.deepEqual(pins, Object.fromEntries(c.HARNESS_FILES.map(name => [name, c.pin(bytes[name])])));
   assert.deepEqual(c.verifyHarness(pins, bytes), pins);
