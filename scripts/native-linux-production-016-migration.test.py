@@ -1477,6 +1477,125 @@ class ConnectionReviewGraphCaptureTests(unittest.TestCase):
             self.assertNotIn("PRIVATE_CONFIG_ARGUMENT", json.dumps(value))
 
 
+def captured_authentication_graph():
+    # Run 39466691322: all 32 references/roles/parents/states. Redacted names
+    # are reconstructed from the exact policy/public GTK labels and their captured hashes.
+    question = ("Administrator authentication is required to retire the verified MCP 2.7.7 or Project Setup 0.3.7 "
+                "standalone app. MCP runtime files, user settings and Unity projects will be kept.")
+    secondary = ("An application is attempting to perform an action that requires privileges. "
+                 "Authentication as one of the users below is required to perform this action.")
+    layout = (
+        (3, None, 16, "Authenticate", True), (4, 3, 20, "", True), (5, 4, 20, "", True),
+        (8, 5, 26, "", True), (9, 5, 20, "", True), (12, 9, 29, question, True),
+        (13, 9, 29, secondary, True), (14, 9, 11, M.USER, True), (15, 14, 33, "", False),
+        (23, 15, 35, "Select user...", False), (24, 15, 35, "Ubuntu (packer)", False),
+        (25, 15, 35, M.USER, False), (16, 9, 20, "", True), (20, 16, 39, "", True),
+        (26, 20, 39, "", True), (33, 26, 40, None, True), (34, 26, 29, "Password:", True),
+        (21, 16, 29, "", True), (6, 4, 62, "Details", True), (10, 6, 20, "", False),
+        (17, 10, 39, "", False), (22, 17, 39, "", False), (27, 22, 29, "Creator Works", False),
+        (28, 27, 88, "", False), (29, 22, 29, "Vendor:", False),
+        (30, 22, 29, "com.creatorworks.hub.deb-retirement", False), (31, 30, 88, "", False),
+        (32, 22, 29, "Action:", False), (7, 4, 20, "", True), (11, 7, 20, "", True),
+        (18, 11, 43, "Cancel", True), (19, 11, 43, "Authenticate", True))
+    reference = lambda number: [":1.0", "/org/a11y/atspi/accessible/" + ("root" if number is None else str(number))]
+    rows = [{"reference": reference(number), "parent": reference(parent), "pid": 5256,
+             "role": role, "name": name, "ready": ready} for number, parent, role, name, ready in layout]
+    observations = [{"reference": row["reference"], "states": dict(zip(
+        ("SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY"),
+        (True, True, True, False, False) if row["ready"] else (False, None, None, None, None)))} for row in rows]
+    return question, rows, observations
+
+
+class AuthenticationDetailsTests(unittest.TestCase):
+    def check(self, rows, question):
+        return M.graph_contract(rows, pid=5256, title="Authenticate", question=question, password=True)
+
+    def test_actual_full_captured_graph_accepts_only_informational_hidden_details(self):
+        question, rows, observations = captured_authentication_graph(); before = copy.deepcopy(rows); record = {}
+        self.assertEqual(len(rows), 32)
+        self.assertEqual([i for i, row in enumerate(rows) if row["role"] in (2, 16, 29, 40, 43) and not row["ready"]], [22, 24, 25, 27])
+        self.assertEqual(M.digest(question.encode()), "61c58189c4a3216c9cfa9e6c457123bdb009b9f7e7b9544c92aa24ed284696b6")
+        self.assertEqual(M.authentication_details_labels(rows), frozenset(tuple(rows[i]["reference"]) for i in (22, 24, 25, 27)))
+        M.authentication_graph_contract(rows, pid=5256, question=question, observations=observations, record=record)
+        self.assertEqual(rows, before); self.assertEqual(record, {})
+
+    def test_semantics_do_not_depend_on_captured_reference_numbers_or_metadata_being_hidden(self):
+        question, rows, _ = captured_authentication_graph()
+        for row in rows:
+            row["reference"] = [":1.77", "/synthetic" + row["reference"][1]]
+            row["parent"] = [":1.77", "/synthetic" + row["parent"][1]]
+        self.check(rows, question)
+        for row in rows[18:28]: row["ready"] = True
+        self.check(rows, question)
+        rows[22]["name"] = "unknown metadata even when visible"
+        with self.assertRaisesRegex(RuntimeError, "Authentication Details role/text/parent changed"):
+            self.check(rows, question)
+
+    def test_each_non_details_required_node_remains_strictly_ready(self):
+        question, rows, _ = captured_authentication_graph()
+        # Dialog, question, secondary text, password, prompt, info label and both actions.
+        for index in (0, 5, 6, 15, 16, 17, 30, 31):
+            changed = copy.deepcopy(rows); changed[index]["ready"] = False
+            with self.subTest(index=index), self.assertRaisesRegex(RuntimeError, "^Native controls are not ready$"):
+                self.check(changed, question)
+
+    def test_full_subtree_roles_names_and_exact_parent_semantics_are_required(self):
+        question, rows, _ = captured_authentication_graph()
+        for mutate in (lambda g: g[18].update(ready=False), lambda g: g[18].update(role=20),
+                       lambda g: g[18].update(name="Other details"), lambda g: g[18].update(parent=g[4]["reference"]),
+                       lambda g: g[19].update(role=39), lambda g: g[20].update(role=20),
+                       lambda g: g[21].update(name="extra container text"),
+                       lambda g: g[22].update(name="another vendor"), lambda g: g[24].update(name="Other:"),
+                       lambda g: g[25].update(name="another.action"), lambda g: g[27].update(name="Other:"),
+                       lambda g: g[23].update(role=43), lambda g: g[23].update(name="unexpected link text"),
+                       lambda g: g[26].update(parent=g[22]["reference"]),
+                       lambda g: g[22].update(parent=g[19]["reference"]),
+                       lambda g: g.__delitem__(26)):
+            changed = copy.deepcopy(rows); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises(RuntimeError): self.check(changed, question)
+
+    def test_extra_duplicate_unknown_or_cyclic_details_nodes_are_not_exempt(self):
+        question, rows, _ = captured_authentication_graph()
+        for role, name, parent in ((29, "extra hidden metadata", 21), (43, "Cancel", 21), (40, None, 21),
+                                   (62, "Details", 1), (29, "outside hidden label", 4)):
+            changed = copy.deepcopy(rows)
+            changed.append({"reference": [":1.0", "/org/a11y/atspi/accessible/99"], "parent": changed[parent]["reference"],
+                            "pid": 5256, "role": role, "name": name, "ready": False})
+            with self.subTest(role=role, name=name), self.assertRaises(RuntimeError): self.check(changed, question)
+        for index, parent in ((19, 21), (18, 21), (21, 21)):
+            changed = copy.deepcopy(rows); changed[index]["parent"] = changed[parent]["reference"]
+            with self.subTest(cycle=(index, parent)), self.assertRaises(RuntimeError): self.check(changed, question)
+
+    def test_metadata_does_not_bypass_owner_references_question_or_password_guards(self):
+        question, rows, _ = captured_authentication_graph()
+        for mutate in (lambda g: g[22].update(pid=999), lambda g: g[24].update(reference=g[22]["reference"]),
+                       lambda g: g[22].update(parent=[":foreign", "/outside"]),
+                       lambda g: g[5].update(name="wrong question"), lambda g: g[15].update(name="PASSWORD MUST NOT BE READ"),
+                       lambda g: g[30].update(name="Other action")):
+            changed = copy.deepcopy(rows); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises(RuntimeError): self.check(changed, question)
+
+    def test_exact_action_profiles_still_require_three_equal_walks_and_one_click(self):
+        question, rows, _ = captured_authentication_graph(); native = M.load("native-linux-polkit-probe")
+        button = Mock(); action = button.get_action_iface.return_value
+        action.get_n_actions.return_value = 1; action.get_action_name.return_value = "click"; action.do_action.return_value = True
+        def profile():
+            self.check(rows, question)
+            return button, {"graph": copy.deepcopy(rows), "frame": [1, 2, 300, 200]}
+        walked = Mock(side_effect=profile); guard = Mock(); record = {"mode": "cancel"}
+        native.cancel_once(walked, guard, record)
+        self.assertEqual(walked.call_count, 3); self.assertEqual(guard.call_count, 3)
+        action.do_action.assert_called_once_with(0); self.assertEqual(record["cancelActionAttempts"], 1)
+        with self.assertRaises(RuntimeError): native.cancel_once(walked, guard, record)
+        action.do_action.assert_called_once_with(0)
+        for phase in (1, 2):
+            profiles = [profile() for _ in range(3)]; profiles[phase][1]["frame"] = [1, 2, 301, 200]
+            action.do_action.reset_mock()
+            with self.subTest(phase=phase), self.assertRaises(RuntimeError):
+                native.cancel_once(Mock(side_effect=profiles), Mock(), {"mode": "cancel"})
+            action.do_action.assert_not_called()
+
+
 class AuthorizationReadinessCaptureTests(unittest.TestCase):
     def fixture(self):
         question = "fixed synthetic retirement question"

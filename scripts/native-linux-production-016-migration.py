@@ -850,6 +850,38 @@ def inside(bounds, frame):
             "Control escaped independently owned native frame")
 
 
+def authentication_details_labels(rows):
+    details = [row for row in rows if row["role"] == 62 and row["name"] == "Details"]
+    if not details:
+        return frozenset()
+    require(len(details) == 1 and rows[0]["role"] == 16 and rows[0]["name"] == "Authenticate"
+            and details[0]["ready"] is True, "One ready authentication Details expander required")
+    by_reference = {tuple(row["reference"]): row for row in rows}
+    container = by_reference[tuple(details[0]["parent"])]
+    require(container["role"] == 20 and container["name"] == ""
+            and container["parent"] == rows[0]["reference"], "Authentication Details container changed")
+    # Pinned polkit-gnome 0.105 plus the exact 016 policy, replayed from run 39466691322.
+    # Only these informational labels may be hidden; no prompt or action is exempt.
+    expected = ((62, "Details", None), (20, "", 0), (39, "", 1), (39, "", 2),
+                (29, "Creator Works", 3), (88, "", 4), (29, "Vendor:", 3),
+                (29, "com.creatorworks.hub.deb-retirement", 3), (88, "", 7), (29, "Action:", 3))
+    children = {}
+    for row in rows[1:]:
+        children.setdefault(tuple(row["parent"]), []).append(row)
+    pending, branch, seen = [details[0]], [], set()
+    while pending:
+        row = pending.pop(); reference = tuple(row["reference"])
+        require(reference not in seen and len(branch) < len(expected), "Unexpected authentication Details descendant")
+        seen.add(reference); branch.append(row)
+        pending.extend(reversed(children.get(reference, [])))
+    require(len(branch) == len(expected), "Incomplete authentication Details subtree")
+    for row, (role, name, parent) in zip(branch, expected):
+        require(row["role"] == role and row["name"] == name
+                and (parent is None or row["parent"] == branch[parent]["reference"]),
+                "Authentication Details role/text/parent changed")
+    return frozenset(tuple(row["reference"]) for row in branch if row["role"] == 29)
+
+
 def graph_contract(rows, *, pid, title, question, password=False, connection_review=False):
     require(not (password and connection_review), "Distinct finite native dialog contracts required")
     require(type(rows) is list and 1 <= len(rows) <= 64 and rows[0]["role"] in (2, 16), "Bounded native alert/dialog required")
@@ -870,7 +902,9 @@ def graph_contract(rows, *, pid, title, question, password=False, connection_rev
                 "Connection-review heading and question must share their native container")
     protected = [row for row in rows if row["role"] == 40]
     require(len(protected) == (1 if password else 0) and all(row["name"] is None for row in protected), "Password must never be read")
-    require(all(row["ready"] for row in rows if row["role"] in (2, 16, 29, 40, 43)), "Native controls are not ready")
+    informational = authentication_details_labels(rows) if password else frozenset()
+    require(all(row["ready"] for row in rows if row["role"] in (2, 16, 29, 40, 43)
+                and tuple(row["reference"]) not in informational), "Native controls are not ready")
 
 
 def connection_review_graph_diagnostic(rows, *, pid, question):
