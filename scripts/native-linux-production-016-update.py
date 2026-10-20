@@ -62,7 +62,10 @@ ENVIRONMENT = ("GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "G
                "UPDATE_PROFILE_SHA256", "CONTROLLER_NODE")
 SOURCES = (Path(__file__).name, "native-unix-window.py", "native-linux-root-probe.py", "native-linux-integrated-pages.py",
            "native-linux-polkit-probe.py", "native-linux-update-flow.py", "native-linux-production-016-flatpak.py",
-           "linux-retirement-package-verify.py", "private-linux-update-fixture-017-package-verify.py", "linux-update-lab-feed.cjs")
+           "linux-retirement-package-verify.py", "private-linux-update-fixture-017-package-verify.py", "linux-update-lab-feed.cjs",
+           "native-linux-production-016-migration.py", "native-linux-production-016-stage.py", "native-linux-016-stage.py")
+INVENTORY_IMPORTS = ("native-linux-production-016-migration.py", "native-linux-production-016-stage.py",
+                     "native-linux-016-stage.py", "linux-retirement-package-verify.py")
 PRIVATE_RELEASE, PRIVATE_TAG = 411494394, "v0.1.13-validation"
 VERIFIER_PINS = {
     "src-tauri/examples/verify-package-input.rs": {"size": 2266, "sha256": "81207a9e6b17a288c9ee95acf9c400ed9b047cfa319a3a1fed33df320f6fb135"},
@@ -168,6 +171,20 @@ def load(name):
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    return module
+
+
+def inventory_observer(sealed):
+    folder = BASE / "scripts"
+    protected_ancestry(folder)
+    for name in INVENTORY_IMPORTS:
+        bound(folder / name, sealed["sources"][name], 2 * 1024**2, uid=0, mode=0o444)
+    spec = importlib.util.spec_from_file_location("update016_inventory", folder / INVENTORY_IMPORTS[0])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    require(module.BASE == BASE and module.UID == UID and module.INVENTORY_COHORTS["update"] == SCENARIOS,
+            "Fixed shared update inventory cohort differs")
     return module
 
 
@@ -832,8 +849,9 @@ def windows(x11):
 
 class Surface:
     """One live signed Root, one manifest/system-bound renderer and one XRes frame."""
-    def __init__(self, record, x11, helper, native, atspi, *, manifest=None, generation_dir=None, title=TITLE, dialog=False):
+    def __init__(self, record, x11, helper, native, atspi, *, manifest=None, generation_dir=None, title=TITLE, dialog=False, inventory=None):
         self.record, self.x11, self.helper, self.native, self.atspi = record, x11, helper, native, atspi
+        self.inventory = inventory
         self.manifest, self.generation_dir, self.dialog = manifest, generation_dir, dialog
         self.renderer = None
         self.references, self.bus = native.native_ax_references()
@@ -1073,24 +1091,21 @@ def direct_pages(surface, actions):
 
 
 def phase_processes(surface):
-    roots, owned = [], 0
-    for directory in Path("/proc").iterdir():
-        if not directory.name.isdigit():
-            continue
-        try:
-            if directory.stat().st_uid != UID:
-                continue
-            owned += 1; require(owned <= 128, "Bounded disposable-account process inventory")
-            value = surface.native.native_process(int(directory.name), surface.helper, full=False)
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        require(value["uids"] == [UID] * 4, "Mixed identity in disposable account")
+    surface.recheck(full=True)
+    require(surface.inventory is not None, "Fresh root inventory channel required")
+    answer = surface.inventory.sample(wait)
+    surface.recheck(full=True)
+    roots = []
+    for value in answer["processes"]:
         name = Path(value["executable"]).name
         require(name not in ("creator-works-mcp-launcher", "creator-project-setup", "creator-mcp-launcher"), "Legacy GUI/backend subprocess refused")
         if name == "creator-hub":
+            if value["pid"] == surface.pid:
+                require(value["startTime"] == surface.record["startTime"] and value["executable"] == surface.record["executable"],
+                        "Root inventory identity differs from the bound live image")
             roots.append(value["pid"])
     require(roots == [surface.pid], "Exactly the bound Root process required, no hidden/duplicate Root")
-    surface.recheck(full=True)
+    surface.last_inventory = answer
 
 
 def phase_bitmap(surface, name):
@@ -1566,6 +1581,8 @@ def native_session(env):
     validate_all_api(parse(profile_raw), parse(api_raw), original_request["context"])
     for name, expected in original_request["sources"].items():
         bound(BASE / "scripts" / name, expected, 2 * 1024**2, uid=0, mode=0o444)
+    observer = inventory_observer(original_request)
+    inventory = observer.InventoryClient(env["GITHUB_SHA"], scenario, cohort="update")
     bound(BASE / "scripts/verify-package-input", original_request["verifier"]["tool"]["pin"], 64 * 1024**2, uid=0, mode=0o755)
     profile = parse(profile_raw); review = parse(read(BASE / "review.json", 2 * 1024**2, uid=0, mode=0o644))
     require(review["signaturesVerified"] is True and all(review[k] is False for k in FALSE), "Root-reviewed signed stage required")
@@ -1634,7 +1651,7 @@ def native_session(env):
             old = phase_identity(kernel_record(initial.pid, native, helper), expected, executable, parent_pid, UID)
         report["initialRoot"] = old; save(BASE / "result/root.json", old)
         old_bus = verify_bus(old, bus, polkit, GLib, portable=portable)
-        surface = Surface(old, x11, helper, native, Atspi, manifest=manifest, generation_dir=generation_dir)
+        surface = Surface(old, x11, helper, native, Atspi, manifest=manifest, generation_dir=generation_dir, inventory=inventory)
         report["startupUi"] = startup_ui(surface, home, first=not portable)
         direct_pages(surface, [])
         report["initialBitmap"] = phase_bitmap(surface, "initial-bitmap")
@@ -1671,7 +1688,7 @@ def native_session(env):
             successor, rejected = observe_successor(old, new_pin, new_executable, parent_pid, baseline, native, helper, old_child=None if portable else initial)
             report["automaticSuccessor"], report["nonliveRejected"] = successor, rejected
             verify_bus(successor, bus, polkit, GLib, portable=portable, previous=old_bus)
-            replacement = Surface(successor, x11, helper, native, Atspi, manifest=review["portable"]["17"]["manifest"] if portable else None, generation_dir=new_dir)
+            replacement = Surface(successor, x11, helper, native, Atspi, manifest=review["portable"]["17"]["manifest"] if portable else None, generation_dir=new_dir, inventory=inventory)
             wait(lambda: feature_ready(replacement, "setup"), 90)
             report["restoredLastTool"] = "setup"
             navigate_home(replacement)
@@ -2436,6 +2453,7 @@ def broker(env):
     review = parse(review_raw)
     write(BASE / "request.json", read(BASE / "inputs/request.json", 65536), 0o644)
     write(BASE / "review.json", review_raw, 0o644)
+    observer = inventory_observer(sealed)
     create_account()
     os.chown(BASE / "result", UID, UID)
     for file in (BASE / "inputs", *(BASE / "inputs").rglob("*")):
@@ -2487,10 +2505,12 @@ def broker(env):
         session.stdin.close(); payload[:] = b"\0" * len(payload)
         if secret is not None:
             secret[:] = b"\0" * len(secret)
+        inventory_state = {"sequence": 1, "nonces": set()}
         index, deadline = 1, time.monotonic() + 900
         while session.poll() is None and time.monotonic() < deadline:
             logs.pump(0.02)
             require(not any(r["truncated"] for r in logs.metadata().values()), "Bounded session diagnostic capture exceeded")
+            observer.serve_inventory(inventory_state, record, env["GITHUB_SHA"], scenario, native, helper, cohort="update")
             target = BASE / "result" / f"input-{index}.json"
             if os.path.lexists(target):
                 require(scenario in ("deb-auth-cancel", "deb-approve") and index <= 12, "Unexpected authorization input request")

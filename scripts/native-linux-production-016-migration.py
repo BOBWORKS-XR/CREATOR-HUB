@@ -1149,8 +1149,15 @@ class Session:
             self.child.terminate()
         self.child.wait(timeout=10)
         if not select.select([backend_fd], [], [], 0)[0]:
-            require(self.native.native_process(self.backend["pid"], self.helper) == self.backend, "Native driver changed before disposal")
-            signal.pidfd_send_signal(backend_fd, signal.SIGTERM)
+            try:
+                current = self.native.native_process(self.backend["pid"], self.helper)
+            except RuntimeError as error:
+                if type(error) is not RuntimeError or str(error) != "Owned process is not live" or self.evidence.get("normalCloseObserved") is not True:
+                    raise
+                # A terminal stat is not thread-group exit; the bound pidfd must become ready.
+            else:
+                require(current == self.backend, "Native driver changed before disposal")
+                signal.pidfd_send_signal(backend_fd, signal.SIGTERM)
             self.pages.wait(lambda: bool(select.select([backend_fd], [], [], 0)[0]), 10)
 
 
@@ -1281,6 +1288,10 @@ def native_process_inventory(native, helper):
 
 
 INVENTORY_MAX_SAMPLES = 2048
+INVENTORY_COHORTS = {
+    "migration": SCENARIOS,
+    "update": ("deb-native-cancel", "deb-auth-cancel", "deb-approve", "portable-native-cancel", "portable-approve"),
+}
 
 
 def inventory_channel():
@@ -1294,9 +1305,10 @@ def inventory_channel():
             and stat.S_IMODE(info.st_mode) == 0o700, "Inventory request directory is not the private fixture directory")
 
 
-def inventory_request(value, harness, scenario, sequence):
+def inventory_request(value, harness, scenario, sequence, *, cohort="migration"):
     keys(value, ("schemaVersion", "operation", "harnessSource", "scenario", "sequence", "nonce"))
-    require(type(harness) is str and re.fullmatch(r"[a-f0-9]{40}", harness) and scenario in SCENARIOS
+    require(type(harness) is str and re.fullmatch(r"[a-f0-9]{40}", harness)
+            and type(cohort) is str and cohort in INVENTORY_COHORTS and scenario in INVENTORY_COHORTS[cohort]
             and type(sequence) is int and 1 <= sequence <= INVENTORY_MAX_SAMPLES
             and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
             and value["operation"] == "global-uid-inventory" and value["harnessSource"] == harness
@@ -1304,9 +1316,9 @@ def inventory_request(value, harness, scenario, sequence):
             and type(value["nonce"]) is str and re.fullmatch(r"[a-f0-9]{64}", value["nonce"]), "Fresh finite inventory request differs")
 
 
-def inventory_answer(value, request):
+def inventory_answer(value, request, *, cohort="migration"):
     keys(value, ("request", "ok", "processes", "terminalProcesses"))
-    inventory_request(value["request"], request["harnessSource"], request["scenario"], request["sequence"])
+    inventory_request(value["request"], request["harnessSource"], request["scenario"], request["sequence"], cohort=cohort)
     require(value["request"] == request and value["ok"] is True and type(value["processes"]) is list
             and type(value["terminalProcesses"]) is list and len(value["processes"]) + len(value["terminalProcesses"]) <= 64,
             "Fresh root inventory answer refused")
@@ -1329,8 +1341,9 @@ def inventory_answer(value, request):
 
 
 class InventoryClient:
-    def __init__(self, harness, scenario):
+    def __init__(self, harness, scenario, *, cohort="migration"):
         self.harness, self.scenario, self.sequence = harness, scenario, 1
+        self.cohort = cohort
         self.nonces, self.blocked, self.lock = set(), False, threading.Lock()
 
     def sample(self, wait):
@@ -1342,7 +1355,7 @@ class InventoryClient:
             inventory_channel()
             value = {"schemaVersion": 1, "operation": "global-uid-inventory", "harnessSource": self.harness,
                      "scenario": self.scenario, "sequence": self.sequence, "nonce": secrets.token_hex(32)}
-            inventory_request(value, self.harness, self.scenario, self.sequence)
+            inventory_request(value, self.harness, self.scenario, self.sequence, cohort=self.cohort)
             require(value["nonce"] not in self.nonces, "Inventory nonce reused")
             self.nonces.add(value["nonce"])
             request = BASE / f"result/inventory-request-{self.sequence}.json"
@@ -1353,13 +1366,13 @@ class InventoryClient:
             wait(lambda: os.path.lexists(response))
             inventory_channel()
             answer = P.parse(read_file(response, 524288, uid=0, mode=0o644))
-            inventory_answer(answer, value)
+            inventory_answer(answer, value, cohort=self.cohort)
             self.sequence += 1
             self.blocked = False
             return answer
 
 
-def serve_inventory(state, record, harness, scenario, native, helper):
+def serve_inventory(state, record, harness, scenario, native, helper, *, cohort="migration"):
     require(os.getuid() == os.geteuid() == 0, "Root-only global inventory observer")
     inventory_channel()
     sequence = state["sequence"]
@@ -1372,13 +1385,13 @@ def serve_inventory(state, record, harness, scenario, native, helper):
     try:
         raw = read_file(request, 512, uid=UID, mode=0o600)
         value = P.parse(raw)
-        inventory_request(value, harness, scenario, sequence)
+        inventory_request(value, harness, scenario, sequence, cohort=cohort)
         require(value["nonce"] not in state["nonces"], "Inventory nonce replay refused")
         state["nonces"].add(value["nonce"])
         inventory = native_process_inventory(native, helper)
         keys(inventory, ("processes", "terminalProcesses"))
         answer = {"request": value, "ok": True, **inventory}
-        inventory_answer(answer, value)
+        inventory_answer(answer, value, cohort=cohort)
         require(len(json.dumps(answer, ensure_ascii=False, allow_nan=False).encode()) <= 524288, "Root inventory response exceeds bound")
         require(read_file(request, 512, uid=UID, mode=0o600) == raw, "Inventory request changed during observation")
         inventory_channel()

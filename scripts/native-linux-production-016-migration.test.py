@@ -611,7 +611,8 @@ class FailedProcessAttributionTests(unittest.TestCase):
 
 
 @contextmanager
-def inventory_rpc_fixture():
+def inventory_rpc_fixture(*, cohort="migration", scenario=None):
+    scenario = M.SCENARIOS[0] if scenario is None else scenario
     with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
         root = Path(temporary).resolve(); (root / "result").mkdir()
         actor = [M.UID]
@@ -632,7 +633,7 @@ def inventory_rpc_fixture():
         def serve():
             actor[0] = 0
             try:
-                return M.serve_inventory(fixture.state, fixture.record, "f" * 40, M.SCENARIOS[0], Mock(), Mock())
+                return M.serve_inventory(fixture.state, fixture.record, "f" * 40, scenario, Mock(), Mock(), cohort=cohort)
             finally:
                 actor[0] = M.UID
         fixture.serve = serve
@@ -644,11 +645,68 @@ def inventory_rpc_fixture():
             if fixture.after_service: fixture.after_service(fixture)
             assert predicate(), "Broker did not publish a response"
         fixture.wait = wait
-        fixture.client = M.InventoryClient("f" * 40, M.SCENARIOS[0])
+        fixture.client = M.InventoryClient("f" * 40, scenario, cohort=cohort)
         yield fixture
 
 
 class InventoryRpcTests(unittest.TestCase):
+    def test_update_cohort_uses_real_finite_scenarios_without_changing_migration_wire(self):
+        self.assertEqual(M.INVENTORY_COHORTS["migration"], M.SCENARIOS)
+        self.assertEqual(M.INVENTORY_COHORTS["update"], (
+            "deb-native-cancel", "deb-auth-cancel", "deb-approve", "portable-native-cancel", "portable-approve"))
+        for scenario in M.INVENTORY_COHORTS["update"]:
+            with self.subTest(scenario=scenario), inventory_rpc_fixture(cohort="update", scenario=scenario) as f:
+                first = f.client.sample(f.wait); second = f.client.sample(f.wait)
+                self.assertEqual(first["request"]["scenario"], scenario)
+                self.assertEqual(set(first["request"]), {"schemaVersion", "operation", "harnessSource", "scenario", "sequence", "nonce"})
+                self.assertEqual(second["request"]["sequence"], 2)
+                self.assertNotEqual(first["request"]["nonce"], second["request"]["nonce"])
+        value = {"schemaVersion": 1, "operation": "global-uid-inventory", "harnessSource": "f" * 40,
+                 "scenario": M.SCENARIOS[0], "sequence": 1, "nonce": "a" * 64}
+        M.inventory_request(value, "f" * 40, M.SCENARIOS[0], 1)
+
+    def test_cohorts_refuse_cross_labels_unknown_overrides_and_default_update_adoption(self):
+        for cohort, scenario in (("migration", "deb-approve"), ("update", M.SCENARIOS[0]),
+                                 ("other", "deb-approve"), (None, "deb-approve"), ([], "deb-approve"),
+                                 ("update", "portable-other")):
+            value = {"schemaVersion": 1, "operation": "global-uid-inventory", "harnessSource": "f" * 40,
+                     "scenario": scenario, "sequence": 1, "nonce": "a" * 64}
+            with self.subTest(cohort=cohort, scenario=scenario), self.assertRaises(RuntimeError):
+                M.inventory_request(value, "f" * 40, scenario, 1, cohort=cohort)
+        with inventory_rpc_fixture(cohort="update", scenario="deb-approve") as f:
+            answer = f.client.sample(f.wait)
+            with self.assertRaises(RuntimeError): M.inventory_answer(answer, answer["request"])
+
+    def test_update_channel_keeps_refusal_replay_and_concurrent_sequence_guards(self):
+        with inventory_rpc_fixture(cohort="update", scenario="portable-approve") as f:
+            with M.concurrent.futures.ThreadPoolExecutor(max_workers=2) as worker:
+                answers = list(worker.map(lambda _: f.client.sample(f.wait), range(2)))
+            self.assertEqual(sorted(a["request"]["sequence"] for a in answers), [1, 2])
+            f.client.nonces.clear()
+            with patch.object(M.secrets, "token_hex", return_value=answers[0]["request"]["nonce"]):
+                with self.assertRaisesRegex(RuntimeError, "nonce replay"): f.client.sample(f.wait)
+            self.assertEqual(f.inventory.call_count, 2)
+            with self.assertRaisesRegex(RuntimeError, "cannot be retried"): f.client.sample(f.wait)
+        for failure in ("source", "scenario", "nonce", "terminal-overlap", "permission"):
+            with self.subTest(failure=failure), inventory_rpc_fixture(cohort="update", scenario="deb-native-cancel") as f:
+                if failure == "permission":
+                    original = PermissionError(13, "synthetic", "/proc/5519/exe")
+                    f.inventory.side_effect = original
+                    with patch.object(M, "inventory_permission_capture", return_value={"stable": False}):
+                        with self.assertRaises(PermissionError) as raised: f.client.sample(f.wait)
+                    self.assertIs(raised.exception, original)
+                else:
+                    def alter(state):
+                        file = state.root / "inventory-response-1.json"; value = json.loads(file.read_bytes())
+                        if failure == "source": value["request"]["harnessSource"] = "0" * 40
+                        if failure == "scenario": value["request"]["scenario"] = M.SCENARIOS[0]
+                        if failure == "nonce": value["request"]["nonce"] = "0" * 64
+                        if failure == "terminal-overlap": value["terminalProcesses"] = [{"pid": 12}]
+                        file.write_text(json.dumps(value))
+                    f.after_service = alter
+                    with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+                with self.assertRaisesRegex(RuntimeError, "cannot be retried"): f.client.sample(f.wait)
+
     def test_fresh_global_samples_use_one_monotonic_channel_across_reopened_sessions(self):
         with inventory_rpc_fixture() as f:
             first = f.client.sample(f.wait); reopened = f.client.sample(f.wait)
@@ -2294,6 +2352,78 @@ class ControllerTests(unittest.TestCase):
             hardlink = file.with_name("hardlink")
             os.link(file, hardlink)
             with self.assertRaises(RuntimeError): M.read_file(file)
+
+    def disposal_fixture(self, outcome):
+        session = M.Session.__new__(M.Session)
+        session.child, session.native, session.helper, session.pages = Mock(), Mock(), Mock(), Mock()
+        session.child.poll.return_value = 0
+        session.backend = {"pid": 12}
+        session.evidence = {"normalCloseObserved": True}
+        session.native.native_process = Mock(**({"side_effect": outcome} if isinstance(outcome, Exception) or callable(outcome)
+                                              else {"return_value": outcome}))
+        def waiting(check, seconds):
+            self.assertEqual(seconds, 10)
+            for _ in range(3):
+                if check(): return
+            raise TimeoutError("Bounded existing backend pidfd did not become ready")
+        session.pages.wait.side_effect = waiting
+        return session
+
+    def test_backend_disposal_terminal_parse_race_waits_existing_pidfd_without_signals(self):
+        helper = M.load("native-unix-window")
+        for state in ("Z", "X"):
+            def observed(*args):
+                return helper.parse_start("12 (backend) " + state + " 11 " + "0 " * 17 + "90", 12)
+            session = self.disposal_fixture(observed)
+            polls = []
+            def poll(*args):
+                self.assertEqual(args, ([99], [], [], 0)); polls.append(True)
+                return ([99] if len(polls) == 3 else [], [], [])
+            with self.subTest(state=state), patch.object(M.select, "select", side_effect=poll), \
+                    patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+                session.dispose_tools(99)
+            self.assertEqual(len(polls), 3)
+            session.native.native_process.assert_called_once_with(12, session.helper)
+            session.child.terminate.assert_not_called(); send.assert_not_called()
+            session.child.wait.assert_called_once_with(timeout=10)
+
+    def test_backend_disposal_terminal_timeout_never_counts_as_exit_or_sends_signal(self):
+        session = self.disposal_fixture(RuntimeError("Owned process is not live"))
+        with patch.object(M.select, "select", return_value=([], [], [])), \
+                patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+            with self.assertRaises(TimeoutError): session.dispose_tools(99)
+        session.child.terminate.assert_not_called(); send.assert_not_called()
+        session.native.native_process.assert_called_once_with(12, session.helper)
+
+    def test_backend_disposal_preserves_other_refusals_and_requires_normal_root_close(self):
+        class DifferentRuntimeError(RuntimeError):
+            pass
+        for original in (RuntimeError("Different liveness refusal"), PermissionError(13, "synthetic", "/proc/12/exe"),
+                         ValueError("Malformed process stat"), DifferentRuntimeError("Owned process is not live")):
+            session = self.disposal_fixture(original)
+            with self.subTest(error=type(original).__name__), patch.object(M.select, "select", return_value=([], [], [])), \
+                    patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+                with self.assertRaises(type(original)) as raised: session.dispose_tools(99)
+            self.assertIs(raised.exception, original)
+            session.pages.wait.assert_not_called(); send.assert_not_called()
+        original = RuntimeError("Owned process is not live")
+        session = self.disposal_fixture(original); session.evidence["normalCloseObserved"] = False
+        with patch.object(M.select, "select", return_value=([], [], [])), patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+            with self.assertRaises(RuntimeError) as raised: session.dispose_tools(99)
+        self.assertIs(raised.exception, original); session.pages.wait.assert_not_called(); send.assert_not_called()
+
+    def test_backend_disposal_live_identity_stays_exact_and_can_signal_only_once(self):
+        for replaced in (False, True):
+            session = self.disposal_fixture({"pid": 500} if replaced else {"pid": 12})
+            with self.subTest(replaced=replaced), patch.object(M.select, "select", side_effect=[([], [], []), ([99], [], [])]), \
+                    patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+                if replaced:
+                    with self.assertRaisesRegex(RuntimeError, "Native driver changed before disposal"): session.dispose_tools(99)
+                    send.assert_not_called(); session.pages.wait.assert_not_called()
+                else:
+                    session.dispose_tools(99)
+                    send.assert_called_once_with(99, M.signal.SIGTERM)
+            session.child.terminate.assert_not_called()
 
     def test_tool_disposal_accepts_proven_tool_exit_and_never_signals_product(self):
         s = M.Session.__new__(M.Session)

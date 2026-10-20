@@ -1893,19 +1893,149 @@ class Pure(unittest.TestCase):
         self.assertLess(code.index("prepare_transport("), code.index("prepare_tls("))
 
     def test_hidden_duplicate_root_or_legacy_backend_refused(self):
-        with tempfile.TemporaryDirectory() as temp:
-            base = Path(temp).resolve(); (base / "1").mkdir(); (base / "2").mkdir()
-            values = {1: {"pid": 1, "uids": [M.UID] * 4, "executable": "/usr/bin/creator-hub"},
-                      2: {"pid": 2, "uids": [M.UID] * 4, "executable": "/usr/bin/python3.10"}}
-            surface = SimpleNamespace(pid=1, helper=None, recheck=lambda **kw: None,
-                                      native=SimpleNamespace(native_process=lambda pid, *a, **k: values[pid]))
-            path_class = M.Path
-            with patch.object(M, "UID", base.stat().st_uid), patch.object(M, "Path", side_effect=lambda p: base if p == "/proc" else path_class(p)):
-                values[1]["uids"] = values[2]["uids"] = [base.stat().st_uid] * 4
-                M.phase_processes(surface)
-                for name in ("creator-hub", "creator-works-mcp-launcher", "creator-project-setup"):
-                    values[2]["executable"] = "/usr/bin/" + name
-                    with self.subTest(name=name), self.assertRaises(RuntimeError): M.phase_processes(surface)
+        values = [{"pid": 12, "startTime": "120", "executable": "/usr/bin/creator-hub"}, {"pid": 13, "executable": "/usr/bin/python3.10"}]
+        answer = {"processes": values, "terminalProcesses": []}
+        surface = SimpleNamespace(pid=12, record={"startTime": "120", "executable": "/usr/bin/creator-hub"},
+                                  recheck=unittest.mock.Mock(), inventory=SimpleNamespace(sample=unittest.mock.Mock(return_value=answer)))
+        M.phase_processes(surface)
+        for name in ("creator-hub", "creator-works-mcp-launcher", "creator-project-setup", "creator-mcp-launcher"):
+            values[1]["executable"] = "/usr/bin/" + name
+            with self.subTest(name=name), self.assertRaises(RuntimeError): M.phase_processes(surface)
+
+    def test_shared_inventory_brackets_every_sample_with_fresh_full_root_guards(self):
+        for failure in (None, "before", "sample", "after", "missing-channel", "terminal-only", "wrong-root", "wrong-start", "wrong-image"):
+            events = []
+            answer = {"processes": [{"pid": 12, "startTime": "120", "executable": "/usr/bin/creator-hub"}], "terminalProcesses": []}
+            if failure == "terminal-only": answer = {"processes": [], "terminalProcesses": [{"pid": 12}]}
+            if failure == "wrong-root": answer["processes"][0]["pid"] = 13
+            if failure == "wrong-start": answer["processes"][0]["startTime"] = "121"
+            if failure == "wrong-image": answer["processes"][0]["executable"] = "/foreign/creator-hub"
+            original = PermissionError(13, "synthetic", "/proc/5519/exe")
+            def check(*, full):
+                self.assertTrue(full); events.append("guard")
+                if failure == ("before" if len(events) == 1 else "after"):
+                    raise RuntimeError("Bound Root changed")
+            def sample(wait):
+                self.assertIs(wait, M.wait); events.append("sample")
+                if failure == "sample": raise original
+                return answer
+            surface = SimpleNamespace(pid=12, record={"startTime": "120", "executable": "/usr/bin/creator-hub"},
+                                      recheck=check, inventory=None if failure == "missing-channel" else SimpleNamespace(sample=sample))
+            with self.subTest(failure=failure):
+                if failure is None:
+                    M.phase_processes(surface)
+                    self.assertIs(surface.last_inventory, answer)
+                elif failure == "sample":
+                    with self.assertRaises(PermissionError) as raised: M.phase_processes(surface)
+                    self.assertIs(raised.exception, original)
+                else:
+                    with self.assertRaises(RuntimeError): M.phase_processes(surface)
+                self.assertEqual(events, ["guard"] if failure in ("before", "missing-channel") else
+                                 ["guard", "sample"] if failure == "sample" else ["guard", "sample", "guard"])
+                if failure is not None: self.assertFalse(hasattr(surface, "last_inventory"))
+
+    def test_initial_and_successor_use_one_inventory_client_without_retaining_old_root(self):
+        answers = [{"request": {"sequence": sequence}, "processes": [{"pid": pid, "startTime": str(pid), "executable": "/usr/bin/creator-hub"}],
+                    "terminalProcesses": []} for sequence, pid in ((1, 12), (2, 14))]
+        client = SimpleNamespace(sample=unittest.mock.Mock(side_effect=answers))
+        for answer in answers:
+            surface = SimpleNamespace(pid=answer["processes"][0]["pid"], record=answer["processes"][0], recheck=unittest.mock.Mock(), inventory=client)
+            M.phase_processes(surface)
+            self.assertEqual(surface.last_inventory["request"]["sequence"], answer["request"]["sequence"])
+        self.assertEqual(client.sample.call_count, 2)
+
+    def test_permission_protected_uid_process_uses_root_reply_not_unprivileged_enumeration(self):
+        original = PermissionError(13, "synthetic protected process", "/proc/5519/exe")
+        answer = {"processes": [{"pid": 12, "startTime": "120", "executable": "/usr/bin/creator-hub"},
+                                {"pid": 5519, "startTime": "90", "executable": "/usr/bin/fixture-observer"}], "terminalProcesses": []}
+        surface = SimpleNamespace(pid=12, record=answer["processes"][0], recheck=unittest.mock.Mock(), helper=None,
+                                  native=SimpleNamespace(native_process=unittest.mock.Mock(side_effect=original)),
+                                  inventory=SimpleNamespace(sample=unittest.mock.Mock(return_value=answer)))
+        path_type = M.Path
+        protected = SimpleNamespace(name="5519", stat=lambda: SimpleNamespace(st_uid=M.UID))
+        with patch.object(M, "Path", side_effect=lambda p: SimpleNamespace(iterdir=lambda: [protected]) if p == "/proc" else path_type(p)):
+            M.phase_processes(surface)
+        surface.native.native_process.assert_not_called()
+        surface.inventory.sample.assert_called_once_with(M.wait)
+        self.assertIs(surface.last_inventory, answer)
+
+    def test_inventory_import_checks_every_sealed_dependency_before_protected_load(self):
+        events = []
+        sealed = {"sources": {name: {"size": 1, "sha256": "a" * 64} for name in M.INVENTORY_IMPORTS}}
+        module = SimpleNamespace(BASE=M.BASE, UID=M.UID, INVENTORY_COHORTS={"update": M.SCENARIOS})
+        def bound(file, expected, maximum, *, uid, mode):
+            self.assertEqual(file, M.BASE / "scripts" / file.name)
+            self.assertEqual(expected, sealed["sources"][file.name]); self.assertEqual((maximum, uid, mode), (2 * 1024**2, 0, 0o444))
+            events.append(file.name)
+        def spec(name, path):
+            self.assertEqual(path, M.BASE / "scripts/native-linux-production-016-migration.py")
+            self.assertEqual(events, list(M.INVENTORY_IMPORTS)); events.append("spec")
+            return SimpleNamespace(name=name, loader=SimpleNamespace(exec_module=lambda target: events.append("exec")))
+        with patch.object(M, "protected_ancestry") as protected, patch.object(M, "bound", side_effect=bound), \
+                patch.object(M.importlib.util, "spec_from_file_location", side_effect=spec), \
+                patch.object(M.importlib.util, "module_from_spec", return_value=module):
+            self.assertIs(M.inventory_observer(sealed), module)
+        protected.assert_called_once_with(M.BASE / "scripts")
+        self.assertEqual(events, [*M.INVENTORY_IMPORTS, "spec", "exec"])
+
+    def test_missing_tampered_or_writable_inventory_sources_never_reach_module_execution(self):
+        sealed = {"sources": {name: {"size": 1, "sha256": "a" * 64} for name in M.INVENTORY_IMPORTS}}
+        for missing in M.INVENTORY_IMPORTS:
+            changed = copy.deepcopy(sealed); del changed["sources"][missing]
+            with self.subTest(missing=missing), patch.object(M, "protected_ancestry"), patch.object(M, "bound"), \
+                    patch.object(M.importlib.util, "spec_from_file_location") as spec:
+                with self.assertRaises(KeyError): M.inventory_observer(changed)
+                spec.assert_not_called()
+        for failure in ("ancestry", *M.INVENTORY_IMPORTS):
+            def bound(file, *args, **kwargs):
+                if file.name == failure: raise RuntimeError("Independent bytes differ")
+            with self.subTest(failure=failure), patch.object(M, "protected_ancestry", side_effect=RuntimeError("Unprotected source") if failure == "ancestry" else None), \
+                    patch.object(M, "bound", side_effect=bound), patch.object(M.importlib.util, "spec_from_file_location") as spec:
+                with self.assertRaises(RuntimeError): M.inventory_observer(sealed)
+                spec.assert_not_called()
+
+    def test_inventory_observer_refuses_wrong_fixed_root_uid_or_update_scenario_table(self):
+        sealed = {"sources": {name: {"size": 1, "sha256": "a" * 64} for name in M.INVENTORY_IMPORTS}}
+        for failure in ("base", "uid", "migration-label", "extra-update"):
+            module = SimpleNamespace(BASE=M.BASE, UID=M.UID, INVENTORY_COHORTS={"update": M.SCENARIOS})
+            if failure == "base": module.BASE = Path("/foreign")
+            if failure == "uid": module.UID += 1
+            if failure == "migration-label": module.INVENTORY_COHORTS["update"] = ("migration-guide-cancel",)
+            if failure == "extra-update": module.INVENTORY_COHORTS["update"] += ("unknown-update",)
+            spec = SimpleNamespace(name="inventory_mismatch_fixture", loader=SimpleNamespace(exec_module=lambda _: None))
+            with self.subTest(failure=failure), patch.object(M, "protected_ancestry"), patch.object(M, "bound"), \
+                    patch.object(M.importlib.util, "spec_from_file_location", return_value=spec), \
+                    patch.object(M.importlib.util, "module_from_spec", return_value=module):
+                with self.assertRaisesRegex(RuntimeError, "Fixed shared update inventory cohort differs"):
+                    M.inventory_observer(sealed)
+
+    def test_inventory_dependency_closure_imports_from_only_the_copied_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary).resolve()
+            for name in M.INVENTORY_IMPORTS:
+                self.assertIn(name, M.SOURCES)
+                (folder / name).write_bytes((HERE / name).read_bytes())
+            spec = importlib.util.spec_from_file_location("sealed_inventory_fixture", folder / M.INVENTORY_IMPORTS[0])
+            module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+            for dependency in (module, module.P, module.P.S, module.P.V):
+                self.assertEqual(Path(dependency.__file__).parent, folder)
+            self.assertEqual(module.INVENTORY_COHORTS["update"], M.SCENARIOS)
+
+    def test_updater_inventory_wiring_keeps_actual_cohort_shared_scanner_and_auth_loop(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        funcs = {n.name: ast.unparse(n) for n in tree.body if isinstance(n, ast.FunctionDef)}
+        phase = funcs["phase_processes"]
+        self.assertNotIn("/proc", phase); self.assertNotIn("except", phase)
+        self.assertLess(phase.index("surface.recheck(full=True)"), phase.index("surface.inventory.sample(wait)"))
+        self.assertEqual(phase.count("surface.recheck(full=True)"), 2)
+        session = funcs["native_session"]
+        self.assertEqual(session.count("observer.InventoryClient(env['GITHUB_SHA'], scenario, cohort='update')"), 1)
+        self.assertEqual(session.count("inventory=inventory"), 2)
+        broker = funcs["broker"]
+        self.assertIn("observer = inventory_observer(sealed)", broker)
+        self.assertLess(broker.index("observer.serve_inventory("), broker.index("target = BASE / 'result'"))
+        self.assertIn("cohort='update'", broker); self.assertIn("pending_proof(root, native, helper, polkit, profile['baseline'])", broker)
+        self.assertNotIn("native_process_inventory", broker)
 
     def test_question_is_distinct_portable_and_deb_source_contract(self):
         self.assertIn("registered helper", M.question(True)); self.assertNotIn("registered helper", M.question(False))
