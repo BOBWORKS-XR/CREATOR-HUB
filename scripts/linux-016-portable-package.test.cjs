@@ -1049,6 +1049,69 @@ test('the hash-bound ICU readelf table has a valid dynamic section with no DT_NE
   assert.deepEqual(p.dynamicDependencies(dynamicTable()), []);
   assert.deepEqual(p.dynamicDependencies(text.replaceAll('\n', '\r\n')), []);
 });
+// GNU 2.42, retained run 39350065455 WebKitNetworkProcess, inspected without execution.
+// ELF SHA256: 044ffa1879fb55bb10d921a19868e5e665356d512652c336fa5af9ac23791477.
+const GNU_BIND_NOW_TABLE = `
+Dynamic section at offset 0x5310 contains 29 entries:
+  Tag        Type                         Name/Value
+ 0x000000000000001d (RUNPATH)            Library runpath: [$ORIGIN]
+ 0x0000000000000001 (NEEDED)             Shared library: [libwebkit2gtk-4.1.so.0]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+ 0x000000000000000c (INIT)               0x1000
+ 0x000000000000000d (FINI)               0x115c
+ 0x0000000000000019 (INIT_ARRAY)         0x3da8
+ 0x000000000000001b (INIT_ARRAYSZ)       8 (bytes)
+ 0x000000000000001a (FINI_ARRAY)         0x3db0
+ 0x000000000000001c (FINI_ARRAYSZ)       8 (bytes)
+ 0x000000006ffffef5 (GNU_HASH)           0x3b0
+ 0x0000000000000005 (STRTAB)             0x5520
+ 0x0000000000000006 (SYMTAB)             0x3d8
+ 0x000000000000000a (STRSZ)              203 (bytes)
+ 0x000000000000000b (SYMENT)             24 (bytes)
+ 0x0000000000000015 (DEBUG)              0x0
+ 0x0000000000000003 (PLTGOT)             0x3fb8
+ 0x0000000000000002 (PLTRELSZ)           24 (bytes)
+ 0x0000000000000014 (PLTREL)             RELA
+ 0x0000000000000017 (JMPREL)             0x648
+ 0x0000000000000007 (RELA)               0x588
+ 0x0000000000000008 (RELASZ)             192 (bytes)
+ 0x0000000000000009 (RELAENT)            24 (bytes)
+ 0x0000000000000018 (BIND_NOW)
+ 0x000000006ffffffb (FLAGS_1)            Flags: NOW PIE
+ 0x000000006ffffffe (VERNEED)            0x558
+ 0x000000006fffffff (VERNEEDNUM)         1
+ 0x000000006ffffff0 (VERSYM)             0x544
+ 0x000000006ffffff9 (RELACOUNT)          3
+ 0x0000000000000000 (NULL)               0x0
+`;
+test('captured GNU BIND_NOW row permits its ignored empty value only', () => {
+  const expected = { needed: ['libwebkit2gtk-4.1.so.0', 'libc.so.6'], versionNeedCount: 1, versionInfoPresent: true };
+  for (const text of [GNU_BIND_NOW_TABLE, GNU_BIND_NOW_TABLE.replaceAll('\n', '\r\n'),
+    GNU_BIND_NOW_TABLE.replace('(BIND_NOW)\n', '(BIND_NOW)           \n'),
+    GNU_BIND_NOW_TABLE.replace('(BIND_NOW)\n', '(BIND_NOW) 0x0\n')]) {
+    assert.deepEqual(p.dynamicTableEvidence(text), expected);
+  }
+});
+test('dynamic BIND_NOW numeric tag and type must agree in both directions', () => {
+  for (const value of [' 0x0', '']) for (const row of [
+    `0x0000000000000018 (FLAGS)${value}`, `0x000000000000001e (BIND_NOW)${value}`,
+  ]) assert.throws(() => p.dynamicTableEvidence(GNU_BIND_NOW_TABLE.replace('0x0000000000000018 (BIND_NOW)', row)), /Inconsistent dynamic BIND_NOW tag/);
+});
+test('non-BIND_NOW empty values remain refused for every other captured tag', () => {
+  const valid = GNU_BIND_NOW_TABLE.replace('(BIND_NOW)\n', '(BIND_NOW) 0x0\n');
+  for (const row of valid.split('\n').filter(line => /^\s*0x/.test(line) && !line.includes('(BIND_NOW)'))) {
+    const empty = row.replace(/(\))\s+.+$/, '$1');
+    assert.notEqual(empty, row);
+    assert.throws(() => p.dynamicTableEvidence(valid.replace(row, empty)), /Malformed dynamic table row/);
+  }
+});
+test('valueless BIND_NOW cannot mask a truncated table or a missing NULL terminator', () => {
+  const nullRow = ' 0x0000000000000000 (NULL)               0x0\n';
+  assert.throws(() => p.dynamicTableEvidence(GNU_BIND_NOW_TABLE.replace(nullRow, '')), /Truncated or malformed dynamic table/);
+  assert.throws(() => p.dynamicTableEvidence(GNU_BIND_NOW_TABLE.replace('contains 29', 'contains 30')), /Truncated or malformed dynamic table/);
+  assert.throws(() => p.dynamicTableEvidence(GNU_BIND_NOW_TABLE.replace(nullRow, ' 0x0000000000000002 (PLTRELSZ) 24 (bytes)\n')), /Dynamic table terminator missing/);
+  assert.throws(() => p.dynamicTableEvidence(GNU_BIND_NOW_TABLE.replace('0x000000006ffffffb (FLAGS_1)            Flags: NOW PIE', '0x0000000000000000 (NULL) 0x0')), /Dynamic NULL must terminate the table/);
+});
 test('dynamic dependency parsing preserves order and the full 128-entry bound', () => {
   const needed = Array.from({ length: 128 }, (_, i) => `libfixture${i}.so.1`);
   assert.deepEqual(p.dynamicDependencies(dynamicTable(needed)), needed);
