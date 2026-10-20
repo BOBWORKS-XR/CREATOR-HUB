@@ -11,7 +11,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
@@ -37,6 +37,311 @@ def process(pid, parent, path='/usr/bin/xdg-dbus-proxy', start=None, full=False)
     if full:
         record['kernelImageSha256'] = 'a' * 64
     return record
+
+
+def invocation_stat(inode, mode, size=64):
+    return SimpleNamespace(st_dev=1, st_ino=inode, st_mode=mode, st_uid=0, st_gid=0,
+                           st_nlink=1, st_size=size, st_mtime_ns=1, st_ctime_ns=1)
+
+
+@contextmanager
+def invocation_fixture():
+    caller = dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10')
+    rows = {19: {**caller, 'state': 'S'},
+            20: dict(pid=20, parentPid=19, startTime='20', state='S', uids=[1001, 0, 0, 0], executable='/usr/bin/sudo'),
+            21: dict(pid=21, parentPid=20, startTime='21', state='R', uids=[0] * 4, executable='/usr/bin/python3.10')}
+    state = SimpleNamespace(caller=caller, rows=rows, reads=[], links=[], events=[], exited=set(), replaced=set(), image_bad=False,
+                            permission=None, close_error=False, images={})
+    stats = {'python': invocation_stat(10, stat.S_IFREG | 0o755), 'sudo': invocation_stat(11, stat.S_IFREG | 0o4755)}
+    def package(kind, budget):
+        def snapshot():
+            state.events.append(('image', kind)); budget()
+            if state.image_bad: raise ValueError('fixed synthetic package mutation')
+            return ('a' if kind == 'python' else 'b') * 64
+        image = SimpleNamespace(path='/usr/bin/python3.10' if kind == 'python' else '/usr/bin/sudo',
+            identity=M.ProxyAssociationProc.stamp(stats[kind]), digest=('a' if kind == 'python' else 'b') * 64,
+            snapshot=Mock(side_effect=snapshot), close=Mock())
+        state.images[kind] = image
+        return image
+    def read(directory, name, maximum):
+        pid = directory - 1000; state.reads.append((pid, name))
+        if state.permission is not None: raise state.permission
+        row = rows[pid]
+        if name == 'stat':
+            return (f'{pid} (PRIVATE_COMM) {row["state"]} {row["parentPid"]} ' + '0 ' * 17 + row['startTime'] + '\n').encode(), []
+        assert name == 'status'
+        return ('Uid:\t' + ' '.join(str(v) for v in row['uids']) + '\n').encode(), []
+    def opened(name, flags, **options):
+        if name == 'exe': return 2000 + options['dir_fd'] - 1000
+        assert str(name).startswith('/proc/')
+        return 1000 + int(str(name).rsplit('/', 1)[1])
+    def info(fd):
+        pid = fd - 2000
+        original = stats['python' if pid in (19, 21) else 'sudo']
+        return invocation_stat(999, original.st_mode) if pid in state.replaced else original
+    def linked(name, *, dir_fd):
+        assert name == 'exe'; state.links.append(dir_fd - 1000)
+        return rows[dir_fd - 1000]['executable']
+    def closed(fd):
+        state.events.append(('close', fd))
+        if state.close_error: raise OSError('fixed synthetic close failure')
+    with patch.object(M.os, 'O_DIRECTORY', 0, create=True), patch.object(M.os, 'O_NOFOLLOW', 0, create=True), \
+            patch.object(M.os, 'O_NONBLOCK', 0, create=True), \
+            patch.object(M.os, 'O_CLOEXEC', 0, create=True), patch.object(M.os, 'getpid', return_value=21), \
+            patch.object(M.os, 'pidfd_open', side_effect=lambda pid: 3000 + pid, create=True), \
+            patch.object(M.os, 'open', side_effect=opened), patch.object(M.os, 'close', side_effect=closed), \
+            patch.object(M.os, 'fstat', side_effect=info), patch.object(M.os, 'stat', side_effect=lambda name, dir_fd: info(dir_fd + 1000)), \
+            patch.object(M.os, 'readlink', side_effect=linked), patch.object(M.ProxyAssociationProc, 'read_at', side_effect=read), \
+            patch.object(M.select, 'select', side_effect=lambda fds, *_: ([fd for fd in fds if fd - 3000 in state.exited], [], [])), \
+            patch.object(M, 'InvocationImage', side_effect=package, create=True):
+        yield state
+
+
+class InvocationGuardTests(unittest.TestCase):
+    def test_direct_worker_caller_path_keeps_held_identity_without_any_sudo_exemption(self):
+        with invocation_fixture() as state:
+            state.rows[21]['parentPid'] = 19
+            with M.InvocationChain(state.caller) as held:
+                rows = held.receipt()
+                self.assertEqual(len(rows), 1); self.assertEqual(rows[0]['parentPid'], 19)
+                self.assertEqual(rows[0]['executableKind'], 'python'); self.assertEqual(rows[0]['uids'], [0] * 4)
+                self.assertEqual(set(held.held), {19, 21}); self.assertEqual(set(state.images), {'python'})
+                M.validate_probe(dict(operation=M.PROBE_OPERATION, complete=True, uid=1001, candidateCount=0,
+                    scopedProcessCount=1, caller=state.caller, invocation=rows, readOnly=True, inputPermitted=False,
+                    authorityGranted=False, releaseReady=False), {'caller': state.caller})
+                @contextmanager
+                def scan(path):
+                    yield [SimpleNamespace(name=str(pid), stat=lambda **opts: SimpleNamespace(st_mode=stat.S_IFDIR | 0o555))
+                           for pid in (19, 20, 21)]
+                with patch.object(M.os, 'scandir', side_effect=scan), \
+                        patch.object(M, 'root_uid_tuple', side_effect=lambda pid: state.rows[pid]['uids']), \
+                        patch.object(M, 'root_process', return_value=state.caller), self.assertRaises(ValueError):
+                    M.complete_uid_inventory(lambda: None, invocation=held)
+                self.assertNotIn(20, state.links)
+            self.assertEqual(len([e for e in state.events if e[0] == 'close']), 6)
+            state.images['python'].close.assert_called_once()
+
+    def test_direct_chain_keeps_worker_caller_uid_exe_image_pidfd_and_parent_guards(self):
+        for mutation in ('worker-uid', 'worker-exe', 'worker-image', 'caller-uid', 'caller-start', 'caller-exe',
+                         'caller-exit', 'worker-parent'):
+            with self.subTest(mutation=mutation), invocation_fixture() as state:
+                state.rows[21]['parentPid'] = 19
+                with M.InvocationChain(state.caller) as held:
+                    if mutation == 'worker-uid': state.rows[21]['uids'] = [1001, 0, 0, 0]
+                    if mutation == 'worker-exe': state.rows[21]['executable'] = '/private/python'
+                    if mutation == 'worker-image': state.replaced.add(21)
+                    if mutation == 'caller-uid': state.rows[19]['uids'] = [1001, 0, 0, 0]
+                    if mutation == 'caller-start': state.rows[19]['startTime'] = '999'
+                    if mutation == 'caller-exe': state.rows[19]['executable'] = '/private/python'
+                    if mutation == 'caller-exit': state.exited.add(19)
+                    if mutation == 'worker-parent': state.rows[21]['parentPid'] = 20
+                    with self.assertRaises(ValueError): held.recheck()
+
+    def test_verified_native_tuple_is_sealed_before_inventory_with_held_image_and_proc_guards(self):
+        with invocation_fixture() as state, M.InvocationChain(state.caller) as held:
+            self.assertEqual(held.mixed_process(20, [1001, 0, 0, 0]), M.InvocationChain.process(state.rows[20]))
+            self.assertEqual(set(held.held), {19, 20, 21})
+            self.assertEqual(held.receipt()[0]['uids'], [0] * 4)
+            self.assertGreaterEqual(state.images['sudo'].snapshot.call_count, 3)
+            self.assertFalse(any(event[0] == 'close' for event in state.events))
+        self.assertEqual(len([e for e in state.events if e[0] == 'close']), 9)
+        for image in state.images.values(): image.close.assert_called_once()
+
+    def test_all_root_mixed_and_combined_sudo_chains_have_identical_held_guards(self):
+        root, mixed = [0] * 4, [1001, 0, 0, 0]
+        for variants in ((root,), (mixed,), (root, root), (mixed, mixed), (root, mixed), (mixed, root)):
+            with self.subTest(variants=variants), invocation_fixture() as state:
+                state.rows[20]['uids'] = variants[0]
+                if len(variants) == 2:
+                    state.rows[22] = dict(pid=22, parentPid=20, startTime='20', state='S',
+                                          uids=variants[1], executable='/usr/bin/sudo')
+                    state.rows[21]['parentPid'] = 22
+                with M.InvocationChain(state.caller) as held:
+                    rows = held.receipt()
+                    self.assertEqual(rows[0]['uids'], root); self.assertEqual(rows[0]['executableKind'], 'python')
+                    self.assertEqual([row['uids'] for row in rows[1:]], list(reversed(variants)))
+                    self.assertTrue(all(row['executableKind'] == 'sudo' and row['imageSha256'] == 'b' * 64 for row in rows[1:]))
+                    held.recheck()
+                    M.validate_probe(dict(operation=M.PROBE_OPERATION, complete=True, uid=1001, candidateCount=0,
+                        scopedProcessCount=4, caller=state.caller, invocation=rows, readOnly=True, inputPermitted=False,
+                        authorityGranted=False, releaseReady=False), {'caller': state.caller})
+                    for pid in (19, 20, 21, *([22] if len(variants) == 2 else [])):
+                        self.assertIn(pid, state.links)
+
+    def test_transition_between_the_two_allowed_sudo_tuples_still_refuses_after_binding(self):
+        root, mixed = [0] * 4, [1001, 0, 0, 0]
+        for before, after in ((root, mixed), (mixed, root)):
+            with self.subTest(before=before), invocation_fixture() as state:
+                state.rows[20]['uids'] = before
+                with M.InvocationChain(state.caller) as held:
+                    state.rows[20]['uids'] = after
+                    with self.assertRaises(ValueError): held.recheck()
+
+    def test_both_sudo_tuples_keep_executable_image_pidfd_and_live_identity_guards(self):
+        for initial in ([0] * 4, [1001, 0, 0, 0]):
+            for mutation in ('exe', 'kernel', 'exit', 'parent', 'start', 'permission'):
+                with self.subTest(initial=initial, mutation=mutation), invocation_fixture() as state:
+                    state.rows[20]['uids'] = initial
+                    with M.InvocationChain(state.caller) as held:
+                        if mutation == 'exe': state.rows[20]['executable'] = '/private/foreign'
+                        if mutation == 'kernel': state.replaced.add(20)
+                        if mutation == 'exit': state.exited.add(20)
+                        if mutation == 'parent': state.rows[20]['parentPid'] = 88
+                        if mutation == 'start': state.rows[20]['startTime'] = '999'
+                        if mutation == 'permission': state.permission = PermissionError('fixed proc denial')
+                        with self.assertRaises((ValueError, PermissionError)): held.recheck()
+
+    def test_every_other_mixed_sudo_tuple_refuses_even_with_the_verified_image(self):
+        rejected = [[1001 if bits & (1 << index) else 0 for index in range(4)] for bits in range(16)]
+        rejected = [ids for ids in rejected if ids not in ([0] * 4, [1001, 0, 0, 0])]
+        rejected.extend([[1002 if index == position else 0 for index in range(4)] for position in range(4)])
+        self.assertEqual(len(rejected), 18)
+        for ids in rejected:
+            with self.subTest(ids=ids), invocation_fixture() as state:
+                state.rows[20]['uids'] = ids
+                with self.assertRaises(ValueError) as caught: M.InvocationChain(state.caller)
+                hop = caught.exception.proxy_caller_diagnostic['hops'][-1]
+                self.assertEqual(caught.exception.proxy_caller_diagnostic['predicate'], 'hop-credentials')
+                self.assertEqual(hop['executableKind'], 'sudo'); self.assertEqual(hop['uids'], ids)
+
+    def test_pid_reuse_parent_uid_executable_kernel_image_and_exit_all_refuse(self):
+        for mutation in ('start', 'parent', 'uid', 'exe', 'kernel', 'package', 'exit', 'permission', 'caller'):
+            with self.subTest(mutation=mutation), invocation_fixture() as state, M.InvocationChain(state.caller) as held:
+                if mutation == 'start': state.rows[20]['startTime'] = '999'
+                if mutation == 'parent': state.rows[20]['parentPid'] = 88
+                if mutation == 'uid': state.rows[20]['uids'] = [1001] * 4
+                if mutation == 'exe': state.rows[20]['executable'] = '/private/foreign'
+                if mutation == 'kernel': state.replaced.add(20)
+                if mutation == 'package': state.image_bad = True
+                if mutation == 'exit': state.exited.add(20)
+                if mutation == 'permission': state.permission = PermissionError('fixed synthetic proc denial')
+                if mutation == 'caller': state.rows[19]['startTime'] = '999'
+                with self.assertRaises((ValueError, PermissionError)):
+                    held.mixed_process(20, [1001, 0, 0, 0])
+
+    def test_mixed_tuple_is_not_enough_without_exact_held_sudo_pid_and_image(self):
+        with invocation_fixture() as state, M.InvocationChain(state.caller) as held:
+            for pid, ids in ((88, [1001, 0, 0, 0]), (21, [1001, 0, 0, 0]),
+                             (20, [1002, 0, 0, 0]), (20, [1001, 0, 1001, 0]), (20, [1001, False, 0, 0])):
+                with self.subTest(pid=pid, ids=ids), self.assertRaises(ValueError): held.mixed_process(pid, ids)
+        with invocation_fixture() as state:
+            state.replaced.add(20)
+            with self.assertRaises(ValueError): M.InvocationChain(state.caller)
+
+    def test_complete_inventory_revalidates_only_exact_chain_and_never_exempts_other_mixed_processes(self):
+        for failure in (None, 'unknown-mixed', 'changed-second-scan', 'permission'):
+            with self.subTest(failure=failure), invocation_fixture() as state, M.InvocationChain(state.caller) as held:
+                scans = []
+                @contextmanager
+                def scan(path):
+                    self.assertEqual(path, '/proc'); scans.append(1)
+                    if failure == 'changed-second-scan' and len(scans) == 2: state.rows[20]['startTime'] = '999'
+                    values = (19, 20, 21, 88) if failure in ('unknown-mixed', 'permission') else (19, 20, 21)
+                    yield [SimpleNamespace(name=str(pid), stat=lambda **opts: SimpleNamespace(st_mode=stat.S_IFDIR | 0o555)) for pid in values]
+                def uids(pid):
+                    if pid == 88:
+                        if failure == 'permission': raise PermissionError('fixed unknown proc denial')
+                        return [1001, 0, 0, 0]
+                    return state.rows[pid]['uids']
+                with patch.object(M.os, 'scandir', side_effect=scan), patch.object(M, 'root_uid_tuple', side_effect=uids), \
+                        patch.object(M, 'root_process', return_value=state.caller):
+                    if failure is None:
+                        proxies, rows = M.complete_uid_inventory(lambda: None, invocation=held)
+                        self.assertEqual(proxies, []); self.assertEqual(set(rows), {19, 20})
+                        self.assertEqual(rows[20]['uids'], [1001, 0, 0, 0]); self.assertEqual(len(scans), 2)
+                    else:
+                        with self.assertRaises((ValueError, PermissionError)):
+                            M.complete_uid_inventory(lambda: None, invocation=held)
+
+    def test_closed_chain_and_original_error_through_cleanup_never_authorize(self):
+        with invocation_fixture() as state:
+            held = M.InvocationChain(state.caller); held.close()
+            with self.assertRaises(ValueError): held.mixed_process(20, [1001, 0, 0, 0])
+            with self.assertRaises(ValueError): held.recheck()
+        with invocation_fixture() as state:
+            original = PermissionError('fixed proc refusal'); state.permission = original; state.close_error = True
+            with self.assertRaises(PermissionError) as caught: M.InvocationChain(state.caller)
+            self.assertIs(caught.exception, original); self.assertTrue(original.invocation_cleanup_failed)
+
+    def test_probe_receipt_rejects_unknown_uids_roles_images_and_reparenting(self):
+        with invocation_fixture() as state, M.InvocationChain(state.caller) as held:
+            value = dict(operation=M.PROBE_OPERATION, complete=True, uid=1001, candidateCount=0, scopedProcessCount=2,
+                caller=state.caller, invocation=held.receipt(), readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
+            M.validate_probe(value, {'caller': state.caller})
+            for mutate in (lambda v: v['invocation'][1].update(uids=[1001, 0, 0, 1001]),
+                           lambda v: v['invocation'][0].update(uids=[1001, 0, 0, 0]),
+                           lambda v: v['invocation'][1].update(executableKind='python'),
+                           lambda v: v['invocation'][1].update(imageSha256='unknown'),
+                           lambda v: v['invocation'][1].update(parentPid=99)):
+                changed = copy.deepcopy(value); mutate(changed)
+                with self.assertRaises(ValueError): M.validate_probe(changed, {'caller': state.caller})
+
+
+class InvocationImageTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self, kind='sudo'):
+        state = SimpleNamespace(raw=b'ELF' + b'x' * 61, replacement=False, alias_changed=False, reads=[])
+        state.file = invocation_stat(10, stat.S_IFREG | (0o4755 if kind == 'sudo' else 0o755))
+        state.alias = invocation_stat(11, stat.S_IFLNK | 0o777) if kind == 'python' else state.file
+        dirs = {fd: invocation_stat(fd, stat.S_IFDIR | 0o755, 4096) for fd in (1, 2, 3)}
+        class FixedPath:
+            def __init__(self, path): self.path = str(path)
+            def __str__(self): return self.path
+            def __eq__(self, other): return isinstance(other, FixedPath) and self.path == other.path
+            @property
+            def parent(self): return FixedPath(self.path.rsplit('/', 1)[0])
+            @property
+            def name(self): return self.path.rsplit('/', 1)[1]
+            def resolve(self, **kwargs): return FixedPath('/usr/bin/python3.10' if kind == 'python' else '/usr/bin/sudo')
+            def lstat(self):
+                if state.alias_changed: return invocation_stat(999, state.alias.st_mode)
+                return state.alias
+        def opened(name, flags, **kwargs):
+            return {'/': 1, 'usr': 2, 'bin': 3, 'sudo': 4, 'python3.10': 4}[name]
+        def named(name, **kwargs):
+            fd = opened(name, 0)
+            if fd in dirs: return dirs[fd]
+            return invocation_stat(999, state.file.st_mode) if state.replacement else state.file
+        def read(fd, count, offset): state.reads.append((count, offset)); return state.raw[offset:offset + count]
+        with patch.object(M, 'Path', FixedPath), patch.object(M.os, 'O_DIRECTORY', 0, create=True), \
+                patch.object(M.os, 'O_NOFOLLOW', 0, create=True), patch.object(M.os, 'O_NONBLOCK', 0, create=True), \
+                patch.object(M.os, 'O_CLOEXEC', 0, create=True), patch.object(M.os, 'open', side_effect=opened), \
+                patch.object(M.os, 'close') as close, patch.object(M.os, 'fstat', side_effect=lambda fd: dirs.get(fd, state.file)), \
+                patch.object(M.os, 'stat', side_effect=named), patch.object(M.os, 'pread', side_effect=read, create=True):
+            state.close = close
+            yield state
+
+    def test_fixed_package_bytes_and_named_identity_are_held_and_rechecked(self):
+        for kind in ('python', 'sudo'):
+            with self.subTest(kind=kind), self.fixture(kind) as state:
+                image = M.InvocationImage(kind, lambda: None)
+                self.assertEqual(image.snapshot(), M.hashlib.sha256(state.raw).hexdigest())
+                self.assertEqual(str(image.path), '/usr/bin/python3.10' if kind == 'python' else '/usr/bin/sudo')
+                self.assertTrue(all(count <= 65536 for count, offset in state.reads))
+                image.close(); self.assertEqual(state.close.call_count, 4)
+
+    def test_foreign_writable_special_wrong_mode_oversized_package_never_admitted(self):
+        for defect in ('uid', 'gid', 'write', 'special', 'not-setuid', 'oversize'):
+            with self.subTest(defect=defect), self.fixture() as state:
+                if defect == 'uid': state.file.st_uid = 1001
+                if defect == 'gid': state.file.st_gid = 1001
+                if defect == 'write': state.file.st_mode |= 0o020
+                if defect == 'special': state.file.st_mode = stat.S_IFIFO | 0o4755
+                if defect == 'not-setuid': state.file.st_mode = stat.S_IFREG | 0o755
+                if defect == 'oversize': state.file.st_size = 64 * 1024**2 + 1
+                with self.assertRaises(ValueError): M.InvocationImage('sudo', lambda: None)
+                self.assertEqual(state.reads, [])
+
+    def test_same_path_replacement_alias_or_same_stamp_byte_mutation_refuses(self):
+        for defect in ('named', 'alias', 'bytes'):
+            with self.subTest(defect=defect), self.fixture() as state:
+                image = M.InvocationImage('sudo', lambda: None)
+                try:
+                    if defect == 'named': state.replacement = True
+                    if defect == 'alias': state.alias_changed = True
+                    if defect == 'bytes': state.raw = b'changed' + state.raw[7:]
+                    with self.assertRaises(ValueError): image.snapshot()
+                finally: image.close()
 
 
 class TranscriptTests(unittest.TestCase):
@@ -408,7 +713,8 @@ class RootAssociationTests(unittest.TestCase):
         state.snapshots = Mock(side_effect=lambda tree: copy.deepcopy(state.data))
         state.request = dict(schemaVersion=1, operation='flatpak-proxy-snapshot-uid1001', harnessSource='a' * 40,
             codeSha256='e' * 64, sequence=1, nonce='f' * 64, expiresNs=2_000_000_000,
-            original=state.rows[10], client=state.rows[14], tree=state.tree_rows)
+            original=state.rows[10], client=state.rows[14], tree=state.tree_rows,
+            caller=dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10'))
         def build():
             with patch.object(M, 'PrivateInstance', return_value=state.instance):
                 return M.AssociatedProxyLineage(state.rows[10], state.rows[14], state.tree, state.reader, lambda r: copy.deepcopy(r),
@@ -463,6 +769,9 @@ class RootAssociationTests(unittest.TestCase):
         for change in (lambda r: r.update(sequence=True), lambda r: r.update(expiresNs=1),
                        lambda r: r.update(operation='global-uid-inventory'), lambda r: r.update(path='/tmp/other'),
                        lambda r: r.update(sequence=4), lambda r: r.update(nonce='bad'),
+                       lambda r: r.pop('caller'), lambda r: r['caller'].update(pid=True),
+                       lambda r: r['caller'].update(uids=[1001, 0, 0, 0]),
+                       lambda r: r['caller'].update(executable='/private/python3.10'),
                        lambda r: r['tree'][0].update(parentPid=99)):
             request = copy.deepcopy(state.request); change(request)
             with self.assertRaises(ValueError): M.root_request(request, 1_000_000_000)
@@ -472,7 +781,7 @@ class RootAssociationTests(unittest.TestCase):
                   for pid, row in state.rows.items()}
         with patch.object(M.os, 'pidfd_open', side_effect=lambda p: p, create=True), \
                 patch.object(M.select, 'select', return_value=([], [], [])), patch.object(M.os, 'close'), \
-                patch.object(M, 'PrivateInstance', return_value=state.instance):
+                patch.object(M, 'PrivateInstance', return_value=state.instance), patch.object(M, 'InvocationChain'):
             return M.association_snapshot(state.request, proc=state.proc, read=state.reader,
                 inventory=inventory or Mock(return_value=([12], scoped)), clock=lambda: 1_000_000_000)
 
@@ -545,13 +854,14 @@ class RootAssociationTests(unittest.TestCase):
         row = dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10')
         request = dict(schemaVersion=1, operation=M.PROBE_OPERATION, harnessSource='a' * 40, codeSha256='b' * 64,
                        sequence=1, nonce='c' * 64, expiresNs=2_000_000_000, caller=row)
-        chain = [dict(pid=21, parentPid=20, startTime='21', state='R', uids=[0] * 4),
-                 dict(pid=20, parentPid=19, startTime='20', state='S', uids=[0] * 4)]
+        chain = [dict(pid=21, parentPid=20, startTime='21', state='R', uids=[0] * 4, executableKind='python', imageSha256='a' * 64),
+                 dict(pid=20, parentPid=19, startTime='20', state='S', uids=[1001, 0, 0, 0], executableKind='sudo', imageSha256='b' * 64)]
         with patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'), \
                 patch.object(M.os, 'pidfd_open', return_value=7, create=True), patch.object(M.os, 'close'), \
                 patch.object(M.select, 'select', return_value=([], [], [])), \
-                patch.object(M, 'probe_caller_chain', return_value=chain), \
+                patch.object(M, 'InvocationChain') as held, \
                 patch.object(M, 'complete_uid_inventory', return_value=([], {19: row})):
+            held.return_value.__enter__.return_value.receipt.return_value = chain
             value = M.inventory_probe(request, clock=lambda: 1_000_000_000)
             M.validate_probe(value, request)
             self.assertEqual(value['candidateCount'], 0)
@@ -589,10 +899,10 @@ class RootAssociationTests(unittest.TestCase):
             with self.subTest(failure=failure), patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'), \
                     patch.object(M.os, 'pidfd_open', return_value=7, create=True), patch.object(M.os, 'close'), \
                     patch.object(M.select, 'select', return_value=([7], [], []) if failure == 'exit' else ([], [], [])), \
-                    patch.object(M, 'probe_caller_chain', side_effect=[[dict(pid=21, state='R')],
-                        [dict(pid=22 if failure == 'chain' else 21, state='S')]]), \
+                    patch.object(M, 'InvocationChain') as held, \
                     patch.object(M, 'complete_uid_inventory', side_effect=PermissionError() if failure == 'permission' else None,
                                  return_value=([], {19: {} if failure == 'caller' else caller})):
+                if failure == 'chain': held.return_value.__enter__.return_value.recheck.side_effect = ValueError()
                 clock = Mock(side_effect=[1_000_000_000, 3_000_000_000]) if failure == 'expired' else lambda: 1_000_000_000
                 with self.assertRaises((ValueError, PermissionError)) as caught: M.inventory_probe(request, clock=clock)
                 if failure == 'exit':
@@ -602,48 +912,32 @@ class RootAssociationTests(unittest.TestCase):
                                    expectedKind='python', executableKind='unread')]))
 
     def test_probe_invocation_only_follows_fixed_sudo_parent_chain_to_actual_caller(self):
-        caller = dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10')
-        for failure in (None, 'foreign-exe', 'mixed-uid', 'sudo-mixed-uid', 'caller-replaced', 'permission', 'zombie'):
-            reads, links = [], []
-            original = PermissionError('PRIVATE_PROC_FAILURE')
-            def read(directory, name, maximum):
-                reads.append((directory, name))
-                if failure == 'permission': raise original
-                if name == 'stat':
-                    parent = 20 if directory == 21 else 19
-                    state = 'Z' if failure == 'zombie' else 'R'
-                    return (f'{directory} (fixed) {state} {parent} ' + '0 ' * 17 + f'{directory}\n').encode(), []
-                ids = b'1001 0 0 0' if failure == 'mixed-uid' or failure == 'sudo-mixed-uid' and directory == 20 else b'0 0 0 0'
-                return b'Uid:\t' + ids + b'\n', []
-            def executable(name, *, dir_fd):
-                links.append(dir_fd)
-                return '/usr/bin/python3.10' if dir_fd == 21 else ('/PRIVATE_FOREIGN_EXECUTABLE' if failure == 'foreign-exe' else '/usr/bin/sudo')
-            with self.subTest(failure=failure), patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'), \
-                    patch.object(M.os, 'O_DIRECTORY', 0, create=True), patch.object(M.os, 'O_NOFOLLOW', 0, create=True), \
-                    patch.object(M.os, 'O_CLOEXEC', 0, create=True), \
-                    patch.object(M.os, 'getpid', return_value=21), \
-                    patch.object(M.os, 'open', side_effect=lambda p, flags: int(p.rsplit('/', 1)[1])), \
-                    patch.object(M.os, 'close'), patch.object(M.os, 'readlink', side_effect=executable), \
-                    patch.object(M.ProxyAssociationProc, 'read_at', side_effect=read), \
-                    patch.object(M, 'root_process', return_value={**caller, 'startTime': '99'} if failure == 'caller-replaced' else caller):
+        for failure in (None, 'foreign-exe', 'mixed-uid', 'sudo-other-uid', 'caller-replaced', 'permission', 'zombie'):
+            with self.subTest(failure=failure), invocation_fixture() as state:
+                original = PermissionError('PRIVATE_PROC_FAILURE')
+                if failure == 'foreign-exe': state.rows[20]['executable'] = '/PRIVATE_FOREIGN_EXECUTABLE'
+                if failure == 'mixed-uid': state.rows[21]['uids'] = [1001, 0, 0, 0]
+                if failure == 'sudo-other-uid': state.rows[20]['uids'] = [1001, 0, 0, 1001]
+                if failure == 'caller-replaced': state.rows[19]['startTime'] = '99'
+                if failure == 'permission': state.permission = original
+                if failure == 'zombie': state.rows[21]['state'] = 'Z'
                 if failure is None:
-                    self.assertEqual([r['pid'] for r in M.probe_caller_chain(caller)], [21, 20])
-                    self.assertEqual(reads, [(21, 'stat'), (21, 'status'), (20, 'stat'), (20, 'status')])
-                    self.assertEqual(links, [21, 20])
+                    rows = M.probe_caller_chain(state.caller)
+                    self.assertEqual([r['pid'] for r in rows], [21, 20])
+                    self.assertEqual(rows[1]['uids'], [1001, 0, 0, 0])
+                    self.assertEqual(rows[1]['executableKind'], 'sudo')
+                    self.assertEqual(rows[1]['imageSha256'], 'b' * 64)
                 else:
-                    with self.assertRaises((ValueError, PermissionError)) as caught: M.probe_caller_chain(caller)
+                    with self.assertRaises((ValueError, PermissionError)) as caught: M.probe_caller_chain(state.caller)
                     detail = caught.exception.proxy_caller_diagnostic
                     self.assertLessEqual(len(M.json.dumps(detail)), 4096)
                     self.assertNotIn('PRIVATE', M.json.dumps(detail))
                     hop = detail['hops'][-1]
-                    if failure in ('mixed-uid', 'sudo-mixed-uid'):
+                    if failure in ('mixed-uid', 'sudo-other-uid'):
                         self.assertEqual(detail['predicate'], 'hop-credentials')
-                        self.assertEqual(hop['uids'], [1001, 0, 0, 0])
-                        self.assertEqual(hop['state'], 'R'); self.assertEqual(hop['executableKind'], 'unread')
+                        self.assertEqual(hop['executableKind'], 'python' if failure == 'mixed-uid' else 'sudo')
                         self.assertEqual(hop['pid'], 21 if failure == 'mixed-uid' else 20)
-                        self.assertEqual(hop['parentPid'], 20 if failure == 'mixed-uid' else 19)
-                        self.assertEqual(hop['startTime'], str(hop['pid']))
-                        self.assertEqual(links, [] if failure == 'mixed-uid' else [21])
+                        self.assertIn(hop['pid'], state.links)
                     elif failure == 'foreign-exe':
                         self.assertEqual(detail['predicate'], 'hop-executable')
                         self.assertEqual((hop['expectedKind'], hop['executableKind']), ('sudo', 'other'))
@@ -652,10 +946,10 @@ class RootAssociationTests(unittest.TestCase):
                     elif failure == 'permission':
                         self.assertIs(caught.exception, original)
                         self.assertEqual(detail['predicate'], 'hop-read'); self.assertIsNone(hop['state'])
-                        self.assertEqual(reads, [(21, 'stat')]); self.assertEqual(links, [])
+                        self.assertEqual(state.reads, [(21, 'stat')]); self.assertEqual(state.links, [])
                     else:
                         self.assertEqual(detail['predicate'], 'hop-process-shape'); self.assertEqual(hop['state'], 'Z')
-                        self.assertEqual(links, [])
+                        self.assertEqual(state.links, [])
 
     def test_optional_caller_proc_metadata_uses_only_existing_identity_reads(self):
         pid = 19

@@ -605,13 +605,14 @@ class PrivateInstance:
 
 def root_request(value, now):
     require(type(value) is dict and set(value) == {'schemaVersion', 'operation', 'harnessSource', 'codeSha256',
-            'sequence', 'nonce', 'expiresNs', 'original', 'client', 'tree'}
+            'sequence', 'nonce', 'expiresNs', 'original', 'client', 'tree', 'caller'}
             and type(value['schemaVersion']) is int and value['schemaVersion'] == 1
             and value['operation'] == 'flatpak-proxy-snapshot-uid1001'
             and type(value['sequence']) is int and 1 <= value['sequence'] <= 3
             and type(value['expiresNs']) is int and now < value['expiresNs'] <= now + ROOT_WORKER_SECONDS * 10**9
             and re.fullmatch(r'[a-f0-9]{40}', value['harnessSource'])
             and all(type(value[k]) is str and re.fullmatch(r'[a-f0-9]{64}', value[k]) for k in ('nonce', 'codeSha256')))
+    validate_caller(value['caller'])
     for row in (value['original'], value['client']):
         OwnedLineage.validate(row); require(row['uids'] == [PROXY_UID] * 4)
     require(value['original']['executable'] == '/usr/bin/bwrap'
@@ -704,8 +705,10 @@ def root_uid_tuple(pid):
         os.close(directory)
 
 
-def complete_uid_inventory(budget):
+def complete_uid_inventory(budget, *, invocation=None):
     def scan():
+        if invocation is not None:
+            invocation.recheck()
         rows, count = {}, 0
         with os.scandir('/proc') as entries:
             for entry in entries:
@@ -718,11 +721,16 @@ def complete_uid_inventory(budget):
                     # proc_pid(5): non-dumpable processes' proc entries can be root-owned.
                     ids = root_uid_tuple(int(entry.name))
                     if PROXY_UID in ids:
-                        require(ids == [PROXY_UID] * 4)
-                        rows[int(entry.name)] = root_process(int(entry.name))
+                        if ids == [PROXY_UID] * 4:
+                            rows[int(entry.name)] = root_process(int(entry.name))
+                        else:
+                            require(invocation is not None)
+                            rows[int(entry.name)] = invocation.mixed_process(int(entry.name), ids)
                 except Exception as error:
                     error.proxy_snapshot_pid = int(entry.name)
                     raise
+        if invocation is not None:
+            invocation.recheck()
         return rows
     first = scan(); proxies = sorted(pid for pid, row in first.items() if row['executable'] == '/usr/bin/xdg-dbus-proxy')
     require(len(proxies) <= 4)
@@ -730,10 +738,20 @@ def complete_uid_inventory(budget):
     return proxies, first
 
 
-def complete_proxy_inventory(budget):
-    proxies, rows = complete_uid_inventory(budget)
+def complete_proxy_inventory(budget, *, invocation=None):
+    proxies, rows = complete_uid_inventory(budget, invocation=invocation)
     require(0 < len(proxies) <= 4)
     return proxies, rows
+
+
+def validate_caller(row):
+    require(type(row) is dict and set(row) == {'pid', 'parentPid', 'startTime', 'uids', 'executable'}
+            and type(row['pid']) is int and 1 < row['pid'] < 2**31
+            and type(row['parentPid']) is int and 0 < row['parentPid'] < 2**31
+            and type(row['startTime']) is str and re.fullmatch(r'[1-9][0-9]{0,19}', row['startTime'])
+            and type(row['uids']) is list and len(row['uids']) == 4
+            and all(type(uid) is int and uid == PROXY_UID for uid in row['uids'])
+            and type(row['executable']) is str and re.fullmatch(r'/usr/bin/python3\.[0-9]{1,2}', row['executable']))
 
 
 def probe_request(value, now):
@@ -744,60 +762,202 @@ def probe_request(value, now):
             and type(value['expiresNs']) is int and now < value['expiresNs'] <= now + ROOT_WORKER_SECONDS * 10**9
             and type(value['harnessSource']) is str and re.fullmatch(r'[a-f0-9]{40}', value['harnessSource'])
             and all(type(value[k]) is str and re.fullmatch(r'[a-f0-9]{64}', value[k]) for k in ('nonce', 'codeSha256')))
-    row = value['caller']
-    require(type(row) is dict and set(row) == {'pid', 'parentPid', 'startTime', 'uids', 'executable'}
-            and type(row['pid']) is int and 1 < row['pid'] < 2**31
-            and type(row['parentPid']) is int and 0 < row['parentPid'] < 2**31
-            and type(row['startTime']) is str and re.fullmatch(r'[1-9][0-9]{0,19}', row['startTime'])
-            and type(row['uids']) is list and all(type(x) is int for x in row['uids']) and row['uids'] == [PROXY_UID] * 4
-            and row['executable'] == str(Path('/usr/bin/python3').resolve(strict=True)))
+    validate_caller(value['caller'])
+    require(value['caller']['executable'] == str(Path('/usr/bin/python3').resolve(strict=True)))
+
+
+class InvocationImage:
+    """Held fixed system package image, never a request-supplied executable."""
+    def __init__(self, kind, budget):
+        require(kind in ('python', 'sudo'))
+        self.kind, self.budget, self.fd, self.parents = kind, budget, None, []
+        self.alias = Path('/usr/bin/python3' if kind == 'python' else '/usr/bin/sudo')
+        self.alias_identity = ProxyAssociationProc.stamp(self.alias.lstat())
+        require(self.alias_identity[3] == self.alias_identity[4] == 0)
+        self.path = self.alias.resolve(strict=True)
+        require(self.path.parent == Path('/usr/bin') and (self.path == self.alias if kind == 'sudo'
+                else re.fullmatch(r'python3\.[0-9]{1,2}', self.path.name)))
+        try:
+            parent = None
+            for name in ('/', 'usr', 'bin'):
+                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                             **({'dir_fd': parent} if parent is not None else {}))
+                self.parents.append((parent, name, fd, self.directory(os.fstat(fd))))
+                parent = fd
+            self.fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+            self.identity = ProxyAssociationProc.stamp(os.fstat(self.fd))
+            self.digest = self.snapshot()
+        except Exception as error:
+            try:
+                self.close()
+            except Exception:
+                error.invocation_cleanup_failed = True
+            raise
+
+    @staticmethod
+    def directory(info):
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0 and not info.st_mode & 0o7022)
+        return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
+
+    def check(self):
+        self.budget()
+        require(self.fd is not None and self.alias.resolve(strict=True) == self.path
+                and ProxyAssociationProc.stamp(self.alias.lstat()) == self.alias_identity)
+        for parent, name, fd, expected in self.parents:
+            require(self.directory(os.fstat(fd)) == expected == self.directory(os.stat(name, follow_symlinks=False,
+                    **({'dir_fd': parent} if parent is not None else {}))))
+        info = os.fstat(self.fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0 and info.st_nlink >= 1
+                and stat.S_IMODE(info.st_mode) == (0o4755 if self.kind == 'sudo' else 0o755)
+                and 0 < info.st_size <= 64 * 1024**2 and ProxyAssociationProc.stamp(info) == self.identity
+                == ProxyAssociationProc.stamp(os.stat(self.path.name, dir_fd=self.parents[-1][2], follow_symlinks=False)))
+
+    def snapshot(self):
+        self.check(); digest, offset = hashlib.sha256(), 0
+        while offset < self.identity[6]:
+            self.budget(); raw = os.pread(self.fd, min(65536, self.identity[6] - offset), offset)
+            require(raw); digest.update(raw); offset += len(raw)
+        require(not os.pread(self.fd, 1, offset))
+        self.check()
+        result = digest.hexdigest()
+        require(not hasattr(self, 'digest') or result == self.digest)
+        return result
+
+    def close(self):
+        failure = None
+        for fd in ([self.fd] if self.fd is not None else []) + [row[2] for row in reversed(self.parents)]:
+            try: os.close(fd)
+            except Exception as error: failure = failure or error
+        self.fd, self.parents = None, []
+        if failure is not None: raise failure
+
+
+class InvocationChain:
+    """This worker -> optional protected sudo ancestors -> the exact unprivileged caller."""
+    def __init__(self, caller, budget=lambda: None):
+        self.caller, self.budget, self.images, self.held, self.rows = copy.deepcopy(caller), budget, {}, {}, []
+        self.detail = dict(predicate='chain-limit', hops=[])
+        try:
+            validate_caller(caller)
+            pid = os.getpid()
+            for _ in range(5):
+                kind = 'python' if not self.rows or pid == caller['pid'] else 'sudo'
+                row = self.retain(pid, kind, caller=pid == caller['pid'])
+                if pid == caller['pid']:
+                    self.detail['predicate'] = 'caller-identity'
+                    require(1 <= len(self.rows) <= 4 and self.process(row) == caller)
+                    self.recheck()
+                    return
+                self.rows.append(row); pid = row['parentPid']
+            self.detail['predicate'] = 'chain-limit'
+            raise ValueError('Fixed invoking caller chain unavailable')
+        except Exception as error:
+            try:
+                error.proxy_caller_diagnostic = bounded(self.detail, 4096)
+            except Exception:
+                pass
+            try:
+                self.close()
+            except Exception:
+                error.invocation_cleanup_failed = True
+            raise
+
+    @staticmethod
+    def process(row):
+        return {key: row[key] for key in ('pid', 'parentPid', 'startTime', 'uids', 'executable')}
+
+    def identity(self, pid, directory, hop):
+        self.detail['predicate'] = 'hop-read'; self.budget()
+        raw, _ = ProxyAssociationProc.read_at(directory, 'stat', 4096)
+        status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
+        text = raw.decode('utf-8'); tail = text[text.rfind(')') + 2:].split()
+        ids = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
+        hop.update(probe_hop_detail(pid, tail, ids))
+        self.detail['predicate'] = 'hop-process-shape'
+        require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and tail[0] not in ('Z', 'X')
+                and len(ids) == 1 and hop['parentPid'] is not None and hop['startTime'] is not None)
+        self.detail['predicate'] = 'hop-executable'
+        executable = os.readlink('exe', dir_fd=directory)
+        return dict(pid=pid, parentPid=int(tail[1]), startTime=tail[19], state=tail[0],
+                    uids=[int(uid) for uid in ids[0]], executable=executable)
+
+    def retain(self, pid, kind, *, caller):
+        require(pid not in self.held and type(pid) is int and 1 < pid < 2**31)
+        hop = probe_hop_detail(pid); hop['expectedKind'] = kind; self.detail['hops'].append(hop)
+        held = self.held[pid] = dict(fds=[], hop=hop, kind=kind, caller=caller)
+        self.detail['predicate'] = 'hop-read'
+        held['pidfd'] = os.pidfd_open(pid); held['fds'].append(held['pidfd'])
+        held['directory'] = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        held['fds'].append(held['directory'])
+        row = self.identity(pid, held['directory'], hop)
+        if kind not in self.images:
+            self.images[kind] = InvocationImage(kind, self.budget)
+        image = self.images[kind]
+        hop['executableKind'] = kind if row['executable'] == str(image.path) else 'other'
+        require(row['executable'] == str(image.path))
+        held['kernel'] = os.open('exe', os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=held['directory'])
+        held['fds'].append(held['kernel'])
+        require(ProxyAssociationProc.stamp(os.fstat(held['kernel'])) == image.identity)
+        image.snapshot()
+        self.detail['predicate'] = 'hop-credentials'
+        # Preserve all-root sudo as well as the observed supervisor real UID, under identical image/proc guards.
+        # https://raw.githubusercontent.com/sudo-project/sudo/SUDO_1_9_9/src/exec_nopty.c
+        expected_uids = (([PROXY_UID] * 4,) if caller else ([0] * 4,) if kind == 'python'
+                         else ([0] * 4, [PROXY_UID, 0, 0, 0]))
+        require(row['uids'] in expected_uids)
+        held['row'] = row
+        return row
+
+    def recheck(self):
+        require(self.caller['pid'] in self.held and self.images and 1 <= len(self.rows) <= 4)
+        for pid, held in self.held.items():
+            row = self.identity(pid, held['directory'], held['hop']); image = self.images[held['kind']]
+            held['hop']['executableKind'] = held['kind'] if row['executable'] == str(image.path) else 'other'
+            require({k: v for k, v in row.items() if k != 'state'} == {k: v for k, v in held['row'].items() if k != 'state'}
+                    and ProxyAssociationProc.stamp(os.fstat(held['kernel'])) == image.identity
+                    == ProxyAssociationProc.stamp(os.stat('exe', dir_fd=held['directory']))
+                    and not select.select([held['pidfd']], [], [], 0)[0])
+            image.snapshot()
+        self.budget()
+
+    def mixed_process(self, pid, ids):
+        require(type(pid) is int and pid in self.held and self.held[pid]['kind'] == 'sudo'
+                and type(ids) is list and all(type(uid) is int for uid in ids) and ids == [PROXY_UID, 0, 0, 0])
+        self.recheck()
+        row = self.held[pid]['row']; require(row['uids'] == ids)
+        return self.process(row)
+
+    def receipt(self):
+        return [{**{k: row[k] for k in ('pid', 'parentPid', 'startTime', 'state', 'uids')},
+                 'executableKind': 'python' if index == 0 else 'sudo',
+                 'imageSha256': self.images['python' if index == 0 else 'sudo'].digest}
+                for index, row in enumerate(self.rows)]
+
+    def close(self):
+        failure = None
+        for held in self.held.values():
+            for fd in reversed(held['fds']):
+                try: os.close(fd)
+                except Exception as error: failure = failure or error
+        for image in self.images.values():
+            try: image.close()
+            except Exception as error: failure = failure or error
+        self.held, self.images = {}, {}
+        if failure is not None: raise failure
+
+    def __enter__(self): return self
+
+    def __exit__(self, kind, value, traceback):
+        try:
+            self.close()
+        except Exception:
+            if value is None: raise
+            value.invocation_cleanup_failed = True
 
 
 def probe_caller_chain(caller):
-    # Only this worker's fixed sudo/python invocation ancestry, never an app ancestry claim.
-    pid, chain = os.getpid(), []
-    detail = dict(predicate='chain-limit', hops=[])
-    try:
-        for _ in range(5):
-            hop = probe_hop_detail(pid)
-            hop['expectedKind'] = 'python' if not chain or pid == caller['pid'] else 'sudo'
-            detail['hops'].append(hop)
-            if pid == caller['pid']:
-                detail['predicate'] = 'caller-read'
-                actual = root_process(pid, probe_diagnostic=hop)
-                hop['executableKind'] = 'python' if actual['executable'] == caller['executable'] else 'other'
-                detail['predicate'] = 'caller-identity'
-                require(actual == caller and chain)
-                return chain
-            detail['predicate'] = 'hop-read'
-            directory = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-            try:
-                raw, _ = ProxyAssociationProc.read_at(directory, 'stat', 4096)
-                status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
-                text = raw.decode('utf-8'); tail = text[text.rfind(')') + 2:].split()
-                ids = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
-                hop.update(probe_hop_detail(pid, tail, ids))
-                detail['predicate'] = 'hop-process-shape'
-                require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and tail[0] not in ('Z', 'X') and len(ids) == 1)
-                detail['predicate'] = 'hop-credentials'
-                require([int(v) for v in ids[0]] == [0] * 4)
-                executable = os.readlink('exe', dir_fd=directory)
-                detail['predicate'] = 'hop-executable'
-                expected = str(Path('/usr/bin/python3').resolve(strict=True)) if not chain else '/usr/bin/sudo'
-                hop['executableKind'] = hop['expectedKind'] if executable == expected else 'other'
-                require(executable == expected)
-                chain.append(dict(pid=pid, parentPid=int(tail[1]), startTime=tail[19], state=tail[0], uids=[0] * 4))
-                pid = int(tail[1])
-            finally:
-                os.close(directory)
-        detail['predicate'] = 'chain-limit'
-        raise ValueError('Fixed invoking caller chain unavailable')
-    except Exception as error:
-        try:
-            error.proxy_caller_diagnostic = copy.deepcopy(bounded(detail, 4096))
-        except Exception:
-            pass
-        raise
+    with InvocationChain(caller) as invocation:
+        return invocation.receipt()
 
 
 def inventory_probe(request, *, clock=time.monotonic_ns):
@@ -807,26 +967,24 @@ def inventory_probe(request, *, clock=time.monotonic_ns):
     fd = os.pidfd_open(request['caller']['pid'])
     stage = 'probe-caller-chain'
     try:
-        chain = probe_caller_chain(request['caller'])
-        try:
+        with InvocationChain(request['caller'], budget) as invocation:
+            try:
+                require(not select.select([fd], [], [], 0)[0])
+            except Exception as error:
+                hop = probe_hop_detail(request['caller']['pid'])
+                hop['expectedKind'] = 'python'
+                error.proxy_caller_diagnostic = dict(predicate='caller-pidfd-live', hops=[hop])
+                raise
+            stage = 'complete-uid-inventory'
+            proxies, rows = complete_uid_inventory(budget, invocation=invocation)
+            require(rows.get(request['caller']['pid']) == request['caller'])
+            stage = 'probe-recheck'
+            invocation.recheck()
             require(not select.select([fd], [], [], 0)[0])
-        except Exception as error:
-            hop = probe_hop_detail(request['caller']['pid'])
-            hop['expectedKind'] = 'python'
-            error.proxy_caller_diagnostic = dict(predicate='caller-pidfd-live', hops=[hop])
-            raise
-        stage = 'complete-uid-inventory'
-        proxies, rows = complete_uid_inventory(budget)
-        require(rows.get(request['caller']['pid']) == request['caller'])
-        stage = 'probe-recheck'
-        after = probe_caller_chain(request['caller'])
-        require([{k: v for k, v in row.items() if k != 'state'} for row in after]
-                == [{k: v for k, v in row.items() if k != 'state'} for row in chain]
-                and not select.select([fd], [], [], 0)[0])
-        budget()
-        return dict(operation=PROBE_OPERATION, complete=True, uid=PROXY_UID, candidateCount=len(proxies),
-                    scopedProcessCount=len(rows), caller=request['caller'], invocation=after,
-                    readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
+            budget()
+            return dict(operation=PROBE_OPERATION, complete=True, uid=PROXY_UID, candidateCount=len(proxies),
+                        scopedProcessCount=len(rows), caller=request['caller'], invocation=invocation.receipt(),
+                        readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
     except Exception as error:
         error.proxy_snapshot_stage = stage
         raise
@@ -844,13 +1002,16 @@ def validate_probe(value, request):
             and value['candidateCount'] <= value['scopedProcessCount'] and value['caller'] == request['caller']
             and value['readOnly'] is True
             and all(value[k] is False for k in ('inputPermitted', 'authorityGranted', 'releaseReady'))
-            and type(value['invocation']) is list and 0 < len(value['invocation']) <= 5)
+            and type(value['invocation']) is list and 1 <= len(value['invocation']) <= 4)
     rows = value['invocation']
-    for row in rows:
-        require(type(row) is dict and set(row) == {'pid', 'parentPid', 'startTime', 'state', 'uids'}
+    for index, row in enumerate(rows):
+        require(type(row) is dict and set(row) == {'pid', 'parentPid', 'startTime', 'state', 'uids', 'executableKind', 'imageSha256'}
                 and all(type(row[k]) is int and 1 < row[k] < 2**31 for k in ('pid', 'parentPid'))
                 and type(row['startTime']) is str and re.fullmatch(r'[1-9][0-9]{0,19}', row['startTime'])
-                and type(row['uids']) is list and len(row['uids']) == 4 and all(type(uid) is int and uid == 0 for uid in row['uids'])
+                and type(row['uids']) is list and all(type(uid) is int for uid in row['uids'])
+                and row['uids'] in (([0] * 4,) if index == 0 else ([0] * 4, [PROXY_UID, 0, 0, 0]))
+                and row['executableKind'] == ('python' if index == 0 else 'sudo')
+                and type(row['imageSha256']) is str and re.fullmatch(r'[a-f0-9]{64}', row['imageSha256'])
                 and type(row['state']) is str and row['state'] in ('R', 'S', 'D', 'I', 'T', 't', 'P'))
     require(len({r['pid'] for r in rows}) == len(rows) and rows[-1]['parentPid'] == request['caller']['pid']
             and all(a['parentPid'] == b['pid'] for a, b in zip(rows, rows[1:])))
@@ -858,6 +1019,17 @@ def validate_probe(value, request):
 
 def association_snapshot(request, *, proc=None, read=root_process, inventory=complete_proxy_inventory,
                          runtime=PROXY_RUNTIME, clock=time.monotonic_ns):
+    root_request(request, clock())
+    with InvocationChain(request['caller'], lambda: require(clock() < request['expiresNs'])) as invocation:
+        def current(budget):
+            invocation.recheck()
+            result = inventory(budget, invocation=invocation) if inventory is complete_proxy_inventory else inventory(budget)
+            invocation.recheck()
+            return result
+        return association_snapshot_held(request, proc=proc, read=read, inventory=current, runtime=runtime, clock=clock)
+
+
+def association_snapshot_held(request, *, proc, read, inventory, runtime, clock):
     root_request(request, clock())
     proc = ProxyAssociationProc() if proc is None else proc
     def budget():

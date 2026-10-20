@@ -1422,7 +1422,7 @@ class RootProxySnapshot:
         request = dict(schemaVersion=1, operation='flatpak-proxy-snapshot-uid1001', harnessSource=self.harness,
                        codeSha256=self.code, sequence=self.sequence, nonce=nonce,
                        expiresNs=min(int(self.capture.transcript.deadline * 10**9), time.monotonic_ns() + 4 * 10**9),
-                       original=self.original, client=self.client, tree=tree)
+                       original=self.original, client=self.client, tree=tree, caller=self.module.root_process(os.getpid()))
         self.module.root_request(request, time.monotonic_ns())
         raw = json_bytes(request); require(len(raw) <= 32768, 'Root snapshot request bound')
         result = root_exchange(self.module.PROXY_TOOL, 'root-proxy-snapshot', raw, request['expiresNs'] / 10**9)

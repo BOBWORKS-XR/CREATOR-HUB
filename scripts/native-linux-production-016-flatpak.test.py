@@ -855,8 +855,10 @@ class RootInventoryPreflightTests(unittest.TestCase):
             request = M.parse(raw)
             data = dict(operation='flatpak-uid-inventory-probe-1001', complete=True, uid=1001, candidateCount=0,
                         scopedProcessCount=2, caller=request['caller'],
-                        invocation=[dict(pid=21, parentPid=20, startTime='21', state='R', uids=[0] * 4),
-                                    dict(pid=20, parentPid=19, startTime='20', state='S', uids=[0] * 4)],
+                        invocation=[dict(pid=21, parentPid=20, startTime='21', state='R', uids=[0] * 4,
+                                         executableKind='python', imageSha256='a' * 64),
+                                    dict(pid=20, parentPid=19, startTime='20', state='S', uids=[1001, 0, 0, 0],
+                                         executableKind='sudo', imageSha256='b' * 64)],
                         readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
             if failure == 'timeout':
                 error = TimeoutError(); error.root_proxy_diagnostic = dict(readOnly=True, inputPermitted=False,
@@ -883,6 +885,42 @@ class RootInventoryPreflightTests(unittest.TestCase):
             self.assertEqual(path, root.parent / 'native-linux-flatpak-root-preflight.json')
             self.assertTrue(report['inventoryProbed']); self.assertEqual(report['inventory']['candidateCount'], 0)
             self.assertNotIn('proxy', report['inventory']); self.assertNotIn('tree', report['inventory'])
+            for name in (*M.GATES, 'inputPermitted', 'authorityGranted'): self.assertIs(report[name], False)
+
+    def test_probe_receipt_accepts_both_verified_sudo_uid_shapes_only(self):
+        for ids, accepted in (([0] * 4, True), ([1001, 0, 0, 0], True),
+                              ([1001, 0, 1001, 0], False), ([1002, 0, 0, 0], False)):
+            with self.subTest(ids=ids), self.fixture() as state:
+                original_exchange = state.worker.side_effect
+                def exchange(*args):
+                    result = original_exchange(*args)
+                    answer = M.parse(result.stdout); answer['snapshot']['invocation'][1]['uids'] = ids
+                    result.stdout = M.json_bytes(answer)
+                    return result
+                state.worker.side_effect = exchange
+                if accepted:
+                    M.root_inventory_preflight(Path('/fixed'))
+                else:
+                    with self.assertRaises(ValueError): M.root_inventory_preflight(Path('/fixed'))
+                report = state.reports[0][1]
+                self.assertIs(report['inventoryProbed'], accepted)
+                self.assertEqual(state.worker.call_count, 1)
+                for name in (*M.GATES, 'inputPermitted', 'authorityGranted'): self.assertIs(report[name], False)
+
+    def test_direct_worker_caller_probe_receipt_remains_non_authorizing(self):
+        with self.fixture() as state:
+            original_exchange = state.worker.side_effect
+            def exchange(*args):
+                result = original_exchange(*args)
+                answer = M.parse(result.stdout)
+                answer['snapshot']['invocation'] = answer['snapshot']['invocation'][:1]
+                answer['snapshot']['invocation'][0]['parentPid'] = answer['request']['caller']['pid']
+                result.stdout = M.json_bytes(answer)
+                return result
+            state.worker.side_effect = exchange
+            M.root_inventory_preflight(Path('/fixed'))
+            report = state.reports[0][1]
+            self.assertTrue(report['inventoryProbed']); self.assertEqual(len(report['inventory']['invocation']), 1)
             for name in (*M.GATES, 'inputPermitted', 'authorityGranted'): self.assertIs(report[name], False)
 
     def test_unknown_missing_source_or_authority_flag_stops_before_any_sudo(self):
@@ -1126,7 +1164,8 @@ class RootWorkerExchangeTests(unittest.TestCase):
 class RootProxySnapshotTests(unittest.TestCase):
     def fixture(self):
         module = SimpleNamespace(PROXY_RUNTIME=Path('/fixed/runtime'), PROXY_TOOL=Path('/protected/observer.py'),
-            protected_tool=Mock(), root_request=Mock(), validate_association=Mock())
+            protected_tool=Mock(), root_request=Mock(), validate_association=Mock(),
+            root_process=Mock(return_value=dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10')))
         capture = SimpleNamespace(budget=Mock(), transcript=SimpleNamespace(deadline=M.time.monotonic() + 10))
         original, client = {'pid': 10}, {'pid': 14}
         with patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.os, 'geteuid', return_value=1001, create=True):
@@ -1145,10 +1184,22 @@ class RootProxySnapshotTests(unittest.TestCase):
         tool, operation, raw, deadline = run.call_args.args
         self.assertEqual((tool, operation), (state.module.PROXY_TOOL, 'root-proxy-snapshot'))
         request = M.parse(raw)
+        self.assertEqual(request['caller'], state.module.root_process.return_value)
+        state.module.root_process.assert_called_once_with(M.os.getpid())
         self.assertLessEqual(request['expiresNs'] - M.time.monotonic_ns(), 4 * 10**9)
         self.assertEqual(deadline, request['expiresNs'] / 10**9)
         state.module.protected_tool.assert_has_calls([unittest.mock.call('b' * 64), unittest.mock.call('b' * 64)])
         self.assertEqual(state.adapter.sequence, 2)
+
+    def test_actual_caller_identity_failure_blocks_before_exchange_and_cannot_retry(self):
+        state = self.fixture(); original = PermissionError('fixed caller proc refusal')
+        state.module.root_process.side_effect = original
+        with patch.object(M, 'root_exchange') as worker:
+            with self.assertRaises(PermissionError) as raised: state.adapter([])
+            self.assertIs(raised.exception, original)
+            self.assertTrue(state.adapter.blocked)
+            with self.assertRaisesRegex(RuntimeError, 'cannot be retried'): state.adapter([])
+            worker.assert_not_called()
 
     def test_replayed_wrong_source_nonce_or_sequence_never_unblocks_retry(self):
         for field in ('nonce', 'sequence', 'harnessSource', 'codeSha256'):
