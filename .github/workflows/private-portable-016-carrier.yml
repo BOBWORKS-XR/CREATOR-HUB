@@ -49,7 +49,7 @@ jobs:
             assert.equal(release.id,411494394);assert.equal(release.tag_name,'v0.1.13-validation');assert.equal(release.draft,true);
             const {data:assets}=await github.rest.repos.listReleaseAssets({...context.repo,release_id:411494394,per_page:100,page:1});
             assert.ok(Array.isArray(assets)&&assets.length<100);const selected=assets.filter(a=>a.id===v.assetId);assert.equal(selected.length,1);const asset=selected[0];
-            assert.equal(asset.name,'signed-private-portable016-carrier-39365532397.zip');assert.equal(asset.state,'uploaded');assert.equal(asset.size,v.zip.size);assert.equal(asset.digest,`sha256:${v.zip.sha256}`);
+            assert.ok(asset.name==='signed-private-portable016-carrier-39365532397.zip'||asset.name==='signed-private-portable016-carrier-39435741602.zip');assert.equal(asset.state,'uploaded');assert.equal(asset.size,v.zip.size);assert.equal(asset.digest,`sha256:${v.zip.sha256}`);
             const {data}=await github.rest.repos.getReleaseAsset({...context.repo,asset_id:v.assetId,headers:{accept:'application/octet-stream'}});
             assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer);const bytes=Buffer.from(data);
             assert.equal(bytes.length,v.zip.size);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),v.zip.sha256);

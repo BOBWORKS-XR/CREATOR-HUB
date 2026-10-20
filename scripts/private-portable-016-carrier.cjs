@@ -8,6 +8,7 @@ const { execFileSync } = require('node:child_process');
 const BRANCH = 'refs/heads/validation/private-portable-016-carrier';
 const WORKFLOW = '.github/workflows/private-portable-016-carrier.yml';
 const ASSET = 'signed-private-portable016-carrier-39365532397.zip';
+const REVIEWED_ASSET = 'signed-private-portable016-carrier-39435741602.zip';
 const RELEASE = 411494394, TAG = 'v0.1.13-validation';
 const META = 2 * 1024 * 1024, SIGNED_META = 128 * 1024, FILE = 256 * 1024 * 1024, ZIP = 768 * 1024 * 1024;
 const FILES = Object.freeze(['package-receipt.json', 'Creator Hub_0.1.16_amd64.AppImage',
@@ -45,7 +46,7 @@ function asset(v, release, assets) {
   validate(v); assert.equal(release.id, RELEASE); assert.equal(release.tag_name, TAG); assert.equal(release.draft, true);
   assert.ok(Array.isArray(assets) && assets.length < 100);
   const selected = assets.filter(item => item.id === v.assetId); assert.equal(selected.length, 1); const found = selected[0];
-  assert.equal(found.name, ASSET); assert.equal(found.state, 'uploaded'); assert.equal(found.size, v.zip.size); assert.equal(found.digest, `sha256:${v.zip.sha256}`); return found;
+  assert.ok(found.name === ASSET || found.name === REVIEWED_ASSET); assert.equal(found.state, 'uploaded'); assert.equal(found.size, v.zip.size); assert.equal(found.digest, `sha256:${v.zip.sha256}`); return found;
 }
 const STAGE_PYTHON = String.raw`
 import hashlib,json,os,stat,sys,zipfile
@@ -130,7 +131,7 @@ function stage(download, output, env = process.env) {
     fs.writeFileSync(path.join(output, 'transport-receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx', mode: 0o600 }); return receipt;
   } catch (error) { fs.writeFileSync(path.join(output, 'transport-refusal.json'), `${JSON.stringify({ transportCompleted: false, error: String(error.message).slice(0, 1500), ...flags() }, null, 2)}\n`, { flag: 'wx', mode: 0o600 }); throw error; }
 }
-module.exports = { BRANCH, WORKFLOW, ASSET, RELEASE, TAG, META, SIGNED_META, FILE, ZIP, FILES, METADATA, flags, record, limit, validate, parse, admission, asset, STAGE_PYTHON, stage };
+module.exports = { BRANCH, WORKFLOW, ASSET, REVIEWED_ASSET, RELEASE, TAG, META, SIGNED_META, FILE, ZIP, FILES, METADATA, flags, record, limit, validate, parse, admission, asset, STAGE_PYTHON, stage };
 if (require.main === module) Promise.resolve().then(() => { const args = process.argv.slice(2); assert.equal(args.length, 3); assert.equal(args[0], 'stage'); return stage(args[1], args[2]); })
   .then(() => console.log(JSON.stringify({ transportCompleted: true, ...flags() })))
   .catch(error => { console.error(String(error.message).slice(0, 1500)); process.exitCode = 1; });

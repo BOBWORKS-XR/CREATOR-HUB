@@ -6,6 +6,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 const c = require('./private-portable-016-carrier.cjs');
+const REVIEWED_ASSET = 'signed-private-portable016-carrier-39435741602.zip';
 const { yaml } = require('../node_modules/playwright-core/lib/utilsBundle.js');
 const workflowSource = fs.readFileSync(path.join(__dirname, '..', c.WORKFLOW), 'utf8');
 const document = yaml.parseDocument(workflowSource, { uniqueKeys: true }); assert.deepEqual(document.errors, []);
@@ -32,6 +33,7 @@ test('helper import is standard-library-only, has no signing/qualification or su
 test('finite constants match existing thirteen-file and four-metadata transport contracts and size bounds', () => {
   const existing = require('./private-linux-portable-fixture-017.cjs'), base = require('./linux-016-portable-package.cjs');
   assert.equal(c.ASSET, 'signed-private-portable016-carrier-39365532397.zip');
+  assert.equal(c.REVIEWED_ASSET, REVIEWED_ASSET);
   assert.deepEqual(c.FILES, existing.LEGACY_NAMES); assert.equal(c.METADATA.length, 4); assert.ok(c.METADATA.every(name => c.FILES.includes(name)));
   assert.equal(c.ZIP, base.LIMITS.zip); assert.equal(c.FILE, base.LIMITS.file); assert.equal(c.META, 2 * 1024 * 1024); assert.equal(c.SIGNED_META, 128 * 1024);
   for (const name of c.METADATA) assert.equal(c.limit(name), name.endsWith('.minisig') ? 4096 : c.SIGNED_META);
@@ -52,15 +54,23 @@ test('manual hosted admission refuses pushes, other branches/platforms, wrong re
   assert.throws(() => c.admission(environment(), 'darwin', 'x64')); assert.throws(() => c.admission(environment(), 'linux', 'arm64'));
   assert.throws(() => c.stage('/never/read', '/never/write', {}));
 });
-test('asset binding admits only fixed private draft/name, uploaded exact byte identity and bounded complete asset list', () => {
+test('asset binding preserves the old name and admits only the distinct reviewed name with exact ID/digest pins', () => {
   const { input } = sample(), release = { id: c.RELEASE, tag_name: c.TAG, draft: true }, good = { id: input.assetId, name: c.ASSET, state: 'uploaded', size: input.zip.size, digest: `sha256:${input.zip.sha256}` };
   c.asset(input, release, [good]);
+  c.asset(input, release, [{ ...good, name: REVIEWED_ASSET }]);
   for (const change of [{ name: 'renamed.zip' }, { name: 'signed-private-portable016-carrier-39352300183.zip' },
-    { state: 'new' }, { size: 1 }, { digest: 'sha256:bad' }]) assert.throws(() => c.asset(input, release, [{ ...good, ...change }]));
+    { name: 'signed-private-portable016-carrier-39435741603.zip' }, { name: REVIEWED_ASSET + '.extra' },
+    { name: REVIEWED_ASSET.toUpperCase() }, { name: '../' + REVIEWED_ASSET },
+    { id: input.assetId + 1 }, { state: 'new' }, { size: 1 }, { digest: 'sha256:bad' }]) assert.throws(() => c.asset(input, release, [{ ...good, ...change }]));
+  for (const name of [c.ASSET, REVIEWED_ASSET]) {
+    for (const change of [{ id: input.assetId + 1 }, { size: input.zip.size + 1 }, { digest: 'sha256:' + 'f'.repeat(64) }]) {
+      assert.throws(() => c.asset(input, release, [{ ...good, name, ...change }]));
+    }
+  }
   for (const change of [{ draft: false }, { id: 1 }, { tag_name: 'v0.1.16' }]) assert.throws(() => c.asset(input, { ...release, ...change }, [good]));
   assert.throws(() => c.asset(input, release, [good, good])); assert.throws(() => c.asset(input, release, Array(100).fill(good)));
 });
-async function gate(t, fault = '') {
+async function gate(t, fault = '', assetName = c.ASSET) {
   const temp = owned(t), { input } = sample(), bytes = Buffer.from('Synthetic ZIP download');
   if (fault === 'unknown') input.policy = 'anything'; if (fault === 'size') input.zip.size = c.ZIP + 1;
   const env = { ...environment(), TRANSPORT_INPUT: JSON.stringify(input, null, 2), RUNNER_TEMP: temp };
@@ -68,7 +78,7 @@ async function gate(t, fault = '') {
   const context = { repo: { owner: 'BOBWORKS-XR', repo: 'CREATOR-HUB' }, eventName: 'workflow_dispatch', ref: c.BRANCH };
   if (fault === 'push') context.eventName = 'push';
   const release = { id: c.RELEASE, tag_name: c.TAG, draft: fault !== 'public' };
-  const asset = { id: input.assetId, name: fault === 'name' ? 'wrong.zip' : fault === 'old-name' ? 'signed-private-portable016-carrier-39352300183.zip' : c.ASSET,
+  const asset = { id: input.assetId, name: fault === 'name' ? 'wrong.zip' : fault === 'old-name' ? 'signed-private-portable016-carrier-39352300183.zip' : assetName,
     state: 'uploaded', size: input.zip.size, digest: `sha256:${input.zip.sha256}` };
   if (fault === 'digest') asset.digest = 'sha256:bad';
   const calls = [], github = { rest: { repos: {
@@ -80,11 +90,21 @@ async function gate(t, fault = '') {
   return { temp, calls, execute: () => new AsyncFunction('require', 'process', 'context', 'github', script)(require, { env }, context, github) };
 }
 test('token-bearing gate reads only fixed release APIs, compares bytes before writing and never decodes a candidate', async t => {
-  const f = await gate(t); await f.execute(); assert.deepEqual(f.calls, ['release', 'list', 'download']);
-  assert.deepEqual(fs.readdirSync(f.temp).sort(), ['private-portable016.zip', 'transport-input.json']);
+  for (const name of [c.ASSET, REVIEWED_ASSET]) {
+    const f = await gate(t, '', name); await f.execute(); assert.deepEqual(f.calls, ['release', 'list', 'download']);
+    assert.deepEqual(fs.readdirSync(f.temp).sort(), ['private-portable016.zip', 'transport-input.json']);
+    await assert.rejects(f.execute());
+  }
   const body = workflow.jobs['stage-input'].steps[0].with.script;
   assert.doesNotMatch(body, /child_process|execFile|spawn|require\(['"]\.\/|zipfile|signingKey|signDetached|console\.|secrets\.|auth\.json/);
-  await assert.rejects(f.execute());
+});
+
+test('token-bearing name admission is the same closed two-name set and refuses aliases before download', async t => {
+  for (const name of ['signed-private-portable016-carrier-39435741603.zip', REVIEWED_ASSET + '.extra',
+    REVIEWED_ASSET.toUpperCase(), '../' + REVIEWED_ASSET]) {
+    const f = await gate(t, '', name); await assert.rejects(f.execute());
+    assert.equal(f.calls.includes('download'), false); assert.deepEqual(fs.readdirSync(f.temp), []);
+  }
 });
 test('token-bearing gate refuses invalid independent input before API and wrong/private asset identity before download', async t => {
   for (const fault of ['unknown', 'size', 'duplicate', 'push', 'public', 'name', 'old-name', 'digest', 'bytes']) {
