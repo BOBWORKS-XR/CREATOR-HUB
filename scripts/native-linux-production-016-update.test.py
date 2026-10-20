@@ -2936,6 +2936,7 @@ class InitialRootCreationContext(unittest.TestCase):
         _, _, node = cls.launch_node()
         body = ast.Module(body=[copy.deepcopy(node)], type_ignores=[])
         namespace = {"subprocess": SimpleNamespace(Popen=popen, DEVNULL=subprocess.DEVNULL), "scenario": scenario,
+                     "root_output": SimpleNamespace(target=lambda _: subprocess.DEVNULL),
                      "HTML_SCENARIOS": M.HTML_SCENARIOS, "app_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
                      "automation_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "TAURI_WEBVIEW_AUTOMATION": "true"}}
         exec(compile(ast.fix_missing_locations(body), "initial-owned-root-launch", "exec"), namespace)
@@ -2964,6 +2965,7 @@ class InitialRootCreationContext(unittest.TestCase):
         # expression with the Root command replaced by a fresh-file Python child.
         worker = r'''
 import ast, os, pathlib, subprocess, sys
+from types import SimpleNamespace
 source, directory = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 tree = ast.parse(source.read_text())
 session = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session")
@@ -2989,6 +2991,7 @@ try:
         Popen = staticmethod(launch)
         DEVNULL = subprocess.DEVNULL
     namespace = {"subprocess": Substitute, "scenario": "deb-native-cancel", "HTML_SCENARIOS": ("deb-native-cancel", "deb-auth-cancel", "deb-approve"),
+                 "root_output": SimpleNamespace(target=lambda _: subprocess.DEVNULL),
                  "app_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
                  "automation_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}}
     exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), "existing-initial-root", "exec"), namespace)
@@ -5166,6 +5169,372 @@ class FeatureReadinessEvidence(unittest.TestCase):
         calls = [ast.unparse(n.func) for n in ast.walk(method) if isinstance(n, ast.Call)]
         self.assertFalse(set(calls) & {"self.click", "wait", "time.sleep", "self.start", "self.optional", "subprocess.Popen"})
         self.assertEqual(calls.count("self.d.read"), 1)
+
+
+class RootPipeDrainerTests(unittest.TestCase):
+    WORKER = """import os
+for fd, value in ((1, b'o'), (2, b'e')):
+    data = memoryview(value * (2 * 1024 * 1024))
+    while data:
+        count = os.write(fd, data)
+        data = data[count:]
+"""
+
+    def launch_writer(self, drainer):
+        # Synthetic Python worker only. No GUI/app, package, permission or input.
+        try:
+            child = subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", self.WORKER], stdin=subprocess.DEVNULL,
+                                     stdout=drainer.target("stdout"), stderr=drainer.target("stderr"))
+        finally:
+            drainer.release_writers()
+        self.addCleanup(self.cleanup_worker, child)
+        self.assertEqual(child.wait(timeout=10), 0)
+        self.assertEqual(child.returncode, 0)
+        for item in drainer.items.values():
+            self.assertTrue(item["done"].wait(5), "Synthetic pipe reader must reach actual EOF; test-only bound")
+        return child
+
+    @staticmethod
+    def cleanup_worker(child):
+        # Only an unexpectedly stalled synthetic test worker, never native Hub.
+        if child.poll() is None:
+            child.kill(); child.wait(timeout=5)
+
+    def assert_drained(self, drainer, *, retained=True):
+        snapshot = drainer.snapshot()
+        for name, value in (("stdout", b"o"), ("stderr", b"e")):
+            row = snapshot["streams"][name]
+            self.assertEqual(row["bytes"], 2 * 1024 * 1024)
+            self.assertTrue(row["eof"]); self.assertTrue(row["readerClosed"]); self.assertTrue(row["truncated"])
+            self.assertLessEqual(row["retainedBytes"], 262144)
+            raw = M.base64.b64decode(row["dataBase64"])
+            self.assertEqual(M.pin(raw), {"size": row["size"], "sha256": row["sha256"]})
+            if retained:
+                self.assertEqual(raw, value * 262144)
+            else:
+                self.assertEqual(row["retentionUnavailable"], {"type": "MemoryError"})
+        self.assertLess(len(json.dumps(snapshot)), 720000)
+
+    def test_actual_above_pipe_buffer_both_streams_exit_normally_without_any_gui_pump(self):
+        drainer = M.RootPipeDrainer()
+        self.assertTrue(drainer.available)
+        # Popen.wait does not read the pipes; independent readers must drain them.
+        self.launch_writer(drainer)
+        self.assert_drained(drainer)
+
+    def test_actual_retention_failure_keeps_draining_to_normal_exit_and_eof(self):
+        with patch.object(M.RootPipeDrainer, "retain", side_effect=MemoryError("SYNTHETIC_PRIVATE_FAILURE")) as retain:
+            drainer = M.RootPipeDrainer()
+            self.launch_writer(drainer)
+        self.assertEqual(retain.call_count, 2)
+        self.assert_drained(drainer, retained=False)
+        self.assertNotIn("SYNTHETIC_PRIVATE_FAILURE", json.dumps(drainer.snapshot()))
+
+    def test_capture_has_no_file_sink_and_file_open_failure_cannot_stop_drain(self):
+        with patch.object(Path, "open", side_effect=OSError("Synthetic capture filesystem unavailable")) as opened:
+            drainer = M.RootPipeDrainer()
+            self.launch_writer(drainer)
+        opened.assert_not_called()
+        self.assert_drained(drainer)
+
+    def test_partial_pipe_creation_closes_prepared_fds_before_devnull_fallback_launch(self):
+        real_pipe, pipes = M.os.pipe, []
+        def create():
+            if pipes:
+                raise OSError("SYNTHETIC_PRIVATE_FAILURE")
+            pair = real_pipe(); pipes.append(pair); return pair
+        with patch.object(M.os, "pipe", side_effect=create):
+            drainer = M.RootPipeDrainer()
+        self.assertFalse(drainer.available)
+        self.assertEqual(drainer.target("stdout"), subprocess.DEVNULL)
+        self.assertEqual(drainer.target("stderr"), subprocess.DEVNULL)
+        for fd in pipes[0]:
+            with self.assertRaises(OSError): os.fstat(fd)
+        self.launch_writer(drainer)
+        self.assertEqual(drainer.snapshot()["startupUnavailable"], {"type": "OSError"})
+        self.assertNotIn("SYNTHETIC_PRIVATE_FAILURE", json.dumps(drainer.snapshot()))
+
+    def test_second_thread_start_failure_closes_unstarted_reader_and_first_reaches_eof(self):
+        real_start, count = M.threading.Thread.start, 0
+        def start(worker):
+            nonlocal count
+            count += 1
+            if count == 2:
+                raise RuntimeError("SYNTHETIC_PRIVATE_FAILURE")
+            return real_start(worker)
+        with patch.object(M.threading.Thread, "start", start):
+            drainer = M.RootPipeDrainer()
+        self.assertFalse(drainer.available)
+        for item in drainer.items.values(): self.assertTrue(item["done"].wait(5))
+        for fd in drainer.readers.values():
+            with self.assertRaises(OSError): os.fstat(fd)
+        self.launch_writer(drainer)
+        self.assertEqual(drainer.snapshot()["startupUnavailable"], {"type": "RuntimeError"})
+        self.assertTrue(all(row["readerClosed"] for row in drainer.snapshot()["streams"].values()))
+
+    def test_prepared_writers_close_on_launch_failure_without_a_child_or_signal(self):
+        drainer = M.RootPipeDrainer()
+        with self.assertRaises(FileNotFoundError):
+            try:
+                with patch.object(M.subprocess, "Popen", side_effect=FileNotFoundError("fixed synthetic launch failure")):
+                    subprocess.Popen(["fixed-synthetic-only"], stdout=drainer.target("stdout"), stderr=drainer.target("stderr"))
+            finally:
+                drainer.release_writers()
+        for item in drainer.items.values(): self.assertTrue(item["done"].wait(5))
+        self.assertTrue(all(row["eof"] for row in drainer.snapshot()["streams"].values()))
+        drainer.release_writers()  # Idempotent, no double close of potentially reused FDs.
+
+    def test_snapshot_does_not_wait_for_eof_and_does_not_close_live_reader(self):
+        drainer = M.RootPipeDrainer()
+        try:
+            before = drainer.snapshot()
+            self.assertTrue(all(not row["eof"] and not row["readerClosed"] for row in before["streams"].values()))
+            self.assertTrue(all(item["worker"].is_alive() for item in drainer.items.values()))
+        finally:
+            drainer.release_writers()
+        for item in drainer.items.values(): self.assertTrue(item["done"].wait(5))
+
+    def test_production_drainer_has_no_files_gui_dependency_process_wait_signals_or_new_deadlines(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "RootPipeDrainer")
+        calls = [ast.unparse(n.func) for n in ast.walk(node) if isinstance(n, ast.Call)]
+        self.assertFalse(set(calls) & {"open", "Path", "wait", "time.sleep", "subprocess.Popen", "os.kill"})
+        self.assertFalse(any(call.endswith((".wait", ".join", ".kill", ".terminate", ".open")) for call in calls))
+        self.assertEqual(calls.count("threading.Thread"), 1)
+        self.assertIn("daemon=True", ast.unparse(node))
+
+
+class RootEndpointDiagnosticTests(unittest.TestCase):
+    def process(self):
+        return {"pid": 12, "startTime": "100", "parentPid": 11, "uids": [M.UID] * 4,
+                "executable": "/usr/bin/creator-hub", "kernelImageSha256": "a" * 64, "image": {"st_ino": "15"}}
+
+    def diagnostics(self):
+        child = Mock(pid=12); child.poll.return_value = 0
+        output = Mock()
+        output.snapshot.return_value = {"availableAtLaunch": True, "startupUnavailable": None, "streams": {
+            name: {"bytes": len(raw), "retainedBytes": len(raw), "eof": False, "truncated": False, **M.pin(raw),
+                   "dataBase64": M.base64.b64encode(raw).decode("ascii")}
+            for name, raw in (("stdout", b"root-start\n"), ("stderr", b"inspector bind refused\n"))}}
+        native = SimpleNamespace()
+        report = {}
+        diagnostic = M.RootEndpointDiagnostics(child, 41000, native, object(), report, output)
+        return SimpleNamespace(child=child, output=output, native=native, report=report, diagnostic=diagnostic)
+
+    def table(self, port=41000, *, inode="123", uid=None, family="tcp", address=None, state="0A"):
+        address = address or ("0100007F" if family == "tcp" else "0" * 32)
+        return (f"header\n0: {address}:{port:04X} {'0' * len(address)}:0000 {state} 0:0 00:0 0 "
+                f"{M.UID if uid is None else uid} 0 {inode} 1\n").encode()
+
+    def test_selective_environment_retains_exact_two_values_and_no_other_names_or_values(self):
+        private = b"SYNTHETIC_CREDENTIAL_NEVER_RETAIN"
+        raw = b"OTHER=" + private * 100 + b"\0TAURI_WEBVIEW_AUTOMATION=true\0WEBKIT_INSPECTOR_SERVER=127.0.0.1:56195\0"
+        value = M.inspector_environment(io.BytesIO(raw))
+        self.assertEqual(value, {"TAURI_WEBVIEW_AUTOMATION": "true", "WEBKIT_INSPECTOR_SERVER": "127.0.0.1:56195"})
+        self.assertNotIn(private.decode(), json.dumps(value)); self.assertNotIn("OTHER", value)
+        self.assertEqual(M.inspector_environment(io.BytesIO(b"OTHER=private\0")), dict.fromkeys(M.INSPECTOR_ENV_KEYS))
+
+    def test_environment_stream_boundaries_and_empty_selected_value_are_exact(self):
+        raw = b"OTHER=" + b"x" * 4077 + b"\0WEBKIT_INSPECTOR_SERVER=\0TAURI_WEBVIEW_AUTOMATION=true\0"
+        self.assertEqual(M.inspector_environment(io.BytesIO(raw)),
+                         {"TAURI_WEBVIEW_AUTOMATION": "true", "WEBKIT_INSPECTOR_SERVER": ""})
+
+    def test_environment_duplicates_controls_truncation_and_overflow_refuse_without_raw_error(self):
+        for raw in (b"TAURI_WEBVIEW_AUTOMATION=true\0TAURI_WEBVIEW_AUTOMATION=false\0",
+                    b"WEBKIT_INSPECTOR_SERVER=private\ntext\0", b"TAURI_WEBVIEW_AUTOMATION=true",
+                    b"WEBKIT_INSPECTOR_SERVER=" + b"x" * 129 + b"\0", b"OTHER=" + b"x" * 65536 + b"\0"):
+            with self.subTest(size=len(raw)), self.assertRaises(RuntimeError) as raised:
+                M.inspector_environment(io.BytesIO(raw))
+            self.assertNotIn("private", str(raised.exception))
+
+    def test_socket_capture_is_exact_port_only_and_distinguishes_owned_and_foreign_inode(self):
+        body = self.table() + self.table(41001, inode="999").split(b"\n", 1)[1]
+        rows = M.endpoint_socket_rows(io.BytesIO(body), 41000, "tcp")
+        self.assertEqual(rows, [{"family": "tcp", "localAddress": "0100007F", "port": 41000,
+                                 "state": "0A", "uid": M.UID, "inode": "123"}])
+        ipv6 = M.endpoint_socket_rows(io.BytesIO(self.table(family="tcp6")), 41000, "tcp6")
+        self.assertEqual(ipv6[0]["family"], "tcp6")
+        with self.assertRaises(RuntimeError): M.endpoint_socket_rows(io.BytesIO(self.table()), 41000, "udp")
+
+    def test_socket_capture_bounds_rows_bytes_and_numeric_fields(self):
+        for raw in (b"x" * (1024 * 1024 + 1), self.table(inode="1" * 21), self.table(uid="x"),
+                    self.table() + self.table().split(b"\n", 1)[1] * 16):
+            with self.subTest(size=len(raw)), self.assertRaises(RuntimeError):
+                M.endpoint_socket_rows(io.BytesIO(raw), 41000, "tcp")
+
+    @contextmanager
+    def process_sources(self, *, records=None, defect=None):
+        process = self.process()
+        def proc_file(pid, part, parser):
+            self.assertEqual(pid, 12)
+            if defect is not None: raise defect
+            raw = b"TAURI_WEBVIEW_AUTOMATION=true\0WEBKIT_INSPECTOR_SERVER=127.0.0.1:41000\0" if part == "environ" else self.table(family=part[4:])
+            return parser(io.BytesIO(raw))
+        with patch.object(M, "kernel_record", side_effect=records or [process, process]) as kernel, \
+                patch.object(M, "endpoint_proc_file", side_effect=proc_file) as files, \
+                patch.object(Path, "iterdir", return_value=[Path("/proc/12/fd/4"), Path("/proc/12/fd/5")]), \
+                patch.object(M.os, "readlink", side_effect=["socket:[123]", "/SYNTHETIC_PRIVATE_FOREIGN_FD_PATH"]):
+            yield process, kernel, files
+
+    def test_process_capture_binds_both_kernel_identities_and_never_retains_non_socket_fd_paths(self):
+        with self.process_sources() as (process, kernel, files):
+            value = M.endpoint_process_snapshot(process, 41000, object(), object())
+        self.assertTrue(value["verified"]); self.assertTrue(value["complete"])
+        self.assertEqual(kernel.call_count, 2)
+        self.assertEqual([call.args[1] for call in files.call_args_list], ["environ", "net/tcp", "net/tcp6"])
+        self.assertTrue(all(row["heldByThisRoot"] for row in value["sockets"]))
+        self.assertNotIn("SYNTHETIC_PRIVATE_FOREIGN_FD_PATH", json.dumps(value))
+        self.assertIn("initial-exec", value["environmentScope"])
+
+    def test_changed_pid_start_uid_parent_or_image_before_read_never_reads_proc_sources(self):
+        for field, value in (("pid", 14), ("startTime", "101"), ("parentPid", 99),
+                             ("uids", [0] * 4), ("kernelImageSha256", "b" * 64)):
+            changed = {**self.process(), field: value}
+            with self.subTest(field=field), self.process_sources(records=[changed]) as (process, _, files):
+                captured = M.endpoint_process_snapshot(process, 41000, object(), object())
+                self.assertFalse(captured["verified"]); files.assert_not_called()
+
+    def test_identity_change_after_read_keeps_observations_explicitly_unverified(self):
+        process = self.process()
+        with self.process_sources(records=[process, {**process, "startTime": "200"}]) as (process, _, _):
+            value = M.endpoint_process_snapshot(process, 41000, object(), object())
+        self.assertFalse(value["verified"]); self.assertFalse(value["complete"])
+        self.assertEqual(value["unavailable"], {"type": "RuntimeError"})
+
+    def test_matching_port_with_foreign_socket_inode_is_never_attributed_to_root(self):
+        with self.process_sources() as (process, _, _), patch.object(M.os, "readlink", return_value="socket:[999]"):
+            value = M.endpoint_process_snapshot(process, 41000, object(), object())
+        self.assertTrue(value["verified"])
+        self.assertTrue(value["sockets"])
+        self.assertTrue(all(not row["heldByThisRoot"] for row in value["sockets"]))
+
+    def test_gone_denied_and_malformed_capture_never_dump_exception_or_change_authority(self):
+        for error in (FileNotFoundError(2, "SYNTHETIC_PRIVATE_ERROR"), PermissionError(13, "SYNTHETIC_PRIVATE_ERROR"), ValueError("SYNTHETIC_PRIVATE_ERROR")):
+            with self.subTest(kind=type(error).__name__), self.process_sources(defect=error) as (process, _, _):
+                value = M.endpoint_process_snapshot(process, 41000, object(), object())
+            self.assertFalse(value["verified"])
+            self.assertNotIn("SYNTHETIC_PRIVATE_ERROR", json.dumps(value))
+            self.assertEqual(value["unavailable"]["type"], type(error).__name__)
+
+    def test_proc_file_is_fixed_nofollow_fd_bound_and_replacement_refuses(self):
+        info = SimpleNamespace(st_mode=stat.S_IFREG | 0o400, st_dev=1, st_ino=2, st_uid=M.UID, st_gid=M.UID,
+                               st_nlink=1, st_size=0, st_mtime_ns=3, st_ctime_ns=4)
+        for changed in (False, True):
+            path = Mock(); path.__truediv__ = Mock(return_value=path)
+            path.lstat.side_effect = [info, SimpleNamespace(**{**vars(info), "st_ino": 5}) if changed else info]
+            stream = io.BytesIO(b"TAURI_WEBVIEW_AUTOMATION=true\0")
+            with self.subTest(changed=changed), patch.object(M, "Path", return_value=path), \
+                    patch.multiple(M.os, O_NOFOLLOW=0x20000, O_NONBLOCK=0x800, O_CLOEXEC=0x80000, create=True), \
+                    patch.object(M.os, "open", return_value=7) as opened, patch.object(M.os, "fstat", return_value=info), \
+                    patch.object(M.os, "fdopen", return_value=stream), patch.object(M.os, "close") as closed:
+                if changed:
+                    with self.assertRaisesRegex(RuntimeError, "changed during read"):
+                        M.endpoint_proc_file(12, "environ", M.inspector_environment)
+                else:
+                    self.assertEqual(M.endpoint_proc_file(12, "environ", M.inspector_environment)["TAURI_WEBVIEW_AUTOMATION"], "true")
+                self.assertTrue(opened.call_args.args[1] & os.O_NOFOLLOW)
+                closed.assert_called_once_with(7)
+        with self.assertRaises(RuntimeError): M.endpoint_proc_file(12, "cmdline", lambda _: None)
+
+    def test_output_is_bounded_exact_bytes_eof_honest_and_no_exit_wait_or_signal(self):
+        state = self.diagnostics()
+        state.diagnostic.finish()
+        output = state.report["rootEndpointDiagnostics"]["output"]
+        self.assertEqual(M.base64.b64decode(output["stdout"]["dataBase64"]), b"root-start\n")
+        self.assertFalse(output["stderr"]["eof"])
+        state.output.snapshot.assert_called_once_with(); state.child.wait.assert_not_called()
+        state.output.close.assert_not_called()
+        state.child.terminate.assert_not_called(); state.child.kill.assert_not_called()
+
+    def test_first_and_timeout_snapshots_retain_old_new_temporal_identity_without_repeated_sampling(self):
+        state = self.diagnostics()
+        adapter = SimpleNamespace(previous=SimpleNamespace(surface=SimpleNamespace(record=self.process())),
+                                  surface=SimpleNamespace(record={**self.process(), "pid": 77, "startTime": "200"}))
+        with patch.object(M, "endpoint_process_snapshot", side_effect=lambda p, *_: {"expected": p, "verified": False}) as capture:
+            state.diagnostic.observe(adapter, False); state.diagnostic.observe(adapter, False)
+            state.diagnostic.snapshot(adapter, "endpoint-refusal")
+        evidence = state.report["rootEndpointDiagnostics"]
+        self.assertEqual(capture.call_count, 4)
+        self.assertEqual([row["phase"] for row in evidence["snapshots"]], ["successor-first-endpoint-check", "endpoint-refusal"])
+        self.assertEqual(evidence["phases"]["successor"]["checks"], 2)
+        self.assertFalse(evidence["phases"]["successor"]["lastOwnedListener"])
+        self.assertEqual([[p["expected"]["pid"] for p in row["processes"]] for row in evidence["snapshots"]], [[12, 77], [12, 77]])
+        self.assertEqual([row["originalExitCode"] for row in evidence["snapshots"]], [0, 0])
+        self.assertFalse(evidence["qualified"]); self.assertFalse(evidence["authority"])
+
+    def test_original_successor_timeout_and_no_input_are_unchanged_with_failed_diagnostics(self):
+        state = HtmlDebLifecycleTests().successor_fixture()
+        diagnostic = self.diagnostics()
+        state.html.root_diagnostics = diagnostic.diagnostic
+        state.pages.listener.return_value = False
+        original = RuntimeError("Readiness deadline; no repeated input, manual successor or outcome adoption")
+        def readiness(check, *args, **kwargs):
+            self.assertFalse(check()); raise original
+        with state.owner.native_stubs(state), patch.object(M, "wait", side_effect=readiness), \
+                patch.object(M, "endpoint_process_snapshot", side_effect=PermissionError(13, "SYNTHETIC_PRIVATE_ERROR")):
+            with self.assertRaises(RuntimeError) as raised: state.html.start()
+        self.assertIs(raised.exception, original)
+        self.assertEqual(state.html.evidence["phase"], "root-endpoint")
+        self.assertEqual(state.html.evidence["inputAttempts"], [])
+        self.assertFalse(state.html.evidence["probePassed"])
+        self.assertEqual(state.requests, [])
+        diagnostic.diagnostic.finish()
+        self.assertNotIn("SYNTHETIC_PRIVATE_ERROR", json.dumps(diagnostic.report))
+        self.assertIn("output", diagnostic.report["rootEndpointDiagnostics"])
+
+    def test_diagnostic_claim_cannot_promote_missing_owned_endpoint_or_add_input(self):
+        state = HtmlDebLifecycleTests().successor_fixture(); diagnostic = self.diagnostics()
+        state.html.root_diagnostics = diagnostic.diagnostic; state.pages.listener.return_value = False
+        with state.owner.native_stubs(state), patch.object(M, "endpoint_process_snapshot", return_value={"verified": True, "heldByThisRoot": True}):
+            self.assertFalse(state.html.endpoint_ready())
+        self.assertFalse(diagnostic.report["rootEndpointDiagnostics"]["phases"]["successor"]["lastOwnedListener"])
+        self.assertFalse(state.html.probed); self.assertEqual(state.requests, [])
+        self.assertFalse(diagnostic.report["rootEndpointDiagnostics"]["qualified"])
+
+    def test_finally_persists_diagnostics_and_preserves_failure_even_if_final_capture_fails(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        session = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session")
+        final = next(n for n in session.body if isinstance(n, ast.Try) and n.finalbody).finalbody
+        code = compile(ast.fix_missing_locations(ast.Module(body=final, type_ignores=[])), "actual-native-session-finally", "exec")
+        for broken in (False, True):
+            state = self.diagnostics(); original = RuntimeError("Original endpoint refusal"); report = state.report
+            if broken: state.diagnostic.finish = Mock(side_effect=OSError("SYNTHETIC_PRIVATE_ERROR"))
+            writer = Mock()
+            namespace = {**vars(M), "secret": None, "surface": None, "replacement": None, "html": None,
+                         "replacement_html": None, "root_diagnostics": state.diagnostic, "report": report,
+                         "failure": original, "save": writer}
+            exec(code, namespace)
+            self.assertIs(namespace["failure"], original)
+            self.assertFalse(report["scenarioPassed"])
+            writer.assert_called_once_with(M.BASE / "result/report.json", report)
+            self.assertNotIn("SYNTHETIC_PRIVATE_ERROR", json.dumps(report))
+            self.assertIn("finalCapture" if broken else "output", report["rootEndpointDiagnostics"])
+
+    def test_diagnostic_wiring_changes_only_deb_stdio_and_keeps_deadlines_and_admission(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        session = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session")
+        launches = [n for n in ast.walk(session) if isinstance(n, ast.Call) and ast.unparse(n.func) == "subprocess.Popen"
+                    and n.args and ast.unparse(n.args[0]) == "['/usr/bin/creator-hub']"]
+        self.assertEqual(len(launches), 1)
+        options = {row.arg: ast.unparse(row.value) for row in launches[0].keywords}
+        self.assertEqual(options["env"], "automation_env if scenario in HTML_SCENARIOS else app_env")
+        self.assertEqual((options["stdout"], options["stderr"], options["umask"]),
+                         ("root_output.target('stdout') if root_output is not None else subprocess.DEVNULL",
+                          "root_output.target('stderr') if root_output is not None else subprocess.DEVNULL", "18"))
+        source = ast.unparse(session)
+        self.assertLess(source.index("root_output = RootPipeDrainer()"), source.index("initial = subprocess.Popen(['/usr/bin/creator-hub']"))
+        protected = [node for node in ast.walk(session) if isinstance(node, ast.Try)
+                     and any(isinstance(row, ast.Assign) and row.value is launches[0] for row in node.body)]
+        self.assertEqual(len(protected), 1)
+        self.assertEqual(ast.unparse(protected[0].finalbody[0]), "if root_output is not None:\n    root_output.release_writers()")
+        observer = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "observe_successor")
+        self.assertIn("wait(ready, 60)", ast.unparse(observer))
+        html = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "HtmlPages")
+        start = next(n for n in html.body if isinstance(n, ast.FunctionDef) and n.name == "start")
+        self.assertIn("wait(self.endpoint_ready)", ast.unparse(start))
+        diagnostics = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "RootEndpointDiagnostics")
+        calls = [ast.unparse(n.func) for n in ast.walk(diagnostics) if isinstance(n, ast.Call)]
+        self.assertFalse(set(calls) & {"wait", "time.sleep", "subprocess.Popen", "os.kill", "os.chmod", "self.child.terminate", "self.child.kill"})
 
 
 if __name__ == "__main__":

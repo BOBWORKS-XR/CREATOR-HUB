@@ -23,6 +23,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import zipfile
 import zlib
@@ -1359,6 +1360,243 @@ def html_automation_environment(env):
     return {**env, "TAURI_WEBVIEW_AUTOMATION": "true", "WEBKIT_INSPECTOR_SERVER": "127.0.0.1:" + str(port)}, port
 
 
+INSPECTOR_ENV_KEYS = ("TAURI_WEBVIEW_AUTOMATION", "WEBKIT_INSPECTOR_SERVER")
+
+
+def inspector_environment(stream):
+    # Discard other values as they are scanned; never collect an environment dump.
+    found, key, value, selected, in_value, total = {}, bytearray(), bytearray(), None, False, 0
+    while True:
+        part = stream.read(4096)
+        if not part:
+            break
+        total += len(part)
+        require(total <= 65536, "Bounded inspector environment required")
+        for char in part:
+            if char == 0:
+                if selected is not None:
+                    require(selected not in found, "Duplicate inspector variable")
+                    found[selected] = bytes(value).decode("ascii")
+                key.clear(); value.clear(); selected, in_value = None, False
+            elif not in_value and char == 61:
+                selected = next((name for name in INSPECTOR_ENV_KEYS if key == name.encode("ascii")), None)
+                in_value = True
+            elif not in_value:
+                if len(key) < 128:
+                    key.append(char)
+            elif selected is not None:
+                require(len(value) < 128 and 32 <= char < 127, "Bounded printable inspector value required")
+                value.append(char)
+    require(not key and not value and not in_value, "Incomplete inspector environment")
+    return {name: found.get(name) for name in INSPECTOR_ENV_KEYS}
+
+
+def endpoint_proc_file(pid, part, parser):
+    require(type(pid) is int and pid > 1 and part in ("environ", "net/tcp", "net/tcp6"), "Fixed endpoint proc source required")
+    path = Path(f"/proc/{pid}") / part
+    before = path.lstat()
+    require(stat.S_ISREG(before.st_mode), "Ordinary endpoint proc source required")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        require(stamp(os.fstat(fd)) == stamp(before), "Endpoint proc source changed during open")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            value = parser(stream)
+        require(stamp(os.fstat(fd)) == stamp(before) and stamp(path.lstat()) == stamp(before), "Endpoint proc source changed during read")
+        return value
+    finally:
+        os.close(fd)
+
+
+def endpoint_socket_rows(stream, port, family):
+    require(family in ("tcp", "tcp6"), "Fixed endpoint socket family required")
+    raw = stream.read(1024 * 1024 + 1)
+    require(len(raw) <= 1024 * 1024, "Bounded endpoint socket table required")
+    rows = []
+    for line in raw.decode("ascii").splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 2 or fields[1].rsplit(":", 1)[-1] != f"{port:04X}":
+            continue
+        require(len(rows) < 16 and len(fields) >= 10 and re.fullmatch(r"[0-9A-F]{2}", fields[3])
+                and re.fullmatch(r"[0-9]{1,10}", fields[7]) and re.fullmatch(r"[0-9]{1,20}", fields[9]), "Bounded exact-port socket row required")
+        address = fields[1].split(":")[0]
+        require(re.fullmatch(r"[0-9A-F]{8}" if family == "tcp" else r"[0-9A-F]{32}", address), "Socket address shape differs")
+        rows.append({"family": family, "localAddress": address, "port": port, "state": fields[3],
+                     "uid": int(fields[7]), "inode": fields[9]})
+    return rows
+
+
+def endpoint_process_snapshot(process, port, native, helper):
+    entry = {"expected": process, "complete": False, "verified": False}
+    try:
+        require(type(process["pid"]) is int and process["pid"] > 1 and process["uids"] == [UID] * 4
+                and type(port) is int and 1024 <= port <= 65535, "Owned endpoint diagnostic required")
+        entry["before"] = kernel_record(process["pid"], native, helper)
+        require(entry["before"] == process, "Endpoint diagnostic process changed before read")
+        entry["environment"] = endpoint_proc_file(process["pid"], "environ", inspector_environment)
+        entry["environmentScope"] = "kernel initial-exec environment; not a claim about later libc mutations"
+        rows = []
+        for family in ("tcp", "tcp6"):
+            rows.extend(endpoint_proc_file(process["pid"], "net/" + family,
+                                           lambda stream, family=family: endpoint_socket_rows(stream, port, family)))
+        descriptors = list(Path(f'/proc/{process["pid"]}/fd').iterdir())
+        require(len(descriptors) <= 256, "Bounded endpoint descriptor inventory required")
+        owned = set(); vanished = 0
+        for descriptor in descriptors:
+            try:
+                link = os.readlink(descriptor)
+            except FileNotFoundError:
+                vanished += 1
+                continue
+            match = re.fullmatch(r"socket:\[([0-9]+)\]", link)
+            if match:
+                owned.add(match[1])
+        entry["sockets"] = [{**row, "heldByThisRoot": row["inode"] in owned} for row in rows]
+        entry["vanishedDescriptors"] = vanished
+        entry["after"] = kernel_record(process["pid"], native, helper)
+        require(entry["after"] == process, "Endpoint diagnostic process changed after read")
+        entry.update(complete=True, verified=True)
+    except Exception as error:
+        entry["unavailable"] = {"type": type(error).__name__[:80]}
+        if isinstance(error, OSError) and type(error.errno) is int and 0 < error.errno < 4096:
+            entry["unavailable"]["errno"] = error.errno
+    return entry
+
+
+class RootPipeDrainer:
+    """Prepare independent readers before launch; keep draining after retention fails."""
+    def __init__(self):
+        self.items, self.readers, self.writers = {}, {}, {}
+        self.available, self.startup_unavailable = False, None
+        try:
+            for name in ("stdout", "stderr"):
+                reader, writer = os.pipe()
+                self.readers[name], self.writers[name] = reader, writer
+                self.items[name] = {"bytes": 0, "kept": bytearray(), "eof": False, "closed": False,
+                                    "lock": threading.Lock(), "done": threading.Event(), "started": False}
+            for name, item in self.items.items():
+                worker = threading.Thread(target=self.drain, args=(name,), name="hub-diagnostic-" + name, daemon=True)
+                item["worker"] = worker
+                worker.start()
+                item["started"] = True
+            self.available = True
+        except Exception as error:
+            self.startup_unavailable = {"type": type(error).__name__[:80]}
+            self.release_writers()
+            for name, reader in self.readers.items():
+                if not self.items.get(name, {}).get("started", False):
+                    try:
+                        os.close(reader)
+                    except OSError:
+                        pass
+                    if name in self.items:
+                        self.items[name]["closed"] = True
+                        self.items[name]["done"].set()
+
+    def target(self, name):
+        require(name in ("stdout", "stderr"), "Fixed Root output stream required")
+        return self.writers[name] if self.available else subprocess.DEVNULL
+
+    def release_writers(self):
+        for name in tuple(self.writers):
+            try:
+                os.close(self.writers.pop(name))
+            except OSError:
+                pass
+
+    @staticmethod
+    def retain(item, data):
+        item["kept"].extend(data[:max(0, 262144 - len(item["kept"]))])
+
+    def drain(self, name):
+        item, reader = self.items[name], self.readers[name]
+        try:
+            while True:
+                data = os.read(reader, 65536)
+                with item["lock"]:
+                    if not data:
+                        item["eof"] = True
+                        break
+                    item["bytes"] += len(data)
+                    if "retentionUnavailable" not in item:
+                        try:
+                            self.retain(item, data)
+                        except Exception as error:
+                            item["retentionUnavailable"] = {"type": type(error).__name__[:80]}
+        except Exception as error:
+            with item["lock"]:
+                item["readUnavailable"] = {"type": type(error).__name__[:80]}
+        finally:
+            try:
+                os.close(reader)
+            except OSError as error:
+                with item["lock"]:
+                    item["closeUnavailable"] = {"type": type(error).__name__[:80]}
+            finally:
+                with item["lock"]:
+                    item["closed"] = True
+                item["done"].set()
+
+    def snapshot(self):
+        output = {}
+        for name, item in self.items.items():
+            with item["lock"]:
+                raw = bytes(item["kept"])
+                output[name] = {"bytes": item["bytes"], "retainedBytes": len(raw), "eof": item["eof"],
+                                "readerClosed": item["closed"], "truncated": item["bytes"] > len(raw),
+                                **pin(raw), "dataBase64": base64.b64encode(raw).decode("ascii")}
+                for key in ("retentionUnavailable", "readUnavailable", "closeUnavailable"):
+                    if key in item:
+                        output[name][key] = item[key]
+        return {"availableAtLaunch": self.available, "startupUnavailable": self.startup_unavailable, "streams": output}
+
+
+class RootEndpointDiagnostics:
+    """Observations only: never changes endpoint admission, input or outcome."""
+    def __init__(self, child, port, native, helper, report, output):
+        self.child, self.port, self.native, self.helper = child, port, native, helper
+        self.begin, self.output = time.monotonic(), output
+        self.evidence = report["rootEndpointDiagnostics"] = {
+            "schemaVersion": 1, "readOnly": True, "authority": False, "qualified": False,
+            "port": port, "originalPid": child.pid, "phases": {}, "snapshots": []}
+
+    def unavailable(self, stage, error):
+        self.evidence[stage] = {"unavailable": {"type": type(error).__name__[:80]}}
+
+    def snapshot(self, adapter, phase):
+        try:
+            require(len(self.evidence["snapshots"]) < 4, "Finite endpoint diagnostic phases required")
+            row = {"phase": phase, "elapsed": round(time.monotonic() - self.begin, 6),
+                   "originalExitCode": self.child.poll(), "processes": []}
+            self.evidence["snapshots"].append(row)
+            old = adapter.previous.surface.record if adapter.previous is not None else adapter.surface.record
+            for process in (old,) if adapter.previous is None else (old, adapter.surface.record):
+                row["processes"].append(endpoint_process_snapshot(process, self.port, self.native, self.helper))
+            row["completedElapsed"] = round(time.monotonic() - self.begin, 6)
+        except Exception as error:
+            self.unavailable("snapshot", error)
+
+    def observe(self, adapter, owned):
+        try:
+            phase = "successor" if adapter.previous is not None else "initial"
+            value = self.evidence["phases"].setdefault(phase, {"checks": 0})
+            value.update(checks=min(1000000, value["checks"] + 1), lastOwnedListener=owned,
+                         elapsed=round(time.monotonic() - self.begin, 6))
+            if value["checks"] == 1:
+                self.snapshot(adapter, phase + "-first-endpoint-check")
+        except Exception as error:
+            self.unavailable("observation", error)
+
+    def finish(self):
+        try:
+            # Snapshot only: readers keep draining independently, with no EOF wait.
+            captured = self.output.snapshot()
+            self.evidence["output"] = captured["streams"]
+            self.evidence["outputPreparation"] = {key: captured[key] for key in ("availableAtLaunch", "startupUnavailable")}
+            self.evidence["outputScope"] = "original-Popen-pipes-and-any-inheriting-successor; not per-process attribution"
+        except Exception as error:
+            self.unavailable("outputRetention", error)
+
+
 def bind_html_owner(surface, *, diagnostic=None):
     """Bind only the native container and WebKit root, never enumerate HTML descendants."""
     deadline = time.monotonic() + 30
@@ -1472,13 +1710,14 @@ def bind_html_owner(surface, *, diagnostic=None):
 
 class HtmlPages:
     """Standard elements only; separate original-Popen and adopted-successor attachments."""
-    def __init__(self, surface, original, pages, driver_pin, port, env, evidence, *, previous=None):
+    def __init__(self, surface, original, pages, driver_pin, port, env, evidence, *, previous=None, root_diagnostics=None):
         self.surface, self.original, self.pages = surface, original, pages
         self.driver_pin, self.port, self.env, self.evidence = driver_pin, port, env, evidence
         require(previous is None or type(previous) is HtmlPages and previous.previous is None
                 and original is previous.original and port == previous.port and driver_pin == previous.driver_pin,
                 "One exact initial-to-successor HTML handoff required")
         self.previous = previous
+        self.root_diagnostics = previous.root_diagnostics if previous is not None else root_diagnostics
         self.version = "0.1.17" if previous is not None else "0.1.16"
         self.log_name = "successor-html-driver" if previous is not None else "html-driver"
         self.phase_pid = surface.pid
@@ -1551,7 +1790,10 @@ class HtmlPages:
             previous = self.evidence.get("expectedNativeModal")
             require(previous is None or observed == previous, "Expected native confirmation changed")
             self.evidence["expectedNativeModal"] = observed
-        return self.pages.listener(self.surface.pid, self.port)
+        owned = self.pages.listener(self.surface.pid, self.port)
+        if self.root_diagnostics is not None:
+            self.root_diagnostics.observe(self, owned)
+        return owned
 
     def successor_handoff(self):
         previous = self.previous
@@ -1588,7 +1830,12 @@ class HtmlPages:
         self.evidence["phase"] = "native-envelope"
         self.evidence["ownership"] = bind_html_owner(self.surface, diagnostic=self.evidence.setdefault("envelopeDiagnostic", {}))
         self.evidence["phase"] = "root-endpoint"
-        wait(self.endpoint_ready)
+        try:
+            wait(self.endpoint_ready)
+        except Exception:
+            if self.root_diagnostics is not None:
+                self.root_diagnostics.snapshot(self, "endpoint-refusal")
+            raise
         driver = BASE / "scripts/tauri-driver"
         bound(driver, self.driver_pin, 64 * 1024**2, uid=0, mode=0o755)
         native = self.pages.record("/usr/bin/WebKitWebDriver")
@@ -2492,7 +2739,7 @@ def native_session(env):
               "privateTargetQualification": private_target_qualification(), "oldRetirementHelperRestored": False, **FALSE}
     portable = scenario.startswith("portable-")
     x11, surface, replacement, agent, wm, initial = helper.X11(), None, None, None, None, None
-    html = replacement_html = None
+    html = replacement_html = root_diagnostics = None
     failure = None
     try:
         wm = subprocess.Popen(["/usr/bin/openbox", "--sm-disable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -2546,8 +2793,17 @@ def native_session(env):
             old = wait(lambda: one_root_child(parent_pid, expected, executable, native, helper))
         else:
             report["installed16"] = verify_installed(review, "16")
-            initial = subprocess.Popen(["/usr/bin/creator-hub"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                       env=automation_env if scenario in HTML_SCENARIOS else app_env, umask=0o022)
+            root_output = RootPipeDrainer() if scenario in HTML_SCENARIOS else None
+            try:
+                initial = subprocess.Popen(["/usr/bin/creator-hub"], stdin=subprocess.DEVNULL,
+                                           stdout=root_output.target("stdout") if root_output is not None else subprocess.DEVNULL,
+                                           stderr=root_output.target("stderr") if root_output is not None else subprocess.DEVNULL,
+                                           env=automation_env if scenario in HTML_SCENARIOS else app_env, umask=0o022)
+            finally:
+                if root_output is not None:
+                    root_output.release_writers()
+            if scenario in HTML_SCENARIOS:
+                root_diagnostics = RootEndpointDiagnostics(initial, automation_port, native, helper, report, root_output)
             expected, executable, parent_pid = profile["baseline"]["hub"], "/usr/bin/creator-hub", os.getpid()
             old = phase_identity(kernel_record(initial.pid, native, helper), expected, executable, parent_pid, UID)
         report["initialRoot"] = old; save(BASE / "result/root.json", old)
@@ -2557,7 +2813,7 @@ def native_session(env):
             capture_initial_creation_context("before-first-input", home, old, report, native, helper)
         if scenario in HTML_SCENARIOS:
             html = HtmlPages(surface, initial, pages, original_request["htmlDriver"]["pin"], automation_port, app_env,
-                             report.setdefault("htmlWebDriver", {}))
+                             report.setdefault("htmlWebDriver", {}), root_diagnostics=root_diagnostics)
             html.start()  # Mandatory runtime compatibility proof, with zero UI inputs before it returns.
             html.startup(home, report)
             html.direct_pages(report["initialPageActionAttempts"])
@@ -2713,6 +2969,11 @@ def native_session(env):
                 except Exception as error:
                     failure = failure or error
                     report["captureRefused"] = True
+        if root_diagnostics is not None:
+            try:
+                root_diagnostics.finish()
+            except Exception as error:
+                root_diagnostics.unavailable("finalCapture", error)
         if failure is not None:
             report["scenarioPassed"] = False; report["disposableTeardownRequired"] = True
             report["recovery"] = "unknown-no-retry-disposable-runner-teardown"
