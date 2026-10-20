@@ -1721,13 +1721,13 @@ class Session:
         self.absent_installation()
         self.driver.click("#native-support-install")
         self.wait(lambda: len(self.windows()) == 2, 120)
-        self.click_dialog(root, [consent_text(self.review["generation"])], ["Install native support", "Cancel"],
+        self.click_dialog(root, ["Install native support", consent_text(self.review["generation"])], ["Install native support", "Cancel"],
                           "Cancel", "setup-cancel", "Install native support")
         self.wait(lambda: self.driver.read("#native-support-install", "enabled") is True)
         self.absent_installation(); self.report["setupCancelAccepted"] = True
         self.driver.click("#native-support-install")
         self.wait(lambda: len(self.windows()) == 2, 120)
-        self.click_dialog(root, [consent_text(self.review["generation"])], ["Install native support", "Cancel"],
+        self.click_dialog(root, ["Install native support", consent_text(self.review["generation"])], ["Install native support", "Cancel"],
                           "Install native support", "setup-approve", "Install native support")
         self.wait(lambda: self.driver.read("#native-support-install", "property/hidden") is True
                   and self.driver.read("#native-support-check", "enabled") is True, 180)

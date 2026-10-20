@@ -1887,6 +1887,88 @@ class DiagnosticTests(unittest.TestCase):
                 self.assertEqual(calls, [False], 'Oversized peer image was hashed')
 
 
+class NativeSetupConsentTests(unittest.TestCase):
+    generation = 'a' * 64
+
+    def receipt_rows(self):
+        # Native 39409484679 row shape, with only the generation replaced by synthetic data.
+        body = ('Install Creator Hub native support 0.1.16?\n\nThis installs and registers the verified generation '
+                + self.generation + ' in your private native data directory. The Hub window runs OUTSIDE the Flatpak sandbox '
+                'and uses your existing native settings.\n\nYour projects, MCP connections and settings will not be imported, '
+                'replaced or migrated here. After installation, close this window normally and reopen Hub from Flatpak. '
+                'No app will be launched or restarted automatically.\n\nCancel keeps Store creation, selection and registration unchanged.')
+        pairs = [('alert', 'Information'), ('filler', ''), ('filler', ''), ('icon', 'Information'), ('filler', ''),
+                 ('label', 'Install native support'), ('label', body), ('filler', ''), ('filler', ''),
+                 ('push button', 'Install native support'), ('push button', 'Cancel')]
+        return [{'role': role, 'name': name, 'showing': True, 'enabled': True} for role, name in pairs]
+
+    def callsite_contracts(self):
+        tree = ast.parse(Path(M.__file__).read_text('utf8'))
+        session = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Session')
+        setup = next(node for node in session.body if isinstance(node, ast.FunctionDef) and node.name == 'setup')
+        calls = [node for node in ast.walk(setup) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                 and node.func.attr == 'click_dialog']
+        self.assertEqual(len(calls), 2)
+        result = {}
+        for call in calls:
+            self.assertEqual(len(call.args), 6)
+            labels = call.args[1]
+            self.assertIsInstance(labels, ast.List)
+            self.assertEqual(len(labels.elts), 2, 'Setup must expect the exact GTK title and body')
+            title = ast.literal_eval(labels.elts[0])
+            self.assertEqual(title, 'Install native support')
+            self.assertEqual(ast.dump(labels.elts[1], include_attributes=False), ast.dump(ast.parse(
+                'consent_text(self.review["generation"])', mode='eval').body, include_attributes=False))
+            phase, action = ast.literal_eval(call.args[4]), ast.literal_eval(call.args[3])
+            self.assertNotIn(phase, result)
+            self.assertEqual(ast.literal_eval(call.args[5]), title)
+            result[phase] = ([title, M.consent_text(self.generation)], ast.literal_eval(call.args[2]), action)
+        self.assertEqual(set(result), {'setup-cancel', 'setup-approve'})
+        return result
+
+    def test_both_actual_setup_callsite_contracts_match_redacted_native_receipt(self):
+        rows = self.receipt_rows()
+        contracts = self.callsite_contracts()
+        for phase, index in (('setup-cancel', 10), ('setup-approve', 9)):
+            labels, buttons, action = contracts[phase]
+            self.assertEqual(action, 'Cancel' if phase == 'setup-cancel' else 'Install native support')
+            self.assertEqual(M.dialog_target(rows, labels, buttons, action), index)
+
+    def test_title_and_577_character_body_are_exactly_source_bound(self):
+        rows = self.receipt_rows()
+        self.assertEqual(len(rows[6]['name']), 577)
+        self.assertEqual(rows[6]['name'], M.consent_text(self.generation))
+        source = (HERE.parent / 'src-tauri/src/native_support.rs').read_text('utf8')
+        self.assertIn('.title("Install native support")', source)
+        template = rows[6]['name'].replace('0.1.16?', '{}?').replace(self.generation, '{}')
+        self.assertIn(json.dumps(template), source)
+
+    def test_extra_duplicate_missing_or_changed_title_body_and_generation_refuse(self):
+        mutations = (lambda rows: rows.append({'role': 'label', 'name': 'extra', 'showing': True, 'enabled': True}),
+                     lambda rows: rows.append(copy.deepcopy(rows[5])), lambda rows: rows.append(copy.deepcopy(rows[6])),
+                     lambda rows: rows.pop(5), lambda rows: rows.pop(6),
+                     lambda rows: rows[5].update(name='Different native question'),
+                     lambda rows: rows[6].update(name=rows[6]['name'] + ' '),
+                     lambda rows: rows[6].update(name=rows[6]['name'].replace(self.generation, 'b' * 64)))
+        for phase, (labels, buttons, action) in self.callsite_contracts().items():
+            for index, mutate in enumerate(mutations):
+                with self.subTest(phase=phase, mutation=index), self.assertRaisesRegex(RuntimeError, 'Exact source-bound native question'):
+                    rows = self.receipt_rows(); mutate(rows)
+                    M.dialog_target(rows, labels, buttons, action)
+
+    def test_missing_extra_duplicate_changed_or_disabled_buttons_still_refuse(self):
+        for phase, (labels, buttons, action) in self.callsite_contracts().items():
+            target = 10 if phase == 'setup-cancel' else 9
+            mutations = (lambda rows: rows.pop(9), lambda rows: rows.append(copy.deepcopy(rows[9])),
+                         lambda rows: rows.append({'role': 'push button', 'name': 'extra', 'showing': True, 'enabled': True}),
+                         lambda rows: rows[9].update(name='Other approval'),
+                         lambda rows: rows[target].update(enabled=False), lambda rows: rows[target].update(showing=False))
+            for index, mutate in enumerate(mutations):
+                with self.subTest(phase=phase, mutation=index), self.assertRaises(RuntimeError):
+                    rows = self.receipt_rows(); mutate(rows)
+                    M.dialog_target(rows, labels, buttons, action)
+
+
 class ReadinessClientTests(unittest.TestCase):
     @contextmanager
     def fixture(self, change=None):
