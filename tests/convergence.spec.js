@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
-async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false, reviewKey = 'a'.repeat(64), streamlined = false, failPhase = '', nativeCancel = false, holdMove = false, uncertain = false, invalidComplete = false } = {}) {
-  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete }) => {
+async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false, reviewKey = 'a'.repeat(64), streamlined = false, failPhase = '', nativeCancel = false, holdMove = false, uncertain = false, invalidComplete = false, initialRecovery = null } = {}) {
+  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery }) => {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     localStorage.setItem('creator-hub.auto-download', 'false');
     window.__CREATOR_HUB_CONVERGENCE_PROTOCOL__ = 1;
@@ -12,7 +12,7 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
       legacyApps: required ? [{ name: 'Creator Works MCP', path: 'C:/fixture-only/Creator Works MCP/launcher.exe' }] : [],
       backups: [], retirementAvailable: false, message: 'Your saved projects and settings stay where they are.',
       reviewKey,
-      streamlined, moveAvailable: true,
+      streamlined, moveAvailable: !initialRecovery, recoveryHelp: initialRecovery,
     };
     window.__TAURI__ = {
       event: { listen: async (name, callback) => {
@@ -30,7 +30,8 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
             window.phases.push(phase); window.progress?.({ payload: phase });
             if (phase === failPhase) {
               window.report = { ...window.report, stage: phase === 'backup' ? 'review' : phase === 'connections' ? 'backed-up' : 'connections-reviewed',
-                backups: phase === 'backup' ? [] : ['C:/fixture-only/original.bak'], moveAvailable: false };
+                backups: phase === 'backup' ? [] : ['C:/fixture-only/original.bak'], moveAvailable: false,
+                recoveryHelp: uncertain ? `Last migration phase: ${phase}\nRetained phase record: C:/fixture-only/convergence/move-v1.json\nChoose Not now to keep using Hub. Migration remains incomplete.\nHave support review the retained phase record before removing an app.` : null };
               return { outcome: 'stopped', phase, report: window.report,
                 message: `Migration stopped during ${phase}. Settings and backups retained.${phase === 'cleanup' && uncertain ? ' Cleanup may be partial.' : ' Standalone cleanup was not started.'} No automatic retry.` };
             }
@@ -73,7 +74,7 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
         return null;
       } },
     };
-  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete });
+  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery });
   await page.goto('http://127.0.0.1:4188');
 }
 
@@ -262,6 +263,70 @@ test('partial retirement can be inspected but is never automatically retried or 
   await page.locator('#convergence-reopen').click();
   await expect(page.locator('#convergence-move')).not.toBeVisible();
   expect(await page.evaluate(() => window.calls.filter(call => call.command === 'move_to_hub').length)).toBe(1);
+});
+
+for (const clipboardAvailable of [true, false]) test(`uncertain migration has a non-writing recovery handoff with clipboard ${clipboardAvailable}`, async ({ page }) => {
+  await load(page, { streamlined: true, failPhase: 'cleanup', uncertain: true });
+  await page.evaluate(available => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+    writeText: async value => { if (!available) throw Error('Clipboard unavailable'); window.copiedRecovery = value; },
+  } }), clipboardAvailable);
+  await page.locator('#convergence-move').click();
+  await expect(page.locator('#convergence-recovery')).toBeVisible();
+  await expect(page.locator('#convergence-title')).toHaveText('Migration needs review');
+  await expect(page.locator('#convergence-summary')).toContainText('Migration has not completed');
+  await expect(page.locator('#convergence-recovery-text')).toHaveValue(/Retained phase record: C:\/fixture-only\/convergence\/move-v1.json/);
+  await expect(page.locator('#convergence-recovery-text')).toHaveAttribute('readonly', '');
+  const before = await page.evaluate(() => window.calls.length);
+  await page.locator('#convergence-copy-recovery').click();
+  await expect(page.locator('#convergence-copy-status')).toContainText(clipboardAvailable ? 'Copied' : 'selected');
+  if (clipboardAvailable) expect(await page.evaluate(() => window.copiedRecovery)).toContain('Migration remains incomplete');
+  else expect(await page.locator('#convergence-recovery-text').evaluate(node => node.selectionEnd - node.selectionStart)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.calls.length)).toBe(before);
+  await expect(page.locator('#convergence-move')).not.toBeVisible();
+  await page.locator('#convergence-later').click();
+  await expect(page.locator('#convergence-dialog')).not.toBeVisible();
+  await page.locator('#convergence-reopen').click();
+  await expect(page.locator('#convergence-recovery-text')).toHaveValue(/Migration remains incomplete/);
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'move_to_hub').length)).toBe(1);
+});
+
+for (const width of [1100, 390]) test(`recovery details remain readable at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 844 });
+  await load(page, { streamlined: true, failPhase: 'cleanup', uncertain: true });
+  await page.locator('#convergence-move').click();
+  await page.evaluate(() => { window.report.recoveryHelp += '\nRetained backup: C:/' + 'long-folder-name/'.repeat(20) + 'original.bak'; });
+  await page.locator('#convergence-refresh').click();
+  await expect(page.locator('#convergence-recovery-text')).toHaveValue(/long-folder-name/);
+  expect(await page.locator('#convergence-dialog').evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
+  const box = await page.locator('#convergence-recovery-text').boundingBox();
+  const dialog = await page.locator('#convergence-dialog').boundingBox();
+  expect(box.x).toBeGreaterThanOrEqual(dialog.x);
+  expect(box.x + box.width).toBeLessThanOrEqual(dialog.x + dialog.width);
+  await page.locator('#convergence-later').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('migration-recovery.png') });
+});
+
+test('already blocked migration exposes retained details without attempting a move, including absent clipboard', async ({ page }) => {
+  await load(page, { streamlined: true, initialRecovery: 'Retained phase record: C:/fixture-only/move-v1.json\nMigration remains incomplete.' });
+  await page.reload();
+  await expect(page.locator('#convergence-title')).toHaveText('Migration needs review');
+  await expect(page.locator('#convergence-move')).not.toBeVisible();
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined }));
+  await page.locator('#convergence-copy-recovery').click();
+  await expect(page.locator('#convergence-copy-status')).toContainText('selected');
+  expect(await page.evaluate(() => window.calls.filter(call => /move_to_hub|retire_convergence|prepare_convergence/.test(call.command)))).toEqual([]);
+  await page.locator('#convergence-later').click();
+  await expect(page.locator('#convergence-dialog')).not.toBeVisible();
+});
+
+for (const initialRecovery of [{ unexpected: true }, 'x'.repeat(16385)]) test(`invalid recovery details refuse without mutation (${typeof initialRecovery})`, async ({ page }) => {
+  await load(page, { streamlined: true, initialRecovery });
+  await expect(page.locator('#convergence-error')).toContainText('report could not be verified');
+  await expect(page.locator('#convergence-recovery')).not.toBeVisible();
+  await expect(page.locator('#convergence-move')).not.toBeVisible();
+  expect(await page.evaluate(() => window.calls.filter(call => /move_to_hub|retire_convergence|prepare_convergence/.test(call.command)))).toEqual([]);
+  await page.locator('#convergence-later').click();
+  await expect(page.locator('#convergence-dialog')).not.toBeVisible();
 });
 
 test('native cancellation and Not now do not start migration phases', async ({ page }) => {
