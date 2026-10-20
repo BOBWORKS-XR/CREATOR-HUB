@@ -46,6 +46,19 @@ not approval of untested packages or a publication receipt.
 
 ### Current Evidence, 2026-10-20
 
+- Source-bound passive diagnostic `f3ae036` passed independent review, 130
+  controller tests, 17 observer tests, 73 input-guard tests and 12 CJS tests.
+  Its signature-only run `39419577175` verified the exact four Python imports
+  against the immutable GitHub commit before execution. Native run `39419871667`
+  retained both an empty Host1 `Start` request and the verified owner's matching
+  empty reply, including the actual GLib reply flag. An offline replay matched
+  those original headers without changing the original receipt or its false
+  qualification flags. The live worker stopped with the reply still queued;
+  sender credentials were read, but its first ancestor snapshot refused without
+  recording the failing operand. Proxy lineage therefore remains unknown.
+  Incomplete input still refused without retry, and warm activation, final
+  preservation, update and restart remain unqualified. Temporary trust cleanup
+  passed. No product package was rebuilt or altered for this diagnostic.
 - Warm-window harness correction `35a9349` binds the exact qualified cold Root
   record rather than hardcoding a different title. Its 73 input-guard tests,
   125 controller tests, eight data-admission tests and independent review passed;
@@ -62,13 +75,28 @@ not approval of untested packages or a publication receipt.
   literals `Unity Hub` and `Unity Hub 3.22.3`, a normal startup title transition.
   This does not establish identity at an earlier failed observation or prove
   rendered pixels; the retained first frame is blank. A finite terminal-title
-  binding remains subject to review and native testing. No sandbox override,
-  sign-in bypass or account state was introduced.
+  binding in `454cda0` passed 119 tests and independent review. Native capture
+  `39417246844` then retained a nonblank, version-bound software-licence dialog
+  with unchanged ownership. It did not accept terms or sign in. A normal window
+  close was attempted, but process exit/output EOF was not observed before the
+  deadline, so the workflow remains failed and genuine registry discovery is
+  unqualified. No forced shutdown, sandbox override or account-state bypass
+  was introduced.
 - Pinned beta9 environment probe `39416141205` passed against its sealed image
   in a fresh profile. Its actual `env` output resolves the native configuration
   root to `$XDG_CONFIG_HOME/unityhub`. All discovery/nonempty/release acceptance
   flags remain false. Native helper interoperability with a genuine current
   Hub-generated registry and the separate Flathub profile remain open gates.
+- The guarded publisher currently dispatches Windows qualification and feed
+  validation only. Linux publication is unimplemented, not a reason to weaken
+  that working route. The next finite extension needs a separate exact Linux
+  asset/receipt validator, closed platform dispatch, and DEB/portable catalogue
+  checks retaining the shared 256 KiB response ceiling and 4 KiB headroom.
+  Bind the per-platform incoming baseline separately from the previous global
+  stable release, exclude private acceptance fixtures, preserve the single
+  guarded publication order with `make_latest=false`, and prove every failed
+  preflight performs zero writes. Existing 25 publisher/feed tests passed in
+  the read-only assessment; no Linux readiness or publication is implied.
 - Read-only publication audit confirms public Windows 0.1.14 skips release rows
   without both Windows descriptor/signature assets. A future Linux-only release
   must not add Windows metadata or replace public Windows bytes just to satisfy
