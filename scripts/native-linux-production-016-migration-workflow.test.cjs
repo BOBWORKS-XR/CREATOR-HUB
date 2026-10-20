@@ -61,6 +61,26 @@ test('actual job guard skips registration pushes even with execution requested, 
   }
 });
 
+test('pinned preflight Python precedes pure tests while native brokers retain the system interpreter', () => {
+  const steps = workflow.jobs.migration.steps;
+  const setups = steps.filter(step => step.uses === 'actions/setup-python@v6');
+  assert.equal(setups.length, 1);
+  assert.deepEqual(setups[0].with, { 'python-version': '3.11.17' });
+  const setup = steps.indexOf(setups[0]);
+  const pure = steps.findIndex(step => step.name?.startsWith('Pure execution'));
+  const download = steps.findIndex(step => step.uses === 'actions/github-script@v8');
+  const dependencies = steps.findIndex(step => step.run?.includes('sudo apt-get install'));
+  const broker = steps.findIndex(step => step.name?.startsWith('Fixed root broker'));
+  assert.ok(0 < setup && setup < pure && pure < download && download < dependencies && dependencies < broker);
+  assert.match(steps[pure].run, /^python3 -B scripts\/native-linux-production-016-stage\.test\.py$/m);
+  assert.match(steps[pure].run, /^python3 -B scripts\/native-linux-production-016-migration\.test\.py$/m);
+  assert.match(steps[dependencies].run, /python3-gi python3-toml/);
+  assert.match(steps[broker].run, /'PATH=\/usr\/bin:\/bin', 'LANG=C', 'LC_ALL=C',\s*'\/usr\/bin\/python3', '-B', str\(source\), 'broker'/);
+  const controller = fs.readFileSync(path.join(__dirname, 'native-linux-production-016-migration.py'), 'utf8');
+  assert.match(controller, /"\/usr\/bin\/python3", "-B", str\(BASE \/ "scripts" \/ Path\(__file__\)\.name\), "session"/);
+  assert.match(controller, /import tomllib as toml\s+except ImportError:\s+import toml/);
+});
+
 test('unchanged production API/offline gate precedes any candidate execution or privilege', () => {
   const steps = workflow.jobs.migration.steps;
   const index = needle => steps.findIndex(step => step.run?.includes(needle));

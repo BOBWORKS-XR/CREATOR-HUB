@@ -48,6 +48,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24.17.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11.17'
       - run: npm ci --ignore-scripts
       - name: Pure execution and inspection refusal tests before download or privilege
         run: |
