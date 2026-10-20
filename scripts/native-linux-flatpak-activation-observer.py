@@ -952,11 +952,13 @@ def root_uid_tuple(pid):
         os.close(directory)
 
 
-def complete_uid_inventory(budget, *, invocation=None):
+def complete_uid_inventory(budget, *, invocation=None, foreign=None):
     def scan(number):
         _inventory_predicate = 'invocation-recheck'
         if invocation is not None:
             invocation.recheck()
+        if foreign is not None:
+            foreign.recheck()
         rows, count = {}, 0
         _inventory_predicate = 'scan-open'
         with os.scandir('/proc') as entries:
@@ -980,13 +982,17 @@ def complete_uid_inventory(budget, *, invocation=None):
                         else:
                             _inventory_predicate = 'mixed-invocation'
                             require(invocation is not None)
-                            rows[int(entry.name)] = invocation.mixed_process(int(entry.name), ids)
+                            pid = int(entry.name)
+                            rows[pid] = (foreign.observe(pid, ids) if foreign is not None and pid not in invocation.held
+                                         else invocation.mixed_process(pid, ids))
                 except Exception as error:
                     inventory_failure(error, number, int(entry.name), entry_uids)
                     raise
         _inventory_predicate = 'invocation-recheck'
         if invocation is not None:
             invocation.recheck()
+        if foreign is not None:
+            foreign.recheck()
         return rows
     number = 1
     try:
@@ -1001,8 +1007,8 @@ def complete_uid_inventory(budget, *, invocation=None):
     return proxies, first
 
 
-def complete_proxy_inventory(budget, *, invocation=None):
-    proxies, rows = complete_uid_inventory(budget, invocation=invocation)
+def complete_proxy_inventory(budget, *, invocation=None, foreign=None):
+    proxies, rows = complete_uid_inventory(budget, invocation=invocation, foreign=foreign)
     require(0 < len(proxies) <= 4)
     return proxies, rows
 
@@ -1232,6 +1238,96 @@ class InvocationChain:
             value.invocation_cleanup_failed = True
 
 
+class ForeignSudoObservations:
+    """Observed inventory rows only: never invocation members, proxy candidates or input authority."""
+    MAX_ROWS = 4
+
+    def __init__(self, invocation, budget):
+        self.invocation, self.budget = invocation, budget
+        self.held, self.image, self.closed = {}, None, False
+
+    def identity(self, pid, held):
+        self.budget()
+        require(not self.closed and not select.select([held['pidfd']], [], [], 0)[0])
+        directory = held['directory']
+        require(ProxyAssociationProc.stamp(os.fstat(directory)) == held['proc']
+                == ProxyAssociationProc.stamp(os.stat(f'/proc/{pid}', follow_symlinks=False)))
+        raw, _ = ProxyAssociationProc.read_at(directory, 'stat', 4096)
+        status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
+        text = raw.decode('utf-8'); tail = text[text.rfind(')') + 2:].split()
+        ids = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
+        row = probe_hop_detail(pid, tail, ids)
+        require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and row['parentPid'] is not None
+                and row['startTime'] is not None and row['uids'] == [PROXY_UID, 0, 0, 0]
+                and row['state'] in ('R', 'S', 'D', 'I', 'T', 't', 'K', 'W', 'P'))
+        require(os.readlink('exe', dir_fd=directory) == str(self.image.path)
+                and ProxyAssociationProc.stamp(os.fstat(held['kernel'])) == self.image.identity
+                == ProxyAssociationProc.stamp(os.stat('exe', dir_fd=directory))
+                and ProxyAssociationProc.stamp(os.fstat(directory)) == held['proc']
+                == ProxyAssociationProc.stamp(os.stat(f'/proc/{pid}', follow_symlinks=False))
+                and not select.select([held['pidfd']], [], [], 0)[0])
+        self.budget()
+        return dict(pid=pid, parentPid=row['parentPid'], startTime=row['startTime'],
+                    uids=list(row['uids']), executable=str(self.image.path))
+
+    def observe(self, pid, ids):
+        self.budget()
+        require(not self.closed and type(pid) is int and 1 < pid < 2**31 and pid not in self.invocation.held
+                and type(ids) is list and len(ids) == 4 and all(type(uid) is int for uid in ids)
+                and ids == [PROXY_UID, 0, 0, 0])
+        if pid not in self.held:
+            require(len(self.held) < self.MAX_ROWS)
+            held = self.held[pid] = dict(fds=[])
+            held['pidfd'] = os.pidfd_open(pid); held['fds'].append(held['pidfd'])
+            require(not select.select([held['pidfd']], [], [], 0)[0])
+            held['directory'] = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            held['fds'].append(held['directory'])
+            info = os.fstat(held['directory']); require(stat.S_ISDIR(info.st_mode))
+            held['proc'] = ProxyAssociationProc.stamp(info)
+            if self.image is None:
+                self.image = InvocationImage('sudo', self.budget)
+            held['kernel'] = os.open('exe', os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=held['directory'])
+            held['fds'].append(held['kernel'])
+            held['row'] = self.identity(pid, held)
+        self.recheck()
+        return copy.deepcopy(self.held[pid]['row'])
+
+    def recheck(self):
+        self.budget(); require(not self.closed)
+        if self.image is not None:
+            self.image.snapshot()
+        for pid, held in self.held.items():
+            require(pid not in self.invocation.held and self.identity(pid, held) == held['row'])
+        if self.image is not None:
+            self.image.snapshot()
+        self.budget()
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed, failure = True, None
+        for held in self.held.values():
+            for fd in reversed(held['fds']):
+                try: os.close(fd)
+                except Exception as error: failure = failure or error
+        if self.image is not None:
+            try: self.image.close()
+            except Exception as error: failure = failure or error
+        self.held, self.image = {}, None
+        if failure is not None:
+            failure.invocation_cleanup_failed = True
+            raise failure
+
+    def __enter__(self): return self
+
+    def __exit__(self, kind, value, traceback):
+        try:
+            self.close()
+        except Exception:
+            if value is None: raise
+            value.invocation_cleanup_failed = True
+
+
 def probe_caller_chain(caller):
     with InvocationChain(caller) as invocation:
         return invocation.receipt()
@@ -1244,7 +1340,7 @@ def inventory_probe(request, *, clock=time.monotonic_ns):
     fd = os.pidfd_open(request['caller']['pid'])
     stage = 'probe-caller-chain'
     try:
-        with InvocationChain(request['caller'], budget) as invocation:
+        with InvocationChain(request['caller'], budget) as invocation, ForeignSudoObservations(invocation, budget) as foreign:
             try:
                 require(not select.select([fd], [], [], 0)[0])
             except Exception as error:
@@ -1253,10 +1349,11 @@ def inventory_probe(request, *, clock=time.monotonic_ns):
                 error.proxy_caller_diagnostic = dict(predicate='caller-pidfd-live', hops=[hop])
                 raise
             stage = 'complete-uid-inventory'
-            proxies, rows = complete_uid_inventory(budget, invocation=invocation)
+            proxies, rows = complete_uid_inventory(budget, invocation=invocation, foreign=foreign)
             require(rows.get(request['caller']['pid']) == request['caller'])
             stage = 'probe-recheck'
             invocation.recheck()
+            foreign.recheck()
             require(not select.select([fd], [], [], 0)[0])
             budget()
             return dict(operation=PROBE_OPERATION, complete=True, uid=PROXY_UID, candidateCount=len(proxies),
@@ -1297,13 +1394,19 @@ def validate_probe(value, request):
 def association_snapshot(request, *, proc=None, read=root_process, inventory=complete_proxy_inventory,
                          runtime=PROXY_RUNTIME, clock=time.monotonic_ns):
     root_request(request, clock())
-    with InvocationChain(request['caller'], lambda: require(clock() < request['expiresNs'])) as invocation:
+    def budget():
+        require(clock() < request['expiresNs'])
+    with InvocationChain(request['caller'], budget) as invocation, ForeignSudoObservations(invocation, budget) as foreign:
         def current(budget):
             invocation.recheck()
-            result = inventory(budget, invocation=invocation) if inventory is complete_proxy_inventory else inventory(budget)
+            foreign.recheck()
+            result = inventory(budget, invocation=invocation, foreign=foreign) if inventory is complete_proxy_inventory else inventory(budget)
             invocation.recheck()
+            foreign.recheck()
             return result
-        return association_snapshot_held(request, proc=proc, read=read, inventory=current, runtime=runtime, clock=clock)
+        result = association_snapshot_held(request, proc=proc, read=read, inventory=current, runtime=runtime, clock=clock)
+        invocation.recheck(); foreign.recheck(); budget()
+        return result
 
 
 def association_snapshot_held(request, *, proc, read, inventory, runtime, clock):
