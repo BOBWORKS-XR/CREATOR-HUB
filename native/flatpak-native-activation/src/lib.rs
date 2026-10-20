@@ -13,10 +13,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SERVICE: &str = include_str!("../com.creatorworks.hub.Host.service");
 const KEY: &str = include_str!("../../../src-tauri/src/catalog-key.pub");
 pub const DESCRIPTOR: &str = "creator-hub-linux-x86_64-deb.json";
-pub const DISCLOSURE: &str = "Creator Hub opens a native window outside the Flatpak sandbox. The native app uses your existing host settings and performs MCP and Project Setup operations. A matching native Creator Hub DEB installation is required. This launcher cannot install host software. RPM, AppImage and SteamOS host installation are not supported by this path.";
+pub const DISCLOSURE: &str = "Creator Hub opens a native window outside the Flatpak sandbox and uses your existing host settings for MCP and Project Setup. If native support is missing, choose Get Native Hub for the dedicated Creator Hub Native Support setup download (Linux x86_64 AppImage), not the ordinary Hub AppImage. Close any existing Hub windows normally, then open the setup download and review native support setup. Installation requires signature verification and your approval. After setup, close that window normally and reopen this Flatpak. A matching native DEB installation is another option on supported distributions. This launcher does not install host software.";
 
 pub fn installer_page() -> String {
-    format!("https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v{VERSION}")
+    format!("https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v{VERSION}/Creator.Hub.Native.Support_{VERSION}_amd64.AppImage")
 }
 
 pub fn launcher_context(id: Option<&str>, arguments: usize) -> Result<(), &'static str> {
@@ -229,8 +229,28 @@ mod tests {
             assert!(launcher_context(id, 1).is_err());
         }
         assert!(launcher_context(Some(ID), 2).is_err());
-        assert!(installer_page().ends_with(&format!("/tag/v{VERSION}")));
+        assert_eq!(installer_page(), format!("https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v{VERSION}/Creator.Hub.Native.Support_{VERSION}_amd64.AppImage"));
         assert!(!installer_page().contains("latest"));
+    }
+
+    #[test]
+    fn setup_guidance_is_graphical_and_preserves_explicit_native_consent() {
+        for phrase in [
+            "outside the Flatpak sandbox",
+            "Linux x86_64 AppImage",
+            "dedicated Creator Hub Native Support",
+            "setup download",
+            "not the ordinary Hub AppImage",
+            "Close any existing Hub windows normally",
+            "signature verification and your approval",
+            "reopen this Flatpak",
+            "does not install host software",
+        ] {
+            assert!(DISCLOSURE.contains(phrase), "{phrase}");
+        }
+        assert!(!DISCLOSURE.contains("--install-native-support"));
+        assert!(!DISCLOSURE.contains("DEB installation is required"));
+        assert!(!DISCLOSURE.contains(VERSION));
     }
     #[test]
     fn exact_deb_descriptor_only_no_test_only_or_path_escape() {

@@ -36,11 +36,24 @@ test('service overlay is normal user session activation, with no new systemd or 
   assert.equal(p.SERVICE,'usr/share/dbus-1/services/com.creatorworks.hub.Host.service');
   for(const word of ['User=','SystemdService=','/bin/sh','sudo','pkexec','mcp','setup'])assert.ok(!p.service().includes(word));
 });
-test('source version bound to native Hub and disclosure names unsupported hosts/outside sandbox',()=>{
+test('source version and graphical setup guidance retain outside-sandbox disclosure and approval',()=>{
   assert.equal(p.version(),JSON.parse(fs.readFileSync(path.join(p.ROOT,'package.json'))).version);
   const rust=fs.readFileSync(path.join(p.NATIVE,'src/lib.rs'),'utf8');
-  for(const text of ['outside the Flatpak sandbox','DEB installation','RPM, AppImage and SteamOS','releases/tag/v{VERSION}'])assert.ok(rust.includes(text),text);
-  assert.ok(p.metainfo(p.version()).includes('outside its sandbox'));
+  const literal=rust.match(/pub const DISCLOSURE: &str = ("(?:[^"\\]|\\.)*");/);
+  assert.ok(literal,'Source-bound ownership checks require one static disclosure literal');
+  const disclosure=JSON.parse(literal[1]);
+  for(const text of ['outside the Flatpak sandbox','dedicated Creator Hub Native Support','Linux x86_64 AppImage','signature verification and your approval','Close any existing Hub windows normally','not the ordinary Hub AppImage','reopen this Flatpak'])assert.ok(disclosure.includes(text),text);
+  assert.ok(!disclosure.includes(p.version()));
+  const metadata=p.metainfo(p.version());
+  for(const text of ['outside its sandbox','Linux x86_64 AppImage','signature verification and your approval','Close existing Hub windows normally','reopen this Flatpak','not the ordinary Hub AppImage'])assert.ok(metadata.includes(text),text);
+  assert.ok(!metadata.includes('DEB is required'));
+  assert.ok(!metadata.includes('--install-native-support'));
+});
+test('Get Native Hub selects the fixed dedicated setup asset, not the ordinary AppImage or release page',()=>{
+  const rust=fs.readFileSync(path.join(p.NATIVE,'src/lib.rs'),'utf8');
+  assert.ok(rust.includes('releases/download/v{VERSION}/Creator.Hub.Native.Support_{VERSION}_amd64.AppImage'));
+  assert.ok(!rust.includes('releases/tag/v{VERSION}'));
+  assert.ok(p.metainfo(p.version()).includes(`Creator.Hub.Native.Support_${p.version()}_amd64.AppImage`));
 });
 test('trusted release verifier embeds actual Root public key, no runtime trust key or bool bypass',()=>{
   const rust=fs.readFileSync(path.join(p.NATIVE,'src/lib.rs'),'utf8');

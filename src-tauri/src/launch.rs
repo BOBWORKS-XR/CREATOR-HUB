@@ -20,6 +20,67 @@ pub fn native_support_requested(arguments: impl IntoIterator<Item = OsString>) -
     )) && matches!(arguments.as_slice(), [flag] if flag == "--install-native-support")
 }
 
+#[cfg(any(
+    test,
+    all(target_os = "linux", feature = "experimental-linux-portable-update")
+))]
+pub(crate) fn automatic_native_support(
+    platform: (&str, &str),
+    enabled: bool,
+    arguments: &[OsString],
+    bundle: Option<tauri::utils::config::BundleType>,
+    has_host_marker: bool,
+    sandboxed: bool,
+    appimage_hint: Option<&std::ffi::OsStr>,
+) -> bool {
+    // Bundle and filename hints select only a restricted screen, never authority.
+    platform == ("linux", "x86_64")
+        && enabled
+        && arguments.is_empty()
+        && bundle == Some(tauri::utils::config::BundleType::AppImage)
+        && !has_host_marker
+        && !sandboxed
+        && native_support_alias(appimage_hint)
+}
+
+#[cfg(any(
+    test,
+    all(target_os = "linux", feature = "experimental-linux-portable-update")
+))]
+fn native_support_alias(hint: Option<&std::ffi::OsStr>) -> bool {
+    let Some(hint) = hint.and_then(std::ffi::OsStr::to_str) else {
+        return false;
+    };
+    // Lexical Linux filename intent only: never inspect or execute this path.
+    if hint.len() > 4096 || !hint.starts_with('/') || hint.chars().any(char::is_control) {
+        return false;
+    }
+    let name = hint.rsplit('/').next().unwrap_or_default();
+    let stem = concat!(
+        "Creator.Hub.Native.Support_",
+        env!("CARGO_PKG_VERSION"),
+        "_amd64"
+    );
+    let Some(suffix) = name
+        .strip_prefix(stem)
+        .and_then(|name| name.strip_suffix(".AppImage"))
+    else {
+        return false;
+    };
+    if suffix.is_empty() {
+        return true;
+    }
+    let Some(number) = suffix
+        .strip_prefix(" (")
+        .and_then(|number| number.strip_suffix(')'))
+    else {
+        return false;
+    };
+    (1..=3).contains(&number.len())
+        && !number.starts_with('0')
+        && number.bytes().all(|digit| digit.is_ascii_digit())
+}
+
 pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<View, ()> {
     let arguments: Vec<_> = arguments.into_iter().take(4).collect();
     match arguments.as_slice() {
@@ -172,5 +233,188 @@ mod tests {
                 args.into_iter().map(OsString::from)
             ));
         }
+    }
+
+    #[test]
+    fn automatic_bootstrap_requires_all_seven_startup_fields() {
+        use tauri::utils::config::BundleType;
+        let image = || Some(BundleType::AppImage);
+        let hint = OsString::from(format!(
+            "/downloads/Creator.Hub.Native.Support_{}_amd64.AppImage",
+            env!("CARGO_PKG_VERSION")
+        ));
+        assert!(automatic_native_support(
+            ("linux", "x86_64"),
+            true,
+            &[],
+            image(),
+            false,
+            false,
+            Some(&hint)
+        ));
+        for os in ["windows", "unknown", "Linux"] {
+            assert!(!automatic_native_support(
+                (os, "x86_64"),
+                true,
+                &[],
+                image(),
+                false,
+                false,
+                Some(&hint)
+            ));
+        }
+        for architecture in ["aarch64", "x86", "unknown"] {
+            assert!(!automatic_native_support(
+                ("linux", architecture),
+                true,
+                &[],
+                image(),
+                false,
+                false,
+                Some(&hint)
+            ));
+        }
+        assert!(!automatic_native_support(
+            ("linux", "x86_64"),
+            false,
+            &[],
+            image(),
+            false,
+            false,
+            Some(&hint)
+        ));
+        for argument in [
+            "--flatpak-activate",
+            "--install-native-support",
+            "--open-app",
+            "file.unity",
+        ] {
+            assert!(!automatic_native_support(
+                ("linux", "x86_64"),
+                true,
+                &[OsString::from(argument)],
+                image(),
+                false,
+                false,
+                Some(&hint)
+            ));
+        }
+        for bundle in [
+            None,
+            Some(BundleType::Deb),
+            Some(BundleType::Rpm),
+            Some(BundleType::Nsis),
+        ] {
+            assert!(!automatic_native_support(
+                ("linux", "x86_64"),
+                true,
+                &[],
+                bundle,
+                false,
+                false,
+                Some(&hint)
+            ));
+        }
+        assert!(!automatic_native_support(
+            ("linux", "x86_64"),
+            true,
+            &[],
+            image(),
+            true,
+            false,
+            Some(&hint)
+        ));
+        assert!(!automatic_native_support(
+            ("linux", "x86_64"),
+            true,
+            &[],
+            image(),
+            false,
+            true,
+            Some(&hint)
+        ));
+        assert_eq!(parse([]), Ok(View::Hub));
+    }
+
+    #[test]
+    fn ordinary_argless_appimage_still_opens_normal_hub() {
+        let stem = format!("/downloads/Creator.Hub_{}_amd64", env!("CARGO_PKG_VERSION"));
+        for name in std::iter::once(format!("{stem}.AppImage"))
+            .chain((1..=999).map(|n| format!("{stem} ({n}).AppImage")))
+        {
+            assert!(!automatic_native_support(
+                ("linux", "x86_64"),
+                true,
+                &[],
+                Some(tauri::utils::config::BundleType::AppImage),
+                false,
+                false,
+                Some(std::ffi::OsStr::new(&name)),
+            ));
+        }
+    }
+
+    #[test]
+    fn setup_alias_accepts_only_current_absolute_name_and_bounded_browser_duplicates() {
+        let stem = format!(
+            "/not-read/Creator.Hub.Native.Support_{}_amd64",
+            env!("CARGO_PKG_VERSION")
+        );
+        for name in std::iter::once(format!("{stem}.AppImage"))
+            .chain((1..=999).map(|n| format!("{stem} ({n}).AppImage")))
+        {
+            assert!(
+                native_support_alias(Some(std::ffi::OsStr::new(&name))),
+                "{name}"
+            );
+        }
+        assert!(!native_support_alias(None));
+        for name in [
+            String::new(),
+            format!("{}.AppImage", stem.trim_start_matches('/')),
+            format!("{stem}.AppImage/"),
+            format!("{stem}.AppImage/other"),
+            format!("{stem}.appimage"),
+            format!("{stem}.AppImage.bak"),
+            format!("{stem} copy.AppImage"),
+            format!("{stem} (0).AppImage"),
+            format!("{stem} (00).AppImage"),
+            format!("{stem} (01).AppImage"),
+            format!("{stem} (1000).AppImage"),
+            format!("{stem} (+1).AppImage"),
+            format!("{stem} (-1).AppImage"),
+            format!("{stem}(1).AppImage"),
+            format!("{stem} (1) (2).AppImage"),
+            format!("{stem} (1 ).AppImage"),
+            format!("{stem} (1.0).AppImage"),
+            format!("{stem} (\u{ff11}).AppImage"),
+            format!("{stem} (1).AppImage "),
+            format!("{stem}\0.AppImage"),
+            format!("/bad\n{stem}.AppImage"),
+            format!("/bad\r{stem}.AppImage"),
+            format!("/bad\u{7f}{stem}.AppImage"),
+            format!("/{}{stem}.AppImage", "x".repeat(4096)),
+            format!(
+                "/Creator.Hub.Native.Support_{}-other_amd64.AppImage",
+                env!("CARGO_PKG_VERSION")
+            ),
+            format!(
+                "/Creator.Hub.Native.Support_{}_aarch64.AppImage",
+                env!("CARGO_PKG_VERSION")
+            ),
+        ] {
+            assert!(
+                !native_support_alias(Some(std::ffi::OsStr::new(&name))),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_alias_rejects_non_utf8_hint() {
+        use std::os::unix::ffi::OsStringExt;
+        let hint = OsString::from_vec(vec![b'/', 0xff]);
+        assert!(!native_support_alias(Some(&hint)));
     }
 }

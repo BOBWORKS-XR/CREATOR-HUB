@@ -7,7 +7,7 @@ fn activate() -> Result<(), &'static str> {
         .map_err(|_| "Cannot connect to the desktop session bus.")?;
     bus.call_sync(Some(contract::NAME), contract::PATH, contract::INTERFACE, contract::METHOD,
         Some(&().to_variant()), Some(VariantTy::UNIT), gio::DBusCallFlags::NONE, 15_000, gio::Cancellable::NONE)
-        .map_err(|_| "Native Hub support is unavailable or did not confirm activation. Install the matching DEB-based native Hub, then try again. This launcher did not install software or change host settings.")?;
+        .map_err(|_| "Native Hub support is unavailable or did not confirm activation. Choose Get Native Hub for the dedicated Creator Hub Native Support setup AppImage, not the ordinary Hub AppImage. Close Hub normally and open the setup download to review native support setup. Then close setup and reopen this Flatpak. This launcher did not install software or change host settings.")?;
     Ok(())
 }
 
@@ -27,7 +27,7 @@ fn installer_page() -> Result<(), &'static str> {
         gio::Cancellable::NONE,
     )
     .map_err(|_| {
-        "The desktop portal could not open the installer page. No native software was installed."
+        "The desktop portal could not open the native support setup download. No native software was installed."
     })?;
     Ok(())
 }

@@ -2,7 +2,7 @@
 use tauri::Manager as _;
 
 const UNAVAILABLE: &str =
-    "Native support setup requires the explicit Linux --install-native-support launch role.";
+    "Native support setup is available only in the dedicated Linux setup window. Close Hub normally, then open the Creator Hub Native Support setup AppImage, not the ordinary Hub AppImage.";
 const COMMANDS: &[&str] = &[
     "native_support_status",
     "install_native_support",
@@ -14,6 +14,35 @@ const COMMANDS: &[&str] = &[
 
 pub(crate) fn command_allowed(bootstrap: bool, command: &str) -> bool {
     !bootstrap || COMMANDS.contains(&command)
+}
+
+pub(crate) fn forwarded_guidance(
+    enabled: bool,
+    bootstrap: bool,
+    arguments: &[String],
+    current_image: Option<&std::path::Path>,
+) -> Option<&'static str> {
+    if !enabled || bootstrap || arguments.len() != 1 {
+        return None;
+    }
+    let current = current_image?;
+    let forwarded = std::path::Path::new(&arguments[0]);
+    if !current.is_absolute()
+        || !forwarded.is_absolute()
+        || arguments[0].chars().any(char::is_control)
+        || !current.metadata().ok()?.is_file()
+        || !forwarded.metadata().ok()?.is_file()
+    {
+        return None;
+    }
+    let current = current.canonicalize().ok()?;
+    let forwarded = forwarded.canonicalize().ok()?;
+    if crate::platform::same_path(&current, &forwarded) {
+        return None;
+    }
+    Some(
+        "Creator Hub is already running in its normal mode. If you opened the dedicated Creator Hub Native Support setup AppImage, finish or cancel your work here and close Hub normally. Then open the setup AppImage again. The ordinary Hub AppImage opens normal Hub. This window has not switched to setup mode and no installation was started.",
+    )
 }
 
 pub(crate) struct NativeSupport {
@@ -126,6 +155,15 @@ mod model {
                 message,
             }
         }
+
+        pub(super) fn failed(previous: Phase, error: &str) -> Self {
+            let phase = if previous == Phase::Complete {
+                Phase::Recovery
+            } else {
+                previous
+            };
+            Self::new(phase, format!("Native setup did not complete. Retained files and settings were kept; nothing will be replayed automatically. {error}"))
+        }
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -163,6 +201,52 @@ mod model {
         flow.register(&store, &package)?;
         flow.verify(&store, &package)?;
         Ok(Outcome::Complete)
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum ResumeOutcome {
+        Kept,
+        Advanced,
+        Complete,
+    }
+
+    pub(super) trait Resume {
+        type Package;
+        type Review;
+        fn approve(&mut self, review: &Self::Review) -> Result<bool, String>;
+        fn pending(&mut self) -> Result<(), String>;
+        fn apply(
+            &mut self,
+            package: &Self::Package,
+            review: &Self::Review,
+            approved: bool,
+        ) -> Result<ResumeOutcome, String>;
+    }
+
+    // The caller supplies a fresh opaque native review on EACH command. Advanced
+    // never authorizes another apply, a new review or an installation replay here.
+    pub(super) fn run_resume<F: Resume>(
+        flow: &mut F,
+        package: &F::Package,
+        review: &F::Review,
+    ) -> Result<ResumeOutcome, String> {
+        let approved = flow.approve(review)?;
+        if approved {
+            flow.pending()?;
+        }
+        let outcome = flow.apply(package, review, approved)?;
+        if !approved && outcome != ResumeOutcome::Kept {
+            return Err("Native recovery cancellation was not confirmed. Review retained evidence before retrying.".into());
+        }
+        Ok(outcome)
+    }
+
+    pub(super) fn resume_status(outcome: ResumeOutcome, complete_message: &str) -> Status {
+        match outcome {
+            ResumeOutcome::Kept => Status::new(Phase::Recovery, "Native recovery was cancelled. No reviewed step was applied; retained files and settings were kept."),
+            ResumeOutcome::Advanced => Status::new(Phase::Recovery, "One reviewed native recovery step finished. Setup is not yet confirmed complete. Choose Review again for a fresh review and explicit approval of the next step. Nothing else will run automatically."),
+            ResumeOutcome::Complete => Status::new(Phase::Complete, complete_message),
+        }
     }
 
     #[cfg(test)]
@@ -301,20 +385,158 @@ mod model {
                 assert_eq!(flow.retained, index >= 4);
             }
         }
+
+        struct FakeResume {
+            steps: Vec<&'static str>,
+            approved: bool,
+            outcome: ResumeOutcome,
+            revision: u64,
+            writes: usize,
+            fail: Option<&'static str>,
+        }
+        impl Resume for FakeResume {
+            type Package = u64;
+            type Review = u64;
+            fn approve(&mut self, _: &u64) -> Result<bool, String> {
+                self.steps.push("fresh-native-consent");
+                if self.fail == Some("consent") {
+                    return Err("Consent failed".into());
+                }
+                Ok(self.approved)
+            }
+            fn pending(&mut self) -> Result<(), String> {
+                self.steps.push("retain-recovery");
+                if self.fail == Some("pending") {
+                    return Err("Cannot retain status".into());
+                }
+                Ok(())
+            }
+            fn apply(
+                &mut self,
+                package: &u64,
+                review: &u64,
+                approved: bool,
+            ) -> Result<ResumeOutcome, String> {
+                if !approved {
+                    self.steps.push("native-keep");
+                    return Ok(ResumeOutcome::Kept);
+                }
+                self.steps.push("one-native-step");
+                if self.fail == Some("apply") || *package != 42 || *review != self.revision {
+                    return Err("Native evidence changed or step failed; retained".into());
+                }
+                self.writes += usize::from(self.outcome == ResumeOutcome::Advanced);
+                self.revision += 1;
+                Ok(self.outcome)
+            }
+        }
+        fn resume_flow() -> FakeResume {
+            FakeResume {
+                steps: vec![],
+                approved: true,
+                outcome: ResumeOutcome::Advanced,
+                revision: 1,
+                writes: 0,
+                fail: None,
+            }
+        }
+
+        #[test]
+        fn advanced_is_one_step_and_never_completion_or_automatic_replay() {
+            let mut flow = resume_flow();
+            let result = run_resume(&mut flow, &42, &1).unwrap();
+            assert_eq!(result, ResumeOutcome::Advanced);
+            let status = resume_status(result, "complete");
+            assert_eq!(status.phase, Phase::Recovery);
+            assert!(status
+                .message
+                .contains("fresh review and explicit approval"));
+            assert_eq!(
+                flow.steps,
+                ["fresh-native-consent", "retain-recovery", "one-native-step"]
+            );
+            assert_eq!(flow.writes, 1);
+            flow.steps.clear();
+            assert!(
+                run_resume(&mut flow, &42, &1).is_err(),
+                "A stale review cannot authorize another step"
+            );
+            assert_eq!(flow.writes, 1);
+            flow.steps.clear();
+            flow.approved = false;
+            assert_eq!(run_resume(&mut flow, &42, &2), Ok(ResumeOutcome::Kept));
+            assert_eq!(flow.steps, ["fresh-native-consent", "native-keep"]);
+            assert_eq!(flow.writes, 1);
+            flow.approved = true;
+            assert_eq!(run_resume(&mut flow, &42, &2), Ok(ResumeOutcome::Advanced));
+            assert_eq!(flow.writes, 2);
+        }
+
+        #[test]
+        fn recovery_cancel_and_failures_never_apply_a_following_step() {
+            let mut flow = resume_flow();
+            flow.approved = false;
+            assert_eq!(run_resume(&mut flow, &999, &999), Ok(ResumeOutcome::Kept));
+            assert_eq!(flow.writes, 0);
+            assert_eq!(
+                resume_status(ResumeOutcome::Kept, "complete").phase,
+                Phase::Recovery
+            );
+            for failure in ["consent", "pending", "apply"] {
+                let mut flow = resume_flow();
+                flow.fail = Some(failure);
+                assert!(run_resume(&mut flow, &42, &1).is_err());
+                assert_eq!(flow.writes, 0);
+                assert!(
+                    flow.steps
+                        .iter()
+                        .filter(|step| **step == "one-native-step")
+                        .count()
+                        <= 1
+                );
+            }
+            let mut flow = resume_flow();
+            flow.outcome = ResumeOutcome::Complete;
+            let outcome = run_resume(&mut flow, &42, &1).unwrap();
+            assert_eq!(
+                resume_status(outcome, "verified complete").phase,
+                Phase::Complete
+            );
+            assert_eq!(flow.writes, 0);
+        }
+
+        #[test]
+        fn a_failed_fresh_review_never_reuses_cached_completion() {
+            for previous in [
+                Phase::Available,
+                Phase::Recovery,
+                Phase::Complete,
+                Phase::Blocked,
+            ] {
+                let failed = Status::failed(previous, "Native origin or evidence changed");
+                assert_ne!(failed.phase, Phase::Complete);
+                assert!(failed.message.contains("did not complete"));
+                assert!(failed
+                    .message
+                    .contains("nothing will be replayed automatically"));
+            }
+        }
     }
 }
 
 #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
 mod enabled {
     use super::{
-        model::{self, Installation, Outcome, Phase, Status},
+        model::{self, Installation, Outcome, Phase, Resume, ResumeOutcome, Status},
         Action, NativeSupport,
     };
     use crate::{manager, platform, portable_package};
     use creator_hub_linux_portable_deployment::{
         self as deployment, BootstrapOutcome, BootstrapRecoveryChoice, BootstrapRecoveryOutcome,
-        BootstrapRecoveryReview, BootstrapReview, Expected, HostSession, InstallChoice,
-        InstallOutcome, RegistrationChoice, RegistrationOutcome, ReviewedBootstrapChoice, Store,
+        BootstrapRecoveryReview, BootstrapResumeChoice, BootstrapResumeOutcome,
+        BootstrapResumeReview, BootstrapResumeStep, BootstrapReview, Expected, HostSession,
+        InstallChoice, InstallOutcome, RecoveryState, RegistrationChoice, RegistrationOutcome,
+        ReviewedBootstrapChoice, Store,
     };
     use std::{fs, sync::atomic::Ordering};
     use tauri::{Emitter, Manager as _};
@@ -364,6 +586,15 @@ mod enabled {
 
     pub(super) fn install(handle: &tauri::AppHandle, action: Action) -> Result<Status, String> {
         let operation = handle.state::<manager::Manager>().begin()?;
+        if matches!(action, Action::Recovery) {
+            match resume_one_step(handle, &operation) {
+                Ok(Some(status)) => return record(handle, status),
+                // The old empty-origin path is admitted only by its existing
+                // typed read-only review, never after a failed resume apply.
+                Ok(None) => {}
+                Err(error) => return stopped(handle, &error),
+            }
+        }
         let mut flow = NativeInstall {
             handle,
             operation: &operation,
@@ -376,11 +607,114 @@ mod enabled {
                 result.message = "Native setup cancelled. No Store creation, selection or registration was performed. Verified download cache may remain; your settings were kept.".into();
                 Ok(result)
             }
-            Err(error) => {
-                let current = status(handle)?;
-                record(handle, Status::new(current.phase, format!(
-                    "Native setup did not complete. Retained files and settings were kept; nothing will be replayed automatically. {error}"
-                )))
+            Err(error) => stopped(handle, &error),
+        }
+    }
+
+    fn stopped(handle: &tauri::AppHandle, error: &str) -> Result<Status, String> {
+        let current = status(handle)?;
+        record(handle, Status::failed(current.phase, error))
+    }
+
+    fn resume_one_step(
+        handle: &tauri::AppHandle,
+        operation: &manager::Operation,
+    ) -> Result<Option<Status>, String> {
+        let mut initial = NativeInstall {
+            handle,
+            operation,
+            action: Action::Recovery,
+        };
+        let package = initial.download()?;
+        let session = initial.session()?;
+        let expected =
+            Expected::linux_x86_64(env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string())?;
+        let review = match deployment::review_bootstrap_resume(
+            &session,
+            package.package(),
+            &expected,
+        ) {
+            Ok(review) => review,
+            Err(resume_error) => {
+                deployment::review_bootstrap_recovery(&session, package.package(), &expected)
+                    .map_err(|empty_error| format!("Retained setup was not admitted by the origin-bound native resume or empty-store review. No adoption or replay. {resume_error} {empty_error}"))?;
+                return Ok(None);
+            }
+        };
+        if review.version() != package.descriptor().version()
+            || review.generation() != package.package().generation()
+        {
+            return Err(
+                "Native recovery review differs from the exact external signed package.".into(),
+            );
+        }
+        let mut flow = NativeResume { initial, session };
+        let result = model::run_resume(&mut flow, &package, &review)?;
+        Ok(Some(model::resume_status(result, COMPLETE)))
+    }
+
+    struct NativeResume<'a> {
+        initial: NativeInstall<'a>,
+        session: HostSession,
+    }
+
+    impl Resume for NativeResume<'_> {
+        type Package = portable_package::VerifiedDownload;
+        type Review = BootstrapResumeReview;
+
+        fn approve(&mut self, review: &Self::Review) -> Result<bool, String> {
+            if self.initial.cancelled() {
+                return Ok(false);
+            }
+            let step = match review.step() {
+                BootstrapResumeStep::Install => "Select only this already staged, signed generation. Registration is a separate later step.",
+                BootstrapResumeStep::AcknowledgeDeployment(RecoveryState::PreparedOldSelectionRetained) => "Acknowledge that the interrupted deployment retained its prior selection. This step will not select or register a package.",
+                BootstrapResumeStep::AcknowledgeDeployment(RecoveryState::SelectionCommitted) => "Acknowledge the already committed deployment selection. This step will not select another generation or register it.",
+                BootstrapResumeStep::RestoreRegistrationBefore => "Restore only the reviewed registration before-images. The selected package stays in place; registering it requires another review and approval.",
+                BootstrapResumeStep::Register => "Register this already selected, signed generation for native Flatpak activation. This step does not change the selected package.",
+                BootstrapResumeStep::Complete => "Verify that this exact setup is complete. This step does not install, select, register or launch an app.",
+            };
+            self.initial
+                .progress("Native recovery evidence verified. Waiting for approval of one step...");
+            let approved = self.initial.handle.dialog().message(format!(
+                "Review Creator Hub native support {}?\n\nVerified generation: {}\n\n{}\n\nOnly this reviewed step is approved. If setup advances, choose Review again for a fresh review and separate approval of the next step. Nothing is replayed or launched automatically. Your projects, MCP connections and settings are not migrated here. Cancel applies no step.",
+                review.version(), review.generation(), step,
+            )).title("Review native support")
+                .buttons(MessageDialogButtons::OkCancelCustom("Apply reviewed step".into(), "Cancel".into()))
+                .blocking_show();
+            Ok(approved && !self.initial.cancelled())
+        }
+
+        fn pending(&mut self) -> Result<(), String> {
+            self.initial
+                .progress("Applying one reviewed native support step. Keep this window open...");
+            record(self.initial.handle, Status::new(Phase::Recovery, "A native recovery step is in progress. If interrupted, keep the retained evidence and review again explicitly; no further step is approved."))?;
+            Ok(())
+        }
+
+        fn apply(
+            &mut self,
+            package: &Self::Package,
+            review: &Self::Review,
+            approved: bool,
+        ) -> Result<ResumeOutcome, String> {
+            let choice = if approved {
+                BootstrapResumeChoice::ApplyReviewedStep
+            } else {
+                BootstrapResumeChoice::Keep
+            };
+            match deployment::resume_bootstrap(
+                &self.session,
+                review,
+                package.package(),
+                choice,
+                || self.initial.cancelled(),
+            )
+            .map_err(|e| e.to_string())?
+            {
+                BootstrapResumeOutcome::Kept => Ok(ResumeOutcome::Kept),
+                BootstrapResumeOutcome::Advanced => Ok(ResumeOutcome::Advanced),
+                BootstrapResumeOutcome::Complete => Ok(ResumeOutcome::Complete),
             }
         }
     }
@@ -464,7 +798,7 @@ mod enabled {
                 Action::Recovery => {
                     deployment::review_bootstrap_recovery(&session, package.package(), &expected)
                         .map(Review::Empty)
-                        .map_err(|error| retained_review(&session, package, &error.to_string()))?
+                        .map_err(|error| error.to_string())?
                 }
                 Action::Status => {
                     return Err("A read-only status cannot start native installation.".into())
@@ -596,34 +930,6 @@ mod enabled {
             lease.revalidate().map_err(|e| e.to_string())
         }
     }
-
-    // Later transaction journals may be inspected, but the empty-origin recovery
-    // API cannot authorize adopting or replaying a staged/selected Store.
-    fn retained_review(
-        session: &HostSession,
-        package: &portable_package::VerifiedDownload,
-        original: &str,
-    ) -> String {
-        let inspection = (|| -> Result<bool, String> {
-            let store = Store::open(session.store_path()).map_err(|e| e.to_string())?;
-            let selection = store.recovery().map_err(|e| e.to_string())?;
-            if selection
-                .as_ref()
-                .is_some_and(|review| review.target_generation != package.package().generation())
-            {
-                return Err("Retained selection journal belongs to another generation; no adoption or replay.".into());
-            }
-            let registration = store
-                .registration_recovery(session)
-                .map_err(|e| e.to_string())?;
-            Ok(selection.is_some() || registration.is_some())
-        })();
-        match inspection {
-            Ok(true) => format!("A retained native selection or registration journal was inspected only. Safe post-selection bootstrap recovery is not enabled; no journal was acknowledged, replayed or removed. {original}"),
-            Ok(false) => format!("This is not a recoverable origin-bound empty bootstrap Store. It was not adopted or changed. {original}"),
-            Err(error) => format!("Retained native setup could not be verified and was kept without adoption or replay. {error} {original}"),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -662,5 +968,65 @@ mod tests {
                 feature = "experimental-linux-portable-update"
             ))
         );
+    }
+
+    #[test]
+    fn forwarded_argless_launch_only_offers_guidance_and_never_promotes_the_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("installed-hub");
+        let downloaded = dir.path().join("downloaded-hub");
+        std::fs::write(&current, b"current image").unwrap();
+        std::fs::write(&downloaded, b"different image").unwrap();
+        let forwarded = vec![downloaded.to_str().unwrap().to_owned()];
+        for enabled in [false, true] {
+            for bootstrap in [false, true] {
+                let original = NativeSupport::new(bootstrap);
+                let before = original.bootstrap;
+                let notice = forwarded_guidance(enabled, bootstrap, &forwarded, Some(&current));
+                assert_eq!(notice.is_some(), enabled && !bootstrap);
+                assert_eq!(original.bootstrap, before);
+                if let Some(message) = notice {
+                    assert!(message.contains("If you opened"));
+                    assert!(message.contains("close Hub normally"));
+                    assert!(message.contains("no installation was started"));
+                    assert!(message.len() < 4096);
+                }
+            }
+        }
+        for arguments in [
+            vec![],
+            vec![current.to_str().unwrap().to_owned()],
+            vec![current
+                .parent()
+                .unwrap()
+                .join(".")
+                .join("installed-hub")
+                .to_str()
+                .unwrap()
+                .to_owned()],
+            vec!["relative-hub".into()],
+            vec![dir
+                .path()
+                .join("missing-image")
+                .to_str()
+                .unwrap()
+                .to_owned()],
+            vec!["bad\0image".into()],
+            vec![dir.path().to_str().unwrap().to_owned()],
+            vec![forwarded[0].clone(), "--open-app".into()],
+        ] {
+            assert!(
+                forwarded_guidance(true, false, &arguments, Some(&current)).is_none(),
+                "{arguments:?}"
+            );
+        }
+        for current in [
+            None,
+            Some(std::path::Path::new("relative")),
+            Some(dir.path()),
+            Some(dir.path().join("missing-current").as_path()),
+        ] {
+            assert!(forwarded_guidance(true, false, &forwarded, current).is_none());
+        }
     }
 }

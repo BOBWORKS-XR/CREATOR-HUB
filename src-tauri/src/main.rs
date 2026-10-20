@@ -337,12 +337,20 @@ fn open_resource(resource: String) -> Result<(), String> {
 }
 
 fn shell_initialization(shell_key: &str, bootstrap: bool) -> String {
-    let recovery = if !bootstrap && cfg!(all(target_os = "linux", feature = "experimental-linux-portable-update")) {
+    let recovery = if !bootstrap
+        && cfg!(all(
+            target_os = "linux",
+            feature = "experimental-linux-portable-update"
+        )) {
         " Object.defineProperty(window, '__CREATOR_HUB_UPDATE_RECOVERY_PROTOCOL__', {value: 1});"
     } else {
         ""
     };
-    let support = if bootstrap && cfg!(all(target_os = "linux", feature = "experimental-linux-portable-update")) {
+    let support = if bootstrap
+        && cfg!(all(
+            target_os = "linux",
+            feature = "experimental-linux-portable-update"
+        )) {
         " Object.defineProperty(window, '__CREATOR_HUB_NATIVE_SUPPORT_PROTOCOL__', {value: 1});"
     } else {
         ""
@@ -382,7 +390,19 @@ fn main() {
         std::process::exit(installer_preflight::run(wait));
     }
     let arguments: Vec<_> = std::env::args_os().skip(1).take(4).collect();
-    let bootstrap = launch::native_support_requested(arguments.clone());
+    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+    let automatic_bootstrap = launch::automatic_native_support(
+        (std::env::consts::OS, std::env::consts::ARCH),
+        cfg!(feature = "experimental-linux-portable-update"),
+        &arguments,
+        tauri::utils::platform::bundle_type(),
+        std::env::var_os(creator_hub_linux_portable_deployment::HOST_MARKER).is_some(),
+        update_target::flatpak(),
+        std::env::var_os("APPIMAGE").as_deref(),
+    );
+    #[cfg(not(all(target_os = "linux", feature = "experimental-linux-portable-update")))]
+    let automatic_bootstrap = false;
+    let bootstrap = launch::native_support_requested(arguments.clone()) || automatic_bootstrap;
     let initial_view = match launch::parse(arguments) {
         Ok(view) => view,
         Err(()) => std::process::exit(2),
@@ -448,7 +468,17 @@ fn main() {
     ];
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(move |app, arguments, _cwd| {
-            if bootstrap { let _ = launch::focus(app); }
+            if let Some(guidance) = native_support::forwarded_guidance(
+                cfg!(all(target_os = "linux", feature = "experimental-linux-portable-update")),
+                bootstrap,
+                &arguments,
+                std::env::current_exe().ok().as_deref(),
+            ) {
+                let _ = launch::focus(app);
+                app.dialog().message(guidance).title("Creator Hub is already open")
+                    .buttons(MessageDialogButtons::Ok).show(|_| {});
+            }
+            else if bootstrap || (cfg!(all(target_os = "linux", feature = "experimental-linux-portable-update")) && arguments.len() == 1) { let _ = launch::focus(app); }
             else { launch::activate(app, arguments); }
         }))
         .manage(launch::Launch::new(initial_view))
@@ -561,17 +591,24 @@ mod tests {
         let script = shell_initialization("test-key", false);
         assert_eq!(
             script.contains("'__CREATOR_HUB_UPDATE_RECOVERY_PROTOCOL__', {value: 1}"),
-            cfg!(all(target_os = "linux", feature = "experimental-linux-portable-update"))
+            cfg!(all(
+                target_os = "linux",
+                feature = "experimental-linux-portable-update"
+            ))
         );
     }
 
     #[test]
     fn native_support_capability_requires_bootstrap_and_disables_update_recovery() {
-        assert!(!shell_initialization("test-key", false).contains("__CREATOR_HUB_NATIVE_SUPPORT_PROTOCOL__"));
+        assert!(!shell_initialization("test-key", false)
+            .contains("__CREATOR_HUB_NATIVE_SUPPORT_PROTOCOL__"));
         let script = shell_initialization("test-key", true);
         assert_eq!(
             script.contains("'__CREATOR_HUB_NATIVE_SUPPORT_PROTOCOL__', {value: 1}"),
-            cfg!(all(target_os = "linux", feature = "experimental-linux-portable-update"))
+            cfg!(all(
+                target_os = "linux",
+                feature = "experimental-linux-portable-update"
+            ))
         );
         assert!(!script.contains("__CREATOR_HUB_UPDATE_RECOVERY_PROTOCOL__"));
     }

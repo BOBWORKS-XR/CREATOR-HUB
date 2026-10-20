@@ -70,8 +70,11 @@ class ActivationTests(unittest.TestCase):
 
     def test_source_bound_disclosure_is_explicit_about_scope(self):
         text = M.disclosure()
-        for part in ("outside the Flatpak sandbox", "existing host settings", "DEB installation", "cannot install", "SteamOS"):
+        for part in ("outside the Flatpak sandbox", "existing host settings", "DEB installation",
+                     "dedicated Creator Hub Native Support setup download", "not the ordinary Hub AppImage",
+                     "signature verification and your approval", "reopen this Flatpak", "does not install host software"):
             self.assertIn(part, text)
+        self.assertNotIn("--install-native-support", text)
 
     def test_only_exact_cancel_and_open_buttons_are_authorized(self):
         for action in ("Cancel", "Open Creator Hub"):

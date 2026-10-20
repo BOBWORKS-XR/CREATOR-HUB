@@ -46,7 +46,7 @@ function recipe() {
           .map(file=>`install -Dm644 ${file} /app/${file}`)]}]};
 }
 function metainfo(v) {
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<component type="desktop-application">\n  <id>${ID}</id>\n  <metadata_license>CC0-1.0</metadata_license>\n  <project_license>MIT</project_license>\n  <name>Creator Hub</name>\n  <summary>Launch native Creator Hub on supported DEB hosts</summary>\n  <description><p>This Flatpak is a launcher. Creator Hub runs outside its sandbox using host settings. A separately installed, signature-verified native Creator Hub DEB is required. This path does not support RPM, AppImage or SteamOS host installation.</p></description>\n  <launchable type="desktop-id">${ID}.desktop</launchable>\n  <url type="homepage">https://github.com/BOBWORKS-XR/CREATOR-HUB</url>\n  <releases><release version="${v}"/></releases>\n</component>\n`;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<component type="desktop-application">\n  <id>${ID}</id>\n  <metadata_license>CC0-1.0</metadata_license>\n  <project_license>MIT</project_license>\n  <name>Creator Hub</name>\n  <summary>Launch native Creator Hub with separately approved native support</summary>\n  <description><p>This Flatpak is a launcher. Creator Hub runs outside its sandbox using host settings. Get Native Hub opens the matching Linux x86_64 AppImage setup download: Creator.Hub.Native.Support_${v}_amd64.AppImage, not the ordinary Hub AppImage. Close existing Hub windows normally and open the setup download to review setup. Native support installation requires signature verification and your approval. Then close setup and reopen this Flatpak. A matching native DEB installation is another option on supported distributions. The launcher does not install host software.</p></description>\n  <launchable type="desktop-id">${ID}.desktop</launchable>\n  <url type="homepage">https://github.com/BOBWORKS-XR/CREATOR-HUB</url>\n  <releases><release version="${v}"/></releases>\n</component>\n`;
 }
 function prepare(launcher,pins,destination) {
   assert.deepEqual(Object.keys(pins).sort(),['launcherSha256','launcherSize','schemaVersion','sourceCommit','sourceTree','version']);
@@ -59,7 +59,7 @@ function prepare(launcher,pins,destination) {
   const hostService=service();
   const files={
     [`flatpak-input/bin/${COMMAND}`]:elf,
-    [`flatpak-input/share/applications/${ID}.desktop`]:Buffer.from(`[Desktop Entry]\nType=Application\nName=Creator Hub\nComment=Starts native Hub outside the Flatpak sandbox; DEB host required\nExec=${COMMAND}\nIcon=${ID}\nTerminal=false\nCategories=Development;\n`),
+    [`flatpak-input/share/applications/${ID}.desktop`]:Buffer.from(`[Desktop Entry]\nType=Application\nName=Creator Hub\nComment=Starts native Hub outside the Flatpak sandbox; separately approved native support required\nExec=${COMMAND}\nIcon=${ID}\nTerminal=false\nCategories=Development;\n`),
     [`flatpak-input/share/appdata/${ID}.appdata.xml`]:Buffer.from(metainfo(v)),
     [`flatpak-input/share/icons/hicolor/128x128/apps/${ID}.png`]:read(path.join(ROOT,'src-tauri/icons/128x128.png')),
     [`flatpak-input/share/licenses/${ID}/LICENSE`]:read(path.join(ROOT,'LICENSE')),
