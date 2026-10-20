@@ -34,7 +34,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Admission-only preflight before setup, downloads or GUI activity
-        run: /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py admit
+        run: /usr/bin/env -u CHROME_BIN /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py admit
       - name: Mandatory pure authority, parser, Python 3.10 and workflow tests
         run: /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.test.py
       - name: Provision only the fixed disposable-runner GUI observation prerequisites
@@ -47,11 +47,11 @@ jobs:
             /usr/bin/dbus-run-session /usr/bin/xvfb-run /usr/bin/Xvfb /usr/bin/openbox; do
             test -x "$tool"
           done
-          /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py prerequisites
+          /usr/bin/env -u CHROME_BIN /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py prerequisites
       - name: Verify exact signed public metadata and extract the authenticated DEB without installing
-        run: /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py stage
+        run: /usr/bin/env -u CHROME_BIN /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py stage
       - name: Observe normal sandbox startup with existing GUI prerequisites only
-        run: /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py session
+        run: /usr/bin/env -u CHROME_BIN /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py session
       - name: Retain bounded owned observation and public package evidence only
         if: always()
         uses: actions/upload-artifact@v4

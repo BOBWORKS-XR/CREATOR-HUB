@@ -125,6 +125,22 @@ class CaptureTests(unittest.TestCase):
         self.assertNotIn("ALSO_PRIVATE", message)
         self.assertNotIn("DISPLAY", message)
 
+    def test_controller_still_refuses_chrome_locator_empty_or_populated(self):
+        for value in ("", "/unused/runner/chrome", "PRIVATE_VALUE --no-sandbox"):
+            with self.subTest(value=value), self.assertRaises(RuntimeError) as caught:
+                self.admit({**self.env(), "CHROME_BIN": value})
+            details = json.loads(str(caught.exception).split("; ", 1)[1])
+            self.assertEqual(details["forbiddenEnvNames"], ["CHROME_BIN"])
+            self.assertNotIn("PRIVATE_VALUE", str(caught.exception))
+
+    def test_removing_only_chrome_locator_does_not_clear_other_refusals(self):
+        for name in ("CHROME_FLAGS", "ELECTRON_DISABLE_SANDBOX", "LD_PRELOAD", "SSL_CERT_FILE", "https_proxy"):
+            env = {**self.env(), "CHROME_BIN": "/unused/runner/chrome", name: ""}
+            del env["CHROME_BIN"]
+            with self.subTest(name=name), self.assertRaises(RuntimeError) as caught:
+                self.admit(env)
+            self.assertEqual(json.loads(str(caught.exception).split("; ", 1)[1])["forbiddenEnvNames"], [name])
+
     def test_inherited_name_diagnostic_is_bounded_and_control_safe(self):
         names = ["LD_" + "a" * 200, "LD_\nprivate", "LD_\udcff"] + ["CHROME_NAME_" + str(i) for i in range(20)]
         with self.assertRaises(RuntimeError) as caught:
@@ -694,6 +710,22 @@ class CaptureTests(unittest.TestCase):
         self.assertNotIn("/home/", workflow)
         for stream in ("hub.stdout", "hub.stderr", "session.stdout", "session.stderr"):
             self.assertIn("/evidence/" + stream, workflow)
+
+    def test_each_workflow_phase_removes_only_runner_chrome_locator_before_python(self):
+        workflow = (HERE.parent / ".github/workflows/linux-unity-hub-registry-capture.yml").read_text(encoding="utf8")
+        script = "scripts/native-linux-unity-hub-registry-capture.py"
+        commands = []
+        for line in workflow.splitlines():
+            if script + " " not in line:
+                continue
+            command = line.strip().removeprefix("run: ")
+            commands.append(shlex.split(command))
+        prefix = ["/usr/bin/env", "-u", "CHROME_BIN", "/usr/bin/python3", "-I", "-B", script]
+        self.assertEqual(commands, [[*prefix, phase] for phase in ("admit", "prerequisites", "stage", "session")])
+        self.assertEqual(workflow.count("/usr/bin/env"), 4)
+        self.assertIn("run: /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.test.py", workflow)
+        for forbidden in ("GITHUB_ENV", "env -i", "env --ignore-environment", "unset ", "export ", "printenv", "/etc/environment"):
+            self.assertNotIn(forbidden, workflow)
 
 
 if __name__ == "__main__":
