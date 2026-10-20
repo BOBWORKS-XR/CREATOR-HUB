@@ -1327,6 +1327,19 @@ class Session:
         require(all(current[key] == origin[key] for key in K.CONTINUITY_FIELDS)
                 and current['uids'] == [os.getuid()] * 4, "Original Flatpak PID/start/parent/UID changed")
 
+    @staticmethod
+    def retain_focus_diagnostic(diagnostic, error):
+        try:
+            value = getattr(error, 'focus_diagnostic', None)
+            require(type(value) is dict and value.get('readOnly') is True and value.get('inputPermitted') is False
+                    and value.get('authorityGranted') is False and value.get('releaseReady') is False,
+                    'Only read-only focus diagnostics may be retained')
+            raw = json_bytes(value)
+            require(len(raw) <= 32768, 'Bounded focus diagnostic required')
+            diagnostic['focusDiagnostic'] = parse(raw)
+        except Exception:
+            pass  # Preserve the original refusal even when diagnostics are unavailable.
+
     def launcher_keyboard(self, client, question, action, phase, *, terminal):
         diagnostic = {'phase': phase, 'client': client, 'mechanism': 'exact-xid-keyboard', 'actionAttempted': False,
                       'actionReturned': False, 'outcomeVerified': False, 'releaseReady': False}
@@ -1358,6 +1371,7 @@ class Session:
             try:
                 receipt = attempt.send(mapping['sequence'])
             except K.InputRefused as error:
+                self.retain_focus_diagnostic(diagnostic, error)
                 receipt = error.receipt
             diagnostic['keyboard'] = receipt
             diagnostic['actionAttempted'] = type(receipt) is dict and type(receipt.get('delivery')) is list and any(
@@ -1367,6 +1381,7 @@ class Session:
             require(delivery == 'complete' or terminal, "Intermediate dialog delivery incomplete; no further input")
             return diagnostic
         except Exception as error:
+            self.retain_focus_diagnostic(diagnostic, error)
             diagnostic['refusal'] = str(error)[:512]
             raise
         finally:

@@ -8,6 +8,7 @@ This module never uses AX, global keyboard injection, focus changes or a retry.
 import copy
 import ctypes as C
 import hashlib
+import json
 import os
 import platform
 import re
@@ -372,6 +373,121 @@ class NativeWindow:
             if values:
                 self.x11.x.XFree(values)
 
+    def check_focus(self, window, focus, revert, owner, frame, clients, message):
+        if focus != window:
+            self._focus_refusal = {'target': window, 'focus': focus, 'revert': revert,
+                'targetXres': self.redacted_owner(owner), 'targetFrame': frame, 'managedStack': copy.deepcopy(clients)}
+        require(focus == window, message)
+
+    @staticmethod
+    def redacted_owner(value):
+        return {'pid': value['pid'], 'client': value['client'], 'mapped': value['mapped'],
+                'titleMatchesExpected': value['title'] == 'Creator Hub'}
+
+    def xres_identity(self, window):
+        # Unlike inspect(), this never requests titles or widget/window content.
+        count, values = C.c_long(), C.POINTER(self.helper.ClientValue)()
+        spec = self.helper.ClientSpec(xid(window), 2)
+        status = self.x11.res.XResQueryClientIds(self.x11.display, 1, C.byref(spec), C.byref(count), C.byref(values))
+        try:
+            self.sync()
+            require(status == 0 and count.value == 1 and values, 'Diagnostic XRes identity unavailable')
+            item = values[0]
+            require(item.spec.mask == 2 and item.length == 4 and item.value, 'Diagnostic XRes PID format differs')
+            pid = self.x11.res.XResGetClientPid(C.byref(item))
+            require(type(pid) is int and 1 < pid < 2**31 and 0 < item.spec.client < 2**32, 'Diagnostic XRes PID/client invalid')
+            return {'pid': pid, 'client': item.spec.client}
+        finally:
+            if values and 0 <= count.value <= 16:
+                self.x11.res.XResClientIdsDestroy(count, values)
+
+    def diagnostic_process(self, window, binding):
+        value = self.xres_identity(window)
+        pid = value['pid']
+        before = os.stat(f'/proc/{pid}', follow_symlinks=False)
+        require(stat.S_ISDIR(before.st_mode), 'Diagnostic process directory unavailable')
+        if before.st_uid != os.getuid():
+            return {**value, 'processRedacted': True}
+        require(binding.native.process_uids(pid) == [os.getuid()] * 4, 'Diagnostic process UID differs')
+        record = binding.native.native_process(pid, binding.helper, False)
+        validate_process(record, full=False)
+        require(record['pid'] == pid and record['uids'] == [os.getuid()] * 4
+                and int(record['image']['st_size']) <= MAX_IMAGE, 'Diagnostic process identity differs')
+        after = os.stat(f'/proc/{pid}', follow_symlinks=False)
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid')
+        require(all(getattr(before, key) == getattr(after, key) for key in fields)
+                and binding.native.native_process(pid, binding.helper, False) == record
+                and self.xres_identity(window) == value, 'Diagnostic process/window changed')
+        return {**value, 'processRedacted': False,
+                'process': {key: copy.deepcopy(record[key]) for key in (*CONTINUITY_FIELDS, 'image')}}
+
+    def diagnostic_parents(self, window, root, binding=None):
+        rows, seen = [], set()
+        for _ in range(8):
+            if window == root:
+                return rows
+            xid(window)
+            require(window not in seen, 'Diagnostic window ancestry is cyclic')
+            seen.add(window)
+            parent, _children = self.tree(window)
+            row = {'window': window, 'parent': parent}
+            if binding is not None:
+                row['xres'] = self.diagnostic_process(window, binding)
+            rows.append(row)
+            window = parent
+        require(window == root, 'Diagnostic window ancestry exceeds bound')
+        return rows
+
+    def focus_observation(self, result, window, binding):
+        root = self.x11.x.XDefaultRootWindow(self.x11.display)
+        owner = self.x11.inspect(window)
+        result['targetXres'] = self.redacted_owner(owner)
+        require(owner['pid'] == binding.process['pid'] and owner['title'] == 'Creator Hub' and owner['mapped'] is True,
+                'Diagnostic target is no longer the exact owned dialog')
+        result['targetFrame'] = rectangle(self.x11.frame_rectangle(window))
+        focus, revert = C.c_ulong(), C.c_int()
+        require(self.get_focus(self.x11.display, C.byref(focus), C.byref(revert)), 'Diagnostic focus unavailable')
+        self.sync()
+        require(0 <= focus.value < 2**32 and revert.value in (0, 1, 2), 'Diagnostic focus format differs')
+        result.update(focus=focus.value, revert=revert.value)
+        for name, key, limit in (('_NET_ACTIVE_WINDOW', 'activeWindow', 1), ('_NET_CLIENT_LIST_STACKING', 'managedStack', 64)):
+            value = self.x11.property(root, name)
+            require(value is None or type(value) is tuple and len(value) == 3 and value[:2] == (33, 32)
+                    and type(value[2]) is list and len(value[2]) <= limit
+                    and all(type(v) is int and 0 <= v < 2**32 for v in value[2]), 'Diagnostic window property exceeds bound')
+            result[key] = copy.deepcopy(value)
+        _parent, stack = self.tree(root)
+        require(len(stack) <= 64, 'Diagnostic root stacking exceeds bound')
+        result['rootStack'] = stack
+        result['targetParents'] = self.diagnostic_parents(window, root)
+        result['focusSentinel'] = {0: 'None', 1: 'PointerRoot', root: 'DesktopRoot'}.get(focus.value)
+        result['focusParents'] = [] if result['focusSentinel'] is not None else self.diagnostic_parents(focus.value, root, binding)
+        require(self.x11.inspect(window) == owner, 'Diagnostic target XRes changed')
+
+    def focus_diagnostic(self, binding, window):
+        original = getattr(self, '_focus_refusal', None)
+        if original is None or original['target'] != window:
+            return None
+        result = {'schemaVersion': 1, 'readOnly': True, 'authorityGranted': False, 'inputPermitted': False,
+                  'releaseReady': False, 'complete': False, 'stable': False, 'original': copy.deepcopy(original)}
+        try:
+            require(binding.process['uids'] == [os.getuid()] * 4, 'Diagnostic target UID differs')
+            result['targetProcess'] = {key: copy.deepcopy(binding.process[key]) for key in (*CONTINUITY_FIELDS, 'image', 'kernelImageSha256')}
+            for label in ('before', 'after'):
+                binding.verify()
+                result[label] = {}
+                self.focus_observation(result[label], window, binding)
+                binding.verify()
+            result['complete'] = True
+            result['stable'] = result['before'] == result['after'] and all(
+                result['before'][key] == original[key] for key in ('focus', 'revert', 'targetXres', 'targetFrame', 'managedStack')) and all(
+                row['xres']['processRedacted'] is False for row in result['before']['focusParents'])
+        except Exception as error:
+            result['unavailable'] = type(error).__name__ if type(error) in (
+                RuntimeError, PermissionError, FileNotFoundError, ProcessLookupError, ValueError, KeyError, TypeError, OSError) else 'OtherError'
+        require(len(json.dumps(result, separators=(',', ':'), allow_nan=False)) <= 32768, 'Diagnostic output exceeds bound')
+        return result
+
     def snapshot(self, window):
         xid(window)
         root = self.x11.x.XDefaultRootWindow(self.x11.display)
@@ -422,12 +538,12 @@ class NativeWindow:
         require(self.get_focus(self.x11.display, C.byref(focus), C.byref(revert)), "Native input focus unavailable")
         self.sync()
         # Child focus is deliberately unsupported until separately kernel-bound.
-        require(focus.value == window, "Focus is not the exact owned top-level XID")
+        self.check_focus(window, focus.value, revert.value, owner, frame, clients, "Focus is not the exact owned top-level XID")
         require(self.x11.inspect(window) == owner and self.x11.frame_rectangle(window) == frame
                 and self.x11.property(root, "_NET_CLIENT_LIST_STACKING") == clients, "Owned window changed during snapshot")
         require(self.get_focus(self.x11.display, C.byref(focus), C.byref(revert)), "Native input focus recheck unavailable")
         self.sync()
-        require(focus.value == window, "Native focus changed during window capture")
+        self.check_focus(window, focus.value, revert.value, owner, frame, clients, "Native focus changed during window capture")
         result = {"owner": owner, "frame": frame, "focus": focus.value, "soleWindow": companion is None, "unobscured": True}
         if companion is not None:
             require(companion.window_identity() == companion.window_owner, "Native Root window changed during capture")
@@ -479,6 +595,15 @@ def validate_target(value, process, window, *, warm_companion=None):
     if warm_companion is not None:
         require(value['warmCompanion'] == warm_companion.evidence and value['managedWindows'] == [warm_companion.window, window],
                 "Exact two-owned-window companion evidence required")
+
+
+def retain_focus_diagnostic(error, binding, api, window):
+    try:
+        value = api.focus_diagnostic(binding, window)
+        if value is not None:
+            error.focus_diagnostic = value
+    except Exception:
+        pass  # Diagnostics must never replace the original refusal.
 
 
 class InputRefused(RuntimeError):
@@ -557,7 +682,10 @@ class KeyboardAttempt:
             self._receipt["deliveryComplete"] = True
             return self.receipt
         except Exception as error:
-            raise InputRefused(str(error), self.receipt) from error
+            refused = InputRefused(str(error), self.receipt)
+            if not self._receipt['delivery']:
+                retain_focus_diagnostic(refused, self.binding, self.api, self.window)
+            raise refused from error
 
     def close(self):
         if not self.closed:
@@ -597,11 +725,14 @@ def capture(helper, native, x11, process, owned_launch, launch_guard, window, *,
                 and warm_companion.process['pid'] != process['pid'] and warm_companion.process['uids'] == process['uids']
                 and warm_companion.window != window, "Companion must be this session's distinct native Root/window")
         warm_companion.verify()
-    binding = None
+    binding, api = None, None
     try:
         binding = OwnedLauncher(helper, native, process, owned_launch, launch_guard)
-        return KeyboardAttempt(binding, NativeWindow(helper, x11, warm_companion=warm_companion), window, warm_companion=warm_companion)
-    except Exception:
+        api = NativeWindow(helper, x11, warm_companion=warm_companion)
+        return KeyboardAttempt(binding, api, window, warm_companion=warm_companion)
+    except Exception as error:
+        if api is not None:
+            retain_focus_diagnostic(error, binding, api, window)
         try:
             if binding is not None:
                 binding.close()

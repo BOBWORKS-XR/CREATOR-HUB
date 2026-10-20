@@ -271,7 +271,7 @@ class LauncherKeyboardTests(unittest.TestCase):
                 guard()
                 self.assertEqual(observed, client)
                 if capture_failure:
-                    raise RuntimeError(capture_failure)
+                    raise capture_failure if isinstance(capture_failure, Exception) else RuntimeError(capture_failure)
                 M.require(window == dialog_window(), 'Wrong exact window')
                 if warm_companion is None:
                     M.require(session.windows() == [window], 'Sole visible managed dialog required')
@@ -406,6 +406,33 @@ class LauncherKeyboardTests(unittest.TestCase):
                 record = M.parse((session.root / 'disclosure-cancel-outcome-gtk.json').read_bytes())
                 self.assertFalse(record['actionAttempted']); self.assertFalse(record['outcomeVerified'])
                 self.assertIn('refusal', record)
+
+    def test_pre_input_focus_diagnostic_is_separate_from_delivery_and_original_error_survives(self):
+        error = RuntimeError('Focus is not the exact owned top-level XID')
+        error.focus_diagnostic = {'readOnly': True, 'inputPermitted': False, 'authorityGranted': False,
+                                  'releaseReady': False, 'complete': False, 'stable': False,
+                                  'original': {'target': 100, 'focus': 101, 'revert': 1}}
+        with self.fixture(capture_failure=error) as (session, state, _):
+            with self.assertRaises(RuntimeError) as raised:
+                session.flatpak('Cancel', 'disclosure-cancel')
+            self.assertIs(raised.exception, error)
+            record = M.parse((session.root / 'disclosure-cancel-gtk.json').read_bytes())
+            self.assertEqual(record['focusDiagnostic'], error.focus_diagnostic)
+            self.assertEqual(state.sends, [])
+            self.assertNotIn('keyboard', record); self.assertNotIn('deliveryClassification', record)
+            self.assertFalse(record['actionAttempted']); self.assertFalse(record['outcomeVerified'])
+            self.assertEqual(record['refusal'], str(error))
+
+    def test_invalid_diagnostic_does_not_replace_original_refusal_or_grant_input(self):
+        for value in ({'readOnly': True, 'inputPermitted': True}, {'readOnly': True, 'payload': 'x' * 40000}, {'payload': object()}):
+            error = RuntimeError('original focus refusal'); error.focus_diagnostic = value
+            with self.subTest(value=list(value)), self.fixture(capture_failure=error) as (session, state, _):
+                with self.assertRaises(RuntimeError) as raised:
+                    session.flatpak('Cancel', 'disclosure-cancel')
+                self.assertIs(raised.exception, error)
+                record = M.parse((session.root / 'disclosure-cancel-gtk.json').read_bytes())
+                self.assertNotIn('focusDiagnostic', record)
+                self.assertEqual(state.sends, []); self.assertFalse(record['actionAttempted'])
 
     def test_empty_wrong_target_unsynced_or_falsely_complete_receipt_never_reaches_outcome(self):
         changes = (lambda r: r.clear(), lambda r: r.update(window=999), lambda r: r.update(pid=99),

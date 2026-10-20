@@ -3,12 +3,13 @@ import copy
 import ctypes as C
 from contextlib import ExitStack
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("flatpak_dialog_input", Path(__file__).with_name("native-linux-flatpak-dialog-input.py"))
@@ -465,6 +466,221 @@ class NativeApiTests(unittest.TestCase):
     def test_factory_refuses_non_linux_before_loading_native_apis(self):
         with patch.object(M.sys, "platform", "win32"), self.assertRaises(RuntimeError):
             M.capture(None, None, None, {}, {}, None, 456)
+
+
+class FocusDiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        M._ATTEMPTS.clear()
+        self.api, self.state = NativeApiTests().native_fixture()
+        self.state.update(focus=457, active=456)
+        self.binding = SimpleNamespace(process=process(), helper=None, checks=0)
+        def verify():
+            self.binding.checks += 1
+        self.binding.verify = verify
+        self.binding.native = SimpleNamespace(native_process=lambda *_: process(full=False), process_uids=lambda _: [1001] * 4)
+        self.api.x11.property = lambda window, name: (33, 32, [self.state['active']]) if name == '_NET_ACTIVE_WINDOW' else self.state['clients']
+        self.queries = []
+        def tree(window):
+            self.queries.append(window)
+            return {457: (456, []), 456: (500, [457]), 500: (50, [456]), 50: (0, self.state['stack'])}[window]
+        self.api.tree = tree
+        self.api.xres_identity = lambda window: {'pid': 123, 'client': 900}
+        self.directory = SimpleNamespace(st_mode=0o40500, st_uid=1001, st_gid=1001, st_dev=1, st_ino=123)
+        original_stat = M.os.stat
+        self.stat_patch = patch.object(M.os, 'stat', side_effect=lambda path, *args, **kwargs:
+            self.directory if str(path).startswith('/proc/') else original_stat(path, *args, **kwargs))
+        self.stat_patch.start(); self.addCleanup(self.stat_patch.stop)
+        self.uid_patch = patch.object(M.os, 'getuid', return_value=1001, create=True)
+        self.uid_patch.start(); self.addCleanup(self.uid_patch.stop)
+
+    def refused(self):
+        with self.assertRaisesRegex(RuntimeError, 'Focus is not the exact owned top-level XID') as raised:
+            self.api.snapshot(456)
+        return raised.exception
+
+    def test_original_focus_child_chain_and_two_stable_observations_are_diagnostic_only(self):
+        error = self.refused()
+        M.retain_focus_diagnostic(error, self.binding, self.api, 456)
+        value = error.focus_diagnostic
+        self.assertEqual(value['original']['focus'], 457)
+        self.assertEqual(value['original']['target'], 456)
+        self.assertEqual(value['before']['focusParents'][0]['parent'], 456)
+        self.assertEqual(value['before'], value['after'])
+        self.assertTrue(value['complete']); self.assertTrue(value['stable'])
+        self.assertGreaterEqual(self.binding.checks, 4)
+        self.assertTrue(value['readOnly']); self.assertFalse(value['inputPermitted'])
+        self.assertFalse(value['authorityGranted']); self.assertFalse(value['releaseReady'])
+        self.assertNotIn('executable', value['before']['focusParents'][0]['xres']['process'])
+        self.assertLessEqual(len(json.dumps(value)), 32768)
+
+    def test_sentinel_focus_never_queries_a_window_or_process(self):
+        for sentinel, label in ((0, 'None'), (1, 'PointerRoot')):
+            with self.subTest(sentinel=sentinel):
+                self.setUp(); self.state['focus'] = sentinel
+                self.api.xres_identity = Mock(side_effect=AssertionError('No sentinel XRes query'))
+                self.refused()
+                value = self.api.focus_diagnostic(self.binding, 456)
+                self.assertEqual(value['before']['focusSentinel'], label)
+                self.assertEqual(value['before']['focusParents'], [])
+                self.assertFalse(any(v in (0, 1) for v in self.queries))
+                self.api.xres_identity.assert_not_called()
+
+    def test_later_focus_or_target_change_is_recorded_but_never_becomes_authority(self):
+        self.refused(); self.state['focus'] = 456
+        value = self.api.focus_diagnostic(self.binding, 456)
+        self.assertEqual(value['original']['focus'], 457)
+        self.assertEqual(value['after']['focus'], 456)
+        self.assertFalse(value['stable']); self.assertFalse(value['inputPermitted'])
+        self.state['frame'] = (11, 20, 600, 350)
+        self.assertFalse(self.api.focus_diagnostic(self.binding, 456)['stable'])
+
+    def test_foreign_uid_never_reads_process_details_or_window_titles(self):
+        self.refused()
+        self.directory.st_uid = 1002
+        self.binding.native.native_process = Mock(side_effect=AssertionError('No foreign process read'))
+        self.binding.native.process_uids = Mock(side_effect=AssertionError('No foreign UID detail read'))
+        self.api.x11.inspect = lambda window: {'pid': 123, 'client': 900, 'title': 'Creator Hub', 'mapped': True} if window == 456 else (_ for _ in ()).throw(AssertionError('No foreign title'))
+        value = self.api.focus_diagnostic(self.binding, 456)
+        self.assertTrue(value['complete'])
+        self.assertFalse(value['stable'])
+        self.assertTrue(value['before']['focusParents'][0]['xres']['processRedacted'])
+        self.binding.native.native_process.assert_not_called()
+        self.binding.native.process_uids.assert_not_called()
+
+    def test_target_title_is_redacted_and_process_failure_preserves_original_exception(self):
+        error = self.refused()
+        self.api.x11.inspect = lambda _: {'pid': 123, 'client': 900, 'title': 'PRIVATE FOREIGN TITLE', 'mapped': True}
+        M.retain_focus_diagnostic(error, self.binding, self.api, 456)
+        self.assertNotIn('PRIVATE', json.dumps(error.focus_diagnostic))
+        self.assertFalse(error.focus_diagnostic['complete'])
+        self.assertEqual(str(error), 'Focus is not the exact owned top-level XID')
+        self.binding.verify = Mock(side_effect=PermissionError('PRIVATE ERROR'))
+        M.retain_focus_diagnostic(error, self.binding, self.api, 456)
+        self.assertNotIn('PRIVATE', json.dumps(error.focus_diagnostic))
+        self.assertFalse(error.focus_diagnostic['complete'])
+        self.assertEqual(str(error), 'Focus is not the exact owned top-level XID')
+
+    def test_focus_active_window_and_exact_target_rechecks_cannot_become_input_authority(self):
+        self.refused()
+        original_focus, count = self.api.get_focus, []
+        def focus(*args):
+            count.append(None)
+            if len(count) == 2: self.state.update(focus=456, active=999)
+            return original_focus(*args)
+        self.api.get_focus = focus
+        value = self.api.focus_diagnostic(self.binding, 456)
+        self.assertEqual(value['before']['focus'], 457); self.assertEqual(value['after']['focus'], 456)
+        self.assertEqual(value['after']['activeWindow'], (33, 32, [999]))
+        self.assertFalse(value['stable']); self.assertFalse(value['inputPermitted'])
+        self.binding.verify = Mock(side_effect=[None, RuntimeError('target changed')])
+        value = self.api.focus_diagnostic(self.binding, 456)
+        self.assertFalse(value['complete']); self.assertFalse(value['stable'])
+        self.assertNotIn('after', value)
+
+    def test_bounds_cycles_denied_and_changed_process_are_incomplete_not_accepted(self):
+        for failure in ('cycle', 'depth', 'denied', 'uid', 'pid-reuse', 'oversize'):
+            with self.subTest(failure=failure):
+                self.setUp(); self.refused()
+                if failure == 'cycle': self.api.tree = lambda window: (window, [])
+                if failure == 'depth': self.api.tree = lambda window: (window + 1, [])
+                if failure == 'denied': self.api.tree = Mock(side_effect=PermissionError('PRIVATE'))
+                if failure == 'uid': self.binding.native.process_uids = lambda _: [1002] * 4
+                if failure == 'pid-reuse':
+                    calls = []
+                    def changed(*_):
+                        row = process(full=False); calls.append(None)
+                        if len(calls) > 1: row['startTime'] = '999'
+                        return row
+                    self.binding.native.native_process = changed
+                if failure == 'oversize': self.state['clients'] = (33, 32, list(range(1000)))
+                value = self.api.focus_diagnostic(self.binding, 456)
+                self.assertFalse(value['complete']); self.assertFalse(value['stable'])
+                self.assertFalse(value['inputPermitted']); self.assertNotIn('PRIVATE', json.dumps(value))
+
+    def test_no_diagnostic_without_a_focus_refusal_and_capture_failure_never_replaces_error(self):
+        error = RuntimeError('original')
+        M.retain_focus_diagnostic(error, self.binding, self.api, 456)
+        self.assertFalse(hasattr(error, 'focus_diagnostic'))
+        self.refused(); self.api.focus_diagnostic = Mock(side_effect=RuntimeError('diagnostic failed'))
+        M.retain_focus_diagnostic(error, self.binding, self.api, 456)
+        self.assertEqual(str(error), 'original')
+        self.assertFalse(hasattr(error, 'focus_diagnostic'))
+
+    def test_factory_retains_constructor_refusal_and_closes_binding_without_sending(self):
+        self.binding.provenance, self.binding.close = {'readOnly': True}, Mock()
+        original_snapshot, errors = self.api.snapshot, []
+        def snapshot(window):
+            try:
+                return original_snapshot(window)
+            except RuntimeError as error:
+                errors.append(error)
+                raise
+        self.api.snapshot = snapshot
+        self.api.submit = Mock(side_effect=AssertionError('No input during capture'))
+        with patch.object(M.sys, 'platform', 'linux'), patch.object(M.platform, 'machine', return_value='x86_64'), \
+                patch.object(M.os, 'geteuid', return_value=1001, create=True), \
+                patch.object(M, 'OwnedLauncher', return_value=self.binding) as constructor, \
+                patch.object(M, 'NativeWindow', return_value=self.api):
+            with self.assertRaisesRegex(RuntimeError, 'Focus is not the exact owned top-level XID') as raised:
+                M.capture(None, self.binding.native, self.api.x11, self.binding.process, {}, lambda: None, 456)
+        self.assertIs(raised.exception, errors[0])
+        self.assertEqual(raised.exception.focus_diagnostic['original']['focus'], 457)
+        constructor.assert_called_once(); self.binding.close.assert_called_once(); self.api.submit.assert_not_called()
+
+    def test_pre_input_send_refusal_retains_diagnostic_without_changing_receipt_or_retrying(self):
+        self.binding.provenance, self.binding.close = {'readOnly': True}, Mock()
+        self.state['focus'] = 456
+        self.api.keycode = lambda _: 9
+        self.api.submit = Mock(side_effect=AssertionError('No input after focus refusal'))
+        attempt = M.KeyboardAttempt(self.binding, self.api, 456)
+        self.state['focus'] = 457
+        with self.assertRaises(M.InputRefused) as raised:
+            attempt.send('Escape')
+        self.assertEqual(raised.exception.receipt['delivery'], [])
+        self.assertNotIn('focusDiagnostic', raised.exception.receipt)
+        self.assertEqual(raised.exception.focus_diagnostic['original']['focus'], 457)
+        reads = self.state['focusCalls']
+        with self.assertRaises(M.InputRefused):
+            attempt.send('Escape')
+        self.assertEqual(self.state['focusCalls'], reads)
+        self.api.submit.assert_not_called()
+
+    def test_post_submission_refusal_does_not_run_new_focus_capture(self):
+        binding, window = Binding(), Window()
+        window.focus_diagnostic = Mock(side_effect=AssertionError('No capture after any key submission'))
+        attempt = M.KeyboardAttempt(binding, window, 456)
+        window.hook = lambda: window.state.update(focus=999)
+        with self.assertRaises(M.InputRefused) as raised:
+            attempt.send('Escape')
+        self.assertEqual(len(raised.exception.receipt['delivery']), 1)
+        self.assertFalse(hasattr(raised.exception, 'focus_diagnostic'))
+        window.focus_diagnostic.assert_not_called()
+
+    def test_raw_xres_query_never_reads_titles_and_checks_fixed_pid_format(self):
+        class Spec(C.Structure):
+            _fields_ = [('client', C.c_ulong), ('mask', C.c_uint)]
+        class Value(C.Structure):
+            _fields_ = [('spec', Spec), ('length', C.c_long), ('value', C.c_void_p)]
+        item = (Value * 1)(Value(Spec(900, 2), 4, 1))
+        observations = {'status': 0, 'count': 1, 'pid': 123}
+        def query(display, count, specification, result_count, values):
+            self.assertEqual(display, 99); self.assertEqual(count, 1)
+            spec = C.cast(specification, C.POINTER(Spec)).contents
+            self.assertEqual((spec.client, spec.mask), (457, 2))
+            C.cast(result_count, C.POINTER(C.c_long))[0] = observations['count']
+            C.cast(values, C.POINTER(C.POINTER(Value)))[0] = C.cast(item, C.POINTER(Value))
+            return observations['status']
+        api = object.__new__(M.NativeWindow)
+        api.helper = SimpleNamespace(ClientSpec=Spec, ClientValue=Value)
+        api.x11 = SimpleNamespace(display=99, res=SimpleNamespace(XResQueryClientIds=query,
+            XResGetClientPid=lambda _: observations['pid'], XResClientIdsDestroy=Mock()), sync=lambda: None)
+        self.assertEqual(api.xres_identity(457), {'pid': 123, 'client': 900})
+        for key, value in (('status', 1), ('count', 2), ('pid', 1)):
+            with self.subTest(key=key):
+                old = observations[key]; observations[key] = value
+                with self.assertRaises(RuntimeError): api.xres_identity(457)
+                observations[key] = old
+        self.assertEqual(api.x11.res.XResClientIdsDestroy.call_count, 4)
 
 
 class WarmCompanionTests(unittest.TestCase):
