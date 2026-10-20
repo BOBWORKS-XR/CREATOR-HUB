@@ -129,7 +129,10 @@ jobs:
           /usr/bin/python3 -I -S -c 'import sys; assert sys.version_info[:2] == (3, 10)'
           /usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.py preflight-import
           /usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.test.py
+          /usr/bin/python3 -I -S -B scripts/native-linux-update-mcp.test.py
           printf 'CONTROLLER_NODE=%s\n' "$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
+      - name: Stage the migration fixture's locked MCP SDK without lifecycle hooks
+        run: npm ci --prefix modules/mcp --ignore-scripts --no-audit --no-fund
       - name: Bind independent profile and fresh API identities before downloading data
         uses: actions/github-script@v8
         env:

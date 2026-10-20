@@ -76,6 +76,26 @@ def profile(portable=False):
     return result
 
 
+def mcp_receipt():
+    # Synthetic unit data, never native preservation evidence.
+    mcp = M.load("native-linux-update-mcp")
+    def process(pid, image):
+        return {"pid": pid, "startTime": str(pid * 10), "parentPid": 20,
+                "uids": [M.UID] * 4, "kernelImageSha256": image * 64}
+    checks = [{"phase": phase, "handshake": {"ready": True, "server": mcp.SERVER},
+               "protocol": {"checked": True, "checks": index + 2, "tools": mcp.TOOLS, "signalsRequested": False},
+               "router": process(30, "a"), "sdk": process(31, "b"), "route": {"unit-only": {"sha256": "c" * 64}}}
+              for index, phase in enumerate(mcp.PHASES)]
+    return {"schemaVersion": 1, "scope": "existing-managed-mcp-update-protocol-only", "checks": checks,
+            "reconnect": {"command": str(M.BASE / "result/home" / mcp.ROUTE_BASE / "router-v1/creator-hub-mcp-router"),
+                          "handshake": {"ready": True, "server": mcp.SERVER},
+                          "protocol": {"checked": True, "checks": 2, "tools": mcp.TOOLS, "signalsRequested": False},
+                          "router": process(40, "a"), "sdk": process(41, "b"), "normalEofClose": True},
+            "protectedBefore": {"unit-only": "d" * 64}, "protectedAfter": {"unit-only": "d" * 64},
+            "originalNormalEofClose": True, "signalsRequested": False,
+            "liveAiAccepted": False, "unityAccepted": False, "releaseReady": False}
+
+
 def api(expected):
     run = {"id": expected["run"], "run_attempt": 1, "head_sha": expected["source"], "head_branch": expected["branch"],
            "path": expected["workflow"], "event": "workflow_dispatch", "status": "completed", "conclusion": "success",
@@ -1265,8 +1285,10 @@ class Pure(unittest.TestCase):
             with patch.object(M, "admission", return_value="portable-approve"), patch.object(M, "request", return_value={"verifier": verifier[1]}), \
                  patch.object(M, "offline_verifier", return_value=verifier), patch.object(M.os, "geteuid", return_value=1, create=True), \
                  patch.object(M, "read", side_effect=read), patch.object(M, "load", side_effect=load), \
+                 patch.object(M, "baseline_mcp_inputs") as mcp_inputs, \
                  patch.object(M, "packaged_root", return_value=b"fixture packaged ELF"), patch.object(M, "run_tool", side_effect=verified):
                 M.stage(folder, {**environment(), "UPDATE_SCENARIO": "portable-approve"})
+            mcp_inputs.assert_called_once_with(folder, p, old["files"], verifier)
             self.assertEqual(len(inspected), 2); self.assertEqual(len(signatures), 4)
             review = M.parse((folder / "review.json").read_bytes())
             self.assertEqual(set(review["portable"]), {"16", "17"})
@@ -1706,7 +1728,7 @@ class Pure(unittest.TestCase):
         with self.assertRaises(RuntimeError): M.selection({"schemaVersion": 1, "generation": new, "version": "0.1.17", "previousGeneration": None}, new, old)
 
     def test_scoped_pass_requires_all_native_evidence(self):
-        common = {**M.FALSE, "initialBitmap": {"nonblank": True}, "successorBitmap": {"nonblank": True},
+        common = {**M.FALSE, "initialBitmap": {"nonblank": True}, "successorBitmap": {"nonblank": True}, "mcpProtocol": mcp_receipt(),
                   "privateTargetQualification": M.private_target_qualification(), **dict.fromkeys(("initial16Verified", "nativeConfirmationObserved", "settingsPreserved", "runtimeSurvived", "normalFinalClose"), True)}
         for scenario in M.SCENARIOS:
             evidence = {**common, "nativeActions": ["Not now" if scenario.endswith("native-cancel") else "Update Hub"],
@@ -4888,6 +4910,160 @@ class PartialAxParentEvidence(unittest.TestCase):
         with patch.object(M.time, "monotonic", return_value=11), patch.object(M, "wait", side_effect=waiting):
             self.assertEqual(surface.walk(), [frame, child])
         self.assertEqual(waits, [29])
+
+
+class McpUpdateProtocol(unittest.TestCase):
+    def resources(self, root):
+        mcp = M.load("native-linux-update-mcp")
+        raw = {name: ("unit-nonexecutable:" + name).encode() for name in mcp.MODULE_FILES + mcp.ROUTING_FILES + ("setup/unit",)}
+        hashes = {name: hashlib.sha256(body).hexdigest() for name, body in raw.items()}
+        entries = {name: {"size": len(body), "mode": 0o755 if name.endswith(("runtime/node", "mcp-launcher", "mcp-router")) else 0o644}
+                   for name, body in raw.items()}
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+            for name, body in raw.items():
+                row = tarfile.TarInfo(name); row.size = len(body); row.mode = entries[name]["mode"]
+                tar.addfile(row, io.BytesIO(body))
+        archive_raw = archive.getvalue()
+        manifest = {"platform": "linux", "arch": "x86_64",
+                    "modules": {"mcp": {"files": {name: hashes[name] for name in mcp.MODULE_FILES}},
+                                "setup": {"files": {"setup/unit": hashes["setup/unit"]}}},
+                    "managedRouting": {"files": {name: hashes[name] for name in mcp.ROUTING_FILES}},
+                    "payloadArchive": {"schemaVersion": 1, "file": "modules.tar.gz", "files": entries,
+                                       "unpackedSize": sum(map(len, raw.values()))}}
+        manifest_raw = json.dumps(manifest).encode()
+        bodies = {"builtin-manifest.json": manifest_raw, "modules.tar.gz": archive_raw,
+                  "creator-hub": b"unit-nonexecutable-root:" + manifest_raw,
+                  **{"modules/" + name: body for name, body in raw.items()}}
+        p = profile(); source = root / "members/assembly16"; source.mkdir(parents=True)
+        for name, body in bodies.items():
+            file = source / name; file.parent.mkdir(parents=True, exist_ok=True); file.write_bytes(body)
+            p["artifacts"]["assembly16"]["files"][name] = M.pin(body)
+        p["baseline"]["archive"] = M.pin(archive_raw); p["baseline"]["raw"] = M.pin(bodies["creator-hub"])
+        package = {"usr/lib/Creator Hub/modules.tar.gz": M.pin(archive_raw)}
+        return p, package, source, hashes
+
+    def test_original_zip_resources_match_embedded_manifest_archive_and_package_inventory(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(M, "signature") as signature:
+            folder = Path(temp).resolve(); p, package, source, hashes = self.resources(folder)
+            directory, pins = M.baseline_mcp_inputs(folder, p, package, ("tool", "evidence"))
+            self.assertEqual(directory, source / "modules")
+            self.assertEqual(pins, {k: v for k, v in hashes.items() if not k.startswith("setup/")})
+            self.assertEqual(signature.call_count, 2)
+            self.assertEqual([call.args[0].name for call in signature.call_args_list], ["runtime.json", "router.json"])
+            self.assertFalse((folder / "extracted").exists())
+
+    def test_changed_direct_resource_manifest_archive_or_package_refuses(self):
+        for kind in ("direct", "manifest", "archive", "package", "missing"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp, patch.object(M, "signature") as signature:
+                folder = Path(temp).resolve(); p, package, source, _ = self.resources(folder)
+                if kind == "direct": (source / "modules/mcp/server/runtime/node").write_bytes(b"wrong")
+                elif kind == "manifest":
+                    file = source / "builtin-manifest.json"; file.write_bytes(b"{}"); p["artifacts"]["assembly16"]["files"][file.name] = M.pin(b"{}")
+                elif kind == "archive": (source / "modules.tar.gz").write_bytes(b"wrong")
+                elif kind == "package": package["usr/lib/Creator Hub/modules.tar.gz"]["sha256"] = "e" * 64
+                else: del p["artifacts"]["assembly16"]["files"]["modules/routing/router.minisig"]
+                with self.assertRaises((RuntimeError, KeyError)):
+                    M.baseline_mcp_inputs(folder, p, package, ("tool", "evidence"))
+                signature.assert_not_called()
+
+    def test_source_signature_refusal_is_not_an_inventory_approval(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(M, "signature", side_effect=RuntimeError("invalid signature")):
+            folder = Path(temp).resolve(); p, package, _, _ = self.resources(folder)
+            with self.assertRaisesRegex(RuntimeError, "invalid signature"):
+                M.baseline_mcp_inputs(folder, p, package, ("tool", "evidence"))
+
+    def test_real_protocol_gate_rejects_eof_missing_phase_bad_identity_route_and_reconnect(self):
+        self.assertEqual(M.mcp_protocol_receipt(mcp_receipt()), mcp_receipt())
+        for kind in ("eof", "missing", "protocol", "identity", "route", "reconnect", "reused", "settings", "close", "promotion"):
+            value = mcp_receipt()
+            if kind == "eof": value = {"eofSent": True, "runtimeSurvived": True}
+            elif kind == "missing": value["checks"].pop()
+            elif kind == "protocol": value["checks"][1]["protocol"]["tools"] = []
+            elif kind == "identity": value["checks"][1]["router"]["startTime"] = "reused"
+            elif kind == "route": value["checks"][2]["route"] = {"wrong": {}}
+            elif kind == "reconnect": value["reconnect"]["command"] += "-other"
+            elif kind == "reused": value["reconnect"]["router"]["pid"] = value["checks"][0]["router"]["pid"]
+            elif kind == "settings": value["protectedAfter"] = {"changed": True}
+            elif kind == "close": value["originalNormalEofClose"] = False
+            else: value["releaseReady"] = True
+            with self.subTest(kind=kind), self.assertRaises(RuntimeError): M.mcp_protocol_receipt(value)
+
+    def test_completion_calls_protocol_then_reconnect_then_original_eof_before_pass(self):
+        receipt = mcp_receipt(); connection = Mock()
+        connection.check.return_value = receipt["checks"][-1]
+        connection.reconnect.return_value = receipt["reconnect"]; connection.close.return_value = receipt
+        report = {"mcpChecks": receipt["checks"][:2]}
+        with patch.object(M, "save") as save:
+            M.complete_mcp_protocol(connection, report)
+        self.assertEqual(connection.mock_calls, [unittest.mock.call.check("after-hub-close"), unittest.mock.call.reconnect(), unittest.mock.call.close()])
+        save.assert_called_once_with(M.BASE / "result/mcp-protocol.json", receipt)
+        self.assertTrue(report["runtimeSurvived"])
+        self.assertEqual(report["mcpProtocol"], receipt)
+
+    def test_completion_failure_never_claims_runtime_survived_or_retries(self):
+        for failure in ("check", "reconnect", "close", "receipt", "save"):
+            connection = Mock(); connection.close.return_value = mcp_receipt()
+            if failure in ("check", "reconnect", "close"): getattr(connection, failure).side_effect = RuntimeError("original")
+            if failure == "receipt": connection.close.return_value = {"eofSent": True}
+            report = {"mcpChecks": []}
+            with self.subTest(failure=failure), patch.object(M, "save", side_effect=RuntimeError("original") if failure == "save" else None), self.assertRaises(RuntimeError):
+                M.complete_mcp_protocol(connection, report)
+            self.assertNotIn("runtimeSurvived", report)
+            self.assertLessEqual(connection.check.call_count, 1); self.assertLessEqual(connection.reconnect.call_count, 1)
+            self.assertLessEqual(connection.close.call_count, 1)
+
+    def test_real_sdk_staging_keeps_locked_inputs_and_unrelated_files_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve(); checkout, base = root / "checkout", root / "fixture"; base.mkdir()
+            source = checkout / "modules/mcp"; (source / "node_modules/sdk").mkdir(parents=True)
+            (source / "package.json").write_bytes(b"unit-package"); (source / "package-lock.json").write_bytes(b"placeholder")
+            (source / "node_modules/sdk/index.js").write_bytes(b"unit-nonexecutable")
+            (source / "node_modules/.bin").mkdir(); (source / "node_modules/.bin/ignored").write_bytes(b"never copy")
+            unrelated = base / "keep"; unrelated.write_bytes(b"unchanged")
+            reader = M.read
+            lock = (HERE.parent / "modules/mcp/package-lock.json").read_text(encoding="utf-8").encode()
+            def read(path, *args, **kw): return lock if Path(path) == source / "package-lock.json" else reader(path, *args, **kw)
+            with patch.object(M, "BASE", base), patch.object(M, "read", side_effect=read):
+                M.stage_mcp_sdk({"GITHUB_WORKSPACE": str(checkout)})
+                with self.assertRaises(RuntimeError): M.stage_mcp_sdk({"GITHUB_WORKSPACE": str(checkout)})
+            self.assertEqual((base / "sdk/package-lock.json").read_bytes(), lock)
+            self.assertEqual((base / "sdk/node_modules/sdk/index.js").read_bytes(), b"unit-nonexecutable")
+            self.assertFalse((base / "sdk/node_modules/.bin").exists())
+            self.assertEqual(unrelated.read_bytes(), b"unchanged")
+
+    def test_bad_sdk_lock_refuses_before_any_fixture_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve(); source = root / "modules/mcp"; source.mkdir(parents=True)
+            (source / "package-lock.json").write_bytes(b"wrong lock")
+            with patch.object(M, "BASE", root / "fixture"), self.assertRaises(RuntimeError):
+                M.stage_mcp_sdk({"GITHUB_WORKSPACE": str(root)})
+            self.assertFalse((root / "fixture").exists())
+
+    def test_actual_session_inserts_protocol_before_launch_after_both_decisions_and_after_close(self):
+        tree = ast.parse((HERE / "native-linux-production-016-update.py").read_text())
+        session = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session")
+        code = ast.unparse(session)
+        self.assertLess(code.index("connection.start()"), code.index("bootstrap16("))
+        self.assertLess(code.index("connection.start()"), code.index("['/usr/bin/creator-hub']"))
+        self.assertEqual(code.count("connection.check('after-update')"), 2)
+        self.assertLess(code.index("connection.check('after-update')"), code.index("replacement.close()"))
+        self.assertLess(code.rindex("connection.check('after-update')"), code.index("surface.close()"))
+        self.assertLess(code.index("surface.close()"), code.index("complete_mcp_protocol(connection, report)"))
+        self.assertLess(code.index("complete_mcp_protocol(connection, report)"), code.index("outcome(scenario, report)"))
+        self.assertNotIn("sys.stdin.buffer.read()", code)
+        self.assertIn("native-linux-update-mcp.py", M.SOURCES)
+
+    def test_helper_preflight_locked_sdk_and_export_are_finite(self):
+        workflow = (HERE.parent / ".github/workflows/native-linux-production-016-update.yml").read_text()
+        self.assertLess(workflow.index("scripts/native-linux-update-mcp.test.py"), workflow.index("Bind independent profile"))
+        self.assertIn("npm ci --prefix modules/mcp --ignore-scripts --no-audit --no-fund", workflow)
+        code = (HERE / "native-linux-production-016-update.py").read_text()
+        exported = ast.unparse(next(n for n in ast.parse(code).body if isinstance(n, ast.FunctionDef) and n.name == "export_evidence"))
+        for path in ("result/mcp-protocol.json", "result/mcp/existing/sdk.stdout", "result/mcp/existing/sdk.stderr", "result/mcp/existing/sdk-result.json",
+                     "result/mcp/reconnect/sdk.stdout", "result/mcp/reconnect/sdk.stderr", "result/mcp/reconnect/sdk-result.json"):
+            self.assertIn(path, exported)
+        self.assertNotIn("rglob", exported)
 
 
 if __name__ == "__main__":

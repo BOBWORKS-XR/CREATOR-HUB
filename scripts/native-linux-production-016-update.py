@@ -65,7 +65,8 @@ ENVIRONMENT = ("GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "G
 SOURCES = (Path(__file__).name, "native-unix-window.py", "native-linux-root-probe.py", "native-linux-integrated-pages.py",
            "native-linux-polkit-probe.py", "native-linux-update-flow.py", "native-linux-production-016-flatpak.py",
            "linux-retirement-package-verify.py", "private-linux-update-fixture-017-package-verify.py", "linux-update-lab-feed.cjs",
-           "native-linux-production-016-migration.py", "native-linux-production-016-stage.py", "native-linux-016-stage.py")
+           "native-linux-production-016-migration.py", "native-linux-production-016-stage.py", "native-linux-016-stage.py",
+           "native-linux-update-mcp.py")
 INVENTORY_IMPORTS = ("native-linux-production-016-migration.py", "native-linux-production-016-stage.py",
                      "native-linux-016-stage.py", "linux-retirement-package-verify.py")
 PRIVATE_RELEASE, PRIVATE_TAG = 411494394, "v0.1.13-validation"
@@ -642,6 +643,35 @@ def compare_update_packages(baseline, candidate, baseline_pins):
     return private_target_qualification()
 
 
+def baseline_mcp_inputs(folder, profile, package_files, verifier):
+    """Reuse original ZIP members; never extract or invent a runtime inventory."""
+    source = folder / "members/assembly16"
+    files = profile["artifacts"]["assembly16"]["files"]
+    manifest_raw = bound(source / "builtin-manifest.json", files["builtin-manifest.json"], 128 * 1024)
+    manifest = parse(manifest_raw)
+    require(manifest["platform"] == "linux" and manifest["arch"] == "x86_64"
+            and manifest_raw in bound(object_path(folder, profile, "raw16"), profile["baseline"]["raw"]),
+            "Original MCP inventory must be embedded in the pinned baseline Root")
+    archive = bound(source / "modules.tar.gz", files["modules.tar.gz"])
+    require(pin(archive) == profile["baseline"]["archive"]
+            == {k: package_files["usr/lib/Creator Hub/modules.tar.gz"][k] for k in ("size", "sha256")},
+            "MCP archive must match original ZIP and inspected installed-resource inventory")
+    hashes = load("native-linux-016-stage").modules(io.BytesIO(archive), manifest)
+    mcp = load("native-linux-update-mcp")
+    names = mcp.MODULE_FILES + mcp.ROUTING_FILES
+    require(set(names) == set(manifest["modules"]["mcp"]["files"]) | set(manifest["managedRouting"]["files"]),
+            "Exact original MCP/router resource set required")
+    for name in names:
+        expected = files["modules/" + name]
+        require(expected == {"size": manifest["payloadArchive"]["files"][name]["size"], "sha256": hashes[name]},
+                "Direct resource differs from the complete original archive inventory")
+        bound(source / "modules" / name, expected)
+    for name in ("runtime", "router"):
+        signature(source / "modules/routing" / (name + ".json"),
+                  source / "modules/routing" / (name + ".minisig"), verifier)
+    return source / "modules", {name: hashes[name] for name in names}
+
+
 def stage(folder, env):
     scenario = admission(env)
     profile_raw, api_raw = read(folder / "profile.json", 65536, mode=0o600), read(folder / "api.json", 512 * 1024, mode=0o600)
@@ -689,6 +719,7 @@ def stage(folder, env):
     old = package_verifier.inspect(obj("deb16"), expected["baseline"], base, "0.1.16")
     new = package_verifier.inspect(obj("deb17"), {**expected["candidate"], "helper": FIXED["17"]["helper"], **{k: baseline[k] for k in ("policy", "service")}}, base, "0.1.17")
     qualification = compare_update_packages(old, new, baseline)
+    baseline_mcp_inputs(folder, profile, old["files"], verifier)
     for version in ("16", "17"):
         native = load("native-linux-root-probe")
         native.verify_deb_marker(read(obj("raw" + version), MAX_FILE), packaged_root(obj("deb" + version), baseline["hub"] if version == "16" else FIXED["17"]["hub"]))
@@ -752,6 +783,7 @@ def outcome(scenario, evidence):
     require(evidence.get("privateTargetQualification") == private_target_qualification()
             and evidence.get("oldRetirementHelperRestored") is (scenario == "deb-approve"), "Private target must disclose the old helper; no fix-retention/public017 qualification")
     require(scenario in SCENARIOS and all(evidence.get(n) is True for n in ("initial16Verified", "nativeConfirmationObserved", "settingsPreserved", "runtimeSurvived", "normalFinalClose")), "Full initial/consent/preservation/close proof required")
+    mcp_protocol_receipt(evidence.get("mcpProtocol"))
     if scenario in HTML_SCENARIOS:
         phases = ("htmlWebDriver", "successorHtmlWebDriver") if scenario == "deb-approve" else ("htmlWebDriver",)
         for name in phases:
@@ -776,6 +808,46 @@ def outcome(scenario, evidence):
             or evidence.get("successorBitmap", {}).get("nonblank") is True), "Actual owned nonblank phase images required")
     require(all(evidence.get(k) is False for k in FALSE), "Scope cannot be promoted to public/Flatpak/release acceptance")
     return True
+
+
+def mcp_protocol_receipt(value):
+    mcp = load("native-linux-update-mcp")
+    require(type(value) is dict and value.get("schemaVersion") == 1
+            and value.get("scope") == "existing-managed-mcp-update-protocol-only"
+            and value.get("originalNormalEofClose") is True and value.get("signalsRequested") is False
+            and all(value.get(k) is False for k in ("liveAiAccepted", "unityAccepted", "releaseReady"))
+            and type(value.get("protectedBefore")) is dict and bool(value["protectedBefore"])
+            and value["protectedBefore"] == value.get("protectedAfter"), "Complete MCP preservation receipt required; EOF sentinel is insufficient")
+    checks = value.get("checks")
+    require(type(checks) is list and len(checks) == 3, "Every real MCP update phase required")
+    for index, row in enumerate(checks):
+        require(row.get("phase") == mcp.PHASES[index] and row.get("handshake") == {"ready": True, "server": mcp.SERVER}
+                and type(row.get("route")) is dict and bool(row["route"]) and row["route"] == checks[0]["route"],
+                "Ordered MCP initialization and unchanged verified route required")
+        mcp._protocol(row.get("protocol"), index + 2)
+        for role in ("router", "sdk"):
+            mcp.same_process(checks[0][role], row[role])
+            require(type(row[role].get("pid")) is int and row[role]["pid"] > 1
+                    and row[role].get("uids") == [UID] * 4
+                    and re.fullmatch(r"[a-f0-9]{64}", row[role].get("kernelImageSha256", "")), "Owned live MCP images required")
+    reconnect = value.get("reconnect")
+    require(type(reconnect) is dict and reconnect.get("command") == str(BASE / "result/home" / mcp.ROUTE_BASE / "router-v1/creator-hub-mcp-router")
+            and reconnect.get("handshake") == {"ready": True, "server": mcp.SERVER}
+            and reconnect.get("normalEofClose") is True, "Reconnect through the same verified router required")
+    mcp._protocol(reconnect.get("protocol"), 2)
+    for role in ("router", "sdk"):
+        before, after = checks[0][role], reconnect[role]
+        require(type(after.get("pid")) is int and after["pid"] > 1 and after["pid"] != before["pid"]
+                and all(after.get(k) == before[k] for k in ("parentPid", "uids", "kernelImageSha256")), "Fresh same-image MCP reconnect required")
+    return value
+
+
+def complete_mcp_protocol(connection, report):
+    report["mcpChecks"].append(connection.check("after-hub-close"))
+    report["mcpReconnect"] = connection.reconnect()
+    report["mcpProtocol"] = mcp_protocol_receipt(connection.close())
+    save(BASE / "result/mcp-protocol.json", report["mcpProtocol"])
+    report["runtimeSurvived"] = True
 
 
 def children(pid):
@@ -2374,7 +2446,7 @@ def native_session(env):
               "automaticSuccessor": None, "scenarioPassed": False, "disposableTeardownRequired": True,
               "privateTargetQualification": private_target_qualification(), "oldRetirementHelperRestored": False, **FALSE}
     portable = scenario.startswith("portable-")
-    x11, surface, replacement, agent, runtime, wm, initial = helper.X11(), None, None, None, None, None, None
+    x11, surface, replacement, agent, wm, initial = helper.X11(), None, None, None, None, None
     html = replacement_html = None
     failure = None
     try:
@@ -2393,9 +2465,17 @@ def native_session(env):
             require(original_request["htmlDriver"]["version"] == HTML_DRIVER_VERSION, "Fixed reviewed WebDriver version required")
             validate_pin(original_request["htmlDriver"]["pin"], 64 * 1024**2)
             automation_env, automation_port = html_automation_environment(app_env)
-        runtime = subprocess.Popen(["/usr/bin/python3", "-I", "-S", "-c", "import sys; sys.stdin.buffer.read()"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   env={k: v for k, v in app_env.items() if k not in ("HTTPS_PROXY", "NO_PROXY")})
-        unrelated = kernel_record(runtime.pid, native, helper)
+        mcp = load("native-linux-update-mcp")
+        verifier = (BASE / "scripts/verify-package-input", original_request["verifier"])
+        resource_source, resource_files = baseline_mcp_inputs(folder, profile, review["deb16"], verifier)
+        route = mcp.prepare_existing_route(load("native-linux-production-016-migration"), home,
+                                           resource_source, resource_files, lambda body, sig: signature(body, sig, verifier))
+        evidence = BASE / "result/mcp"; evidence.mkdir(mode=0o700)
+        connection = mcp.McpFixture(route, evidence,
+                                   {**{k: v for k, v in app_env.items() if k not in ("HTTPS_PROXY", "NO_PROXY")},
+                                    "CREATOR_WORKS_TOOL_GROUPS": "none", "CREATOR_WORKS_CONFIG_OWNER": "creator-hub-v1"},
+                                   tuple(before), pages, helper, native)
+        report["mcpChecks"] = [connection.start()]
         system = Gio.bus_get_sync(Gio.BusType.SYSTEM, None); bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         parent = kernel_record(os.getpid(), native, helper)
         endpoint = agent_record = None
@@ -2517,6 +2597,7 @@ def native_session(env):
             report["installed17Verified"] = report["automaticRestartObserved"] = True
             if replacement_html is not None:
                 replacement_html.detach()
+            report["mcpChecks"].append(connection.check("after-update"))
             replacement.close()
             if portable:
                 wait(lambda: initial.poll() is not None)
@@ -2541,15 +2622,14 @@ def native_session(env):
             report["oldSelectionUnchanged"] = report["initialRootSurvived"] = True
             if html is not None and not html.detached:
                 html.detach()  # Remote-session deletion must leave this same Popen alive.
+            report["mcpChecks"].append(connection.check("after-update"))
             surface.close(); wait(lambda: initial.poll() is not None)
             require(initial.returncode == 0, "Cancelled original Root/selector did not close normally")
             report["normalFinalClose"] = True
             if html is not None:
                 html.finish_tools()
         report["after"] = preserved(home, before); report["settingsPreserved"] = True
-        require(kernel_record(runtime.pid, native, helper) == unrelated and runtime.poll() is None, "Unrelated EOF-only runtime changed/exited")
-        report["runtimeSurvived"] = True
-        runtime.stdin.close(); require(runtime.wait(timeout=10) == 0, "Unrelated runtime EOF shutdown failed")
+        complete_mcp_protocol(connection, report)
         require(windows(x11) == [] and kernel_record(wm.pid, native, helper) == wm_record, "Visible app remained or WM identity changed")
         report["scenarioPassed"] = outcome(scenario, report)
         report["disposableTeardownRequired"] = False
@@ -3329,6 +3409,36 @@ def closed_transport_diagnostic(value, pins, scenario):
     return result
 
 
+def stage_mcp_sdk(env):
+    # Same locked, no-lifecycle-hook SDK tool handoff as the migration fixture.
+    source = Path(env["GITHUB_WORKSPACE"]) / "modules/mcp"
+    require(hashlib.sha256(read(source / "package-lock.json", 2 * 1024**2)).hexdigest()
+            == load("native-linux-update-mcp").SDK_LOCK, "Independent MCP SDK lock changed")
+    destination = BASE / "sdk"
+    require(not os.path.lexists(destination), "Fresh root-owned SDK tool handoff required")
+    destination.mkdir(mode=0o755)
+    for name in ("package.json", "package-lock.json"):
+        write(destination / name, read(source / name, 2 * 1024**2), 0o644)
+    modules = source / "node_modules"
+    require(modules.resolve(strict=True) == modules and modules.is_dir(), "Declared npm-ci SDK dependency tree required")
+    count, total = 0, 0
+    for file in modules.rglob("*"):
+        relative = file.relative_to(modules)
+        if ".bin" in relative.parts:
+            continue
+        require(not file.is_symlink() and file.resolve(strict=True) == file, "Linked SDK tools refused")
+        target = destination / "node_modules" / relative
+        if file.is_dir():
+            target.mkdir(mode=0o755, parents=True, exist_ok=True)
+            continue
+        body = read(file, 16 * 1024**2)
+        count += 1; total += len(body)
+        require(count <= 20000 and total <= 256 * 1024**2, "SDK tool inventory exceeds migration bounds")
+        target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        write(target, body, 0o644)
+    require(count > 0, "SDK dependency files are missing")
+
+
 def broker(env):
     scenario = admission(env)
     require(os.getuid() == os.geteuid() == 0 and HERE == Path(env["GITHUB_WORKSPACE"]) / "scripts", "Fixed root broker must begin in the reviewed checkout")
@@ -3363,6 +3473,7 @@ def broker(env):
     review = parse(review_raw)
     write(BASE / "request.json", read(BASE / "inputs/request.json", 65536), 0o644)
     write(BASE / "review.json", review_raw, 0o644)
+    stage_mcp_sdk(env)
     observer = inventory_observer(sealed)
     create_account()
     os.chown(BASE / "result", UID, UID)
@@ -3512,7 +3623,9 @@ def export_evidence(env):
              "result/successor-html-driver.stdout", "result/successor-html-driver.stderr",
              "result/initial-bitmap/root-window.png", "result/successor-bitmap/root-window.png", "result/bootstrap-failure-ui.json",
              "result/bootstrap-failure-bitmap/root-window.png", "result/transport-diagnostic.json",
-             "result/portable-ancestry-before-launch.json", "result/portable-ancestry-after-refusal.json")
+             "result/portable-ancestry-before-launch.json", "result/portable-ancestry-after-refusal.json",
+             "result/mcp-protocol.json", "result/mcp/existing/sdk.stdout", "result/mcp/existing/sdk.stderr", "result/mcp/existing/sdk-result.json",
+             "result/mcp/reconnect/sdk.stdout", "result/mcp/reconnect/sdk.stderr", "result/mcp/reconnect/sdk-result.json")
     diagnostics = sorted((*BASE.glob("public-tool-failure-*.json"), *BASE.glob("tls-restore-failure-*.json")))
     require(len(diagnostics) <= 8 and all(re.fullmatch(r"(?:public-tool-failure-(baseline-dpkg-install|update-ca-certificates|synthetic-useradd)|tls-restore-failure)-[1-9][0-9]*\.json", file.name)
                                         and file.lstat().st_uid == 0 for file in diagnostics), "Unknown public tool evidence refused")
