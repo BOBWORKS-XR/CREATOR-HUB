@@ -248,10 +248,11 @@ class Lifecycle(unittest.TestCase):
             after.update(ActiveState="active", SubState="running")
         if changed:
             after["InvocationID"] = "b" * 32
-        process = types.SimpleNamespace(returncode=None)
+        process = types.SimpleNamespace(pid=9001, returncode=None,
+            stdout=types.SimpleNamespace(fileno=lambda: 100), stderr=types.SimpleNamespace(fileno=lambda: 101))
         summary = (b"Finished with result: success\nMain processes terminated with: code=exited/status=0\n" if normal else
                    b"Finished with result: timeout\nMain processes terminated with: code=killed/status=TERM\n")
-        handle = (process, object(), {"stdout": bytearray(), "stderr": bytearray(summary)})
+        handle = (process, types.SimpleNamespace(get_map=lambda: {}), {"stdout": bytearray(), "stderr": bytearray(summary)})
         process.poll = lambda: process.returncode
         count = 0
         def pump(*args):
@@ -317,6 +318,136 @@ class Lifecycle(unittest.TestCase):
         self.assertNotIn("import signal", source)
         self.assertNotIn("--collect", source)
         self.assertNotIn("reset-failed", " ".join(c.value for c in ast.walk(tree) if isinstance(c, ast.Constant) and isinstance(c.value, str)))
+
+
+class CollectedUnit(unittest.TestCase):
+    def model(self, *, mode="normal", loadstate="not-found", row_change=None, proof=True):
+        case = "exec-no-pam"
+        before, after = properties(case), properties(case)
+        after.update(ActiveState="active", SubState="running")
+        gone = missing(case)
+        gone["LoadState"] = loadstate
+        gone.update(row_change or {})
+        clock = types.SimpleNamespace(now=0.0)
+        child = types.SimpleNamespace(pid=9001, returncode=None,
+            stdout=types.SimpleNamespace(fileno=lambda: 100), stderr=types.SimpleNamespace(fileno=lambda: 101))
+        child.poll = lambda: child.returncode
+        mapping = {100: types.SimpleNamespace(fd=100, fileobj=child.stdout, data="stdout", events=p.selectors.EVENT_READ),
+                   101: types.SimpleNamespace(fd=101, fileobj=child.stderr, data="stderr", events=p.selectors.EVENT_READ)}
+        selector = types.SimpleNamespace(get_map=lambda: mapping)
+        handle = (child, selector, {"stdout": bytearray(), "stderr": bytearray()})
+        summary = b"Finished with result: success\nMain processes terminated with: code=exited/status=0\n"
+        if mode == "wrong-summary":
+            summary = summary.replace(b"success", b"exit-code")
+        chunks = [summary[:13], summary[13:29], summary[29:48], summary[48:]]
+        pumps, queries, pin_reads = [], [], []
+        def pump(actual, wait=0):
+            self.assertIs(actual, handle)
+            self.assertLessEqual(wait, 0.1)
+            clock.now += 0.1
+            pumps.append(wait)
+            if len(pumps) > 2:
+                if mode == "changed-pid":
+                    child.pid += 1
+                if mode == "changed-pipe":
+                    child.stderr = types.SimpleNamespace(fileno=lambda: 101)
+                if mode == "unknown-registration":
+                    mapping[101].fileobj = object()
+                if chunks:
+                    handle[2]["stderr"].extend(chunks.pop(0))
+                elif mapping:
+                    if mode != "incomplete-eof":
+                        mapping.pop(next(iter(mapping)))
+                        if mode == "late-eof" and not mapping:
+                            clock.now = 18.0
+                    else:
+                        mapping.pop(100, None)
+            return child.returncode is not None and not mapping
+        def show(unit):
+            queries.append(unit)
+            self.assertLessEqual(len(queries), 3, "Terminal observation must not query the service again")
+            if len(queries) == 3:
+                # Exit/collection occurs during the original query, after the
+                # previous pump returned False. EOF still requires several pumps.
+                child.returncode = None if mode == "never-exits" else 0
+                return gone
+            return before if len(queries) == 1 else after
+        def tool_pin(name):
+            pin_reads.append(name)
+            return {"sha256": "b" if mode == "changed-tool" and len(pumps) > 2 else "a"}
+        observed = {"pid": 123, "startTime": "456", "kernelImageVerified": proof}
+        record = {}
+        try:
+            with patch.object(p, "absent"), patch.object(p, "tool_pin", side_effect=tool_pin), \
+                    patch.object(p, "start", return_value=handle), patch.object(p, "pump", side_effect=pump), \
+                    patch.object(p, "show", side_effect=show), patch.object(p, "native_sleep", return_value=observed), \
+                    patch.object(p, "close") as closed, patch.object(p.time, "monotonic", side_effect=lambda: clock.now):
+                try:
+                    p.run_case(USER, case, record)
+                finally:
+                    closed.assert_called_once_with(handle)
+        finally:
+            self.last = {"record": record, "queries": queries, "pumps": pumps, "clock": clock.now}
+        return record
+
+    def test_successful_collection_before_wrapper_eof_drains_same_handle(self):
+        record = self.model()
+        self.assertTrue(record["completed"])
+        self.assertEqual(record["outcome"], "normal-exit")
+        self.assertTrue(record["pipesClosed"])
+        self.assertEqual(len(self.last["queries"]), 3)
+        self.assertGreater(len(self.last["pumps"]), 3)
+        terminal = record["terminalObservation"]
+        self.assertFalse(terminal["cachedCompleteBeforeQuery"])
+        self.assertEqual(terminal["firstNotFound"]["LoadState"], "not-found")
+        self.assertEqual(terminal["before"]["returnCode"], 0)
+        self.assertTrue(terminal["before"]["openPipes"])
+        self.assertEqual(terminal["after"]["openPipes"], [])
+        self.assertEqual(terminal["after"]["returnCode"], 0)
+        self.assertLess(self.last["clock"], 18)
+
+    def test_live_wrapper_or_incomplete_eof_fails_at_original_deadline(self):
+        for mode in ("never-exits", "incomplete-eof"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(RuntimeError, "original deadline"):
+                self.model(mode=mode)
+            self.assertNotIn("completed", self.last["record"])
+            self.assertEqual(len(self.last["queries"]), 3)
+            self.assertGreaterEqual(self.last["clock"], 18)
+            self.assertLess(self.last["clock"], 18.11)
+
+    def test_wrong_summary_does_not_complete_collected_case(self):
+        with self.assertRaisesRegex(RuntimeError, "Unproved wrapper outcome"):
+            self.model(mode="wrong-summary")
+        self.assertNotIn("completed", self.last["record"])
+
+    def test_eof_at_original_deadline_does_not_complete(self):
+        with self.assertRaisesRegex(RuntimeError, "original deadline"):
+            self.model(mode="late-eof")
+        self.assertEqual(self.last["clock"], 18)
+        self.assertNotIn("completed", self.last["record"])
+        self.assertEqual(self.last["record"]["terminalObservation"]["after"]["openPipes"], [])
+
+    def test_unknown_loadstate_no_terminal_observation(self):
+        for loadstate in ("error", "masked", None, 0):
+            with self.subTest(loadstate=loadstate), self.assertRaises(RuntimeError):
+                self.model(loadstate=loadstate)
+            self.assertNotIn("terminalObservation", self.last["record"])
+            self.assertEqual(len(self.last["pumps"]), 2)
+
+    def test_foreign_missing_row_or_unverified_kernel_never_enters_drain(self):
+        for change in ({"Id": "other.service"}, {"InvocationID": "b" * 32}, {"MainPID": "42"}, {"Transient": "yes"}):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                self.model(row_change=change)
+            self.assertNotIn("terminalObservation", self.last["record"])
+        with self.assertRaises(RuntimeError):
+            self.model(proof=False)
+        self.assertNotIn("terminalObservation", self.last["record"])
+
+    def test_pid_pipe_or_tool_identity_change_does_not_complete(self):
+        for mode in ("changed-pid", "changed-pipe", "changed-tool", "unknown-registration"):
+            with self.subTest(mode=mode), self.assertRaises(RuntimeError):
+                self.model(mode=mode)
+            self.assertNotIn("completed", self.last["record"])
 
 
 class FreshAccountAndTools(unittest.TestCase):

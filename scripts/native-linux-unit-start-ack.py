@@ -268,6 +268,58 @@ def outcome(returncode, stderr):
     raise RuntimeError("Unproved wrapper outcome")
 
 
+def seal_wrapper(handle):
+    child, selector, streams = handle
+    require(type(child.pid) is int and 1 < child.pid < 2**31, "Unknown original wrapper PID")
+    pipes = tuple((getattr(child, name), getattr(child, name).fileno()) for name in ("stdout", "stderr"))
+    require(all(type(fd) is int and fd >= 0 for _pipe, fd in pipes) and pipes[0][1] != pipes[1][1],
+            "Unknown original wrapper pipes")
+    return child, selector, streams, child.pid, pipes
+
+
+def wrapper_state(handle, sealed):
+    child, selector, streams = handle
+    require(child is sealed[0] and selector is sealed[1] and streams is sealed[2] and child.pid == sealed[3],
+            "Original wrapper identity changed")
+    require(type(streams) is dict and set(streams) == {"stdout", "stderr"}
+            and all(type(v) is bytearray and len(v) <= LIMIT for v in streams.values()), "Unknown wrapper output state")
+    for name, (pipe, fd) in zip(("stdout", "stderr"), sealed[4]):
+        require(getattr(child, name) is pipe and pipe.fileno() == fd, "Original wrapper pipe changed")
+    opened = []
+    for key in selector.get_map().values():
+        require(key.data in ("stdout", "stderr") and key.data not in opened
+                and key.fileobj is getattr(child, key.data) and key.fd == key.fileobj.fileno()
+                and key.events == selectors.EVENT_READ, "Unknown wrapper pipe registration")
+        opened.append(key.data)
+    code = child.poll()
+    require(code is None or type(code) is int, "Unknown wrapper exit state")
+    return {"pid": child.pid, "returnCode": code, "openPipes": sorted(opened),
+            "bytes": {name: len(raw) for name, raw in streams.items()}}
+
+
+def observe_collected_wrapper(handle, sealed, record, row, cached_complete, deadline):
+    observation = {"firstNotFound": row, "cachedCompleteBeforeQuery": cached_complete, "drainPumps": 0}
+    record["terminalObservation"] = observation
+    try:
+        state = wrapper_state(handle, sealed)
+        observation["before"] = state
+        observation["after"] = state
+        while True:
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, "Terminal wrapper incomplete at original deadline; no signal/retry")
+            if state["returnCode"] is not None and not state["openPipes"]:
+                return True
+            # Continue draining only these original pipes. No unit query,
+            # service/admission retry, new deadline or process signal.
+            pump(handle, min(0.1, remaining))
+            observation["drainPumps"] += 1
+            state = wrapper_state(handle, sealed)
+            observation["after"] = state
+    except Exception as error:
+        observation["errorType"] = type(error).__name__
+        raise
+
+
 def run_case(user, case, record):
     unit = unit_name(user, case)
     record["stage"] = "absent-unit"
@@ -277,11 +329,13 @@ def run_case(user, case, record):
     pin, wrapper_pin = tool_pin("/usr/bin/sleep"), tool_pin("/usr/bin/systemd-run")
     handle = start(record["command"])
     started = time.monotonic()
+    deadline = started + 18
     invocation = None
     try:
+        sealed_wrapper = seal_wrapper(handle)
         for _ in range(180):
             done = pump(handle, 0.1)
-            require(time.monotonic() - started < 18, "Probe deadline exceeded; no signal/retry")
+            require(time.monotonic() < deadline, "Probe deadline exceeded; no signal/retry")
             record["stage"] = "unit-properties"
             row = show(unit)
             if row["LoadState"] == "loaded":
@@ -301,8 +355,18 @@ def run_case(user, case, record):
                                                                        "elapsedMs": int((time.monotonic() - started) * 1000)})
                 record["lastBoundUnit"] = row
             else:
-                require(row["LoadState"] == "not-found" and (done or invocation is None),
+                require(type(row["LoadState"]) is str and row["LoadState"] == "not-found"
+                        and row["Id"] == unit and row["Transient"] == "no" and row["InvocationID"] == ""
+                        and row["MainPID"] == row["ExecMainPID"] == "0",
                         "Unit disappeared before wrapper completion")
+                if invocation is not None:
+                    require(record["executionObserved"] is True
+                            and record["execution"]["kernel"]["kernelImageVerified"] is True
+                            and record["execution"]["before"]["InvocationID"] == invocation
+                            and record["execution"]["after"]["InvocationID"] == invocation,
+                            "Collected unit lacks bound running sleep proof")
+                    record["stage"] = "terminal-observation"
+                    done = observe_collected_wrapper(handle, sealed_wrapper, record, row, done, deadline)
             if done:
                 record["stage"] = "wrapper-outcome"
                 record.update(returnCode=handle[0].returncode, elapsedMs=int((time.monotonic() - started) * 1000),
