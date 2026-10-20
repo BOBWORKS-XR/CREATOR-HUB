@@ -2,6 +2,17 @@ name: Linux portable deployment primitives
 
 on:
   workflow_dispatch:
+    inputs:
+      run_signed_controls:
+        description: Run only the fixed signed 4d9 016 to private 017 filesystem controls; no GUI or product execution
+        type: boolean
+        required: true
+        default: false
+      signed_profile:
+        description: Exact original 20258-byte reviewed016 portable profile (SHA256 1412daac05451789cbd99a400fa9fbd0a67f4c44f888844c0855112103b70325); required only for signed controls
+        type: string
+        required: false
+        default: ''
   push:
     branches: [validation/linux-portable-deployment]
     paths:
@@ -16,7 +27,8 @@ jobs:
     if: >-
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
       github.ref == 'refs/heads/validation/linux-portable-deployment' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name != 'workflow_dispatch' || inputs.run_signed_controls != true)
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -41,3 +53,140 @@ jobs:
           set -euo pipefail
           cargo test --locked --manifest-path native/linux-portable-deployment/Cargo.toml -- --test-threads=1
           cargo test --locked --manifest-path native/linux-portable-deployment/Cargo.toml --features experimental-restart -- --test-threads=1
+  signed-inputs:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-portable-deployment' && github.event_name == 'workflow_dispatch' &&
+      github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/linux-portable-deployment.yml@refs/heads/validation/linux-portable-deployment' &&
+      inputs.run_signed_controls == true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    # Same private-draft GET capability as the existing data-only carrier job.
+    # No checkout, archive decoding, tool or candidate execution with this token.
+    permissions:
+      contents: write
+    outputs:
+      artifact: ${{ steps.transport.outputs.artifact-id }}
+    steps:
+      - name: Download only the two original independently pinned private carriers
+        uses: actions/github-script@v8
+        env:
+          SIGNED_CONTROLS_EXECUTE: ${{ inputs.run_signed_controls }}
+          SIGNED_PROFILE: ${{ inputs.signed_profile }}
+        with:
+          script: |
+            const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
+            const ref = 'refs/heads/validation/linux-portable-deployment', workflow = '.github/workflows/linux-portable-deployment.yml';
+            for (const [key,value] of Object.entries({GITHUB_ACTIONS:'true',RUNNER_ENVIRONMENT:'github-hosted',RUNNER_OS:'Linux',RUNNER_ARCH:'X64',
+              GITHUB_REPOSITORY:'BOBWORKS-XR/CREATOR-HUB',GITHUB_REPOSITORY_ID:'1364807512',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:ref,
+              GITHUB_WORKFLOW_REF:`BOBWORKS-XR/CREATOR-HUB/${workflow}@${ref}`,SIGNED_CONTROLS_EXECUTE:'true'})) assert.equal(process.env[key],value,key);
+            assert.deepEqual(context.repo,{owner:'BOBWORKS-XR',repo:'CREATOR-HUB'}); assert.equal(context.sha,process.env.GITHUB_SHA);
+            assert.match(context.sha,/^[a-f0-9]{40}$/);
+            for (const key of ['GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT']) { assert.match(process.env[key]||'',/^[1-9][0-9]*$/); assert.ok(Number.isSafeInteger(Number(process.env[key]))); }
+            assert.equal(context.runId,Number(process.env.GITHUB_RUN_ID));
+            const raw=Buffer.from(process.env.SIGNED_PROFILE||''),sha=b=>crypto.createHash('sha256').update(b).digest('hex');
+            const profilePin={size:20258,sha256:'1412daac05451789cbd99a400fa9fbd0a67f4c44f888844c0855112103b70325'};
+            assert.equal(raw.length,profilePin.size); assert.equal(sha(raw),profilePin.sha256,'Exact reviewed 4d9 profile required');
+            const p=JSON.parse(raw),roles=['signedPortable16','signedPortable17'],ids={signedPortable16:659622698,signedPortable17:658277802};
+            assert.deepEqual(Object.keys(p.deliveries).sort(),roles); const repo={owner:'BOBWORKS-XR',repo:'CREATOR-HUB'};
+            const release=(await github.rest.repos.getRelease({...repo,release_id:411494394})).data;
+            assert.equal(release.id,411494394); assert.equal(release.tag_name,'v0.1.13-validation'); assert.equal(release.draft,true);
+            const assets={};
+            for (const role of roles) {
+              const e=p.deliveries[role]; assert.equal(e.asset,ids[role]);
+              const a=(await github.rest.repos.getReleaseAsset({...repo,asset_id:ids[role]})).data;
+              assert.equal(a.id,e.asset); assert.equal(a.name,e.name); assert.equal(a.size,e.zip.size);
+              assert.equal(a.state,'uploaded'); assert.equal(a.digest,'sha256:'+e.zip.sha256);
+              assert.equal(a.url,`https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/${ids[role]}`);
+              assets[role]=Object.fromEntries(['id','name','size','digest','state','url'].map(k=>[k,a[k]]));
+            }
+            const folder=path.join(fs.realpathSync(process.env.RUNNER_TEMP),'portable-signed-controls-download');
+            fs.mkdirSync(folder,{mode:0o700}); fs.writeFileSync(path.join(folder,'profile.json'),raw,{flag:'wx',mode:0o600});
+            for (const role of roles) {
+              const response=await github.rest.repos.getReleaseAsset({...repo,asset_id:ids[role],headers:{accept:'application/octet-stream'}});
+              assert.ok(Buffer.isBuffer(response.data)||response.data instanceof ArrayBuffer);
+              const bytes=Buffer.from(response.data),expected=p.deliveries[role].zip;
+              assert.equal(bytes.length,expected.size); assert.equal(sha(bytes),expected.sha256);
+              fs.writeFileSync(path.join(folder,role+'.zip'),bytes,{flag:'wx',mode:0o600});
+            }
+            const receipt={schemaVersion:1,harnessSource:context.sha,run:context.runId,attempt:Number(process.env.GITHUB_RUN_ATTEMPT),profile:profilePin,
+              release:{id:release.id,tag_name:release.tag_name,draft:release.draft},assets,dataOnly:true,releaseReady:false};
+            fs.writeFileSync(path.join(folder,'transport.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});
+      - uses: actions/upload-artifact@v4
+        id: transport
+        with:
+          name: portable-signed-controls-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/portable-signed-controls-download
+  signed-controls:
+    needs: signed-inputs
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-portable-deployment' && github.event_name == 'workflow_dispatch' &&
+      github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/linux-portable-deployment.yml@refs/heads/validation/linux-portable-deployment' &&
+      inputs.run_signed_controls == true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SIGNED_CONTROLS_EXECUTE: ${{ inputs.run_signed_controls }}
+      CARGO_TARGET_DIR: ${{ runner.temp }}/portable-signed-controls-target
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.signed-inputs.outputs.artifact }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/portable-signed-controls-download
+      - name: Test admission, refusals, workflow syntax and fixed original profile before decoding
+        env:
+          SIGNED_CONTROLS_TEST_PROFILE: ${{ runner.temp }}/portable-signed-controls-download/profile.json
+        run: node --test scripts/linux-portable-signed-controls.test.cjs
+      - name: Stage only seven exact original inputs using the existing ZIP decoder
+        run: |
+          node scripts/linux-portable-signed-controls.cjs stage \
+            "$RUNNER_TEMP/portable-signed-controls-download" "$RUNNER_TEMP/portable-signed-controls-staged"
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Run only the fixed signed filesystem control integration test
+        env:
+          CREATOR_SIGNED_CONTROLS_INPUT_ROOT: ${{ runner.temp }}/portable-signed-controls-staged/input
+          CREATOR_SIGNED_CONTROLS_OUTPUT: ${{ runner.temp }}/portable-signed-controls-staged/result
+        run: |
+          set -euo pipefail
+          cargo fetch --locked --manifest-path native/linux-portable-deployment/Cargo.toml
+          rustc -Vv > "$RUNNER_TEMP/portable-signed-controls-staged/compiler.txt"
+          cargo test --release --offline --locked --manifest-path native/linux-portable-deployment/Cargo.toml \
+            --features experimental-restart --test production_signed_controls -- \
+            --exact signed_input_filesystem_controls --ignored --nocapture --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/portable-signed-controls-staged/cargo-test.log"
+      - name: Retain original bounded test and transport evidence, not the private store
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-signed-controls-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/portable-signed-controls-download/profile.json
+            ${{ runner.temp }}/portable-signed-controls-download/transport.json
+            ${{ runner.temp }}/portable-signed-controls-staged/stage-receipt.json
+            ${{ runner.temp }}/portable-signed-controls-staged/compiler.txt
+            ${{ runner.temp }}/portable-signed-controls-staged/cargo-test.log
+            ${{ runner.temp }}/portable-signed-controls-staged/result/run.json
+            ${{ runner.temp }}/portable-signed-controls-staged/result/child.log
+            ${{ runner.temp }}/portable-signed-controls-staged/result/01-inputs.json
+            ${{ runner.temp }}/portable-signed-controls-staged/result/02-signature.json
+            ${{ runner.temp }}/portable-signed-controls-staged/result/03-stage.json
+            ${{ runner.temp }}/portable-signed-controls-staged/result/04-stale.json
+            ${{ runner.temp }}/portable-signed-controls-staged/result/05-complete.json
