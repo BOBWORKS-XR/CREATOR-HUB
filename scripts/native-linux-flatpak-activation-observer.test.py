@@ -2,6 +2,7 @@
 import ast
 import copy
 import importlib.util
+import io
 import os
 from pathlib import Path
 import stat
@@ -387,6 +388,323 @@ class PreInputLineageTests(unittest.TestCase):
         self.assertEqual(value['treeCount'], 100); self.assertTrue(value['treeTruncated'])
         self.assertGreater(len(value['tree']), 0); self.assertLessEqual(len(value['tree']), 16)
         self.assertFalse(value['inputPermitted'])
+
+
+class RootAssociationTests(unittest.TestCase):
+    def fixture(self):
+        state = ProxyAssociationTests().fixture()
+        state.rows[13]['image'] = copy.deepcopy(state.rows[10]['image'])
+        state.tree[13]['image'] = copy.deepcopy(state.rows[10]['image'])
+        state.private = dict(instanceId='123', infoSha256='b' * 64, originalPid=10,
+            directories=[[1, n, stat.S_IFDIR | 0o700, 1001, 1001, 2] for n in (1, 2, 3)],
+            infoIdentity=[1, 2, stat.S_IFREG | 0o644, 1001, 1001, 1, 200, 5, 6],
+            pidIdentity=[1, 3, stat.S_IFREG | 0o644, 1001, 1001, 1, 2, 5, 6])
+        state.tree_rows = [copy.deepcopy(state.rows[pid]) for pid in (14, 13, 10)]
+        state.data = dict(complete=True, uid=1001, candidateCount=1, scopedProcessCount=8,
+            original=copy.deepcopy(state.rows[10]), client=copy.deepcopy(state.rows[14]), tree=copy.deepcopy(state.tree_rows),
+            proxy=copy.deepcopy(state.rows[12]), flatpakInfo={k: state.info[k] for k in ('sha256', 'fields')},
+            privateInstance=copy.deepcopy(state.private), pipes=[dict(appPid=13, appFd=7, proxyFd=8, inode=900)])
+        state.instance = SimpleNamespace(snapshot=Mock(side_effect=lambda: copy.deepcopy(state.private)), close=Mock())
+        state.snapshots = Mock(side_effect=lambda tree: copy.deepcopy(state.data))
+        state.request = dict(schemaVersion=1, operation='flatpak-proxy-snapshot-uid1001', harnessSource='a' * 40,
+            codeSha256='e' * 64, sequence=1, nonce='f' * 64, expiresNs=2_000_000_000,
+            original=state.rows[10], client=state.rows[14], tree=state.tree_rows)
+        def build():
+            with patch.object(M, 'PrivateInstance', return_value=state.instance):
+                return M.AssociatedProxyLineage(state.rows[10], state.rows[14], state.tree, state.reader, lambda r: copy.deepcopy(r),
+                    snapshot=state.snapshots, image_open=state.image_open, system_image=state.system, pidfds=state.pidfds,
+                    guard=state.guard, budget=lambda: None)
+        state.build_associated = build
+        return state
+
+    def test_external_association_seals_without_fabricating_proxy_ancestry(self):
+        state = self.fixture(); baseline = state.build_associated(); baseline.begin_input()
+        self.assertEqual(state.snapshots.call_count, 2)
+        for pid in (10, 13, 14): del state.rows[pid]
+        value = baseline.observe(':1.40', lambda n: dict(name=n, pid=12, uid=1001), budget=lambda: None)
+        self.assertTrue(value['stable']); self.assertTrue(value['sealedBeforeInput'])
+        self.assertEqual([r['pid'] for r in value['senderAncestors']], [12])
+        self.assertEqual(value['externalAssociation']['tree'][-1]['pid'], 10)
+        self.assertFalse(value['qualified']); self.assertFalse(value['inputPermitted'])
+        baseline.close(); state.instance.close.assert_called_once()
+
+    def test_complete_snapshot_and_all_fixed_association_fields_are_mandatory(self):
+        for change in (lambda d: d.update(complete=False), lambda d: d.update(uid=True),
+                       lambda d: d.update(candidateCount=0), lambda d: d.update(extra=1),
+                       lambda d: d['privateInstance'].update(originalPid=99),
+                       lambda d: d['privateInstance'].update(infoSha256='c' * 64),
+                       lambda d: d['flatpakInfo']['fields'].update(app='foreign.app'),
+                       lambda d: d['proxy'].update(uids=[1002] * 4),
+                       lambda d: d['proxy'].update(executable='/usr/bin/other'),
+                       lambda d: d['pipes'][0].update(appPid=99)):
+            state = self.fixture(); change(state.data)
+            with self.assertRaises(ValueError): state.build_associated()
+
+    def test_preinput_root_recheck_mutation_unknown_or_expired_stops_input(self):
+        for mutation in ('instance', 'pipe', 'proxy', 'complete', 'error'):
+            state = self.fixture(); baseline = state.build_associated()
+            if mutation == 'instance': state.data['privateInstance']['pidIdentity'][-1] += 1
+            if mutation == 'pipe': state.data['pipes'][0]['inode'] += 1
+            if mutation == 'proxy': state.data['proxy']['startTime'] = '999'
+            if mutation == 'complete': state.data['complete'] = False
+            if mutation == 'error': state.snapshots.side_effect = TimeoutError()
+            with self.assertRaises((ValueError, TimeoutError)): baseline.begin_input()
+            self.assertFalse(baseline.started); baseline.close()
+
+    def test_subsequent_start_credentials_must_match_exact_sealed_proxy_once(self):
+        for credential in (dict(name=':1.40', pid=99, uid=1001), dict(name=':1.40', pid=12, uid=1002)):
+            state = self.fixture(); baseline = state.build_associated(); baseline.begin_input()
+            self.assertFalse(baseline.observe(':1.40', lambda n: credential, budget=lambda: None)['stable'])
+            self.assertFalse(baseline.observe(':1.40', lambda n: dict(name=n, pid=12, uid=1001), budget=lambda: None)['stable'])
+            baseline.close()
+
+    def test_root_request_is_finite_typed_and_never_accepts_paths_payload_or_expiry(self):
+        state = self.fixture(); M.root_request(state.request, 1_000_000_000)
+        for change in (lambda r: r.update(sequence=True), lambda r: r.update(expiresNs=1),
+                       lambda r: r.update(operation='global-uid-inventory'), lambda r: r.update(path='/tmp/other'),
+                       lambda r: r.update(sequence=4), lambda r: r.update(nonce='bad'),
+                       lambda r: r['tree'][0].update(parentPid=99)):
+            request = copy.deepcopy(state.request); change(request)
+            with self.assertRaises(ValueError): M.root_request(request, 1_000_000_000)
+
+    def run_snapshot(self, state, inventory=None):
+        scoped = {pid: {k: v for k, v in row.items() if k not in ('image', 'kernelImageSha256')}
+                  for pid, row in state.rows.items()}
+        with patch.object(M.os, 'pidfd_open', side_effect=lambda p: p, create=True), \
+                patch.object(M.select, 'select', return_value=([], [], [])), patch.object(M.os, 'close'), \
+                patch.object(M, 'PrivateInstance', return_value=state.instance):
+            return M.association_snapshot(state.request, proc=state.proc, read=state.reader,
+                inventory=inventory or Mock(return_value=([12], scoped)), clock=lambda: 1_000_000_000)
+
+    def test_root_snapshot_proves_both_endpoints_same_info_and_stable_rechecks(self):
+        state = self.fixture(); value = self.run_snapshot(state)
+        M.validate_association(value, state.rows[10], state.rows[14], state.tree_rows)
+        self.assertTrue(value['complete']); self.assertEqual(value['pipes'][0]['inode'], 900)
+        self.assertNotIn('identity', value['flatpakInfo'])
+        self.assertNotIn('cmdline', str(value)); self.assertNotIn('environ', str(value))
+
+    def test_root_snapshot_wrong_info_direction_duplicate_matching_or_changed_scan_refuses(self):
+        for mutation in ('info', 'direction', 'duplicate', 'scan', 'unreadable'):
+            state = self.fixture()
+            scoped = {pid: {k: v for k, v in row.items() if k not in ('image', 'kernelImageSha256')}
+                      for pid, row in state.rows.items()}
+            inventory = Mock(return_value=([12], scoped))
+            if mutation == 'info':
+                state.proc.info.side_effect = lambda pid: {**copy.deepcopy(state.info), 'sha256': 'e' * 64} if pid == 12 else state.info
+            if mutation == 'direction': state.pipes[12][0][0]['access'] = 'read'
+            if mutation == 'scan': inventory.side_effect = [([12], scoped), ([12], {**scoped, 99: {}})]
+            if mutation == 'unreadable': inventory.side_effect = PermissionError()
+            if mutation == 'duplicate':
+                state.rows[15] = {**copy.deepcopy(state.rows[12]), 'pid': 15, 'startTime': '15'}
+                state.pipes[15] = copy.deepcopy(state.pipes[12])
+                scoped[15] = {k: v for k, v in state.rows[15].items() if k not in ('image', 'kernelImageSha256')}
+                inventory.return_value = ([12, 15], scoped)
+            with self.subTest(mutation=mutation), self.assertRaises((ValueError, PermissionError)):
+                self.run_snapshot(state, inventory)
+
+    def test_root_entrypoint_and_client_code_remain_proc_only_not_candidate_execution(self):
+        source = Path(M.__file__).read_text()
+        tree = ast.parse(source)
+        names = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+        root_code = '\n'.join(ast.get_source_segment(source, names[n]) for n in
+                              ('root_snapshot_main', 'root_process', 'association_snapshot', 'complete_proxy_inventory'))
+        for forbidden in ('cmdline', 'environ[', 'subprocess', 'exec(', 'eval(', 'chmod(', 'unlink('):
+            self.assertNotIn(forbidden, root_code.replace('no cmdline', 'no command line'))
+        self.assertIn("os.environ.get('SUDO_UID')", root_code)
+        self.assertIn('protected_tool', root_code)
+
+    def test_complete_root_inventory_never_skips_permission_disappearance_or_changed_uid_set(self):
+        entries = [SimpleNamespace(name=str(pid), stat=Mock(return_value=SimpleNamespace(st_mode=stat.S_IFDIR | 0o700,
+                    st_uid=1001))) for pid in (12, 925)]
+        def scan(_):
+            context = Mock(); context.__enter__ = Mock(return_value=iter(entries)); context.__exit__ = Mock(return_value=False)
+            return context
+        for error in (PermissionError(), FileNotFoundError(), ProcessLookupError()):
+            with patch.object(M.os, 'scandir', side_effect=scan), patch.object(M, 'root_uid_tuple', return_value=[1001] * 4), \
+                    patch.object(M, 'root_process', side_effect=error):
+                with self.assertRaises(type(error)): M.complete_proxy_inventory(lambda: None)
+        reads = [dict(pid=12, executable='/usr/bin/xdg-dbus-proxy'), dict(pid=925, executable='/usr/bin/other'),
+                 dict(pid=12, executable='/usr/bin/xdg-dbus-proxy'), dict(pid=925, executable='/usr/bin/changed')]
+        with patch.object(M.os, 'scandir', side_effect=scan), patch.object(M, 'root_uid_tuple', return_value=[1001] * 4), \
+                patch.object(M, 'root_process', side_effect=reads):
+            with self.assertRaises(ValueError): M.complete_proxy_inventory(lambda: None)
+
+    def test_root_owned_proc_directory_cannot_hide_actual_target_uid_or_mixed_credentials(self):
+        entry = SimpleNamespace(name='12', stat=Mock(return_value=SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0)))
+        def scan(_):
+            context = Mock(); context.__enter__ = Mock(return_value=iter([entry])); context.__exit__ = Mock(return_value=False)
+            return context
+        row = dict(pid=12, startTime='12', parentPid=1, uids=[1001] * 4, executable='/usr/bin/xdg-dbus-proxy')
+        with patch.object(M.os, 'scandir', side_effect=scan), patch.object(M, 'root_uid_tuple', return_value=[1001] * 4), \
+                patch.object(M, 'root_process', return_value=row):
+            self.assertEqual(M.complete_proxy_inventory(lambda: None), ([12], {12: row}))
+        with patch.object(M.os, 'scandir', side_effect=scan), patch.object(M, 'root_uid_tuple', return_value=[1001, 0, 0, 0]):
+            with self.assertRaises(ValueError): M.complete_proxy_inventory(lambda: None)
+
+    def test_probe_zero_proxy_inventory_cannot_supply_an_association(self):
+        row = dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10')
+        request = dict(schemaVersion=1, operation=M.PROBE_OPERATION, harnessSource='a' * 40, codeSha256='b' * 64,
+                       sequence=1, nonce='c' * 64, expiresNs=2_000_000_000, caller=row)
+        chain = [dict(pid=21, parentPid=20, startTime='21', state='R', uids=[0] * 4),
+                 dict(pid=20, parentPid=19, startTime='20', state='S', uids=[0] * 4)]
+        with patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'), \
+                patch.object(M.os, 'pidfd_open', return_value=7, create=True), patch.object(M.os, 'close'), \
+                patch.object(M.select, 'select', return_value=([], [], [])), \
+                patch.object(M, 'probe_caller_chain', return_value=chain), \
+                patch.object(M, 'complete_uid_inventory', return_value=([], {19: row})):
+            value = M.inventory_probe(request, clock=lambda: 1_000_000_000)
+            M.validate_probe(value, request)
+            self.assertEqual(value['candidateCount'], 0)
+            self.assertTrue(value['complete']); self.assertTrue(value['readOnly'])
+            for key in ('inputPermitted', 'authorityGranted', 'releaseReady'):
+                self.assertIs(value[key], False)
+            with self.assertRaises(ValueError): M.root_request(request, 1_000_000_000)
+            with self.assertRaises(ValueError): M.validate_association(value, {}, {}, [])
+            for key, changed in (('complete', False), ('candidateCount', True), ('uid', True),
+                                 ('authorityGranted', True), ('proxy', {})):
+                with self.subTest(key=key), self.assertRaises(ValueError): M.validate_probe({**value, key: changed}, request)
+        with patch.object(M, 'complete_uid_inventory', return_value=([], {19: row})):
+            with self.assertRaises(ValueError): M.complete_proxy_inventory(lambda: None)
+
+    def test_probe_request_is_separate_closed_source_nonce_expiry_and_caller_schema(self):
+        request = dict(schemaVersion=1, operation=M.PROBE_OPERATION, harnessSource='a' * 40, codeSha256='b' * 64,
+                       sequence=1, nonce='c' * 64, expiresNs=2_000_000_000,
+                       caller=dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10'))
+        with patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'):
+            M.probe_request(request, 1_000_000_000)
+            for change in (lambda r: r.update(operation='flatpak-proxy-snapshot-uid1001'),
+                           lambda r: r.update(expiresNs=1), lambda r: r.update(expiresNs=7_000_000_000),
+                           lambda r: r.update(sequence=2), lambda r: r.update(nonce='bad'),
+                           lambda r: r.update(tree=[]), lambda r: r['caller'].update(pid=True),
+                           lambda r: r['caller'].update(uids=[1001, 0, 0, 0]),
+                           lambda r: r['caller'].update(executable='/tmp/unknown')):
+                changed = copy.deepcopy(request); change(changed)
+                with self.assertRaises(ValueError): M.probe_request(changed, 1_000_000_000)
+
+    def test_probe_refuses_changed_caller_chain_exit_and_incomplete_uid_inventory(self):
+        caller = dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10')
+        request = dict(schemaVersion=1, operation=M.PROBE_OPERATION, harnessSource='a' * 40, codeSha256='b' * 64,
+                       sequence=1, nonce='c' * 64, expiresNs=2_000_000_000, caller=caller)
+        for failure in ('chain', 'caller', 'exit', 'permission', 'expired'):
+            with self.subTest(failure=failure), patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'), \
+                    patch.object(M.os, 'pidfd_open', return_value=7, create=True), patch.object(M.os, 'close'), \
+                    patch.object(M.select, 'select', return_value=([7], [], []) if failure == 'exit' else ([], [], [])), \
+                    patch.object(M, 'probe_caller_chain', side_effect=[[dict(pid=21, state='R')],
+                        [dict(pid=22 if failure == 'chain' else 21, state='S')]]), \
+                    patch.object(M, 'complete_uid_inventory', side_effect=PermissionError() if failure == 'permission' else None,
+                                 return_value=([], {19: {} if failure == 'caller' else caller})):
+                clock = Mock(side_effect=[1_000_000_000, 3_000_000_000]) if failure == 'expired' else lambda: 1_000_000_000
+                with self.assertRaises((ValueError, PermissionError)): M.inventory_probe(request, clock=clock)
+
+    def test_probe_invocation_only_follows_fixed_sudo_parent_chain_to_actual_caller(self):
+        caller = dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10')
+        for failure in (None, 'foreign-exe', 'mixed-uid', 'caller-replaced'):
+            def read(directory, name, maximum):
+                if name == 'stat':
+                    parent = 20 if directory == 21 else 19
+                    return (f'{directory} (fixed) R {parent} ' + '0 ' * 17 + f'{directory}\n').encode(), []
+                ids = b'1001 0 0 0' if failure == 'mixed-uid' else b'0 0 0 0'
+                return b'Uid:\t' + ids + b'\n', []
+            def executable(name, *, dir_fd):
+                return '/usr/bin/python3.10' if dir_fd == 21 else ('/tmp/foreign' if failure == 'foreign-exe' else '/usr/bin/sudo')
+            with self.subTest(failure=failure), patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'), \
+                    patch.object(M.os, 'O_DIRECTORY', 0, create=True), patch.object(M.os, 'O_NOFOLLOW', 0, create=True), \
+                    patch.object(M.os, 'O_CLOEXEC', 0, create=True), \
+                    patch.object(M.os, 'getpid', return_value=21), \
+                    patch.object(M.os, 'open', side_effect=lambda p, flags: int(p.rsplit('/', 1)[1])), \
+                    patch.object(M.os, 'close'), patch.object(M.os, 'readlink', side_effect=executable), \
+                    patch.object(M.ProxyAssociationProc, 'read_at', side_effect=read), \
+                    patch.object(M, 'root_process', return_value={**caller, 'startTime': '99'} if failure == 'caller-replaced' else caller):
+                if failure is None:
+                    self.assertEqual([r['pid'] for r in M.probe_caller_chain(caller)], [21, 20])
+                else:
+                    with self.assertRaises(ValueError): M.probe_caller_chain(caller)
+
+    def test_root_watchdog_is_armed_before_any_stdin_read_and_exits_only_itself(self):
+        state, events = self.fixture(), []
+        stream = Mock()
+        stream.buffer.read.side_effect = lambda bound: (events.append('read'), M.json.dumps(state.request).encode())[1]
+        with patch.object(M.signal, 'SIGALRM', 14, create=True), patch.object(M.signal, 'ITIMER_REAL', 0, create=True), \
+                patch.object(M.signal, 'signal') as install, \
+                patch.object(M.signal, 'setitimer', side_effect=lambda *a: events.append('watchdog'), create=True), \
+                patch.object(M.os, '_exit') as exit_self, patch.object(M.os, 'getuid', return_value=0, create=True), \
+                patch.object(M.os, 'geteuid', return_value=0, create=True), \
+                patch.dict(M.os.environ, {'SUDO_UID': '1001'}), \
+                patch.object(M, 'PROXY_TOOL', Path(M.__file__)), patch.object(M.sys, 'argv', ['observer.py', 'root-proxy-snapshot']), \
+                patch.object(M.sys, 'stdin', stream), patch.object(M.sys, 'stdout', io.StringIO()), \
+                patch.object(M.time, 'monotonic_ns', return_value=1_000_000_000), \
+                patch.object(M, 'protected_tool'), patch.object(M, 'association_snapshot', return_value=state.data):
+            M.root_snapshot_main()
+            self.assertEqual(events, ['watchdog', 'read'])
+            stream.buffer.read.assert_called_once_with(32769)
+            install.call_args.args[1](14, None); exit_self.assert_called_once_with(124)
+
+    def test_root_probe_entrypoint_never_requests_launcher_or_association_authority(self):
+        request = dict(operation=M.PROBE_OPERATION, codeSha256='b' * 64)
+        out = io.StringIO()
+        with patch.object(M.signal, 'SIGALRM', 14, create=True), patch.object(M.signal, 'ITIMER_REAL', 0, create=True), \
+                patch.object(M.signal, 'signal'), patch.object(M.signal, 'setitimer', create=True), \
+                patch.object(M.os, 'getuid', return_value=0, create=True), patch.object(M.os, 'geteuid', return_value=0, create=True), \
+                patch.dict(M.os.environ, {'SUDO_UID': '1001'}), patch.object(M, 'PROXY_TOOL', Path(M.__file__)), \
+                patch.object(M.sys, 'argv', ['observer.py', 'root-inventory-probe']), \
+                patch.object(M.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(M.json.dumps(request).encode()))), \
+                patch.object(M.sys, 'stdout', out), patch.object(M, 'protected_tool') as code, \
+                patch.object(M, 'probe_request') as validate, patch.object(M, 'inventory_probe', return_value={'candidateCount': 0}) as probe, \
+                patch.object(M, 'root_request', side_effect=AssertionError('No launcher request')), \
+                patch.object(M, 'association_snapshot', side_effect=AssertionError('No association')):
+            M.root_snapshot_main()
+            validate.assert_called_once(); probe.assert_called_once_with(request)
+            self.assertEqual(code.call_count, 2)
+            self.assertEqual(M.json.loads(out.getvalue())['snapshot'], {'candidateCount': 0})
+
+    def test_private_instance_readback_replacement_and_size_are_guarded_without_writes(self):
+        # Real Linux fd/proc coverage is separate; this checks the held instance
+        # operand contract without creating a host runtime or invoking root.
+        state = self.fixture()
+        obj = M.PrivateInstance.__new__(M.PrivateInstance)
+        obj.original, obj.info = state.rows[10], state.info
+        obj.paths, obj.fds = [], [9]
+        obj.stamps = state.private['directories']
+        obj.expected = copy.deepcopy(state.private)
+        obj.expected['directories'] = state.private['directories']
+        info = state.private['infoIdentity']; pid = state.private['pidIdentity']
+        raw = b'public-info'
+        obj.info = {**state.info, 'sha256': M.hashlib.sha256(raw).hexdigest()}
+        obj.expected['infoSha256'] = obj.info['sha256']
+        with patch.object(M.ProxyAssociationProc, 'read_at', side_effect=[(raw, info), (b'10', pid)]):
+            self.assertEqual(obj.snapshot(), obj.expected)
+        with patch.object(M.ProxyAssociationProc, 'read_at', side_effect=[(raw, info), (b'99', pid)]):
+            with self.assertRaises(ValueError): obj.snapshot()
+
+    @unittest.skipUnless(sys.platform == 'linux' and os.getuid() == os.getgid(), 'Real Linux private-directory FD semantics')
+    def test_real_unix_private_instance_holds_exact_info_pid_and_refuses_same_byte_replacement(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(M, 'PROXY_UID', os.getuid()):
+            runtime = Path(folder).resolve() / 'runtime'; runtime.mkdir(mode=0o700)
+            parent = runtime / '.flatpak'; parent.mkdir(mode=0o700)
+            instance = parent / '123'; instance.mkdir(mode=0o700)
+            raw = b'fixed public instance info\n'
+            def create(name, body):
+                with os.fdopen(os.open(instance / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as stream:
+                    stream.write(body)
+            create('info', raw); create('pid', b'10')
+            info = dict(sha256=M.hashlib.sha256(raw).hexdigest(), fields=dict(instanceId='123'))
+            held = M.PrivateInstance(info, dict(pid=10), runtime)
+            try:
+                before = held.snapshot()
+                (instance / 'pid').rename(instance / 'retained-original-pid')
+                create('pid', b'10')
+                with self.assertRaises(ValueError): held.snapshot()
+                self.assertEqual((instance / 'info').read_bytes(), raw)
+                self.assertEqual(before['originalPid'], 10)
+            finally:
+                held.close()
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Real Linux own-proc metadata only')
+    def test_real_unix_own_proc_identity_is_stable_without_command_or_environment_reads(self):
+        with patch.object(M, 'PROXY_UID', os.getuid()):
+            first = M.root_process(os.getpid())
+            self.assertEqual(first, M.root_process(os.getpid()))
+        self.assertEqual(set(first), {'pid', 'parentPid', 'startTime', 'uids', 'executable'})
 
 
 class ProxyAssociationTests(unittest.TestCase):

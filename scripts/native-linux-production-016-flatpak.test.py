@@ -1,5 +1,6 @@
 """Pure controller/refusal tests. Never runs app, desktop, network or installer."""
 import ast
+import builtins
 import copy
 import gzip
 import hashlib
@@ -826,6 +827,422 @@ class WarmConsumedTerminalTests(unittest.TestCase):
             self.assertEqual(state.code, 0); self.assertFalse(session.launcher_keys[0]['outcomeVerified'])
 
 
+class RootInventoryPreflightTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self, change=None, failure=None):
+        names = ('scripts/native-linux-production-016-flatpak.py', 'scripts/native-linux-production-016-flatpak.test.py',
+                 'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py',
+                 'scripts/native-linux-flatpak-dialog-input.py', 'scripts/native-linux-flatpak-dialog-input.test.py',
+                 'scripts/native-unix-window.py', 'scripts/native-unix-window.test.py')
+        sources = {name: (HERE.parent / name).read_bytes() for name in names}
+        proof = dict(schemaVersion=1, profile=M.PROFILE, harnessSource='a' * 40,
+                     harnessFiles={name: pin(raw) for name, raw in sources.items()}, **M.GATES)
+        if change: change(proof)
+        state = SimpleNamespace(events=[], reports=[], proof=proof)
+        def execute(code, namespace):
+            builtins.exec(code, namespace)
+            state.module = SimpleNamespace(**namespace)
+            namespace['Path'] = lambda path: SimpleNamespace(resolve=lambda **options: '/usr/bin/python3.10')
+            namespace['protected_tool'] = Mock(side_effect=lambda digest: state.events.append('protected'))
+            namespace['root_process'] = Mock(return_value=dict(pid=19, parentPid=18, startTime='19',
+                uids=[1001] * 4, executable='/usr/bin/python3.10'))
+        def read_bound(file, expected, maximum):
+            state.events.append('bound'); raw = sources[file.relative_to(HERE.parent).as_posix()]
+            self.assertEqual(expected, pin(raw)); return raw
+        def exchange(tool, operation, raw, deadline):
+            state.events.append('root-worker')
+            self.assertEqual(operation, 'root-inventory-probe')
+            request = M.parse(raw)
+            data = dict(operation='flatpak-uid-inventory-probe-1001', complete=True, uid=1001, candidateCount=0,
+                        scopedProcessCount=2, caller=request['caller'],
+                        invocation=[dict(pid=21, parentPid=20, startTime='21', state='R', uids=[0] * 4),
+                                    dict(pid=20, parentPid=19, startTime='20', state='S', uids=[0] * 4)],
+                        readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
+            if failure == 'timeout':
+                error = TimeoutError(); error.root_proxy_diagnostic = dict(readOnly=True, inputPermitted=False,
+                    authorityGranted=False, releaseReady=False, cleanupUnconfirmed=True, exitObserved=False)
+                raise error
+            if failure == 'authority': data['authorityGranted'] = True
+            if failure == 'replay': request['nonce'] = 'd' * 64
+            return SimpleNamespace(returncode=0, stdout=M.json_bytes(dict(request=request, ok=True, snapshot=data)), stderr=b'')
+        with patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.os, 'geteuid', return_value=1001, create=True), \
+                patch.dict(M.os.environ, {**ENV, 'EXECUTION_REQUEST': M.REQUEST}, clear=True), \
+                patch.object(M.Path, 'exists', return_value=False), patch.object(M, 'regular', return_value=M.json_bytes(proof)), \
+                patch.object(M, 'bound', side_effect=read_bound) as bounded, \
+                patch.object(M, 'exec', side_effect=execute, create=True), patch.object(M, 'root_exchange', side_effect=exchange) as worker, \
+                patch.object(M, 'output', side_effect=lambda path, raw: state.reports.append((path, M.parse(raw)))):
+            state.worker, state.bounded = worker, bounded
+            yield state
+
+    def test_actual_preflight_operation_verifies_all_eight_sources_then_protected_worker_and_zero_proxy_receipt(self):
+        with self.fixture() as state:
+            root = Path('/fixed')
+            M.root_inventory_preflight(root)
+            self.assertEqual(state.events, ['bound'] * 8 + ['protected', 'root-worker', 'protected'])
+            path, report = state.reports[0]
+            self.assertEqual(path, root.parent / 'native-linux-flatpak-root-preflight.json')
+            self.assertTrue(report['inventoryProbed']); self.assertEqual(report['inventory']['candidateCount'], 0)
+            self.assertNotIn('proxy', report['inventory']); self.assertNotIn('tree', report['inventory'])
+            for name in (*M.GATES, 'inputPermitted', 'authorityGranted'): self.assertIs(report[name], False)
+
+    def test_unknown_missing_source_or_authority_flag_stops_before_any_sudo(self):
+        for change in (lambda p: p['harnessFiles'].pop('scripts/native-unix-window.py'),
+                       lambda p: p.update(harnessSource='b' * 40), lambda p: p.update(releaseReady=True),
+                       lambda p: p.update(extra=True)):
+            with self.fixture(change) as state:
+                with self.assertRaises(RuntimeError): M.root_inventory_preflight(Path('/fixed'))
+                state.worker.assert_not_called(); state.bounded.assert_not_called()
+
+    def test_expired_replayed_authorizing_or_unconfirmed_cleanup_probe_cannot_pass(self):
+        for failure in ('replay', 'authority', 'timeout'):
+            with self.subTest(failure=failure), self.fixture(failure=failure) as state:
+                with self.assertRaises((RuntimeError, ValueError, TimeoutError)): M.root_inventory_preflight(Path('/fixed'))
+                report = state.reports[0][1]
+                self.assertFalse(report['inventoryProbed']); self.assertFalse(report['releaseReady'])
+                if failure == 'timeout': self.assertTrue(report['workerCleanup']['cleanupUnconfirmed'])
+                self.assertEqual(state.worker.call_count, 1)
+
+    def test_inspect_only_existing_artifact_root_or_wrong_uid_never_enters_probe(self):
+        for field in ('request', 'root', 'uid'):
+            with self.subTest(field=field), self.fixture() as state:
+                with patch.dict(M.os.environ, {'EXECUTION_REQUEST': 'inspect-only'} if field == 'request' else {}), \
+                        patch.object(M.Path, 'exists', return_value=field == 'root'), \
+                        patch.object(M.os, 'getuid', return_value=21314 if field == 'uid' else 1001, create=True):
+                    with self.assertRaises(RuntimeError): M.root_inventory_preflight(Path('/fixed'))
+                state.worker.assert_not_called(); state.bounded.assert_not_called()
+
+    def test_main_routes_preflight_before_any_artifact_root_stat(self):
+        with patch.dict(M.os.environ, ENV, clear=True), patch.object(M.sys, 'platform', 'linux'), \
+                patch.object(M.platform, 'machine', return_value='x86_64'), \
+                patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.os, 'geteuid', return_value=1001, create=True), \
+                patch.object(M.sys, 'argv', ['controller.py', 'root-preflight']), patch.object(M, 'locations', return_value=Path('/fixed')), \
+                patch.object(M.Path, 'lstat', side_effect=AssertionError('Premature artifact-root access')), \
+                patch.object(M, 'root_inventory_preflight') as probe:
+            M.main(); probe.assert_called_once_with(Path('/fixed'))
+
+    def test_probe_failure_receipt_error_does_not_mask_original_and_no_runtime_is_created(self):
+        with self.fixture(failure='timeout'), patch.object(M, 'output', side_effect=OSError('fixed synthetic refusal')):
+            with self.assertRaises(TimeoutError) as raised: M.root_inventory_preflight(Path('/fixed'))
+            self.assertEqual(raised.exception.root_preflight_receipt_error, 'OSError')
+        source = Path(M.__file__).read_text()
+        node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == 'root_inventory_preflight')
+        code = ast.get_source_segment(source, node)
+        for forbidden in ('mkdir(', 'PROXY_RUNTIME', 'PrivateInstance', 'association_snapshot(', '.chmod(', 'makedirs('):
+            self.assertNotIn(forbidden, code)
+        workflow = (HERE.parent / M.WORKFLOW).read_text()
+        self.assertIn('${{ runner.temp }}/native-linux-flatpak-root-preflight.json', workflow)
+        self.assertIn('${{ runner.temp }}/native-linux-flatpak-root-source.json', workflow)
+
+    def test_root_probe_permission_failure_retains_only_typed_original_scan_metadata(self):
+        with self.fixture() as state:
+            result = SimpleNamespace(returncode=1, stderr=b'', stdout=M.json_bytes(
+                dict(ok=False, unavailable='PermissionError', stage='complete-uid-inventory', pid=925)))
+            with patch.object(M, 'root_exchange', return_value=result):
+                with self.assertRaises(RuntimeError): M.root_inventory_preflight(Path('/fixed'))
+            self.assertEqual(state.reports[0][1]['workerCleanup'], dict(readOnly=True, inputPermitted=False,
+                authorityGranted=False, releaseReady=False, type='PermissionError', stage='complete-uid-inventory', pid=925))
+
+    def test_probe_accepts_only_before_expiry_including_after_final_protected_source_check(self):
+        for delta in (-1, 0, 1, 'protected-check'):
+            with self.subTest(delta=delta), self.fixture() as state:
+                clock = [1_000_000_000]
+                exchange = state.worker.side_effect
+                def reply(*args):
+                    result = exchange(*args)
+                    clock[0] = M.parse(args[2])['expiresNs'] + (delta if type(delta) is int else -1)
+                    return result
+                state.worker.side_effect = reply
+                execute = M.exec.side_effect
+                def load(code, namespace):
+                    execute(code, namespace)
+                    protected = namespace['protected_tool']
+                    def recheck(digest):
+                        protected(digest)
+                        if delta == 'protected-check' and protected.call_count == 2:
+                            clock[0] = 5_000_000_000
+                    namespace['protected_tool'] = recheck
+                M.exec.side_effect = load
+                with patch.object(M.time, 'monotonic_ns', side_effect=lambda: clock[0]):
+                    if delta == -1:
+                        M.root_inventory_preflight(Path('/fixed'))
+                        self.assertTrue(state.reports[0][1]['inventoryProbed'])
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'probe expired'): M.root_inventory_preflight(Path('/fixed'))
+                        self.assertFalse(state.reports[0][1]['inventoryProbed'])
+                self.assertEqual(state.worker.call_count, 1)
+
+
+class RootWorkerExchangeTests(unittest.TestCase):
+    @contextmanager
+    def child(self, *, running=False, overflow=None, closed_after=None, read_failure=False, eof=True, poll_advance=0.0):
+        class Stream:
+            def __init__(self, fd): self.fd, self.closed = fd, False
+            def fileno(self): return self.fd
+            def close(self): self.closed = True
+        state = SimpleNamespace(clock=0.0, reads={1: 0, 2: 0}, submitted=bytearray())
+        child = SimpleNamespace(stdin=Stream(0), stdout=Stream(1), stderr=Stream(2), args=['fixed'],
+                                returncode=None if running else 0,
+                                kill=Mock(side_effect=PermissionError()), wait=Mock(side_effect=AssertionError('Unbounded wait')),
+                                terminate=Mock(side_effect=PermissionError()))
+        state.child = child
+        def poll():
+            state.clock += poll_advance
+            if closed_after is not None and child.stdin.closed and state.clock >= closed_after:
+                child.returncode = 124
+            return child.returncode
+        child.poll = Mock(side_effect=poll)
+        def selected(readers, writers, exceptional, timeout):
+            state.clock += max(.001, timeout)
+            return readers, writers, []
+        def read(fd, amount):
+            if read_failure: raise PermissionError()
+            if not eof: raise BlockingIOError()
+            state.reads[fd] += 1
+            raw = (b'x' * 40000 if overflow == 'stdout' else b'{}') if fd == 1 else (b'e' * 3000 if overflow == 'stderr' else b'')
+            position = (state.reads[fd] - 1) * 4096
+            return raw[position:position + amount]
+        def write(fd, raw):
+            self.assertEqual(fd, 0); state.submitted.extend(raw); return len(raw)
+        with patch.object(M.subprocess, 'Popen', return_value=child) as launch, \
+                patch.object(M.os, 'set_blocking', create=True) as blocking, patch.object(M.os, 'read', side_effect=read), \
+                patch.object(M.os, 'write', side_effect=write), patch.object(M.select, 'select', side_effect=selected), \
+                patch.object(M.time, 'monotonic', side_effect=lambda: state.clock), patch.object(M, 'ROOT_WORKERS_UNKNOWN', []):
+            state.launch, state.blocking = launch, blocking
+            yield state
+            child.kill.assert_not_called(); child.terminate.assert_not_called(); child.wait.assert_not_called()
+
+    def test_fixed_isolated_command_drains_and_observes_exit_without_signal_or_wait(self):
+        with self.child() as state:
+            result = M.root_exchange(Path('/protected/observer.py'), 'root-proxy-snapshot', b'fixed-request', 1)
+            self.assertEqual((result.stdout, result.stderr, result.returncode), (b'{}', b'', 0))
+            self.assertEqual(state.submitted, b'fixed-request')
+            argv, options = state.launch.call_args.args[0], state.launch.call_args.kwargs
+            self.assertEqual(argv, ['/usr/bin/sudo', '-n', '--', '/usr/bin/python3', '-I', '-S', '-B',
+                                    str(Path('/protected/observer.py')), 'root-proxy-snapshot'])
+            self.assertEqual(options['env'], dict(PATH='/usr/bin:/bin', LANG='C.UTF-8', LC_ALL='C.UTF-8'))
+            self.assertTrue(options['start_new_session']); self.assertTrue(options['close_fds'])
+            self.assertEqual(state.blocking.call_count, 3)
+            self.assertTrue(all(stream.closed for stream in (state.child.stdin, state.child.stdout, state.child.stderr)))
+
+    def test_timeout_root_kill_eperm_cannot_enter_unbounded_wait_and_cleanup_unknown_blocks_input(self):
+        with self.child(running=True, eof=False) as state:
+            with self.assertRaises(TimeoutError) as raised:
+                M.root_exchange(Path('/protected/observer.py'), 'root-proxy-snapshot', b'fixed-request', .1)
+            value = raised.exception.root_proxy_diagnostic
+            self.assertLess(state.clock, .4)
+            self.assertIs(value['exitObserved'], False); self.assertIs(value['cleanupUnconfirmed'], True)
+            for key in ('inputPermitted', 'authorityGranted', 'releaseReady'): self.assertIs(value[key], False)
+            self.assertEqual(M.ROOT_WORKERS_UNKNOWN, [state.child])
+            adapter = RootProxySnapshotTests().fixture().adapter
+            with patch.object(M, 'root_exchange', side_effect=raised.exception):
+                with self.assertRaises(TimeoutError): adapter([])
+            self.assertTrue(adapter.blocked)
+
+    def test_timeout_may_observe_own_worker_exit_but_still_refuses_and_never_retries(self):
+        with self.child(running=True, closed_after=.15) as state:
+            with self.assertRaises(TimeoutError) as raised:
+                M.root_exchange(Path('/protected/observer.py'), 'root-inventory-probe', b'fixed-request', .1)
+            value = raised.exception.root_proxy_diagnostic
+            self.assertTrue(value['exitObserved']); self.assertFalse(value['cleanupUnconfirmed'])
+            self.assertEqual(M.ROOT_WORKERS_UNKNOWN, [])
+
+    def test_both_pipe_eofs_without_observed_worker_exit_remains_unknown(self):
+        with self.child(running=True) as state:
+            with self.assertRaises(TimeoutError) as raised:
+                M.root_exchange(Path('/protected/observer.py'), 'root-inventory-probe', b'fixed-request', .1)
+            value = raised.exception.root_proxy_diagnostic
+            self.assertTrue(value['stdoutEof']); self.assertTrue(value['stderrEof'])
+            self.assertFalse(value['exitObserved']); self.assertTrue(value['cleanupUnconfirmed'])
+
+    def test_complete_response_at_or_after_exchange_deadline_refuses_but_just_before_passes(self):
+        for deadline, poll_advance, accepted in ((.03, 0, False), (.03, .001, False), (.040000001, 0, True)):
+            with self.subTest(deadline=deadline, poll_advance=poll_advance), self.child(poll_advance=poll_advance) as state:
+                if accepted:
+                    result = M.root_exchange(Path('/protected/observer.py'), 'root-proxy-snapshot', b'fixed-request', deadline)
+                    self.assertEqual(result.returncode, 0); self.assertEqual(state.clock, .04)
+                    self.assertAlmostEqual(deadline - state.clock, 1e-9, places=15)
+                else:
+                    with self.assertRaises(TimeoutError) as raised:
+                        M.root_exchange(Path('/protected/observer.py'), 'root-proxy-snapshot', b'fixed-request', deadline)
+                    self.assertGreaterEqual(state.clock, deadline)
+                    self.assertFalse(raised.exception.root_proxy_diagnostic['inputPermitted'])
+
+    def test_pipe_overflow_or_read_failure_keeps_original_error_with_bounded_cleanup(self):
+        for failure in ('stdout', 'stderr', 'read'):
+            with self.subTest(failure=failure), self.child(overflow=failure, read_failure=failure == 'read') as state:
+                with self.assertRaises((RuntimeError, PermissionError)) as raised:
+                    M.root_exchange(Path('/protected/observer.py'), 'root-proxy-snapshot', b'fixed-request', 1)
+                self.assertLess(state.clock, 1.3)
+                self.assertIn('cleanupUnconfirmed', raised.exception.root_proxy_diagnostic)
+                self.assertEqual(state.launch.call_count, 1)
+
+    def test_exchange_never_uses_run_context_manager_kill_or_unbounded_wait(self):
+        source = ast.get_source_segment(Path(M.__file__).read_text(), next(n for n in ast.parse(Path(M.__file__).read_text()).body
+            if isinstance(n, ast.FunctionDef) and n.name == 'root_exchange'))
+        for forbidden in ('subprocess.run', 'with subprocess', '.wait(', '.kill(', '.terminate(', 'os.kill(', '.communicate('):
+            self.assertNotIn(forbidden, source)
+
+
+class RootProxySnapshotTests(unittest.TestCase):
+    def fixture(self):
+        module = SimpleNamespace(PROXY_RUNTIME=Path('/fixed/runtime'), PROXY_TOOL=Path('/protected/observer.py'),
+            protected_tool=Mock(), root_request=Mock(), validate_association=Mock())
+        capture = SimpleNamespace(budget=Mock(), transcript=SimpleNamespace(deadline=M.time.monotonic() + 10))
+        original, client = {'pid': 10}, {'pid': 14}
+        with patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.os, 'geteuid', return_value=1001, create=True):
+            adapter = M.RootProxySnapshot(module, Path('/fixed'), 'a' * 40, 'b' * 64, original, client, capture,
+                                         dict(appCommit='c' * 64, runtimeCommit='d' * 64))
+        data = dict(complete=True, flatpakInfo=dict(fields=dict(appCommit='c' * 64, runtimeCommit='d' * 64)))
+        def run(tool, operation, raw, deadline):
+            request = M.parse(raw)
+            return SimpleNamespace(returncode=0, stderr=b'', stdout=M.json_bytes(dict(request=request, ok=True, snapshot=data)))
+        return SimpleNamespace(adapter=adapter, module=module, capture=capture, run=run, data=data)
+
+    def test_fixed_protected_python_snapshot_reply_and_installed_commits(self):
+        state = self.fixture()
+        with patch.object(M, 'root_exchange', side_effect=state.run) as run:
+            self.assertEqual(state.adapter([{'pid': 14}]), state.data)
+        tool, operation, raw, deadline = run.call_args.args
+        self.assertEqual((tool, operation), (state.module.PROXY_TOOL, 'root-proxy-snapshot'))
+        request = M.parse(raw)
+        self.assertLessEqual(request['expiresNs'] - M.time.monotonic_ns(), 4 * 10**9)
+        self.assertEqual(deadline, request['expiresNs'] / 10**9)
+        state.module.protected_tool.assert_has_calls([unittest.mock.call('b' * 64), unittest.mock.call('b' * 64)])
+        self.assertEqual(state.adapter.sequence, 2)
+
+    def test_replayed_wrong_source_nonce_or_sequence_never_unblocks_retry(self):
+        for field in ('nonce', 'sequence', 'harnessSource', 'codeSha256'):
+            state = self.fixture()
+            def run(*args):
+                result = state.run(*args)
+                value = M.parse(result.stdout); value['request'][field] = 99 if field == 'sequence' else '0' * 64
+                result.stdout = M.json_bytes(value); return result
+            with patch.object(M, 'root_exchange', side_effect=run) as child:
+                with self.assertRaises(RuntimeError): state.adapter([])
+                with self.assertRaisesRegex(RuntimeError, 'cannot be retried'): state.adapter([])
+                self.assertEqual(child.call_count, 1)
+
+    def test_unknown_timeout_incomplete_or_wrong_installed_commit_remains_blocked(self):
+        for failure in ('timeout', 'incomplete', 'wrong-runtime', 'stderr', 'oversize'):
+            state = self.fixture()
+            if failure == 'incomplete': state.module.validate_association.side_effect = ValueError()
+            if failure == 'wrong-runtime': state.data['flatpakInfo']['fields']['runtimeCommit'] = 'e' * 64
+            def run(*args):
+                if failure == 'timeout': raise TimeoutError()
+                result = state.run(*args)
+                if failure == 'stderr': result.stderr = b'refused'
+                if failure == 'oversize': result.stdout = b'x' * 32769
+                return result
+            with patch.object(M, 'root_exchange', side_effect=run):
+                with self.assertRaises((RuntimeError, ValueError, TimeoutError)): state.adapter([])
+            self.assertTrue(state.adapter.blocked)
+
+    def test_nonfinite_uid_and_runtime_never_start_a_root_child(self):
+        state = self.fixture()
+        with patch.object(M.os, 'getuid', return_value=21314, create=True), patch.object(M.os, 'geteuid', return_value=21314, create=True):
+            with self.assertRaisesRegex(RuntimeError, 'UID1001'):
+                M.RootProxySnapshot(state.module, Path('/fixed'), 'a' * 40, 'b' * 64, {}, {}, state.capture,
+                                    dict(appCommit='c' * 64, runtimeCommit='d' * 64))
+
+    def test_association_response_expiry_recheck_blocks_boundary_and_expired_without_retry(self):
+        for delta, accepted in ((-1, True), (0, False), (1, False)):
+            state = self.fixture()
+            clock = [1_000_000_000]
+            state.capture.transcript.deadline = 15
+            def run(*args):
+                result = state.run(*args)
+                clock[0] = M.parse(args[2])['expiresNs'] + delta
+                return result
+            with self.subTest(delta=delta), patch.object(M.time, 'monotonic_ns', side_effect=lambda: clock[0]), \
+                    patch.object(M, 'root_exchange', side_effect=run) as worker:
+                if accepted:
+                    self.assertEqual(state.adapter([]), state.data)
+                    self.assertFalse(state.adapter.blocked); self.assertEqual(state.adapter.sequence, 2)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'snapshot expired'): state.adapter([])
+                    self.assertTrue(state.adapter.blocked); self.assertEqual(state.adapter.sequence, 1)
+                    with self.assertRaisesRegex(RuntimeError, 'cannot be retried'): state.adapter([])
+                    self.assertEqual(worker.call_count, 1)
+
+    def test_final_protected_source_recheck_cannot_carry_association_past_expiry(self):
+        state = self.fixture(); clock = [1_000_000_000]
+        state.capture.transcript.deadline = 15
+        def protected(_):
+            if state.module.protected_tool.call_count == 2:
+                clock[0] = 5_000_000_000
+        state.module.protected_tool.side_effect = protected
+        with patch.object(M.time, 'monotonic_ns', side_effect=lambda: clock[0]), patch.object(M, 'root_exchange', side_effect=state.run):
+            with self.assertRaisesRegex(RuntimeError, 'snapshot expired'): state.adapter([])
+        self.assertTrue(state.adapter.blocked); self.assertEqual(state.adapter.sequence, 1)
+
+    def test_root_refusal_retains_only_same_read_numeric_pid_fixed_stage_and_type(self):
+        state = self.fixture()
+        answer = dict(ok=False, unavailable='PermissionError', stage='complete-uid-inventory', pid=925)
+        result = SimpleNamespace(returncode=1, stderr=b'', stdout=M.json_bytes(answer))
+        with patch.object(M, 'root_exchange', return_value=result) as child:
+            with self.assertRaises(RuntimeError) as raised: state.adapter([])
+        value = raised.exception.root_proxy_diagnostic
+        self.assertEqual(value, dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False,
+                                    type='PermissionError', stage='complete-uid-inventory', pid=925))
+        self.assertTrue(state.adapter.blocked); child.assert_called_once()
+
+    def test_terminal_attribution_requires_bound_association_validator_not_fake_ancestry(self):
+        spec = importlib.util.spec_from_file_location('association_wire_test', HERE / 'native-linux-flatpak-activation-observer.py')
+        observer = importlib.util.module_from_spec(spec); spec.loader.exec_module(observer)
+        fixture = LauncherKeyboardTests()
+        original = fixture.process(10, 9, '/usr/bin/bwrap')
+        parent = fixture.process(13, 10, '/usr/bin/bwrap')
+        parent['image'] = copy.deepcopy(original['image'])
+        client = fixture.process(14, 13, '/app/bin/creator-hub-flatpak-activate')
+        proxy = fixture.process(12, 99, '/usr/bin/xdg-dbus-proxy')
+        tree = [client, parent, original]
+        association = dict(complete=True, uid=1001, candidateCount=1, scopedProcessCount=8, original=original,
+            client=client, tree=tree, proxy=proxy, flatpakInfo=dict(sha256='e' * 64,
+                fields=dict(app='com.creatorworks.hub', instanceId='123', appCommit='c' * 64, runtimeCommit='d' * 64)),
+            privateInstance=dict(instanceId='123', infoSha256='e' * 64, originalPid=10,
+                directories=[[1, n, stat.S_IFDIR | 0o700, 1001, 1001, 2] for n in (1, 2, 3)],
+                infoIdentity=[1, 2, stat.S_IFREG | 0o644, 1001, 1001, 1, 200, 5, 6],
+                pidIdentity=[1, 3, stat.S_IFREG | 0o644, 1001, 1001, 1, 2, 5, 6]),
+            pipes=[dict(appPid=13, appFd=30, proxyFd=32, inode=29948)])
+        owner = dict(name=':1.30', pid=40)
+        call = dict(kind=1, sender=':1.40', destination=M.NAME, serial=1, replySerial=0, flags=0, empty=True,
+                    path='/com/creatorworks/hub/Host', interface='com.creatorworks.hub.Host1', member='Start')
+        reply = dict(kind=2, sender=owner['name'], destination=call['sender'], serial=2, replySerial=1, flags=1, empty=True)
+        sender = dict(qualified=False, inputPermitted=False, stable=True, sealedBeforeInput=True, correlatesToOriginalPopen=True,
+            peer=dict(name=':1.40', pid=12, uid=1001), originalPopen=M.proxy_process_snapshot(original),
+            expectedClient=M.proxy_process_snapshot(client), senderAncestors=[M.proxy_process_snapshot(proxy)],
+            clientAncestors=[M.proxy_process_snapshot(r) for r in tree], externalAssociation=association)
+        value = {k: True for k in ('readOnly', 'armed', 'inputStarted', 'workerStopped', 'busIdentityMatched', 'closed', 'callReplyMatched')}
+        value.update({k: False for k in ('qualified', 'inputPermitted', 'authorityGranted', 'releaseReady', 'deadlineExceeded')})
+        value.update(messageCount=2, call=call, reply=reply, senderObservation=sender, observedHeaders=[call, reply])
+        record = dict(observation=value)
+        M.attributed_warm_activation(record, client, original, owner, association_validator=observer.validate_association)
+        with self.assertRaises(RuntimeError): M.attributed_warm_activation(record, client, original, owner)
+        for change in (lambda r: r['observation']['senderObservation']['externalAssociation'].update(complete=False),
+                       lambda r: r['observation']['senderObservation']['peer'].update(pid=99),
+                       lambda r: r['observation']['senderObservation']['externalAssociation']['pipes'][0].update(appPid=99),
+                       lambda r: r['observation']['senderObservation'].pop('externalAssociation')):
+            changed = copy.deepcopy(record); change(changed)
+            with self.assertRaises((RuntimeError, ValueError)):
+                M.attributed_warm_activation(changed, client, original, owner, association_validator=observer.validate_association)
+
+    def test_workflow_installs_only_bound_observer_and_runs_real_root_probe_before_collection(self):
+        text = (HERE.parent / '.github/workflows/native-linux-production-016-flatpak.yml').read_text()
+        root = '/var/lib/creator-hub-flatpak-proxy-observer'
+        self.assertEqual(text.count('sudo /usr/bin/mkdir -m 0755 ' + root), 1)
+        self.assertEqual(text.count('sudo /usr/bin/install -o root -g root -m 0444 scripts/native-linux-flatpak-activation-observer.py'), 1)
+        self.assertLess(text.index('await lane.collectHarness'), text.index('sudo /usr/bin/mkdir'))
+        self.assertLess(text.index('sudo /usr/bin/install'), text.index('flatpak.py root-preflight'))
+        self.assertLess(text.index('flatpak.py root-preflight'), text.index('await lane.collect('))
+        self.assertIn("if: inputs.execution_request == '" + M.REQUEST + "'", text[:text.index('await lane.collectHarness')])
+        self.assertIn('result.testsRun == 2 and not result.skipped and result.wasSuccessful()', text)
+        self.assertIn('test_real_unix_private_instance_holds_exact_info_pid_and_refuses_same_byte_replacement', text)
+        self.assertIn('test_real_unix_own_proc_identity_is_stable_without_command_or_environment_reads', text)
+        self.assertLess(text.index('result.testsRun == 2'), text.index('await lane.collect('))
+        self.assertNotIn('mkdir -p ' + root, text)
+        self.assertNotIn('sudo python3 scripts/native-linux-flatpak-activation-observer.py', text)
+
+
 class WarmLineageWiringTests(unittest.TestCase):
     def test_refused_proxy_capture_reuses_bound_operands_and_checks_both_existing_guards(self):
         session = object.__new__(M.Session)
@@ -927,30 +1344,33 @@ class WarmLineageWiringTests(unittest.TestCase):
                 self.assertEqual(refused['record']['observation']['callbackMessages'], 0)
                 self.assertEqual(system.close.call_count, 2)
                 system.snapshot = lambda: (copy.deepcopy(rows[12]['image']), rows[12]['kernelImageSha256'])
-                # Only the already-refused zero-candidate path may run the read-only extra capture.
+                # No descendant proxy now requires the separate finite root adapter;
+                # refusal there cannot fall back to incomplete unprivileged evidence.
                 proxy = tree.pop(12)
                 connections_before = len(connections)
+                session.review = {'flatpak': {'commit': 'c' * 64}}
                 for broken in (False, True):
-                    evidence = dict(readOnly=True, qualified=False, inputPermitted=False, authorityGranted=False,
-                                    releaseReady=False, complete=True, associationObserved=True)
-                    with patch.object(M.Session, 'capture_refused_proxy_association',
-                                      side_effect=RuntimeError('PRIVATE DIAGNOSTIC') if broken else None,
-                                      return_value=evidence) as diagnostic:
-                        refused = M.Session.start_warm_activation_diagnostic(session, rows[14], attempt)
-                    diagnostic.assert_called_once()
-                    self.assertEqual(refused['record']['unavailable'], 'ValueError')
-                    self.assertEqual(refused['record']['setupFailureStage'], 'pre-input-lineage-create')
-                    self.assertEqual(refused['record']['preInputBaseline']['failureStage'], 'candidate-count')
+                    installed = dict(ref=M.REF, runtime=M.RUNTIME, commit='c' * 64, runtimeCommit='d' * 64)
+                    with patch.object(M.Session, 'capture_refused_proxy_association') as diagnostic, \
+                            patch.object(M, 'regular', return_value=M.json_bytes(installed)), \
+                            patch.object(M, 'RootProxySnapshot', side_effect=ValueError('PRIVATE ROOT REFUSAL') if broken
+                                         else TimeoutError('PRIVATE ROOT DEADLINE')) as adapter:
+                        # Keep the independently bound source inventory for its initial read.
+                        def regular(path, *_):
+                            return M.json_bytes(installed) if path.name == 'installed-flatpak.json' else M.json_bytes(binding)
+                        with patch.object(M, 'regular', side_effect=regular):
+                            refused = M.Session.start_warm_activation_diagnostic(session, rows[14], attempt)
+                    diagnostic.assert_not_called(); adapter.assert_called_once()
+                    self.assertEqual(refused['record']['unavailable'], 'ValueError' if broken else 'TimeoutError')
+                    self.assertEqual(refused['record']['setupFailureStage'], 'external-instance-admission')
+                    self.assertEqual(refused['record']['preInputBaseline']['candidateCount'], 0)
                     self.assertIsNone(refused['capture'].baseline)
                     M.Session.finish_warm_activation_diagnostic(session, refused)
                     self.assertFalse(refused['record']['observation']['armed'])
                     self.assertFalse(refused['record']['observation']['inputStarted'])
                     self.assertEqual(len(connections), connections_before)
-                    self.assertNotIn('PRIVATE DIAGNOSTIC', M.json_bytes(refused['record']).decode())
-                    if broken:
-                        self.assertEqual(refused['record']['externalProxyDiagnostic']['unavailable'], 'RuntimeError')
-                    else:
-                        self.assertEqual(refused['record']['externalProxyDiagnostic'], evidence)
+                    self.assertNotIn('PRIVATE ROOT', M.json_bytes(refused['record']).decode())
+                    self.assertNotIn('externalProxyDiagnostic', refused['record'])
                 tree[12] = proxy
                 def arm_refusal(*_): raise ValueError('PRIVATE ARM ERROR')
                 gio.DBusConnection.new_for_address_sync = arm_refusal
@@ -961,7 +1381,8 @@ class WarmLineageWiringTests(unittest.TestCase):
                 M.Session.finish_warm_activation_diagnostic(session, refused)
                 self.assertNotIn('PRIVATE ARM ERROR', M.json_bytes(refused['record']).decode())
             self.assertCountEqual(closed, opened)
-            self.assertTrue(all(item.close.call_count == 1 for item in held)); self.assertEqual(system.close.call_count, 5)
+            self.assertTrue(all(item.close.call_count == 1 for item in held))
+            self.assertEqual(system.close.call_count, 3)  # Both external-adapter refusals precede image opening.
 
 
 class LauncherReadinessDiagnosticTests(unittest.TestCase):
@@ -1805,7 +2226,7 @@ class ControllerTests(unittest.TestCase):
         self.assertLess(workflow.index('.cjs preflight'), workflow.index('await lane.collect('))
         self.assertLess(workflow.index('.py stage'), workflow.index('cargo install tauri-driver'))
         self.assertLess(workflow.index('.py stage'), workflow.index('.py session'))
-        self.assertEqual(workflow.count("if: inputs.execution_request == '" + M.REQUEST + "'"), 4)
+        self.assertEqual(workflow.count("if: inputs.execution_request == '" + M.REQUEST + "'"), 6)
         self.assertEqual(workflow.count('dtolnay/rust-toolchain@1.99.0'), 1)
         self.assertLess(workflow.index('dtolnay/rust-toolchain@1.99.0'), workflow.index('.py stage'))
         self.assertNotIn('--no-install-recommends minisign', workflow)

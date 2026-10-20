@@ -10,7 +10,10 @@ import configparser
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
+import select
+import signal
 import stat
 import sys
 import threading
@@ -20,6 +23,11 @@ NAME = 'com.creatorworks.hub.Host'
 PATH = '/com/creatorworks/hub/Host'
 INTERFACE = 'com.creatorworks.hub.Host1'
 SECONDS, MAX_MESSAGES, MAX_PENDING, MAX_ANCESTORS, MAX_OUTPUT = 15, 64, 8, 12, 32768
+PROXY_TOOL = Path('/var/lib/creator-hub-flatpak-proxy-observer/observer.py')
+PROXY_RUNTIME = Path('/home/runner/work/_temp/native-linux-production-016-flatpak/runtime')
+PROXY_UID = 1001
+ROOT_WORKER_SECONDS = 5
+PROBE_OPERATION = 'flatpak-uid-inventory-probe-1001'
 
 
 def require(value):
@@ -549,6 +557,368 @@ def proxy_association_diagnostic(original, client, tree, read, *, image_open, sy
                     complete=False, associationObserved=False, unavailable='OutputLimit')
 
 
+class PrivateInstance:
+    """Hold only the fixed CI runtime's instance directories and public identity files."""
+    def __init__(self, info, original, runtime=PROXY_RUNTIME):
+        require(type(runtime) is Path or isinstance(runtime, Path))
+        self.fds, self.stamps, self.runtime = [], [], runtime
+        try:
+            instance = info['fields']['instanceId']
+            require(re.fullmatch(r'[0-9]{1,20}', instance))
+            paths = (runtime, runtime / '.flatpak', runtime / '.flatpak' / instance)
+            for path in paths:
+                before = path.lstat()
+                require(path.resolve(strict=True) == path and stat.S_ISDIR(before.st_mode)
+                        and before.st_uid == before.st_gid == PROXY_UID and not before.st_mode & 0o7022)
+                require(path != runtime or stat.S_IMODE(before.st_mode) == 0o700)
+                fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                self.fds.append(fd); self.stamps.append(ProxyAssociationProc.stamp(before))
+                require(ProxyAssociationProc.stamp(os.fstat(fd)) == self.stamps[-1])
+            self.paths, self.info, self.original = paths, copy.deepcopy(info), copy.deepcopy(original)
+            self.expected = self.snapshot()
+        except Exception:
+            self.close(); raise
+
+    def snapshot(self):
+        for path, fd, stamp in zip(self.paths, self.fds, self.stamps):
+            # Directory timestamps can change as Flatpak manages other instances;
+            # directory identity/permissions, not unrelated child churn, are held.
+            for current in (os.fstat(fd), path.lstat()):
+                require(ProxyAssociationProc.stamp(current)[:7] == stamp[:7])
+        raw, info_stamp = ProxyAssociationProc.read_at(self.fds[-1], 'info', 65536, sized=True)
+        pid, pid_stamp = ProxyAssociationProc.read_at(self.fds[-1], 'pid', 32, sized=True)
+        for stamp in (info_stamp, pid_stamp):
+            require(stamp[3] == stamp[4] == PROXY_UID and stamp[5] == 1 and not stamp[2] & 0o7022)
+        require(pid == str(self.original['pid']).encode() and hashlib.sha256(raw).hexdigest() == self.info['sha256'])
+        value = dict(instanceId=self.info['fields']['instanceId'], infoSha256=self.info['sha256'],
+                     originalPid=self.original['pid'], directories=[list(s[:6]) for s in self.stamps],
+                     infoIdentity=list(info_stamp), pidIdentity=list(pid_stamp))
+        if hasattr(self, 'expected'):
+            require(value == self.expected)
+        return value
+
+    def close(self):
+        for fd in self.fds:
+            os.close(fd)
+        self.fds = []
+
+
+def root_request(value, now):
+    require(type(value) is dict and set(value) == {'schemaVersion', 'operation', 'harnessSource', 'codeSha256',
+            'sequence', 'nonce', 'expiresNs', 'original', 'client', 'tree'}
+            and type(value['schemaVersion']) is int and value['schemaVersion'] == 1
+            and value['operation'] == 'flatpak-proxy-snapshot-uid1001'
+            and type(value['sequence']) is int and 1 <= value['sequence'] <= 3
+            and type(value['expiresNs']) is int and now < value['expiresNs'] <= now + ROOT_WORKER_SECONDS * 10**9
+            and re.fullmatch(r'[a-f0-9]{40}', value['harnessSource'])
+            and all(type(value[k]) is str and re.fullmatch(r'[a-f0-9]{64}', value[k]) for k in ('nonce', 'codeSha256')))
+    for row in (value['original'], value['client']):
+        OwnedLineage.validate(row); require(row['uids'] == [PROXY_UID] * 4)
+    require(value['original']['executable'] == '/usr/bin/bwrap'
+            and value['client']['executable'] == '/app/bin/creator-hub-flatpak-activate'
+            and type(value['tree']) is list and 1 < len(value['tree']) <= MAX_ANCESTORS
+            and len({r['pid'] for r in value['tree']}) == len(value['tree']))
+    for row in value['tree']:
+        OwnedLineage.validate(row); require(row['uids'] == [PROXY_UID] * 4)
+    require(value['tree'][0] == value['client'] and value['tree'][-1] == value['original'])
+    for child, parent in zip(value['tree'], value['tree'][1:]):
+        require(child['parentPid'] == parent['pid'] and parent['executable'] == '/usr/bin/bwrap'
+                and int(parent['startTime']) <= int(child['startTime'])
+                and parent['image'] == value['original']['image']
+                and parent['kernelImageSha256'] == value['original']['kernelImageSha256'])
+
+
+def root_process(pid, full=False):
+    """Read kernel proc identity only; no cmdline, environment or candidate imports."""
+    require(type(pid) is int and 1 < pid < 2**31)
+    directory = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        def identity():
+            raw, _ = ProxyAssociationProc.read_at(directory, 'stat', 4096)
+            status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
+            text = raw.decode('utf-8'); tail = text[text.rfind(')') + 2:].split()
+            require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and tail[0] not in ('Z', 'X'))
+            ids = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
+            require(len(ids) == 1 and [int(x) for x in ids[0]] == [PROXY_UID] * 4)
+            return dict(pid=pid, parentPid=int(tail[1]), startTime=tail[19], uids=[PROXY_UID] * 4)
+        before = identity()
+        executable = os.readlink('exe', dir_fd=directory)
+        require(0 < len(executable) <= 4096 and not executable.endswith(' (deleted)'))
+        if not full:
+            require(identity() == before and os.readlink('exe', dir_fd=directory) == executable)
+            return {**before, 'executable': executable}
+        require(executable in ('/usr/bin/bwrap', '/usr/bin/xdg-dbus-proxy', '/app/bin/creator-hub-flatpak-activate'))
+        image_fd = os.open('exe', os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+        try:
+            image = os.fstat(image_fd)
+            require(stat.S_ISREG(image.st_mode) and image.st_nlink > 0 and 0 < image.st_size <= 64 * 1024**2)
+            digest, size = hashlib.sha256(), 0
+            while chunk := os.read(image_fd, 65536):
+                size += len(chunk); require(size <= image.st_size); digest.update(chunk)
+            require(size == image.st_size and ProxyAssociationProc.stamp(os.fstat(image_fd)) == ProxyAssociationProc.stamp(image)
+                    and ProxyAssociationProc.stamp(os.stat('exe', dir_fd=directory)) == ProxyAssociationProc.stamp(image)
+                    and identity() == before and os.readlink('exe', dir_fd=directory) == executable)
+            keys = ('st_dev', 'st_ino', 'st_size', 'st_mode', 'st_uid', 'st_gid', 'st_mtime_ns', 'st_ctime_ns')
+            return {**before, 'executable': executable, 'image': {k: str(getattr(image, k)) for k in keys},
+                    'kernelImageSha256': digest.hexdigest()}
+        finally:
+            os.close(image_fd)
+    except Exception as error:
+        error.proxy_snapshot_pid = pid
+        raise
+    finally:
+        os.close(directory)
+
+
+def root_uid_tuple(pid):
+    directory = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
+        ids = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
+        require(len(ids) == 1)
+        result = [int(v) for v in ids[0]]
+        require(all(0 <= uid < 2**31 for uid in result))
+        return result
+    finally:
+        os.close(directory)
+
+
+def complete_uid_inventory(budget):
+    def scan():
+        rows, count = {}, 0
+        with os.scandir('/proc') as entries:
+            for entry in entries:
+                if not re.fullmatch(r'[1-9][0-9]{0,9}', entry.name):
+                    continue
+                count += 1; budget(); require(count <= ProxyAssociationProc.MAX_PIDS)
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                    require(stat.S_ISDIR(info.st_mode))
+                    # proc_pid(5): non-dumpable processes' proc entries can be root-owned.
+                    ids = root_uid_tuple(int(entry.name))
+                    if PROXY_UID in ids:
+                        require(ids == [PROXY_UID] * 4)
+                        rows[int(entry.name)] = root_process(int(entry.name))
+                except Exception as error:
+                    error.proxy_snapshot_pid = int(entry.name)
+                    raise
+        return rows
+    first = scan(); proxies = sorted(pid for pid, row in first.items() if row['executable'] == '/usr/bin/xdg-dbus-proxy')
+    require(len(proxies) <= 4)
+    require(scan() == first)  # No skipped, opaque, zombie or disappeared process is adopted.
+    return proxies, first
+
+
+def complete_proxy_inventory(budget):
+    proxies, rows = complete_uid_inventory(budget)
+    require(0 < len(proxies) <= 4)
+    return proxies, rows
+
+
+def probe_request(value, now):
+    require(type(value) is dict and set(value) == {'schemaVersion', 'operation', 'harnessSource', 'codeSha256',
+            'sequence', 'nonce', 'expiresNs', 'caller'}
+            and type(value['schemaVersion']) is int and value['schemaVersion'] == 1
+            and value['operation'] == PROBE_OPERATION and type(value['sequence']) is int and value['sequence'] == 1
+            and type(value['expiresNs']) is int and now < value['expiresNs'] <= now + ROOT_WORKER_SECONDS * 10**9
+            and type(value['harnessSource']) is str and re.fullmatch(r'[a-f0-9]{40}', value['harnessSource'])
+            and all(type(value[k]) is str and re.fullmatch(r'[a-f0-9]{64}', value[k]) for k in ('nonce', 'codeSha256')))
+    row = value['caller']
+    require(type(row) is dict and set(row) == {'pid', 'parentPid', 'startTime', 'uids', 'executable'}
+            and type(row['pid']) is int and 1 < row['pid'] < 2**31
+            and type(row['parentPid']) is int and 0 < row['parentPid'] < 2**31
+            and type(row['startTime']) is str and re.fullmatch(r'[1-9][0-9]{0,19}', row['startTime'])
+            and type(row['uids']) is list and all(type(x) is int for x in row['uids']) and row['uids'] == [PROXY_UID] * 4
+            and row['executable'] == str(Path('/usr/bin/python3').resolve(strict=True)))
+
+
+def probe_caller_chain(caller):
+    # Only this worker's fixed sudo/python invocation ancestry, never an app ancestry claim.
+    pid, chain = os.getpid(), []
+    for _ in range(5):
+        if pid == caller['pid']:
+            require(root_process(pid) == caller and chain)
+            return chain
+        directory = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            raw, _ = ProxyAssociationProc.read_at(directory, 'stat', 4096)
+            status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
+            text = raw.decode('utf-8'); tail = text[text.rfind(')') + 2:].split()
+            ids = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
+            require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and tail[0] not in ('Z', 'X')
+                    and len(ids) == 1 and [int(v) for v in ids[0]] == [0] * 4)
+            executable = os.readlink('exe', dir_fd=directory)
+            require(executable == (str(Path('/usr/bin/python3').resolve(strict=True)) if not chain else '/usr/bin/sudo'))
+            chain.append(dict(pid=pid, parentPid=int(tail[1]), startTime=tail[19], state=tail[0], uids=[0] * 4))
+            pid = int(tail[1])
+        finally:
+            os.close(directory)
+    raise ValueError('Fixed invoking caller chain unavailable')
+
+
+def inventory_probe(request, *, clock=time.monotonic_ns):
+    probe_request(request, clock())
+    def budget():
+        require(clock() < request['expiresNs'])
+    fd = os.pidfd_open(request['caller']['pid'])
+    stage = 'probe-caller-chain'
+    try:
+        chain = probe_caller_chain(request['caller'])
+        require(not select.select([fd], [], [], 0)[0])
+        stage = 'complete-uid-inventory'
+        proxies, rows = complete_uid_inventory(budget)
+        require(rows.get(request['caller']['pid']) == request['caller'])
+        stage = 'probe-recheck'
+        after = probe_caller_chain(request['caller'])
+        require([{k: v for k, v in row.items() if k != 'state'} for row in after]
+                == [{k: v for k, v in row.items() if k != 'state'} for row in chain]
+                and not select.select([fd], [], [], 0)[0])
+        budget()
+        return dict(operation=PROBE_OPERATION, complete=True, uid=PROXY_UID, candidateCount=len(proxies),
+                    scopedProcessCount=len(rows), caller=request['caller'], invocation=after,
+                    readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
+    except Exception as error:
+        error.proxy_snapshot_stage = stage
+        raise
+    finally:
+        os.close(fd)
+
+
+def validate_probe(value, request):
+    require(type(value) is dict and set(value) == {'operation', 'complete', 'uid', 'candidateCount', 'scopedProcessCount',
+            'caller', 'invocation', 'readOnly', 'inputPermitted', 'authorityGranted', 'releaseReady'}
+            and value['operation'] == PROBE_OPERATION and value['complete'] is True
+            and type(value['uid']) is int and value['uid'] == PROXY_UID
+            and type(value['candidateCount']) is int and 0 <= value['candidateCount'] <= 4
+            and type(value['scopedProcessCount']) is int and 0 < value['scopedProcessCount'] <= ProxyAssociationProc.MAX_PIDS
+            and value['candidateCount'] <= value['scopedProcessCount'] and value['caller'] == request['caller']
+            and value['readOnly'] is True
+            and all(value[k] is False for k in ('inputPermitted', 'authorityGranted', 'releaseReady'))
+            and type(value['invocation']) is list and 0 < len(value['invocation']) <= 5)
+    rows = value['invocation']
+    for row in rows:
+        require(type(row) is dict and set(row) == {'pid', 'parentPid', 'startTime', 'state', 'uids'}
+                and all(type(row[k]) is int and 1 < row[k] < 2**31 for k in ('pid', 'parentPid'))
+                and type(row['startTime']) is str and re.fullmatch(r'[1-9][0-9]{0,19}', row['startTime'])
+                and type(row['uids']) is list and len(row['uids']) == 4 and all(type(uid) is int and uid == 0 for uid in row['uids'])
+                and type(row['state']) is str and row['state'] in ('R', 'S', 'D', 'I', 'T', 't', 'P'))
+    require(len({r['pid'] for r in rows}) == len(rows) and rows[-1]['parentPid'] == request['caller']['pid']
+            and all(a['parentPid'] == b['pid'] for a, b in zip(rows, rows[1:])))
+
+
+def association_snapshot(request, *, proc=None, read=root_process, inventory=complete_proxy_inventory,
+                         runtime=PROXY_RUNTIME, clock=time.monotonic_ns):
+    root_request(request, clock())
+    proc = ProxyAssociationProc() if proc is None else proc
+    def budget():
+        require(clock() < request['expiresNs'])
+    fds, instance, stage = [], None, 'complete-uid-inventory'
+    try:
+        candidates, scoped = inventory(budget)
+        require(type(scoped) is dict and 0 < len(scoped) <= ProxyAssociationProc.MAX_PIDS
+                and type(candidates) is list and 0 < len(candidates) <= 4 and len(set(candidates)) == len(candidates))
+        rows = {}
+        stage = 'held-process-identities'
+        for pid in [r['pid'] for r in request['tree']] + candidates:
+            budget(); fd = os.pidfd_open(pid); fds.append(fd)
+            require(not select.select([fd], [], [], 0)[0])
+            rows[pid] = read(pid, True); OwnedLineage.validate(rows[pid])
+            require({k: v for k, v in rows[pid].items() if k not in ('image', 'kernelImageSha256')} == scoped.get(pid))
+        require(all(rows[r['pid']] == r for r in request['tree']))
+        stage = 'private-instance-and-pipes'
+        info = proc.info(request['client']['pid'])
+        instance = PrivateInstance(info, request['original'], runtime)
+        private = instance.snapshot()
+        bwraps = [r['pid'] for r in request['tree'] if r['executable'] == '/usr/bin/bwrap']
+        pipes = {pid: proc.pipes(pid) for pid in (*bwraps, *candidates)}
+        infos = {pid: proc.info(pid) for pid in candidates}
+        matches = []
+        for pid in candidates:
+            row = rows[pid]; mode = int(row['image']['st_mode'])
+            require(row['uids'] == [PROXY_UID] * 4 and row['executable'] == '/usr/bin/xdg-dbus-proxy'
+                    and int(row['image']['st_uid']) == int(row['image']['st_gid']) == 0
+                    and stat.S_ISREG(mode) and not mode & 0o7022)
+            if infos[pid]['sha256'] != info['sha256'] or infos[pid]['fields'] != info['fields']:
+                continue
+            links = [dict(appPid=app, appFd=a['fd'], proxyFd=b['fd'], inode=a['inode'])
+                     for app in bwraps for a in pipes[app][0] for b in pipes[pid][0]
+                     if a['inode'] == b['inode'] and a['access'] == 'read' and b['access'] == 'write']
+            require(len(links) <= 16)
+            if links:
+                require(len({m['inode'] for m in links}) == 1)
+                matches.append((pid, links))
+        stage = 'unique-associated-proxy'
+        require(len(matches) == 1)
+        stage = 'complete-association-recheck'
+        require(inventory(budget) == (candidates, scoped) and instance.snapshot() == private
+                and proc.info(request['client']['pid']) == info
+                and all(proc.info(pid) == infos[pid] for pid in candidates)
+                and all(proc.pipes(pid) == old for pid, old in pipes.items())
+                and all(read(pid, True) == row for pid, row in rows.items())
+                and all(not select.select([fd], [], [], 0)[0] for fd in fds))
+        budget()
+        pid, links = matches[0]
+        return bounded(dict(complete=True, uid=PROXY_UID, candidateCount=len(candidates), scopedProcessCount=len(scoped),
+            original=request['original'], client=request['client'], tree=request['tree'], proxy=rows[pid],
+            flatpakInfo=dict(sha256=info['sha256'], fields=info['fields']), privateInstance=private,
+            pipes=links), 24576)
+    except Exception as error:
+        error.proxy_snapshot_stage = stage
+        raise
+    finally:
+        if instance is not None:
+            instance.close()
+        for fd in fds:
+            os.close(fd)
+
+
+def protected_tool(expected=None):
+    for path in (PROXY_TOOL.parent, *PROXY_TOOL.parent.parents):
+        info = path.lstat()
+        require(path.resolve(strict=True) == path and stat.S_ISDIR(info.st_mode)
+                and info.st_uid == info.st_gid == 0 and not info.st_mode & 0o7022)
+    directory = os.open(PROXY_TOOL.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        raw, stamp = ProxyAssociationProc.read_at(directory, PROXY_TOOL.name, 1024 * 1024, sized=True)
+        require(stamp[3] == stamp[4] == 0 and stamp[5] == 1 and stat.S_IMODE(stamp[2]) == 0o444)
+        digest = hashlib.sha256(raw).hexdigest()
+        require(expected is None or digest == expected)
+        return digest
+    finally:
+        os.close(directory)
+
+
+def root_snapshot_main():
+    # This sole root entry point imports only stdlib and reads only fixed proc/runtime paths.
+    # A missing stdin EOF cannot leave a privileged helper alive indefinitely.
+    signal.signal(signal.SIGALRM, lambda *_: os._exit(124))
+    signal.setitimer(signal.ITIMER_REAL, ROOT_WORKER_SECONDS)
+    try:
+        require(os.getuid() == os.geteuid() == 0 and os.environ.get('SUDO_UID') == str(PROXY_UID)
+                and Path(__file__) == PROXY_TOOL and sys.argv[1:] in (['root-proxy-snapshot'], ['root-inventory-probe']))
+        raw = sys.stdin.buffer.read(32769); require(len(raw) <= 32768)
+        def pairs(items):
+            result = {}
+            for key, value in items:
+                require(key not in result); result[key] = value
+            return result
+        request = json.loads(raw, object_pairs_hook=pairs)
+        probe = sys.argv[1:] == ['root-inventory-probe']
+        (probe_request if probe else root_request)(request, time.monotonic_ns())
+        protected_tool(request['codeSha256'])
+        data = inventory_probe(request) if probe else association_snapshot(request)
+        protected_tool(request['codeSha256'])
+        answer = dict(request=request, ok=True, snapshot=data)
+        sys.stdout.write(json.dumps(bounded(answer), allow_nan=False, ensure_ascii=True))
+    except Exception as error:
+        refusal = dict(ok=False, unavailable=type(error).__name__, stage=getattr(error, 'proxy_snapshot_stage', 'root-entry'))
+        pid = getattr(error, 'proxy_snapshot_pid', None)
+        if type(pid) is int and 1 < pid < 2**31:
+            refusal['pid'] = pid
+        sys.stdout.write(json.dumps(refusal))
+        raise SystemExit(1)
+
+
 class OwnedLineage:
     """Seal live ancestry before input; never infer a later ancestor's exit from /proc errors."""
     def __init__(self, original, client, tree, read, redact, *, image_open, system_image, pidfds, guard, budget,
@@ -780,6 +1150,104 @@ class OwnedLineage:
                     self.system.close()
 
 
+class AssociatedProxyLineage(OwnedLineage):
+    """Seal an external proxy by a complete root snapshot, never invented ancestry."""
+    def __init__(self, original, client, tree, read, redact, *, snapshot, image_open, system_image, pidfds,
+                 guard, budget, diagnostic=None, diagnostic_state=None):
+        self.original, self.client, self.tree = copy.deepcopy(original), copy.deepcopy(client), copy.deepcopy(tree)
+        self.read, self.redact, self.pidfds, self.guard, self.budget = read, redact, pidfds, guard, budget
+        self.system, self.rows, self.held, self.fds, self.chains = system_image, {}, {}, {}, {}
+        self.started, self.used, self.closed = False, False, False
+        self.lock = threading.RLock()
+        self.diagnostic, self.diagnostic_state = diagnostic, diagnostic_state
+        self.stage, self.stage_pid, self.last_row, self.last_image = 'association-owned-chain', None, None, None
+        self.snapshot_source, self.association, self.instance = snapshot, None, None
+        try:
+            self.validate(original); self.validate(client)
+            require(original['uids'] == client['uids'] == [PROXY_UID] * 4)
+            self.client_chain = self.walk(client['pid'], image_open)
+            request_tree = [self.rows[pid] for pid in self.client_chain]
+            self.checkpoint('association-root-snapshot')
+            data = snapshot(request_tree)
+            validate_association(data, original, client, request_tree)
+            self.association = copy.deepcopy(data)
+            pid, row = data['proxy']['pid'], data['proxy']
+            self.fds[pid] = pidfds.open(pid)
+            self.held[pid] = image_open(pid)
+            require(read(pid, True) == row and self.held[pid].snapshot() == (row['image'], row['kernelImageSha256'])
+                    and system_image.snapshot() == (row['image'], row['kernelImageSha256'])
+                    and not pidfds.ready(self.fds[pid]))
+            self.rows[pid], self.chains[pid] = copy.deepcopy(row), [pid]
+            self.instance = PrivateInstance(dict(sha256=data['flatpakInfo']['sha256'], fields=data['flatpakInfo']['fields']), original)
+            require(self.instance.snapshot() == data['privateInstance'])
+            OwnedLineage.verify_live(self)
+        except Exception as error:
+            self.capture_failure(error); self.close(); raise
+
+    def verify_live(self):
+        OwnedLineage.verify_live(self)
+        self.checkpoint('association-complete-root-recheck')
+        current = self.snapshot_source([self.rows[pid] for pid in self.client_chain])
+        validate_association(current, self.original, self.client, [self.rows[pid] for pid in self.client_chain])
+        require(current == self.association and self.instance.snapshot() == current['privateInstance'])
+        OwnedLineage.verify_live(self)
+
+    def observe(self, name, peer, *, budget):
+        value = super().observe(name, peer, budget=budget)
+        if value.get('stable') is True:
+            value['externalAssociation'] = copy.deepcopy(self.association)
+        return bounded(value, 24576)
+
+    def close(self):
+        try:
+            if self.instance is not None:
+                self.instance.close(); self.instance = None
+        finally:
+            super().close()
+
+
+def validate_association(data, original, client, tree):
+    require(type(data) is dict and set(data) == {'complete', 'uid', 'candidateCount', 'scopedProcessCount', 'original',
+            'client', 'tree', 'proxy', 'flatpakInfo', 'privateInstance', 'pipes'}
+            and data['complete'] is True and type(data['uid']) is int and data['uid'] == PROXY_UID
+            and type(data['candidateCount']) is int and 1 <= data['candidateCount'] <= 4
+            and type(data['scopedProcessCount']) is int and data['candidateCount'] <= data['scopedProcessCount'] <= 4096
+            and data['original'] == original and data['client'] == client and data['tree'] == tree)
+    require(type(tree) is list and 1 < len(tree) <= MAX_ANCESTORS and tree[0] == client and tree[-1] == original
+            and len({r['pid'] for r in tree}) == len(tree))
+    for row in tree:
+        OwnedLineage.validate(row); require(row['uids'] == [PROXY_UID] * 4)
+    for child, parent in zip(tree, tree[1:]):
+        require(child['parentPid'] == parent['pid'] and parent['executable'] == '/usr/bin/bwrap'
+                and int(parent['startTime']) <= int(child['startTime'])
+                and parent['image'] == original['image'] and parent['kernelImageSha256'] == original['kernelImageSha256'])
+    OwnedLineage.validate(data['proxy'])
+    row = data['proxy']; image = row['image']
+    require(row['executable'] == '/usr/bin/xdg-dbus-proxy' and row['uids'] == [PROXY_UID] * 4
+            and int(image['st_uid']) == int(image['st_gid']) == 0 and stat.S_ISREG(int(image['st_mode']))
+            and not int(image['st_mode']) & 0o7022 and row['pid'] not in {r['pid'] for r in tree})
+    info, private = data['flatpakInfo'], data['privateInstance']
+    require(type(info) is dict and set(info) == {'sha256', 'fields'} and re.fullmatch(r'[a-f0-9]{64}', info['sha256'])
+            and type(info['fields']) is dict and set(info['fields']) == {'app', 'instanceId', 'appCommit', 'runtimeCommit'}
+            and info['fields']['app'] == 'com.creatorworks.hub' and re.fullmatch(r'[0-9]{1,20}', info['fields']['instanceId'])
+            and all(re.fullmatch(r'[a-f0-9]{64}', info['fields'][k]) for k in ('appCommit', 'runtimeCommit')))
+    require(type(private) is dict and set(private) == {'instanceId', 'infoSha256', 'originalPid', 'directories', 'infoIdentity', 'pidIdentity'}
+            and private['instanceId'] == info['fields']['instanceId'] and private['infoSha256'] == info['sha256']
+            and type(private['originalPid']) is int and private['originalPid'] == original['pid']
+            and type(private['directories']) is list and len(private['directories']) == 3
+            and all(type(s) is list and len(s) == 6 and all(type(v) is int and 0 <= v < 2**64 for v in s) for s in private['directories'])
+            and all(type(private[k]) is list and len(private[k]) == 9
+                    and all(type(v) is int and 0 <= v < 2**64 for v in private[k]) for k in ('infoIdentity', 'pidIdentity')))
+    links = data['pipes']
+    require(type(links) is list and 0 < len(links) <= 16)
+    for link in links:
+        require(type(link) is dict and set(link) == {'appPid', 'appFd', 'proxyFd', 'inode'}
+                and all(type(v) is int and 0 <= v < 2**64 for v in link.values())
+                and link['appPid'] in {r['pid'] for r in tree if r['executable'] == '/usr/bin/bwrap'}
+                and link['appFd'] < 2**31 and link['proxyFd'] < 2**31 and link['inode'] > 0)
+    require(len({p['inode'] for p in links}) == 1)
+
+
 class PassiveCapture:
     def __init__(self, owner, original, client, read, redact, target_guard, address, uid):
         require(type(owner) is dict and set(owner) == {'name', 'pid'} and unique(owner['name'])
@@ -795,7 +1263,7 @@ class PassiveCapture:
         self.baseline, self.input_started, self.settled = None, False, threading.Event()
 
     def begin_input(self):
-        require(type(self.baseline) is OwnedLineage and self.armed)
+        require(type(self.baseline) in (OwnedLineage, AssociatedProxyLineage) and self.armed)
         self.baseline.begin_input()
         with self.lock:
             require(not self.closed and not self.stop.is_set() and not self.headers and not self.input_started)
@@ -1014,4 +1482,7 @@ class PassiveCapture:
 
 
 if __name__ == '__main__':
-    raise SystemExit('Import-only passive CI diagnostics; no standalone bus or input interface')
+    if sys.argv[1:] in (['root-proxy-snapshot'], ['root-inventory-probe']):
+        root_snapshot_main()
+    else:
+        raise SystemExit('Import-only passive CI diagnostics; no standalone bus or input interface')

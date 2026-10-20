@@ -61,6 +61,37 @@ jobs:
           python3 -B scripts/native-linux-flatpak-dialog-input.test.py
           python3 -B scripts/native-linux-flatpak-activation-observer.test.py
           python3 -B scripts/native-linux-production-016-flatpak.test.py
+      - name: Independently bind the eight harness sources before native-only root preflight
+        if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('node:fs'), path = require('node:path');
+            const lane = require(path.join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-production-016-flatpak.cjs'));
+            lane.preflight();
+            const get = async ([group, name], args) => (await github.rest[group][name]({ owner: context.repo.owner, repo: context.repo.repo, ...args })).data;
+            const harnessFiles = await lane.collectHarness(get, context.sha);
+            const proof = { schemaVersion: 1, profile: lane.PROFILE, harnessSource: context.sha, harnessFiles, ...lane.FALSE_GATES };
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'native-linux-flatpak-root-source.json'), JSON.stringify(proof), { flag: 'wx', mode: 0o600 });
+      - name: Exercise two real Linux FD tests and the non-authorizing protected inventory operation before downloads
+        if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
+        run: |
+          /usr/bin/python3 -I -B - <<'PY'
+          import importlib.util, pathlib, sys, unittest
+          assert sys.platform == 'linux'
+          file = pathlib.Path('scripts/native-linux-flatpak-activation-observer.test.py').resolve()
+          spec = importlib.util.spec_from_file_location('flatpak_probe_linux_tests', file)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          names = ('test_real_unix_private_instance_holds_exact_info_pid_and_refuses_same_byte_replacement',
+                   'test_real_unix_own_proc_identity_is_stable_without_command_or_environment_reads')
+          result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(module.RootAssociationTests(name) for name in names))
+          assert result.testsRun == 2 and not result.skipped and result.wasSuccessful()
+          PY
+          sudo /usr/bin/mkdir -m 0755 /var/lib/creator-hub-flatpak-proxy-observer
+          sudo /usr/bin/install -o root -g root -m 0444 scripts/native-linux-flatpak-activation-observer.py \
+            /var/lib/creator-hub-flatpak-proxy-observer/observer.py
+          /usr/bin/python3 -I -S -B scripts/native-linux-production-016-flatpak.py root-preflight
       - name: Bind actual source and successful API artifacts; download data only
         uses: actions/github-script@v8
         with:
@@ -92,7 +123,8 @@ jobs:
             --root "$RUNNER_TEMP/native-linux-production-016-flatpak/tools"
       - name: Separately requested isolated install and native UI scenarios
         if: inputs.execution_request == 'execute-production-bootstrap-activation-016'
-        run: /usr/bin/python3 -B scripts/native-linux-production-016-flatpak.py session
+        run: |
+          /usr/bin/python3 -B scripts/native-linux-production-016-flatpak.py session
       - name: Unconditionally verify or finish only the owned CI TLS cleanup
         if: always()
         run: /usr/bin/python3 -B scripts/native-linux-production-016-flatpak.py tls-cleanup
@@ -104,6 +136,8 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
           path: |
+            ${{ runner.temp }}/native-linux-flatpak-root-source.json
+            ${{ runner.temp }}/native-linux-flatpak-root-preflight.json
             ${{ runner.temp }}/native-linux-production-016-flatpak/api-binding.json
             ${{ runner.temp }}/native-linux-production-016-flatpak/stage-review.json
             ${{ runner.temp }}/native-linux-production-016-flatpak/installed-flatpak.json

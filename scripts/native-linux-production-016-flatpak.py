@@ -1178,7 +1178,7 @@ def warm_release_error(value, rows, window):
             'Only the exact release SendEvent BadWindow is a candidate; delivery remains incomplete')
 
 
-def attributed_warm_activation(record, client, admitted, owner):
+def attributed_warm_activation(record, client, admitted, owner, *, association_validator=None):
     require(type(record) is dict and not any(k in record for k in ('unavailable', 'captureUnavailable')),
             'Warm activation capture unavailable')
     value = record.get('observation')
@@ -1208,8 +1208,217 @@ def attributed_warm_activation(record, client, admitted, owner):
     peer, ancestry = sender.get('peer'), sender.get('senderAncestors')
     require(type(peer) is dict and set(peer) == {'name', 'pid', 'uid'} and peer['name'] == call['sender']
             and type(peer['pid']) is int and peer['pid'] > 1 and type(peer['uid']) is int and peer['uid'] == client['uids'][0]
-            and type(ancestry) is list and 1 < len(ancestry) <= 12 and ancestry[0]['pid'] == peer['pid']
-            and ancestry[-1] == proxy_process_snapshot(admitted), 'No name-only or UID-only sender attribution')
+            and type(ancestry) is list and 0 < len(ancestry) <= 12 and ancestry[0]['pid'] == peer['pid'],
+            'No name-only or UID-only sender attribution')
+    if 'externalAssociation' in sender:
+        association = sender['externalAssociation']
+        require(type(association) is dict and association.get('complete') is True
+                and association.get('uid') == peer['uid'] == 1001
+                and association.get('original') == admitted and association.get('client') == client
+                and proxy_process_snapshot(association['proxy']) == ancestry[0]
+                and association['proxy']['pid'] == peer['pid'] and len(ancestry) == 1
+                and sender.get('clientAncestors') == [proxy_process_snapshot(r) for r in association['tree']],
+                'External proxy must match the complete pre-input instance/pipe snapshot, not fabricated ancestry')
+        # Admission already validated and held this exact snapshot before input.
+        # Repeat the closed wire contract here before any terminal acceptance.
+        require(callable(association_validator), 'The independently bound association validator is required')
+        association_validator(association, admitted, client, association['tree'])
+    else:
+        require(1 < len(ancestry) and ancestry[-1] == proxy_process_snapshot(admitted),
+                'No name-only or UID-only sender attribution')
+
+
+ROOT_WORKERS_UNKNOWN = []
+
+
+def root_worker_refusal(answer):
+    error = RuntimeError('Complete protected root snapshot unavailable; no input')
+    if type(answer) is dict and answer.get('ok') is False and set(answer) <= {'ok', 'unavailable', 'stage', 'pid'}:
+        value = dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
+        if answer.get('unavailable') in ('ValueError', 'KeyError', 'TypeError', 'RuntimeError', 'PermissionError',
+                                        'FileNotFoundError', 'ProcessLookupError', 'OSError'):
+            value['type'] = answer['unavailable']
+        if answer.get('stage') in ('root-entry', 'complete-uid-inventory', 'held-process-identities',
+            'private-instance-and-pipes', 'unique-associated-proxy', 'complete-association-recheck',
+            'probe-caller-chain', 'probe-recheck'):
+            value['stage'] = answer['stage']
+        if type(answer.get('pid')) is int and 1 < answer['pid'] < 2**31:
+            value['pid'] = answer['pid']
+        error.root_proxy_diagnostic = value
+    return error
+
+
+def root_exchange(tool, operation, raw, deadline):
+    """Bounded pipe exchange; never signal a privileged child or wait without a deadline."""
+    require(operation in ('root-proxy-snapshot', 'root-inventory-probe') and 0 < len(raw) <= 32768
+            and time.monotonic() < deadline <= time.monotonic() + 6, 'Finite protected worker exchange required')
+    child = subprocess.Popen(['/usr/bin/sudo', '-n', '--', '/usr/bin/python3', '-I', '-S', '-B',
+                              str(tool), operation], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        bufsize=0, close_fds=True, start_new_session=True,
+        env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'})
+    streams = (child.stdin, child.stdout, child.stderr)
+    buffers, eof, offset, failure = [bytearray(), bytearray()], [False, False], 0, None
+    def pump(until, writing):
+        nonlocal offset
+        readers = [stream for i, stream in enumerate(streams[1:]) if not eof[i]]
+        writers = [child.stdin] if writing and not child.stdin.closed else []
+        ready, writable, _ = select.select(readers, writers, [], max(0, min(.02, until - time.monotonic())))
+        if writable:
+            try:
+                offset += os.write(child.stdin.fileno(), raw[offset:])
+            except BlockingIOError:
+                pass
+            if offset == len(raw):
+                child.stdin.close()
+        for stream in ready:
+            i = 0 if stream is child.stdout else 1
+            require(len(buffers[i]) <= (32768 if i == 0 else 2048), 'Protected worker output bound exceeded')
+            try:
+                chunk = os.read(stream.fileno(), min(4096, (32768 if i == 0 else 2048) + 1 - len(buffers[i])))
+            except BlockingIOError:
+                continue
+            if not chunk:
+                eof[i] = True
+            else:
+                buffers[i].extend(chunk)
+                require(len(buffers[i]) <= (32768 if i == 0 else 2048), 'Protected worker output bound exceeded')
+    try:
+        for stream in streams:
+            os.set_blocking(stream.fileno(), False)
+        while time.monotonic() < deadline:
+            pump(deadline, True)
+            if child.poll() is not None and all(eof):
+                require(offset == len(raw), 'Complete worker request was not submitted')
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('Protected worker response reached or exceeded deadline')
+                return subprocess.CompletedProcess(child.args, child.returncode, bytes(buffers[0]), bytes(buffers[1]))
+        raise TimeoutError('Protected worker exit/EOF not observed within deadline')
+    except Exception as error:
+        failure = error
+        raise
+    finally:
+        if failure is not None:
+            # Closing our input is safe even when sudo cannot be killed by this UID.
+            try:
+                child.stdin.close()
+            except OSError:
+                pass
+            cleanup_deadline = time.monotonic() + .25
+            try:
+                while time.monotonic() < cleanup_deadline and (child.poll() is None or not all(eof)):
+                    pump(cleanup_deadline, False)
+            except Exception:
+                pass
+            try:
+                observed = child.poll() is not None
+            except OSError:
+                observed = False
+            failure.root_proxy_diagnostic = dict(readOnly=True, inputPermitted=False, authorityGranted=False,
+                releaseReady=False, stage='root-worker-exchange', exitObserved=observed,
+                stdoutEof=eof[0], stderrEof=eof[1], cleanupUnconfirmed=not (observed and all(eof)))
+            if not observed:
+                ROOT_WORKERS_UNKNOWN.append(child)
+        for stream in streams:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+def root_inventory_preflight(root):
+    require(os.getuid() == os.geteuid() == 1001 and os.environ.get('EXECUTION_REQUEST') == REQUEST
+            and not any(os.environ.get(k) for k in ('DISPLAY', 'WAYLAND_DISPLAY', 'FLATPAK_ID'))
+            and not root.exists() and not root.is_symlink(), 'Native-only headless preflight before collection required')
+    proof = parse(regular(root.parent / 'native-linux-flatpak-root-source.json', 32768, 0o600))
+    names = ('scripts/native-linux-production-016-flatpak.py', 'scripts/native-linux-production-016-flatpak.test.py',
+             'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py',
+             'scripts/native-linux-flatpak-dialog-input.py', 'scripts/native-linux-flatpak-dialog-input.test.py',
+             'scripts/native-unix-window.py', 'scripts/native-unix-window.test.py')
+    require(set(proof) == {'schemaVersion', 'profile', 'harnessSource', 'harnessFiles', *GATES}
+            and type(proof['schemaVersion']) is int and proof['schemaVersion'] == 1 and proof['profile'] == PROFILE
+            and proof['harnessSource'] == os.environ.get('GITHUB_SHA')
+            and re.fullmatch(r'[a-f0-9]{40}', proof['harnessSource'])
+            and set(proof['harnessFiles']) == set(names) and all(proof[k] is False for k in GATES),
+            'Independent exact eight-file current-source binding required before sudo')
+    sources = {name: bound(HERE.parent / name, proof['harnessFiles'][name], 1024 * 1024) for name in names}
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader('flatpak_root_preflight', loader=None))
+    module.__file__ = str(HERE.parent / names[2])
+    exec(compile(sources[names[2]], module.__file__, 'exec'), module.__dict__)
+    code = proof['harnessFiles'][names[2]]['sha256']
+    report = dict(schemaVersion=1, profile=PROFILE, harnessSource=proof['harnessSource'], readOnly=True,
+                  inputPermitted=False, authorityGranted=False, inventoryProbed=False, **GATES)
+    failure = None
+    try:
+        module.protected_tool(code)
+        caller = module.root_process(os.getpid())
+        request = dict(schemaVersion=1, operation=module.PROBE_OPERATION, harnessSource=proof['harnessSource'],
+                       codeSha256=code, sequence=1, nonce=secrets.token_hex(32),
+                       expiresNs=time.monotonic_ns() + 4 * 10**9, caller=caller)
+        module.probe_request(request, time.monotonic_ns())
+        result = root_exchange(module.PROXY_TOOL, 'root-inventory-probe', json_bytes(request), request['expiresNs'] / 10**9)
+        answer = parse(result.stdout)
+        if result.returncode != 0 or result.stderr:
+            raise root_worker_refusal(answer)
+        require(set(answer) == {'request', 'ok', 'snapshot'}
+                and answer['request'] == request and answer['ok'] is True, 'Complete root inventory probe required')
+        module.validate_probe(answer['snapshot'], request)
+        module.protected_tool(code)
+        require(time.monotonic_ns() < request['expiresNs'], 'Root inventory probe expired')
+        report.update(inventoryProbed=True, inventory=answer['snapshot'])
+    except Exception as error:
+        failure = error
+        report['unavailable'] = type(error).__name__
+        if hasattr(error, 'root_proxy_diagnostic'):
+            report['workerCleanup'] = error.root_proxy_diagnostic
+        raise
+    finally:
+        try:
+            output(root.parent / 'native-linux-flatpak-root-preflight.json', json_bytes(report))
+        except Exception as error:
+            if failure is None:
+                raise
+            failure.root_preflight_receipt_error = type(error).__name__
+
+
+class RootProxySnapshot:
+    def __init__(self, module, root, harness, code_sha256, original, client, capture, commits):
+        require(os.getuid() == os.geteuid() == 1001 and root / 'runtime' == module.PROXY_RUNTIME
+                and re.fullmatch(r'[a-f0-9]{40}', harness) and re.fullmatch(r'[a-f0-9]{64}', code_sha256),
+                'Only the fixed hosted UID1001 Flatpak fixture may request this read-only snapshot')
+        require(type(commits) is dict and set(commits) == {'appCommit', 'runtimeCommit'}
+                and all(re.fullmatch(r'[a-f0-9]{64}', v) for v in commits.values()), 'Exact installed app/runtime commits required')
+        self.module, self.harness, self.code, self.original, self.client = module, harness, code_sha256, original, client
+        self.capture, self.sequence, self.nonces, self.blocked = capture, 1, set(), False
+        self.commits = dict(commits)
+
+    def __call__(self, tree):
+        require(not self.blocked, 'Unknown root snapshot cannot be retried')
+        self.blocked = True
+        self.capture.budget()
+        self.module.protected_tool(self.code)
+        nonce = secrets.token_hex(32)
+        require(nonce not in self.nonces and self.sequence <= 3, 'Fresh bounded root snapshot sequence required')
+        self.nonces.add(nonce)
+        request = dict(schemaVersion=1, operation='flatpak-proxy-snapshot-uid1001', harnessSource=self.harness,
+                       codeSha256=self.code, sequence=self.sequence, nonce=nonce,
+                       expiresNs=min(int(self.capture.transcript.deadline * 10**9), time.monotonic_ns() + 4 * 10**9),
+                       original=self.original, client=self.client, tree=tree)
+        self.module.root_request(request, time.monotonic_ns())
+        raw = json_bytes(request); require(len(raw) <= 32768, 'Root snapshot request bound')
+        result = root_exchange(self.module.PROXY_TOOL, 'root-proxy-snapshot', raw, request['expiresNs'] / 10**9)
+        require(0 < len(result.stdout) <= 32768, 'Complete protected root snapshot unavailable; no input')
+        answer = parse(result.stdout)
+        if result.returncode != 0 or result.stderr:
+            raise root_worker_refusal(answer)
+        require(set(answer) == {'request', 'ok', 'snapshot'} and answer['request'] == request and answer['ok'] is True,
+                'Root snapshot source/nonce/sequence reply differs')
+        self.module.validate_association(answer['snapshot'], self.original, self.client, tree)
+        require(all(answer['snapshot']['flatpakInfo']['fields'][k] == v for k, v in self.commits.items()),
+                'Proxy instance must bind the independently installed app/runtime commits')
+        self.capture.budget(); self.module.protected_tool(self.code)
+        require(time.monotonic_ns() < request['expiresNs'], 'Root snapshot expired; no input')
+        self.sequence += 1; self.blocked = False
+        return answer['snapshot']
 
 
 class ObserverPidfds:
@@ -1473,6 +1682,7 @@ class Session:
             name = names[2]
             module.__file__ = str(HERE.parent / name)
             exec(compile(sources[name], module.__file__, 'exec'), module.__dict__)
+            state['associationValidator'] = module.validate_association
             stage = 'qualified-cold-root'
             cold, owner = self.report['coldRoot'], self.report['coldHost1Owner']
             require(self.report['coldActivationAccepted'] is True and owner['pid'] == cold['pid'], 'Qualified cold Root required')
@@ -1497,19 +1707,40 @@ class Session:
                 baseline_diagnostic.update(readOnly=True, inputPermitted=False, authorityGranted=False,
                                            releaseReady=False, captureUnavailable=True)
             state['baselineDiagnostic'] = baseline_diagnostic
+            snapshot = None
+            if not any(row.get('executable') == '/usr/bin/xdg-dbus-proxy' for row in tree.values()):
+                stage = 'external-instance-admission'
+                installed = parse(regular(self.root / 'installed-flatpak.json', 32768, 0o600))
+                require(installed['ref'] == REF and installed['runtime'] == RUNTIME
+                        and installed['commit'] == self.review['flatpak']['commit'], 'Actual installed Flatpak commit binding required')
+                snapshot = RootProxySnapshot(module, self.root, binding['harnessSource'],
+                    hashlib.sha256(sources[name]).hexdigest(), attempt.binding.launch, client, capture,
+                    dict(appCommit=installed['commit'], runtimeCommit=installed['runtimeCommit']))
             stage = 'protected-proxy-image-open'
             system = PortalImage('proxy')
             stage = 'pre-input-lineage-create'
-            capture.baseline = module.OwnedLineage(attempt.binding.launch, client,
-                tree, capture.read, proxy_process_snapshot,
-                image_open=K.HeldImage, system_image=system, pidfds=ObserverPidfds,
+            options = dict(image_open=K.HeldImage, system_image=system, pidfds=ObserverPidfds,
                 guard=attempt.binding.verify, budget=capture.budget, diagnostic=baseline_diagnostic,
                 diagnostic_state=capture.diagnostic_state)
+            if snapshot is None:
+                capture.baseline = module.OwnedLineage(attempt.binding.launch, client,
+                    tree, capture.read, proxy_process_snapshot, **options)
+            else:
+                capture.baseline = module.AssociatedProxyLineage(attempt.binding.launch, client,
+                    tree, capture.read, proxy_process_snapshot, snapshot=snapshot, **options)
             stage = 'observer-arm'
             capture.arm()
         except Exception as error:
             state['record']['unavailable'] = type(error).__name__
             state['record']['setupFailureStage'] = stage
+            failure = getattr(error, 'root_proxy_diagnostic', None)
+            if type(failure) is dict:
+                try:
+                    raw = json_bytes(failure)
+                    require(len(raw) <= 2048, 'Bounded root snapshot refusal')
+                    state['record']['rootProxySnapshotRefusal'] = parse(raw)
+                except Exception:
+                    pass  # Never replace the original ownership refusal.
             if state['capture'] is not None:
                 try:
                     flags = state['capture'].diagnostic_state()
@@ -1851,7 +2082,8 @@ class Session:
                 record = self.finish_warm_activation_diagnostic(pending, settle=True)
                 require(action == 'Open Creator Hub' and not missing, 'Only warm disclosure Enter may qualify')
                 admitted = self.launcher_keys[-1]['keyboard']['launchProvenance']['admittedLaunch']
-                attributed_warm_activation(record, client, admitted, self.report['coldHost1Owner'])
+                attributed_warm_activation(record, client, admitted, self.report['coldHost1Owner'],
+                    association_validator=pending.get('associationValidator'))
             candidate = self.launcher_keys[-1].get('deliveryClassification') == 'warm-consumed-terminal-candidate'
             proof = self.consumed_warm_outcome() if candidate else self.launcher_outcome(action, phase, missing)
             for diagnostic in self.launcher_keys:
@@ -2602,9 +2834,11 @@ def main():
     if capture:
         portal_worker_args(args)
     else:
-        require(provider or len(args) == 1 and args[0] in ("stage", "session", "_run", "_tls_guard", "tls-cleanup"),
+        require(provider or len(args) == 1 and args[0] in ("stage", "session", "_run", "_tls_guard", "tls-cleanup", "root-preflight"),
                 "Only fixed native controller modes")
     root = locations()
+    if args == ['root-preflight']:
+        root_inventory_preflight(root); return
     if sys.argv[1] == 'tls-cleanup':
         verify_tls_cleanup(root); return
     before = root.lstat()
