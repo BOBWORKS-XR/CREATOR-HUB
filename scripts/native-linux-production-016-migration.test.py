@@ -1184,6 +1184,113 @@ class RootGlobalInventoryTests(unittest.TestCase):
                     self.assertEqual(len(answer["processes"]), 63); self.assertEqual(len(answer["terminalProcesses"]), 1)
 
 
+class ConnectionReviewGraphCaptureTests(unittest.TestCase):
+    def graph(self, extra="Warning"):
+        question = "Command: /synthetic/client-node\nServer: /synthetic/server.mjs\nPRIVATE_CONFIG_ARGUMENT"
+        rows = [{"reference": [":1.2", str(i)], "parent": [":1.2", "app" if i == 0 else "0"], "pid": 123,
+                 "role": role, "name": name, "ready": True} for i, (role, name) in enumerate(
+                     [(2, "Warning"), (29, question), (43, "Move reviewed connections"), (43, "Keep existing"), (29, extra)])]
+        return question, rows
+
+    def check(self, rows, question, record):
+        return M.connection_review_graph_contract(rows, pid=123, question=question, record=record)
+
+    def test_actual_extra_label_refusal_retains_only_bounded_already_read_redacted_graph(self):
+        question, rows = self.graph()
+        record = {}; original_rows = copy.deepcopy(rows)
+        with patch.object(M, "read_file") as read, patch.object(M, "ax_graph") as walk, \
+                patch.object(M.subprocess, "Popen") as spawn, self.assertRaisesRegex(RuntimeError, "^Unexpected extra connection-review text$"):
+            self.check(rows, question, record)
+        capture = record["refusedGraph"]
+        self.assertEqual(rows, original_rows)
+        self.assertEqual(capture["questionIndexes"], [1]); self.assertEqual(capture["extraLabelIndexes"], [4])
+        self.assertEqual(capture["nodes"][4]["name"], {"kind": "known", "text": "Warning"})
+        self.assertEqual(capture["nodes"][4]["parentIndex"], 0)
+        self.assertEqual(capture["nodes"][1]["name"]["kind"], "expected-question")
+        self.assertNotIn("PRIVATE_CONFIG_ARGUMENT", json.dumps(capture)); self.assertNotIn("/synthetic/", json.dumps(capture))
+        self.assertLessEqual(len(json.dumps(capture).encode()), 32768)
+        for key in ("inputPermitted", "authorityGranted", "releaseReady"): self.assertIs(capture[key], False)
+        self.assertTrue(capture["diagnosticOnly"])
+        read.assert_not_called(); walk.assert_not_called(); spawn.assert_not_called()
+
+    def test_unknown_labels_have_only_lengths_and_hash_never_body_or_configuration(self):
+        extra = 'other-client --token=SECRET_VALUE /private/client.json\n{"command":"PRIVATE"}'
+        question, rows = self.graph(extra)
+        record = {}
+        with self.assertRaisesRegex(RuntimeError, "Unexpected extra connection-review text"): self.check(rows, question, record)
+        name = record["refusedGraph"]["nodes"][4]["name"]
+        self.assertEqual(name, {"kind": "redacted", "chars": len(extra), "utf8Bytes": len(extra.encode()), "sha256": M.digest(extra.encode())})
+        raw = json.dumps(record["refusedGraph"])
+        for secret in ("SECRET_VALUE", "other-client", "PRIVATE", "client.json", "command"): self.assertNotIn(secret, raw)
+
+    def test_success_and_other_refusals_have_no_diagnostic_and_matcher_stays_strict(self):
+        question, rows = self.graph()
+        record = {}; self.check(rows[:-1], question, record); self.assertEqual(record, {})
+        for mutate in (lambda g: g[1].update(name="wrong question"), lambda g: g[0].update(pid=999),
+                       lambda g: g[2].update(name="wrong action")):
+            bad = copy.deepcopy(rows); mutate(bad); record = {}
+            with patch.object(M, "connection_review_graph_diagnostic") as capture, self.assertRaises(RuntimeError):
+                self.check(bad, question, record)
+            self.assertEqual(record, {}); capture.assert_not_called()
+
+    def test_capture_failure_preserves_identical_original_exception_and_omits_error_message(self):
+        question, rows = self.graph(); original = RuntimeError("Unexpected extra connection-review text")
+        record = {}
+        with patch.object(M, "graph_contract", side_effect=original), \
+                patch.object(M, "connection_review_graph_diagnostic", side_effect=ValueError("PRIVATE capture failure")), \
+                self.assertRaises(RuntimeError) as raised:
+            self.check(rows, question, record)
+        self.assertIs(raised.exception, original)
+        self.assertEqual(record, {"graphCaptureUnavailable": {"type": "ValueError"}})
+
+    def test_capture_limits_and_malformed_or_foreign_rows_do_not_mask_original_refusal(self):
+        question, rows = self.graph()
+        for mutate in (lambda g: g.extend(copy.deepcopy(g) * 13), lambda g: g[4].update(name="x" * 4097),
+                       lambda g: g[4].update(pid=999), lambda g: g[4].update(reference=g[1]["reference"]),
+                       lambda g: g[4].update(parent=[":1.2", "foreign"]), lambda g: g[4].update(ready="yes")):
+            bad = copy.deepcopy(rows); mutate(bad)
+            with self.assertRaises(RuntimeError): M.connection_review_graph_diagnostic(bad, pid=123, question=question)
+        class DifferentRuntimeError(RuntimeError): pass
+        original = DifferentRuntimeError("Unexpected extra connection-review text")
+        record = {}
+        with patch.object(M, "graph_contract", side_effect=original), self.assertRaises(DifferentRuntimeError) as raised:
+            self.check(rows, question, record)
+        self.assertIs(raised.exception, original); self.assertEqual(record, {})
+
+    def test_refusal_prevents_connection_action_and_production_uses_the_wrapper(self):
+        question, rows = self.graph(); record = {}; button = Mock()
+        def profile():
+            self.check(rows, question, record)
+            return button, {}
+        with self.assertRaisesRegex(RuntimeError, "Unexpected extra connection-review text"):
+            M.approve_connection_review(profile, Mock(), record)
+        button.get_action_iface.assert_not_called(); self.assertNotIn("actionAttempts", record)
+        tree = ast.parse(Path(M.__file__).read_text())
+        session = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Session")
+        method = next(n for n in session.body if isinstance(n, ast.FunctionDef) and n.name == "review_connections")
+        calls = [n for n in ast.walk(method) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "connection_review_graph_contract"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual({k.arg for k in calls[0].keywords}, {"pid", "question", "record"})
+
+    def test_graph_is_persisted_with_primary_failure_in_existing_session_receipt(self):
+        question, rows = self.graph()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            with patch.object(M.Session, "start"):
+                session = M.Session(root, binding())
+            record = session.evidence["connectionReview"] = {}
+            try:
+                self.check(rows, question, record)
+            except RuntimeError as error:
+                session.retain_failure(error)
+            value = json.loads((root / "session.json").read_bytes())
+            self.assertEqual(value["firstFailure"]["message"], "Unexpected extra connection-review text")
+            self.assertEqual(value["connectionReview"]["refusedGraph"]["extraLabelIndexes"], [4])
+            self.assertEqual(list(root.iterdir()), [root / "session.json"])
+            self.assertNotIn("PRIVATE_CONFIG_ARGUMENT", json.dumps(value))
+
+
 class SessionProgressTests(unittest.TestCase):
     class Stall(BaseException):
         pass

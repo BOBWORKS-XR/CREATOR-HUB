@@ -869,6 +869,60 @@ def graph_contract(rows, *, pid, title, question, password=False, connection_rev
     require(all(row["ready"] for row in rows if row["role"] in (2, 16, 29, 40, 43)), "Native controls are not ready")
 
 
+def connection_review_graph_diagnostic(rows, *, pid, question):
+    # Synthetic CI graph only. No new AX calls, raw question/configuration, or unknown label bodies.
+    require(type(rows) is list and 1 <= len(rows) <= 64 and type(pid) is int and 1 < pid < 2**31
+            and type(question) is str and len(question) <= 4096, "Diagnostic graph exceeds bound")
+    references = []
+    for row in rows:
+        keys(row, ("reference", "parent", "pid", "role", "name", "ready"))
+        require(row["pid"] == pid and type(row["role"]) is int and 0 <= row["role"] < 65536
+                and type(row["ready"]) is bool, "Diagnostic graph owner/metadata differs")
+        for field in ("reference", "parent"):
+            value = row[field]
+            require(type(value) is list and len(value) == 2 and all(type(v) is str and len(v) <= 256 for v in value),
+                    "Diagnostic graph reference exceeds bound")
+        references.append(tuple(row["reference"]))
+    require(len(set(references)) == len(rows), "Diagnostic graph reference duplicated")
+    indexes = {reference: i for i, reference in enumerate(references)}
+    known = ("", "Warning", CONNECTION_REVIEW_TITLE, "Move reviewed connections", "Keep existing")
+    nodes, questions, extras, text_bytes = [], [], [], 0
+    for index, row in enumerate(rows):
+        parent = indexes.get(tuple(row["parent"]))
+        require(index == 0 or parent is not None, "Diagnostic graph parent escaped")
+        name = row["name"]
+        if name is None:
+            summary = {"kind": "unread"}
+        else:
+            require(type(name) is str and len(name) <= 4096, "Diagnostic name exceeds bound")
+            raw = name.encode("utf-8"); text_bytes += len(raw)
+            require(text_bytes <= 65536, "Diagnostic text budget exceeded")
+            summary = ({"kind": "known", "text": name} if name in known else
+                       {"kind": "expected-question" if name == question else "redacted",
+                        "chars": len(name), "utf8Bytes": len(raw), "sha256": digest(raw)})
+        if row["role"] == 29:
+            (questions if name == question else extras).append(index)
+        nodes.append({"index": index, "parentIndex": parent, "role": row["role"], "ready": row["ready"], "name": summary})
+    value = {"schemaVersion": 1, "scope": "synthetic-connection-review-016", "diagnosticOnly": True,
+        "inputPermitted": False, "authorityGranted": False, "releaseReady": False, "rootPid": pid,
+        "nodeCount": len(nodes), "questionIndexes": questions, "extraLabelIndexes": extras, "nodes": nodes}
+    require(len(json.dumps(value, allow_nan=False).encode()) <= 32768, "Diagnostic output budget exceeded")
+    return value
+
+
+def connection_review_graph_contract(rows, *, pid, question, record):
+    try:
+        graph_contract(rows, pid=pid, title="Warning", question=question, connection_review=True)
+    except RuntimeError as error:
+        if type(error) is RuntimeError and str(error) == "Unexpected extra connection-review text" and type(record) is dict:
+            try:
+                if "refusedGraph" not in record:
+                    record["refusedGraph"] = connection_review_graph_diagnostic(rows, pid=pid, question=question)
+            except Exception as capture_error:
+                record["graphCaptureUnavailable"] = {"type": type(capture_error).__name__[:100]}
+        raise
+
+
 def ax_graph(atspi, helper, native, refs, owner, frame, *, protected=None):
     apps = [node for node in helper.fresh_close_children(atspi.get_desktop(0), 64) if node.get_process_id() == owner.root["pid"]]
     require(len(apps) == 1, "One attributed AX application required")
@@ -1216,7 +1270,7 @@ class Session:
             def profile():
                 guard()
                 graph, nodes = ax_graph(Atspi, self.helper, self.native, refs, owner, frame)
-                graph_contract(graph, pid=request.pid, title="Warning", question=expected["question"], connection_review=True)
+                connection_review_graph_contract(graph, pid=request.pid, question=expected["question"], record=record)
                 require(self.x11.frame_rectangle(window) == frame, "Connection-review native frame changed")
                 button = next(node for node, row in zip(nodes, graph) if row["role"] == 43 and row["name"] == "Move reviewed connections")
                 return button, {"graph": graph, "xres": xres, "frame": frame, **expected}
