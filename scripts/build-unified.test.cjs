@@ -36,6 +36,21 @@ function productionStaging(commit, files) {
     productionContract: p.PRODUCTION_CONTRACT, ...p.FLAGS };
 }
 
+test('private017 is a separate explicit selector and cannot mix with production016 or historical profiles', () => {
+  const b = require('./build-unified.cjs'), p = require('./private-linux-update-fixture-017.cjs');
+  assert.deepEqual(b.parseBuildOptions(['--linux-private-update-fixture-017']), { linuxPrivateUpdateFixture: true });
+  assert.throws(() => b.parseBuildOptions(['--linux-private-update-fixture-017', '--linux-private-update-fixture-017']), /Duplicate/);
+  const options = { linuxPrivateUpdateFixture: true, integratedFeatures: true };
+  assert.equal(b.candidateProfile(options), p.PROFILE);
+  for (const change of [{ linuxPrivateUpdateFixture: 'true' }, { integratedFeatures: false },
+    { linuxProductionMigration: true }, { linuxIntegratedCandidate: true }, { linuxRetirementCandidate: true }, { linuxPortableHostCandidate: true }]) {
+    assert.throws(() => b.candidateProfile({ ...options, ...change }));
+  }
+  assert.equal(b.candidateProfile({ integratedFeatures: true, linuxProductionMigration: true }), 'production-migration-016');
+  assert.equal(b.candidateProfile({ integratedFeatures: true, linuxIntegratedCandidate: true }), 'integrated-candidate');
+  assert.throws(() => b.build('never-build17', options, { env: {}, execute() { assert.fail('No tooling without exact private017 context'); } }), /native Linux|private017 context/);
+});
+
 test('production016 profile is explicit, exclusive and refuses unsigned or old source before any tooling', () => {
   const b = require('./build-unified.cjs');
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'creator-production-options-')));

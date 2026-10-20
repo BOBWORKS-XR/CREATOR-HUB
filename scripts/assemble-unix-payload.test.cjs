@@ -54,6 +54,14 @@ test('the separate 016 handoff requires its independently admitted version and c
   const old = data();
   assert.throws(() => validateHandoff(old.h, old.prepared, old.records, 'linux', 'x86_64', '0.1.16'));
 });
+test('private017 does not relax original016 handoff or producer validation into accepting relabelled evidence', () => {
+  const f = data('linux', '0.1.16');
+  f.h.hubVersion = f.prepared.hubVersion = f.h.apiProof.expected.version = '0.1.17';
+  assert.throws(() => validateHandoff(f.h, f.prepared, f.records, 'linux', 'x86_64', '0.1.17'), /Finite native assembly version/);
+  assert.throws(() => validateHandoff(f.h, f.prepared, f.records, 'linux', 'x86_64', '0.1.16'));
+  const original = data('linux', '0.1.16');
+  assert.deepEqual(validateHandoff(original.h, original.prepared, original.records, 'linux', 'x86_64', '0.1.16'), original.h.builtinManifest);
+});
 const faults = {
   target: f => { f.h.arch = 'wrong'; },
   source: f => { f.h.source = { ...f.h.source, sourceCommit: 'f'.repeat(40) }; },
