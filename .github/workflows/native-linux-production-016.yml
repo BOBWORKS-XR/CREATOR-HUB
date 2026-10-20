@@ -1,0 +1,58 @@
+name: Production 016 native input inspection (not acceptance)
+
+on:
+  push:
+    branches: [validation/native-linux-production-016]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Independently pinned production 016 assembly JSON; inspection only, no app installation or execution
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/native-linux-production-016' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      CREATOR_NATIVE_LINUX_PRODUCTION_016: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - run: npm ci --ignore-scripts
+      - name: Pure contract and actual Unix file-admission tests before downloads
+        run: |
+          node --test scripts/native-linux-production-016-input.test.cjs scripts/native-linux-production-016-workflow.test.cjs
+          python3 -B scripts/native-linux-production-016-stage.test.py
+      - name: Bind successful producer API evidence and download only exact data
+        uses: actions/github-script@v8
+        env:
+          PROFILE: ${{ inputs.profile }}
+        with:
+          script: |
+            const lane = require(require('node:path').join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-production-016-input.cjs'));
+            await lane.run({github, context, profile: process.env.PROFILE});
+      - name: Inspect raw and packaged Root, production proofs and complete resources without executing candidate code
+        run: python3 -B scripts/native-linux-production-016-stage.py
+      - name: Retain inspection receipts only, never claim installed or accepted
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-production-016-inspection-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/native-linux-production-016-input/profile.json
+            ${{ runner.temp }}/native-linux-production-016-input/api-binding.json
+            ${{ runner.temp }}/native-linux-production-016-stage/binding.json
