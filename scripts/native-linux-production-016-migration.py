@@ -914,41 +914,132 @@ def ax_graph(atspi, helper, native, refs, owner, frame, *, protected=None):
 
 
 class Session:
+    PROGRESS_BOUNDARIES = ("startup", "tooling", "driver-spawn", "listeners-ready", "status-ready",
+        "session-create", "session-created", "root-bound", "window-wait", "window-bound", "startup-ready",
+        "reopen-terms", "finish-ui", "projects-wait", "home-observed", "close", "closed")
+
     def __init__(self, root, binding, *, reopened=False, inventory=None):
         self.root, self.binding = root, binding
         self.inventory = inventory
         self.dialogs = set()
         self.logs = None
         self.evidence = {"normalCloseObserved": False, "reopened": reopened}
+        self._progress_lock, self._progress_started = threading.RLock(), time.monotonic()
+        self._receipt_raw, self._receipt_inode, self._progress_blocked = None, None, False
+        self.checkpoint("startup")
         try:
             self.start()
         except Exception as error:
             self.evidence["startupRefused"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+            self.retain_failure(error)
             if self.logs is not None:
-                self.logs.pump()
-                self.evidence["logs"] = self.logs.metadata()
-                self.logs.close()
-            save(root / "session.json", self.evidence)
+                try:
+                    self.logs.pump()
+                    self.evidence["logs"] = self.logs.metadata()
+                except Exception:
+                    self.evidence["captureRefused"] = True
+                finally:
+                    try:
+                        self.logs.close()
+                    except Exception:
+                        self.evidence["captureRefused"] = True
+            self.checkpoint()
             raise
+
+    def persist_evidence(self):
+        file = self.root / "session.json"
+        raw = json.dumps(self.evidence, ensure_ascii=False, allow_nan=False).encode()
+        require(len(raw) <= 1048576, "Session receipt bound exceeded")
+        previous = getattr(self, "_receipt_raw", None)
+        if previous is None:
+            P.write(file, raw, 0o600)
+        else:
+            info = file.lstat()
+            require((info.st_dev, info.st_ino) == self._receipt_inode
+                    and read_file(file, 1048576, uid=os.getuid() if os.name == "posix" else None,
+                                  mode=0o600 if os.name == "posix" else None) == previous,
+                    "Session diagnostic receipt changed")
+            temporary = file.with_name("session.json.progress-new")
+            P.write(temporary, raw, 0o600)
+            os.replace(temporary, file)
+        info = file.lstat()
+        self._receipt_raw, self._receipt_inode = raw, (info.st_dev, info.st_ino)
+
+    def checkpoint(self, boundary=None, *, guard=None, request=None):
+        # One replaceable diagnostic snapshot in the already-exported receipt; never an input authority.
+        if not hasattr(self, "_progress_lock"):
+            return
+        with self._progress_lock:
+            if self._progress_blocked:
+                return
+            try:
+                progress = self.evidence.setdefault("progress", {"schemaVersion": 1, "diagnosticOnly": True,
+                    "authorityGranted": False, "releaseReady": False, "sequence": 0, "guards": {}})
+                elapsed = int((time.monotonic() - self._progress_started) * 1000)
+                require(0 <= elapsed <= 86400000 and progress["sequence"] < 65536, "Session progress budget exceeded")
+                progress.update(sequence=progress["sequence"] + 1, elapsedMs=elapsed)
+                if boundary is not None:
+                    require(boundary in self.PROGRESS_BOUNDARIES, "Unknown diagnostic session boundary")
+                    progress["boundary"] = boundary
+                if guard is not None:
+                    name, phase = guard
+                    require(name in ("bootstrap", "driver", "root", "window") and phase in ("entered", "completed"),
+                            "Unknown diagnostic guard boundary")
+                    progress["guards"][name] = {"phase": phase, "elapsedMs": elapsed}
+                current = request if request is not None else getattr(getattr(self, "d", None), "last_request", None)
+                if current is not None:
+                    require(type(current) is dict and set(current) == {"method", "route", "phase"}
+                            and current["method"] in ("GET", "POST", "DELETE") and type(current["route"]) is str
+                            and len(current["route"]) <= 512 and re.fullmatch(r"/[A-Za-z0-9_./-]+", current["route"])
+                            and ".." not in current["route"]
+                            and current["phase"] in ("entered", "before-guard", "http", "after-guard", "returned"),
+                            "Invalid diagnostic request metadata")
+                    progress["activeRequest"] = dict(current)
+                require(len(json.dumps(progress).encode()) <= 4096, "Session progress snapshot exceeds bound")
+                self.persist_evidence()
+            except Exception:
+                self.evidence["progressCaptureUnavailable"] = True
+                self._progress_blocked = True
+
+    def retain_failure(self, error):
+        self.evidence.setdefault("firstFailure", {"type": type(error).__name__[:100], "message": str(error)[:1000]})
+        self.checkpoint()
+
+    def observe_request(self, request):
+        def observed(method, route, *args, **kwargs):
+            self.checkpoint(request={"method": method, "route": route, "phase": "entered"})
+            try:
+                value = request(method, route, *args, **kwargs)
+            except Exception as error:
+                self.retain_failure(error)
+                raise
+            self.checkpoint()
+            return value
+        return observed
 
     def start(self):
         root, binding = self.root, self.binding
+        self.checkpoint("tooling")
         self.pages, self.helper, self.native, self.polkit = neutral()
         self.d, self.x11 = self.pages.Driver(), self.helper.X11()
+        self.d.request = self.observe_request(self.d.request)
         self.native_driver = self.pages.record("/usr/bin/WebKitWebDriver")
         require(self.native_driver["uid"] == self.native_driver["gid"] == 0 and self.native_driver["mode"] == 0o755, "Protected WebKit driver required")
         driver = BASE / "bin/tauri-driver"
         pin = P.parse(read_file(BASE / "driver.json", uid=0, mode=0o644))
         self.pages.pinned(driver, pin, 0, 0o755)
+        self.checkpoint("driver-spawn")
         self.child = subprocess.Popen([str(driver), "--native-driver", "/usr/bin/WebKitWebDriver"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.logs = self.native.Capture(self.child, root, "driver")
         self.driver_identity = self.native.native_process(self.child.pid, self.helper)
         require(self.driver_identity["kernelImageSha256"] == pin["sha256"], "Running test driver differs")
         self.evidence["driver"] = self.driver_identity
         def bootstrap_guard():
+            self.checkpoint(guard=("bootstrap", "entered"))
             self.logs.pump()
             require(self.child.poll() is None and self.native.native_process(self.child.pid, self.helper) == self.driver_identity, "Driver changed/exited")
             require(not any(row["truncated"] for row in self.logs.metadata().values()), "Bounded driver log overflow")
+            self.checkpoint(guard=("bootstrap", "completed"))
         self.d.guard = bootstrap_guard
         backend = None
         def sockets_ready():
@@ -971,31 +1062,40 @@ class Session:
         self.pages.wait(sockets_ready)
         self.backend = backend
         self.evidence["backend"] = self.backend
+        self.checkpoint("listeners-ready")
         def bound_driver_guard():
+            self.checkpoint(guard=("driver", "entered"))
             bootstrap_guard()
             self.backend_guard()
             require(self.pages.listener(self.child.pid, 4444), "Owned driver socket changed")
+            self.checkpoint(guard=("driver", "completed"))
         self.d.guard = bound_driver_guard
         self.pages.wait(lambda: self.d.request("GET", "/status")["ready"] is True)
+        self.checkpoint("status-ready")
+        self.checkpoint("session-create")
         response = self.d.request("POST", "/session", {"capabilities": {"alwaysMatch": {"tauri:options": {"application": HUB, "args": []}}}})
         self.d.session = response["sessionId"]
         require(re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.d.session), "Invalid native driver session")
+        self.checkpoint("session-created")
         roots = [item for item in self.pages.subtree(self.child.pid, self.helper, self.native).values() if item["executable"] == HUB]
         require(len(roots) == 1, "One driver-owned 016 Root required")
         self.owned = self.native.native_process(roots[0]["pid"], self.helper)
         require(self.owned["kernelImageSha256"] == binding["profile"]["pins"]["hub"]["sha256"]
                 and self.owned["parentPid"] == self.backend["pid"], "Actual 016 kernel image/parent differs")
         self.evidence["root"] = self.owned
+        self.checkpoint("root-bound")
         self.pidfd = os.pidfd_open(self.owned["pid"])
         def mapped():
             self.process_guard()
             value = self.x11.property(self.x11.x.XDefaultRootWindow(self.x11.display), "_NET_CLIENT_LIST_STACKING")
             return bool(startup_inventory(value))
+        self.checkpoint("window-wait")
         self.pages.wait(mapped)
         self.window = self.native.client_ids(self.x11)[0]
         self.request = self.helper.Request("snapshot", self.owned["pid"], self.owned["startTime"], HUB,
                                            self.owned["kernelImageSha256"], self.window, TITLE, "FRAME")
         self.xres = self.helper.bound_window(self.request, self.x11)
+        self.checkpoint("window-bound")
         self.gtk_file = Path("/usr/lib/x86_64-linux-gnu/libgtk-3.so.0").resolve(strict=True)
         self.gtk = self.pages.record(self.gtk_file)
         require(self.gtk["uid"] == self.gtk["gid"] == 0 and not self.gtk["mode"] & 0o022, "Protected GTK required")
@@ -1004,11 +1104,13 @@ class Session:
         self.d.guard = self.guard
         self.guard()
         self.evidence.update(root=self.owned, xres=self.xres)
+        self.checkpoint("startup-ready")
 
     def backend_guard(self):
         require(self.native.native_process(self.backend["pid"], self.helper) == self.backend and self.pages.listener(self.backend["pid"], 4445), "Native driver changed")
 
     def process_guard(self):
+        self.checkpoint(guard=("root", "entered"))
         self.logs.pump()
         require(not any(row["truncated"] for row in self.logs.metadata().values()), "Driver logs exceeded capture bound")
         require(self.child.poll() is None and self.native.native_process(self.child.pid, self.helper) == self.driver_identity
@@ -1032,8 +1134,10 @@ class Session:
             except Exception as capture_error:
                 self.evidence["processInventoryRefusal"] = {"errno": error.errno, "readOnly": True, "stable": False, "unavailable": type(capture_error).__name__}
             raise
+        self.checkpoint(guard=("root", "completed"))
 
     def guard(self):
+        self.checkpoint(guard=("window", "entered"))
         self.process_guard()
         require(self.helper.bound_window(self.request, self.x11) == self.xres, "Owned Root window changed")
         windows = self.native.client_ids(self.x11)
@@ -1042,6 +1146,7 @@ class Session:
             if window != self.window:
                 observed = self.x11.inspect(window)
                 require((observed["pid"], observed["title"]) in self.dialogs and observed["mapped"], "Foreign native dialog")
+        self.checkpoint(guard=("window", "completed"))
 
     def consent(self, approve):
         import gi
@@ -1124,6 +1229,7 @@ class Session:
         self.dialogs.clear()
 
     def close(self):
+        self.checkpoint("close")
         self.guard()
         backend_fd = os.pidfd_open(self.backend["pid"])
         try:
@@ -1137,7 +1243,8 @@ class Session:
         self.logs.pump()
         self.evidence["logs"] = self.logs.metadata()
         require(not any(row["truncated"] for row in self.logs.metadata().values()), "Driver log overflow")
-        save(self.root / "session.json", self.evidence)
+        self.checkpoint("closed")
+        self.persist_evidence()
         self.logs.close()
         os.close(self.pidfd)
         self.x11.dispose()
@@ -1945,6 +2052,7 @@ def home_observation(d, home):
 
 def finish_ui(session, scenario, *, reopened=False):
     d, pages = session.d, session.pages
+    session.checkpoint("finish-ui")
     if reopened:
         if d.elements("#convergence-dialog") and d.read("#convergence-dialog", "attribute/open") is not None:
             require(scenario != SCENARIOS[3], "Completed migration guide reopened")
@@ -1959,6 +2067,7 @@ def finish_ui(session, scenario, *, reopened=False):
                     "System cancellation was hidden or falsely completed")
         d.click("#convergence-later")
     pages.wait(lambda: d.read("#convergence-dialog", "attribute/open") is None)
+    session.checkpoint("projects-wait")
     pages.wait(lambda: d.read("#view-projects", "attribute/aria-busy") == "false")
     # Synthetic projects deliberately declare no SDK. Use the existing native
     # filter action, rather than pretending an SDK or bridge was installed.
@@ -1966,6 +2075,7 @@ def finish_ui(session, scenario, *, reopened=False):
         d.click('#project-sdk option[value="all"]')
     pages.wait(lambda: bool(d.elements('#project-list .project-row[data-mcp-selected="true"]')))
     session.evidence["home"] = home_observation(d, BASE / "result/home")
+    session.checkpoint("home-observed")
     session.guard()
     folder = session.root / "home-bitmap"
     folder.mkdir(mode=0o700)
@@ -2397,6 +2507,7 @@ def run_session(env):
         second = root / "reopened"; second.mkdir(mode=0o700)
         session = Session(second, binding, reopened=True, inventory=inventory)
         require(read_file(home / TERMS) == terms and session.owned["pid"] != report["first"]["root"]["pid"], "Normal reopen or terms retention failed")
+        session.checkpoint("reopen-terms")
         pages.wait(lambda: session.d.read("#usage-terms-dialog", "attribute/open") is None)
         finish_ui(session, scenario, reopened=True)
         if scenario == SCENARIOS[0]:
@@ -2424,6 +2535,7 @@ def run_session(env):
         report["refusal"] = {"type": type(error).__name__, "message": str(error)[:1500]}
         report["disposableTeardownRequired"] = True
         if session is not None:
+            session.retain_failure(error)
             report["lastSession"] = session.evidence
             try:
                 session.process_guard()

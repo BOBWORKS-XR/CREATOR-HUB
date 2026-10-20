@@ -1184,6 +1184,164 @@ class RootGlobalInventoryTests(unittest.TestCase):
                     self.assertEqual(len(answer["processes"]), 63); self.assertEqual(len(answer["terminalProcesses"]), 1)
 
 
+class SessionProgressTests(unittest.TestCase):
+    class Stall(BaseException):
+        pass
+
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            with patch.object(M.Session, "start"):
+                session = M.Session(root, binding(), reopened=True)
+            session.d = SimpleNamespace(last_request=None)
+            yield session, root / "session.json"
+
+    def receipt(self, file):
+        value = json.loads(file.read_bytes())
+        self.assertLessEqual(len(json.dumps(value["progress"]).encode()), 4096)
+        self.assertTrue(value["progress"]["diagnosticOnly"])
+        self.assertFalse(value["progress"]["authorityGranted"])
+        self.assertFalse(value["progress"]["releaseReady"])
+        return value
+
+    def test_startup_stall_keeps_existing_exported_session_receipt_before_constructor_returns(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            cls = next(n for n in ast.parse(Path(M.__file__).read_text()).body if isinstance(n, ast.ClassDef) and n.name == "Session")
+            start = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "start")
+            index = next(i for i, node in enumerate(start.body) if isinstance(node, ast.Assign)
+                         and any(isinstance(target, ast.Name) and target.id == "response" for target in node.targets))
+            function = ast.FunctionDef(name="actual_session_create", args=ast.arguments(posonlyargs=[],
+                args=[ast.arg(arg="self")], kwonlyargs=[], kw_defaults=[], defaults=[]),
+                body=copy.deepcopy(start.body[index - 1:index + 1]), decorator_list=[])
+            namespace = dict(vars(M))
+            exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "actual-session-create", "exec"), namespace)
+            def stalled(session):
+                session.d = SimpleNamespace(last_request=None, request=session.observe_request(Mock(side_effect=self.Stall())))
+                namespace["actual_session_create"](session)
+            with patch.object(M.Session, "start", stalled), self.assertRaises(self.Stall):
+                M.Session(root, binding(), reopened=True)
+            value = self.receipt(root / "session.json")
+            self.assertTrue(value["reopened"])
+            self.assertFalse(value["normalCloseObserved"])
+            self.assertEqual(value["progress"]["boundary"], "session-create")
+            self.assertNotIn("firstFailure", value)
+
+    def test_pending_request_and_guard_completion_survive_injected_transport_stall_without_retry(self):
+        with self.fixture() as (session, file):
+            driver = M.load("native-linux-integrated-pages").Driver()
+            session.d = driver
+            def guard():
+                session.checkpoint(guard=("driver", "entered"))
+                session.checkpoint(guard=("driver", "completed"))
+            driver.guard = guard
+            with patch.object(driver.http, "open", side_effect=self.Stall()) as opened, self.assertRaises(self.Stall):
+                session.observe_request(driver.request)("POST", "/session", {"notRetained": "private-payload"})
+            value = self.receipt(file)
+            opened.assert_called_once()
+            self.assertEqual(driver.last_request["phase"], "http")
+            self.assertEqual(value["progress"]["activeRequest"], {"method": "POST", "route": "/session", "phase": "before-guard"})
+            self.assertEqual(value["progress"]["guards"]["driver"]["phase"], "completed")
+            self.assertNotIn("private-payload", file.read_text())
+            self.assertNotIn("firstFailure", value)
+
+    def test_guard_entry_survives_injected_guard_stall_without_completion_claim(self):
+        with self.fixture() as (session, file):
+            session.checkpoint("window-wait")
+            session.logs = SimpleNamespace(pump=Mock(side_effect=self.Stall()))
+            with self.assertRaises(self.Stall):
+                session.process_guard()
+            value = self.receipt(file)
+            self.assertEqual(value["progress"]["boundary"], "window-wait")
+            self.assertEqual(value["progress"]["guards"]["root"]["phase"], "entered")
+
+    def test_replaced_inode_or_preexisting_temporary_receipt_is_never_overwritten_or_removed(self):
+        for failure in ("inode", "temporary"):
+            with self.subTest(failure=failure), self.fixture() as (session, file):
+                if failure == "inode":
+                    foreign = file.with_name("foreign.json")
+                    foreign.write_bytes(file.read_bytes())
+                    os.replace(foreign, file)
+                    expected = file.read_bytes()
+                else:
+                    foreign = file.with_name("session.json.progress-new")
+                    foreign.write_bytes(b"foreign temporary")
+                    expected = file.read_bytes()
+                session.checkpoint("session-created")
+                self.assertTrue(session.evidence["progressCaptureUnavailable"])
+                self.assertEqual(file.read_bytes(), expected)
+                if failure == "temporary": self.assertEqual(foreign.read_bytes(), b"foreign temporary")
+
+    def test_first_failure_is_on_disk_before_actual_optional_failure_ui_and_is_never_replaced(self):
+        source = ast.parse(Path(M.__file__).read_text())
+        run = next(n for n in source.body if isinstance(n, ast.FunctionDef) and n.name == "run_session")
+        handler = next(n.handlers[0] for n in run.body if isinstance(n, ast.Try) and n.handlers)
+        function = ast.FunctionDef(name="failure", args=ast.arguments(posonlyargs=[],
+            args=[ast.arg(arg=name) for name in ("error", "report", "session")], kwonlyargs=[], kw_defaults=[], defaults=[]),
+            body=[ast.Try(body=[ast.Raise(exc=ast.Name(id="error", ctx=ast.Load()))], handlers=[copy.deepcopy(handler)], orelse=[], finalbody=[])], decorator_list=[])
+        namespace = dict(vars(M))
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "actual-session-failure", "exec"), namespace)
+        with self.fixture() as (session, file):
+            original = RuntimeError("first native failure")
+            def stalled_guard():
+                self.assertEqual(self.receipt(file)["firstFailure"]["message"], str(original))
+                raise self.Stall()
+            session.process_guard = stalled_guard
+            report = {}
+            with self.assertRaises(self.Stall): namespace["failure"](original, report, session)
+            session.retain_failure(ValueError("later capture failure"))
+            self.assertEqual(self.receipt(file)["firstFailure"], {"type": "RuntimeError", "message": "first native failure"})
+            self.assertEqual(report["refusal"]["message"], str(original))
+
+    def test_atomic_progress_is_bounded_monotonic_and_replaces_only_its_own_snapshot(self):
+        with self.fixture() as (session, file):
+            first = self.receipt(file)["progress"]
+            for _ in range(12): session.checkpoint(guard=("root", "entered"))
+            value = self.receipt(file)["progress"]
+            self.assertGreater(value["sequence"], first["sequence"])
+            self.assertGreaterEqual(value["elapsedMs"], first["elapsedMs"])
+            self.assertEqual(list(file.parent.iterdir()), [file])
+            file.write_bytes(b"foreign receipt")
+            session.checkpoint("startup-ready")
+            self.assertEqual(file.read_bytes(), b"foreign receipt")
+            self.assertTrue(session.evidence["progressCaptureUnavailable"])
+
+    def test_diagnostic_write_failure_does_not_mask_original_exception_or_retry(self):
+        with self.fixture() as (session, file):
+            original = RuntimeError("original request failed")
+            request = Mock(side_effect=original)
+            with patch.object(M.os, "replace", side_effect=OSError("capture storage refused")) as replace:
+                with self.assertRaises(RuntimeError) as raised:
+                    session.observe_request(request)("GET", "/status")
+                self.assertIs(raised.exception, original)
+                self.assertEqual(replace.call_count, 1)
+                self.assertEqual(request.call_count, 1)
+            self.assertEqual(session.evidence["firstFailure"]["message"], str(original))
+            self.assertFalse(self.receipt(file)["normalCloseObserved"])
+
+    def test_startup_primary_failure_is_saved_before_optional_log_capture_can_fail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            original = RuntimeError("original startup refusal")
+            log = Mock()
+            def capture():
+                self.assertEqual(self.receipt(root / "session.json")["firstFailure"]["message"], str(original))
+                raise OSError("optional capture failed")
+            log.pump.side_effect = capture
+            log.close.side_effect = OSError("optional close failed")
+            def start(session):
+                session.logs = log
+                raise original
+            with patch.object(M.Session, "start", start), self.assertRaises(RuntimeError) as raised:
+                M.Session(root, binding())
+            self.assertIs(raised.exception, original)
+            value = self.receipt(root / "session.json")
+            self.assertEqual(value["startupRefused"]["message"], str(original))
+            self.assertTrue(value["captureRefused"])
+            log.close.assert_called_once()
+
+
 class DriverReadinessTests(unittest.TestCase):
     def startup(self, *, driver_at=1, backend_at=3, appears_at=1, statuses=(True,), change=None, transport_error=False):
         state = SimpleNamespace(tick=0, requests=[], statuses=iter(statuses), rows={}, closed=set())
