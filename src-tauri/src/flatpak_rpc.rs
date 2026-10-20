@@ -22,6 +22,7 @@ const NATIVE_WINDOW_ONLY: &[&str] = &[
     "native_support_status",
     "install_native_support",
     "review_native_support_recovery",
+    "prepare_project_registry",
 ];
 
 pub(super) const EVENTS: &[&str] = &[

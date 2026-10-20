@@ -457,6 +457,7 @@ fn main() {
         hosted_restore::restore_hosted_app,
         hosted_restore::complete_hosted_restore,
         projects::project_inventory,
+        projects::prepare_project_registry,
         projects::add_project_folder,
         projects::remove_project_folder,
         projects::open_unity_project,

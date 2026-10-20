@@ -1,6 +1,6 @@
 const { test, expect } = require('@playwright/test');
 
-async function load(page, { openProjects = true } = {}) {
+async function load(page, { openProjects = true, registryHelper } = {}) {
   await page.addInitScript(() => {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     window.calls = [];
@@ -34,6 +34,18 @@ async function load(page, { openProjects = true } = {}) {
       } },
     };
   });
+  if (registryHelper !== undefined) await page.addInitScript(state => {
+    window.projects = { projects: [], warnings: [], registryHelperPreparationAvailable: state };
+    const invoke = window.__TAURI__.core.invoke;
+    window.__TAURI__.core.invoke = async (command, args) => {
+      if (command !== 'prepare_project_registry') return invoke(command, args);
+      window.calls.push({ command, args });
+      if (window.holdPreparation) await new Promise(resolve => { window.finishPreparation = resolve; });
+      if (window.preparationFailure) throw window.preparationFailure;
+      window.projects = { projects: window.preparedProjects || [], warnings: [], registryHelperPreparationAvailable: false };
+      return window.projects;
+    };
+  }, registryHelper);
   await page.goto('http://127.0.0.1:4188');
   await expect(page.locator('#catalog-status')).toContainText('Update check complete');
   await expect(page.locator('#view-hub')).toBeVisible();
@@ -41,10 +53,79 @@ async function load(page, { openProjects = true } = {}) {
   await page.locator('#hub-pages [data-view="projects"]').click();
   await expect(page.locator('#view-projects')).toBeVisible();
   await expect(page.locator('#view-hub')).toBeHidden();
-  await expect(page.locator('#project-status')).toContainText('4 known projects');
+  await expect(page.locator('#project-status')).toContainText(registryHelper === undefined ? '4 known projects' : '0 known projects');
 }
 
 const projectNames = page => page.locator('.project-info > strong');
+
+test('fresh Linux Projects offers one explicit helper preparation without a saved project', async ({ page }) => {
+  await load(page, { registryHelper: true });
+  const prepare = page.getByRole('button', { name: 'Download verified Unity helper', exact: true });
+  await expect(prepare).toBeVisible();
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'prepare_project_registry'))).toEqual([]);
+  await page.evaluate(() => { window.holdPreparation = true; });
+  await prepare.click();
+  await expect(prepare).toBeDisabled();
+  await expect(page.locator('#refresh-projects')).toBeDisabled();
+  await page.evaluate(() => document.getElementById('prepare-project-registry').click());
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'prepare_project_registry'))).toEqual([{ command: 'prepare_project_registry', args: {} }]);
+  await page.evaluate(() => window.finishPreparation());
+  await expect(prepare).toBeHidden();
+  await expect(page.locator('#project-status')).toContainText('0 known projects');
+  expect(await page.evaluate(() => calls.filter(c => /project/.test(c.command)).map(c => c.command))).toEqual(['project_inventory', 'prepare_project_registry']);
+});
+
+test('declined or failed Linux preparation retains the explicit action without automatic replay', async ({ page }) => {
+  await load(page, { registryHelper: true });
+  const prepare = page.locator('#prepare-project-registry');
+  for (const failure of ['Unity registry helper download was declined.', 'Helper download failed.']) {
+    await page.evaluate(failure => { window.preparationFailure = failure; }, failure);
+    await prepare.click();
+    await expect(page.locator('#project-status')).toHaveText(failure);
+    await expect(prepare).toBeEnabled();
+    await expect(prepare).toBeVisible();
+  }
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'prepare_project_registry').length)).toBe(2);
+  await page.evaluate(() => { window.failure = 'Inventory unavailable'; });
+  await page.locator('#refresh-projects').click();
+  await expect(page.locator('#project-status')).toHaveText('Inventory unavailable');
+  await expect(prepare).toBeVisible();
+});
+
+for (const registryHelper of [undefined, false, null, 'true']) test(`helper preparation is absent without an explicit missing Linux capability (${registryHelper})`, async ({ page }) => {
+  await load(page, { registryHelper });
+  await expect(page.locator('#prepare-project-registry')).toBeHidden();
+  await page.locator('#refresh-projects').click();
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'prepare_project_registry'))).toEqual([]);
+});
+
+test('prepared Linux registry results preserve Projects filters and show returned projects without an extra lookup', async ({ page }) => {
+  await load(page, { registryHelper: true });
+  await page.locator('#project-sdk').selectOption('all');
+  await page.locator('#project-sort').selectOption('name');
+  await page.locator('#project-search').fill('Forest');
+  await page.evaluate(() => {
+    window.preparedProjects = [{ id: 'native-project', name: 'Creator Forest', path: '/home/creator/Unity Projects/Creator Forest', sdk: 'creator', sdkLabel: 'Creator SDK / Altspace', source: 'Unity Hub', added: false, unityVersion: '6000.3.21f1' }];
+  });
+  await page.locator('#prepare-project-registry').click();
+  await expect(projectNames(page)).toHaveText(['Creator Forest']);
+  await expect(page.locator('#project-sdk')).toHaveValue('all');
+  await expect(page.locator('#project-sort')).toHaveValue('name');
+  await expect(page.locator('#project-search')).toHaveValue('Forest');
+  await expect(page.locator('#prepare-project-registry')).toBeHidden();
+  expect(await page.evaluate(() => calls.filter(c => /project/.test(c.command)).map(c => c.command))).toEqual(['project_inventory', 'prepare_project_registry']);
+});
+
+for (const width of [320, 360, 940]) test(`empty Linux preparation action fits at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 640 });
+  await load(page, { registryHelper: true });
+  const box = await page.locator('#prepare-project-registry').boundingBox();
+  expect(box).not.toBeNull();
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(width);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  await page.screenshot({ path: testInfo.outputPath('linux-registry-helper.png'), fullPage: true });
+});
 
 test('a project-opening warning already in the inventory is shown once and keeps the project', async ({ page }) => {
   await load(page);

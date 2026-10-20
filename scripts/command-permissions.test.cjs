@@ -57,6 +57,7 @@ test('native terms and preference commands have exact trusted-main-window grants
     ['preferences', ['hub_preferences_status', 'set_hub_preference']],
     ['native_support', ['native_support_status', 'install_native_support', 'review_native_support_recovery']],
     ['self_update', ['hub_update_recovery_status', 'review_retained_hub_update']],
+    ['projects', ['prepare_project_registry']],
     ['convergence', ['convergence_status', 'refresh_convergence', 'prepare_convergence', 'migrate_convergence_connections', 'retire_convergence_apps', 'move_to_hub', 'inspect_convergence_outcome']],
   ]) {
     for (const command of commands) {
@@ -70,7 +71,8 @@ test('native terms and preference commands have exact trusted-main-window grants
   const transport = fs.readFileSync(path.join(root, 'src', 'flatpak_rpc.rs'), 'utf8');
   const nativeOnly = registry(transport, /NATIVE_WINDOW_ONLY: &\[&str\] = &\[([\s\S]*?)\];/, /^"[a-z_]+"$/);
   for (const command of ['move_to_hub', 'inspect_convergence_outcome', 'native_support_status',
-    'install_native_support', 'review_native_support_recovery', 'hub_update_recovery_status', 'review_retained_hub_update']) {
+    'install_native_support', 'review_native_support_recovery', 'hub_update_recovery_status', 'review_retained_hub_update',
+    'prepare_project_registry']) {
     assert.ok(nativeOnly.includes(command), `${command} must not be exported through the sandbox command bridge`);
   }
 });
