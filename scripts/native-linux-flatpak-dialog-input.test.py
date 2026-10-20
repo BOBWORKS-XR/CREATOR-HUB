@@ -407,7 +407,7 @@ class NativeApiTests(unittest.TestCase):
             frame_rectangle=lambda window: state["frame"], sync=lambda: None)
         api.x11 = x11
         api.attributes = lambda window: SimpleNamespace(width=1920, height=1080) if window == 50 else state["overlay"]
-        api.tree = lambda window: {456: (500, []), 500: (50, [456]), 50: (0, state["stack"])}[window]
+        api.tree = lambda window: {456: (500, []), 500: (50, [456]), 50: (0, state["stack"])}.get(window, (50, []))
         def focus(display, result, revert):
             state["focusCalls"] += 1
             C.cast(result, C.POINTER(C.c_ulong))[0] = state["focus"]
@@ -468,11 +468,199 @@ class NativeApiTests(unittest.TestCase):
             M.capture(None, None, None, {}, {}, None, 456)
 
 
+class DirectChildFocusTests(unittest.TestCase):
+    def setUp(self):
+        M._ATTEMPTS.clear()
+        # Native 39395026033: stable same-client direct child, not a timing guess.
+        self.target, self.child, self.root, self.frame = 8388611, 8388612, 1293, 6291556
+        self.owner = {'pid': 7296, 'client': 8388608, 'title': 'Creator Hub', 'mapped': True}
+        self.state = {'focus': self.child, 'revert': 2, 'active': (33, 32, [self.target]),
+                      'clients': (33, 32, [self.target]), 'stack': [self.frame, 8388609],
+                      'parent': self.target, 'xres': {'pid': 7296, 'client': 8388608},
+                      'targetXres': {'pid': 7296, 'client': 8388608}, 'geometry': (368, 367, 546, 286),
+                      'overlay': SimpleNamespace(x=1500, y=20, width=20, height=20, border=0, map_state=2, class_=1)}
+        self.api = object.__new__(M.NativeWindow)
+        self.api.x11 = SimpleNamespace(display=99, x=SimpleNamespace(XDefaultRootWindow=lambda _: self.root),
+            property=lambda window, name: self.state['active'] if name == '_NET_ACTIVE_WINDOW' else self.state['clients'],
+            inspect=lambda window: copy.deepcopy(self.owner), frame_rectangle=lambda window: self.state['geometry'], sync=lambda: None)
+        self.api.attributes = lambda window: SimpleNamespace(width=1920, height=1080) if window == self.root else self.state['overlay']
+        self.tree_reads, self.xres_reads, self.sent = [], [], []
+        def tree(window):
+            self.tree_reads.append(window)
+            return {self.target: (self.frame, [self.child]), self.child: (self.state['parent'], []),
+                    self.frame: (self.root, [self.target]), self.root: (0, self.state['stack'])}.get(window, (self.root, []))
+        self.api.tree = tree
+        def xres(window):
+            self.xres_reads.append(window)
+            return copy.deepcopy(self.state['targetXres'] if window == self.target else self.state['xres'])
+        self.api.xres_identity = xres
+        def focus(display, result, revert):
+            C.cast(result, C.POINTER(C.c_ulong))[0] = self.state['focus']
+            C.cast(revert, C.POINTER(C.c_int))[0] = self.state['revert']
+            return 1
+        self.api.get_focus = focus
+        self.api.keycode = lambda symbol: {0xff1b: 9, 0xff0d: 36, 0xff09: 23, 0x20: 65}[symbol]
+        self.hook = lambda: None
+        def submit(window, code, modifiers, pressed):
+            self.sent.append((window, code, modifiers, pressed)); self.hook()
+            return 1
+        self.api.submit = submit
+        self.binding = Binding()
+        self.binding.process = process(7296, 7295, '22221')
+
+    def expected_proof(self):
+        return {'window': self.child, 'parent': self.target, 'root': self.root, 'pid': 7296,
+                'client': 8388608, 'activeWindow': self.target, 'revert': 2}
+
+    def test_actual_native_direct_child_shape_is_retained_and_delivery_still_targets_toplevel(self):
+        snapshot = self.api.snapshot(self.target)
+        self.assertEqual(snapshot['focus'], self.child)
+        self.assertEqual(snapshot['directChildFocus'], self.expected_proof())
+        M.validate_target(snapshot, self.binding.process, self.target)
+        attempt = M.KeyboardAttempt(self.binding, self.api, self.target)
+        receipt = attempt.send('Escape')
+        self.assertEqual(attempt.baseline['directChildFocus'], self.expected_proof())
+        self.assertEqual(self.sent, [(self.target, 9, 0, True), (self.target, 9, 0, False)])
+        self.assertTrue(receipt['deliveryComplete']); self.assertFalse(receipt['outcomeVerified'])
+        self.assertNotIn('directChildFocus', receipt)
+        self.assertGreaterEqual(self.binding.checks, 8)
+
+    def test_original_top_level_path_requires_no_child_or_active_window_queries(self):
+        self.state['focus'] = self.target
+        property_read = self.api.x11.property
+        def prop(window, name):
+            self.assertNotEqual(name, '_NET_ACTIVE_WINDOW')
+            return property_read(window, name)
+        self.api.x11.property = prop
+        snapshot = self.api.snapshot(self.target)
+        self.assertEqual(set(snapshot), {'owner', 'frame', 'focus', 'soleWindow', 'unobscured'})
+        self.assertEqual(snapshot['focus'], self.target); self.assertEqual(self.xres_reads, [])
+        M.validate_target(snapshot, self.binding.process, self.target)
+        attempt = M.KeyboardAttempt(self.binding, self.api, self.target)
+        attempt.send('Escape')
+        self.assertEqual(self.binding.checks, 6)
+        self.assertEqual(self.sent, [(self.target, 9, 0, True), (self.target, 9, 0, False)])
+        self.assertEqual(self.xres_reads, [])
+
+    def test_foreign_client_pid_target_binding_and_non_direct_parent_never_reach_input(self):
+        mutations = (lambda: self.state['xres'].update(client=8388609), lambda: self.state['xres'].update(pid=7297),
+                     lambda: self.state['targetXres'].update(client=8388609), lambda: self.state['targetXres'].update(pid=7297),
+                     lambda: self.state.update(parent=999), lambda: self.state.update(parent=self.frame),
+                     lambda: self.state.update(parent=self.child), lambda: self.state.update(parent=8388613),
+                     lambda: self.state.update(parent=float(self.target)))
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                self.setUp(); mutate()
+                with self.assertRaises(RuntimeError): M.KeyboardAttempt(self.binding, self.api, self.target)
+                self.assertEqual(self.sent, [])
+
+    def test_sentinels_desktop_root_and_sibling_are_not_queried_or_admitted_as_children(self):
+        for focus in (0, 1, self.root, self.frame):
+            with self.subTest(focus=focus):
+                self.state['focus'] = focus; self.tree_reads.clear(); self.xres_reads.clear()
+                with self.assertRaises(RuntimeError): self.api.snapshot(self.target)
+                self.assertEqual(self.sent, []); self.assertEqual(self.xres_reads, [])
+                if focus in (0, 1): self.assertNotIn(focus, self.tree_reads)
+
+    def test_active_window_must_be_exact_managed_target_not_child_or_another_window(self):
+        for active in (None, (33, 32, [self.child]), (33, 32, [999]), (33, 32, [self.target, 999]),
+                       (6, 32, [self.target]), [33, 32, [self.target]]):
+            with self.subTest(active=active):
+                self.state['active'] = active
+                with self.assertRaises(RuntimeError): self.api.snapshot(self.target)
+                self.assertEqual(self.sent, [])
+
+    def test_direct_child_proof_schema_types_identity_and_raw_focus_are_exact(self):
+        snapshot = self.api.snapshot(self.target)
+        mutations = (lambda v: v['directChildFocus'].update(extra=True), lambda v: v.pop('directChildFocus'),
+                     lambda v: v['directChildFocus'].pop('root'), lambda v: v['directChildFocus'].update(parent=self.frame),
+                     lambda v: v['directChildFocus'].update(window=self.target), lambda v: v['directChildFocus'].update(pid=7297),
+                     lambda v: v['directChildFocus'].update(client=8388609), lambda v: v['directChildFocus'].update(activeWindow=self.child),
+                     lambda v: v['directChildFocus'].update(root=self.child), lambda v: v['directChildFocus'].update(revert=True),
+                     lambda v: v['directChildFocus'].update(revert=3), lambda v: v['directChildFocus'].update(pid=2**31),
+                     lambda v: v['directChildFocus'].update(client=2**32), lambda v: v['directChildFocus'].update(root=True),
+                     lambda v: v.update(focus=0), lambda v: v.update(focus=2**32),
+                     lambda v: v.update(focus=True), lambda v: v.update(focus=self.target))
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                value = copy.deepcopy(snapshot); mutate(value)
+                with self.assertRaises(RuntimeError): M.validate_target(value, self.binding.process, self.target)
+
+    def test_child_focus_revert_ancestry_xres_and_active_window_are_rechecked_within_snapshot(self):
+        mutations = (lambda: self.state.update(focus=self.target), lambda: self.state.update(focus=8388613),
+                     lambda: self.state.update(revert=1), lambda: self.state.update(parent=self.frame),
+                     lambda: self.state['xres'].update(client=8388609), lambda: self.state.update(active=(33, 32, [999])))
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                self.setUp(); read = self.api.get_focus; calls = []
+                def focus(*args):
+                    calls.append(None)
+                    if len(calls) == 2: mutate()
+                    return read(*args)
+                self.api.get_focus = focus
+                with self.assertRaises(RuntimeError): self.api.snapshot(self.target)
+                self.assertEqual(self.sent, [])
+
+    def test_process_and_window_drift_before_key_or_between_strokes_never_retry_or_release_elsewhere(self):
+        mutations = (lambda: setattr(self.binding, 'failure', 'PID/start/UID/image changed'),
+                     lambda: self.state.update(parent=self.frame), lambda: self.state.update(focus=self.target),
+                     lambda: self.state.update(active=(33, 32, [999])), lambda: self.state.update(geometry=(369, 367, 546, 286)),
+                     lambda: self.state.update(clients=(33, 32, [self.target, 999])),
+                     lambda: (setattr(self.state['overlay'], 'x', 400), setattr(self.state['overlay'], 'y', 400)))
+        for mutate in mutations:
+            for partial in (False, True):
+                with self.subTest(mutate=mutate, partial=partial):
+                    self.setUp(); attempt = M.KeyboardAttempt(self.binding, self.api, self.target)
+                    if partial: self.hook = mutate
+                    else: mutate()
+                    with self.assertRaises(M.InputRefused) as raised: attempt.send('Escape')
+                    self.assertEqual(len(self.sent), 1 if partial else 0)
+                    self.assertEqual(len(raised.exception.receipt['delivery']), 1 if partial else 0)
+                    with self.assertRaises(M.InputRefused): attempt.send('Escape')
+                    self.assertEqual(len(self.sent), 1 if partial else 0)
+
+    def test_real_owned_binding_detects_pid_start_uid_and_image_drift_after_final_child_query(self):
+        mutations = (lambda row: row.update(startTime='999'), lambda row: row.update(parentPid=999),
+                     lambda row: row.update(uids=[1002] * 4), lambda row: row.update(kernelImageSha256='c' * 64),
+                     lambda row: row['image'].update(st_ino='999'))
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                self.setUp(); signed = LauncherTests(); signed.setUp()
+                self.owner['pid'] = self.state['xres']['pid'] = self.state['targetXres']['pid'] = 123
+                binding = signed.bind()
+                read, calls = self.api.get_focus, []
+                def focus(*args):
+                    calls.append(None)
+                    if len(calls) == 4: mutate(signed.rows[123])
+                    return read(*args)
+                self.api.get_focus = focus
+                try:
+                    with self.assertRaises(RuntimeError): M.KeyboardAttempt(binding, self.api, self.target)
+                    self.assertEqual(len(calls), 4); self.assertEqual(self.sent, [])
+                finally:
+                    binding.close()
+
+    def test_different_otherwise_valid_direct_child_cannot_replace_the_frozen_focus(self):
+        for partial in (False, True):
+            with self.subTest(partial=partial):
+                self.setUp(); original_tree = self.api.tree
+                self.api.tree = lambda window: (self.target, []) if window == 8388613 else original_tree(window)
+                attempt = M.KeyboardAttempt(self.binding, self.api, self.target)
+                change = lambda: self.state.update(focus=8388613)
+                if partial: self.hook = change
+                else: change()
+                with self.assertRaises(M.InputRefused): attempt.send('Escape')
+                self.assertEqual(len(self.sent), 1 if partial else 0)
+                self.assertEqual(attempt.baseline['focus'], self.child)
+                with self.assertRaises(M.InputRefused): attempt.send('Escape')
+                self.assertEqual(len(self.sent), 1 if partial else 0)
+
+
 class FocusDiagnosticTests(unittest.TestCase):
     def setUp(self):
         M._ATTEMPTS.clear()
         self.api, self.state = NativeApiTests().native_fixture()
-        self.state.update(focus=457, active=456)
+        self.state.update(focus=457, active=999)
         self.binding = SimpleNamespace(process=process(), helper=None, checks=0)
         def verify():
             self.binding.checks += 1

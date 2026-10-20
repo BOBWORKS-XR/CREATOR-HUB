@@ -374,10 +374,23 @@ class NativeWindow:
                 self.x11.x.XFree(values)
 
     def check_focus(self, window, focus, revert, owner, frame, clients, message):
-        if focus != window:
+        if focus == window:
+            return None
+        try:
+            root = self.x11.x.XDefaultRootWindow(self.x11.display)
+            require(type(focus) is int and 1 < focus < 2**32 and focus != root
+                    and type(revert) is int and revert in (0, 1, 2), message)
+            parent, _children = self.tree(focus)
+            require(type(parent) is int and parent == window, message)
+            expected = {'pid': owner['pid'], 'client': owner['client']}
+            require(self.xres_identity(window) == expected and self.xres_identity(focus) == expected, message)
+            require(self.x11.property(root, '_NET_ACTIVE_WINDOW') == (33, 32, [window]), message)
+            return {'window': focus, 'parent': window, 'root': root, 'pid': owner['pid'], 'client': owner['client'],
+                    'activeWindow': window, 'revert': revert}
+        except Exception:
             self._focus_refusal = {'target': window, 'focus': focus, 'revert': revert,
                 'targetXres': self.redacted_owner(owner), 'targetFrame': frame, 'managedStack': copy.deepcopy(clients)}
-        require(focus == window, message)
+            raise
 
     @staticmethod
     def redacted_owner(value):
@@ -537,14 +550,18 @@ class NativeWindow:
         focus, revert = C.c_ulong(), C.c_int()
         require(self.get_focus(self.x11.display, C.byref(focus), C.byref(revert)), "Native input focus unavailable")
         self.sync()
-        # Child focus is deliberately unsupported until separately kernel-bound.
-        self.check_focus(window, focus.value, revert.value, owner, frame, clients, "Focus is not the exact owned top-level XID")
+        # GTK may focus its own direct child; event delivery still targets window.
+        child_focus = self.check_focus(window, focus.value, revert.value, owner, frame, clients, "Focus is not the exact owned top-level XID")
         require(self.x11.inspect(window) == owner and self.x11.frame_rectangle(window) == frame
                 and self.x11.property(root, "_NET_CLIENT_LIST_STACKING") == clients, "Owned window changed during snapshot")
         require(self.get_focus(self.x11.display, C.byref(focus), C.byref(revert)), "Native input focus recheck unavailable")
         self.sync()
-        self.check_focus(window, focus.value, revert.value, owner, frame, clients, "Native focus changed during window capture")
+        require(self.check_focus(window, focus.value, revert.value, owner, frame, clients,
+                                 "Native focus changed during window capture") == child_focus,
+                "Native focus changed during window capture")
         result = {"owner": owner, "frame": frame, "focus": focus.value, "soleWindow": companion is None, "unobscured": True}
+        if child_focus is not None:
+            result['directChildFocus'] = child_focus
         if companion is not None:
             require(companion.window_identity() == companion.window_owner, "Native Root window changed during capture")
             result.update(warmCompanion=companion.evidence, managedWindows=[companion.window, window])
@@ -581,6 +598,9 @@ class NativeWindow:
 def validate_target(value, process, window, *, warm_companion=None):
     require(warm_companion is None or type(warm_companion) is WarmRoot, "One opaque native Root companion required")
     fields = {"owner", "frame", "focus", "soleWindow", "unobscured"}
+    child_focus = type(value) is dict and value.get('focus') != window
+    if child_focus:
+        fields.add('directChildFocus')
     if warm_companion is not None:
         fields |= {'warmCompanion', 'managedWindows'}
     require(type(value) is dict and set(value) == fields, "Exact target snapshot required")
@@ -590,8 +610,18 @@ def validate_target(value, process, window, *, warm_companion=None):
             and type(owner["client"]) is int and owner["client"] > 0
             and owner["title"] == "Creator Hub" and owner["mapped"] is True, "Exact XRes-owned visible launcher dialog required")
     rectangle(value["frame"])
-    require(type(value["focus"]) is int and value["focus"] == window
+    require(type(value["focus"]) is int and 1 < value['focus'] < 2**32
             and value["soleWindow"] is (warm_companion is None) and value["unobscured"] is True, "Exact sole unobscured focused window required")
+    if child_focus:
+        proof = value['directChildFocus']
+        require(type(proof) is dict and set(proof) == {'window', 'parent', 'root', 'pid', 'client', 'activeWindow', 'revert'}
+                and all(type(proof[key]) is int and 1 < proof[key] < 2**32 for key in ('window', 'parent', 'root', 'activeWindow'))
+                and type(proof['pid']) is int and 1 < proof['pid'] < 2**31 and proof['pid'] == owner['pid']
+                and type(proof['client']) is int and 0 < proof['client'] < 2**32 and proof['client'] == owner['client']
+                and proof['window'] == value['focus'] and proof['parent'] == proof['activeWindow'] == window
+                and proof['root'] not in (window, value['focus'])
+                and type(proof['revert']) is int and proof['revert'] in (0, 1, 2),
+                'Exact same-client direct-child focus proof required')
     if warm_companion is not None:
         require(value['warmCompanion'] == warm_companion.evidence and value['managedWindows'] == [warm_companion.window, window],
                 "Exact two-owned-window companion evidence required")
@@ -647,6 +677,8 @@ class KeyboardAttempt:
         self.binding.verify()
         after = self.api.snapshot(self.window)
         validate_target(after, self.process, self.window, warm_companion=self.warm_companion)
+        if 'directChildFocus' in after:
+            self.binding.verify()
         require(before == after and (self.baseline is None or after == self.baseline), "Owned input target changed")
         if self.warm_companion is not None:
             self.warm_companion.verify()
