@@ -257,6 +257,8 @@ mod tests {
     fn activation_failure_exposes_read_only_recovery_without_claiming_support_is_missing() {
         let source = include_str!("linux.rs");
         assert!(source.contains(".map_err(|_| contract::ACTIVATION_UNAVAILABLE)?"));
+        assert!(source.contains("\"Creator Hub could not open\""));
+        assert!(!source.contains("\"Native Hub support is required\""));
         for phrase in [
             "does not tell us whether support is missing",
             "do not delete its records or reinstall over an interrupted update",
