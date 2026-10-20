@@ -8,7 +8,7 @@ async function open(page, options = {}) {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00Z' }));
     window.__CREATOR_HUB_FEATURE_PROTOCOL__ = 1;
     window.__actualShellTest = options.shell === true;
-    window.calls = []; window.events = {}; window.pending = {};
+    window.calls = []; window.events = {}; window.pending = {}; window.pendingReject = {};
     window.failNext = options.fail || null;
     const recipe = { editorVersion: '6000.3.21f1', creatorSdkVersion: '4.0.14', urpVersion: '17.3.0', inputSystemVersion: '1.20.0' };
     const readyEnvironment = { platform: options.linux ? 'linux' : 'windows', ready: true, hubInstalled: true, hubVersion: '3.21.1', hubAutoRegistration: true,
@@ -60,7 +60,7 @@ async function open(page, options = {}) {
         const { feature, command: name, args: fields } = args;
         if (!['setup', 'mcp'].includes(feature) || !fields || Array.isArray(fields)) throw new Error('Invalid feature request');
         if (window.failNext === name) { window.failNext = null; throw new Error('Fixture failure: ' + name); }
-        if (window.hold === name) await new Promise(resolve => { window.pending[name] = resolve; });
+        if (window.hold === name) await new Promise((resolve, reject) => { window.pending[name] = resolve; window.pendingReject[name] = reject; });
         switch (name) {
           case 'probe_environment':
             if (window.incompleteNextProbe) { window.incompleteNextProbe = false; return { ready: true }; }
@@ -400,6 +400,50 @@ test('one Refresh call, no duplicate operation or automatic retry, error remains
   await expect(field(page, 'setup', 'refresh')).toBeEnabled();
   await show(page, 'mcp'); await expect(field(page, 'mcp', 'error')).toBeHidden();
   expect((await commands(page, 'probe_environment')).length).toBe(3);
+});
+
+for (const outcome of ['success', 'error']) test(`Setup requirements refresh blocks Inspect and Repair until ${outcome}, without automatic replay`, async ({ page }) => {
+  await open(page); await show(page, 'setup');
+  await field(page, 'setup', 'existing-tab').click();
+  await field(page, 'setup', 'existing-path').fill('/projects/Reviewed');
+  await field(page, 'setup', 'inspect').click();
+  await field(page, 'setup', 'approval').check();
+  await expect(field(page, 'setup', 'repair')).toBeEnabled();
+  expect((await commands(page, 'inspect_project')).length).toBe(1);
+
+  await page.evaluate(() => { window.hold = 'probe_environment'; });
+  await field(page, 'setup', 'refresh').click();
+  await page.waitForFunction(() => pending.probe_environment);
+  await expect(field(page, 'setup', 'inspect')).toBeDisabled();
+  await expect(field(page, 'setup', 'repair')).toBeDisabled();
+  await field(page, 'setup', 'inspect').dispatchEvent('click');
+  await field(page, 'setup', 'repair').dispatchEvent('click');
+  expect((await commands(page, 'probe_environment')).length).toBe(2);
+  expect((await commands(page, 'inspect_project')).length).toBe(1);
+  expect((await commands(page, 'run_existing_project')).length).toBe(0);
+
+  await page.evaluate(outcome => {
+    window.hold = null;
+    if (outcome === 'error') pendingReject.probe_environment(new Error('Fixture requirements refresh refused'));
+    else pending.probe_environment();
+  }, outcome);
+  await expect(field(page, 'setup', 'inspect')).toBeEnabled();
+  await expect(field(page, 'setup', 'repair')).toBeEnabled();
+  await expect(field(page, 'setup', 'approval')).toBeChecked();
+  await expect(field(page, 'setup', 'existing-path')).toHaveValue('/projects/Reviewed');
+  if (outcome === 'error') {
+    await expect(field(page, 'setup', 'error')).toContainText('Fixture requirements refresh refused');
+    await expect(field(page, 'setup', 'status')).toHaveText('Needs attention');
+  } else await expect(field(page, 'setup', 'error')).toBeHidden();
+  expect((await commands(page, 'probe_environment')).length).toBe(2);
+  expect((await commands(page, 'inspect_project')).length).toBe(1);
+  expect((await commands(page, 'run_existing_project')).length).toBe(0);
+
+  await field(page, 'setup', 'inspect').click();
+  await expect(field(page, 'setup', 'approval')).not.toBeChecked();
+  expect((await commands(page, 'inspect_project')).length).toBe(2);
+  expect((await commands(page, 'probe_environment')).length).toBe(2);
+  expect((await commands(page, 'run_existing_project')).length).toBe(0);
 });
 
 test('Setup creates once with exact DTO, consumes only scoped progress and completes while hidden', async ({ page }) => {
