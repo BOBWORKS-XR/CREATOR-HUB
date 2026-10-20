@@ -1012,6 +1012,10 @@ pub fn launch_hub() -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[path = "sdk_compatibility_audit.rs"]
+mod sdk_compatibility_audit;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
