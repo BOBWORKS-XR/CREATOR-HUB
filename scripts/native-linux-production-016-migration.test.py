@@ -1,6 +1,7 @@
 """Pure/temp execution contracts only; never installs or opens a native app."""
 import ast
 import copy
+import http.client
 import importlib.util
 import io
 import json
@@ -408,6 +409,116 @@ def permission_capture_fixture(*, statuses=None, starts=("12345", "12345"), fail
         stack.enter_context(patch.object(M.subprocess, "run", side_effect=AssertionError("No command execution")))
         yield fixture
         assert not fixture.fds, "Permission diagnostic leaked an FD"
+
+
+class DriverReadinessTests(unittest.TestCase):
+    def startup(self, *, driver_at=1, backend_at=3, appears_at=1, statuses=(True,), change=None, transport_error=False):
+        state = SimpleNamespace(tick=0, requests=[], statuses=iter(statuses), rows={}, closed=set())
+        driver = dict(pid=100, parentPid=99, executable="/fixture/tauri-driver", uids=[M.UID] * 4,
+                      startTime="100", kernelImageSha256="d" * 64)
+        backend = dict(pid=101, parentPid=100, executable="/usr/bin/WebKitWebDriver", uids=[M.UID] * 4,
+                       startTime="101", kernelImageSha256="b" * 64)
+        state.rows = {100: copy.deepcopy(driver), 101: copy.deepcopy(backend)}
+        def process(pid, _):
+            if pid not in state.rows:
+                raise ProcessLookupError("Synthetic owned process disappeared")
+            return copy.deepcopy(state.rows[pid])
+        def listener(pid, port):
+            return (pid, port) not in state.closed and ((pid, port) == (100, 4444) and state.tick >= driver_at or
+                    (pid, port) == (101, 4445) and state.tick >= backend_at)
+        def wait(check):
+            for _ in range(8):
+                state.tick += 1
+                if change:
+                    change(state)
+                if check():
+                    return
+            raise RuntimeError("Read-only readiness deadline; no mutation retried")
+        def request(method, endpoint):
+            session.d.guard()
+            state.requests.append((method, endpoint, state.tick))
+            self.assertEqual((method, endpoint), ("GET", "/status"))
+            if not listener(100, 4444) or not listener(101, 4445) or transport_error:
+                raise http.client.RemoteDisconnected("Remote end closed connection without response")
+            result = {"ready": next(state.statuses)}
+            session.d.guard()
+            return result
+        session = M.Session.__new__(M.Session)
+        session.logs = Mock()
+        session.logs.metadata.return_value = {"stdout": {"truncated": False}}
+        session.child = SimpleNamespace(pid=100, poll=lambda: None)
+        session.driver_identity, session.native_driver = driver, {"sha256": "b" * 64}
+        session.helper, session.evidence = None, {}
+        session.native = SimpleNamespace(native_process=process)
+        session.pages = SimpleNamespace(wait=wait, listener=listener,
+            subtree=lambda *args: copy.deepcopy({pid: row for pid, row in state.rows.items()
+                                                if pid != 101 or state.tick >= appears_at}))
+        session.d = SimpleNamespace(guard=lambda: None, request=request)
+        # Execute the actual startup statements, stopping before POST /session.
+        cls = next(n for n in ast.parse(Path(M.__file__).read_text()).body if isinstance(n, ast.ClassDef) and n.name == "Session")
+        start = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "start")
+        first = next(i for i, n in enumerate(start.body) if isinstance(n, ast.FunctionDef) and n.name == "bootstrap_guard")
+        last = next(i for i, n in enumerate(start.body) if isinstance(n, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == "response" for t in n.targets))
+        wrapper = ast.FunctionDef(name="fixture_start", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg="self")],
+            kwonlyargs=[], kw_defaults=[], defaults=[]), body=start.body[first:last], decorator_list=[])
+        code = compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])), "migration-owned-driver-preflight", "exec")
+        self.last_state, self.last_session = state, session
+        namespace = dict(vars(M))
+        exec(code, namespace)
+        namespace["fixture_start"](session)
+        return state, session
+
+    def test_staggered_owned_listeners_are_ready_before_any_status_or_root_request(self):
+        for driver_at, backend_at, appears_at in ((1, 3, 1), (3, 1, 1), (1, 4, 3)):
+            with self.subTest(driver_at=driver_at, backend_at=backend_at, appears_at=appears_at):
+                state, session = self.startup(driver_at=driver_at, backend_at=backend_at, appears_at=appears_at)
+                self.assertEqual(len(state.requests), 1)
+                self.assertGreaterEqual(state.requests[0][2], max(driver_at, backend_at, appears_at))
+                self.assertEqual(session.evidence["backend"], session.backend)
+
+    def test_missing_listener_or_backend_never_sends_http(self):
+        for arguments in (dict(driver_at=99), dict(backend_at=99), dict(appears_at=99)):
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(RuntimeError, "Read-only readiness deadline"):
+                self.startup(**arguments)
+            self.assertEqual(self.last_state.requests, [])
+
+    def test_owned_backend_or_driver_identity_change_fails_before_http(self):
+        for pid in (100, 101):
+            for field, value in (("kernelImageSha256", "x" * 64), ("parentPid", 999),
+                                 ("uids", [0] * 4), ("startTime", "replacement")):
+                def change(state):
+                    if state.tick == 2:
+                        state.rows[pid][field] = value
+                with self.subTest(pid=pid, field=field), self.assertRaises(RuntimeError):
+                    self.startup(change=change)
+                self.assertEqual(self.last_state.requests, [])
+        def disappear(state):
+            if state.tick == 2:
+                del state.rows[101]
+        with self.assertRaisesRegex(RuntimeError, "disappeared"):
+            self.startup(change=disappear)
+        self.assertEqual(self.last_state.requests, [])
+
+    def test_readonly_status_false_can_wait_but_transport_failure_stops_without_retry(self):
+        state, _ = self.startup(statuses=(False, True))
+        self.assertEqual([(method, path) for method, path, _ in state.requests], [("GET", "/status")] * 2)
+        with self.assertRaises(http.client.RemoteDisconnected):
+            self.startup(transport_error=True)
+        self.assertEqual(len(self.last_state.requests), 1)
+
+    def test_bound_identity_and_both_sockets_remain_guarded_after_preflight(self):
+        for field, value in (("kernelImageSha256", "x" * 64), ("parentPid", 999),
+                             ("uids", [0] * 4), ("startTime", "replacement")):
+            state, session = self.startup()
+            state.rows[101][field] = value
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                session.d.guard()
+        for socket in ((100, 4444), (101, 4445)):
+            state, session = self.startup()
+            state.closed.add(socket)
+            with self.subTest(socket=socket), self.assertRaises(RuntimeError):
+                session.d.guard()
 
 
 class PermissionCaptureTests(unittest.TestCase):

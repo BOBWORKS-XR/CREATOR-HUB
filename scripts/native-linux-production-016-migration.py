@@ -880,14 +880,33 @@ class Session:
             require(self.child.poll() is None and self.native.native_process(self.child.pid, self.helper) == self.driver_identity, "Driver changed/exited")
             require(not any(row["truncated"] for row in self.logs.metadata().values()), "Bounded driver log overflow")
         self.d.guard = bootstrap_guard
-        self.pages.wait(lambda: self.pages.listener(self.child.pid, 4444) and self.d.request("GET", "/status")["ready"] is True)
-        peers = self.pages.subtree(self.child.pid, self.helper, self.native)
-        backends = [item for item in peers.values() if item["executable"] == "/usr/bin/WebKitWebDriver" and item["parentPid"] == self.child.pid]
-        require(len(backends) == 1, "One independently owned native driver required")
-        self.backend = self.native.native_process(backends[0]["pid"], self.helper)
-        require(self.backend["kernelImageSha256"] == self.native_driver["sha256"] and self.pages.listener(self.backend["pid"], 4445), "Native driver binding differs")
+        backend = None
+        def sockets_ready():
+            nonlocal backend
+            bootstrap_guard()
+            peers = self.pages.subtree(self.child.pid, self.helper, self.native)
+            backends = [item for item in peers.values() if item["executable"] == "/usr/bin/WebKitWebDriver" and item["parentPid"] == self.child.pid]
+            require(len(backends) <= 1 and (backend is None or len(backends) == 1), "Owned native driver disappeared or duplicated")
+            if not backends:
+                return False
+            current = self.native.native_process(backends[0]["pid"], self.helper)
+            require(current["parentPid"] == self.child.pid and current["uids"] == [UID] * 4
+                    and current["kernelImageSha256"] == self.native_driver["sha256"], "Native driver image/parent/UID differs")
+            require(backend is None or current == backend, "Native driver identity changed during startup")
+            backend = current
+            ready = self.pages.listener(self.child.pid, 4444) and self.pages.listener(backend["pid"], 4445)
+            bootstrap_guard()
+            return ready
+        # The intermediary forwards /status before WebKit has necessarily bound.
+        self.pages.wait(sockets_ready)
+        self.backend = backend
         self.evidence["backend"] = self.backend
-        self.d.guard = lambda: (bootstrap_guard(), self.backend_guard())
+        def bound_driver_guard():
+            bootstrap_guard()
+            self.backend_guard()
+            require(self.pages.listener(self.child.pid, 4444), "Owned driver socket changed")
+        self.d.guard = bound_driver_guard
+        self.pages.wait(lambda: self.d.request("GET", "/status")["ready"] is True)
         response = self.d.request("POST", "/session", {"capabilities": {"alwaysMatch": {"tauri:options": {"application": HUB, "args": []}}}})
         self.d.session = response["sessionId"]
         require(re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.d.session), "Invalid native driver session")
