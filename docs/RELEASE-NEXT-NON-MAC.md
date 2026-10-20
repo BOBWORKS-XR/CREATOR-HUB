@@ -46,6 +46,32 @@ not approval of untested packages or a publication receipt.
 
 ### Current Evidence, 2026-10-20
 
+- Latest production packaging checkpoint: portable run `39352300183` passed.
+  Its original ZIP, seven output files and all 373 transport inventory entries
+  were independently checked. The Native Support alias and ordinary AppImage
+  are byte-identical. The private qualification manifest/descriptor were signed
+  with the existing catalogue key and independently verified; all installation,
+  update, restart, migration and release acceptance flags remain false.
+- Production Flatpak launcher run `39348943839` passed. The original ZIP,
+  exact three files, source binding and imported OSTree inventory were checked.
+  This establishes the bundle, not native-host installation or operation.
+- Actual private 0.1.17 assembly `39352480021` passed from `75a99ff`; its original
+  ZIP and eight output roles were checked. This is genuinely compiled target
+  code for outgoing-update tests, not a renamed 0.1.16 binary. It must never be
+  published or counted as a completed update/restart test.
+- Migration run `39355492887` passed the exact seven-directory CI fixture
+  correction, then refused `/usr/share/dict` while checking system package
+  metadata, before GUI actions or a retirement transaction. That path's actual
+  metadata has not yet been captured; its cause remains unverified. Production
+  guards and system metadata are unchanged. Fresh installation, public-0.1.12
+  manual upgrade, full migration and signed-update native tests remain open.
+- Clean source CI `39349309933` passed all six non-Mac jobs. The Deck is again
+  reachable in Desktop Mode with GNOME Platform 50; no Hub installation or
+  runtime acceptance on that device is implied. Windows published bytes and the
+  user's installed Windows app remain unchanged. No Mac jobs were run.
+
+The entries below retain earlier checkpoints and their narrower scopes.
+
 - The exact Windows candidate passed fresh installation, guarded NSIS upgrade,
   signed public-0.1.14-to-0.1.16 update with automatic restart, and the native
   single-guide migration/retirement scenario. Runs `39323383380`, `39322268458`,
@@ -129,7 +155,8 @@ not approval of untested packages or a publication receipt.
   independently passed the complete production DEB, raw/packaged Root transform,
   source tree, helper/policy/service, resources and both build proofs. This is
   not installation or migration acceptance. The production Flatpak producer
-  `39348943839` is running; runtime and lifecycle qualification remain open.
+  `39348943839` later passed as recorded above; runtime and lifecycle
+  qualification remain open.
 - Clean source CI `39329938286` passed all six non-Mac jobs. The existing public
   Windows release and user installation remain unchanged. The existing private
   validation draft is transport only and was not published; no Mac job or new

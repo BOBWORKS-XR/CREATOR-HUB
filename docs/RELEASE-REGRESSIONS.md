@@ -45,6 +45,13 @@ of defect-free releases. Source tests do not replace the installed checks below.
 | Fresh Windows checkout changes exact Unix protocol/source bytes, or runs CLI tests before their binary exists | `scripts/checkout-contracts.test.cjs`, `scripts/linux-deb-helper.test.cjs`; five explicit LF attributes | A fresh CRLF checkout passes the script suite; build the refusal-only helper before assertions, without enabling transaction features |
 | Frozen-source tests pass locally but fail on shallow Actions history; private fixture metadata outgrows a file-count assumption | `scripts/native-linux-update-flow.test.py` | Fetch only the exact frozen source before fixture tests; bound private metadata bytes while preserving exact selected asset IDs, hashes and signatures; native outcomes remain separately required |
 | Disposable Linux fixture source sits beneath a world-writable runner ancestor | Exact public path/UID/GID/mode refusal and measured-ancestry workflow regression | Record original metadata before changes; secure only enumerated root-owned runner fixture/policy ancestors and recheck inode/ownership; do not relax the application guard or modify user machines |
+| Cargo-owned selector output is hard-linked and a strict installed-file reader rejects it | Fresh-copy and original-identity regressions in `scripts/linux-016-portable-production.test.cjs` | Copy to a fresh single-link staging file, compare bytes and preserve the original inode/mode/link count; final package admission stays strict |
+| Valid ELF `DT_BIND_NOW` has an empty value column | `scripts/linux-016-portable-package.test.cjs`, retained full-closure sweep from `39350065455` | Accept only the exact numeric tag/name pairing; malformed and unknown rows still refuse. All 158 retained unique ELFs passed the corrected parser; runtime compatibility is separate |
+| Hosted Python lacks `tomllib`, or setup-python injects an unexpected global library path | `scripts/native-linux-production-016-migration-workflow.test.cjs` | Pin the pure-test interpreter without updating the global environment; pass its path only to preflight. Native broker keeps the system interpreter and declared runtime dependencies |
+| Clean runners import locked npm dependencies before installing them | Private017 workflow sequencing regressions | Hook-free `npm ci` precedes imports/pure tests; data and provenance gates still precede native package/tool provisioning |
+| Helper inspection discards the refusal reason and cannot identify an unsafe path | `scripts/native-linux-production-016-migration.test.py` | Preserve bounded stdout/reason, actual helper identity and before/after metadata. Capture unknown metadata parents before any proposed correction; never weaken production checks by guesswork |
+| A first-run MCP guide blocks a native test's next menu action | `scripts/native-linux-production-016-incoming.test.py` | Wait for the owned guide, use the non-writing start action once and verify closure; uncertain outcomes stop. Do not save preferences merely to clear a test dialog |
+| Flatpak preservation is checked before final close, missing shutdown writes | `scripts/native-linux-production-016-flatpak.test.py` | Repeat protected-state and generation checks after normal Root close and Host1 owner release, before reporting success |
 
 Native preflight also checks these captured boundaries:
 
@@ -54,6 +61,9 @@ Native preflight also checks these captured boundaries:
   strict installed-image checks; do not weaken package/resource link checks.
 - Read the workflow's actual event/branch before pushing a validation ref, then
   verify the resulting run's source. A push alone is not a dispatched test.
+- Pass one shared installation/preflight case before fanning out native scenarios.
+  A common harness failure is not a reason to repeat every expensive lane or
+  rebuild unchanged product bytes.
 - Keep historical transport baselines explicit when the public registry advances.
   New Windows targets after 0.1.14 use its published pins; the historical public12
   and B05-to-private15 labs retain their original scope and cannot qualify 0.1.16.
