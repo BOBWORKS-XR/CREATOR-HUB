@@ -2622,6 +2622,176 @@ def capture_wrapper(record, child, logs, started, deadline):
     diagnostic_event("wrapper-observed", value)
 
 
+UNIT_NAME = "creator-production-migration-016-fixture.service"
+UNIT_PROPERTIES = ("Id", "LoadState", "Transient", "MainPID", "ExecMainPID", "User", "PAMName",
+    "ActiveState", "SubState", "Result", "Type", "TimeoutStartUSec", "TimeoutStopUSec", "RuntimeMaxUSec", "WatchdogUSec",
+    "ExecMainCode", "ExecMainStatus", "ExecMainStartTimestamp", "ExecMainStartTimestampMonotonic",
+    "ExecMainExitTimestamp", "ExecMainExitTimestampMonotonic", "InvocationID", "ControlGroup")
+
+
+def unit_tool_pin(name):
+    require(name in ("systemctl", "systemd-run"), "Fixed unit diagnostic tools only")
+    file = Path("/usr/bin") / name
+    for entry in (file, *file.parents):
+        info = entry.lstat()
+        require(info.st_uid == 0 and not info.st_mode & 0o022 and not stat.S_ISLNK(info.st_mode), "Unprotected unit diagnostic tool")
+    return digest(read_file(file, 16 * 1024 * 1024, uid=0, mode=0o755))
+
+
+def unit_command(kind):
+    require(kind in ("unit", "version"), "Fixed read-only unit diagnostic operation required")
+    pin = unit_tool_pin("systemctl")
+    command = ["/usr/bin/systemctl", "--system", "--no-pager", "--no-ask-password", "show", "--all",
+               "--property=" + (",".join(UNIT_PROPERTIES) if kind == "unit" else "Version")]
+    if kind == "unit": command.append(UNIT_NAME)
+    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             cwd=BASE, env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
+    streams, output = [child.stdout, child.stderr], {child.stdout: bytearray(), child.stderr: bytearray()}
+    try:
+        for stream in streams: os.set_blocking(stream.fileno(), False)
+        deadline = time.monotonic() + 2
+        while (streams or child.poll() is None) and time.monotonic() < deadline:
+            for stream in select.select(streams, [], [], min(0.02, max(0, deadline - time.monotonic())))[0]:
+                raw = os.read(stream.fileno(), min(4096, 16385 - len(output[stream])))
+                output[stream].extend(raw)
+                require(len(output[stream]) <= 16384, "Unit diagnostic output exceeds bound")
+                if not raw: streams.remove(stream)
+        require(not streams and child.poll() == 0, "Unit diagnostic unavailable or deadline")
+        require(unit_tool_pin("systemctl") == pin, "Unit diagnostic tool changed")
+        return bytes(output[child.stdout])
+    finally:
+        # Never signal the unit, wrapper or even this diagnostic child. A hung
+        # read-only client is unavailable and left to disposable runner teardown.
+        child.stdout.close(); child.stderr.close()
+
+
+def unit_properties(raw):
+    require(type(raw) is bytes and len(raw) <= 16384, "Bounded unit properties required")
+    try: lines = raw.decode("ascii").splitlines()
+    except UnicodeError: raise RuntimeError("Non-ASCII unit properties") from None
+    values = {}
+    for line in lines:
+        name, separator, value = line.partition("=")
+        require(separator and name in UNIT_PROPERTIES and name not in values and len(value) <= 4096
+                and all(32 <= ord(c) < 127 for c in value), "Unknown/duplicate/malformed unit property")
+        values[name] = value
+    keys(values, UNIT_PROPERTIES)
+    return values
+
+
+class UnitDiagnostics:
+    def __init__(self, record, native, helper):
+        self.native, self.helper, self.sealed = native, helper, None
+        self.attempted, self.last_sample = set(), -1
+        self.data = {"diagnosticOnly": True, "authorityGranted": False, "releaseReady": False, "snapshots": [],
+                     "managerVersion": {"status": "unavailable"}}
+        record["unitDiagnostics"] = self.data
+
+    def process(self, pid, uid):
+        require(type(pid) is int and 1 < pid < 2**22, "Bounded diagnostic actor required")
+        value = self.native.native_process(pid, self.helper)
+        require(value["uids"] == [uid] * 4 and int(value["image"]["st_uid"]) == 0
+                and int(value["image"]["st_gid"]) == 0 and int(value["image"]["st_mode"]) == 0o100755,
+                "Unit actor credentials/image protection differ")
+        require(value["kernelImageSha256"] == digest(read_file(Path(value["executable"]), 64 * 1024 * 1024, uid=0, mode=0o755)),
+                "Unit actor differs from protected named image")
+        return value
+
+    def capture(self, phase, child, state=None):
+        if phase not in ("initial", "projects-entry", "terminal") or phase in self.attempted or len(self.attempted) >= 3:
+            return
+        if phase == "terminal":
+            for missed in ("initial", "projects-entry"):
+                if missed not in self.attempted:
+                    self.attempted.add(missed)
+                    self.data["snapshots"].append({"phase": missed, "status": "unavailable", "bindingVerified": False,
+                                                   "stage": "boundary-not-observed"})
+        self.attempted.add(phase)
+        row = {"phase": phase, "status": "unavailable", "bindingVerified": False}
+        self.data["snapshots"].append(row)
+        stage = "unit-read-before"
+        try:
+            row["wrapperReturnCode"] = child.poll()
+            before = unit_properties(unit_command("unit")); row["before"] = before
+            require(before["Id"] == UNIT_NAME and before["LoadState"] == "loaded" and before["Transient"] == "yes"
+                    and before["User"] == USER and before["PAMName"] == "login"
+                    and re.fullmatch(r"[a-f0-9]{32}", before["InvocationID"]) and before["InvocationID"] != "0" * 32,
+                    "Unknown/collected unit identity")
+            if self.sealed is None:
+                stage = "initial-wrapper-binding"
+                require(phase == "initial" and child.poll() is None and type(state) is dict, "Initial owned unit binding unavailable")
+                wrapper = self.process(child.pid, 0)
+                row["wrapperObserved"] = wrapper
+                require(wrapper["parentPid"] == os.getpid() and wrapper["executable"] == "/usr/bin/systemd-run"
+                        and wrapper["kernelImageSha256"] == unit_tool_pin("systemd-run"), "Original unit wrapper differs")
+                stage = "unit-main-binding"
+                main = self.process(int(before["MainPID"]), UID)
+                row["mainObserved"] = main
+                require(before["ExecMainPID"] == str(main["pid"]) and main["executable"] == "/usr/bin/dbus-run-session"
+                        and int(main["startTime"]) >= int(wrapper["startTime"]), "Unit main process differs")
+                stage = "session-driver-binding"
+                driver = self.process(state["driver"]["pid"], UID)
+                pin = P.parse(read_file(BASE / "driver.json", uid=0, mode=0o644))
+                require(driver == state["driver"] and driver["executable"] == str(BASE / "bin/tauri-driver")
+                        and driver["kernelImageSha256"] == pin["sha256"], "Unit session driver differs")
+                stage = "session-supervisor-binding"
+                supervisor = self.process(driver["parentPid"], UID)
+                require(proc_bytes(Path(f"/proc/{supervisor['pid']}/cmdline"), 8192)
+                        == b"/usr/bin/python3\0-B\0/opt/creator-polkit-fixture/scripts/native-linux-production-016-migration.py\0session\0",
+                        "Fixed diagnostic session required")
+                stage = "session-ancestry-binding"
+                chain, seen, actor = [], set(), supervisor
+                for _ in range(8):
+                    require(actor["pid"] not in seen, "Cyclic diagnostic ancestry")
+                    seen.add(actor["pid"]); chain.append(actor)
+                    if actor["pid"] == main["pid"]: break
+                    actor = self.process(actor["parentPid"], UID)
+                require(chain[-1] == main, "Unit main is not the owned session ancestor")
+                sealed = {"invocation": before["InvocationID"], "wrapper": wrapper, "main": main, "chain": chain, "driver": driver}
+            else:
+                stage = "sealed-invocation-binding"
+                sealed = self.sealed
+                require(before["InvocationID"] == sealed["invocation"] and before["ExecMainPID"] == str(sealed["main"]["pid"]),
+                        "Unit invocation/main changed")
+            stage = "unit-read-after"
+            after = unit_properties(unit_command("unit")); row["after"] = after
+            identity = ("Id", "LoadState", "Transient", "MainPID", "ExecMainPID", "User", "PAMName", "InvocationID", "ControlGroup")
+            require(all(before[key] == after[key] for key in identity), "Unit identity changed during capture")
+            stage = "kernel-binding-recheck"
+            if child.poll() is None:
+                require(self.process(child.pid, 0) == sealed["wrapper"], "Owned wrapper changed")
+            if before["MainPID"] != "0":
+                require(before["MainPID"] == str(sealed["main"]["pid"])
+                        and all(self.process(actor["pid"], UID) == actor for actor in sealed["chain"]), "Owned unit ancestry changed")
+            else:
+                require(phase == "terminal" and self.sealed is not None and child.poll() is not None, "Unproved unit main exit")
+            self.sealed = sealed
+            row.update(status="captured", bindingVerified=True, wrapper=sealed["wrapper"], main=sealed["main"], ancestry=sealed["chain"])
+        except Exception as error:
+            row.update(stage=stage, errorType=type(error).__name__[:80])
+        if phase == "initial":
+            try:
+                raw = unit_command("version")
+                require(len(raw) <= 256 and re.fullmatch(rb"Version=[A-Za-z0-9_.+(): -]{1,200}\n", raw), "Bounded manager version required")
+                self.data["managerVersion"] = {"status": "captured", "value": raw.decode("ascii")[8:-1]}
+            except Exception as error:
+                self.data["managerVersion"] = {"status": "unavailable", "errorType": type(error).__name__[:80]}
+
+    def poll(self, child):
+        if "projects-entry" in self.attempted:
+            return
+        try:
+            file = BASE / "result/first/session.json"
+            if not file.exists(): return
+            state = P.parse(read_file(file, 65536, uid=UID, mode=0o600))
+            if type(state.get("driver")) is not dict: return
+            if "initial" not in self.attempted: self.capture("initial", child, state)
+            if state.get("progress", {}).get("boundary") in ("projects-wait", "home-observed"):
+                self.capture("projects-entry", child, state)
+        except Exception as error:
+            self.data.setdefault("observationUnavailable", {"errorType": type(error).__name__[:80]})
+
+
 def broker(env):
     scenario = admission(env)
     require(os.getuid() == os.geteuid() == 0, "Root fixture broker only")
@@ -2641,6 +2811,7 @@ def broker(env):
     context, relock, failure = {}, False, None
     wrapper_started, deadline = None, None
     inventory_state = {"sequence": 1, "nonces": set()}
+    unit_diagnostics = UnitDiagnostics(record, native, helper)
     try:
         if scenario in SCENARIOS[2:]:
             secret = bytearray(secrets.token_hex(32).encode("ascii"))
@@ -2661,6 +2832,9 @@ def broker(env):
             logs.pump()
             require(not any(row["truncated"] for row in logs.metadata().values()), "Session diagnostic capture exceeded bound")
             serve_inventory(inventory_state, record, env["GITHUB_SHA"], scenario, native, helper)
+            if record.get("inventorySamples", 0) != unit_diagnostics.last_sample:
+                unit_diagnostics.last_sample = record.get("inventorySamples", 0)
+                unit_diagnostics.poll(child)
             request = BASE / f"result/input-{index}.json"
             if request.exists():
                 value = P.parse(read_file(request, 256, uid=UID, mode=0o600))
@@ -2691,6 +2865,7 @@ def broker(env):
                                                   "error": {"type": type(capture_error).__name__}}
     finally:
         wipe(secret); wipe(payload)
+        unit_diagnostics.capture("terminal", child)
         if logs is not None:
             try:
                 logs.pump()

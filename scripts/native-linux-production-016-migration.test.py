@@ -1936,6 +1936,214 @@ class ExitDiagnosticsTests(unittest.TestCase):
         self.assertIn("while child.poll() is None and time.monotonic() < deadline:", source)
 
 
+class UnitDiagnosticsTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self):
+        phases = ("initial", "projects-entry", "terminal")
+        props = {name: "" for name in M.UNIT_PROPERTIES}
+        props.update(Id=M.UNIT_NAME, LoadState="loaded", Transient="yes", MainPID="100", ExecMainPID="100", User=M.USER,
+                     PAMName="login", Type="exec", ActiveState="activating", SubState="start", Result="success",
+                     InvocationID="a" * 32, ControlGroup="/system.slice/" + M.UNIT_NAME, TimeoutStartUSec="1min 30s",
+                     TimeoutStopUSec="1min 30s", RuntimeMaxUSec="infinity", WatchdogUSec="0", ExecMainCode="0", ExecMainStatus="0")
+        def row(pid, parent, image, uid=M.UID):
+            return {"pid": pid, "parentPid": parent, "startTime": str(1000 + pid), "uids": [uid] * 4, "executable": image,
+                    "kernelImageSha256": M.digest(b"fixture"), "image": {"st_uid": "0", "st_gid": "0", "st_mode": str(0o100755)}}
+        rows = {99: row(99, os.getpid(), "/usr/bin/systemd-run", 0), 100: row(100, 1, "/usr/bin/dbus-run-session"),
+                109: row(109, 100, "/usr/bin/dash"), 110: row(110, 109, "/usr/bin/python3.10"),
+                120: row(120, 110, str(M.BASE / "bin/tauri-driver"))}
+        state = SimpleNamespace(props=props, rows=rows, calls=[], fault=None, evidence={"driver": copy.deepcopy(rows[120]), "progress": {"boundary": "window-wait"}})
+        record = {"scenarioPassed": False, **M.FLAGS}
+        native = SimpleNamespace(native_process=lambda pid, _: copy.deepcopy(state.rows[pid]))
+        def command(kind):
+            state.calls.append(kind)
+            if state.fault: raise state.fault
+            if kind == "version": return b"Version=249.11-0ubuntu3.23\n"
+            return "".join(key + "=" + value + "\n" for key, value in state.props.items()).encode()
+        def read(file, *_, **__):
+            if file == M.BASE / "result/first/session.json": return json.dumps(state.evidence).encode()
+            if file == M.BASE / "driver.json": return json.dumps({"sha256": M.digest(b"fixture")}).encode()
+            return b"fixture"
+        with patch.object(M, "unit_command", side_effect=command), patch.object(M, "read_file", side_effect=read), patch.object(M.Path, "exists", return_value=True), patch.object(M, "unit_tool_pin", return_value=M.digest(b"fixture")), patch.object(M, "proc_bytes", return_value=b"/usr/bin/python3\0-B\0/opt/creator-polkit-fixture/scripts/native-linux-production-016-migration.py\0session\0"):
+            state.capture = M.UnitDiagnostics(record, native, None)
+            state.child = SimpleNamespace(pid=99, poll=lambda: None)
+            state.record, state.phases = record, phases
+            yield state
+
+    def test_exact_owned_exec_unit_captures_properties_and_version_without_child_cgroup_assumption(self):
+        with self.fixture() as f:
+            for phase in f.phases: f.capture.capture(phase, f.child, f.evidence)
+            result = f.record["unitDiagnostics"]
+            self.assertEqual([r["phase"] for r in result["snapshots"]], list(f.phases))
+            self.assertTrue(all(r["status"] == "captured" and r["bindingVerified"] is True for r in result["snapshots"]))
+            self.assertEqual(result["managerVersion"], {"status": "captured", "value": "249.11-0ubuntu3.23"})
+            self.assertEqual(f.calls.count("version"), 1)
+            self.assertEqual(f.calls.count("unit"), 6)
+            self.assertEqual(result["snapshots"][0]["before"]["RuntimeMaxUSec"], "infinity")
+            self.assertEqual(result["snapshots"][0]["before"]["ControlGroup"], "/system.slice/" + M.UNIT_NAME)
+            self.assertFalse(result["authorityGranted"]); self.assertFalse(result["releaseReady"])
+
+    def test_wrong_unit_user_pam_pid_or_ancestry_never_binds_and_never_retries_phase(self):
+        for key, value in (("Id", "other.service"), ("User", "root"), ("PAMName", "other"), ("MainPID", "999"),
+                           ("ExecMainPID", "101"), ("LoadState", "not-found"), ("Transient", "no"), ("InvocationID", "0" * 32)):
+            with self.subTest(key=key), self.fixture() as f:
+                f.props[key] = value
+                f.capture.capture("initial", f.child, f.evidence)
+                count = len(f.calls)
+                f.capture.capture("initial", f.child, f.evidence)
+                row = f.record["unitDiagnostics"]["snapshots"][0]
+                self.assertEqual(row["status"], "unavailable"); self.assertFalse(row["bindingVerified"])
+                self.assertEqual(len(f.calls), count)
+                self.assertFalse(f.record["scenarioPassed"])
+        with self.fixture() as f:
+            f.rows[109]["parentPid"] = 1
+            f.capture.capture("initial", f.child, f.evidence)
+            self.assertEqual(f.record["unitDiagnostics"]["snapshots"][0]["status"], "unavailable")
+
+    def test_replaced_invocation_or_reused_process_stays_unavailable_with_before_metadata(self):
+        for fault in ("invocation", "process", "image", "user"):
+            with self.subTest(fault=fault), self.fixture() as f:
+                f.capture.capture("initial", f.child, f.evidence)
+                if fault == "invocation": f.props["InvocationID"] = "b" * 32
+                elif fault == "process": f.rows[100]["startTime"] = "9999"
+                elif fault == "image": f.rows[100]["kernelImageSha256"] = "b" * 64
+                else: f.props["User"] = "root"
+                f.capture.capture("projects-entry", f.child, f.evidence)
+                row = f.record["unitDiagnostics"]["snapshots"][-1]
+                self.assertEqual(row["status"], "unavailable"); self.assertFalse(row["bindingVerified"])
+                self.assertIn("before", row)
+
+    def test_terminal_collected_or_exited_unit_is_explicit_without_recreating_or_adopting(self):
+        for collected in (False, True):
+            with self.subTest(collected=collected), self.fixture() as f:
+                f.capture.capture("initial", f.child, f.evidence)
+                f.child.poll = lambda: 1
+                f.props.update(MainPID="0", ActiveState="failed", SubState="failed", Result="timeout", ExecMainCode="2", ExecMainStatus="15")
+                if collected: f.props.update(LoadState="not-found", InvocationID="", ExecMainPID="0")
+                f.capture.capture("terminal", f.child, f.evidence)
+                row = f.record["unitDiagnostics"]["snapshots"][-1]
+                self.assertEqual(row["status"], "unavailable" if collected else "captured")
+                self.assertEqual(row["wrapperReturnCode"], 1)
+
+    def test_poll_only_arms_initial_and_projects_once_and_terminal_uses_remaining_third_slot(self):
+        with self.fixture() as f:
+            for _ in range(4): f.capture.poll(f.child)
+            self.assertEqual([r["phase"] for r in f.record["unitDiagnostics"]["snapshots"]], ["initial"])
+            f.evidence["progress"]["boundary"] = "projects-wait"
+            for _ in range(4): f.capture.poll(f.child)
+            f.capture.capture("terminal", f.child, f.evidence)
+            f.capture.capture("unexpected", f.child, f.evidence)
+            self.assertEqual(len(f.record["unitDiagnostics"]["snapshots"]), 3)
+            self.assertEqual(f.calls.count("unit"), 6)
+
+    def test_duplicate_missing_unknown_or_oversized_property_output_refuses_without_raw_errors(self):
+        with self.fixture() as f:
+            good = "".join(k + "=" + v + "\n" for k, v in f.props.items()).encode()
+        for raw in (good + b"User=other\n", good + b"Environment=secret\n", good.replace(b"Type=exec\n", b""), b"x" * 16385, b"\xff"):
+            with self.subTest(size=len(raw)), self.assertRaises(RuntimeError): M.unit_properties(raw)
+        with self.fixture() as f:
+            f.fault = OSError("private diagnostic failure")
+            f.capture.capture("initial", f.child, f.evidence)
+            self.assertNotIn("private", json.dumps(f.record))
+            self.assertEqual(f.record["unitDiagnostics"]["snapshots"][0]["status"], "unavailable")
+
+    def test_read_only_tool_uses_fixed_commands_empty_environment_and_bounded_streams(self):
+        for kind in ("unit", "version"):
+            stdout, stderr = Mock(), Mock(); stdout.fileno.return_value = 10; stderr.fileno.return_value = 11
+            child = Mock(stdout=stdout, stderr=stderr, poll=Mock(return_value=0))
+            pending = {10: [b"Version=249.11\n", b""], 11: [b""]}
+            with patch.object(M, "unit_tool_pin", return_value="a" * 64), patch.object(M.subprocess, "Popen", return_value=child) as spawn, patch.object(M.os, "set_blocking", create=True), patch.object(M.os, "read", side_effect=lambda fd, count: pending[fd].pop(0)), patch.object(M.select, "select", side_effect=lambda streams, *_: (list(streams), [], [])):
+                self.assertEqual(M.unit_command(kind), b"Version=249.11\n")
+            command = spawn.call_args.args[0]
+            self.assertEqual(command[:6], ["/usr/bin/systemctl", "--system", "--no-pager", "--no-ask-password", "show", "--all"])
+            self.assertEqual(command[6], "--property=" + (",".join(M.UNIT_PROPERTIES) if kind == "unit" else "Version"))
+            self.assertEqual(command[7:], [M.UNIT_NAME] if kind == "unit" else [])
+            self.assertEqual(spawn.call_args.kwargs["stdin"], M.subprocess.DEVNULL)
+            self.assertEqual(spawn.call_args.kwargs["env"], {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
+            child.kill.assert_not_called(); child.terminate.assert_not_called()
+            stdout.close.assert_called_once(); stderr.close.assert_called_once()
+        with patch.object(M.subprocess, "Popen") as spawn:
+            with self.assertRaises(RuntimeError): M.unit_command("restart")
+            spawn.assert_not_called()
+
+    def test_tool_timeout_oversize_exit_failure_or_changed_tool_never_signals_or_dumps_output(self):
+        for fault in ("timeout", "oversize", "exit", "changed"):
+            stdout, stderr = Mock(), Mock(); stdout.fileno.return_value = 10; stderr.fileno.return_value = 11
+            child = Mock(stdout=stdout, stderr=stderr, poll=Mock(return_value=1 if fault == "exit" else 0))
+            reads = {10: [b"Version=249.11\n", b""], 11: [b""]}
+            clock = iter([0, 3]) if fault == "timeout" else None
+            with patch.object(M, "unit_tool_pin", side_effect=["a" * 64, "b" * 64] if fault == "changed" else None, return_value="a" * 64), patch.object(M.subprocess, "Popen", return_value=child), patch.object(M.os, "set_blocking", create=True), patch.object(M.os, "read", side_effect=lambda fd, count: b"x" * count if fault == "oversize" else reads[fd].pop(0)), patch.object(M.select, "select", side_effect=lambda streams, *_: (list(streams), [], [])), patch.object(M.time, "monotonic", side_effect=(lambda: next(clock)) if clock else None, return_value=0):
+                with self.assertRaises(RuntimeError): M.unit_command("unit")
+            child.kill.assert_not_called(); child.terminate.assert_not_called()
+            stdout.close.assert_called_once(); stderr.close.assert_called_once()
+
+    def test_second_property_read_drift_or_kernel_reparenting_is_unavailable_not_adopted(self):
+        for fault in ("invocation", "main", "parent"):
+            with self.subTest(fault=fault), self.fixture() as f:
+                original = M.unit_command
+                def change(kind):
+                    raw = original(kind)
+                    if kind == "unit" and f.calls.count("unit") == 2:
+                        if fault == "parent": f.rows[109]["parentPid"] = 1
+                        else: raw = raw.replace(("InvocationID=" + "a" * 32).encode(), ("InvocationID=" + "b" * 32).encode()) if fault == "invocation" else raw.replace(b"MainPID=100\n", b"MainPID=101\n")
+                    return raw
+                with patch.object(M, "unit_command", side_effect=change): f.capture.capture("initial", f.child, f.evidence)
+                row = f.record["unitDiagnostics"]["snapshots"][0]
+                self.assertEqual(row["status"], "unavailable"); self.assertFalse(row["bindingVerified"])
+                self.assertIn("before", row); self.assertIn("after", row)
+
+    def test_diagnostic_failure_preserves_original_exception_and_version_failure_is_separate(self):
+        original = RuntimeError("original broker refusal")
+        with self.fixture() as f:
+            f.fault = OSError("private diagnostic error")
+            with self.assertRaises(RuntimeError) as raised:
+                try: raise original
+                finally: f.capture.capture("terminal", f.child)
+            self.assertIs(raised.exception, original)
+            self.assertNotIn("private", json.dumps(f.record))
+            self.assertTrue(all(f.record[key] is False for key in M.FLAGS))
+        with self.fixture() as f:
+            original_command = M.unit_command
+            with patch.object(M, "unit_command", side_effect=lambda kind: b"Version=secret\nEnvironment=secret\n" if kind == "version" else original_command(kind)):
+                f.capture.capture("initial", f.child, f.evidence)
+            self.assertEqual(f.record["unitDiagnostics"]["snapshots"][0]["status"], "captured")
+            self.assertEqual(f.record["unitDiagnostics"]["managerVersion"]["status"], "unavailable")
+            self.assertNotIn("secret", json.dumps(f.record))
+
+    def test_broker_wiring_is_diagnostic_only_and_keeps_service_command_and_assertions(self):
+        source = ast.parse(Path(M.__file__).read_text())
+        broker = next(n for n in source.body if isinstance(n, ast.FunctionDef) and n.name == "broker")
+        body = next(n for n in broker.body if isinstance(n, ast.Try))
+        captures = [n for n in ast.walk(broker) if isinstance(n, ast.Call) and ast.unparse(n.func) == "unit_diagnostics.capture"]
+        self.assertEqual(len(captures), 1); self.assertEqual(captures[0].args[0].value, "terminal")
+        self.assertIn(captures[0], list(ast.walk(body.finalbody[2])))
+        self.assertIn('require(child.poll() == 0, "Synthetic session failed/unknown; no signal or retry requested")', Path(M.__file__).read_text())
+        self.assertIn("index, deadline = 1, time.monotonic() + 540", Path(M.__file__).read_text())
+        command = M.session_command({key: "synthetic" for key in M.ENVIRONMENT})
+        self.assertEqual([x for x in command if x.startswith("--property=")], ["--property=PAMName=login", "--property=Type=exec", "--property=LimitCORE=0", "--property=WorkingDirectory=" + str(M.BASE)])
+
+    def test_unobserved_boundaries_are_explicit_unavailable_without_extra_unit_queries(self):
+        with self.fixture() as f:
+            f.capture.capture("terminal", f.child)
+            rows = f.record["unitDiagnostics"]["snapshots"]
+            self.assertEqual([row["phase"] for row in rows], list(f.phases))
+            self.assertEqual([row["stage"] for row in rows[:2]], ["boundary-not-observed"] * 2)
+            self.assertTrue(all(row["status"] == "unavailable" and row["bindingVerified"] is False for row in rows))
+            self.assertEqual(f.calls, ["unit"])
+
+    def test_initial_wrapper_driver_supervisor_and_birth_proofs_are_not_name_only(self):
+        for fault in ("wrapper-parent", "wrapper-image", "wrapper-uid", "main-birth", "driver", "supervisor-argv"):
+            with self.subTest(fault=fault), self.fixture() as f:
+                if fault == "wrapper-parent": f.rows[99]["parentPid"] += 1
+                elif fault == "wrapper-image": f.rows[99]["kernelImageSha256"] = "b" * 64
+                elif fault == "wrapper-uid": f.rows[99]["uids"] = [M.UID] * 4
+                elif fault == "main-birth": f.rows[100]["startTime"] = "1"
+                elif fault == "driver": f.evidence["driver"]["startTime"] = "changed"
+                else: M.proc_bytes.return_value = b"unrelated Python script\0"
+                f.capture.capture("initial", f.child, f.evidence)
+                row = f.record["unitDiagnostics"]["snapshots"][0]
+                self.assertEqual(row["status"], "unavailable"); self.assertFalse(row["bindingVerified"])
+
+
 class JournalPhaseTests(unittest.TestCase):
     @staticmethod
     def captured():
