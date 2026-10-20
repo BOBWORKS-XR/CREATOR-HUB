@@ -173,15 +173,7 @@ function stageWindowsIntegration(output) {
     nativeGuiAccepted: false, migrationAccepted: false, signedUpdateAccepted: false, releaseReady: false,
   }, null, 2), { flag: 'wx' });
 }
-function candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures, linuxProductionMigration = false,
-  linuxPrivateUpdateFixture = false, linuxPortableHostCandidate = false }) {
-  if (typeof linuxPrivateUpdateFixture !== 'boolean') throw Error('Private017 profile selection must be an explicit boolean.');
-  if (linuxPrivateUpdateFixture) {
-    if (linuxRetirementCandidate || linuxIntegratedCandidate || linuxProductionMigration || linuxPortableHostCandidate || !integratedFeatures) {
-      throw Error('Private017 requires --integrated-features and refuses all other Linux profiles.');
-    }
-    return require('./private-linux-update-fixture-017.cjs').PROFILE;
-  }
+function candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures, linuxProductionMigration = false }) {
   if (typeof linuxProductionMigration !== 'boolean') throw Error('Production profile selection must be an explicit boolean.');
   if (linuxProductionMigration) {
     if (linuxRetirementCandidate || linuxIntegratedCandidate || !integratedFeatures) throw Error('Production migration requires --integrated-features and refuses both development profiles.');
@@ -294,24 +286,13 @@ function verifyStage(directory, manifest) {
 }
 function build(label, { installer = false, managed = false, experimentalUnix = false, experimentalWritable = false,
   prepareManagedUnix = false, signedUnixInput = null, linuxRetirementCandidate = false,
-  linuxIntegratedCandidate = false, integratedFeatures = false, linuxPortableHostCandidate = false, linuxProductionMigration = false,
-  linuxPrivateUpdateFixture = false } = {}, context = {}) {
+  linuxIntegratedCandidate = false, integratedFeatures = false, linuxPortableHostCandidate = false, linuxProductionMigration = false } = {}, context = {}) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(label || '')) throw Error('Provide a unique, simple build name.');
   const root = context.root || repositoryRoot;
   const execute = context.execute || execFileSync;
   const environment = context.env || process.env;
   const platform = context.platform || { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
   const arch = context.arch || { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
-  if (linuxPrivateUpdateFixture !== false) {
-    const private017 = require('./private-linux-update-fixture-017.cjs');
-    candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures, linuxProductionMigration,
-      linuxPrivateUpdateFixture, linuxPortableHostCandidate });
-    private017.checkOptions({ installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput,
-      linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures, linuxProductionMigration,
-      linuxPrivateUpdateFixture, linuxPortableHostCandidate }, platform, arch, root, environment);
-    return require('./assemble-unix-payload.cjs').assemble(signedUnixInput, path.join(root, 'artifacts', 'unified', label), platform, arch,
-      { ...context, root, env: environment, execute });
-  }
   checkProductionOptions({ installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput,
     linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures, linuxProductionMigration }, platform, arch, root, environment);
   checkPortableHostOptions({ installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput,
@@ -580,12 +561,12 @@ function writeAssemblyManifests(output, signedManifest, finalManifest) {
 }
 function parseBuildOptions(args) {
   const options = {};
-  const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix. --integrated-features is Windows/Linux candidate-only; --linux-integrated-candidate, --linux-production-migration-016, --linux-portable-host-candidate and --linux-private-update-fixture-017 are Linux-only.';
+  const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix. --integrated-features is Windows/Linux candidate-only; --linux-integrated-candidate, --linux-production-migration-016 and --linux-portable-host-candidate are Linux-only.';
   const flags = { '--installer': 'installer', '--managed': 'managed', '--experimental-unix': 'experimentalUnix',
     '--experimental-unix-writable': 'experimentalWritable', '--prepare-managed-unix': 'prepareManagedUnix',
     '--linux-retirement-test-candidate': 'linuxRetirementCandidate', '--integrated-features': 'integratedFeatures',
     '--linux-integrated-candidate': 'linuxIntegratedCandidate', '--linux-portable-host-candidate': 'linuxPortableHostCandidate',
-    '--linux-production-migration-016': 'linuxProductionMigration', '--linux-private-update-fixture-017': 'linuxPrivateUpdateFixture' };
+    '--linux-production-migration-016': 'linuxProductionMigration' };
   const seen = new Set();
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];

@@ -142,6 +142,122 @@ mod tests {
             .success());
     }
 
+    fn isolated(test: &str) -> bool {
+        const MARKER: &str = "CREATOR_GUI_GUARD_FIXTURE";
+        if std::env::var(MARKER).ok().as_deref() == Some(test) {
+            return false;
+        }
+        assert!(Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--test-threads=1"])
+            .env(MARKER, test)
+            .status()
+            .unwrap()
+            .success());
+        true
+    }
+
+    struct InheritedWriterChild {
+        pid: libc::pid_t,
+        release: Option<File>,
+    }
+
+    impl InheritedWriterChild {
+        fn release_and_reap(mut self) {
+            self.release.as_mut().unwrap().write_all(b"G").unwrap();
+            drop(self.release.take());
+            let mut status = 0;
+            assert_eq!(unsafe { libc::waitpid(self.pid, &mut status, 0) }, self.pid);
+            self.pid = 0;
+            assert!(libc::WIFEXITED(status));
+            assert_eq!(libc::WEXITSTATUS(status), 0);
+        }
+    }
+
+    impl Drop for InheritedWriterChild {
+        fn drop(&mut self) {
+            // EOF also releases a child if an earlier assertion unwinds.
+            drop(self.release.take());
+            if self.pid != 0 {
+                let mut status = 0;
+                // The child's release poll is bounded; do not mask an earlier panic.
+                let _ = unsafe { libc::waitpid(self.pid, &mut status, 0) };
+            }
+        }
+    }
+
+    fn inherited_writer_child(writer: &File) -> InheritedWriterChild {
+        const PIPE_TIMEOUT_MS: libc::c_int = 3000;
+        fn pipe() -> (File, File) {
+            let mut descriptors = [-1; 2];
+            assert_eq!(
+                unsafe {
+                    libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK)
+                },
+                0
+            );
+            unsafe {
+                (
+                    File::from_raw_fd(descriptors[0]),
+                    File::from_raw_fd(descriptors[1]),
+                )
+            }
+        }
+        let (mut ready, ready_write) = pipe();
+        let (release_read, release_write) = pipe();
+        let (ready_fd, ready_write_fd, release_fd, release_write_fd, writer_fd) = (
+            ready.as_raw_fd(),
+            ready_write.as_raw_fd(),
+            release_read.as_raw_fd(),
+            release_write.as_raw_fd(),
+            writer.as_raw_fd(),
+        );
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            // After fork, use only async-signal-safe syscalls and never Rust destructors.
+            unsafe {
+                libc::close(ready_fd);
+                libc::close(release_write_fd);
+                if libc::fcntl(writer_fd, libc::F_GETFL) & libc::O_ACCMODE != libc::O_WRONLY
+                    || libc::fcntl(writer_fd, libc::F_GETFD) & libc::FD_CLOEXEC != libc::FD_CLOEXEC
+                    || libc::write(ready_write_fd, b"R".as_ptr().cast(), 1) != 1
+                {
+                    libc::_exit(101);
+                }
+                let mut event = libc::pollfd {
+                    fd: release_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                if libc::poll(&mut event, 1, PIPE_TIMEOUT_MS) != 1
+                    || event.revents & libc::POLLIN == 0
+                {
+                    libc::_exit(102);
+                }
+                let mut byte = 0u8;
+                let count = libc::read(release_fd, (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(if count == 1 && byte == b'G' { 0 } else { 102 });
+            }
+        }
+        drop(ready_write);
+        drop(release_read);
+        let child = InheritedWriterChild {
+            pid,
+            release: Some(release_write),
+        };
+        let mut event = libc::pollfd {
+            fd: ready_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut event, 1, PIPE_TIMEOUT_MS) }, 1);
+        assert_ne!(event.revents & libc::POLLIN, 0);
+        let mut byte = [0];
+        assert_eq!(ready.read(&mut byte).unwrap(), 1);
+        assert_eq!(byte, *b"R");
+        child
+    }
+
     #[test]
     fn busy_image_refuses_guard_and_preserves_bytes_modes() {
         let (_dir, path) = fixture();
@@ -175,6 +291,9 @@ mod tests {
 
     #[test]
     fn held_guard_blocks_exec_but_allows_rename_and_unlink_without_byte_changes() {
+        if isolated("linux::gui::tests::held_guard_blocks_exec_but_allows_rename_and_unlink_without_byte_changes") {
+            return;
+        }
         let (dir, path) = fixture();
         let image = File::open(&path).unwrap();
         let before = fingerprint(&image);
@@ -204,6 +323,29 @@ mod tests {
         assert_eq!(before, fingerprint(&image));
         drop(guard);
         exec_ok(&deleted);
+        assert_eq!(before, fingerprint(&image));
+    }
+
+    #[test]
+    fn inherited_writer_blocks_exec_after_parent_drop_until_owned_child_is_reaped() {
+        if isolated("linux::gui::tests::inherited_writer_blocks_exec_after_parent_drop_until_owned_child_is_reaped") {
+            return;
+        }
+        let (_dir, path) = fixture();
+        let image = File::open(&path).unwrap();
+        let before = fingerprint(&image);
+        let guard = bind(
+            image.try_clone().unwrap(),
+            &image.metadata().unwrap(),
+            || writer(&path),
+        )
+        .unwrap();
+        let child = inherited_writer_child(&guard._writer);
+        drop(guard);
+        exec_busy(&path);
+        assert_eq!(before, fingerprint(&image));
+        child.release_and_reap();
+        exec_ok(&path);
         assert_eq!(before, fingerprint(&image));
     }
 

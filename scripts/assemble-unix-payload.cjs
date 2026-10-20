@@ -35,10 +35,6 @@ function inside(file, root) {
   assert.ok(relative && !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`), 'Owned staging path required');
 }
 function admission(root, platform, arch, env, execute = execFileSync) {
-  const privateFixture = env.GITHUB_REF === 'refs/heads/validation/linux-private-update-fixture-017'
-    || env.CREATOR_LINUX_PRIVATE_UPDATE_FIXTURE_017 !== undefined && env.CREATOR_LINUX_PRIVATE_UPDATE_FIXTURE_017 !== '0';
-  const private017 = privateFixture ? require('./private-linux-update-fixture-017.cjs') : null;
-  if (privateFixture) private017.context(platform, arch, env);
   const os = { linux: 'Linux', macos: 'macOS' }[platform];
   const cpu = { x86_64: 'X64', aarch64: 'ARM64' }[arch];
   const validationPush = env.GITHUB_EVENT_NAME === 'push' && env.GITHUB_REF === 'refs/heads/validation/unix-assembly-014';
@@ -46,7 +42,7 @@ function admission(root, platform, arch, env, execute = execFileSync) {
     && env.RUNNER_OS === os && env.RUNNER_ARCH === cpu && env.GITHUB_REPOSITORY === REPOSITORY
     && env.GITHUB_REPOSITORY_ID === '1364807512'
     && (env.GITHUB_EVENT_NAME === 'workflow_dispatch' || validationPush)
-    && env.GITHUB_WORKFLOW_REF === `${REPOSITORY}/${privateFixture ? private017.WORKFLOW : WORKFLOW}@${env.GITHUB_REF}`, 'Explicit native assembly workflow required');
+    && env.GITHUB_WORKFLOW_REF === `${REPOSITORY}/${WORKFLOW}@${env.GITHUB_REF}`, 'Explicit native assembly workflow required');
   assert.ok(!Object.keys(env).some(n => /^(APPLE_|TAURI_SIGNING_|CREATOR_HUB_SIGNING_|DYLD_|LD_PRELOAD$|NODE_OPTIONS$)/.test(n)), 'Assembly refuses signing credentials and runtime injection');
   assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/);
   assert.match(env.CREATOR_UNIX_HANDOFF_SHA256 || '', /^[a-f0-9]{64}$/);
@@ -55,8 +51,6 @@ function admission(root, platform, arch, env, execute = execFileSync) {
   assert.equal(git(['rev-parse', '--show-toplevel']), root);
   assert.equal(git(['rev-parse', 'HEAD']), env.GITHUB_SHA);
   assert.equal(git(['status', '--porcelain=v1', '--untracked-files=normal']), '', 'Clean initial assembly source required');
-  if (privateFixture) return { commit: env.GITHUB_SHA, handoffSha256: env.CREATOR_UNIX_HANDOFF_SHA256,
-    ...private017.source(root, execute) };
   const version = env.GITHUB_REF === 'refs/heads/validation/linux-integrated-candidate-016' ? '0.1.16' : '0.1.14';
   if (version === '0.1.16') {
     const flags = ['CREATOR_LINUX_INTEGRATED_CANDIDATE', 'CREATOR_LINUX_PRODUCTION_MIGRATION_016',
@@ -144,7 +138,6 @@ function assemble(input, output, platform, arch, context = {}) {
   const env = context.env || process.env;
   const execute = context.execute || execFileSync;
   const accepted = admission(root, platform, arch, env, execute);
-  if (accepted.profile === 'private-update-fixture-017') require('./private-linux-update-fixture-017.cjs').requireTrustedHandoff();
   assert.equal(platform, { linux: 'linux', darwin: 'macos' }[process.platform], 'Matching native Unix process required');
   assert.equal(arch, { x64: 'x86_64', arm64: 'aarch64' }[process.arch], 'Matching native architecture required');
   absolute(input); absolute(output);

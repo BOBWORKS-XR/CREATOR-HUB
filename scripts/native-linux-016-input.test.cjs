@@ -115,7 +115,7 @@ test('original legacy download validates release metadata then actual bounded by
   await assert.rejects(L.publicDeb(github, row, async () => ({ status: 200, body: [Buffer.alloc(row.size)] })));
 });
 test('exact-branch registration push skips the sole native job; execution stays manual and finite', () => {
-  const text = fs.readFileSync(path.join(__dirname, '../.github/workflows/native-linux-016-pages.yml'), 'utf8').replace(/\r\n/g, '\n');
+  const text = fs.readFileSync(path.join(__dirname, '../.github/workflows/native-linux-016-pages.yml'), 'utf8');
   assert.match(text, /^on:\n  push:\n    branches: \[validation\/native-linux-016\]\n  workflow_dispatch:/m);
   assert.doesNotMatch(text, /contents: write|secrets\.|macos-|windows-|cargo tauri|npm run build|git push/);
   const jobs = text.split('\njobs:\n')[1];
