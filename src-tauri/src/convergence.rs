@@ -34,6 +34,20 @@ pub struct Report {
     retirement_available: bool,
     message: String,
     review_key: Option<String>,
+    recovery_help: Option<String>,
+}
+
+fn recovery_help(phase: Option<&str>, path: &std::path::Path) -> String {
+    let step = match phase {
+        Some("backup") => "In MCP, open Saved MCP settings and review the retained settings evidence. Do not delete either settings folder or restore a backup over newer settings.",
+        Some("connections") => "In MCP, open Existing client connections and recovery, then Check interrupted changes. Resume only a change that Hub explicitly marks eligible.",
+        Some("cleanup") => "Standalone cleanup may be partial. Keep the remaining apps and compatibility runtime files. Have support review the retained phase record and package state before removing or reinstalling an app.",
+        _ => "Have support review the retained phase record before retrying migration. Do not delete or edit recovery records to bypass the check.",
+    };
+    format!(
+        "Creator Hub {}\nLast migration phase: {}\nRetained phase record: {}\n\nChoose Not now to keep using Hub. Migration remains incomplete.\n\n{step}\n\nIf review cannot resolve the outcome, share these details with support. Keep the original records and backups; no operation has been replayed. These details contain local paths, not settings contents. Review paths before sharing.",
+        env!("CARGO_PKG_VERSION"), phase.unwrap_or("unknown"), path.display()
+    )
 }
 
 struct Plan {
@@ -273,7 +287,8 @@ fn inspect() -> Result<Plan, String> {
     let legacy_apps = legacy_apps()?;
     // Validate even when legacy apps exist; do not short-circuit a newer policy.
     let already_reviewed = reviewed_snapshots_at(&record_path()?, &snapshots)?;
-    let pending_batch = read_batch_at(&batch_path()?)?;
+    let phase_path = batch_path()?;
+    let pending_batch = read_batch_at(&phase_path)?;
     let uncertain_batch = pending_batch.as_ref().is_some_and(batch_needs_review);
     let pending_retirement = retirement_pending()?
         || pending_batch
@@ -311,6 +326,10 @@ fn inspect() -> Result<Plan, String> {
             backups: vec![],
             retirement_available: false,
             review_key: Some(review_key),
+            recovery_help: uncertain_batch.then(|| recovery_help(
+                pending_batch.as_ref().map(|record| record.phase.as_str()),
+                &phase_path,
+            )),
             message: if uncertain_batch {
                 "An earlier Move to Hub operation has an uncertain or partial outcome. Settings, backups and recovery records were kept. Review the native phase record before repeating any operation."
             } else if pending_batch.as_ref().is_some_and(|record| record.outcome != "complete") {
@@ -951,6 +970,7 @@ pub async fn inspect_convergence_outcome(handle: tauri::AppHandle) -> Result<Rep
             fresh.report.move_available = false;
             fresh.report.required = true;
             fresh.report.message = "Retained state was inspected without changing it. A partial or uncertain native outcome still needs explicit recovery review. No transaction was retried.".into();
+            fresh.report.recovery_help = Some(recovery_help(record.as_ref().map(|record| record.phase.as_str()), &batch_path()?));
         }
         let report = fresh.report.clone();
         *saved = Some(fresh);
@@ -1872,6 +1892,9 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             }
         }
         if outcome != "cancelled" { plan.report.message = message.clone(); }
+        if !plan.retry_allowed {
+            plan.report.recovery_help = Some(recovery_help(Some(phase), &journal.path));
+        }
         plan.report.move_available = plan.retry_allowed && plan.report.stage == "review";
         Ok(MoveOutcome { outcome, phase, report: plan.report.clone(), message })
     }).await.map_err(|_| "Migration outcome is unknown. Keep retained files and review recovery; do not repeat the move.")?
@@ -2070,6 +2093,25 @@ pub async fn retire_convergence_apps(handle: tauri::AppHandle) -> Result<Report,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncertain_migration_handoff_names_the_retained_record_without_replaying() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("move-v1.json");
+        fs::write(&path, b"retained evidence").unwrap();
+        for phase in [None, Some("backup"), Some("connections"), Some("cleanup")] {
+            let text = recovery_help(phase, &path);
+            assert!(text.contains(&path.display().to_string()));
+            assert!(text.contains("Migration remains incomplete"));
+            assert!(text.contains("Choose Not now"));
+            assert!(text.contains("not settings contents"));
+            assert!(!text.contains("retained evidence"));
+            assert_eq!(fs::read(&path).unwrap(), b"retained evidence");
+        }
+        assert!(recovery_help(Some("backup"), &path).contains("Saved MCP settings"));
+        assert!(recovery_help(Some("connections"), &path).contains("Check interrupted changes"));
+        assert!(recovery_help(Some("cleanup"), &path).contains("before removing or reinstalling"));
+    }
 
     #[test]
     fn linux_production_consent_keeps_retirement_disclosures_without_test_only_claims() {
@@ -3076,6 +3118,7 @@ mod tests {
                 retirement_available: false,
                 message: String::new(),
                 review_key: None,
+                recovery_help: None,
             },
         };
         (temp, roots, plan)

@@ -57,6 +57,11 @@ footer .text-button { font-size: 11px; }
 #convergence-summary { margin-top: 8px; line-height: 1.55; color: var(--muted); }
 #convergence-details { margin: 16px 0; padding-left: 20px; line-height: 1.6; overflow-wrap: anywhere; }
 #convergence-error { margin-top: 12px; color: var(--red); line-height: 1.5; }
+#convergence-recovery { margin-top: 14px; }
+#convergence-recovery label { display: block; margin-bottom: 6px; font-weight: 600; }
+#convergence-recovery-text { display: block; width: 100%; min-height: 112px; max-height: 240px; resize: vertical; padding: 10px; border: 1px solid var(--line); border-radius: 4px; background: #0c1012; color: inherit; font: inherit; line-height: 1.5; overflow-wrap: anywhere; }
+#convergence-copy-status { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.recovery-copy-icon { width: 16px; height: 16px; flex: 0 0 16px; background: currentColor; mask: url('icons/copy.svg') center / contain no-repeat; }
 .convergence-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 18px; }
 .convergence-actions [hidden] { display: none; }
 .context-help-heading { position: sticky; top: 0; display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 16px 18px; border-bottom: 1px solid #293137; background: #111518; }

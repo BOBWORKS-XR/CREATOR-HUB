@@ -14,6 +14,7 @@
       || (value.retirementAvailable !== undefined && typeof value.retirementAvailable !== 'boolean')
       || (value.streamlined !== undefined && typeof value.streamlined !== 'boolean')
       || (value.moveAvailable !== undefined && typeof value.moveAvailable !== 'boolean')
+      || (value.recoveryHelp != null && !text(value.recoveryHelp, 16384))
       || (value.reviewKey != null && (typeof value.reviewKey !== 'string' || !/^[a-f0-9]{64}$/.test(value.reviewKey)))
       || (value.stage === 'complete' && (value.required || value.retirementAvailable === true || value.legacyApps.length))) {
       throw new Error('The native migration report could not be verified. Existing apps are kept.');
@@ -23,6 +24,7 @@
       moveAvailable: value.moveAvailable !== false,
       settings: [...value.settings], backups: [...value.backups], message: value.message,
       reviewKey: value.reviewKey || null,
+      recoveryHelp: value.recoveryHelp || null,
       retirementAvailable: value.retirementAvailable === true,
       legacyApps: value.legacyApps.map(app => ({ name: app.name, path: app.path })) };
   }
@@ -78,6 +80,10 @@
       const progress = streamlined && document.querySelector('#convergence-progress');
       const explanation = document.querySelector('#convergence-explanation');
       const backupDetails = document.querySelector('#convergence-backups');
+      const recovery = document.querySelector('#convergence-recovery');
+      const recoveryText = document.querySelector('#convergence-recovery-text');
+      const copyRecovery = document.querySelector('#convergence-copy-recovery');
+      const copyStatus = document.querySelector('#convergence-copy-status');
       if (streamlined && (!move || !progress || !explanation || !backupDetails)) throw new Error('The migration guide is unavailable. Existing apps are kept.');
       if (explanation) explanation.hidden = !streamlined;
       const locked = [...document.body.children].filter(node => node !== dialog && !node.inert);
@@ -123,10 +129,18 @@
           : reminderSaveFailed ? 'Continue without saving reminder' : 'Continue for now';
         later.disabled = busy;
         dialog.setAttribute('aria-busy', String(busy));
+        if (recovery && recoveryText && copyRecovery && copyStatus) {
+          recovery.hidden = !current?.recoveryHelp || stage === 'complete';
+          recoveryText.value = current?.recoveryHelp || '';
+          copyRecovery.disabled = busy || recovery.hidden;
+          copyStatus.textContent = '';
+        }
         if (streamlined) {
-          title.textContent = stage === 'complete' ? 'Move complete' : 'Move to Hub';
+          title.textContent = stage === 'complete' ? 'Move complete' : current?.recoveryHelp ? 'Migration needs review' : 'Move to Hub';
           summary.textContent = stage === 'complete' ? 'Your existing setup is now managed in Creator Hub.'
+            : current?.recoveryHelp ? 'Settings and backups are kept. Migration has not completed.'
             : 'Move existing settings and AI connections into Creator Hub.';
+          explanation.hidden = Boolean(current?.recoveryHelp);
           if (backupDetails) backupDetails.hidden = !details.childElementCount;
           prepare.hidden = connections.hidden = retire.hidden = true;
           move.hidden = stage === 'complete' || stopped || stage !== 'review' || !current?.moveAvailable;
@@ -148,6 +162,7 @@
         refresh.removeEventListener('click', refreshClick);
         later.removeEventListener('click', laterClick);
         if (move) move.removeEventListener('click', moveClick);
+        copyRecovery?.removeEventListener('click', copyRecoveryClick);
         if (typeof unlisten === 'function') unlisten();
         locked.forEach(node => { node.inert = false; });
         active = undefined;
@@ -245,6 +260,19 @@
         catch (reason) { showError(reason); }
         finally { busy = false; render(); }
       }
+      async function copyRecoveryClick(event) {
+        event.preventDefault();
+        if (ended || busy || !dialog.open || copyRecovery.disabled || !current?.recoveryHelp) return;
+        try {
+          await navigator.clipboard.writeText(current.recoveryHelp);
+          if (!ended && dialog.open) copyStatus.textContent = 'Copied. Review local paths before sharing.';
+        } catch {
+          if (!ended && dialog.open) {
+            recoveryText.focus(); recoveryText.select();
+            copyStatus.textContent = 'Clipboard unavailable. Recovery details are selected for copying.';
+          }
+        }
+      }
       dialog.addEventListener('cancel', cancel);
       prepare.addEventListener('click', prepareClick);
       connections.addEventListener('click', connectionsClick);
@@ -252,6 +280,7 @@
       refresh.addEventListener('click', refreshClick);
       later.addEventListener('click', laterClick);
       if (move) move.addEventListener('click', moveClick);
+      copyRecovery?.addEventListener('click', copyRecoveryClick);
       if (streamlined && typeof window.__TAURI__?.event?.listen === 'function') {
         try {
           unlisten = await window.__TAURI__.event.listen('convergence-progress', event => {
