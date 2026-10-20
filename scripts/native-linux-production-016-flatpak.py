@@ -2204,19 +2204,51 @@ class Session:
         require(client["parentPid"] in found and int(client["startTime"]) >= int(start), "Launcher left this exact owned Flatpak launch")
         self.flatpak_launch = dict(found[child.pid])
         self.disclosure()
+        pending_window = None
         def initial_window_ready():
+            nonlocal pending_window
             candidates = self.windows()
+            if pending_window is not None:
+                self.flatpak_guard(); self.stable(client)
+                require(pending_window['window'] in candidates, 'Pending launcher window disappeared or changed')
             for window in candidates:
                 try:
-                    owned = self.x11.inspect(window)['pid'] == client['pid']
+                    try:
+                        props = self.x11.inspect(window)
+                    except RuntimeError as error:
+                        origin = getattr(self.helper, '_VISIBILITY_DIAGNOSTIC_ORIGIN', None)
+                        raw = getattr(error, 'window_visibility_refusal', None)
+                        if not (origin is not None and getattr(error, '_visibility_diagnostic_origin', None) is origin
+                                and type(error) is RuntimeError and str(error) == 'Owned X window is not a managed visible window'
+                                and type(raw) is dict and raw == {'window': window, 'map_state': 0, 'override_redirect': 0, 'class': 1}
+                                and all(type(value) is int for value in raw.values())):
+                            raise
+                        # Only this owned, initially unmapped window may remain pending; this grants no input authority.
+                        self.flatpak_guard(); self.stable(client)
+                        owner = K.NativeWindow(self.helper, self.x11).xres_identity(window)
+                        require(type(owner) is dict and set(owner) == {'pid', 'client'}
+                                and type(owner['pid']) is int and owner['pid'] == client['pid']
+                                and type(owner['client']) is int and 0 < owner['client'] < 2**32,
+                                'Pending launcher XRes ownership differs')
+                        observed = {'window': window, **owner}
+                        require(pending_window is None or observed == pending_window, 'Pending launcher XRes identity changed')
+                        self.stable(client); self.flatpak_guard()
+                        pending_window = observed
+                        return False
+                    if pending_window is not None and window == pending_window['window']:
+                        require(props['pid'] == pending_window['pid'] and props['client'] == pending_window['client']
+                                and props['mapped'] is True, 'Pending launcher mapped identity changed')
+                    if props['pid'] == client['pid']:
+                        require(pending_window is None or window == pending_window['window'], 'Pending launcher window changed')
+                        if pending_window is not None:
+                            self.stable(client); self.flatpak_guard()
+                        return True
                 except Exception as error:
                     try:
                         self.record_launcher_readiness_refusal(client, window, candidates, phase, error)
                     except Exception:
                         pass  # Diagnostic failures cannot mask or retry the original refusal.
                     raise
-                if owned:
-                    return True
             return False
         self.wait(initial_window_ready)
         self.portal_client = client if action == "Get Native Hub" else None

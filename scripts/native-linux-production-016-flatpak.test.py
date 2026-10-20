@@ -1712,6 +1712,165 @@ class WarmLineageWiringTests(unittest.TestCase):
             self.assertEqual(system.close.call_count, 4)  # Constructor refusals precede image opening; worker refusal closes it.
 
 
+class LauncherInitialMappingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location('shared_initial_mapping_tests', HERE / 'native-unix-window.test.py')
+        cls.shared = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.shared)
+
+    @contextmanager
+    def fixture(self, maps=(0, 0, 2), *, phase='disclosure-cancel', change=None, alter=None):
+        action = 'Open Creator Hub' if phase == 'warm' else 'Cancel'
+        with LauncherKeyboardTests().fixture(action, phase) as (session, state, _):
+            source, _ = self.shared.XResTests().native_fixture(pid=14)
+            source.property = Mock(return_value=(99, 8, b'Creator Hub'))
+            state.tick, state.map, state.inspections, state.errors = 0, maps[0], [], []
+            state.reads, state.override, state.kind = [], 0, 1
+            session.helper._VISIBILITY_DIAGNOSTIC_ORIGIN = self.shared.h._VISIBILITY_DIAGNOSTIC_ORIGIN
+            original_inspect = session.x11.inspect
+            def attributes(display, window, pointer):
+                state.reads.append((window, state.map))
+                attrs = self.shared.C.cast(pointer, self.shared.C.POINTER(self.shared.h.WindowAttributes)).contents
+                attrs.map_state, attrs.override_redirect, attrs.class_ = state.map, state.override, state.kind
+                return 1
+            source.x.XGetWindowAttributes = attributes
+            def inspect(window):
+                if window == 200: return original_inspect(window)
+                state.map = maps[min(state.tick, len(maps) - 1)]
+                if change: change(session, state, source)
+                state.inspections.append((window, state.map, list(state.sends)))
+                try:
+                    return source.inspect(window)
+                except Exception as error:
+                    state.errors.append(error)
+                    if alter: alter(error)
+                    raise
+            session.x11.inspect = Mock(side_effect=inspect)
+            session.x11.x = SimpleNamespace(XDefaultRootWindow=lambda _: 50)
+            session.x11.display = 99
+            session.x11.property = lambda *_: (33, 32, session.windows())
+            session.captures = []
+            session.wait = lambda check, seconds=30: M.Session.wait(session, check, seconds)
+            api = object.__new__(M.K.NativeWindow)
+            api.helper, api.x11 = self.shared.h, source
+            original_xres = api.xres_identity
+            api.xres_identity = Mock(side_effect=original_xres)
+            def sleep(seconds):
+                self.assertEqual(seconds, 0.1)
+                state.tick += 1
+            with patch.object(M.P.time, 'monotonic', side_effect=lambda: state.tick / 10), \
+                    patch.object(M.P.time, 'sleep', side_effect=sleep), \
+                    patch.object(M.K, 'NativeWindow', return_value=api), \
+                    patch.object(M.P, 'wait', wraps=M.P.wait) as waits:
+                yield session, state, source, api, waits
+
+    def test_recorded_owned_unmapped_window_waits_until_mapped_before_one_action(self):
+        for phase in ('disclosure-cancel', 'warm'):
+            with self.subTest(phase=phase), self.fixture(phase=phase) as (session, state, source, api, waits):
+                session.flatpak('Open Creator Hub' if phase == 'warm' else 'Cancel', phase)
+                self.assertEqual([row[1] for row in state.inspections], [0, 0, 2])
+                self.assertTrue(all(not row[2] for row in state.inspections))
+                self.assertEqual(state.sends, ['Enter' if phase == 'warm' else 'Escape'])
+                self.assertEqual(len(state.captures), 1)
+                self.assertEqual(api.xres_identity.call_count, 2)
+                source.property.assert_called_once_with(100, '_NET_WM_NAME')
+                self.assertTrue(all(call.args[1] == 30 for call in waits.call_args_list))
+                self.assertFalse((session.root / (phase + '-readiness-gtk.json')).exists())
+
+    def test_persistent_owned_unmapped_window_uses_original_thirty_second_deadline(self):
+        with self.fixture(maps=(0,)) as (session, state, source, api, waits):
+            with self.assertRaisesRegex(RuntimeError, 'Read-only readiness deadline; no mutation retried'):
+                session.flatpak('Cancel', 'disclosure-cancel')
+            self.assertEqual(state.tick, 300)
+            self.assertEqual(session.x11.inspect.call_count, 300)
+            self.assertEqual(api.xres_identity.call_count, 300)
+            self.assertTrue(all(call.args[1] == 30 for call in waits.call_args_list))
+            self.assertEqual(state.sends, []); self.assertEqual(state.captures, [])
+            source.property.assert_not_called()
+
+    def test_pending_identity_never_uses_foreign_invalid_or_unavailable_xres(self):
+        for value in ({'pid': 99, 'client': 789}, {'pid': 14, 'client': 0}, {'pid': 14, 'client': True},
+                      {'pid': 14, 'client': 789, 'extra': 1}, PermissionError('XRes unavailable')):
+            with self.subTest(value=value), self.fixture(maps=(0, 2)) as (session, state, _, api, _):
+                if isinstance(value, Exception): api.xres_identity.side_effect = value
+                else: api.xres_identity.side_effect = lambda _: copy.deepcopy(value)
+                with self.assertRaises((RuntimeError, PermissionError)):
+                    session.flatpak('Cancel', 'disclosure-cancel')
+                self.assertEqual(state.tick, 0)
+                self.assertEqual(state.sends, []); self.assertEqual(state.captures, [])
+
+    def test_pending_xid_disappearance_or_replacement_refuses_without_input(self):
+        for replacement in ([], [101]):
+            with self.subTest(replacement=replacement), self.fixture(maps=(0, 2)) as (session, state, _, _, _):
+                session.windows = lambda: [100] if state.tick == 0 else replacement
+                with self.assertRaisesRegex(RuntimeError, 'Pending launcher window disappeared or changed'):
+                    session.flatpak('Cancel', 'disclosure-cancel')
+                self.assertEqual(state.tick, 1)
+                self.assertEqual(state.sends, []); self.assertEqual(state.captures, [])
+
+    def test_pending_xres_pid_or_client_change_refuses_even_when_mapped(self):
+        for mapped in (0, 2):
+            for field in ('pid', 'client'):
+                def changed(session, state, source):
+                    if state.tick:
+                        if field == 'pid': source.res.XResGetClientPid = lambda _: 99
+                        else: source.references[1][0].spec.client = 790
+                with self.subTest(mapped=mapped, field=field), self.fixture(maps=(0, mapped), change=changed) as (session, state, _, _, _):
+                    with self.assertRaises(RuntimeError): session.flatpak('Cancel', 'disclosure-cancel')
+                    self.assertEqual(state.tick, 1)
+                    self.assertEqual(state.sends, []); self.assertEqual(state.captures, [])
+
+    def test_pending_before_and_after_process_and_popen_guards_remain_required(self):
+        for name in ('stable', 'flatpak_guard'):
+            for failed_call in (1, 2):
+                with self.subTest(name=name, failed_call=failed_call), self.fixture(maps=(0, 2)) as (session, state, _, api, _):
+                    session.record_launcher_readiness_refusal = Mock()
+                    calls = []
+                    original = getattr(session, name)
+                    def guard(*args):
+                        calls.append(args)
+                        if len(calls) == failed_call: raise RuntimeError('Owned identity changed')
+                        return original(*args)
+                    setattr(session, name, guard)
+                    with self.assertRaisesRegex(RuntimeError, 'Owned identity changed'):
+                        session.flatpak('Cancel', 'disclosure-cancel')
+                    self.assertEqual(state.tick, 0)
+                    self.assertEqual(state.sends, []); self.assertEqual(state.captures, [])
+                    session.record_launcher_readiness_refusal.assert_called_once()
+                    if failed_call == 1: api.xres_identity.assert_not_called()
+
+    def test_only_exact_authenticated_normal_unmapped_refusal_may_wait(self):
+        changes = (lambda e: delattr(e, '_visibility_diagnostic_origin'),
+                   lambda e: setattr(e, '_visibility_diagnostic_origin', object()),
+                   lambda e: e.window_visibility_refusal.update(map_state=False),
+                   lambda e: e.window_visibility_refusal.update(window=101),
+                   lambda e: e.window_visibility_refusal.update(**{'class': 2}),
+                   lambda e: e.window_visibility_refusal.update(extra=1),
+                   lambda e: setattr(e, 'args', ('Owned X window is unavailable',)))
+        for change in changes:
+            with self.subTest(change=change), self.fixture(maps=(0, 2), alter=change) as (session, state, _, _, _):
+                with self.assertRaises(RuntimeError) as raised: session.flatpak('Cancel', 'disclosure-cancel')
+                self.assertIs(raised.exception, state.errors[0])
+                self.assertEqual(state.tick, 0)
+                self.assertEqual(state.sends, []); self.assertEqual(state.captures, [])
+        for mapped, override in ((1, 0), (0, 1), (2, 1)):
+            def changed(session, state, source): state.override = override
+            with self.subTest(mapped=mapped, override=override), self.fixture(maps=(mapped,), change=changed) as (session, state, _, _, _):
+                with self.assertRaises(RuntimeError): session.flatpak('Cancel', 'disclosure-cancel')
+                self.assertEqual(state.tick, 0)
+                self.assertEqual(state.sends, []); self.assertEqual(state.captures, [])
+
+    def test_mapped_readiness_never_bypasses_strict_input_window_binding(self):
+        with self.fixture(maps=(0, 2)) as (session, state, _, _, _):
+            session.owned_window = Mock(side_effect=RuntimeError('Strict input window refused'))
+            with self.assertRaisesRegex(RuntimeError, 'Strict input window refused'):
+                session.flatpak('Cancel', 'disclosure-cancel')
+            session.owned_window.assert_called_once()
+            self.assertEqual(state.tick, 1)
+            self.assertEqual(state.sends, []); self.assertEqual(state.captures, [])
+
+
 class LauncherReadinessDiagnosticTests(unittest.TestCase):
     @contextmanager
     def fixture(self, *, map_state=0, override=0, foreign=False, query_failure=False):
@@ -1888,9 +2047,14 @@ class LauncherOriginalVisibilityTests(unittest.TestCase):
                     raise
             inspect.side_effect = exact_guard
             if diagnostic_failure == 'constructor': constructor.side_effect = RuntimeError('PRIVATE DIAGNOSTIC')
+            # Exercise diagnostic retention independently of the new initial pending-window policy.
+            session.flatpak_child = session.launch(['/usr/bin/flatpak', 'run', '--user', M.REF], 'disclosure-cancel')
+            session.flatpak_origin = session.native.native_process(session.flatpak_child.pid, session.helper, False)
             with self.assertRaises(RuntimeError) as raised:
-                session.flatpak('Cancel', 'disclosure-cancel')
+                session.x11.inspect(100)
             self.assertIs(raised.exception, errors[0])
+            session.record_launcher_readiness_refusal(session.native.native_process(14, session.helper), 100,
+                                                      [100], 'disclosure-cancel', raised.exception)
             record = M.parse((session.root / 'disclosure-cancel-readiness-gtk.json').read_bytes())
             self.assertEqual(raw_reads, [100]); inspect.assert_called_once_with(100)
             self.assertEqual(state.sends, []); self.assertEqual(state.captures, [])
