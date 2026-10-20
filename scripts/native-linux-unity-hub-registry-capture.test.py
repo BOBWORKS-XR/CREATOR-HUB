@@ -698,6 +698,161 @@ class CaptureTests(unittest.TestCase):
             with self.subTest(drift=drift), self.assertRaises(RuntimeError):
                 self.exec_fixture(native_drift=drift)
 
+    def startup_window_fixture(self, *, records=None, clients=None, processes=None, polls=None, clock=None,
+                               output_error=None):
+        child, helper, native, x11, output, wm_output = (mock.Mock() for _ in range(6))
+        child.pid = 123
+        child.poll.return_value = None
+        child.poll.side_effect = polls
+        process = {"pid": 123, "startTime": "456", "parentPid": 122, "uids": [1001] * 4,
+                   "executable": "/fixed/unityhub-bin", "kernelImageSha256": "a" * 64}
+        native.native_process.return_value = process
+        native.native_process.side_effect = processes
+        initial = {"pid": 123, "client": 10, "mapped": True, "title": "Unity Hub"}
+        terminal = {**initial, "title": "Unity Hub 3.22.3"}
+        x11.property.return_value = (33, 32, [100])
+        x11.property.side_effect = None if clients is None else [(33, 32, value) for value in clients]
+        x11.inspect.return_value = terminal
+        x11.inspect.side_effect = records
+        output.check.side_effect = output_error
+        value, failure = None, None
+        with mock.patch.object(C.time, "monotonic", side_effect=clock, return_value=0):
+            try:
+                value = C.await_startup_window(child, process, helper, native, x11, output, wm_output, 1)
+            except (RuntimeError, OSError) as error:
+                failure = error
+        helper.Request.parse.assert_not_called()
+        helper.perform.assert_not_called()
+        x11.check_close.assert_not_called()
+        x11.close_window.assert_not_called()
+        child.kill.assert_not_called()
+        child.terminate.assert_not_called()
+        return types.SimpleNamespace(value=value, failure=failure, child=child, helper=helper, native=native,
+                                     x11=x11, output=output, wm_output=wm_output, process=process,
+                                     initial=initial, terminal=terminal)
+
+    def test_startup_title_literals_match_exact_observed_vendor_profile(self):
+        self.assertEqual(C.VERSION, "3.22.3")
+        self.assertEqual(C.STARTUP_TITLE, "Unity Hub")
+        self.assertEqual(C.TERMINAL_TITLE, "Unity Hub 3.22.3")
+        self.assertEqual(C.pin(C.STARTUP_TITLE.encode())["sha256"],
+                         "81cb0ebb660ee5b809c70b03ac07c055350819b4d14e1dc7bcb7326a2893e42e")
+        self.assertEqual(C.pin(C.TERMINAL_TITLE.encode())["sha256"],
+                         "4470c87e4b600a798d66b2865cd6ef4bb9ee63db37c8c378c8b005e178c95325")
+
+    def test_startup_window_waits_only_until_exact_terminal_record(self):
+        initial = {"pid": 123, "client": 10, "mapped": True, "title": "Unity Hub"}
+        terminal = {**initial, "title": "Unity Hub 3.22.3"}
+        result = self.startup_window_fixture(records=[initial, initial, terminal],
+                                             clients=[[], [100], [100], [100], [100]])
+        self.assertIsNone(result.failure)
+        self.assertEqual(result.value, (100, terminal))
+        self.assertEqual(result.x11.inspect.call_args_list, [mock.call(100)] * 3)
+        self.assertEqual(result.output.check.call_count, 4)
+        self.assertEqual(result.wm_output.check.call_count, 4)
+        terminal["title"] = "changed after return"
+        self.assertEqual(result.value[1]["title"], "Unity Hub 3.22.3")
+
+    def test_startup_window_already_terminal_needs_no_artificial_delay(self):
+        result = self.startup_window_fixture(clock=[0, 0.9])
+        self.assertIsNone(result.failure)
+        self.assertEqual(result.value, (100, result.terminal))
+        result.x11.inspect.assert_called_once_with(100)
+        self.assertEqual(result.x11.property.call_count, 2)
+        self.assertEqual(result.native.native_process.call_count, 3)
+
+    def test_startup_window_rejects_unknown_title_without_retaining_it(self):
+        for title in ("PRIVATE_FOREIGN_TITLE", "Unity Hub 3.22.2", "Unity Hub 3.22.3 ", "", None):
+            with self.subTest(title=title):
+                result = self.startup_window_fixture(records=[{"pid": 123, "client": 10, "mapped": True, "title": title}])
+                self.assertIn("Unexpected owned startup title", str(result.failure))
+                self.assertIsNone(result.value)
+                result.x11.inspect.assert_called_once_with(100)
+                self.assertEqual(result.x11.property.call_count, 1)
+                self.assertNotIn("PRIVATE_FOREIGN_TITLE", str(result.failure))
+
+    def test_startup_window_rejects_initial_foreign_pid_client_or_unmapped_window(self):
+        for drift in ({"pid": 124}, {"client": 0}, {"mapped": False}):
+            with self.subTest(drift=drift):
+                record = {"pid": 123, "client": 10, "mapped": True, "title": "Unity Hub", **drift}
+                result = self.startup_window_fixture(records=[record])
+                self.assertIn("not the exact owned Hub", str(result.failure))
+                self.assertIsNone(result.value)
+                self.assertEqual(result.native.native_process.call_count, 1)
+
+    def test_startup_window_rejects_non_title_drift_during_transition(self):
+        initial = {"pid": 123, "client": 10, "mapped": True, "title": "Unity Hub"}
+        for drift in ({"pid": 124}, {"client": 11}, {"mapped": False}, {"extra": 1}):
+            with self.subTest(drift=drift):
+                result = self.startup_window_fixture(records=[initial, {**initial, "title": "Unity Hub 3.22.3", **drift}])
+                self.assertIsInstance(result.failure, RuntimeError)
+                self.assertIsNone(result.value)
+                self.assertEqual(result.x11.inspect.call_count, 2)
+                self.assertEqual(result.x11.property.call_count, 2)
+
+    def test_startup_window_rejects_missing_replaced_or_extra_window_without_reinspection(self):
+        initial = {"pid": 123, "client": 10, "mapped": True, "title": "Unity Hub"}
+        for clients in ([], [101], [100, 101]):
+            with self.subTest(clients=clients):
+                result = self.startup_window_fixture(records=[initial], clients=[[100], clients])
+                self.assertIn("sole window changed", str(result.failure))
+                self.assertIsNone(result.value)
+                result.x11.inspect.assert_called_once_with(100)
+        result = self.startup_window_fixture(clients=[[100, 101]])
+        self.assertIn("sole window changed", str(result.failure))
+        result.x11.inspect.assert_not_called()
+
+    def test_startup_window_rechecks_sole_window_before_terminal_binding(self):
+        for clients in ([], [101], [100, 101]):
+            with self.subTest(clients=clients):
+                result = self.startup_window_fixture(clients=[[100], clients])
+                self.assertIn("sole window changed before binding", str(result.failure))
+                self.assertIsNone(result.value)
+                result.x11.inspect.assert_called_once_with(100)
+
+    def test_startup_window_process_drift_shortcircuits_before_during_and_after_window_reads(self):
+        process = {"pid": 123, "startTime": "456", "parentPid": 122, "uids": [1001] * 4,
+                   "executable": "/fixed/unityhub-bin", "kernelImageSha256": "a" * 64}
+        for drift in ({"pid": 124}, {"startTime": "999"}, {"parentPid": 121}, {"uids": [0] * 4},
+                      {"executable": "/foreign/image"}, {"kernelImageSha256": "b" * 64}):
+            for stage in range(3):
+                with self.subTest(drift=drift, stage=stage):
+                    result = self.startup_window_fixture(processes=[process] * stage + [{**process, **drift}])
+                    self.assertIsInstance(result.failure, RuntimeError)
+                    self.assertIsNone(result.value)
+                    self.assertEqual(result.x11.inspect.call_count, 0 if stage == 0 else 1)
+                    self.assertEqual(result.x11.property.call_count, 0 if stage == 0 else (2 if stage == 2 else 1))
+
+    def test_startup_window_exit_or_read_failure_never_retries(self):
+        result = self.startup_window_fixture(polls=[0])
+        self.assertIn("exited or changed", str(result.failure))
+        result.native.native_process.assert_not_called()
+        result.x11.property.assert_not_called()
+        error = OSError("fixed reader refusal")
+        result = self.startup_window_fixture(records=[error])
+        self.assertIs(result.failure, error)
+        result.x11.inspect.assert_called_once_with(100)
+        result = self.startup_window_fixture(processes=[error])
+        self.assertIs(result.failure, error)
+        result.x11.inspect.assert_not_called()
+        result = self.startup_window_fixture(output_error=error)
+        self.assertIs(result.failure, error)
+        result.native.native_process.assert_not_called()
+        result.x11.property.assert_not_called()
+
+    def test_startup_window_deadline_is_original_budget_even_for_late_terminal(self):
+        initial = {"pid": 123, "client": 10, "mapped": True, "title": "Unity Hub"}
+        for clock, records, clients, reads in (([1], None, None, 0),
+                                               ([0, 1], [initial], None, 1),
+                                               ([0, 1], None, None, 1),
+                                               ([0, 1], None, [[]], 0)):
+            with self.subTest(clock=clock, records=records, clients=clients):
+                result = self.startup_window_fixture(clock=clock, records=records, clients=clients)
+                self.assertIn("startup title deadline", str(result.failure))
+                self.assertIsNone(result.value)
+                self.assertEqual(result.x11.inspect.call_count, reads)
+                self.assertLessEqual(result.output.check.call_count, 1)
+
     def test_frame_metrics_match_shared_predicate_and_keep_blank_unqualified(self):
         _helper, native = C.helpers()
         for channels in (3, 4):
@@ -995,7 +1150,7 @@ class CaptureTests(unittest.TestCase):
 
     def observe_fixture(self, *, bitmap_error=None, changed_before_close=False, sandboxes=None,
                         prelaunch_property=(33, 32, []), close_timeout=False, close_alive=False,
-                        changed_window_before_close=None, close_process_error=None):
+                        changed_window_before_close=None, close_process_error=None, startup_titles=None):
         """Mocks only: no ELF, display, native imports, screenshot or input is executed."""
         (self.root / "evidence").mkdir()
         C.save(self.root / "evidence/session-attempt.json", {"attemptConsumed": True})
@@ -1010,9 +1165,16 @@ class CaptureTests(unittest.TestCase):
         child.poll.side_effect = lambda: None if alive[0] else 0
         process = {"pid": 123, "parentPid": os.getpid(), "uids": [1001] * 4, "startTime": "456",
                    "executable": str(self.root / "image" / C.NATIVE), "kernelImageSha256": staged["image"]["sha256"]}
-        bound = {"pid": 123, "mapped": True, "client": 10, "title": "Unity Hub"}
-        clients = iter([prelaunch_property, (33, 32, [100]), (33, 32, [])])
-        x11.property.side_effect = lambda _window, name: next(clients) if name == "_NET_CLIENT_LIST_STACKING" else (33, 32, [1])
+        bound = {"pid": 123, "mapped": True, "client": 10, "title": "Unity Hub 3.22.3"}
+        prelaunch = [True]
+        def property_value(_window, name):
+            if name != "_NET_CLIENT_LIST_STACKING":
+                return (33, 32, [1])
+            if prelaunch[0]:
+                prelaunch[0] = False
+                return prelaunch_property
+            return (33, 32, [100] if alive[0] else [])
+        x11.property.side_effect = property_value
         x11.inspect.return_value = bound
         helper.X11.return_value = x11
         real_helper, _real_native = C.helpers()
@@ -1030,12 +1192,16 @@ class CaptureTests(unittest.TestCase):
             alive[0] = close_alive
         x11.close_window.side_effect = close
         finished = [False]
+        titles = list(startup_titles or [])
+        current_title = [bound["title"]]
         self.close_guard_window_reads = 0
         def inspect(_window):
             if finished[0]:
                 self.close_guard_window_reads += 1
                 return {**bound, **(changed_window_before_close or {})}
-            return bound
+            if titles:
+                current_title[0] = titles.pop(0)
+            return {**bound, "title": current_title[0]}
         x11.inspect.side_effect = inspect
         def current_process(*_args):
             if finished[0] and close_process_error is not None:
@@ -1070,8 +1236,10 @@ class CaptureTests(unittest.TestCase):
                 mock.patch.object(C, "file_pin", side_effect=image_pin), \
                 mock.patch.object(C.os, "getuid", return_value=1001, create=True), \
                 mock.patch.object(C, "source_gate", return_value=staged["sources"]), \
-                mock.patch.object(C, "owned_frame", return_value=frame, side_effect=bitmap_error), \
-                mock.patch.object(C, "observe_render", side_effect=observe_render), \
+                mock.patch.object(C, "await_vendor_exec", wraps=C.await_vendor_exec) as exec_gate, \
+                mock.patch.object(C, "await_startup_window", wraps=C.await_startup_window) as startup_gate, \
+                mock.patch.object(C, "owned_frame", return_value=frame, side_effect=bitmap_error) as frames, \
+                mock.patch.object(C, "observe_render", side_effect=observe_render) as render_gate, \
                 mock.patch.object(C, "Drain") as output, \
                 mock.patch.object(C, "wait_exit", return_value=0, side_effect=RuntimeError("Owned process/output deadline") if close_timeout else None), \
                 mock.patch.object(C.subprocess, "Popen", side_effect=[wm, child]) as launch:
@@ -1081,8 +1249,72 @@ class CaptureTests(unittest.TestCase):
                 C.observe(env)
             except RuntimeError as error:
                 failure = error
+        self.frame_calls = frames.call_count
+        self.phase_deadlines = [gate.call_args.args[index] if gate.called else None
+                                for gate, index in ((exec_gate, -1), (startup_gate, -1), (render_gate, 6))]
         report = json.loads((self.root / "evidence/observation.json").read_text())
         return report, failure, helper, x11, launch
+
+    def test_startup_title_transition_precedes_immutable_capture_request(self):
+        report, failure, helper, x11, _launch = self.observe_fixture(
+            startup_titles=["Unity Hub", "Unity Hub 3.22.3"])
+        self.assertIsNone(failure)
+        self.assertTrue(report["observationCaptured"])
+        self.assertTrue(report["normalCloseObserved"])
+        self.assertEqual(report["xres"]["title"], "Unity Hub 3.22.3")
+        helper.Request.parse.assert_called_once()
+        self.assertEqual(helper.Request.parse.call_args.args[0][-2], "Unity Hub 3.22.3")
+        x11.close_window.assert_called_once_with(100, report["xres"])
+        self.assertTrue(all(report[name] is False for name in C.FALSE))
+
+    def test_startup_title_gate_and_render_receive_same_original_exec_deadline(self):
+        _report, failure, _helper, _x11, _launch = self.observe_fixture(
+            startup_titles=["Unity Hub", "Unity Hub 3.22.3"])
+        self.assertIsNone(failure)
+        self.assertTrue(all(value is not None for value in self.phase_deadlines))
+        self.assertEqual(self.phase_deadlines, [self.phase_deadlines[0]] * 3)
+
+    def test_unknown_startup_title_never_creates_capture_request_or_close_authority(self):
+        report, failure, helper, x11, _launch = self.observe_fixture(
+            startup_titles=["Unity Hub", "PRIVATE_UNKNOWN_STARTUP_TITLE"])
+        self.assertIn("Unexpected owned startup title", str(failure))
+        self.assertFalse(report["observationCaptured"])
+        self.assertFalse(report["normalCloseObserved"])
+        self.assertNotIn("xres", report)
+        helper.Request.parse.assert_not_called()
+        helper.perform.assert_not_called()
+        self.assertEqual(self.frame_calls, 0)
+        x11.check_close.assert_not_called()
+        x11.close_window.assert_not_called()
+        self.assertNotIn("PRIVATE_UNKNOWN_STARTUP_TITLE", json.dumps(report) + str(failure))
+        self.assertTrue(all(report[name] is False for name in C.FALSE))
+
+    def test_title_reversion_after_terminal_binding_never_becomes_steady_capture_allowlist(self):
+        report, failure, helper, x11, _launch = self.observe_fixture(
+            startup_titles=["Unity Hub", "Unity Hub 3.22.3", "Unity Hub"])
+        self.assertIsNotNone(failure)
+        self.assertIn("Hub changed during observation", report["refusal"])
+        self.assertFalse(report["observationCaptured"])
+        self.assertFalse(report["normalCloseObserved"])
+        self.assertEqual(report["xres"]["title"], "Unity Hub 3.22.3")
+        self.assertEqual(helper.Request.parse.call_args.args[0][-2], "Unity Hub 3.22.3")
+        helper.perform.assert_not_called()
+        self.assertEqual(self.frame_calls, 0)
+        x11.check_close.assert_not_called()
+        x11.close_window.assert_not_called()
+        self.assertTrue(all(report[name] is False for name in C.FALSE))
+
+    def test_initial_title_at_normal_close_still_refuses_after_successful_terminal_capture(self):
+        report, failure, helper, x11, _launch = self.observe_fixture(
+            startup_titles=["Unity Hub", "Unity Hub 3.22.3"], changed_window_before_close={"title": "Unity Hub"})
+        self.assertIn("normal-close guard changed", str(failure))
+        self.assertTrue(report["observationCaptured"])
+        self.assertFalse(report["normalCloseObserved"])
+        self.assertEqual(helper.Request.parse.call_args.args[0][-2], "Unity Hub 3.22.3")
+        self.assertFalse(report["normalCloseGuard"]["windowEqual"])
+        x11.check_close.assert_not_called()
+        x11.close_window.assert_not_called()
+        self.assertTrue(all(report[name] is False for name in C.FALSE))
 
     def test_mocked_first_run_snapshot_only_then_one_owned_normal_close(self):
         report, failure, helper, x11, launch = self.observe_fixture()

@@ -28,6 +28,7 @@ WORKFLOW = REPO + "/.github/workflows/linux-unity-hub-registry-capture.yml@" + B
 REQUEST = "observe-official-hub-3.22.3"
 DIRECTORY = "linux-unity-hub-registry-capture"
 VERSION, PACKAGE = "3.22.3", "unityhub"
+STARTUP_TITLE, TERMINAL_TITLE = "Unity Hub", "Unity Hub 3.22.3"
 FINGERPRINT = "A08CA7CD4D006A4128EC2850BE3E6EA534E8243F"
 REPOSITORY = "https://hub-dist.unity3d.com/artifactory/hub-debian-prod-local/"
 DEB_MEMBER = "pool/main/u/unity/unityhub_amd64/UnityHubSetup-3.22.3-amd64.deb"
@@ -709,6 +710,40 @@ def await_vendor_exec(child, executable, image_pin, interpreters, helper, native
     raise RuntimeError("Owned vendor exec deadline; no retry or alternate image")
 
 
+def await_startup_window(child, process, helper, native, x11, output, wm_output, deadline):
+    # The pinned vendor sets its versioned title during initializeUI; bind only that final record.
+    window, initial = None, None
+    while time.monotonic() < deadline:
+        output.pump()
+        output.check()
+        wm_output.pump()
+        wm_output.check()
+        require(child.poll() is None and native.native_process(child.pid, helper) == process,
+                "Owned Hub exited or changed before capture")
+        clients = wm_client_ids(x11)
+        if window is None and not clients:
+            continue
+        require(len(clients) == 1 and (window is None or clients == [window]),
+                "First-run sole window changed; no input authorized")
+        candidate = x11.inspect(clients[0])
+        require(candidate["pid"] == child.pid and candidate["mapped"] is True and candidate["client"] > 0,
+                "First-run window is not the exact owned Hub")
+        if window is None:
+            window, initial = clients[0], dict(candidate)
+        require({**candidate, "title": initial["title"]} == initial,
+                "Owned startup window identity changed")
+        require(child.poll() is None and native.native_process(child.pid, helper) == process,
+                "Owned Hub changed while checking startup window")
+        if candidate["title"] == TERMINAL_TITLE:
+            require(wm_client_ids(x11) == [window], "First-run sole window changed before binding")
+            require(child.poll() is None and native.native_process(child.pid, helper) == process,
+                    "Owned Hub changed before terminal title binding")
+            require(time.monotonic() < deadline, "Owned startup title deadline; no capture authorized")
+            return window, dict(candidate)
+        require(candidate["title"] == STARTUP_TITLE, "Unexpected owned startup title; no capture authorized")
+    raise RuntimeError("Owned startup title deadline; no capture authorized")
+
+
 def sanitize_ax(value):
     require(type(value) is dict and type(value.get("nodes")) is list and len(value["nodes"]) <= 512
             and value.get("actionCount") == 0, "Bounded observation-only AX result required")
@@ -919,22 +954,7 @@ def observe(env):
             {path: wrapper_tools[path] for path in ("/usr/bin/env", "/usr/bin/bash")}, helper, native, output, wm_output, deadline)
         require(all(system_tool(path) == value for path, value in wrapper_tools.items()), "Vendor interpreter/tools changed during launch")
         report["process"] = process
-        window = None
-        while time.monotonic() < deadline:
-            output.pump()
-            output.check()
-            wm_output.pump()
-            wm_output.check()
-            require(child.poll() is None and native.native_process(child.pid, helper) == process, "Owned Hub exited or changed before capture")
-            clients = wm_client_ids(x11)
-            if clients:
-                require(len(clients) == 1, "Ambiguous first-run windows; no input authorized")
-                candidate = x11.inspect(clients[0])
-                require(candidate["pid"] == child.pid and candidate["mapped"] is True and candidate["client"] > 0,
-                        "First-run window is not the exact owned Hub")
-                window, bound = clients[0], candidate
-                break
-        require(window is not None, "No owned Hub window before deadline")
+        window, bound = await_startup_window(child, process, helper, native, x11, output, wm_output, deadline)
         request = helper.Request.parse(["snapshot", str(child.pid), process["startTime"], str(executable),
                                         staged["image"]["sha256"], str(window), bound["title"], "FRAME"])
         report.update(window=window, xres=bound, phase="owned-first-run-capture")
