@@ -96,9 +96,14 @@ def delivery_api(p, env):
             "digest": "sha256:" + "a" * 64, "workflow_run": {k: run[k] for k in ("id", "head_sha", "head_branch")}}}
 
 
-def manifest(version="17"):
+def manifest(version="17", icons=False):
     files = {"AppRun": b"runner", "usr/bin/creator-hub": b"hub", "usr/libexec/creator-hub-portable-selector": b"selector"}
-    entries = {name: {"kind": "directory", "mode": 0o755} for name in ("usr", "usr/bin", "usr/libexec")}
+    directories = ["usr", "usr/bin", "usr/libexec"]
+    if icons:
+        directories.extend(("usr/share", "usr/share/icons", "usr/share/icons/hicolor",
+                            "usr/share/icons/hicolor/256x256@2", "usr/share/icons/hicolor/256x256@2/apps"))
+        files["usr/share/icons/hicolor/256x256@2/apps/creator-hub.png"] = b"icon"
+    entries = {name: {"kind": "directory", "mode": 0o755} for name in directories}
     entries.update({name: {"kind": "file", "mode": 0o755, **M.pin(body)} for name, body in files.items()})
     body = io.BytesIO()
     with tarfile.open(fileobj=body, mode="w", format=tarfile.USTAR_FORMAT) as tar:
@@ -806,8 +811,27 @@ class Pure(unittest.TestCase):
     def test_duplicate_json_nonfinite_and_paths_refused(self):
         for value in (b'{"x":1,"x":2}', b'{"x":NaN}'):
             with self.assertRaises(RuntimeError): M.parse(value)
-        for name in ("../x", "/x", "a//b", "a/./b", "a\\b", "a:b", "a\x00b"):
+        for name in ("", ".", "..", "../x", "/x", "a//b", "a/./b", "a\\b", "a:b", "a\x00b",
+                     "/@x", "C:/@x", "@x/", "@x//y", "@x/./y", "@x/../y", "a\uff20b", "a@b\n"):
             with self.assertRaises(RuntimeError): M.safe_name(name)
+
+    def test_actual_portable_icon_paths_with_ascii_at_are_canonical(self):
+        for version in ("16", "17"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temp:
+                value, raw = manifest(icons=True)
+                baseline = profile()["baseline"]
+                expected = baseline if version == "16" else M.FIXED["17"]
+                value.update(version="0.1." + version, sourceCommit=expected["source"], sourceTree=expected["tree"])
+                M.portable_manifest(value, version, baseline)
+                file = Path(temp).resolve() / "archive.tar.gz"; file.write_bytes(raw)
+                M.verify_tar(file, value)
+
+    def test_portable_ascii_at_does_not_admit_case_aliases(self):
+        value, _ = manifest(icons=True)
+        name = "usr/share/icons/hicolor/256x256@2/apps/creator-hub.png"
+        value["entries"][name.upper()] = copy.deepcopy(value["entries"][name])
+        with self.assertRaisesRegex(RuntimeError, "Bounded unique complete inventory"):
+            M.portable_manifest(value, "17")
 
     def test_complete_signed_manifest_and_tar(self):
         value, raw = manifest(); M.portable_manifest(value, "17")

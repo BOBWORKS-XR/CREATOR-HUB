@@ -107,7 +107,7 @@ def validate_pin(value, maximum=MAX_FILE):
 
 def safe_name(name):
     require(type(name) is str and 0 < len(name) <= 240 and not name.startswith("/")
-            and re.fullmatch(r"[A-Za-z0-9_ ./+-]+", name) and all(p not in ("", ".", "..") for p in name.split("/")), "Canonical finite member path required")
+            and re.fullmatch(r"[A-Za-z0-9_ ./+@-]+", name) and all(p not in ("", ".", "..") for p in name.split("/")), "Canonical finite member path required")
     return name
 
 
