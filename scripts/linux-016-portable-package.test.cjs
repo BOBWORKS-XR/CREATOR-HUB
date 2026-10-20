@@ -1233,7 +1233,7 @@ test('whole-closure ABI refuses failed inspectors and changes to the hash-bound 
 test('packaging wires pinned source provenance and whole-closure analysis before unsigned TAR creation', () => {
   const source = fs.readFileSync(path.join(__dirname, 'linux-016-portable-package.cjs'), 'utf8');
   const provenance = source.indexOf('receipt.hostBaselineSource = hostBaselineEvidence(receipt.upstreamPackagingTools)');
-  const dependencies = source.indexOf('receipt.dependencies = dependencies(transport, finalInventory.entries, run, { includeHub: true })');
+  const dependencies = source.indexOf('receipt.dependencies = dependencies(transport, finalInventory.entries, run, { includeHub: true,');
   const abi = source.indexOf('receipt.closureAbi = closureAbiRequirements(transport, receipt.dependencies, run)');
   const tar = source.indexOf('const tarBinding = await packTar(transport, tar, finalInventory)');
   assert.ok(provenance > 0 && dependencies > provenance && abi > dependencies && tar > abi);

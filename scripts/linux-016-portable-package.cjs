@@ -19,6 +19,20 @@ const LIMITS = Object.freeze({ manifest: 2 * 1024 * 1024, archive: 256 * 1024 * 
   file: 256 * 1024 * 1024, total: 512 * 1024 * 1024, entries: 8192, zip: 768 * 1024 * 1024 });
 const INPUTS = ['creator-hub', 'modules.tar.gz', 'builtin-manifest.json', 'signed-unix-assembly.json', 'unix-package-integrity.json'];
 const RECEIPTS = [...INPUTS.filter(n => n.endsWith('.json')), 'linux-byte-receipts.json', 'direct-features-candidate.json'];
+const DEB_MEMBER = `native-packages/Creator Hub_${VERSION}_amd64.deb`;
+const PROTOTYPE = Object.freeze({ production: false, workflow: WORKFLOW, branch: BRANCH,
+  features: Object.freeze([...FEATURES]), inputs: Object.freeze([...INPUTS]), receipts: Object.freeze([...RECEIPTS]),
+  pinFiles: Object.freeze([...INPUTS, 'linux-byte-receipts.json', 'direct-features-candidate.json']) });
+const PRODUCTION = Object.freeze({ production: true, id: 'production-portable-016',
+  workflow: '.github/workflows/linux-016-portable-production.yml', branch: 'refs/heads/validation/linux-016-portable-production',
+  features: Object.freeze(['integrated-features', 'experimental-flatpak-host', 'linux-production-migration', 'experimental-linux-portable-update']),
+  inputs: Object.freeze([...INPUTS, DEB_MEMBER]),
+  receipts: Object.freeze([...RECEIPTS, 'linux-retirement-candidate.json', 'linux-retirement-package-integrity.json']),
+  pinFiles: Object.freeze([...INPUTS, 'linux-byte-receipts.json', 'direct-features-candidate.json', DEB_MEMBER,
+    'linux-retirement-candidate.json', 'linux-retirement-package-integrity.json']) });
+function fixedProfile(value) {
+  assert.ok(value === PROTOTYPE || value === PRODUCTION, 'Caller-selected packaging policy refused'); return value;
+}
 const HOST_EXCLUSIONS = Object.freeze({
   source: Object.freeze({
     url: 'https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/199fc9f768b35ad6166109299e5cf3832adeb5d5/excludelist',
@@ -55,34 +69,38 @@ function pin(value, limit = LIMITS.file) {
   keys(value, ['size', 'sha256']); sha(value.sha256);
   assert.ok(Number.isSafeInteger(value.size) && value.size > 0 && value.size <= limit, 'Pin exceeds bound');
 }
-function validatePins(p) {
+function validatePins(p, profile = PROTOTYPE) {
+  fixedProfile(profile);
   keys(p, ['schemaVersion', 'sourceCommit', 'sourceTree', 'runId', 'runAttempt', 'jobId', 'workflowId',
-    'artifactId', 'artifact', 'receiptsArtifactId', 'receiptsArtifact', 'handoffSha256', 'files']);
-  assert.equal(p.schemaVersion, 1); sha(p.sourceCommit, 40); sha(p.sourceTree, 40); sha(p.handoffSha256);
+    'artifactId', 'artifact', 'receiptsArtifactId', 'receiptsArtifact', 'handoffSha256', 'files', ...(profile.production ? ['profile'] : [])]);
+  assert.equal(p.schemaVersion, profile.production ? 2 : 1);
+  if (profile.production) assert.equal(p.profile, profile.id);
+  sha(p.sourceCommit, 40); sha(p.sourceTree, 40); sha(p.handoffSha256);
   for (const n of ['runId', 'runAttempt', 'jobId', 'workflowId', 'artifactId', 'receiptsArtifactId']) id(p[n]);
   assert.notEqual(p.artifactId, p.receiptsArtifactId);
   pin(p.artifact, LIMITS.zip); pin(p.receiptsArtifact, LIMITS.manifest);
-  keys(p.files, [...INPUTS, 'linux-byte-receipts.json', 'direct-features-candidate.json']);
+  keys(p.files, profile.pinFiles);
   for (const [name, value] of Object.entries(p.files)) pin(value, name.endsWith('.json') ? 128 * 1024 : LIMITS.file);
   pin(p.files['builtin-manifest.json'], 65536);
   return p;
 }
-function admission(env, platform = process.platform, arch = process.arch) {
+function admission(env, platform = process.platform, arch = process.arch, profile = PROTOTYPE) {
+  fixedProfile(profile);
   assert.equal(platform, 'linux'); assert.equal(arch, 'x64');
   for (const [n, v] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
     RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64', GITHUB_REPOSITORY: REPO, GITHUB_REPOSITORY_ID: String(REPO_ID),
-    GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: BRANCH, GITHUB_WORKFLOW_REF: `${REPO}/${WORKFLOW}@${BRANCH}` })) assert.equal(env[n], v, n);
+    GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: profile.branch, GITHUB_WORKFLOW_REF: `${REPO}/${profile.workflow}@${profile.branch}` })) assert.equal(env[n], v, n);
   sha(env.GITHUB_SHA, 40);
   for (const n of ['GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT']) assert.match(env[n] || '', /^[1-9][0-9]*$/);
   assert.ok(!env.FLATPAK_ID && !env.DISPLAY && !env.WAYLAND_DISPLAY, 'Headless disposable host required');
   assert.ok(!Object.keys(env).some(n => /^(LD_|DYLD_|TAURI_|APPLE_|CREATOR_HUB_SIGNING_|NODE_OPTIONS$|NODE_EXTRA_CA_CERTS$|NODE_TLS_REJECT_UNAUTHORIZED$|SSL_CERT_|CURL_CA_BUNDLE$|WEBKIT_|APPIMAGE$|APPDIR$|RUSTFLAGS$|CARGO_ENCODED_RUSTFLAGS$|PYTHON)/.test(n)
     || n.toLowerCase().endsWith('proxy')), 'Runtime, trust, compiler and signing overrides refused');
 }
-function preflight(env = process.env, platform = process.platform, arch = process.arch) {
-  admission(env, platform, arch);
+function preflight(env = process.env, platform = process.platform, arch = process.arch, profile = PROTOTYPE) {
+  admission(env, platform, arch, profile);
   assert.ok(typeof env.ASSEMBLY_PINS === 'string' && typeof env.PRIVATE_INPUT === 'string', 'Both independent JSON inputs required');
   assert.ok(Buffer.byteLength(env.ASSEMBLY_PINS) + Buffer.byteLength(env.PRIVATE_INPUT) <= 60000, 'Dispatch JSON exceeds bounded preflight input');
-  const p = validatePins(JSON.parse(env.ASSEMBLY_PINS)), input = JSON.parse(env.PRIVATE_INPUT);
+  const p = validatePins(JSON.parse(env.ASSEMBLY_PINS), profile), input = JSON.parse(env.PRIVATE_INPUT);
   keys(input, ['expected', 'prepared', 'artifactSize', 'jobId']);
   const e = input.expected; keys(e, ['target', 'version', 'sourceCommit', 'runId', 'runAttempt', 'artifactId', 'zipSha256']);
   assert.equal(e.target, 'linux'); assert.equal(e.version, VERSION); sha(e.sourceCommit, 40); sha(e.zipSha256);
@@ -123,8 +141,8 @@ function inside(file, root) {
   const rel = path.relative(root, file);
   assert.ok(rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel), 'Fresh owned staging path required');
 }
-function verifyProducer(p, proof) {
-  validatePins(p);
+function verifyProducer(p, proof, profile = PROTOTYPE) {
+  validatePins(p, profile);
   const { run: r, job: j, workflow: w, commit: c } = proof;
   assert.equal(r.id, p.runId); assert.equal(r.run_attempt, p.runAttempt);
   assert.equal(r.status, 'completed'); assert.equal(r.conclusion, 'success'); assert.equal(r.event, 'workflow_dispatch');
@@ -151,9 +169,9 @@ function verifyProducer(p, proof) {
       'Artifact not created within the independently pinned assembly job');
   }
 }
-function collect(p, privateInput, request) {
+function collect(p, privateInput, request, profile = PROTOTYPE) {
   const original = require('./unix-payload-binding.cjs');
-  validatePins(p); keys(privateInput, ['expected', 'prepared', 'artifactSize', 'jobId']);
+  validatePins(p, profile); keys(privateInput, ['expected', 'prepared', 'artifactSize', 'jobId']);
   assert.equal(privateInput.expected.target, 'linux'); assert.equal(privateInput.expected.version, VERSION);
   const e = privateInput.expected;
   keys(e, ['target', 'version', 'sourceCommit', 'runId', 'runAttempt', 'artifactId', 'zipSha256']);
@@ -164,7 +182,7 @@ function collect(p, privateInput, request) {
   const proof = { run: request(`actions/runs/${p.runId}`), job: request(`actions/jobs/${p.jobId}`),
     workflow: request(`actions/workflows/${p.workflowId}`), commit: request(`git/commits/${p.sourceCommit}`),
     artifact: request(`actions/artifacts/${p.artifactId}`), receiptsArtifact: request(`actions/artifacts/${p.receiptsArtifactId}`) };
-  verifyProducer(p, proof);
+  verifyProducer(p, proof, profile);
   const jobs = request(`actions/runs/${e.runId}/attempts/${e.runAttempt}/jobs?per_page=100`);
   assert.ok(jobs.total_count === jobs.jobs.length && jobs.jobs.length <= 20, 'Incomplete original native-job listing');
   const privateProof = { ...privateInput, run: request(`actions/runs/${e.runId}`),
@@ -189,8 +207,9 @@ const ZIP_STAGE = String.raw`
 import hashlib,json,os,stat,sys,zipfile
 from pathlib import Path
 source,output=map(Path,sys.argv[1:]); config=json.load(sys.stdin)
-pins=config['pins']; metadata=config.get('metadata',{}); allowed=set(config['allowed']); dirs=set()
+pins=config['pins']; metadata=config.get('metadata',{}); allowed=set(config['allowed']); dirs=set(); outputs=config.get('outputs',{})
 assert not set(pins)&set(metadata)
+assert set(outputs)<=set(pins) and len(set(outputs.get(n,n) for n in pins))==len(pins)
 for name in allowed:
     parts=name.split('/')
     dirs.update('/'.join(parts[:i]) for i in range(1,len(parts)))
@@ -211,11 +230,12 @@ with zipfile.ZipFile(source) as z:
     assert (set(pins)|set(metadata))<=names
     output.mkdir(mode=0o700)
     for name,pin in pins.items():
-        assert '/' not in name and name in allowed
+        target=outputs.get(name,name)
+        assert name in allowed and target and target not in ('.','..') and not any(c in target for c in '/\\:')
         e=z.getinfo(name); assert not e.is_dir() and e.file_size==pin['size']
         data=z.read(e); assert len(data)==pin['size'] and hashlib.sha256(data).hexdigest()==pin['sha256']
-        with (output/name).open('xb') as f: f.write(data)
-        os.chmod(output/name,0o755 if name=='creator-hub' else 0o644)
+        with (output/target).open('xb') as f: f.write(data)
+        os.chmod(output/target,0o755 if name=='creator-hub' else 0o644)
     for name,expected in metadata.items():
         assert name=='prepared-unix.json' and name in allowed
         e=z.getinfo(name); assert not e.is_dir() and 0<e.file_size<=128*1024
@@ -224,15 +244,17 @@ with zipfile.ZipFile(source) as z:
         with (output/name).open('xb') as f: f.write(data)
         os.chmod(output/name,0o644)
 `;
-function stageZip(file, output, pins, allowed, run) {
-  run('python3', ['-B', '-c', ZIP_STAGE, file, output], { input: JSON.stringify({ pins, allowed }) });
+function stageZip(file, output, pins, allowed, run, profile = PROTOTYPE) {
+  fixedProfile(profile);
+  run('python3', ['-B', '-c', ZIP_STAGE, file, output], { input: JSON.stringify({ pins, allowed,
+    ...(profile.production && Object.hasOwn(pins, DEB_MEMBER) ? { outputs: { [DEB_MEMBER]: 'production-root.deb' } } : {}) }) });
 }
-function validateReceipts(input, receipts, binding) {
+function validateReceipts(input, receipts, binding, profile = PROTOTYPE) {
   const finite = require('./flatpak-package.cjs'), archive = require('./module-archive.cjs');
   const { runtimeDescriptor } = require('./mcp-runtime-descriptor.cjs');
-  const { pins: p, proof, privateProof } = binding; verifyProducer(p, proof); verifyPrivateProof(privateProof);
+  const { pins: p, proof, privateProof } = binding; verifyProducer(p, proof, profile); verifyPrivateProof(privateProof);
   const bytes = Object.fromEntries(INPUTS.map(n => [n, exact(path.join(input, n), p.files[n])]));
-  for (const n of RECEIPTS) exact(path.join(receipts, n), p.files[n]);
+  for (const n of profile.receipts) exact(path.join(receipts, n), p.files[n]);
   const compact = JSON.parse(exact(path.join(receipts, 'linux-byte-receipts.json'), p.files['linux-byte-receipts.json']));
   assert.equal(compact.schemaVersion, 1); assert.equal(compact.sourceCommit, p.sourceCommit);
   assert.equal(compact.runId, p.runId); assert.equal(compact.runAttempt, p.runAttempt); keys(compact.files, INPUTS);
@@ -244,8 +266,17 @@ function validateReceipts(input, receipts, binding) {
   assert.equal(a.assemblyCommit, p.sourceCommit); assert.equal(a.handoffSha256, p.handoffSha256);
   assert.deepEqual(a.privateSource, privateProof.prepared.source);
   // No inference from a workflow name or direct-page scope can prove the exact Cargo features.
-  assert.deepEqual(a.compiledFeatures, FEATURES, 'Parent assembly must attest the exact compiledFeatures; scope alone is insufficient');
-  require('./build-unified.cjs').validatePortableBuildProof(a.portableHostBuild, p.sourceCommit, FEATURES, p.files['creator-hub'], p.sourceTree);
+  assert.deepEqual(a.compiledFeatures, profile.features, 'Parent assembly must attest the exact compiledFeatures; scope alone is insufficient');
+  const build = require('./build-unified.cjs');
+  build.validatePortableBuildProof(a.portableHostBuild, p.sourceCommit, profile.features, p.files['creator-hub'], p.sourceTree);
+  if (profile.production) {
+    build.validateProductionBuildProof(a.productionMigration, p.sourceCommit, profile.features);
+    assert.equal(a.productionMigration.sourceTree, p.sourceTree);
+    assert.deepEqual(a.productionMigration.rawHub, p.files['creator-hub']);
+    const staging = json(path.join(receipts, 'linux-retirement-candidate.json'));
+    require('./linux-retirement-package.cjs').validateProductionReceipt(staging, p.sourceCommit);
+    assert.deepEqual(a.productionMigration.staging, staging);
+  } else assert.equal(Object.hasOwn(a, 'productionMigration'), false, 'Production proof cannot relabel prototype assembly');
   for (const n of ['privateModulesRecompiled', 'privateModulesResigned', 'nativeGuiAccepted', 'releaseReady']) assert.equal(a[n], false);
   assert.equal(a.mcpMode, 'writable');
   const direct = JSON.parse(exact(path.join(receipts, 'direct-features-candidate.json'), p.files['direct-features-candidate.json']));
@@ -278,13 +309,15 @@ function validateReceipts(input, receipts, binding) {
   assert.ok(at >= 0 && hub.indexOf(marker, at + 1) === -1, 'Exactly one raw UNK marker required');
   const debHub = Buffer.from(hub); debHub.write('DEB', at + marker.length - 3, 'ascii');
   assert.equal(hash(debHub), deb.hubSha256, 'Root does not bind the parent DEB integrity receipt');
-  return { bytes, manifest: m, portableHostBuild: a.portableHostBuild };
+  if (profile.production) assert.equal(deb.sha256, p.files[DEB_MEMBER].sha256);
+  return { bytes, manifest: m, portableHostBuild: a.portableHostBuild,
+    ...(profile.production ? { productionMigration: a.productionMigration, debHub: record(debHub) } : {}) };
 }
 
-function hostProfile(rawHub, packagedHub, proof, pins) {
-  validatePins(pins);
+function hostProfile(rawHub, packagedHub, proof, pins, profile = PROTOTYPE) {
+  validatePins(pins, profile);
   const builder = require('./build-unified.cjs');
-  builder.validatePortableBuildProof(proof, pins.sourceCommit, FEATURES, record(rawHub), pins.sourceTree);
+  builder.validatePortableBuildProof(proof, pins.sourceCommit, profile.features, record(rawHub), pins.sourceTree);
   for (const witness of builder.PORTABLE_ROOT_WITNESSES) {
     assert.ok(rawHub.includes(Buffer.from(witness)), 'Old Root cannot be relabelled with a portable profile');
   }
@@ -292,6 +325,155 @@ function hostProfile(rawHub, packagedHub, proof, pins) {
   return Buffer.from(JSON.stringify({ schemaVersion: 1, version: VERSION,
     activationInterface: 'com.creatorworks.hub.Host1', integratedFeatures: true,
     startupImageBinding: 1, executableSha256: hash(packagedHub) }, null, 2) + '\n');
+}
+const PRODUCTION_DEB_CHECK = String.raw`
+import base64,importlib.util,json,sys
+from pathlib import Path
+sys.dont_write_bytecode=True
+root,deb=map(Path,sys.argv[1:]); c=json.load(sys.stdin)
+def load(name):
+    spec=importlib.util.spec_from_file_location(name.replace('-','_'),root/'scripts'/(name+'.py'))
+    m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+s=load('native-linux-016-stage'); v=load('linux-retirement-package-verify')
+checked=v.verify(str(deb),c['pins']['helper']['sha256'],c['pins']['policy']['sha256'],'0.1.16','production-migration-016')
+manifest=base64.b64decode(c['manifest'],validate=True)
+records=s.inspect_deb(s.deb_records(deb),{'pins':c['pins']},manifest,s.parse(manifest))
+print(json.dumps({'profile':checked['profile'],'files':checked['files'],
+                  'packageFiles':{name:records[name] for name in s.DEB_MEMBERS.values()}}))
+`;
+function productionDeb(root, input, receipts, pins, baseline, run) {
+  validatePins(pins, PRODUCTION);
+  const retirement = require('./linux-retirement-package.cjs'), staging = baseline.productionMigration.staging;
+  const file = path.join(input, 'production-root.deb'), packagePin = pins.files[DEB_MEMBER];
+  exact(file, packagePin);
+  const service = { ...record(retirement.SERVICE_BYTES), mode: 0o644, uid: 0, gid: 0 };
+  const files = { ...staging.files, [retirement.SERVICE]: service };
+  const receipt = json(path.join(receipts, 'linux-retirement-package-integrity.json'));
+  keys(receipt, ['schemaVersion', 'acceptanceOnly', 'archiveIntegrityPassed', 'package', 'files', 'systemInstallationTested',
+    'profile', 'productionContract', 'sourceCommit', 'rootFeature', 'helperFeature', ...Object.keys(retirement.FLAGS)]);
+  assert.equal(receipt.schemaVersion, 2); assert.equal(receipt.acceptanceOnly, true); assert.equal(receipt.archiveIntegrityPassed, true);
+  assert.equal(receipt.systemInstallationTested, false); assert.equal(receipt.profile, retirement.PRODUCTION_PROFILE);
+  assert.equal(receipt.sourceCommit, pins.sourceCommit); assert.equal(receipt.rootFeature, retirement.PRODUCTION_ROOT_FEATURE);
+  assert.equal(receipt.helperFeature, retirement.PRODUCTION_HELPER_FEATURE); assert.deepEqual(receipt.productionContract, retirement.PRODUCTION_CONTRACT);
+  for (const name of Object.keys(retirement.FLAGS)) assert.equal(receipt[name], false);
+  assert.deepEqual(receipt.package, { path: DEB_MEMBER, ...packagePin }); assert.deepEqual(receipt.files, files);
+  const config = { manifest: baseline.bytes['builtin-manifest.json'].toString('base64'), pins: {
+    hub: baseline.debHub, modulesArchive: pins.files['modules.tar.gz'], helper: staging.files[retirement.HELPER],
+    policy: staging.files[retirement.POLICY], service } };
+  const expected = Object.fromEntries([
+    ['usr/bin/creator-hub', { ...baseline.debHub, mode: 0o755 }],
+    ['usr/lib/Creator Hub/modules.tar.gz', { ...pins.files['modules.tar.gz'], mode: 0o644 }],
+    ...Object.entries(files).map(([name, entry]) => [name.slice(1), { size: entry.size, sha256: entry.sha256, mode: entry.mode }]),
+  ]);
+  const verified = JSON.parse(String(run('python3', ['-B', '-c', PRODUCTION_DEB_CHECK, root, file],
+    { input: JSON.stringify(config), maxBuffer: 65536 })));
+  assert.deepEqual(verified, { profile: retirement.PRODUCTION_PROFILE, files, packageFiles: expected }, 'Actual production DEB bytes differ');
+  exact(file, packagePin);
+  return { ...verified, package: packagePin, nativeExecution: false, releaseReady: false };
+}
+const SELECTOR_ENTRYPOINT = 'usr/libexec/creator-hub-portable-selector';
+const SELECTOR_TOOLCHAIN = '1.99.0-x86_64-unknown-linux-gnu';
+const SELECTOR_SOURCES = Object.freeze(['native/linux-portable-deployment', 'src-tauri/src/catalog-key.pub']);
+function selectorBuildArguments(root, target) {
+  return ['build', '--release', '--locked', '--no-default-features', '--manifest-path',
+    path.join(root, 'native/linux-portable-deployment/Cargo.toml'), '--bin', 'creator-hub-portable-selector',
+    '--features', 'experimental-restart', '--target', TARGET, '--target-dir', target];
+}
+function buildSelector(root, output, pins, run) {
+  validatePins(pins, PRODUCTION);
+  const source = path.join(output, 'selector-source'), target = path.join(output, 'selector-target');
+  assert.equal(fs.existsSync(source), false); assert.equal(fs.existsSync(target), false);
+  const listing = String(run('git', ['ls-tree', '-rz', '--full-tree', pins.sourceCommit, '--', ...SELECTOR_SOURCES], { maxBuffer: 65536 }));
+  const rows = listing.split('\0').filter(Boolean); assert.ok(rows.length > 0 && rows.length <= 256);
+  const sources = {}; let total = 0;
+  fs.mkdirSync(source, { mode: 0o700 });
+  for (const row of rows) {
+    const match = /^100(?:644|755) blob ([a-f0-9]{40})\t(.+)$/.exec(row); assert.ok(match, 'Nonregular selector Cargo source refused');
+    const name = match[2]; assert.ok(relative(name) && !name.split('/').includes('.cargo')
+      && (name.startsWith('native/linux-portable-deployment/') || name === SELECTOR_SOURCES[1]) && !Object.hasOwn(sources, name));
+    const bytes = Buffer.from(run('git', ['cat-file', 'blob', match[1]], { encoding: null, maxBuffer: 2 * 1024 * 1024 }));
+    assert.equal(crypto.createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'), match[1]);
+    const current = read(path.join(root, name), 2 * 1024 * 1024); assert.deepEqual(record(current), record(bytes), 'Selector source differs from assembly source tree');
+    total += bytes.length; assert.ok(total <= 16 * 1024 * 1024, 'Selector Cargo source exceeds bound'); sources[name] = record(bytes);
+    const destination = path.join(source, name); fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o755 });
+    fs.writeFileSync(destination, bytes, { flag: 'wx', mode: 0o644 });
+  }
+  for (const name of ['native/linux-portable-deployment/Cargo.toml', 'native/linux-portable-deployment/Cargo.lock',
+    'native/linux-portable-deployment/src/bin/creator-hub-portable-selector.rs', SELECTOR_SOURCES[1]]) assert.ok(sources[name], `Missing selector source: ${name}`);
+  for (let directory = source;; directory = path.dirname(directory)) {
+    for (const name of ['config', 'config.toml']) assert.equal(fs.existsSync(path.join(directory, '.cargo', name)), false, 'Inherited Cargo configuration refused');
+    if (path.dirname(directory) === directory) break;
+  }
+  const options = { cwd: source, timeout: 900000 };
+  const compiler = String(run('rustc', ['--version', '--verbose'], options));
+  assert.match(compiler, /^rustc 1\.99\.0 /); assert.match(compiler, /^host: x86_64-unknown-linux-gnu$/m);
+  const cargo = String(run('cargo', ['--version'], options)); assert.match(cargo, /^cargo 1\.99\.0 /);
+  const toolFiles = Object.fromEntries(['rustc', 'cargo'].map(name => {
+    const file = String(run('rustup', ['which', '--toolchain', SELECTOR_TOOLCHAIN, name], options)).trim();
+    assert.ok(path.isAbsolute(file)); return [name, { path: file, ...record(read(file)) }];
+  }));
+  const args = selectorBuildArguments(source, target);
+  const metadata = JSON.parse(String(run(toolFiles.cargo.path, ['metadata', '--locked', '--no-deps', '--format-version', '1',
+    '--manifest-path', path.join(source, 'native/linux-portable-deployment/Cargo.toml')], options)));
+  assert.equal(metadata.packages.length, 1); const pkg = metadata.packages[0];
+  assert.equal(pkg.name, 'creator-hub-linux-portable-deployment'); assert.equal(pkg.version, '0.1.0');
+  assert.deepEqual(pkg.features.default, []); assert.deepEqual(pkg.features['experimental-restart'], []);
+  assert.ok(pkg.dependencies.every(d => !d.path), 'Selector build cannot compile Root or private path dependencies');
+  assert.equal(pkg.targets.filter(t => t.name === 'creator-hub-portable-selector' && t.kind.includes('bin')).length, 1);
+  run(toolFiles.cargo.path, args, options);
+  const file = path.join(target, TARGET, 'release/creator-hub-portable-selector'), bytes = read(file, 32 * 1024 * 1024);
+  require('./flatpak-package.cjs').validateElf(bytes);
+  for (const [name, expected] of Object.entries(sources)) {
+    exact(path.join(root, name), expected); exact(path.join(source, name), expected);
+  }
+  for (const item of Object.values(toolFiles)) exact(item.path, { size: item.size, sha256: item.sha256 });
+  return { file, proof: { schemaVersion: 1, sourceCommit: pins.sourceCommit, sourceTree: pins.sourceTree, sources,
+    publicKeySource: sources[SELECTOR_SOURCES[1]], target: TARGET, features: ['experimental-restart'],
+    toolchain: SELECTOR_TOOLCHAIN, compiler, cargo, toolFiles, arguments: args, executable: record(bytes),
+    rootRecompiled: false, privateModulesRecompiled: false, nativeExecution: false, releaseReady: false } };
+}
+function attachSelector(root, before, selector) {
+  assert.deepEqual(inventory(root), before, 'Transport changed before selector staging');
+  const expected = selector.proof.executable, bytes = exact(selector.file, expected);
+  assert.ok(bytes.length <= 32 * 1024 * 1024); require('./flatpak-package.cjs').validateElf(bytes);
+  const directory = 'usr/libexec', file = path.join(root, SELECTOR_ENTRYPOINT);
+  assert.equal(Object.hasOwn(before.entries, SELECTOR_ENTRYPOINT), false, 'Existing selector cannot be adopted');
+  if (!before.entries[directory]) fs.mkdirSync(path.join(root, directory), { mode: 0o755 });
+  else assert.deepEqual(before.entries[directory], { kind: 'directory', mode: 0o755 });
+  fs.writeFileSync(file, bytes, { flag: 'wx', mode: 0o755 }); fs.chmodSync(file, 0o755);
+  exact(selector.file, expected);
+  const after = inventory(root), entries = { ...before.entries, [directory]: { kind: 'directory', mode: 0o755 },
+    [SELECTOR_ENTRYPOINT]: { kind: 'file', ...expected, mode: 0o755 } };
+  assert.deepEqual(after, { entries: Object.fromEntries(Object.entries(entries).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)),
+    links: {}, unpackedSize: before.unpackedSize + expected.size }); return after;
+}
+function imageSnapshot(file) {
+  require('./flatpak-package.cjs').ordinary(file);
+  const before = fs.lstatSync(file, { bigint: true });
+  assert.ok(before.isFile() && before.nlink === 1n && before.size > 0n && before.size <= BigInt(LIMITS.archive));
+  const binding = s => [s.dev, s.ino, s.mode, s.nlink, s.size, s.mtimeNs, s.birthtimeNs];
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+  try {
+    const held = fs.fstatSync(fd, { bigint: true }); assert.deepEqual(binding(held), binding(before), 'Image changed during open');
+    const digest = crypto.createHash('sha256'), block = Buffer.alloc(1024 * 1024); let size = 0, count;
+    while ((count = fs.readSync(fd, block)) !== 0) { size += count; assert.ok(BigInt(size) <= held.size); digest.update(block.subarray(0, count)); }
+    assert.equal(BigInt(size), held.size); assert.deepEqual(binding(fs.fstatSync(fd, { bigint: true })), binding(held));
+    require('./flatpak-package.cjs').ordinary(file);
+    const after = fs.lstatSync(file, { bigint: true }); assert.deepEqual(binding(after), binding(before), 'Named image changed during read');
+    return { identity: [...binding(after), after.ctimeNs], pin: { size, sha256: digest.digest('hex') } };
+  } finally { fs.closeSync(fd); }
+}
+function nativeSupportAlias(source, destination) {
+  assert.equal(path.basename(source), `Creator Hub_${VERSION}_amd64.AppImage`);
+  assert.equal(path.basename(destination), `Creator.Hub.Native.Support_${VERSION}_amd64.AppImage`);
+  require('./flatpak-package.cjs').ordinary(path.dirname(destination));
+  const before = imageSnapshot(source);
+  fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+  const copy = imageSnapshot(destination), after = imageSnapshot(source);
+  assert.deepEqual(after, before, 'Original image identity/bytes changed during alias copy');
+  assert.deepEqual(copy.pin, before.pin, 'Native Support alias differs from ordinary image');
+  return { ordinaryName: path.basename(source), nativeSupportName: path.basename(destination), ...before.pin,
+    identicalBytes: true, sourceIdentityRechecked: true, role: 'restricted-setup-screen-intent-only', nativeExecution: false, releaseReady: false };
 }
 function verifyHostProfileInventory(inv, bytes, executable) {
   validateInventory(inv);
@@ -824,7 +1006,7 @@ function hostBaselineEvidence(tools) {
   assert.deepEqual(tools['linuxdeploy-x86_64.AppImage'], HOST_EXCLUSIONS.tool, 'Unreviewed linuxdeploy exclusion provenance');
   return HOST_EXCLUSIONS;
 }
-function dependencies(root, files, run, { includeHub = false } = {}) {
+function dependencies(root, files, run, { includeHub = false, includeSelector = false } = {}) {
   const finite = require('./flatpak-package.cjs');
   const patterns = { webkit: /(?:^|\/)libwebkit2gtk-4\.1\.so(?:\.\d+)*$/,
     javascriptCore: /(?:^|\/)libjavascriptcoregtk-4\.1\.so(?:\.\d+)*$/,
@@ -867,6 +1049,10 @@ function dependencies(root, files, run, { includeHub = false } = {}) {
   if (includeHub) {
     assert.ok(files['usr/bin/creator-hub']?.kind === 'file', 'Missing fixed Hub executable for dependency inspection');
     result.primary.hub = ['usr/bin/creator-hub']; inspect('usr/bin/creator-hub');
+  }
+  if (includeSelector) {
+    assert.ok(files[SELECTOR_ENTRYPOINT]?.kind === 'file', 'Missing separately inventoried selector');
+    result.primary.selector = [SELECTOR_ENTRYPOINT]; inspect(SELECTOR_ENTRYPOINT);
   }
   if (files[GIO_TLS]) {
     result.primary.gioTls = [GIO_TLS]; inspect(GIO_TLS);
@@ -1007,8 +1193,8 @@ async function packTar(root, destination, inv) {
   } catch (e) { gzip.destroy(e); await consume.catch(() => {}); throw e; }
   finally { fs.closeSync(fd); }
 }
-function manifest(p, inv, binding) {
-  validatePins(p); validateInventory(inv);
+function manifest(p, inv, binding, profile = PROTOTYPE) {
+  validatePins(p, profile); validateInventory(inv);
   keys(binding, ['size', 'sha256', 'unpackedSize']); pin({ size: binding.size, sha256: binding.sha256 }, LIMITS.archive);
   assert.equal(binding.unpackedSize, inv.unpackedSize);
   const entrypoint = inv.entries['usr/bin/creator-hub'];
@@ -1046,9 +1232,10 @@ function overlay(payload) {
     createUpdaterArtifacts: false, externalBin: [], resources: { [payload]: archive.FILE },
     linux: { appimage: { files: {}, bundleMediaFramework: false } } } };
 }
-function bundleArgs(root, config) {
+function bundleArgs(root, config, profile = PROTOTYPE) {
+  fixedProfile(profile);
   return [path.join(root, 'node_modules/@tauri-apps/cli/tauri.js'), 'bundle', '--ci', '--no-sign', '--bundles', 'appimage',
-    '--target', TARGET, '--features', FEATURES.join(','), '--config', config];
+    '--target', TARGET, '--features', profile.features.join(','), '--config', config];
 }
 function toolInventory(cache) {
   const finite = require('./flatpak-package.cjs');
@@ -1059,13 +1246,13 @@ function toolInventory(cache) {
   for (const n of names.slice(0, 4)) assert.ok(fs.existsSync(path.join(cache, n)), `Missing upstream packaging tool: ${n}`);
   return Object.fromEntries(names.filter(n => fs.existsSync(path.join(cache, n))).map(n => [n, record(read(path.join(cache, n), 128 * 1024 * 1024))]));
 }
-async function produce(root, inputRoot, output, decoder, env = process.env) {
+async function produce(root, inputRoot, output, decoder, env = process.env, profile = PROTOTYPE) {
   const finite = require('./flatpak-package.cjs'), archive = require('./module-archive.cjs'), unix = require('./unix-package-payload.cjs');
-  admission(env); finite.ordinary(root); finite.ordinary(inputRoot);
+  admission(env, process.platform, process.arch, profile); finite.ordinary(root); finite.ordinary(inputRoot);
   const temp = fs.realpathSync(env.RUNNER_TEMP); inside(inputRoot, temp); inside(output, temp); inside(decoder, temp);
   assert.equal(fs.existsSync(output), false, 'Fresh output required');
   const binding = json(path.join(inputRoot, 'input-binding.json'), 512 * 1024), p = binding.pins;
-  verifyProducer(p, binding.proof); verifyPrivateProof(binding.privateProof);
+  verifyProducer(p, binding.proof, profile); verifyPrivateProof(binding.privateProof);
   exact(path.join(inputRoot, 'assembly.zip'), p.artifact); exact(path.join(inputRoot, 'receipts.zip'), p.receiptsArtifact);
   exact(path.join(inputRoot, 'private-original.zip'), { size: binding.privateProof.artifactSize, sha256: binding.privateProof.expected.zipSha256 });
   const execute = (command, args, options = {}) => execFileSync(command, args, { cwd: root, encoding: 'utf8',
@@ -1087,9 +1274,10 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     XDG_CONFIG_HOME: path.join(output, 'config'), XDG_DATA_HOME: path.join(output, 'data'), CARGO_HOME: path.join(output, 'cargo'),
     RUSTUP_HOME: env.RUSTUP_HOME || path.join(env.HOME, '.rustup'), CARGO_TARGET_DIR: path.join(output, 'target'),
     LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', CI: 'true', NO_STRIP: '1' };
+  if (profile.production) child.RUSTUP_TOOLCHAIN = SELECTOR_TOOLCHAIN;
   for (const n of ['HOME', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'CARGO_HOME']) fs.mkdirSync(child[n], { mode: 0o700 });
   const run = (command, args, options = {}) => execute(command, args, { env: child, ...options });
-  const receipt = { schemaVersion: 1, scope: 'unsigned-linux-016-portable-packaging-only', producer: binding,
+  const receipt = { schemaVersion: profile.production ? 2 : 1, scope: profile.production ? 'unsigned-linux-016-production-portable-packaging-only' : 'unsigned-linux-016-portable-packaging-only', producer: binding,
     packagingSource: env.GITHUB_SHA, rootRecompiled: false, privatePayloadChanged: false, payloadResigned: false,
     applicationLaunched: false, updateAcceptanceTested: false, hermetic: false, upstreamToolsPinned: false,
     metadataNormalization: { scope: 'copied-transport-only', packagingProcessUmask: process.umask(),
@@ -1098,13 +1286,18 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
       hostBeforeBundle: metadataEvidence(path.parse(root).root) }, ...flags() };
   try {
     const input = path.join(output, 'original-input'), receipts = path.join(output, 'original-receipts');
-    stageZip(path.join(inputRoot, 'assembly.zip'), input, Object.fromEntries(INPUTS.map(n => [n, p.files[n]])), mainAllowed(), run);
-    stageZip(path.join(inputRoot, 'receipts.zip'), receipts, Object.fromEntries(RECEIPTS.map(n => [n, p.files[n]])), RECEIPT_ALLOWED, run);
+    stageZip(path.join(inputRoot, 'assembly.zip'), input, Object.fromEntries(profile.inputs.map(n => [n, p.files[n]])), mainAllowed(), run, profile);
+    stageZip(path.join(inputRoot, 'receipts.zip'), receipts, Object.fromEntries(profile.receipts.map(n => [n, p.files[n]])), RECEIPT_ALLOWED, run, profile);
     run('python3', ['-B', '-c', ZIP_STAGE, path.join(inputRoot, 'private-original.zip'), path.join(output, 'original-private-metadata')],
       { input: JSON.stringify({ pins: {}, metadata: { 'prepared-unix.json': binding.privateProof.prepared },
         allowed: ['modules.tar.gz', 'prepared-unix.json', 'transfer-binding.json'] }) });
-    const baseline = validateReceipts(input, receipts, binding), payload = path.join(input, archive.FILE);
+    const baseline = validateReceipts(input, receipts, binding, profile), payload = path.join(input, archive.FILE);
     archive.verify(payload, baseline.manifest, decoder, (command, args, opts) => run(command, args, opts));
+    let selector;
+    if (profile.production) {
+      receipt.productionDeb = productionDeb(root, input, receipts, p, baseline, run);
+      selector = buildSelector(root, output, p, run); receipt.selectorBuild = selector.proof;
+    }
     const release = path.join(child.CARGO_TARGET_DIR, TARGET, 'release'); fs.mkdirSync(release, { recursive: true });
     const binary = path.join(release, 'creator-hub'); fs.writeFileSync(binary, baseline.bytes['creator-hub'], { flag: 'wx', mode: 0o755 });
     const overlayFile = path.join(output, 'portable-overlay.json'); write(overlayFile, overlay(payload));
@@ -1112,12 +1305,13 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     assert.equal(receipt.cliVersion, 'tauri-cli 2.11.4');
     receipt.cliInputs = Object.fromEntries(['package-lock.json', 'node_modules/@tauri-apps/cli/tauri.js',
       'node_modules/@tauri-apps/cli-linux-x64-gnu/cli.linux-x64-gnu.node'].map(n => [n, record(read(path.join(root, n)))]));
-    run(process.execPath, bundleArgs(root, overlayFile), { stdio: 'inherit', timeout: 900000 });
+    run(process.execPath, bundleArgs(root, overlayFile, profile), { stdio: 'inherit', timeout: 900000 });
     // Preserve the exact unsigned image before any post-bundle audit can refuse.
     const bundles = path.join(release, 'bundle/appimage'), imageName = `Creator Hub_${VERSION}_amd64.AppImage`;
     assert.deepEqual(fs.readdirSync(bundles).filter(n => n.endsWith('.AppImage')), [imageName]);
     const image = path.join(output, imageName);
     receipt.appImage = retainAppImage(path.join(bundles, imageName), image);
+    if (profile.production) receipt.nativeSupportAlias = nativeSupportAlias(image, path.join(output, `Creator.Hub.Native.Support_${VERSION}_amd64.AppImage`));
     exact(binary, p.files['creator-hub']);
     receipt.upstreamPackagingTools = toolInventory(path.join(child.XDG_CACHE_HOME, 'tauri'));
     receipt.hostBaselineSource = hostBaselineEvidence(receipt.upstreamPackagingTools);
@@ -1154,20 +1348,21 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     assert.ok(Buffer.byteLength(JSON.stringify(receipt.metadataNormalization)) <= 64 * 1024, 'Metadata receipt exceeds bound');
     // Tauri copies custom usr/ files only. Keep the original AppImage unchanged;
     // bind this root-level record into the canonical transport instead.
-    const profile = hostProfile(baseline.bytes['creator-hub'], bytes, baseline.portableHostBuild, p);
-    const finalInventory = attachHostProfile(transport, transformation.flattened, profile, record(bytes));
+    const hostProfileBytes = hostProfile(baseline.bytes['creator-hub'], bytes, baseline.portableHostBuild, p, profile);
+    let finalInventory = attachHostProfile(transport, transformation.flattened, hostProfileBytes, record(bytes));
+    if (profile.production) finalInventory = attachSelector(transport, finalInventory, selector);
     write(path.join(output, 'appdir-original-inventory.json'), transformation.original);
     write(path.join(output, 'appdir-flattened-inventory.json'), finalInventory);
-    receipt.dependencies = dependencies(transport, finalInventory.entries, run, { includeHub: true });
+    receipt.dependencies = dependencies(transport, finalInventory.entries, run, { includeHub: true, ...(profile.production ? { includeSelector: true } : {}) });
     receipt.closureAbi = closureAbiRequirements(transport, receipt.dependencies, run);
-    receipt.portableHostProfile = { path: HOST_PROFILE, ...record(profile), executable: record(bytes),
-      rawExecutable: baseline.portableHostBuild.rawHub, compiledFeatures: FEATURES,
+    receipt.portableHostProfile = { path: HOST_PROFILE, ...record(hostProfileBytes), executable: record(bytes),
+      rawExecutable: baseline.portableHostBuild.rawHub, compiledFeatures: profile.features,
       scope: 'canonical-appdir-transport-only', appImageContainsProfile: false };
     finite.validateElf(read(path.join(transport, 'usr/bin/creator-hub')));
     const tar = path.join(output, 'creator-hub-linux-x86_64-0.1.16.appdir.tar.gz');
-    verifyHostProfileInventory(inventory(transport), profile, record(bytes));
+    verifyHostProfileInventory(inventory(transport), hostProfileBytes, record(bytes));
     const tarBinding = await packTar(transport, tar, finalInventory);
-    const unsigned = manifest(p, finalInventory, tarBinding);
+    const unsigned = manifest(p, finalInventory, tarBinding, profile);
     write(path.join(output, 'portable-manifest.unsigned.json'), unsigned);
     receipt.archive = tarBinding; receipt.manifest = record(read(path.join(output, 'portable-manifest.unsigned.json'), LIMITS.manifest));
     receipt.measurements = { entries: Object.keys(unsigned.entries).length, unpackedFileBytes: tarBinding.unpackedSize,
@@ -1176,7 +1371,12 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
       nodeProcessMaxRssKiB: process.resourceUsage().maxRSS,
       flattenedLinks: Object.keys(transformation.original.links).length, boundsProvisional: true, productionEnabled: false };
     receipt.flattenedLinks = transformation.original.links;
-    validateReceipts(input, receipts, binding);
+    validateReceipts(input, receipts, binding, profile);
+    if (profile.production) {
+      exact(path.join(input, 'production-root.deb'), p.files[DEB_MEMBER]); exact(selector.file, selector.proof.executable);
+      assert.deepEqual(imageSnapshot(image).pin, receipt.appImage);
+      assert.deepEqual(imageSnapshot(path.join(output, receipt.nativeSupportAlias.nativeSupportName)).pin, receipt.appImage);
+    }
     exact(path.join(inputRoot, 'assembly.zip'), p.artifact); exact(path.join(inputRoot, 'receipts.zip'), p.receiptsArtifact);
     exact(path.join(inputRoot, 'private-original.zip'), { size: binding.privateProof.artifactSize, sha256: binding.privateProof.expected.zipSha256 });
     assert.deepEqual(inventory(retained, true), inv); assert.deepEqual(inventory(appdir, true), inv);
@@ -1189,12 +1389,12 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     write(path.join(output, 'package-refusal.json'), receipt); throw error;
   }
 }
-function fetchInputs(output, env = process.env) {
-  const { pins: p, privateInput } = preflight(env);
+function fetchInputs(output, env = process.env, profile = PROTOTYPE) {
+  const { pins: p, privateInput } = preflight(env, process.platform, process.arch, profile);
   inside(output, fs.realpathSync(env.RUNNER_TEMP)); assert.equal(fs.existsSync(output), false);
   const api = route => JSON.parse(execFileSync('gh', ['api', `repos/${REPO}/${route}`],
     { encoding: 'utf8', timeout: 30000, maxBuffer: 2 * 1024 * 1024 }));
-  const binding = collect(p, privateInput, api); fs.mkdirSync(output, { mode: 0o700 });
+  const binding = collect(p, privateInput, api, profile); fs.mkdirSync(output, { mode: 0o700 });
   for (const [artifactId, expected, name] of [[p.artifactId, p.artifact, 'assembly.zip'], [p.receiptsArtifactId, p.receiptsArtifact, 'receipts.zip']]) {
     const bytes = execFileSync('gh', ['api', `repos/${REPO}/actions/artifacts/${artifactId}/zip`],
       { timeout: 180000, maxBuffer: expected.size + 1 });
@@ -1202,15 +1402,34 @@ function fetchInputs(output, env = process.env) {
     fs.writeFileSync(path.join(output, name), bytes, { flag: 'wx', mode: 0o600 });
   }
   require('./download-unix-payload-zip.cjs').download({ binding: binding.privateProof, downloadedZipVerified: false, releaseReady: false }, path.join(output, 'private-original.zip'));
-  assert.deepEqual(collect(p, privateInput, api), binding, 'API evidence changed during download');
+  assert.deepEqual(collect(p, privateInput, api, profile), binding, 'API evidence changed during download');
   write(path.join(output, 'input-binding.json'), binding);
+}
+function production016() {
+  assert.equal(arguments.length, 0, 'Production packaging profile has no caller policy');
+  return Object.freeze({ VERSION, TARGET, WORKFLOW: PRODUCTION.workflow, BRANCH: PRODUCTION.branch,
+    FEATURES: PRODUCTION.features, INPUTS: PRODUCTION.inputs, RECEIPTS: PRODUCTION.receipts,
+    PROFILE: PRODUCTION.id, DEB_MEMBER, SELECTOR_ENTRYPOINT, SELECTOR_TOOLCHAIN, PRODUCTION_DEB_CHECK,
+    validatePins: pins => validatePins(pins, PRODUCTION),
+    admission: (env, platform = process.platform, arch = process.arch) => admission(env, platform, arch, PRODUCTION),
+    preflight: (env = process.env, platform = process.platform, arch = process.arch) => preflight(env, platform, arch, PRODUCTION),
+    verifyProducer: (pins, proof) => verifyProducer(pins, proof, PRODUCTION),
+    collect: (pins, input, request) => collect(pins, input, request, PRODUCTION),
+    stageZip: (file, output, pins, allowed, run) => stageZip(file, output, pins, allowed, run, PRODUCTION),
+    validateReceipts: (input, receipts, binding) => validateReceipts(input, receipts, binding, PRODUCTION),
+    hostProfile: (raw, packaged, proof, pins) => hostProfile(raw, packaged, proof, pins, PRODUCTION),
+    bundleArgs: (root, config) => bundleArgs(root, config, PRODUCTION),
+    manifest: (pins, inventory, archive) => manifest(pins, inventory, archive, PRODUCTION),
+    fetchInputs: (output, env = process.env) => fetchInputs(output, env, PRODUCTION),
+    produce: (root, input, output, decoder, env = process.env) => produce(root, input, output, decoder, env, PRODUCTION),
+    productionDeb, selectorBuildArguments, buildSelector, attachSelector, imageSnapshot, nativeSupportAlias });
 }
 module.exports = { VERSION, TARGET, FEATURES, HOST_PROFILE, LIMITS, WORKFLOW, BRANCH, INPUTS, RECEIPTS, get MAIN_ALLOWED() { return mainAllowed(); }, RECEIPT_ALLOWED,
   record, flags, validatePins, admission, preflight, verifyProducer, verifyPrivateProof, collect, ZIP_STAGE, stageZip, validateReceipts,
   relative, prohibited, validateGtkMetadata, validateGioRuntime, retainAppImage, internalTarget, inventory, retainOriginalAppDir, flatten, dynamicDependencies, dynamicTableEvidence, HOST_BASELINE, HOST_EXCLUSIONS, hostBaselineEvidence, dependencies, versionRequirements, closureAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
   hostProfile, verifyHostProfileInventory, attachHostProfile, SCHEMA_DIRECTORY, COMPILED_SCHEMA, METADATA_PINS, METADATA_PROBES, DATA_LIMIT,
   metadataRole, gvdbVariants, GVDB_VARIANTS, validateCompiledSchema, validateMetadataFormat, validateMetadata, metadataRead, metadataEvidence, transportMode,
-  APPRUN_WRAPPED, APPRUN_TOOL, APPRUN_PIN, APPRUN_SOURCES, validateAppRunWrapped, appRunToolBinding };
+  APPRUN_WRAPPED, APPRUN_TOOL, APPRUN_PIN, APPRUN_SOURCES, validateAppRunWrapped, appRunToolBinding, production016 };
 if (require.main === module) (async () => {
   const [mode, ...args] = process.argv.slice(2);
   if (mode === 'preflight') { assert.equal(args.length, 0); preflight(); console.log(JSON.stringify({ preflightPassed: true, releaseReady: false })); }

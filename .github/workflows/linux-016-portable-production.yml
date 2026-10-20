@@ -1,0 +1,112 @@
+name: Unsigned production-input Linux 016 portable packaging (not acceptance)
+
+on:
+  workflow_dispatch:
+    inputs:
+      assembly_pins:
+        description: Independent schemaVersion 2 production-portable-016 pins; successful assembly source/tree, run/attempt/job/workflow, both artifact size/SHA identities, handoff and exact file pins including DEB and production receipts. No defaults.
+        type: string
+        required: true
+      private_input:
+        description: Original signed private-payload binding input; expected Linux 0.1.16 pins, prepared metadata, independent original jobId and artifactSize. No rebuild or signing.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/linux-016-portable-production'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.22.3
+      - name: Refuse wrong profile or unpinned inputs before package installation
+        shell: bash
+        env:
+          ASSEMBLY_PINS: ${{ inputs.assembly_pins }}
+          PRIVATE_INPUT: ${{ inputs.private_input }}
+        run: |
+          set -euo pipefail
+          node scripts/linux-016-portable-production.cjs preflight
+      - name: Install packaging and inspection prerequisites on this disposable runner only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev \
+            build-essential file patchelf python3-yaml
+      - name: Install lockfile dependencies without npm hooks
+        run: npm ci --ignore-scripts
+      - name: Test both fixed profiles and parse all scripts and workflow Bash
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test scripts/linux-016-portable-package.test.cjs scripts/linux-016-portable-production.test.cjs \
+            scripts/module-archive.test.cjs scripts/unix-package-payload.test.cjs \
+            scripts/unix-payload-binding.test.cjs scripts/download-unix-payload-zip.test.cjs \
+            scripts/linux-retirement-package.test.cjs
+      - name: Fetch only successful independently pinned production assembly and original private bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSEMBLY_PINS: ${{ inputs.assembly_pins }}
+          PRIVATE_INPUT: ${{ inputs.private_input }}
+        run: |
+          set -euo pipefail
+          node scripts/linux-016-portable-production.cjs fetch "$RUNNER_TEMP/linux-016-production-input"
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Compile the existing bounded archive inspection tool only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --manifest-path native/module-archive/Cargo.toml \
+            --target-dir "$RUNNER_TEMP/linux-016-production-verifier"
+      - name: Verify production DEB, build only source-bound selector and bundle supplied Root once
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/linux-016-portable-production.cjs package "$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/linux-016-production-input" "$RUNNER_TEMP/linux-016-production-output" \
+            "$RUNNER_TEMP/linux-016-production-verifier/release/creator-hub-module-archive"
+      - name: Retain unsigned complete transport, ordinary image and exact-byte setup alias
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-016-production-portable-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/linux-016-production-output/creator-hub-linux-x86_64-0.1.16.appdir.tar.gz
+            ${{ runner.temp }}/linux-016-production-output/portable-manifest.unsigned.json
+            ${{ runner.temp }}/linux-016-production-output/Creator Hub_0.1.16_amd64.AppImage
+            ${{ runner.temp }}/linux-016-production-output/Creator.Hub.Native.Support_0.1.16_amd64.AppImage
+            ${{ runner.temp }}/linux-016-production-output/appdir-original-inventory.json
+            ${{ runner.temp }}/linux-016-production-output/appdir-flattened-inventory.json
+            ${{ runner.temp }}/linux-016-production-output/package-receipt.json
+      - name: Retain original refusal evidence without claiming acceptance
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-016-production-portable-refusal-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/linux-016-production-input/input-binding.json
+            ${{ runner.temp }}/linux-016-production-output/package-refusal.json
+            ${{ runner.temp }}/linux-016-production-output/Creator Hub_0.1.16_amd64.AppImage
+            ${{ runner.temp }}/linux-016-production-output/Creator.Hub.Native.Support_0.1.16_amd64.AppImage
+            ${{ runner.temp }}/linux-016-production-output/appdir-original-inventory.json
+            ${{ runner.temp }}/linux-016-production-output/appdir-flattened-inventory.json
