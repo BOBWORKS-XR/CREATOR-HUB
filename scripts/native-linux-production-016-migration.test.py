@@ -1929,11 +1929,24 @@ class ExitDiagnosticsTests(unittest.TestCase):
         command = M.session_command(env)
         self.assertNotIn("--quiet", command)
         self.assertEqual(command[:9], ["/usr/bin/systemd-run", "--wait", "--pipe", "--collect", "--unit=creator-production-migration-016-fixture",
-            "--uid=" + M.USER, "--property=PAMName=login", "--property=Type=exec", "--property=LimitCORE=0"])
+            "--uid=" + M.USER, "--property=PAMName=login", "--property=Type=simple", "--property=LimitCORE=0"])
         self.assertEqual(command[9], "--property=WorkingDirectory=" + str(M.BASE))
         source = Path(M.__file__).read_text()
         self.assertIn("index, deadline = 1, time.monotonic() + 540", source)
         self.assertIn("while child.poll() is None and time.monotonic() < deadline:", source)
+
+    def test_simple_session_retains_exact_pam_uid_transport_and_environment_without_timeout_overrides(self):
+        env = {key: "synthetic-" + key for key in M.ENVIRONMENT}
+        values = {key: env[key] for key in M.ENVIRONMENT}
+        values.update(HOME=str(M.BASE / "result/home"), USER=M.USER, RUNNER_TEMP=str(M.BASE / "result"),
+                      XDG_RUNTIME_DIR=str(M.BASE / "result/runtime"), LANG="C", LC_ALL="C", GDK_BACKEND="x11", NO_AT_BRIDGE="0")
+        expected = ["/usr/bin/systemd-run", "--wait", "--pipe", "--collect", "--unit=creator-production-migration-016-fixture",
+                    "--uid=" + M.USER, "--property=PAMName=login", "--property=Type=simple", "--property=LimitCORE=0",
+                    "--property=WorkingDirectory=" + str(M.BASE),
+                    *("--setenv=" + key + "=" + value for key, value in values.items()),
+                    "/usr/bin/dbus-run-session", "--", "/usr/bin/xvfb-run", "-a", "--server-args=-screen 0 1280x1000x24",
+                    "/usr/bin/python3", "-B", str(M.BASE / "scripts" / Path(M.__file__).name), "session"]
+        self.assertEqual(M.session_command(env), expected)
 
 
 class UnitDiagnosticsTests(unittest.TestCase):
@@ -1981,6 +1994,27 @@ class UnitDiagnosticsTests(unittest.TestCase):
             self.assertEqual(result["snapshots"][0]["before"]["RuntimeMaxUSec"], "infinity")
             self.assertEqual(result["snapshots"][0]["before"]["ControlGroup"], "/system.slice/" + M.UNIT_NAME)
             self.assertFalse(result["authorityGranted"]); self.assertFalse(result["releaseReady"])
+
+    def test_simple_pam_unit_still_requires_positive_kernel_uid_driver_and_birth_proofs(self):
+        for fault in (None, "pre-exec", "main-image", "main-uid", "main-birth", "driver-image"):
+            with self.subTest(fault=fault), self.fixture() as f:
+                f.props.update(Type="simple", ActiveState="active", SubState="running")
+                if fault == "pre-exec": f.rows[100]["executable"] = "/usr/lib/systemd/systemd"
+                elif fault == "main-image": f.rows[100]["kernelImageSha256"] = "b" * 64
+                elif fault == "main-uid": f.rows[100]["uids"] = [0] * 4
+                elif fault == "main-birth": f.rows[100]["startTime"] = "1"
+                elif fault == "driver-image": f.rows[120]["kernelImageSha256"] = "b" * 64
+                f.capture.capture("initial", f.child, f.evidence)
+                row = f.record["unitDiagnostics"]["snapshots"][0]
+                self.assertEqual(row["before"]["Type"], "simple")
+                self.assertEqual(row["before"]["PAMName"], "login")
+                self.assertEqual(row["status"], "captured" if fault is None else "unavailable")
+                self.assertEqual(row["bindingVerified"], fault is None)
+                if fault is None:
+                    self.assertEqual(row["main"]["executable"], "/usr/bin/dbus-run-session")
+                    self.assertEqual(row["main"]["uids"], [M.UID] * 4)
+                    self.assertEqual(row["main"]["kernelImageSha256"], M.digest(b"fixture"))
+                self.assertTrue(all(f.record[key] is False for key in M.FLAGS))
 
     def test_wrong_unit_user_pam_pid_or_ancestry_never_binds_and_never_retries_phase(self):
         for key, value in (("Id", "other.service"), ("User", "root"), ("PAMName", "other"), ("MainPID", "999"),
@@ -2119,7 +2153,7 @@ class UnitDiagnosticsTests(unittest.TestCase):
         self.assertIn('require(child.poll() == 0, "Synthetic session failed/unknown; no signal or retry requested")', Path(M.__file__).read_text())
         self.assertIn("index, deadline = 1, time.monotonic() + 540", Path(M.__file__).read_text())
         command = M.session_command({key: "synthetic" for key in M.ENVIRONMENT})
-        self.assertEqual([x for x in command if x.startswith("--property=")], ["--property=PAMName=login", "--property=Type=exec", "--property=LimitCORE=0", "--property=WorkingDirectory=" + str(M.BASE)])
+        self.assertEqual([x for x in command if x.startswith("--property=")], ["--property=PAMName=login", "--property=Type=simple", "--property=LimitCORE=0", "--property=WorkingDirectory=" + str(M.BASE)])
 
     def test_unobserved_boundaries_are_explicit_unavailable_without_extra_unit_queries(self):
         with self.fixture() as f:

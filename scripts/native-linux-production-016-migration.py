@@ -2569,11 +2569,13 @@ def install_fixture(env):
 
 
 def session_command(env):
+    # Headless matrix 39487763403: exec+PAM timed out; simple+PAM exited zero.
+    # Retain PAM and independent kernel/UID proofs; the FD mechanism is unproven.
     values = {key: env[key] for key in ENVIRONMENT}
     values.update(HOME=str(BASE / "result/home"), USER=USER, RUNNER_TEMP=str(BASE / "result"),
                   XDG_RUNTIME_DIR=str(BASE / "result/runtime"), LANG="C", LC_ALL="C", GDK_BACKEND="x11", NO_AT_BRIDGE="0")
     return ["/usr/bin/systemd-run", "--wait", "--pipe", "--collect", "--unit=creator-production-migration-016-fixture",
-            "--uid=" + USER, "--property=PAMName=login", "--property=Type=exec", "--property=LimitCORE=0", "--property=WorkingDirectory=" + str(BASE),
+            "--uid=" + USER, "--property=PAMName=login", "--property=Type=simple", "--property=LimitCORE=0", "--property=WorkingDirectory=" + str(BASE),
             *("--setenv=" + key + "=" + value for key, value in values.items()),
             "/usr/bin/dbus-run-session", "--", "/usr/bin/xvfb-run", "-a", "--server-args=-screen 0 1280x1000x24",
             "/usr/bin/python3", "-B", str(BASE / "scripts" / Path(__file__).name), "session"]
