@@ -86,12 +86,12 @@ function updateControls() {
   elements.createAnother.disabled = opening || checking;
   elements.refresh.disabled = busy || inspecting || checking;
   for (const button of [newMode, existingMode]) button.disabled = busy || inspecting || opening || checking;
-  existing.path.disabled = busy || inspecting;
-  existing.browse.disabled = busy || inspecting;
-  existing.approval.disabled = busy || inspecting;
-  inspectButton.disabled = busy || inspecting || !existing.path.value.trim();
-  repairButton.disabled = busy || inspecting || !existingReport?.canRepair || !existing.approval.checked;
-  validateButton.disabled = busy || inspecting || !existingReport?.canValidate || !existing.approval.checked;
+  existing.path.disabled = busy || inspecting || checking || opening;
+  existing.browse.disabled = busy || inspecting || checking || opening;
+  existing.approval.disabled = busy || inspecting || checking || opening;
+  inspectButton.disabled = busy || inspecting || checking || opening || !existing.path.value.trim();
+  repairButton.disabled = busy || inspecting || checking || opening || !existingReport?.canRepair || !existing.approval.checked;
+  validateButton.disabled = busy || inspecting || checking || opening || !existingReport?.canValidate || !existing.approval.checked;
   retryHub.disabled = busy || inspecting || opening;
   restartHub.disabled = busy || inspecting || opening || checking;
   document.querySelector('#open-result-hub-button').disabled = busy || inspecting || opening;
@@ -407,7 +407,7 @@ function clearInspection() {
 existing.path.addEventListener('input', clearInspection);
 existing.approval.addEventListener('change', updateControls);
 existing.browse.addEventListener('click', async () => {
-  if (busy || inspecting) return;
+  if (busy || inspecting || checking || opening) return;
   try {
     const path = await invoke('pick_parent_folder');
     if (path && !busy && !inspecting) { existing.path.value = path; clearInspection(); }
@@ -415,7 +415,7 @@ existing.browse.addEventListener('click', async () => {
 });
 
 inspectButton.addEventListener('click', async () => {
-  if (busy || inspecting || !existing.path.value.trim()) return;
+  if (busy || inspecting || checking || opening || !existing.path.value.trim()) return;
   clearInspection();
   inspecting = true;
   existing.activity.classList.remove('hidden');
@@ -439,7 +439,7 @@ inspectButton.addEventListener('click', async () => {
 });
 
 async function runExisting(repair) {
-  if (busy || inspecting || !existingReport || !existing.approval.checked || !(repair ? existingReport.canRepair : existingReport.canValidate)) return;
+  if (busy || inspecting || checking || opening || !existingReport || !existing.approval.checked || !(repair ? existingReport.canRepair : existingReport.canValidate)) return;
   const reviewed = existingReport;
   busy = true;
   existing.result.classList.add('hidden');

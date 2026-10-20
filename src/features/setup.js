@@ -32,7 +32,9 @@ export function mount(root, api) {
           <section id="feature-setup-existing" role="tabpanel" aria-label="Existing project" hidden>
             <div class="feature-input-row"><label>Unity project folder<input data-field="existing-path" type="text" autocomplete="off" spellcheck="false"></label><button data-field="existing-browse" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span> Browse</button></div>
             <button data-field="inspect" class="primary-button" type="button">Inspect project</button>
+            <p data-field="inspection-summary" role="status"></p>
             <div data-field="findings"></div><ul data-field="changes"></ul>
+            <button data-field="review-hub" class="text-button" type="button" hidden>Open Unity Hub for manual review</button>
             <label class="feature-check"><input data-field="approval" type="checkbox"><span>Back up settings and allow Unity to import and validate this project.</span></label>
             <div class="feature-actions"><button data-field="repair" class="primary-button" type="button" disabled>Back up and apply repairs</button><button data-field="validate" class="text-button" type="button" disabled>Back up and validate</button><button data-field="open-existing" class="text-button" type="button" hidden>Open project in Unity</button></div>
             <div data-field="existing-result" class="feature-output" role="status"></div>
@@ -55,7 +57,11 @@ export function mount(root, api) {
   let hub = null;
   let operation = null;
   let stage = 0;
-  const run = async (action, label) => { const result = await page.run(action, label); controls(); return result; };
+  const run = async (action, label) => {
+    const result = await page.run(action, label);
+    if (result && !root.querySelector('#feature-setup-existing').hidden && inspection?.findings.some(finding => finding.status === 'blocked')) $('status').textContent = 'Review findings';
+    controls(); return result;
+  };
   function controls() {
     const canBootstrap = ['windows', 'linux'].includes(environment?.platform);
     $('create').disabled = Boolean(created) || !environment || (!environment.ready && !canBootstrap);
@@ -64,6 +70,10 @@ export function mount(root, api) {
     $('inspect').disabled = !$('existing-path').value.trim();
     $('repair').disabled = !inspection?.canRepair || !$('approval').checked;
     $('validate').disabled = !inspection?.canValidate || !$('approval').checked;
+    $('repair').hidden = !inspection?.canRepair;
+    $('validate').hidden = !inspection?.canValidate;
+    $('approval').parentElement.hidden = !inspection?.canRepair && !inspection?.canValidate;
+    $('review-hub').hidden = !inspection?.findings.some(finding => finding.status === 'blocked');
     $('open-existing').hidden = !completed;
     $('register').hidden = !created || Boolean(hub?.registered);
     $('restart').hidden = !hub?.registered || !hub?.refreshPending || !['windows', 'linux'].includes(environment?.platform);
@@ -91,7 +101,7 @@ export function mount(root, api) {
     controls();
   }
   function showHub(value) { hub = value; $('hub-result').textContent = value?.message || ''; controls(); }
-  function clearInspection() { inspection = null; completed = null; $('approval').checked = false; $('findings').replaceChildren(); $('changes').replaceChildren(); $('existing-result').replaceChildren(); controls(); }
+  function clearInspection() { inspection = null; completed = null; $('approval').checked = false; $('inspection-summary').replaceChildren(); $('findings').replaceChildren(); $('changes').replaceChildren(); $('existing-result').replaceChildren(); controls(); }
   function startActivity(kind, label, detail) {
     operation = kind; stage = 0;
     $('stage').textContent = label; $('detail').textContent = detail;
@@ -120,6 +130,7 @@ export function mount(root, api) {
   page.on($('refresh'), 'click', () => run(async () => { renderEnvironment(await page.call('probe_environment')); }, 'Checking requirements'));
   page.on($('retry'), 'click', () => { if (!page.busy()) void api.retry('setup'); });
   page.on($('hub'), 'click', () => run(() => page.call('launch_hub'), 'Opening Unity Hub'));
+  page.on($('review-hub'), 'click', () => run(() => page.call('launch_hub'), 'Opening Unity Hub'));
   for (const [name, url] of Object.entries(licenceUrls)) page.on($(`licence-${name}`), 'click', () => run(() => page.call('open_official_url', { url }), 'Opening licence terms'));
   page.on($('create'), 'click', () => run(async () => {
     if (created || !environment || !$('name').value.trim() || !$('parent').value.trim()) throw new Error('Enter a project name and folder.');
@@ -150,8 +161,14 @@ export function mount(root, api) {
     clearInspection();
     const result = await page.call('inspect_project', { path: $('existing-path').value });
     inspection = result; $('existing-path').value = result.projectPath;
+    const blockers = result.findings.filter(finding => finding.status === 'blocked').length;
+    $('inspection-summary').textContent = blockers
+      ? `${blockers} ${blockers === 1 ? 'blocker needs' : 'blockers need'} review. No project files were changed. Resolve each finding, then inspect again. For manual review, open this project from Unity Hub using its existing Editor version.`
+      : 'Inspection complete. No project files were changed. Review the findings before approving a repair or validation.';
+    const labels = { pass: ['Ready', 'feature-good'], blocked: ['Blocked', 'feature-warn'], repair: ['Repair available', 'feature-warn'], check: ['Needs Unity check', 'feature-note'] };
     $('findings').replaceChildren(...result.findings.map(finding => {
-      const block = node('div', null, 'feature-section'); block.append(node('strong', finding.title), node('p', finding.detail)); return block;
+      const [label, style] = Object.hasOwn(labels, finding.status) ? labels[finding.status] : ['Review', 'feature-note'];
+      const block = node('div', null, 'feature-section'); block.append(node('strong', `${finding.title}: ${label}`, style), node('p', finding.detail)); return block;
     }));
     $('changes').replaceChildren(...result.proposedChanges.map(change => node('li', change)));
   }, 'Inspecting project; no files changed'));

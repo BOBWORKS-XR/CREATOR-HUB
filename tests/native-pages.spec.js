@@ -81,7 +81,8 @@ async function open(page, options = {}) {
             if (options.setupCreateOutcome === 'installation-cancelled') throw new Error('Installation cancelled. Nothing was installed.');
             if (options.setupCreateOutcome === 'validation-failure') return { success: false, projectPath: '/projects/Space', message: 'Unity validation reported failures.', logPath: '/reports/create.log' };
             return { success: true, projectPath: '/projects/Space', message: 'Validated project', hub: { registered: true, refreshPending: true, message: 'Registered in Unity Hub' } };
-          case 'inspect_project': return { projectPath: fields.path, fingerprint: 'reviewed-fingerprint', canRepair: fields.path !== options.blockedProject, canValidate: fields.path !== options.blockedProject,
+          case 'inspect_project': if (window.inspectionOverride) return { projectPath: fields.path, fingerprint: 'reviewed-fingerprint', ...structuredClone(window.inspectionOverride) };
+            return { projectPath: fields.path, fingerprint: 'reviewed-fingerprint', canRepair: fields.path !== options.blockedProject, canValidate: fields.path !== options.blockedProject,
             findings: [{ title: 'Visual Scripting', detail: fields.path === options.blockedProject ? 'Close this project and inspect again.' : options.hostile ? '<img src=x onerror=alert(1)>' : 'Initialization needs repair', status: fields.path === options.blockedProject ? 'blocked' : 'repair' }], proposedChanges: ['Initialize node database'] };
           case 'run_existing_project': return { success: true, projectPath: fields.request.projectPath, message: 'Validation passed', backupPath: '/backups/settings', reportPath: '/reports/validation.json' };
           case 'open_project': case 'launch_hub': case 'register_project': return { registered: true, message: 'Registered' };
@@ -661,6 +662,63 @@ for (const reset of ['path edit', 'folder picker', 'reinspection']) test(`Setup 
   }
   await expect(field(page, 'setup', 'existing-result')).toBeEmpty();
   expect((await commands(page, 'run_existing_project')).length).toBe(1);
+});
+
+for (const width of [1100, 390]) test(`Setup reports each independent blocker and offers manual review without changing packages at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 850 });
+  await open(page); await show(page, 'setup'); await field(page, 'setup', 'existing-tab').click();
+  await field(page, 'setup', 'existing-path').fill('/projects/Existing');
+  await page.evaluate(() => { window.inspectionOverride = {
+    canRepair: false, canValidate: false, proposedChanges: [], findings: [
+      { title: 'Unity version', status: 'pass', detail: '6000.3.21f1' },
+      { title: 'Creator SDK', status: 'blocked', detail: 'Installed reference 4.0.22 differs from tested 4.0.14. No automatic version replacement.' },
+      { title: 'Visual Scripting package', status: 'blocked', detail: 'Installed reference 1.9.12 differs from tested 1.9.1. No automatic version replacement.' },
+      { title: 'Project lock', status: 'blocked', detail: 'Close this Unity project, then inspect again.' },
+    ],
+  }; });
+  await field(page, 'setup', 'inspect').click();
+  await expect(field(page, 'setup', 'status')).toHaveText('Review findings');
+  await expect(field(page, 'setup', 'findings')).toContainText('Unity version: Ready');
+  await expect(field(page, 'setup', 'findings')).toContainText('Creator SDK: Blocked');
+  await expect(field(page, 'setup', 'findings')).toContainText('Visual Scripting package: Blocked');
+  await expect(field(page, 'setup', 'inspection-summary')).toContainText('3 blockers');
+  await expect(field(page, 'setup', 'inspection-summary')).toContainText('No project files were changed');
+  await expect(field(page, 'setup', 'review-hub')).toBeVisible();
+  await expect(field(page, 'setup', 'approval').locator('..')).toBeHidden();
+  await expect(field(page, 'setup', 'repair')).toBeDisabled();
+  await expect(field(page, 'setup', 'validate')).toBeDisabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('setup-blocked-review.png'), fullPage: true });
+  await field(page, 'setup', 'review-hub').click();
+  expect((await commands(page, 'launch_hub')).length).toBe(1);
+  expect((await commands(page, 'open_project')).length).toBe(0);
+  await expect(field(page, 'setup', 'status')).toHaveText('Review findings');
+  await page.evaluate(() => { window.inspectionOverride.findings.pop(); });
+  await field(page, 'setup', 'inspect').click();
+  await expect(field(page, 'setup', 'inspection-summary')).toContainText('2 blockers');
+  await expect(field(page, 'setup', 'findings')).not.toContainText('Project lock');
+  await expect(field(page, 'setup', 'repair')).toBeDisabled();
+  expect(await commands(page, 'run_existing_project')).toEqual([]);
+  await field(page, 'setup', 'existing-path').fill('/projects/Different');
+  await expect(field(page, 'setup', 'inspection-summary')).toBeEmpty();
+  await expect(field(page, 'setup', 'review-hub')).toBeHidden();
+});
+
+test('Setup reinspection failure discards old findings and remains retryable without repair', async ({ page }) => {
+  await open(page, { blockedProject: '/projects/Existing' }); await show(page, 'setup');
+  await field(page, 'setup', 'existing-tab').click(); await field(page, 'setup', 'existing-path').fill('/projects/Existing');
+  await field(page, 'setup', 'inspect').click();
+  await expect(field(page, 'setup', 'findings')).toContainText('Close this project');
+  await page.evaluate(() => { window.failNext = 'inspect_project'; });
+  await field(page, 'setup', 'inspect').click();
+  await expect(field(page, 'setup', 'error')).toContainText('inspect_project');
+  await expect(field(page, 'setup', 'findings')).toBeEmpty();
+  await expect(field(page, 'setup', 'inspection-summary')).toBeEmpty();
+  await expect(field(page, 'setup', 'inspect')).toBeEnabled();
+  await expect(field(page, 'setup', 'repair')).toBeDisabled();
+  expect(await commands(page, 'run_existing_project')).toEqual([]);
+  await field(page, 'setup', 'inspect').click();
+  await expect(field(page, 'setup', 'status')).toHaveText('Review findings');
 });
 
 test('first-run guide has no connection writes; saving skip failure remains recoverable', async ({ page }) => {
