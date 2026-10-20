@@ -1065,9 +1065,12 @@ def launcher_button_mapping(source, question, action):
             'widgetFocusVerified': False, 'nativeOutcomeRequired': True}
 
 
-def keyboard_delivery(receipt, sequence, process, window, origin):
+def keyboard_delivery(receipt, sequence, process, window, origin, *, warm_companion=None):
     fields = {'schemaVersion', 'mechanism', 'pid', 'startTime', 'window', 'intent', 'candidateAction', 'delivery',
               'deliveryComplete', 'launchProvenance', 'widgetFocusVerified', 'outcomeVerified', 'nativeVerificationRequired', 'releaseReady'}
+    if warm_companion is not None:
+        require(type(warm_companion) is K.WarmRoot and sequence == 'Enter', "Only one opaque warm Enter companion is allowed")
+        fields |= {'warmCompanion'}
     require(type(receipt) is dict and set(receipt) in (fields, fields | {'refusal'}) and len(json_bytes(receipt)) <= 16384,
             "One bounded complete helper receipt required")
     require(type(receipt['schemaVersion']) is int and receipt['schemaVersion'] == 1
@@ -1078,6 +1081,9 @@ def keyboard_delivery(receipt, sequence, process, window, origin):
             and receipt['widgetFocusVerified'] is False and receipt['outcomeVerified'] is False
             and receipt['nativeVerificationRequired'] is True and receipt['releaseReady'] is False,
             "Helper receipt target/intent/authority differs")
+    if warm_companion is not None:
+        require(receipt['warmCompanion'] == {'binding': warm_companion.evidence, 'managedWindows': [warm_companion.window, window]},
+                "Warm receipt differs from the exact two-owned-window binding")
     provenance = receipt['launchProvenance']
     require(type(provenance) is dict and set(provenance) == {'readOnly', 'popen', 'admittedLaunch', 'systemImage'}
             and provenance['readOnly'] is True and provenance['popen'] == {key: origin[key] for key in K.CONTINUITY_FIELDS},
@@ -1325,7 +1331,7 @@ class Session:
         diagnostic = {'phase': phase, 'client': client, 'mechanism': 'exact-xid-keyboard', 'actionAttempted': False,
                       'actionReturned': False, 'outcomeVerified': False, 'releaseReady': False}
         self.launcher_keys.append(diagnostic)
-        attempt = None
+        attempt, companion = None, None
         try:
             require(client['executable'] == '/app/bin/creator-hub-flatpak-activate'
                     and client['kernelImageSha256'] == self.review['flatpak']['files']['creator-hub-flatpak-activate']['sha256'],
@@ -1336,7 +1342,19 @@ class Session:
             diagnostic['sourceDialogButtonMapping'] = {**mapping, 'sourceFile': name, 'sourceSha256': hashlib.sha256(source).hexdigest()}
             self.flatpak_guard(); self.stable(client)
             window = self.owned_window(client, 'Creator Hub')
-            attempt = K.capture(self.helper, self.native, self.x11, client, self.flatpak_origin, self.flatpak_guard, window)
+            if phase == 'warm':
+                require(question == 'disclosure' and action == 'Open Creator Hub' and mapping['sequence'] == 'Enter',
+                        "Companion only authorizes warm disclosure Enter")
+                require(self.report.get('coldActivationAccepted') is True, "An independently qualified cold Root is required before warm input")
+                cold = self.report['coldRoot']
+                expected = self.root / 'home/data/creator-hub-portable/generations' / self.review['generation'] / 'AppDir/usr/bin/creator-hub'
+                require(cold['kernelImageSha256'] == self.review['portable']['root']['sha256'] and cold['executable'] == str(expected),
+                        "Warm companion is not the independently signed cold generation")
+                companion = K.bind_warm_root(self.helper, self.native, self.x11, cold, self.report['coldRootWindow'],
+                                             self.report['coldHost1Owner'], self.host_owner)
+                require(companion.evidence['xres'] == self.report['coldRootXres'], "Cold Root XRes owner changed before warm input")
+            options = {} if companion is None else {'warm_companion': companion}
+            attempt = K.capture(self.helper, self.native, self.x11, client, self.flatpak_origin, self.flatpak_guard, window, **options)
             try:
                 receipt = attempt.send(mapping['sequence'])
             except K.InputRefused as error:
@@ -1344,7 +1362,7 @@ class Session:
             diagnostic['keyboard'] = receipt
             diagnostic['actionAttempted'] = type(receipt) is dict and type(receipt.get('delivery')) is list and any(
                 type(row) is dict and row.get('submissionAttempted') is True for row in receipt['delivery'])
-            delivery = keyboard_delivery(receipt, mapping['sequence'], client, window, self.flatpak_origin)
+            delivery = keyboard_delivery(receipt, mapping['sequence'], client, window, self.flatpak_origin, warm_companion=companion)
             diagnostic['deliveryClassification'] = delivery
             require(delivery == 'complete' or terminal, "Intermediate dialog delivery incomplete; no further input")
             return diagnostic
@@ -1356,7 +1374,11 @@ class Session:
                 if attempt is not None:
                     attempt.close()
             finally:
-                save(self.root / (phase + '-gtk.json'), diagnostic)
+                try:
+                    if companion is not None:
+                        companion.close()
+                finally:
+                    save(self.root / (phase + '-gtk.json'), diagnostic)
 
     def launcher_outcome(self, action, phase, missing):
         if action == 'Cancel' or missing:
@@ -1377,7 +1399,9 @@ class Session:
         window = self.owned_window(native, P.TITLE)
         require(self.windows() == [window], "Activation must have one owned native Hub window")
         if phase == 'warm':
-            require(native == self.report['coldRoot'], "Warm activation replaced the original native Hub")
+            require(native == self.report['coldRoot'] and owner == self.report['coldHost1Owner']
+                    and window == self.report['coldRootWindow'] and self.x11.inspect(window) == self.report['coldRootXres'],
+                    "Warm activation replaced the original native Hub/window/Host1 owner")
         self.stable(native)
         require(self.host_owner() == owner, "Native Host1 owner changed during outcome observation")
         return 'same-owned-native-root' if phase == 'warm' else 'signed-native-root-activated'
@@ -1717,7 +1741,12 @@ def run_session(root, review):
         values = dict(value.split(b"=", 1) for value in environment.split(b"\0") if b"=" in value)
         require(all(values.get(name.encode()) == os.environ[name].encode() for name in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME")), "Native paths changed")
         window = session.owned_window(cold, P.TITLE)
-        session.report["coldActivationAccepted"] = True; session.report["coldRoot"] = cold
+        cold_owner, cold_xres = session.host_owner(), session.x11.inspect(window)
+        require(cold_owner is not None and cold_owner['pid'] == cold['pid'] and cold_xres['pid'] == cold['pid']
+                and cold_xres['mapped'] is True, "Cold Root/Host1/XRes ownership must agree")
+        session.stable(cold)
+        require(session.host_owner() == cold_owner and session.x11.inspect(window) == cold_xres, "Cold Root ownership changed during binding")
+        session.report.update(coldActivationAccepted=True, coldRoot=cold, coldHost1Owner=cold_owner, coldRootWindow=window, coldRootXres=cold_xres)
         session.report["phase"] = "warm-activation"
         session.flatpak("Open Creator Hub", "warm")
         session.stable(cold); require(session.host_owner()["pid"] == cold["pid"] and session.windows() == [window], "Warm activation created/replaced Root")

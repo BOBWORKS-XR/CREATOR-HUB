@@ -467,6 +467,220 @@ class NativeApiTests(unittest.TestCase):
             M.capture(None, None, None, {}, {}, None, 456)
 
 
+class WarmCompanionTests(unittest.TestCase):
+    def setUp(self):
+        M._ATTEMPTS.clear()
+        self.root = process(321, 1, '90', '/approved/AppDir/usr/bin/creator-hub')
+        self.owner = {'name': ':1.40', 'pid': 321}
+        self.xres = {'pid': 321, 'client': 901, 'title': 'Creator Hub', 'mapped': True}
+        self.counts = {'native': 0, 'owner': 0, 'image': 0, 'xres': 0}
+        self.images = []
+        self.held_result = lambda: (copy.deepcopy(self.root['image']), 'a' * 64)
+        self.current_result = lambda: (copy.deepcopy(self.root['image']), 'a' * 64)
+        def inspect(window):
+            self.assertEqual(window, 789)
+            self.counts['xres'] += 1
+            return copy.deepcopy(self.xres)
+        self.x11 = SimpleNamespace(display=99, inspect=inspect)
+        def native(pid, helper, full=True):
+            self.assertEqual(pid, 321)
+            self.counts['native'] += 1
+            return copy.deepcopy(self.root)
+        self.native = SimpleNamespace(native_process=native)
+
+    def owner_probe(self):
+        self.counts['owner'] += 1
+        return copy.deepcopy(self.owner)
+
+    def image_open(self, pid):
+        self.assertEqual(pid, 321)
+        self.counts['image'] += 1
+        held = not self.images
+        image = SimpleNamespace(closed=False)
+        image.snapshot = lambda: self.held_result() if held else self.current_result()
+        image.close = lambda: setattr(image, 'closed', True)
+        self.images.append(image)
+        return image
+
+    def bind(self):
+        with patch.object(M.sys, 'platform', 'linux'), patch.object(M.platform, 'machine', return_value='x86_64'), \
+                patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.os, 'geteuid', return_value=1001, create=True):
+            return M.bind_warm_root(None, self.native, self.x11, self.root, 789, self.owner, self.owner_probe, image_open=self.image_open)
+
+    def attempt(self):
+        companion = self.bind()
+        window, binding = Window(), Binding()
+        window.state.update(soleWindow=False, warmCompanion=companion.evidence, managedWindows=[789, 456])
+        return M.KeyboardAttempt(binding, window, 456, warm_companion=companion), companion, window
+
+    def test_companion_cannot_be_constructed_as_a_generic_allowlist(self):
+        with self.assertRaises(RuntimeError):
+            M.WarmRoot(None, None, None, {}, 789, {}, None)
+        for value in ({}, [], [789], True, SimpleNamespace()):
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                M.KeyboardAttempt(Binding(), Window(), 456, warm_companion=value)
+
+    def test_one_warm_enter_rechecks_root_image_xres_and_host_owner_before_each_event(self):
+        attempt, companion, window = self.attempt()
+        before = copy.deepcopy(self.counts)
+        receipt = attempt.send('Enter')
+        self.assertEqual(window.sent, [(456, 36, 0, True), (456, 36, 0, False)])
+        for key in self.counts:
+            self.assertGreaterEqual(self.counts[key] - before[key], 6, key)
+        self.assertEqual(receipt['warmCompanion'], {'binding': companion.evidence, 'managedWindows': [789, 456]})
+        self.assertFalse(attempt.baseline['soleWindow'])
+        self.assertTrue(receipt['deliveryComplete']); self.assertFalse(receipt['outcomeVerified'])
+        attempt.close(); attempt.close()
+        self.assertTrue(all(image.closed for image in self.images))
+        with self.assertRaises(RuntimeError): companion.verify()
+
+    def test_companion_never_authorizes_escape_shift_tab_or_repeated_attempt(self):
+        for sequence in ('Escape', 'ShiftTabSpace'):
+            self.setUp()
+            attempt, companion, window = self.attempt()
+            with self.subTest(sequence=sequence), self.assertRaises(M.InputRefused):
+                attempt.send(sequence)
+            self.assertEqual(window.sent, [])
+            with self.assertRaises(M.InputRefused): attempt.send('Enter')
+            attempt.close()
+
+    def test_changed_root_pid_start_uid_image_or_process_exit_refuses_before_input(self):
+        for change in ({'pid': 322}, {'parentPid': 2}, {'startTime': '91'}, {'uids': [1002] * 4},
+                       {'kernelImageSha256': 'b' * 64}, {'executable': '/other/AppDir/usr/bin/creator-hub'}):
+            self.setUp(); attempt, companion, window = self.attempt(); self.root.update(change)
+            with self.subTest(change=change), self.assertRaises(M.InputRefused): attempt.send('Enter')
+            self.assertEqual(window.sent, []); attempt.close()
+        self.setUp(); attempt, companion, window = self.attempt()
+        self.native.native_process = lambda *_: (_ for _ in ()).throw(ProcessLookupError('Root exited'))
+        with self.assertRaises(M.InputRefused): attempt.send('Enter')
+        self.assertEqual(window.sent, []); attempt.close()
+
+    def test_changed_xres_xid_visibility_or_host1_owner_refuses_before_input(self):
+        changes = (lambda: self.xres.update(pid=322), lambda: self.xres.update(client=902),
+                   lambda: self.xres.update(mapped=False), lambda: self.xres.update(title='Different Root'),
+                   lambda: self.owner.update(name=':1.41'), lambda: self.owner.update(pid=322))
+        for change in changes:
+            self.setUp(); attempt, companion, window = self.attempt(); change()
+            with self.subTest(change=change), self.assertRaises(M.InputRefused): attempt.send('Enter')
+            self.assertEqual(window.sent, []); attempt.close()
+        self.setUp(); attempt, companion, window = self.attempt()
+        self.x11.inspect = lambda _: (_ for _ in ()).throw(RuntimeError('Root XID unavailable'))
+        with self.assertRaises(M.InputRefused): attempt.send('Enter')
+        self.assertEqual(window.sent, []); attempt.close()
+
+    def test_changed_held_or_live_root_fd_refuses_without_path_only_adoption(self):
+        for which in ('held', 'current'):
+            self.setUp(); attempt, companion, window = self.attempt()
+            changed = lambda: (copy.deepcopy(self.root['image']), 'b' * 64)
+            if which == 'held': self.held_result = changed
+            else: self.current_result = changed
+            with self.subTest(which=which), self.assertRaises(M.InputRefused): attempt.send('Enter')
+            self.assertEqual(window.sent, []); attempt.close()
+
+    def test_companion_change_after_keypress_retains_partial_and_never_releases_or_retries(self):
+        attempt, companion, window = self.attempt()
+        window.hook = lambda: self.owner.update(name=':1.41')
+        with self.assertRaises(M.InputRefused) as error: attempt.send('Enter')
+        self.assertEqual(window.sent, [(456, 36, 0, True)])
+        self.assertFalse(error.exception.receipt['deliveryComplete'])
+        self.assertTrue(error.exception.receipt['delivery'][0]['synchronized'])
+        with self.assertRaises(M.InputRefused): attempt.send('Enter')
+        attempt.close()
+
+    def test_two_window_mode_never_ignores_target_focus_occlusion_or_extra_windows(self):
+        changes = (lambda window: window.state.update(focus=789), lambda window: window.state.update(unobscured=False),
+                   lambda window: window.state.update(managedWindows=[789, 456, 999]),
+                   lambda window: window.state.update(managedWindows=[456, 789]),
+                   lambda window: window.state.update(soleWindow=True))
+        for change in changes:
+            self.setUp(); attempt, companion, window = self.attempt(); change(window)
+            with self.subTest(change=change), self.assertRaises(M.InputRefused): attempt.send('Enter')
+            self.assertEqual(window.sent, []); attempt.close()
+
+    def native_fixture(self):
+        api, state = NativeApiTests().native_fixture()
+        target = api.x11.inspect
+        self.x11 = api.x11
+        api.x11.inspect = lambda window: copy.deepcopy(self.xres) if window == 789 else target(window)
+        companion = self.bind()
+        api.warm_companion = companion
+        state['clients'] = (33, 32, [789, 456]); state['stack'] = [800, 500, 999]
+        old_tree = api.tree
+        api.tree = lambda window: (800, []) if window == 789 else (50, [789]) if window == 800 else old_tree(window)
+        return api, state, companion
+
+    def test_native_snapshot_requires_exact_two_windows_and_companion_below_target(self):
+        api, state, companion = self.native_fixture()
+        value = api.snapshot(456)
+        M.validate_target(value, {'pid': 123}, 456, warm_companion=companion)
+        self.assertFalse(value['soleWindow']); self.assertEqual(value['managedWindows'], [789, 456])
+        changes = (lambda: state.update(clients=(33, 32, [789, 456, 999])),
+                   lambda: state.update(clients=(33, 32, [456, 789])),
+                   lambda: state.update(clients=(33, 32, [456])),
+                   lambda: state.update(stack=[500, 800, 999]),
+                   lambda: state.update(focus=789), lambda: setattr(state['overlay'], 'x', 30))
+        for index in range(len(changes)):
+            self.setUp(); api, state, companion = self.native_fixture()
+            changes[index]()
+            with self.subTest(change=index), self.assertRaises(RuntimeError): api.snapshot(456)
+            companion.close()
+
+    def test_exact_two_window_snapshot_is_not_accepted_without_companion_authority(self):
+        api, state, companion = self.native_fixture()
+        with self.assertRaises(RuntimeError): M.validate_target(api.snapshot(456), {'pid': 123}, 456)
+        api.warm_companion = None
+        with self.assertRaises(RuntimeError): api.snapshot(456)
+        companion.close()
+
+    def test_capture_rejects_foreign_session_same_target_or_wrong_uid_before_native_input_setup(self):
+        companion = self.bind()
+        client = process()
+        cases = ((SimpleNamespace(), self.x11, client, 456), (self.native, SimpleNamespace(), client, 456),
+                 (self.native, self.x11, {**client, 'pid': 321}, 456),
+                 (self.native, self.x11, client, 789), (self.native, self.x11, {**client, 'uids': [1002] * 4}, 456))
+        for native, x11, target, window in cases:
+            with self.subTest(target=target['pid'], window=window), patch.object(M.sys, 'platform', 'linux'), \
+                    patch.object(M.platform, 'machine', return_value='x86_64'), \
+                    patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.os, 'geteuid', return_value=1001, create=True), \
+                    patch.object(M, 'OwnedLauncher') as launcher:
+                with self.assertRaises(RuntimeError):
+                    M.capture(None, native, x11, target, {}, lambda: None, window, warm_companion=companion)
+                launcher.assert_not_called()
+        companion.close()
+
+    def test_companion_admission_failure_closes_held_and_current_images(self):
+        self.current_result = lambda: (copy.deepcopy(self.root['image']), 'b' * 64)
+        with self.assertRaises(RuntimeError): self.bind()
+        self.assertTrue(self.images)
+        self.assertTrue(all(image.closed for image in self.images))
+
+    def test_actual_window_snapshot_rechecks_companion_xres_after_focus_queries(self):
+        api, state, companion = self.native_fixture()
+        focus = api.get_focus
+        def changed(*args):
+            result = focus(*args)
+            self.xres['client'] = 902
+            return result
+        api.get_focus = changed
+        with self.assertRaises(RuntimeError): api.snapshot(456)
+        companion.close()
+
+    def test_default_receipt_keys_remain_exactly_the_original_sole_window_contract(self):
+        attempt = M.KeyboardAttempt(Binding(), Window(), 456)
+        self.assertEqual(set(attempt.receipt), {'schemaVersion', 'mechanism', 'pid', 'startTime', 'window', 'intent', 'candidateAction',
+            'delivery', 'deliveryComplete', 'launchProvenance', 'widgetFocusVerified', 'outcomeVerified', 'nativeVerificationRequired', 'releaseReady'})
+        self.assertEqual(set(attempt.baseline), {'owner', 'frame', 'focus', 'soleWindow', 'unobscured'})
+        self.assertTrue(attempt.baseline['soleWindow'])
+
+    def test_root_owner_role_and_bounds_are_checked_before_any_image_is_held(self):
+        for mutation in (lambda: self.root.update(executable='/app/bin/creator-hub-flatpak-activate'),
+                         lambda: self.root['image'].update(st_size=str(M.MAX_IMAGE + 1)),
+                         lambda: self.owner.update(name='com.creatorworks.hub.Host'), lambda: self.owner.update(pid=322)):
+            self.setUp(); mutation()
+            with self.assertRaises(RuntimeError): self.bind()
+            self.assertEqual(self.images, [])
+
+
 class HeldImageTests(unittest.TestCase):
     def setUp(self):
         self.body = b"\x7fELF\x02" + b"signed fixture" * 3

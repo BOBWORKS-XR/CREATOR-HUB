@@ -203,7 +203,7 @@ class LauncherKeyboardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             source = (HERE.parent / 'native/flatpak-native-activation/src/linux.rs').read_bytes()
-            state = SimpleNamespace(code=None, captures=[], sends=[], closed=0, outcomes=[], origin_reads=0)
+            state = SimpleNamespace(code=None, captures=[], sends=[], closed=0, outcomes=[], origin_reads=0, companions=[])
             session = object.__new__(M.Session)
             session.root, session.helper, session.x11 = root, SimpleNamespace(), object()
             launch = self.process(10, 9, '/usr/bin/bwrap')
@@ -235,11 +235,12 @@ class LauncherKeyboardTests(unittest.TestCase):
             session.wait = lambda check, seconds=30: self.assertTrue(check(), 'Read-only readiness condition was not reached')
             session.disclosure = lambda: 'authenticated disclosure'
             session.click_dialog = Mock(side_effect=AssertionError('Launcher must never reach AX input'))
-            session.host_owner = lambda: {'pid': 40, 'name': ':1.42'} if phase in ('cold', 'warm') and state.code is not None else None
+            session.host_owner = lambda: {'pid': 40, 'name': ':1.42'} if phase == 'warm' or phase == 'cold' and state.code is not None else None
             def dialog_window(): return 101 if missing and state.sends == ['Enter'] else 100
             session.windows = lambda: [200] if phase in ('cold', 'warm') and state.code is not None else [] if state.code is not None else (
                 [200, dialog_window()] if phase == 'warm' else [dialog_window()])
-            session.x11 = SimpleNamespace(inspect=lambda window: {'pid': 40 if window == 200 else 14})
+            session.x11 = SimpleNamespace(inspect=lambda window: {'pid': 40 if window == 200 else 14,
+                'client': 901 if window == 200 else 900, 'title': 'Creator Hub', 'mapped': True})
             session.owned_window = lambda process, title: 200 if process['pid'] == 40 else 999 if wrong_window else dialog_window()
             def preserved():
                 if preservation_failure:
@@ -247,20 +248,45 @@ class LauncherKeyboardTests(unittest.TestCase):
                 state.outcomes.append('preserved')
                 return {'retained': True}
             session.snapshot_preserved = preserved
-            session.report = {'coldRoot': native_root}
+            session.report = {'coldActivationAccepted': True, 'coldRoot': native_root, 'coldRootWindow': 200, 'coldHost1Owner': {'pid': 40, 'name': ':1.42'},
+                              'coldRootXres': session.x11.inspect(200)}
             session.portal_calls = [{'url': M.PORTAL_URL, 'browserOpened': False, 'downloadAttempted': False, 'senderUid': 1001}]
-            def capture(helper, native, x11, observed, origin, guard, window):
+            def bind_warm(helper, native, x11, observed, window, owner, owner_probe):
+                # Integration adapter fixture only; real FD/XRes/Host1 binding is exercised in the helper suite.
+                companion = object.__new__(M.K.WarmRoot)
+                companion.helper, companion.native, companion.x11 = helper, native, x11
+                companion.process, companion.window, companion.owner = copy.deepcopy(observed), window, copy.deepcopy(owner)
+                companion.window_owner = copy.deepcopy(x11.inspect(window))
+                companion.held = SimpleNamespace(close=lambda: None)
+                def verify():
+                    M.require(companion.held is not None and owner_probe() == companion.owner
+                              and native.native_process(observed['pid'], helper) == observed
+                              and x11.inspect(window) == companion.window_owner, 'Companion identity/Host1/window changed')
+                companion.verify = verify
+                companion.verify()
+                state.companions.append(companion)
+                return companion
+            def capture(helper, native, x11, observed, origin, guard, window, *, warm_companion=None):
                 state.captures.append(window)
                 guard()
                 self.assertEqual(observed, client)
                 if capture_failure:
                     raise RuntimeError(capture_failure)
                 M.require(window == dialog_window(), 'Wrong exact window')
-                M.require(session.windows() == [window], 'Sole visible managed dialog required')
+                if warm_companion is None:
+                    M.require(session.windows() == [window], 'Sole visible managed dialog required')
+                else:
+                    self.assertIs(type(warm_companion), M.K.WarmRoot)
+                    warm_companion.verify()
+                    M.require(session.windows() == [warm_companion.window, window], 'Exact two-owned-window stack required')
                 def send(sequence):
                     state.sends.append(sequence)
                     guard()
                     record = self.receipt(sequence, client, origin, window, partial=partial == sequence)
+                    if warm_companion is not None:
+                        M.require(sequence == 'Enter', 'Warm disclosure Enter only')
+                        warm_companion.verify()
+                        record['warmCompanion'] = {'binding': warm_companion.evidence, 'managedWindows': [warm_companion.window, window]}
                     if changed_receipt:
                         changed_receipt(record)
                     if not missing or sequence == 'Escape':
@@ -272,6 +298,7 @@ class LauncherKeyboardTests(unittest.TestCase):
                 return SimpleNamespace(send=send, close=close)
             tree = {pid: {k: v for k, v in row.items() if k != 'kernelImageSha256'} for pid, row in rows.items() if pid != 40}
             with patch.object(M, 'bound', return_value=source) as source_read, patch.object(M.K, 'capture', side_effect=capture), \
+                    patch.object(M.K, 'bind_warm_root', side_effect=bind_warm), \
                     patch.object(M.P, 'subtree', return_value=tree), patch.object(M.os, 'getuid', return_value=1001, create=True), \
                     patch.object(M.os, 'getpid', return_value=9), patch.object(M.os, 'readlink', return_value='mnt:[1]'):
                 yield session, state, source_read
@@ -297,12 +324,13 @@ class LauncherKeyboardTests(unittest.TestCase):
         for action, phase, missing, sequences in (('Cancel', 'disclosure-cancel', False, ['Escape']),
                 ('Open Creator Hub', 'missing-host', True, ['Enter', 'Escape']),
                 ('Get Native Hub', 'portal-only', False, ['ShiftTabSpace']),
-                ('Open Creator Hub', 'cold', False, ['Enter'])):
+                ('Open Creator Hub', 'cold', False, ['Enter']), ('Open Creator Hub', 'warm', False, ['Enter'])):
             with self.subTest(phase=phase), self.fixture(action, phase, missing) as (session, state, source_read):
                 session.flatpak(action, phase, missing)
                 self.assertEqual(state.sends, sequences)
                 self.assertEqual(state.closed, len(sequences))
                 self.assertEqual(source_read.call_count, len(sequences))
+                self.assertEqual(len(state.companions), 1 if phase == 'warm' else 0)
                 for record in session.launcher_keys:
                     self.assertTrue(record['outcomeVerified']); self.assertTrue(record['preservedDataVerified'])
                     self.assertFalse(record['actionReturned']); self.assertFalse(record['releaseReady'])
@@ -424,13 +452,16 @@ class LauncherKeyboardTests(unittest.TestCase):
                 self.assertEqual(len(state.sends), 1)
                 self.assertFalse(session.launcher_keys[0]['outcomeVerified'])
 
-    def test_warm_dialog_stops_before_input_under_the_unchanged_single_window_helper(self):
+    def test_warm_dialog_uses_one_explicit_companion_without_hiding_or_changing_the_root(self):
         with self.fixture('Open Creator Hub', 'warm') as (session, state, _):
-            with self.assertRaisesRegex(RuntimeError, 'Sole visible managed dialog'):
-                session.flatpak('Open Creator Hub', 'warm')
-            self.assertEqual(state.sends, [])
+            session.flatpak('Open Creator Hub', 'warm')
+            self.assertEqual(state.sends, ['Enter']); self.assertEqual(len(state.companions), 1)
             record = M.parse((session.root / 'warm-outcome-gtk.json').read_bytes())
-            self.assertFalse(record['actionAttempted']); self.assertFalse(record['outcomeVerified'])
+            self.assertTrue(record['outcomeVerified'])
+            self.assertEqual(record['keyboard']['warmCompanion']['managedWindows'], [200, 100])
+            self.assertEqual(record['keyboard']['warmCompanion']['binding']['hostOwner'], session.report['coldHost1Owner'])
+            self.assertEqual(record['keyboard']['warmCompanion']['binding']['root'], session.report['coldRoot'])
+            self.assertIsNone(state.companions[0].held)
 
     def test_warm_outcome_requires_the_original_signed_root_even_if_exit_was_observed(self):
         with self.fixture('Open Creator Hub', 'warm') as (session, state, _):
@@ -439,6 +470,61 @@ class LauncherKeyboardTests(unittest.TestCase):
             session.report['coldRoot'] = {'different': 'instance'}
             with self.assertRaisesRegex(RuntimeError, 'replaced'):
                 session.launcher_outcome('Open Creator Hub', 'warm', False)
+
+    def test_warm_without_qualified_signed_cold_root_owner_or_xres_refuses_before_input(self):
+        for mutation in ('not-qualified', 'hash', 'path', 'owner', 'window', 'xres', 'live-root'):
+            with self.subTest(mutation=mutation), self.fixture('Open Creator Hub', 'warm') as (session, state, _):
+                if mutation == 'not-qualified': session.report['coldActivationAccepted'] = False
+                elif mutation == 'hash': session.report['coldRoot'] = {**session.report['coldRoot'], 'kernelImageSha256': 'd' * 64}
+                elif mutation == 'path': session.report['coldRoot'] = {**session.report['coldRoot'], 'executable': '/other/AppDir/usr/bin/creator-hub'}
+                elif mutation == 'owner': session.report['coldHost1Owner'] = {'pid': 40, 'name': ':1.43'}
+                elif mutation == 'window': session.report['coldRootWindow'] = 201
+                elif mutation == 'xres': session.report['coldRootXres'] = {**session.report['coldRootXres'], 'client': 902}
+                else:
+                    original = session.native.native_process
+                    session.native.native_process = lambda pid, helper, full=True: {**original(pid, helper, full), 'startTime': '999'} if pid == 40 else original(pid, helper, full)
+                with self.assertRaises(RuntimeError): session.flatpak('Open Creator Hub', 'warm')
+                self.assertEqual(state.sends, [])
+                self.assertEqual(state.captures, [])
+                self.assertFalse(session.launcher_keys[0]['outcomeVerified'])
+                self.assertTrue(all(companion.held is None for companion in state.companions))
+
+    def test_companion_receipt_must_match_the_exact_binding_and_literal_two_window_order(self):
+        mutations = (lambda record: record.pop('warmCompanion'),
+                     lambda record: record['warmCompanion'].update(managedWindows=[100, 200]),
+                     lambda record: record['warmCompanion']['binding']['hostOwner'].update(name=':1.43'),
+                     lambda record: record['warmCompanion'].update(soleWindow=True))
+        for change in mutations:
+            with self.subTest(change=change), self.fixture('Open Creator Hub', 'warm', changed_receipt=change) as (session, state, _):
+                with self.assertRaises(RuntimeError): session.flatpak('Open Creator Hub', 'warm')
+                self.assertEqual(state.sends, ['Enter'])
+                self.assertFalse(session.launcher_keys[0]['outcomeVerified'])
+                self.assertIsNone(state.companions[0].held)
+
+    def test_partial_warm_enter_only_qualifies_if_original_host1_owner_survives_phase_exit(self):
+        for changed in (False, True):
+            with self.subTest(changed=changed), self.fixture('Open Creator Hub', 'warm', partial='Enter') as (session, state, _):
+                if changed:
+                    session.host_owner = lambda: {'pid': 40, 'name': ':1.43' if state.code is not None else ':1.42'}
+                    with self.assertRaisesRegex(RuntimeError, 'replaced'):
+                        session.flatpak('Open Creator Hub', 'warm')
+                else:
+                    session.flatpak('Open Creator Hub', 'warm')
+                record = session.launcher_keys[0]
+                self.assertFalse(record['keyboard']['deliveryComplete'])
+                self.assertIs(record['outcomeVerified'], not changed)
+                self.assertEqual(record['ownedPhaseExit']['exitCode'], 0)
+                self.assertEqual(state.sends, ['Enter'])
+
+    def test_companion_is_not_created_for_a_different_warm_question_or_action(self):
+        with self.fixture('Open Creator Hub', 'warm') as (session, state, _):
+            session.flatpak_origin = session.native.native_process(10, None, False)
+            session.flatpak_child = SimpleNamespace(pid=10, poll=lambda: None)
+            session.children = [session.flatpak_child]
+            session.launcher_keys = []
+            with self.assertRaisesRegex(RuntimeError, 'warm disclosure Enter'):
+                session.launcher_keyboard(session.native.native_process(14, None), 'missing', 'Close', 'warm', terminal=True)
+            self.assertEqual(state.sends, []); self.assertEqual(state.companions, [])
 
     def test_helper_preflight_is_mandatory_before_any_download(self):
         workflow = (HERE.parent / M.WORKFLOW).read_text()
@@ -853,7 +939,7 @@ class ControllerTests(unittest.TestCase):
             M.require(fixture.read_bytes() == before, "Native fixture setting/project/client entry changed")
         def host_owner():
             if state['running']:
-                return {"pid": 99}
+                return {"pid": 99, "name": ':1.99'}
             if state['closed']:
                 events.append('host-released')
                 if mutation == 'host-release':
@@ -880,7 +966,8 @@ class ControllerTests(unittest.TestCase):
         session.native = SimpleNamespace(bitmap=lambda *args: {"synthetic": True})
         session.helper = SimpleNamespace(Request=lambda *args: None)
         session.x11 = SimpleNamespace(display=None, x=SimpleNamespace(XDefaultRootWindow=lambda *args: 0),
-            property=lambda window, name: (33, 32, [101]), dispose=lambda: None)
+            property=lambda window, name: (33, 32, [101]), dispose=lambda: None,
+            inspect=lambda window: {'pid': 99, 'client': 901, 'title': 'Creator Hub', 'mapped': True})
         context = SimpleNamespace(pending=lambda: False)
         repository = SimpleNamespace(Gio=None, GLib=SimpleNamespace(MainContext=SimpleNamespace(default=lambda: context)),
                                      Gdk=SimpleNamespace(init=lambda *args: None))

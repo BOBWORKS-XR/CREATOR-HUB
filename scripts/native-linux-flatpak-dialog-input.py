@@ -26,6 +26,7 @@ SEQUENCES = {
 }
 _ATTEMPTS = set()
 _RESERVATION_LOCK = threading.Lock()
+_WARM_ROOT_AUTHORITY = object()
 
 
 def require(value, message):
@@ -246,6 +247,73 @@ class OwnedLauncher:
                 held.close()
 
 
+class WarmRoot:
+    """Opaque, single native Root companion; never a window/process allowlist."""
+    def __init__(self, helper, native, x11, process, window, owner, owner_probe, *, _authority=None, image_open=HeldImage):
+        require(_authority is _WARM_ROOT_AUTHORITY, "Use the finite native Root binding factory")
+        validate_process(process, full=True)
+        require(process['executable'].endswith('/AppDir/usr/bin/creator-hub')
+                and 5 <= int(process['image']['st_size']) <= MAX_IMAGE, "Exact bounded native portable Root required")
+        require(type(owner) is dict and set(owner) == {'name', 'pid'} and type(owner['pid']) is int
+                and owner['pid'] == process['pid'] and type(owner['name']) is str
+                and len(owner['name']) <= 255 and re.fullmatch(r':[0-9]+\.[0-9]+', owner['name']) and callable(owner_probe),
+                "Exact Host1 unique owner must belong to this native Root")
+        self.helper, self.native, self.x11 = helper, native, x11
+        self.process, self.window, self.owner = copy.deepcopy(process), xid(window), copy.deepcopy(owner)
+        self.owner_probe, self.image_open, self.held = owner_probe, image_open, None
+        try:
+            self.window_owner = self.window_identity()
+            self.held = image_open(process['pid'])
+            self.verify()
+        except Exception:
+            self.close()
+            raise
+
+    def window_identity(self):
+        value = self.x11.inspect(self.window)
+        require(type(value) is dict and set(value) == {'pid', 'client', 'title', 'mapped'}
+                and type(value['pid']) is int and value['pid'] == self.process['pid']
+                and type(value['client']) is int and value['client'] > 0
+                and value['title'] == 'Creator Hub' and value['mapped'] is True,
+                "Exact mapped XRes-owned native Root companion required")
+        return value
+
+    @property
+    def evidence(self):
+        return {'readOnly': True, 'root': copy.deepcopy(self.process), 'window': self.window,
+                'xres': copy.deepcopy(self.window_owner), 'hostOwner': copy.deepcopy(self.owner)}
+
+    def verify(self):
+        require(self.held is not None, "Native Root companion is closed")
+        require(self.owner_probe() == self.owner, "Native Host1 owner changed")
+        require(self.native.native_process(self.process['pid'], self.helper) == self.process, "Native Root PID/start/UID/image changed")
+        expected = self.process['image'], self.process['kernelImageSha256']
+        require(self.held.snapshot() == expected, "Held native Root executable changed")
+        current = self.image_open(self.process['pid'])
+        try:
+            require(current.snapshot() == expected, "Native Root no longer has its held executable")
+        finally:
+            current.close()
+        require(self.window_identity() == self.window_owner, "Native Root XRes/XID binding changed")
+        require(self.native.native_process(self.process['pid'], self.helper) == self.process
+                and self.owner_probe() == self.owner and self.window_identity() == self.window_owner,
+                "Native Root companion changed during recheck")
+
+    def close(self):
+        if self.held is not None:
+            held, self.held = self.held, None
+            held.close()
+
+
+def bind_warm_root(helper, native, x11, process, window, owner, owner_probe, *, image_open=HeldImage):
+    """Caller binds the signed cold generation and closes this token on any failure."""
+    require(sys.platform == 'linux' and platform.machine() == 'x86_64' and os.geteuid() == os.getuid() > 0,
+            "Unprivileged native Linux x86_64 controller required")
+    require(type(process) is dict and process.get('uids') == [os.getuid()] * 4, "Native Root/controller UID differs")
+    return WarmRoot(helper, native, x11, process, window, owner, owner_probe,
+                    _authority=_WARM_ROOT_AUTHORITY, image_open=image_open)
+
+
 class KeyEvent(C.Structure):
     _fields_ = [(name, kind) for name, kind in (
         ("type", C.c_int), ("serial", C.c_ulong), ("send_event", C.c_int), ("display", C.c_void_p),
@@ -270,9 +338,11 @@ def rectangle(value):
 
 
 class NativeWindow:
-    def __init__(self, helper, x11):
+    def __init__(self, helper, x11, *, warm_companion=None):
         require(C.sizeof(C.c_long) == 8 and C.sizeof(KeyEnvelope) == 192, "Linux LP64 X11 event ABI required")
         self.helper, self.x11 = helper, x11
+        require(warm_companion is None or type(warm_companion) is WarmRoot, "One opaque native Root companion required")
+        self.warm_companion = warm_companion
         # Independent function wrappers do not change the shared helper's argtypes.
         def function(name, result, *arguments):
             return C.CFUNCTYPE(result, *arguments)((name, x11.x))
@@ -307,7 +377,14 @@ class NativeWindow:
         root = self.x11.x.XDefaultRootWindow(self.x11.display)
         require(window != root, "Desktop root is not a dialog")
         clients = self.x11.property(root, "_NET_CLIENT_LIST_STACKING")
-        require(type(clients) is tuple and clients == (33, 32, [window]), "Sole visible managed dialog required")
+        companion = getattr(self, 'warm_companion', None)
+        if companion is None:
+            require(type(clients) is tuple and clients == (33, 32, [window]), "Sole visible managed dialog required")
+        else:
+            require(type(companion) is WarmRoot and companion.x11 is self.x11 and companion.window != window
+                    and type(clients) is tuple and clients == (33, 32, [companion.window, window]),
+                    "Exactly native Root then topmost launcher dialog required")
+            require(companion.window_identity() == companion.window_owner, "Native Root XRes binding changed")
         owner, frame = self.x11.inspect(window), rectangle(self.x11.frame_rectangle(window))
         screen = self.attributes(root)
         require(0 < screen.width <= 8192 and 0 < screen.height <= 8192
@@ -323,6 +400,18 @@ class NativeWindow:
             raise RuntimeError("WM ancestry exceeds bound")
         _parent, stack = self.tree(root)
         require(stack.count(ancestor) == 1, "Dialog WM frame is absent/ambiguous")
+        if companion is not None:
+            companion_frame, seen = companion.window, {companion.window}
+            for _ in range(8):
+                parent, _children = self.tree(companion_frame)
+                if parent == root:
+                    break
+                require(type(parent) is int and parent > 1 and parent not in seen, "Ambiguous native Root WM ancestry")
+                seen.add(parent); companion_frame = parent
+            else:
+                raise RuntimeError("Native Root WM ancestry exceeds bound")
+            require(stack.count(companion_frame) == 1 and stack.index(companion_frame) < stack.index(ancestor),
+                    "Native Root must remain below the launcher dialog")
         for other in stack[stack.index(ancestor) + 1:]:
             geometry = self.attributes(other)
             if geometry.map_state == 2 and geometry.class_ == 1:
@@ -339,7 +428,11 @@ class NativeWindow:
         require(self.get_focus(self.x11.display, C.byref(focus), C.byref(revert)), "Native input focus recheck unavailable")
         self.sync()
         require(focus.value == window, "Native focus changed during window capture")
-        return {"owner": owner, "frame": frame, "focus": focus.value, "soleWindow": True, "unobscured": True}
+        result = {"owner": owner, "frame": frame, "focus": focus.value, "soleWindow": companion is None, "unobscured": True}
+        if companion is not None:
+            require(companion.window_identity() == companion.window_owner, "Native Root window changed during capture")
+            result.update(warmCompanion=companion.evidence, managedWindows=[companion.window, window])
+        return result
 
     def keycode(self, symbol):
         require(type(symbol) is int and symbol in {key for sequence in SEQUENCES.values() for key, _modifiers in sequence},
@@ -369,8 +462,12 @@ class NativeWindow:
         self.x11.sync()
 
 
-def validate_target(value, process, window):
-    require(type(value) is dict and set(value) == {"owner", "frame", "focus", "soleWindow", "unobscured"}, "Exact target snapshot required")
+def validate_target(value, process, window, *, warm_companion=None):
+    require(warm_companion is None or type(warm_companion) is WarmRoot, "One opaque native Root companion required")
+    fields = {"owner", "frame", "focus", "soleWindow", "unobscured"}
+    if warm_companion is not None:
+        fields |= {'warmCompanion', 'managedWindows'}
+    require(type(value) is dict and set(value) == fields, "Exact target snapshot required")
     owner = value["owner"]
     require(type(owner) is dict and set(owner) == {"pid", "client", "title", "mapped"}
             and type(owner["pid"]) is int and owner["pid"] == process["pid"]
@@ -378,7 +475,10 @@ def validate_target(value, process, window):
             and owner["title"] == "Creator Hub" and owner["mapped"] is True, "Exact XRes-owned visible launcher dialog required")
     rectangle(value["frame"])
     require(type(value["focus"]) is int and value["focus"] == window
-            and value["soleWindow"] is True and value["unobscured"] is True, "Exact sole unobscured focused window required")
+            and value["soleWindow"] is (warm_companion is None) and value["unobscured"] is True, "Exact sole unobscured focused window required")
+    if warm_companion is not None:
+        require(value['warmCompanion'] == warm_companion.evidence and value['managedWindows'] == [warm_companion.window, window],
+                "Exact two-owned-window companion evidence required")
 
 
 class InputRefused(RuntimeError):
@@ -389,8 +489,10 @@ class InputRefused(RuntimeError):
 
 
 class KeyboardAttempt:
-    def __init__(self, binding, window_api, window):
+    def __init__(self, binding, window_api, window, *, warm_companion=None):
         self.window, self.binding, self.api = xid(window), binding, window_api
+        require(warm_companion is None or type(warm_companion) is WarmRoot, "One opaque native Root companion required")
+        self.warm_companion = warm_companion
         self.process = copy.deepcopy(binding.process)
         require(type(self.process["pid"]) is int and self.process["pid"] > 1 and type(self.process["startTime"]) is str
                 and re.fullmatch(r"[1-9][0-9]{0,19}", self.process["startTime"]), "Exact attempt process identity required")
@@ -400,6 +502,8 @@ class KeyboardAttempt:
                          "window": window, "intent": None, "candidateAction": None, "delivery": [], "deliveryComplete": False,
                           "launchProvenance": copy.deepcopy(binding.provenance),
                          "widgetFocusVerified": False, "outcomeVerified": False, "nativeVerificationRequired": True, "releaseReady": False}
+        if warm_companion is not None:
+            self._receipt['warmCompanion'] = {'binding': warm_companion.evidence, 'managedWindows': [warm_companion.window, window]}
         self.guard()
 
     @property
@@ -408,13 +512,19 @@ class KeyboardAttempt:
 
     def guard(self):
         require(not self.closed, "Keyboard attempt is closed")
+        if self.warm_companion is not None:
+            self.warm_companion.verify()
         self.binding.verify()
         before = self.api.snapshot(self.window)
-        validate_target(before, self.process, self.window)
+        validate_target(before, self.process, self.window, warm_companion=self.warm_companion)
+        if self.warm_companion is not None:
+            self.warm_companion.verify()
         self.binding.verify()
         after = self.api.snapshot(self.window)
-        validate_target(after, self.process, self.window)
+        validate_target(after, self.process, self.window, warm_companion=self.warm_companion)
         require(before == after and (self.baseline is None or after == self.baseline), "Owned input target changed")
+        if self.warm_companion is not None:
+            self.warm_companion.verify()
         if self.baseline is None:
             self.baseline = copy.deepcopy(after)
 
@@ -427,6 +537,7 @@ class KeyboardAttempt:
             _ATTEMPTS.add(self.key)
         try:
             require(type(sequence) is str and sequence in SEQUENCES, "Only Escape, Enter or ShiftTabSpace is supported")
+            require(self.warm_companion is None or sequence == 'Enter', "Native Root companion is only for warm disclosure Enter")
             self._receipt["intent"] = sequence
             self._receipt["candidateAction"] = {"Escape": "decline-or-close", "Enter": "default-open", "ShiftTabSpace": "get-native-hub"}[sequence]
             codes = [(self.api.keycode(symbol), modifiers) for symbol, modifiers in SEQUENCES[sequence]]
@@ -451,7 +562,11 @@ class KeyboardAttempt:
     def close(self):
         if not self.closed:
             self.closed = True
-            self.binding.close()
+            try:
+                self.binding.close()
+            finally:
+                if self.warm_companion is not None:
+                    self.warm_companion.close()
 
     def __enter__(self):
         return self
@@ -460,7 +575,7 @@ class KeyboardAttempt:
         self.close()
 
 
-def capture(helper, native, x11, process, owned_launch, launch_guard, window):
+def capture(helper, native, x11, process, owned_launch, launch_guard, window, *, warm_companion=None):
     """Call only after the parent controller's production/disposable-run admission.
 
     launch_guard must recheck the independently owned Popen/session liveness and
@@ -470,15 +585,29 @@ def capture(helper, native, x11, process, owned_launch, launch_guard, window):
     Retain either the returned receipt or InputRefused.receipt; neither is an
     application acknowledgement. A process/window disappearing after key-down
     can leave a partial delivery, which must not cause a retry or fallback input.
+    warm_companion is only the separately bound native Root for warm Enter; it
+    never authorizes another target or a general set of desktop windows.
     """
     require(sys.platform == "linux" and platform.machine() == "x86_64" and os.geteuid() == os.getuid() > 0,
             "Unprivileged native Linux x86_64 controller required")
     require(type(process) is dict and process.get("uids") == [os.getuid()] * 4, "Controller/launcher UID differs")
-    binding = OwnedLauncher(helper, native, process, owned_launch, launch_guard)
+    require(warm_companion is None or type(warm_companion) is WarmRoot, "One opaque native Root companion required")
+    if warm_companion is not None:
+        require(warm_companion.helper is helper and warm_companion.native is native and warm_companion.x11 is x11
+                and warm_companion.process['pid'] != process['pid'] and warm_companion.process['uids'] == process['uids']
+                and warm_companion.window != window, "Companion must be this session's distinct native Root/window")
+        warm_companion.verify()
+    binding = None
     try:
-        return KeyboardAttempt(binding, NativeWindow(helper, x11), window)
+        binding = OwnedLauncher(helper, native, process, owned_launch, launch_guard)
+        return KeyboardAttempt(binding, NativeWindow(helper, x11, warm_companion=warm_companion), window, warm_companion=warm_companion)
     except Exception:
-        binding.close()
+        try:
+            if binding is not None:
+                binding.close()
+        finally:
+            if warm_companion is not None:
+                warm_companion.close()
         raise
 
 
