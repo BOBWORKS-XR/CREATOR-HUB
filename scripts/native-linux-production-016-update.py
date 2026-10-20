@@ -1298,11 +1298,15 @@ def startup_ui(surface, home, *, first):
         wait(lambda: surface.source("usage-terms-continue", optional=True) is None)
     else:
         require(surface.source("usage-terms-continue", optional=True) is None, "Accepted native terms unexpectedly repeated")
+    later = wait(lambda: surface.source("convergence-later", optional=True))
+    require(later[0]["name"] == "Not now", "Unexpected migration/recovery UI in updater lane")
+    surface.click("convergence-later", actions)
+    wait(lambda: surface.source("convergence-dialog", optional=True) is None)
     wait(lambda: surface.source("projects-home-title", optional=True))
-    later = surface.source("convergence-later", optional=True)
-    if later:
-        require(later[0]["name"] == "Not now", "Unexpected migration/recovery UI in updater lane")
-        surface.click("convergence-later", actions)
+    wait(lambda: (status := surface.source("project-status", optional=True))
+         and (status[0].get("text") or status[0]["name"]) == "2 known projects. SDK labels reflect package declarations, not build validation."
+         and (refresh := surface.source("refresh-projects", optional=True))
+         and refresh[0]["enabled"] and refresh[0]["sensitive"] and not refresh[0]["busy"])
     require(parse(read(home / PREFS))["autoDownload"] is False, "Automatic download must remain disabled")
     return actions
 
@@ -1351,6 +1355,23 @@ def observe_successor(old, expected, executable, parent, baseline, native, helpe
     return wait(ready, 60), observed
 
 
+def capture_bootstrap_failure(surface, actions):
+    result = {"schemaVersion": 1, "readOnly": True, "qualified": False, "root": surface.record, "actions": list(actions)}
+    try:
+        result["snapshot"], _ = surface.snapshot()
+    except Exception as error:
+        result["snapshotRefused"] = type(error).__name__
+    try:
+        result["bitmap"] = phase_bitmap(surface, "bootstrap-failure-bitmap")
+    except Exception as error:
+        result["bitmapRefused"] = type(error).__name__
+    try:
+        save(BASE / "result/bootstrap-failure-ui.json", result)
+    except Exception:
+        pass
+    return result
+
+
 def bootstrap16(folder, profile, review, env, helper, native, atspi, x11):
     executable = folder / "Creator.Hub.Native.Support_0.1.16_amd64.AppImage"
     source = object_path(folder, profile, "appimage16")
@@ -1378,26 +1399,33 @@ def bootstrap16(folder, profile, review, env, helper, native, atspi, x11):
     appdir = Path(root["executable"]).parents[2]
     surface = Surface(root, x11, helper, native, atspi, manifest=review["portable"]["16"]["manifest"], generation_dir=appdir)
     actions = []
-    wait(lambda: surface.source("usage-terms-checkbox", optional=True))
-    surface.click("usage-terms-checkbox", actions); surface.click("usage-terms-continue", actions)
-    wait(lambda: surface.source("native-support-install", optional=True))
-    surface.click("native-support-install", actions)
-    dialog = Surface(root, x11, helper, native, atspi, title="Install native support", dialog=True)
-    generation = review["portable"]["16"]["generation"]
-    body = ("Install Creator Hub native support 0.1.16?\n\nThis installs and registers the verified generation " + generation +
-            " in your private native data directory. The Hub window runs OUTSIDE the Flatpak sandbox and uses your existing native settings.\n\n"
-            "Your projects, MCP connections and settings will not be imported, replaced or migrated here. After installation, close this window normally and reopen Hub from Flatpak. "
-            "No app will be launched or restarted automatically.\n\nCancel keeps Store creation, selection and registration unchanged.")
     try:
-        dialog.dialog_action(body, ("Install native support", "Cancel"), "Install native support", [])
-    finally:
-        dialog.bus.close_sync(None)
-    expected = "Native support is installed and registered. Close this setup window normally, then reopen Creator Hub from Flatpak. No MCP connection, project or settings migration was started."
-    wait(lambda: field_text(surface, "native-support-status") == expected, 180)
-    portable_state(Path(env["HOME"]), review, "16")
-    surface.close(); wait(lambda: child.poll() is not None)
-    require(child.returncode == 0 and not windows(x11), "Setup must close normally before activation")
-    surface.bus.close_sync(None)
+        wait(lambda: surface.source("usage-terms-checkbox", optional=True))
+        surface.click("usage-terms-checkbox", actions); surface.click("usage-terms-continue", actions)
+        wait(lambda: surface.source("native-support-install", optional=True))
+        surface.click("native-support-install", actions)
+        dialog = Surface(root, x11, helper, native, atspi, title="Install native support", dialog=True)
+        generation = review["portable"]["16"]["generation"]
+        body = ("Install Creator Hub native support 0.1.16?\n\nThis installs and registers the verified generation " + generation +
+                " in your private native data directory. The Hub window runs OUTSIDE the Flatpak sandbox and uses your existing native settings.\n\n"
+                "Your projects, MCP connections and settings will not be imported, replaced or migrated here. After installation, close this window normally and reopen Hub from Flatpak. "
+                "No app will be launched or restarted automatically.\n\nCancel keeps Store creation, selection and registration unchanged.")
+        try:
+            dialog.dialog_action(body, ("Install native support", "Cancel"), "Install native support", [])
+        finally:
+            dialog.bus.close_sync(None)
+        expected = "Native support is installed and registered. Close this setup window normally, then reopen Creator Hub from Flatpak. No MCP connection, project or settings migration was started."
+        wait(lambda: field_text(surface, "native-support-status") == expected, 180)
+        portable_state(Path(env["HOME"]), review, "16")
+        surface.close(); wait(lambda: child.poll() is not None)
+        require(child.returncode == 0 and not windows(x11), "Setup must close normally before activation")
+        surface.bus.close_sync(None)
+    except Exception:
+        try:
+            capture_bootstrap_failure(surface, actions)
+        except Exception:
+            pass
+        raise
     return {"actualSetupUi": True, "installedSignedGeneration": generation, "normalExitCode": child.returncode}
 
 
@@ -2249,6 +2277,39 @@ def validate_transport_report(value, pins, scenario):
     return {"servedPaths": sorted(served), "publicDiscovery": False, "releaseReady": False}
 
 
+def closed_transport_diagnostic(value, pins, scenario):
+    flags = ("publicDiscovery", "nativeAcceptanceTested", "baselineActuallyTested", "signaturesVerifiedByHarness",
+             "signedUpdateAccepted", "migrationAccepted", "restartAccepted", "restoredViewsAccepted", "liveAiAcceptance", "releaseReady")
+    counters = ("connectionCount", "requestCount", "receivedHttpBytes", "reservedResponseBytes", "rejectedRequestCount")
+    keys(value, ("schemaVersion", "scope", "mode", "fromVersion", "targetVersion", "labDiscovery", "pins", "closeReason", "requests", *flags, *counters))
+    mode = "portable" if scenario.startswith("portable-") else "deb"
+    require(value["schemaVersion"] == 1 and value["mode"] == mode and value["fromVersion"] == "0.1.16"
+            and value["targetVersion"] == "0.1.17" and value["scope"] == "linux-" + mode + "-production016-to-private017-lab-transport"
+            and value["pins"] == pins["files"] and value["labDiscovery"] is True
+            and all(value[name] is False for name in flags), "Closed diagnostic transport identity differs")
+    require(value["closeReason"] in ("caller", "request-budget", "received-byte-budget", "connection-budget", "transport-error", "duration-budget")
+            and all(type(value[name]) is int and 0 <= value[name] < 2**40 for name in counters), "Bounded closed transport metadata required")
+    expected = {}
+    for relative, expected_pin in pins["files"].items():
+        directory, name = relative.split("/", 1)
+        version = "16" if directory == "portable16" else "17"
+        expected["/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1." + version + "/" + name] = expected_pin["sha256"]
+    require(type(value["requests"]) is list and len(value["requests"]) <= len(expected) + 1, "Bounded diagnostic routes required")
+    requests, seen = [], set()
+    for row in value["requests"]:
+        keys(row, ("host", "path", "sha256"))
+        require(type(row["sha256"]) is str and re.fullmatch(r"[a-f0-9]{64}", row["sha256"]), "Diagnostic route digest required")
+        require((row["host"] == "api.github.com" and row["path"] == "/repos/BOBWORKS-XR/CREATOR-HUB/releases?per_page=10")
+                or (row["host"] == "github.com" and row["path"] in expected and row["sha256"] == expected[row["path"]]), "Foreign diagnostic route refused")
+        identity = (row["host"], row["path"])
+        require(identity not in seen, "Duplicate diagnostic route")
+        seen.add(identity); requests.append(dict(row))
+    result = {"schemaVersion": 1, "readOnly": True, "qualified": False, "mode": mode, "closeReason": value["closeReason"],
+              **{name: value[name] for name in counters}, "requests": requests, **dict.fromkeys(flags, False)}
+    require(len(json.dumps(result).encode()) <= 16384, "Bounded closed transport diagnostic output")
+    return result
+
+
 def broker(env):
     scenario = admission(env)
     require(os.getuid() == os.geteuid() == 0 and HERE == Path(env["GITHUB_WORKSPACE"]) / "scripts", "Fixed root broker must begin in the reviewed checkout")
@@ -2380,6 +2441,11 @@ def broker(env):
                     failure = failure or error
                     record[label] = {"refused": True, "type": type(error).__name__, "message": str(error)[:1000]}
         try:
+            transport_diagnostic = closed_transport_diagnostic(parse(read(transport / "lab-transport.json", 65536, uid=UID, mode=0o600)), pins, scenario)
+            save(BASE / "result/transport-diagnostic.json", transport_diagnostic)
+        except Exception as error:
+            record["transportDiagnosticUnavailable"] = type(error).__name__
+        try:
             record["tlsCleanup"] = tls_cleanup(env)
         except Exception as error:
             failure = failure or error; record["tlsCleanupRefused"] = True
@@ -2413,7 +2479,8 @@ def export_evidence(env):
     owner = destination.parent.stat().st_uid
     destination.mkdir(mode=0o700); os.chown(destination, owner, owner)
     names = ("broker.json", "request.json", "review.json", "result/report.json", "result/original-ui.json", "result/successor-ui.json", "session.stdout", "session.stderr",
-             "result/initial-bitmap/root-window.png", "result/successor-bitmap/root-window.png")
+             "result/initial-bitmap/root-window.png", "result/successor-bitmap/root-window.png", "result/bootstrap-failure-ui.json",
+             "result/bootstrap-failure-bitmap/root-window.png", "result/transport-diagnostic.json")
     diagnostics = sorted((*BASE.glob("public-tool-failure-*.json"), *BASE.glob("tls-restore-failure-*.json")))
     require(len(diagnostics) <= 8 and all(re.fullmatch(r"(?:public-tool-failure-(baseline-dpkg-install|update-ca-certificates)|tls-restore-failure)-[1-9][0-9]*\.json", file.name)
                                         and file.lstat().st_uid == 0 for file in diagnostics), "Unknown public tool evidence refused")

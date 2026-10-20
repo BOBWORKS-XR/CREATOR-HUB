@@ -197,6 +197,209 @@ def offline_verifier_inputs(folder):
 
 
 class Pure(unittest.TestCase):
+    def startup_surface(self, *, guide=True, first=True, closes=True, later_name="Not now", delayed_guide=False, inventory_completes=True):
+        offered = "before-guide" if delayed_guide else "guide"
+        state = SimpleNamespace(phase="terms" if first else offered if guide else "home", actions=[], reads=[], closing_reads=0,
+                                offer_reads=0, inventory_reads=0)
+        def source(source_id, *, optional=False):
+            state.reads.append((state.phase, source_id))
+            if source_id == "convergence-later" and state.phase == "before-guide":
+                state.offer_reads += 1
+                if state.offer_reads == 3:
+                    state.phase = "guide"
+            visible = ((source_id in ("usage-terms-checkbox", "usage-terms-continue") and state.phase == "terms")
+                       or (source_id in ("convergence-dialog", "convergence-later") and state.phase in ("guide", "closing"))
+                       or (source_id in ("projects-home-title", "project-status", "refresh-projects")
+                           and state.phase in ("before-guide", "home-loading", "home")))
+            if source_id == "convergence-dialog" and state.phase == "closing" and closes:
+                state.closing_reads += 1
+                if state.closing_reads == 2:
+                    state.phase = "home-loading"; visible = False
+            if source_id == "project-status" and state.phase == "home-loading":
+                state.inventory_reads += 1
+                if state.inventory_reads == 3 and inventory_completes:
+                    state.phase = "home"
+            if not visible:
+                self.assertTrue(optional, "Unexpected required control lookup")
+                return None
+            row = {"name": later_name if source_id == "convergence-later" else source_id,
+                   "enabled": state.phase == "home", "sensitive": True, "busy": False}
+            if source_id == "project-status":
+                row["text"] = ("2 known projects. SDK labels reflect package declarations, not build validation."
+                               if state.phase == "home" else "Reading known project locations..." if state.phase == "home-loading" else "")
+            return (row, None)
+        def click(source_id, actions):
+            self.assertNotIn(source_id, state.actions)
+            self.assertIsNotNone(source(source_id))
+            state.actions.append(source_id); actions.append(source_id)
+            if source_id == "usage-terms-continue":
+                state.phase = offered if guide else "home"
+            elif source_id == "convergence-later":
+                state.phase = "closing"
+        def bounded_wait(check, *args):
+            for _ in range(4):
+                result = check()
+                if result:
+                    return result
+            raise RuntimeError("Test readiness deadline; no repeated input")
+        return SimpleNamespace(source=source, click=click), state, bounded_wait
+
+    def test_startup_defers_observed_modal_once_before_waiting_for_inert_home(self):
+        surface, state, waiting = self.startup_surface()
+        with patch.object(M, "wait", side_effect=waiting), patch.object(M, "read", return_value=b'{"autoDownload":false}'):
+            actions = M.startup_ui(surface, Path("/fixture/home"), first=True)
+        self.assertEqual(actions, ["usage-terms-checkbox", "usage-terms-continue", "convergence-later"])
+        self.assertEqual(state.actions, actions)
+        self.assertEqual(state.closing_reads, 2)
+        self.assertFalse(any(phase not in ("home-loading", "home") and name == "projects-home-title" for phase, name in state.reads))
+        self.assertEqual(state.phase, "home")
+        self.assertEqual(state.inventory_reads, 3)
+
+    def test_startup_does_not_adopt_home_before_delayed_guide_in_either_initial_lane(self):
+        for first in (True, False):
+            with self.subTest(first=first):
+                surface, state, waiting = self.startup_surface(first=first, delayed_guide=True)
+                with patch.object(M, "wait", side_effect=waiting), patch.object(M, "read", return_value=b'{"autoDownload":false}'):
+                    actions = M.startup_ui(surface, Path("/fixture/home"), first=first)
+                expected = (["usage-terms-checkbox", "usage-terms-continue"] if first else []) + ["convergence-later"]
+                self.assertEqual(actions, expected); self.assertEqual(state.actions, expected)
+                self.assertEqual(state.offer_reads, 3); self.assertEqual(state.closing_reads, 2)
+                self.assertEqual(state.phase, "home")
+                self.assertFalse(any(phase == "before-guide" and name == "projects-home-title" for phase, name in state.reads))
+
+    def test_startup_stuck_modal_refuses_without_home_lookup_or_second_deferral(self):
+        surface, state, waiting = self.startup_surface(first=False, closes=False)
+        with patch.object(M, "wait", side_effect=waiting), patch.object(M, "read") as read:
+            with self.assertRaisesRegex(RuntimeError, "Test readiness deadline"):
+                M.startup_ui(surface, Path("/fixture/home"), first=False)
+        self.assertEqual(state.actions, ["convergence-later"])
+        self.assertFalse(any(name == "projects-home-title" for _, name in state.reads))
+        read.assert_not_called()
+
+    def test_startup_refuses_missing_seeded_offer_in_both_initial_lanes(self):
+        for first in (True, False):
+            surface, state, waiting = self.startup_surface(first=first, guide=False)
+            with self.subTest(first=first), patch.object(M, "wait", side_effect=waiting), patch.object(M, "read", return_value=b'{"autoDownload":false}') as read:
+                with self.assertRaisesRegex(RuntimeError, "Test readiness deadline"):
+                    M.startup_ui(surface, Path("/fixture/home"), first=first)
+            self.assertEqual(state.actions, ["usage-terms-checkbox", "usage-terms-continue"] if first else [])
+            read.assert_not_called()
+
+    def test_startup_requires_completed_inventory_after_deferral_not_heading_or_false_busy_alone(self):
+        surface, state, waiting = self.startup_surface(first=False, inventory_completes=False)
+        with patch.object(M, "wait", side_effect=waiting), patch.object(M, "read", return_value=b'{"autoDownload":false}') as read:
+            with self.assertRaisesRegex(RuntimeError, "Test readiness deadline"):
+                M.startup_ui(surface, Path("/fixture/home"), first=False)
+        self.assertEqual(state.actions, ["convergence-later"])
+        self.assertEqual(state.phase, "home-loading")
+        read.assert_not_called()
+
+    def test_startup_preserves_auto_download_guard_after_reviewed_deferral(self):
+        for auto_download in (False, True):
+            surface, state, waiting = self.startup_surface(first=False)
+            with self.subTest(auto_download=auto_download), patch.object(M, "wait", side_effect=waiting), \
+                    patch.object(M, "read", return_value=json.dumps({"autoDownload": auto_download}).encode()):
+                if auto_download:
+                    with self.assertRaisesRegex(RuntimeError, "Automatic download must remain disabled"):
+                        M.startup_ui(surface, Path("/fixture/home"), first=False)
+                else:
+                    self.assertEqual(M.startup_ui(surface, Path("/fixture/home"), first=False), ["convergence-later"])
+            self.assertEqual(state.actions, ["convergence-later"])
+
+    def test_startup_refuses_unreviewed_deferral_label_or_repeated_terms_without_input(self):
+        for first, label in ((False, "Continue in Hub"), (True, "Not now")):
+            surface, state, waiting = self.startup_surface(first=first, later_name=label)
+            with self.subTest(first=first, label=label), patch.object(M, "wait", side_effect=waiting), patch.object(M, "read") as read:
+                with self.assertRaisesRegex(RuntimeError, "Accepted native terms unexpectedly repeated" if first else "Unexpected migration/recovery UI"):
+                    M.startup_ui(surface, Path("/fixture/home"), first=False)
+            self.assertEqual(state.actions, [])
+            read.assert_not_called()
+
+    def test_bootstrap_failure_capture_is_owned_bounded_and_independent_without_new_input(self):
+        rows = [{"id": "native-support-status", "text": "Synthetic download refused", "showing": True}]
+        for snapshot_fails, bitmap_fails in ((False, False), (True, False), (False, True)):
+            surface = SimpleNamespace(record={"pid": 17}, snapshot=lambda: (rows, []))
+            if snapshot_fails:
+                surface.snapshot = lambda: (_ for _ in ()).throw(RuntimeError("DO-NOT-RETAIN"))
+            with self.subTest(snapshot_fails=snapshot_fails, bitmap_fails=bitmap_fails), \
+                    patch.object(M, "phase_bitmap", side_effect=RuntimeError("DO-NOT-RETAIN") if bitmap_fails else None,
+                                 return_value={"nonblank": True, "windowOnly": True}) as bitmap, patch.object(M, "save") as save:
+                result = M.capture_bootstrap_failure(surface, ["usage-terms-checkbox", "usage-terms-continue", "native-support-install"])
+            bitmap.assert_called_once_with(surface, "bootstrap-failure-bitmap")
+            self.assertTrue(result["readOnly"]); self.assertFalse(result["qualified"])
+            self.assertEqual(result["actions"].count("native-support-install"), 1)
+            self.assertNotIn("DO-NOT-RETAIN", json.dumps(result))
+            if not snapshot_fails:
+                self.assertEqual(result["snapshot"], rows)
+            save.assert_called_once_with(M.BASE / "result/bootstrap-failure-ui.json", result)
+        with patch.object(M, "phase_bitmap", side_effect=RuntimeError("unavailable")), patch.object(M, "save", side_effect=FileExistsError):
+            M.capture_bootstrap_failure(SimpleNamespace(record={}, snapshot=lambda: ([], [])), [])
+
+    def test_bootstrap_dialog_deadline_captures_local_surface_and_preserves_original_error(self):
+        for diagnostic_fails in (False, True):
+            actions = []
+            root = {"pid": 42, "uids": [M.UID] * 4, "executable": "/fixture/AppDir/usr/bin/creator-hub", "kernelImageSha256": "a" * 64}
+            surface = SimpleNamespace(source=lambda *a, **k: ({}, None), click=lambda name, supplied: (actions.append(name), supplied.append(name)))
+            original = RuntimeError("Original native dialog readiness deadline")
+            review = {"portable": {"16": {"manifest": {"entries": {M.ROOT_ENTRY: {"sha256": "a" * 64}}}}}}
+            with self.subTest(diagnostic_fails=diagnostic_fails), patch.object(M, "object_path", return_value=Path("/fixture/source")), \
+                    patch.object(M, "object_pin", return_value={}), patch.object(M, "bound"), \
+                    patch.object(M.subprocess, "Popen", return_value=SimpleNamespace(pid=42, poll=lambda: None)), \
+                    patch.object(M, "kernel_record", return_value=root), patch.object(M, "children", return_value=[]), \
+                    patch.object(M, "wait", side_effect=lambda check, *a: check()), \
+                    patch.object(M, "Surface", side_effect=[surface, original]) as surfaces, \
+                    patch.object(M, "capture_bootstrap_failure", side_effect=PermissionError("diagnostic refused") if diagnostic_fails else None) as capture:
+                with self.assertRaises(RuntimeError) as failure:
+                    M.bootstrap16(Path("/fixture"), {}, review, {"HOME": "/fixture/home"}, None, None, None, None)
+            self.assertIs(failure.exception, original)
+            self.assertEqual(actions, ["usage-terms-checkbox", "usage-terms-continue", "native-support-install"])
+            self.assertEqual(surfaces.call_count, 2)
+            self.assertEqual(surfaces.call_args.kwargs["title"], "Install native support")
+            capture.assert_called_once_with(surface, actions)
+
+    def transport_diagnostic_fixture(self, portable=True):
+        input_profile = profile(portable)
+        scenario = "portable-native-cancel" if portable else "deb-native-cancel"
+        files = {name: M.object_pin(input_profile, role) for name, role in M.transport_files(input_profile, scenario).items()}
+        mode = "portable" if portable else "deb"
+        value = {"schemaVersion": 1, "scope": "linux-" + mode + "-production016-to-private017-lab-transport", "mode": mode,
+                 "fromVersion": "0.1.16", "targetVersion": "0.1.17", "labDiscovery": True,
+                 **dict.fromkeys(("publicDiscovery", "nativeAcceptanceTested", "baselineActuallyTested", "signaturesVerifiedByHarness",
+                                  "signedUpdateAccepted", "migrationAccepted", "restartAccepted", "restoredViewsAccepted", "liveAiAcceptance", "releaseReady"), False),
+                 "pins": files, "connectionCount": 1, "requestCount": 1, "receivedHttpBytes": 128,
+                 "reservedResponseBytes": 256, "rejectedRequestCount": 0, "closeReason": "caller", "requests": []}
+        return value, {"files": files}, scenario
+
+    def test_closed_transport_diagnostic_keeps_partial_known_requests_without_claiming_acceptance(self):
+        value, pins, scenario = self.transport_diagnostic_fixture()
+        member = next(iter(pins["files"]))
+        directory, name = member.split("/", 1)
+        value["requests"] = [{"host": "github.com", "path": "/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.16/" + name,
+                              "sha256": pins["files"][member]["sha256"]}]
+        original = copy.deepcopy(value)
+        result = M.closed_transport_diagnostic(value, pins, scenario)
+        self.assertEqual(result["requests"], value["requests"])
+        self.assertTrue(result["readOnly"]); self.assertFalse(result["qualified"])
+        self.assertNotIn("pins", result); self.assertEqual(value, original)
+        with self.assertRaises(RuntimeError):
+            M.validate_transport_report(value, pins, scenario)
+        tree = ast.parse(Path(M.__file__).read_text())
+        exporter = ast.unparse(next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "export_evidence"))
+        for name in ("result/bootstrap-failure-ui.json", "result/bootstrap-failure-bitmap/root-window.png", "result/transport-diagnostic.json"):
+            self.assertIn(name, exporter)
+
+    def test_closed_transport_diagnostic_refuses_secrets_foreign_routes_changed_pins_and_bounds(self):
+        for mutate in (lambda v: v.update(key="DO-NOT-RETAIN"), lambda v: v.update(closeReason="DO-NOT-RETAIN"),
+                       lambda v: v.update(requestCount=True), lambda v: v.update(connectionCount=2**40),
+                       lambda v: v.update(requests=[{"host": "foreign", "path": "/secret", "sha256": "a" * 64}]),
+                       lambda v: v.update(requests=[{"host": "api.github.com", "path": "/secret", "sha256": "a" * 64}]),
+                       lambda v: v.update(requests=[{"host": "api.github.com", "path": "/repos/BOBWORKS-XR/CREATOR-HUB/releases?per_page=10", "sha256": "a" * 64}] * 12),
+                       lambda v: v.update(pins={})):
+            value, pins, scenario = self.transport_diagnostic_fixture()
+            mutate(value)
+            with self.assertRaises(RuntimeError):
+                M.closed_transport_diagnostic(value, pins, scenario)
+
     def public_tool_failure(self, argv, *, output=b"installer output\n", error=b"dependency failure\n", code=1, **kwargs):
         def child(actual, **options):
             self.assertEqual(actual, argv)
