@@ -2381,7 +2381,8 @@ class HtmlActionDiagnostics(unittest.TestCase):
         surface, _, _, _ = self.observe(interface)
         surface.record, surface.last = {"pid": 42}, [self.row()]
         retained = eval(compile(ast.Expression(copy.deepcopy(save_call.args[1])), "actual-ui-export", "eval"), {"current": surface})
-        self.assertEqual(retained, {"root": surface.record, "snapshot": surface.last, "htmlButtonActions": surface.html_actions})
+        self.assertEqual(retained, {"root": surface.record, "snapshot": surface.last,
+                                   "htmlButtonActions": surface.html_actions, "axParentDiagnostic": None})
         self.assertNotIn("snapshot()", ast.unparse(save_call)); self.assertNotIn("walk()", ast.unparse(save_call))
 
 
@@ -2391,7 +2392,8 @@ class HomeMenuLabels(unittest.TestCase):
     def select(self, rows):
         tree = ast.parse(Path(M.__file__).read_text())
         original = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "navigate_home")
-        body = copy.deepcopy(original.body[:4]) + [ast.Return(value=ast.Name(id="choices", ctx=ast.Load()))]
+        end = next(i for i, n in enumerate(original.body) if "One exact Home navigation control required" in ast.unparse(n))
+        body = copy.deepcopy(original.body[:end + 1]) + [ast.Return(value=ast.Name(id="choices", ctx=ast.Load()))]
         function = ast.FunctionDef(name="select", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg="surface")],
             kwonlyargs=[], kw_defaults=[], defaults=[]), body=body, decorator_list=[])
         clicks, nodes = [], [object() for _ in rows]
@@ -2456,7 +2458,8 @@ class HomeMenuLabels(unittest.TestCase):
                 start = next(i for i, n in enumerate(statements) if isinstance(n, ast.Assign)
                              and isinstance(n.targets[0], ast.Tuple) and [v.id for v in n.targets[0].elts] == ["row", "node"])
             else:
-                start = 4
+                start = next(i for i, n in enumerate(statements) if isinstance(n, ast.Assign)
+                             and isinstance(n.targets[0], ast.Tuple) and [v.id for v in n.targets[0].elts] == ["row", "_"])
             end = next(i for i, n in enumerate(statements) if "Navigation changed before input" in ast.unparse(n) or "Home navigation changed" in ast.unparse(n))
             function = ast.FunctionDef(name="identity", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
                 body=copy.deepcopy(statements[start:end + 1]), decorator_list=[])
@@ -2567,6 +2570,129 @@ class JournalMetadataDiagnostics(unittest.TestCase):
         for call in calls:
             self.assertEqual([(k.arg, ast.unparse(k.value)) for k in call.keywords], [("diagnostics", "report['journalDiagnostics']")])
         self.assertIn("'journalDiagnostics': []", ast.unparse(session))
+
+
+class StartupPartialEvidence(unittest.TestCase):
+    def test_startup_retains_attempts_and_phase_even_if_an_action_raises(self):
+        surface, state, waiting = Pure().startup_surface()
+        report = {"startupUi": []}; original = RuntimeError("Original action outcome unknown")
+        click = surface.click
+        def uncertain(control, actions):
+            self.assertEqual(report["startupPhase"], control)
+            click(control, actions)
+            if control == "usage-terms-continue": raise original
+        surface.click = uncertain
+        with patch.object(M, "wait", side_effect=waiting), self.assertRaises(RuntimeError) as error:
+            M.startup_ui(surface, Path("/fixture/home"), first=True, actions=report["startupUi"], progress=report)
+        self.assertIs(error.exception, original)
+        self.assertEqual(report["startupUi"], ["usage-terms-checkbox", "usage-terms-continue"])
+        self.assertEqual(report["startupPhase"], "usage-terms-continue")
+        self.assertEqual(surface.call_phase, "startup-ui:usage-terms-continue")
+        self.assertEqual(state.actions, report["startupUi"])
+
+    def test_first_lookup_refusal_preserves_original_exception_and_pre_wait_phase(self):
+        report = {"startupUi": []}; surface, _, waiting = Pure().startup_surface()
+        original = RuntimeError("Missing AX parent")
+        def source(control, **kwargs):
+            self.assertEqual(report["startupPhase"], "wait-usage-terms")
+            self.assertEqual(control, "usage-terms-checkbox")
+            raise original
+        surface.source = source
+        with patch.object(M, "wait", side_effect=waiting), self.assertRaises(RuntimeError) as error:
+            M.startup_ui(surface, Path("/fixture/home"), first=True, actions=report["startupUi"], progress=report)
+        self.assertIs(error.exception, original)
+        self.assertEqual(report["startupUi"], [])
+        self.assertEqual(report["startupPhase"], "wait-usage-terms")
+
+    def test_progress_does_not_add_lookups_snapshots_waits_or_actions(self):
+        results = []
+        for attach in (False, True):
+            surface, state, waiting = Pure().startup_surface(); report = {"startupUi": []}
+            events = []; source, snapshot, click = surface.source, surface.snapshot, surface.click
+            def observed_source(control, **kwargs):
+                events.append(("source", control)); return source(control, **kwargs)
+            def observed_snapshot(): events.append(("snapshot",)); return snapshot()
+            def observed_click(control, actions):
+                if attach: self.assertEqual(report["startupPhase"], control)
+                events.append(("click", control)); return click(control, actions)
+            surface.source, surface.snapshot, surface.click = observed_source, observed_snapshot, observed_click
+            with patch.object(M, "wait", side_effect=waiting), patch.object(M, "read", return_value=b'{"autoDownload":false}'):
+                result = M.startup_ui(surface, Path("/fixture/home"), first=True,
+                                      **({"actions": report["startupUi"], "progress": report} if attach else {}))
+            if attach:
+                self.assertIs(result, report["startupUi"]); self.assertEqual(report["startupPhase"], "complete")
+            results.append((events, state.actions, result))
+        self.assertEqual(results[0], results[1])
+
+    def test_caller_publishes_startup_and_page_action_lists_before_entering_functions(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        session = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session")
+        source = ast.unparse(session)
+        self.assertIn("'startupUi': []", source); self.assertIn("'startupPhase': 'not-started'", source)
+        call = next(n for n in ast.walk(session) if isinstance(n, ast.Call) and ast.unparse(n.func) == "startup_ui")
+        options = {k.arg: ast.unparse(k.value) for k in call.keywords}
+        self.assertEqual(options["actions"], "report['startupUi']"); self.assertEqual(options["progress"], "report")
+        pages = [n for n in ast.walk(session) if isinstance(n, ast.Call) and ast.unparse(n.func) == "direct_pages"]
+        self.assertEqual(sorted(ast.unparse(n.args[1]) for n in pages),
+                         ["report['initialPageActionAttempts']", "report['successorPageActionAttempts']"])
+
+
+class PartialAxParentEvidence(unittest.TestCase):
+    def fixture(self, *, parent_present=False):
+        calls = []
+        class Node:
+            def __init__(self, ref, role, parent=None): self.ref, self.role, self.parent = ref, role, parent
+            def clear_cache(self): calls.append((self.ref, "clear"))
+            def get_process_id(self): calls.append((self.ref, "pid")); return 42
+            def get_role(self): calls.append((self.ref, "role")); return self.role
+            def get_parent(self): calls.append((self.ref, "parent")); return self.parent
+            def get_name(self): raise AssertionError("PRIVATE_EDITABLE_NAME_MUST_NOT_BE_READ")
+            def get_attributes(self): raise AssertionError("PRIVATE_ATTRIBUTES_MUST_NOT_BE_READ")
+            def get_state_set(self): raise AssertionError("Additional state query refused")
+        frame = Node("/frame", 2)
+        child = Node("/child", 43, frame if parent_present else None)
+        surface = M.Surface.__new__(M.Surface)
+        surface.pid, surface.dialog, surface.last = 42, False, None
+        surface.call_phase = "startup-ui:wait-usage-terms"
+        surface.atspi = SimpleNamespace(Role=SimpleNamespace(APPLICATION=1, FRAME=2, WINDOW=3))
+        surface.references = SimpleNamespace(window=None, identity=lambda node, owner: (":1.4", node.ref))
+        surface.recheck = lambda **kwargs: calls.append(("surface", "recheck"))
+        surface.node = lambda node: calls.append((node.ref, "ownership"))
+        surface.native_frame = lambda: frame
+        def children(node, limit):
+            calls.append((node.ref, "children")); return [child] if node is frame else []
+        surface.helper = SimpleNamespace(fresh_close_children=children)
+        return surface, calls, frame, child
+
+    def test_missing_parent_captures_only_same_read_context_before_original_refusal(self):
+        surface, calls, _, _ = self.fixture(); original_require = M.require
+        original = RuntimeError("Missing AX parent")
+        def require(value, message):
+            if not value and message == "Missing AX parent": raise original
+            original_require(value, message)
+        with patch.object(M, "wait", side_effect=lambda check: check()), patch.object(M, "require", side_effect=require), self.assertRaises(RuntimeError) as error:
+            surface.walk()
+        self.assertIs(error.exception, original)
+        evidence = surface.ax_parent_diagnostic
+        self.assertEqual(evidence["phase"], "startup-ui:wait-usage-terms")
+        self.assertEqual(evidence["site"], "Surface.walk/parent-presence")
+        self.assertEqual(evidence["nodeReference"], (":1.4", "/child"))
+        self.assertEqual(evidence["expectedParentReference"], (":1.4", "/frame"))
+        self.assertFalse(evidence["actualParentPresent"])
+        self.assertEqual((evidence["depth"], evidence["visitedCount"], evidence["pendingCount"], evidence["role"]), (1, 1, 0, 43))
+        self.assertEqual(evidence["unreadFields"], ["state", "toolkit", "sourceId"])
+        self.assertNotIn("PRIVATE", json.dumps(evidence)); self.assertLess(len(json.dumps(evidence)), 2048)
+        self.assertEqual(calls.count(("/child", "role")), 1)
+        self.assertEqual(calls.count(("/child", "parent")), 1)
+        self.assertNotIn(("/child", "children"), calls)
+
+    def test_valid_graph_retains_strict_fresh_checks_without_new_queries(self):
+        surface, calls, frame, child = self.fixture(parent_present=True)
+        with patch.object(M, "wait", side_effect=lambda check: check()): result = surface.walk()
+        self.assertEqual(result, [frame, child])
+        self.assertEqual(calls.count(("surface", "recheck")), 2)
+        self.assertEqual(calls.count(("/child", "parent")), 1)
+        self.assertIsNone(getattr(surface, "ax_parent_diagnostic", None))
 
 
 if __name__ == "__main__":

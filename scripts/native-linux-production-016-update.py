@@ -871,6 +871,8 @@ class Surface:
             self.main_window = (others[0], {k: main[k] for k in ("pid", "title", "mapped", "client")})
         self.last = None
         self.html_actions = []
+        self.call_phase = None
+        self.ax_parent_diagnostic = None
 
     def find_window(self, title):
         self.stable()
@@ -946,8 +948,14 @@ class Surface:
             require(key not in seen, "Duplicate/cyclic AX graph")
             seen.add(key)
             if depth:
-                require(node.get_role() not in (self.atspi.Role.APPLICATION, self.atspi.Role.FRAME, self.atspi.Role.WINDOW), "Nested AX window refused")
+                role = node.get_role()
+                require(role not in (self.atspi.Role.APPLICATION, self.atspi.Role.FRAME, self.atspi.Role.WINDOW), "Nested AX window refused")
                 actual = node.get_parent()
+                if actual is None and getattr(self, "ax_parent_diagnostic", None) is None:
+                    self.ax_parent_diagnostic = {"site": "Surface.walk/parent-presence", "phase": getattr(self, "call_phase", None),
+                        "nodeReference": key, "expectedParentReference": parent, "actualParentPresent": False,
+                        "depth": depth, "visitedCount": len(nodes), "pendingCount": len(pending), "role": int(role),
+                        "unreadFields": ["state", "toolkit", "sourceId"]}
                 require(actual is not None, "Missing AX parent")
                 self.node(actual); parents.append(tuple(self.references.identity(actual, self)))
             nodes.append(node)
@@ -1109,6 +1117,7 @@ def field_text(surface, source_id):
 
 
 def direct_pages(surface, actions):
+    surface.call_phase = "direct-pages"
     phase_processes(surface)
     wait(lambda: surface.source("projects-home-title", optional=True))
     require(field_text(surface, "projects-home-title") == "Projects", "Direct Projects page missing")
@@ -1376,6 +1385,7 @@ def journal(home, previous=None, *, diagnostics=None):
 
 
 def navigate_home(surface):
+    surface.call_phase = "navigate-home"
     surface.click("suite-trigger", [])
     rows, nodes = surface.snapshot()
     choices = [(r, n) for r, n in zip(rows, nodes) if r["showing"] and r["role"] == int(surface.atspi.Role.PUSH_BUTTON)
@@ -1394,19 +1404,33 @@ def navigate_home(surface):
     wait(lambda: surface.source("projects-home-title", optional=True))
 
 
-def startup_ui(surface, home, *, first):
-    actions = []
+def startup_ui(surface, home, *, first, actions=None, progress=None):
+    actions = [] if actions is None else actions
+    def phase(value):
+        surface.call_phase = "startup-ui:" + value
+        if progress is not None:
+            progress["startupPhase"] = value
     if first:
+        phase("wait-usage-terms")
         wait(lambda: surface.source("usage-terms-checkbox", optional=True))
+        phase("usage-terms-checkbox")
         surface.click("usage-terms-checkbox", actions)
+        phase("usage-terms-continue")
         surface.click("usage-terms-continue", actions)
+        phase("wait-usage-terms-dismissed")
         wait(lambda: surface.source("usage-terms-continue", optional=True) is None)
     else:
+        phase("review-existing-terms")
         require(surface.source("usage-terms-continue", optional=True) is None, "Accepted native terms unexpectedly repeated")
+    phase("wait-convergence-offer")
     later = wait(lambda: surface.source("convergence-later", optional=True))
+    phase("review-convergence-label")
     require(later[0]["name"] == "Not now", "Unexpected migration/recovery UI in updater lane")
+    phase("convergence-later")
     surface.click("convergence-later", actions)
+    phase("wait-convergence-dismissed")
     wait(lambda: surface.source("convergence-dialog", optional=True) is None)
+    phase("wait-projects-home")
     wait(lambda: surface.source("projects-home-title", optional=True))
     def projects_ready():
         rows, _ = surface.snapshot()
@@ -1422,8 +1446,11 @@ def startup_ui(surface, home, *, first):
                 return False
         refresh = surface.source("refresh-projects", optional=True)
         return bool(refresh and refresh[0]["enabled"] and refresh[0]["sensitive"] and not refresh[0]["busy"])
+    phase("wait-projects-ready")
     wait(projects_ready)
+    phase("check-preferences")
     require(parse(read(home / PREFS))["autoDownload"] is False, "Automatic download must remain disabled")
+    phase("complete")
     return actions
 
 
@@ -1695,6 +1722,7 @@ def native_session(env):
     value = ctypes.c_int(); require(libc.prctl(37, ctypes.byref(value), 0, 0, 0) == 0 and value.value == 1, "Subreaper setup not confirmed")
     report = {"schemaVersion": 1, "profile": PROFILE, "scenario": scenario, "harnessSource": env["GITHUB_SHA"],
               "fromSource": profile["baseline"]["source"], "toSource": FIXED["17"]["source"], "nativeActions": [], "systemActions": [], "journalDiagnostics": [],
+              "startupUi": [], "startupPhase": "not-started", "initialPageActionAttempts": [], "successorPageActionAttempts": [],
               "automaticSuccessor": None, "scenarioPassed": False, "disposableTeardownRequired": True,
               "privateTargetQualification": private_target_qualification(), "oldRetirementHelperRestored": False, **FALSE}
     portable = scenario.startswith("portable-")
@@ -1745,8 +1773,8 @@ def native_session(env):
         report["initialRoot"] = old; save(BASE / "result/root.json", old)
         old_bus = verify_bus(old, bus, polkit, GLib, portable=portable)
         surface = Surface(old, x11, helper, native, Atspi, manifest=manifest, generation_dir=generation_dir, inventory=inventory)
-        report["startupUi"] = startup_ui(surface, home, first=not portable)
-        direct_pages(surface, [])
+        startup_ui(surface, home, first=not portable, actions=report["startupUi"], progress=report)
+        direct_pages(surface, report["initialPageActionAttempts"])
         report["initialBitmap"] = phase_bitmap(surface, "initial-bitmap")
         first_journal = journal(home, diagnostics=report["journalDiagnostics"])
         navigate_home(surface)
@@ -1787,7 +1815,7 @@ def native_session(env):
             navigate_home(replacement)
             wait(lambda: field_text(replacement, "hub-update-status") == "You are using Hub 0.1.17. No newer update was found.", 90)
             report["fresh17UiVersion"] = True
-            report["directPagesObserved"] = direct_pages(replacement, [])
+            report["directPagesObserved"] = direct_pages(replacement, report["successorPageActionAttempts"])
             report["successorBitmap"] = phase_bitmap(replacement, "successor-bitmap")
             report["readJournal17"] = journal(home, first_journal, diagnostics=report["journalDiagnostics"])
             if portable:
@@ -1838,7 +1866,8 @@ def native_session(env):
             if current is not None:
                 try:
                     save(BASE / "result" / ("successor-ui.json" if current is replacement else "original-ui.json"),
-                         {"root": current.record, "snapshot": current.last, "htmlButtonActions": current.html_actions})
+                         {"root": current.record, "snapshot": current.last, "htmlButtonActions": current.html_actions,
+                          "axParentDiagnostic": getattr(current, "ax_parent_diagnostic", None)})
                     current.bus.close_sync(None)
                 except Exception as error:
                     failure = failure or error
