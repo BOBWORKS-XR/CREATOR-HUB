@@ -301,13 +301,41 @@ class CaptureTests(unittest.TestCase):
         x11.property.return_value = (33, 32, [100, 200])
         self.assertEqual(C.wm_client_ids(x11), native.client_ids(x11))
 
-    def test_local_inventory_rejects_missing_malformed_duplicate_or_unbounded_ids(self):
-        for value in (None, (6, 32, []), (33, 8, []), (33, 32), (33, 32, ""), (33, 32, [1, 1]),
+    def test_local_inventory_rejects_malformed_duplicate_or_unbounded_ids(self):
+        for value in ([33, 32, []], (6, 32, []), (33, 8, []), (33, 32), (33, 32, ""), (33, 32, [1, 1]),
                       (33, 32, [0]), (33, 32, [True]), (33, 32, [2**32]), (33, 32, list(range(1, 34)))):
             with self.subTest(value=value), self.assertRaises(RuntimeError):
                 x11 = mock.Mock()
                 x11.property.return_value = value
                 C.wm_client_ids(x11)
+
+    def test_actual_x11_missing_atom_contract_is_empty_only_in_local_reader(self):
+        helper, native = C.helpers()
+        x11 = object.__new__(helper.X11)
+        x11.display, x11.x = None, mock.Mock()
+        x11.atom = mock.Mock(return_value=0)
+        self.assertIsNone(x11.property(1, "_NET_CLIENT_LIST_STACKING"))
+        x11.x.XGetWindowProperty.assert_not_called()
+        with self.assertRaises(RuntimeError):
+            native.client_ids(x11)
+        report = {}
+        self.assertEqual(C.wm_client_ids(x11, report), [])
+        self.assertEqual(report["prelaunchWmProperty"], {"pythonType": "NoneType", "rawRetained": True, "raw": None})
+
+    def test_prelaunch_property_evidence_precedes_typed_refusal_and_is_bounded(self):
+        for value in ((6, 32, []), (33, 32, [1, 1]), (33, 32, list(range(1, 257))), (33, 32, [0xffffffff] * 256)):
+            report, x11 = {}, mock.Mock()
+            x11.property.return_value = value
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                C.wm_client_ids(x11, report)
+            self.assertEqual(report["prelaunchWmProperty"]["raw"], [value[0], value[1], value[2]])
+            self.assertLess(len(json.dumps(report)), 4096)
+        report, x11 = {}, mock.Mock()
+        x11.property.return_value = (33, 8, b"DO_NOT_EXPORT_UNKNOWN_BYTES")
+        with self.assertRaises(RuntimeError):
+            C.wm_client_ids(x11, report)
+        self.assertFalse(report["prelaunchWmProperty"]["rawRetained"])
+        self.assertNotIn("DO_NOT_EXPORT", json.dumps(report))
 
     def test_real_request_parser_rejects_numeric_pid_and_accepts_strings(self):
         helper, _native = C.helpers()
@@ -698,7 +726,7 @@ class CaptureTests(unittest.TestCase):
             C.session(self.env())
         launch.assert_not_called()
 
-    def observe_fixture(self, *, bitmap_error=None, changed_before_close=False, sandboxes=None):
+    def observe_fixture(self, *, bitmap_error=None, changed_before_close=False, sandboxes=None, prelaunch_property=(33, 32, [])):
         """Mocks only: no ELF, display, native imports, screenshot or input is executed."""
         (self.root / "evidence").mkdir()
         C.save(self.root / "evidence/session-attempt.json", {"attemptConsumed": True})
@@ -714,8 +742,8 @@ class CaptureTests(unittest.TestCase):
         process = {"pid": 123, "parentPid": os.getpid(), "uids": [1001] * 4, "startTime": "456",
                    "executable": str(self.root / "image" / C.NATIVE), "kernelImageSha256": staged["image"]["sha256"]}
         bound = {"pid": 123, "mapped": True, "client": 10, "title": "Unity Hub"}
-        clients = iter([[], [100], []])
-        x11.property.side_effect = lambda _window, name: (33, 32, next(clients)) if name == "_NET_CLIENT_LIST_STACKING" else (33, 32, [1])
+        clients = iter([prelaunch_property, (33, 32, [100]), (33, 32, [])])
+        x11.property.side_effect = lambda _window, name: next(clients) if name == "_NET_CLIENT_LIST_STACKING" else (33, 32, [1])
         x11.inspect.return_value = bound
         helper.X11.return_value = x11
         real_helper, _real_native = C.helpers()
@@ -800,6 +828,30 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(report["normalCloseAttempted"])
         self.assertFalse(report["normalCloseObserved"])
         x11.close_window.assert_not_called()
+
+    def test_missing_prelaunch_property_is_retained_in_mocked_observation(self):
+        report, failure, _helper, _x11, _launch = self.observe_fixture(prelaunch_property=None)
+        self.assertIsNone(failure)
+        self.assertEqual(report["prelaunchWmProperty"]["raw"], None)
+        self.assertTrue(report["prelaunchWmProperty"]["rawRetained"])
+        self.assertTrue(report["normalCloseObserved"])
+
+    def test_malformed_prelaunch_property_is_retained_before_failed_observation(self):
+        report, failure, _helper, _x11, launch = self.observe_fixture(prelaunch_property=(6, 32, []))
+        self.assertIsNotNone(failure)
+        self.assertEqual(report["prelaunchWmProperty"]["raw"], [6, 32, []])
+        self.assertFalse(report["candidateExecuted"])
+        self.assertFalse(report["normalCloseAttempted"])
+        self.assertEqual(launch.call_count, 1)  # Owned Openbox only; no Hub process.
+
+    def test_nonempty_prelaunch_desktop_still_refuses_before_hub_launch(self):
+        report, failure, _helper, _x11, launch = self.observe_fixture(prelaunch_property=(33, 32, [100]))
+        self.assertIsNotNone(failure)
+        self.assertIn("Fresh owned desktop readiness required", report["refusal"])
+        self.assertEqual(report["prelaunchWmProperty"]["raw"], [33, 32, [100]])
+        self.assertFalse(report["candidateExecuted"])
+        self.assertFalse(report["normalCloseAttempted"])
+        self.assertEqual(launch.call_count, 1)
 
     def test_disabled_or_absent_userns_blocks_all_gui_launch(self):
         for value in (None, "0", "2"):

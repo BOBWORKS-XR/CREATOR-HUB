@@ -585,10 +585,26 @@ def helpers():
     return result
 
 
-def wm_client_ids(x11):
+def wm_client_ids(x11, report=None):
     """Inventory may be empty; only the later XRes check establishes window ownership."""
     root = x11.x.XDefaultRootWindow(x11.display)
     value = x11.property(root, "_NET_CLIENT_LIST_STACKING")
+    if report is not None:
+        snapshot = {"pythonType": type(value).__name__[:32], "rawRetained": False}
+        if value is None or (type(value) in (tuple, list) and len(value) == 3
+                and all(type(item) is int and 0 <= item <= 0xffffffff for item in value[:2])
+                and type(value[2]) is list and len(value[2]) <= 256
+                and all(type(item) is int and 0 <= item <= 0xffffffff for item in value[2])):
+            snapshot.update(raw=None if value is None else [value[0], value[1], list(value[2])], rawRetained=True)
+        elif type(value) in (tuple, list):
+            snapshot["fieldCount"] = len(value)
+            if len(value) == 3:
+                snapshot["dataType"] = type(value[2]).__name__[:32]
+                if type(value[2]) in (list, bytes, str):
+                    snapshot["dataCount"] = len(value[2])
+        report["prelaunchWmProperty"] = snapshot
+    if value is None:
+        return []
     require(type(value) is tuple and len(value) == 3 and value[:2] == (33, 32)
             and type(value[2]) is list and len(value[2]) <= 32
             and all(type(xid) is int and 0 < xid <= 0xffffffff for xid in value[2])
@@ -738,7 +754,7 @@ def observe(env):
             wm_output.check()
             require(wm.poll() is None, "Owned window manager exited")
         require(x11.property(x11.x.XDefaultRootWindow(x11.display), "_NET_SUPPORTING_WM_CHECK")
-                and not wm_client_ids(x11), "Fresh owned desktop readiness required")
+                and not wm_client_ids(x11, report), "Fresh owned desktop readiness required")
         executable = root / "image" / staged["image"]["relative"]
         native_pin = {key: staged["image"][key] for key in ("size", "sha256")}
         file_pin(executable, MAX_FILE, native_pin)
