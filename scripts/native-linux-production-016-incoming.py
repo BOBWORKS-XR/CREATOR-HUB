@@ -38,27 +38,28 @@ FLAGS = dict.fromkeys(("freshInstallAccepted", "manualPublic012UpgradeAccepted",
                       "unityAccepted", "releaseReady"), False)
 PROFILE = {
     "schemaVersion": 1, "cohort": "production-migration-016", "mode": "pages",
-    "assembly": {"sourceCommit": "c13cb9ef3b9116ea5ffb1f6cf8250becf5fd49e7",
-                 "sourceTree": "10623f5cdc379028ff91cbdfdbb103615969856d", "runId": 39345920645,
-                 "runAttempt": 1, "jobId": 118378461923, "artifactId": 12232135251, "zipBytes": 183558947,
-                 "zipSha256": "68117617c5d781e30ef59bd1141ff47b454bd61f53ebda116454556a7810ae82"},
+    "assembly": {"sourceCommit": "ff3053539e96d3b6af5612a8308d4bda7af773e5",
+                 "sourceTree": "a9c5c920e929bd125e359e50da4e742e9704a75c", "runId": 39362673838,
+                 "runAttempt": 1, "jobId": 118432286345, "artifactId": 12238143241, "zipBytes": 183555720,
+                 "zipSha256": "e8a36b7750c1e4bc4e3dcf68b6eff670f7f9a3a26dafa81f20e43f7790cba333"},
     "pins": {
-        "rawHub": {"size": 28664048, "sha256": "576bcd511cdfbe392b96d6eb6e6271f3a7b670f4ad7ae258aeaeccecab53e090"},
-        "deb": {"size": 64299150, "sha256": "547df71d3aa083c0861e91bb350c18d792928a31b3dce0768ac838b008345a95"},
-        "hub": {"size": 28664048, "sha256": "e543bee19394a0980d49abefaa8e2be1da0191301792eb9007b1dc477e4dace2"},
+        "rawHub": {"size": 28663344, "sha256": "a9a7789d14c9a13d1aac543d9f94a6c22a9b3f89ae1d04590c0f0401f59360df"},
+        "deb": {"size": 64296228, "sha256": "76e8b6a8b5c28f97167066784fac440c27584f8ecd492d4dae87a7a2d9307d6f"},
+        "hub": {"size": 28663344, "sha256": "69d9ad0ebf64691039f23c3f5759b02edfce8925d97cd708925268a5238f8654"},
         "manifest": {"size": 3663, "sha256": "d52dc1f5fd6ef4ce373db605411fb53a93aa45bbd1cf4d72994ffe07e22c41a3"},
         "modulesArchive": {"size": 55566243, "sha256": "5dc48637de643ff52d09fbfbf7dd4e258116646d6cf44ea58b1679237c3a8fb0"},
-        "assemblyReceipt": {"size": 3547, "sha256": "3f7d20c6642b475fb348dd6e4c37e9c6a95c42abd9be2e2ae9d2f1e94a0660f7"},
-        "packageIntegrity": {"size": 2151, "sha256": "dc439fe307347a2f382d9d2decc49b08db922a8a59b4ca34a5e7f9d0c5db0be9"},
-        "helper": {"size": 1167744, "sha256": "501e97da9c93d370caa750c46f4c3f272d546281e8e2eeedfaf4f01193d644be"},
+        "assemblyReceipt": {"size": 3547, "sha256": "c2cf8eaa89b4dde62ce13c6c574420fee7bc5415300fa182f08f629458ee2776"},
+        "packageIntegrity": {"size": 2151, "sha256": "b4fbe996a06bc31234917c4e19f9d057399a1399297a6304fbce3896e042fd49"},
+        "helper": {"size": 1168536, "sha256": "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"},
         "policy": {"size": 878, "sha256": "f4819f08e0a96e98d10a449a82a26b4f59d69714460eb9082387f746e1889bb4"},
         "service": {"size": 92, "sha256": "9a270a39c219b4f2d294cfaa2a849db84b1e1883fa532d2c90d7f95625780340"}}}
 BASELINE = {"releaseId": 402585934, "assetId": 608099582, "tagObject": "4c11a9ebaf5076fe0b051455b35b7d2dce48c119",
             "source": "35a16a45814d821d65b5d203628478449174cd55", "name": "Creator.Hub_0.1.12_amd64.deb",
             "size": 5911218, "sha256": "a1d20fb23544356d90ab2314b6d430b274220e97d9129815eea731ac39c7ffd2"}
-INSPECTION = {"run": 39348205069, "job": 118385851104, "workflow": 389992948,
-              "artifact": 12232440390, "size": 5392,
-              "sha256": "c81f98ef25690180220e8c2c89525807fe6cf4e923b629306b31ee75696863d7"}
+INSPECTION = {"run": 39364292874, "job": 118437413085, "workflow": 389992948,
+              "artifact": 12238786956, "size": 5428,
+              "sha256": "50e42962d521c0e9937f1cd13cf2131fc701e17bfa04868ac84f730a889ddd9e",
+              "source": "a47abfee7d6ff6857283bf345ae50d95243670c3"}
 PREF_KEYS = ("creator-hub.preview", "creator-hub.auto-download", "creator-hub.restore-hosted-views")
 PREF_IDS = ("preview-channel", "auto-download", "restore-hosted-views")
 # https://github.com/BOBWORKS-XR/CREATOR-HUB/blob/35a16a45814d821d65b5d203628478449174cd55/src/app.js
@@ -159,12 +160,12 @@ def validate_api(value):
     require(all(type(n) is int for n in (run["id"], run["run_attempt"], run["workflow_id"], run["repository"]["id"],
                                         job["id"], job["run_id"], job["run_attempt"], artifact["id"], artifact["size_in_bytes"])), "Canonical inspection API integers required")
     require(run["id"] == INSPECTION["run"] and run["run_attempt"] == 1 and run["workflow_id"] == INSPECTION["workflow"]
-            and run["head_sha"] == PROFILE["assembly"]["sourceCommit"] and run["head_branch"] == BRANCH.removeprefix("refs/heads/")
+            and run["head_sha"] == INSPECTION["source"] and run["head_branch"] == BRANCH.removeprefix("refs/heads/")
             and run["path"] == ".github/workflows/native-linux-production-016.yml" and run["event"] == "workflow_dispatch"
             and run["repository"]["id"] == 1364807512 and run["status"] == "completed" and run["conclusion"] == "success", "Original production inspection run differs")
     require(job["id"] == INSPECTION["job"] and job["run_id"] == run["id"] and job["run_attempt"] == 1
             and job["status"] == "completed" and job["conclusion"] == "success", "Original inspection job differs")
-    require(artifact["id"] == INSPECTION["artifact"] and artifact["name"] == "native-linux-production-016-inspection-39348205069-1"
+    require(artifact["id"] == INSPECTION["artifact"] and artifact["name"] == "native-linux-production-016-inspection-39364292874-1"
             and artifact["size_in_bytes"] == INSPECTION["size"] and artifact["digest"] == "sha256:" + INSPECTION["sha256"]
             and artifact["expired"] is False and artifact["workflow_run"]["id"] == run["id"]
             and artifact["workflow_run"]["head_sha"] == run["head_sha"]

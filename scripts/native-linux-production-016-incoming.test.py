@@ -41,13 +41,13 @@ def api():
                  digest="sha256:" + p.BASELINE["sha256"], state="uploaded",
                  browser_download_url="https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.12/" + p.BASELINE["name"])
     return dict(inspectionRun=dict(id=p.INSPECTION["run"], run_attempt=1, workflow_id=p.INSPECTION["workflow"],
-                                  head_sha=p.PROFILE["assembly"]["sourceCommit"], head_branch="validation/native-linux-production-016",
+                                  head_sha=p.INSPECTION["source"], head_branch="validation/native-linux-production-016",
                                   path=".github/workflows/native-linux-production-016.yml", event="workflow_dispatch",
                                   repository=dict(id=1364807512), status="completed", conclusion="success"),
                 inspectionJob=dict(id=p.INSPECTION["job"], run_id=p.INSPECTION["run"], run_attempt=1, status="completed", conclusion="success"),
-                inspectionArtifact=dict(id=p.INSPECTION["artifact"], name="native-linux-production-016-inspection-39348205069-1",
+                inspectionArtifact=dict(id=p.INSPECTION["artifact"], name="native-linux-production-016-inspection-39364292874-1",
                                         size_in_bytes=p.INSPECTION["size"], digest="sha256:" + p.INSPECTION["sha256"], expired=False,
-                                        workflow_run=dict(id=p.INSPECTION["run"], head_sha=p.PROFILE["assembly"]["sourceCommit"],
+                                        workflow_run=dict(id=p.INSPECTION["run"], head_sha=p.INSPECTION["source"],
                                                           repository_id=1364807512, head_repository_id=1364807512)),
                 release=dict(id=p.BASELINE["releaseId"], tag_name="v0.1.12", draft=False, prerelease=False, assets=[copy.deepcopy(asset)]), asset=asset,
                 tag=dict(ref="refs/tags/v0.1.12", object=dict(type="tag", sha=p.BASELINE["tagObject"])),
@@ -367,7 +367,29 @@ class Admission(unittest.TestCase):
             with self.assertRaises(REFUSAL):
                 p.validate_api(changed)
 
-    def test_frozen_c13_profile_and_false_gates_cannot_be_relabelled(self):
+    def test_fixed_distinct_inspection_and_product_sources_are_not_interchangeable(self):
+        product = "ff3053539e96d3b6af5612a8308d4bda7af773e5"
+        inspection = "a47abfee7d6ff6857283bf345ae50d95243670c3"
+        self.assertEqual(p.PROFILE["assembly"]["sourceCommit"], product)
+        self.assertEqual(p.INSPECTION["source"], inspection)
+        self.assertNotEqual(product, inspection)
+        p.validate_api(api())
+        p.validate_binding(binding(), environment())
+        for wrong_source in (product, "c" * 40):
+            changed = api()
+            changed["inspectionRun"]["head_sha"] = wrong_source
+            changed["inspectionArtifact"]["workflow_run"]["head_sha"] = wrong_source
+            with self.subTest(inspection_source=wrong_source), self.assertRaises(REFUSAL):
+                p.validate_api(changed)
+        for wrong_source in (inspection, "c" * 40):
+            changed = binding()
+            changed["profile"]["assembly"]["sourceCommit"] = wrong_source
+            changed["api"]["assembly"]["sourceCommit"] = wrong_source
+            changed["productionProof"]["sourceCommit"] = wrong_source
+            with self.subTest(product_source=wrong_source), self.assertRaises(REFUSAL):
+                p.validate_binding(changed, environment())
+
+    def test_frozen_final016_profile_and_false_gates_cannot_be_relabelled(self):
         p.validate_binding(binding(), environment())
         for mutate in (lambda x: x["profile"]["assembly"].update(sourceCommit="d" * 40),
                        lambda x: x["profile"]["assembly"].update(runAttempt=True),
