@@ -85,7 +85,7 @@ pub fn run() -> Result<(), &'static str> {
             gtk::DialogFlags::MODAL,
             gtk::MessageType::Warning,
             gtk::ButtonsType::None,
-            "Native Hub support is required",
+            "Creator Hub could not open",
         );
         error.set_title("Creator Hub");
         error.set_position(gtk::WindowPosition::Center);
