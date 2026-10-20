@@ -1,0 +1,265 @@
+name: Private actual017 portable transport (unsigned, never acceptance)
+
+on:
+  # Registration only. Pushes cannot execute the package job.
+  push:
+    branches: [validation/private-linux-portable-fixture-017]
+  workflow_dispatch:
+    inputs:
+      producer_profile:
+        description: Independent canonical JSON profile without tools; actual successful017 assembly/API/ZIP/member pins, signed016 thirteen-file pins and signed017 plan SHA. No defaults or policy overrides.
+        required: true
+        type: string
+      producer_profile_sha256:
+        description: SHA256 of the exact producer_profile text (pretty two-space JSON, no trailing newline). Tool pins are derived only after controlled validator builds.
+        required: true
+        type: string
+      signed_inputs:
+        description: Canonical JSON of schemaVersion and signed016/signed017 Actions artifact carriers. Exact run/attempt/job/workflow/source/tree/ZIP and member identities; carriers are not signature authority. No draft-write permission.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/private-linux-portable-fixture-017'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 55
+    env:
+      CREATOR_PRIVATE_PORTABLE_017: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Install locked inspection dependencies without hooks
+        run: npm ci --ignore-scripts
+      - name: Pure regressions before downloads or native dependencies
+        run: node --test scripts/private-linux-portable-fixture-017.test.cjs
+      - name: Bind independent requests, actual successful APIs and exact data-only artifact downloads
+        id: download
+        uses: actions/github-script@v8
+        env:
+          PRODUCER_PROFILE: ${{ inputs.producer_profile }}
+          PRODUCER_PROFILE_SHA256: ${{ inputs.producer_profile_sha256 }}
+          SIGNED_INPUTS: ${{ inputs.signed_inputs }}
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{execFileSync}=require('node:child_process');
+            const lane=require('./scripts/private-linux-portable-fixture-017.cjs'),base=require('./scripts/linux-016-portable-package.cjs');
+            const keys=(v,n)=>{assert.ok(v&&typeof v==='object'&&!Array.isArray(v));assert.deepEqual(Object.keys(v).sort(),[...n].sort());};
+            const sha=(v,n=64)=>assert.ok(typeof v==='string'&&new RegExp(`^[a-f0-9]{${n}}$`).test(v));
+            const id=v=>assert.ok(Number.isSafeInteger(v)&&v>0);
+            const pin=(v,max)=>{keys(v,['size','sha256']);id(v.size);sha(v.sha256);assert.ok(v.size<=max);};
+            const parse=(text,max)=>{assert.ok(typeof text==='string'&&Buffer.byteLength(text)>0&&Buffer.byteLength(text)<=max);const v=JSON.parse(text);assert.equal(text,JSON.stringify(v,null,2));return v;};
+            const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+            lane.admission(process.env);assert.equal(context.sha,process.env.GITHUB_SHA);
+            const profile=parse(process.env.PRODUCER_PROFILE,32768),carriers=parse(process.env.SIGNED_INPUTS,32768);
+            sha(process.env.PRODUCER_PROFILE_SHA256);assert.equal(hash(Buffer.from(process.env.PRODUCER_PROFILE)),process.env.PRODUCER_PROFILE_SHA256);
+            keys(profile,['schemaVersion','profile','assembly017','signed016','signed017']);assert.equal(profile.schemaVersion,1);assert.equal(profile.profile,lane.PROFILE);
+            const a=profile.assembly017;keys(a,['runId','runAttempt','jobId','workflowId','artifactId','zip','files']);
+            for(const k of ['runId','runAttempt','jobId','workflowId','artifactId'])id(a[k]);pin(a.zip,base.LIMITS.zip);keys(a.files,Object.keys(lane.ROLES));
+            const members=new Set();
+            for(const [role,v]of Object.entries(a.files)){keys(v,['member','size','sha256']);pin({size:v.size,sha256:v.sha256},role==='manifest'?65536:['receipt','expected','integrity','api'].includes(role)?2*1024*1024:base.LIMITS.file);assert.ok(base.relative(v.member)&&path.posix.basename(v.member)===lane.ROLES[role]);assert.ok(!members.has(v.member.toLowerCase()));members.add(v.member.toLowerCase());}
+            keys(profile.signed016,['planSha256','files']);sha(profile.signed016.planSha256);keys(profile.signed016.files,lane.LEGACY_NAMES);
+            for(const [name,v]of Object.entries(profile.signed016.files))pin(v,name.endsWith('.minisig')?4096:name.endsWith('.json')?2*1024*1024:base.LIMITS.file);
+            keys(profile.signed017,['planSha256']);sha(profile.signed017.planSha256);
+            keys(carriers,['schemaVersion','signed016','signed017']);assert.equal(carriers.schemaVersion,1);
+            const c=carriers.signed016;keys(c,['runId','runAttempt','jobId','workflowId','sourceCommit','sourceTree','artifactId','zip','members']);
+            for(const k of ['runId','runAttempt','jobId','workflowId','artifactId'])id(c[k]);sha(c.sourceCommit,40);sha(c.sourceTree,40);pin(c.zip,base.LIMITS.zip);keys(c.members,lane.LEGACY_NAMES);
+            const names=new Set();for(const [name,member]of Object.entries(c.members)){assert.ok(base.relative(member)&&path.posix.basename(member)===name);assert.ok(!names.has(member.toLowerCase()));names.add(member.toLowerCase());}
+            const d=carriers.signed017;keys(d,['jobId','artifactId','zip','files']);id(d.jobId);id(d.artifactId);pin(d.zip,1024*1024*1024);
+            keys(d.files,['private017-signed.zip','approved-plan.json','signed-input.json']);const seen=new Set();
+            for(const [name,v]of Object.entries(d.files)){keys(v,['member','size','sha256']);pin({size:v.size,sha256:v.sha256},name.endsWith('.zip')?1024*1024*1024:128*1024);assert.ok(base.relative(v.member)&&path.posix.basename(v.member)===name);assert.ok(!seen.has(v.member.toLowerCase()));seen.add(v.member.toLowerCase());}
+            assert.notEqual(d.artifactId,a.artifactId);
+            const run=(program,args,options={})=>execFileSync(program,args,{cwd:process.env.GITHUB_WORKSPACE,encoding:'utf8',timeout:30000,maxBuffer:2*1024*1024,...options});
+            lane.sourceCheck(process.env,run);run('git',['diff','--exit-code','HEAD','--','scripts/stage-private-linux-update-fixture-017.py']);assert.equal(String(run('git',['status','--porcelain=v1','--untracked-files=all','--','scripts/stage-private-linux-update-fixture-017.py'])).trim(),'');run('git',['merge-base','--is-ancestor',lane.SOURCE.sourceCommit,'HEAD']);
+            const allowed=new Set([...lane.SCOPE_PATHS.filter(n=>n.startsWith('scripts/')),lane.WORKFLOW,'scripts/private-linux-portable-fixture-017.test.cjs','scripts/linux-016-portable-package.test.cjs','scripts/linux-016-portable-production.test.cjs']);
+            for(const name of String(run('git',['diff','--name-only','-z',lane.SOURCE.sourceCommit,'HEAD'])).split('\0').filter(Boolean))assert.ok(allowed.has(name),'Only reviewed sidecar files may differ from actual017 source');
+            const request=async route=>(await github.request(`GET /repos/BOBWORKS-XR/CREATOR-HUB/${route}`)).data;
+            async function bind(expected,fixed={}){
+              const proof={run:await request(`actions/runs/${expected.runId}`),job:await request(`actions/jobs/${expected.jobId}`),workflow:await request(`actions/workflows/${expected.workflowId}`),artifact:await request(`actions/artifacts/${expected.artifactId}`),commit:await request(`git/commits/${expected.sourceCommit}`)};
+              const {run,job,workflow,artifact,commit}=proof;
+              for(const [k,v]of Object.entries({id:expected.runId,run_attempt:expected.runAttempt,workflow_id:expected.workflowId,head_sha:expected.sourceCommit,event:'workflow_dispatch',status:'completed',conclusion:'success'}))assert.equal(run[k],v);
+              for(const repo of [run.repository,run.head_repository]){assert.equal(repo.id,1364807512);assert.equal(repo.full_name,'BOBWORKS-XR/CREATOR-HUB');}
+              assert.equal(workflow.id,expected.workflowId);assert.equal(workflow.path,run.path);assert.match(run.path,/^\.github\/workflows\/[a-z0-9-]+\.yml$/);
+              assert.equal(commit.sha,expected.sourceCommit);assert.equal(commit.tree.sha,expected.sourceTree);
+              for(const [k,v]of Object.entries({id:expected.jobId,run_id:expected.runId,run_attempt:expected.runAttempt,head_sha:expected.sourceCommit,status:'completed',conclusion:'success'}))assert.equal(job[k],v);assert.ok(job.labels.includes('ubuntu-22.04'));
+              assert.equal(artifact.id,expected.artifactId);assert.equal(artifact.expired,false);assert.equal(artifact.size_in_bytes,expected.zip.size);assert.equal(artifact.digest,`sha256:${expected.zip.sha256}`);
+              for(const [k,v]of Object.entries({id:expected.runId,head_sha:expected.sourceCommit,head_branch:run.head_branch,repository_id:1364807512,head_repository_id:1364807512}))assert.equal(artifact.workflow_run[k],v);
+              const times=[job.started_at,artifact.created_at,job.completed_at].map(Date.parse);assert.ok(times.every(Number.isFinite)&&times[0]<=times[1]&&times[1]<=times[2]);
+              if(fixed.job)assert.equal(job.name,fixed.job);if(fixed.branch)assert.equal(run.head_branch,fixed.branch);if(fixed.workflow)assert.equal(run.path,fixed.workflow);if(fixed.artifact)assert.equal(artifact.name,fixed.artifact);
+              return proof;
+            }
+            const exact17={...a,...lane.SOURCE},assembly=await bind(exact17,{job:'assemble',branch:'validation/linux-private-update-fixture-017',workflow:'.github/workflows/private-linux-update-fixture-017.yml',artifact:`private-linux-update-fixture-017-${a.runId}-${a.runAttempt}`});
+            const signed016=await bind(c),signed017=await bind({...exact17,...d},{job:'stage-input',branch:'validation/linux-private-update-fixture-017',workflow:'.github/workflows/private-linux-update-fixture-017.yml',artifact:`private017-signed-input-${a.runId}-${a.runAttempt}`});
+            const temp=fs.realpathSync(process.env.RUNNER_TEMP),stage=path.join(temp,'private017-portable-stage');assert.equal(fs.existsSync(stage),false);fs.mkdirSync(stage,{mode:0o700});
+            const input=path.join(stage,'input');fs.mkdirSync(input,{mode:0o700});
+            const write=(name,body)=>{assert.ok(Buffer.byteLength(body)<=2*1024*1024);fs.writeFileSync(path.join(stage,name),body,{flag:'wx',mode:0o600});};
+            async function download(artifactId,expected,file){const {data}=await github.rest.actions.downloadArtifact({owner:'BOBWORKS-XR',repo:'CREATOR-HUB',artifact_id:artifactId,archive_format:'zip'});assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer);const bytes=Buffer.from(data);assert.equal(bytes.length,expected.size);assert.equal(hash(bytes),expected.sha256);fs.writeFileSync(file,bytes,{flag:'wx',mode:0o600});}
+            await download(a.artifactId,a.zip,path.join(input,'assembly017.zip'));await download(c.artifactId,c.zip,path.join(stage,'signed016-carrier.zip'));await download(d.artifactId,d.zip,path.join(stage,'signed017-carrier.zip'));
+            write('request.json',JSON.stringify({profile,carriers,profileSha256:process.env.PRODUCER_PROFILE_SHA256},null,2)+'\n');write('download-proof.json',JSON.stringify({assembly,signed016,signed017,releaseReady:false},null,2)+'\n');
+      - name: Inspect all data, fresh original proofs and complete selector source equality before APT or Cargo
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),{execFileSync}=require('node:child_process');
+            const lane=require('./scripts/private-linux-portable-fixture-017.cjs'),base=require('./scripts/linux-016-portable-package.cjs'),c16=require('./scripts/private-portable-016-contract.cjs'),a17=require('./scripts/private-linux-update-fixture-017-assemble.cjs');
+            lane.admission(process.env);const root=process.env.GITHUB_WORKSPACE,stage=path.join(fs.realpathSync(process.env.RUNNER_TEMP),'private017-portable-stage'),input=path.join(stage,'input');
+            const read=file=>require('./scripts/flatpak-package.cjs').read(file,1024*1024*1024),record=base.record;
+            const saved=JSON.parse(read(path.join(stage,'request.json'))),{profile,carriers}=saved;
+            assert.equal(record(Buffer.from(JSON.stringify(profile,null,2))).sha256,saved.profileSha256);
+            const run=(program,args,options={})=>execFileSync(program,args,{cwd:root,encoding:'utf8',timeout:180000,maxBuffer:2*1024*1024,...options});
+            lane.sourceCheck(process.env,run);run('git',['diff','--exit-code','HEAD','--','scripts/stage-private-linux-update-fixture-017.py']);assert.equal(String(run('git',['status','--porcelain=v1','--untracked-files=all','--','scripts/stage-private-linux-update-fixture-017.py'])).trim(),'');
+            function stageZip(file,destination,pins,outputs){assert.deepEqual(record(read(file)),pins.zip);run('/usr/bin/python3',['-B','-c',base.ZIP_STAGE,file,destination],{input:JSON.stringify({pins:pins.files,allowed:Object.keys(pins.files),outputs})});}
+            const oldFiles=Object.fromEntries(lane.LEGACY_NAMES.map(name=>[carriers.signed016.members[name],profile.signed016.files[name]]));
+            stageZip(path.join(stage,'signed016-carrier.zip'),path.join(input,'signed016'),{zip:carriers.signed016.zip,files:oldFiles},Object.fromEntries(lane.LEGACY_NAMES.map(name=>[carriers.signed016.members[name],name])));
+            // The frozen assembly CLI has a different branch guard. Reuse its data-only library, never spoof that environment.
+            const carrier17=String.raw`
+            import hashlib,importlib.util,json,os,stat,sys,zipfile
+            from pathlib import Path
+            sys.dont_write_bytecode=True
+            root,source,output,destination,scope=map(Path,sys.argv[1:]); config=json.load(sys.stdin)
+            spec=importlib.util.spec_from_file_location('private017_data',root/'scripts/stage-private-linux-update-fixture-017.py')
+            m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+            for p in (source,output,destination,scope): m.canonical(p)
+            m.require(all(p!=scope and p.is_relative_to(scope) for p in (source,output,destination)),'Owned carrier scope required')
+            m.require(not output.exists() and output.parent.is_dir(),'Fresh carrier output required')
+            c=config['carrier']; files=c['files']; expected=c['zip']
+            m.require(set(files)=={'private017-signed.zip','approved-plan.json','signed-input.json'},'Exact carrier roles required')
+            allowed={v['member'] for v in files.values()}; dirs=set()
+            for name in allowed:
+                parts=name.split('/');m.require(name and len(name)<=240 and not any(p in ('','.','..') for p in parts) and not any(x in name for x in ('\\',':')),'Unsafe carrier member')
+                dirs.update('/'.join(parts[:i]) for i in range(1,len(parts)))
+            named=source.lstat();m.require(stat.S_ISREG(named.st_mode) and named.st_nlink==1 and named.st_size==expected['size'] and 0<named.st_size<=m.MAX_ZIP,'Bounded single-link carrier required')
+            fd=os.open(source,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0))
+            with os.fdopen(fd,'rb') as stream:
+                before=os.fstat(stream.fileno());m.require(m.opened_identity(before)==m.opened_identity(named),'Carrier replaced')
+                digest=hashlib.sha256();count=0
+                for chunk in iter(lambda:stream.read(65536),b''):
+                    count+=len(chunk);m.require(count<=expected['size'],'Carrier grew');digest.update(chunk)
+                m.require(count==expected['size'] and digest.hexdigest()==expected['sha256'],'Carrier hash differs');stream.seek(0)
+                with zipfile.ZipFile(stream) as archive:
+                    entries=archive.infolist();m.require(0<len(entries)<=128,'Bounded carrier inventory required');seen=set();folded=set();expanded=0
+                    for e in entries:
+                        name=e.filename.rstrip('/') if e.is_dir() else e.filename;mode=e.external_attr>>16
+                        m.require(name not in seen and name.lower() not in folded and name in (dirs if e.is_dir() else allowed),'Unknown or duplicate carrier member')
+                        m.require(stat.S_IFMT(mode) in (0,stat.S_IFDIR if e.is_dir() else stat.S_IFREG) and not mode&0o7000 and not e.flag_bits&1 and e.compress_type in (zipfile.ZIP_STORED,zipfile.ZIP_DEFLATED),'Special carrier entry refused')
+                        seen.add(name);folded.add(name.lower());expanded+=e.file_size;m.require(0<=e.file_size<=m.MAX_ZIP and expanded<=m.MAX_ZIP+256*1024,'Carrier expansion exceeds bound')
+                    m.require(allowed<=seen,'Incomplete carrier');output.mkdir(mode=0o700)
+                    for name,v in files.items():
+                        e=archive.getinfo(v['member']);bound=m.MAX_ZIP if name.endswith('.zip') else 128*1024
+                        m.require(not e.is_dir() and 0<e.file_size==v['size']<=bound,'Carrier role size differs');digest=hashlib.sha256();count=0
+                        with archive.open(e) as src,(output/name).open('xb') as dst:
+                            for chunk in iter(lambda:src.read(65536),b''):
+                                count+=len(chunk);m.require(count<=v['size'],'Carrier role grew');digest.update(chunk);dst.write(chunk)
+                        m.require(count==v['size'] and digest.hexdigest()==v['sha256'],'Carrier role hash differs');(output/name).chmod(0o600)
+                m.canonical(source);m.require(m.identity(before)==m.identity(os.fstat(stream.fileno())) and m.identity(named)==m.identity(source.lstat()),'Carrier changed')
+            transport=json.loads((output/'signed-input.json').read_bytes(),object_pairs_hook=m.pairs)
+            m.require(set(transport)=={'assetId','zipBytes','zipSha256','planSha256'} and transport['planSha256']==config['planSha256'],'Inner transport plan differs')
+            print(json.dumps(m.stage(output/'private017-signed.zip',transport['zipSha256'],transport['zipBytes'],output/'approved-plan.json',config['planSha256'],destination,scope)))
+            `;
+            run('/usr/bin/python3',['-B','-c',carrier17,root,path.join(stage,'signed017-carrier.zip'),path.join(stage,'signed017-carrier'),path.join(input,'signed017'),fs.realpathSync(process.env.RUNNER_TEMP)],{input:JSON.stringify({carrier:carriers.signed017,planSha256:profile.signed017.planSha256})});
+            const signed=a17.inputs(path.join(input,'signed017'),profile.signed017.planSha256);assert.deepEqual(signed.plan.rootSource,lane.SOURCE);
+            const legacy=Object.fromEntries(lane.LEGACY_NAMES.map(name=>{const bytes=read(path.join(input,'signed016',name));assert.deepEqual(record(bytes),profile.signed016.files[name]);return[name,bytes];}));
+            const plan=c16.parse(legacy['plan.json']);assert.equal(record(legacy['plan.json']).sha256,profile.signed016.planSha256);c16.validatePlan(plan);
+            const bodies=Object.fromEntries(c16.FILES.map(name=>[name,legacy[name===c16.UNSIGNED?c16.MANIFEST:name]])),old=c16.validateOutput(plan,bodies);
+            const request=async route=>(await github.request(`GET /repos/BOBWORKS-XR/CREATOR-HUB/${route}`)).data;
+            const proof16=await require('./scripts/sign-private-portable-016.cjs').fresh(plan,old.receipt.producer,request);
+            const proof17=await require('./scripts/private-linux-update-fixture-017-provenance.cjs').fresh({plan:signed.plan,handoff:signed.handoff,preparedFile:signed.files['prepared-unix.json']},request);
+            const selector=lane.selectorSources(root,old.receipt.selectorBuild,run);
+            const {data}=await github.rest.actions.downloadArtifact({owner:'BOBWORKS-XR',repo:'CREATOR-HUB',artifact_id:plan.producer.artifactId,archive_format:'zip'});assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer);const original=Buffer.from(data);assert.deepEqual(record(original),plan.producer.zip);fs.writeFileSync(path.join(input,'portable016.zip'),original,{flag:'wx',mode:0o600});
+            const a=profile.assembly017,checked=path.join(stage,'checked-assembly017');stageZip(path.join(input,'assembly017.zip'),checked,{zip:a.zip,files:Object.fromEntries(Object.values(a.files).map(({member,size,sha256})=>[member,{size,sha256}]))},Object.fromEntries(Object.entries(a.files).map(([role,v])=>[v.member,lane.ROLES[role]])));
+            lane.validateAssembly(profile,Object.fromEntries(Object.entries(lane.ROLES).map(([role,name])=>[role,read(path.join(checked,name))])),signed);
+            signed.recheck();lane.sourceCheck(process.env,run);run('git',['diff','--exit-code','HEAD','--','scripts/stage-private-linux-update-fixture-017.py']);assert.equal(String(run('git',['status','--porcelain=v1','--untracked-files=all','--','scripts/stage-private-linux-update-fixture-017.py'])).trim(),'');
+            const receipt=JSON.stringify({profileSha256:saved.profileSha256,request:record(read(path.join(stage,'request.json'))),proof16,proof17,selector,signatureVerificationPending:true,releaseReady:false},null,2)+'\n';assert.ok(Buffer.byteLength(receipt)<=2*1024*1024);
+            fs.writeFileSync(path.join(stage,'data-preflight.json'),receipt,{flag:'wx',mode:0o600});
+      - name: Provision packaging and trusted-validator prerequisites after data-only gates
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            libxdo-dev libssl-dev librsvg2-dev build-essential file patchelf
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Compile only source-bound signature verifier and archive decoder; derive fresh-copy tool pins
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{execFileSync}=require('node:child_process');
+          const lane=require('./scripts/private-linux-portable-fixture-017.cjs'),{capture}=require('./scripts/sign-unix-payload.cjs'),finite=require('./scripts/flatpak-package.cjs');
+          lane.admission(process.env);const root=process.env.GITHUB_WORKSPACE,stage=path.join(fs.realpathSync(process.env.RUNNER_TEMP),'private017-portable-stage');
+          const saved=JSON.parse(finite.read(path.join(stage,'request.json'),65536)),preflight=JSON.parse(finite.read(path.join(stage,'data-preflight.json'),2*1024*1024));
+          assert.equal(preflight.signatureVerificationPending,true);assert.equal(preflight.releaseReady,false);assert.deepEqual(capture(path.join(stage,'request.json'),65536),preflight.request);
+          const run=(command,args,options={})=>execFileSync(command,args,{cwd:root,encoding:'utf8',timeout:600000,maxBuffer:2*1024*1024,...options});
+          lane.sourceCheck(process.env,run);
+          const paths=['src-tauri/Cargo.toml','src-tauri/Cargo.lock','src-tauri/build.rs','src-tauri/examples/verify-package-input.rs','src-tauri/src','native/mcp-router','native/module-archive'];
+          function sources(){
+            assert.equal(String(run('git',['status','--porcelain=v1','--untracked-files=all','--',...paths])).trim(),'');
+            run('git',['diff','--exit-code',lane.SOURCE.sourceCommit,'HEAD','--',...paths]);
+            const rows=String(run('git',['ls-tree','-rz','--full-tree','HEAD','--',...paths])).split('\0').filter(Boolean);assert.ok(rows.length>5&&rows.length<=1024);
+            const files={};for(const row of rows){const m=/^100(?:644|755) blob ([a-f0-9]{40})\t(.+)$/.exec(row);assert.ok(m);assert.ok(!Object.hasOwn(files,m[2]));const file=path.join(root,m[2]),pin=capture(file,2*1024*1024),bytes=finite.read(file,2*1024*1024);assert.deepEqual(require('./scripts/linux-016-portable-package.cjs').record(bytes),pin);assert.equal(crypto.createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'),m[1]);files[m[2]]={gitBlob:m[1],...pin};}
+            assert.ok(Object.values(files).reduce((n,v)=>n+v.size,0)<=32*1024*1024);return files;
+          }
+          const before=sources(),compiler=String(run('rustc',['--version','--verbose'])),cargo=String(run('cargo',['--version']));assert.match(compiler,/^rustc 1\.99\.0 /);assert.match(compiler,/^host: x86_64-unknown-linux-gnu$/m);assert.match(cargo,/^cargo 1\.99\.0 /);
+          const verifierTarget=path.join(stage,'verifier-build'),decoderTarget=path.join(stage,'decoder-build');
+          const args={verifier:['build','--release','--locked','--manifest-path',path.join(root,'src-tauri/Cargo.toml'),'--example','verify-package-input','--target-dir',verifierTarget],decoder:['build','--release','--locked','--manifest-path',path.join(root,'native/module-archive/Cargo.toml'),'--bin','creator-hub-module-archive','--target-dir',decoderTarget]};
+          for(const values of Object.values(args))run('cargo',values,{stdio:'inherit'});
+          assert.deepEqual(sources(),before);lane.sourceCheck(process.env,run);
+          const compiled={verifier:path.join(verifierTarget,'release/examples/verify-package-input'),decoder:path.join(decoderTarget,'release/creator-hub-module-archive')},tools=lane.fixedTools(root),pins={};
+          for(const name of ['verifier','decoder']){const expected=capture(compiled[name],256*1024*1024,true);assert.equal(fs.existsSync(tools[name]),false);fs.mkdirSync(path.dirname(tools[name]),{recursive:true});fs.copyFileSync(compiled[name],tools[name],fs.constants.COPYFILE_EXCL);fs.chmodSync(tools[name],0o755);pins[name]=require('./scripts/linux-016-portable-package.cjs').record(finite.read(tools[name]));assert.deepEqual(pins[name],expected);assert.equal(fs.lstatSync(tools[name]).nlink,1);assert.deepEqual(capture(compiled[name],expected.size,true),expected);}
+          const profile=lane.validateProfile({...saved.profile,tools:pins}),bytes=lane.json(profile);fs.writeFileSync(path.join(stage,'input/profile.json'),bytes,{flag:'wx',mode:0o600});
+          const receipt={schemaVersion:1,scope:'controlled-validator-builds-only',packagingSource:process.env.GITHUB_SHA,packagingTree:String(run('git',['rev-parse','HEAD^{tree}'])).trim(),rootSource:lane.SOURCE,independentProfileSha256:saved.profileSha256,internalProfile:require('./scripts/linux-016-portable-package.cjs').record(bytes),sources:before,publicKey:before['src-tauri/src/catalog-key.pub'],compiler,cargo,arguments:args,tools:pins,freshSingleLinkCopies:true,rootRecompiled:false,selectorRecompiled:false,privateModulesRecompiled:false,releaseReady:false};
+          assert.ok(lane.json(receipt).length<=2*1024*1024);fs.writeFileSync(path.join(stage,'tool-build.json'),lane.json(receipt),{flag:'wx',mode:0o600});
+          NODE
+      - name: Verify signatures and bundle only the already compiled actual017 Root
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),lane=require('./scripts/private-linux-portable-fixture-017.cjs'),{capture}=require('./scripts/sign-unix-payload.cjs');
+          const stage=path.join(fs.realpathSync(process.env.RUNNER_TEMP),'private017-portable-stage'),receipt=JSON.parse(fs.readFileSync(path.join(stage,'tool-build.json')));
+          assert.equal(receipt.packagingSource,process.env.GITHUB_SHA);assert.deepEqual(receipt.rootSource,lane.SOURCE);assert.equal(receipt.releaseReady,false);
+          assert.deepEqual(capture(path.join(stage,'input/profile.json'),32768),receipt.internalProfile);
+          for(const [name,file]of Object.entries(lane.fixedTools(process.env.GITHUB_WORKSPACE)))assert.deepEqual(capture(file,receipt.tools[name].size),receipt.tools[name]);
+          lane.produce({root:process.env.GITHUB_WORKSPACE,input:path.join(stage,'input'),output:path.join(fs.realpathSync(process.env.RUNNER_TEMP),'private017-portable-output'),profileSha256:receipt.internalProfile.sha256}).catch(error=>{console.error(String(error.message).slice(0,2000));process.exitCode=1;});
+          NODE
+      - name: Retain only unsigned transport, ordinary image and bounded byte receipts
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-linux-portable-fixture-017-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/private017-portable-output/creator-hub-linux-x86_64-0.1.17.appdir.tar.gz
+            ${{ runner.temp }}/private017-portable-output/portable-manifest.unsigned.json
+            ${{ runner.temp }}/private017-portable-output/Creator Hub_0.1.17_amd64.AppImage
+            ${{ runner.temp }}/private017-portable-output/appdir-original-inventory.json
+            ${{ runner.temp }}/private017-portable-output/appdir-flattened-inventory.json
+            ${{ runner.temp }}/private017-portable-output/package-receipt.json
+            ${{ runner.temp }}/private017-portable-stage/download-proof.json
+            ${{ runner.temp }}/private017-portable-stage/data-preflight.json
+            ${{ runner.temp }}/private017-portable-stage/tool-build.json
+      - name: Retain bounded refusal and exact ordinary image without claiming acceptance
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-linux-portable-fixture-017-refusal-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/private017-portable-output/package-refusal.json
+            ${{ runner.temp }}/private017-portable-output/Creator Hub_0.1.17_amd64.AppImage
+            ${{ runner.temp }}/private017-portable-stage/download-proof.json
+            ${{ runner.temp }}/private017-portable-stage/data-preflight.json
+            ${{ runner.temp }}/private017-portable-stage/tool-build.json
