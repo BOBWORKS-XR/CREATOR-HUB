@@ -1,6 +1,7 @@
 """Pure authority/parser/FD tests. No downloaded CLI or application is executed."""
 import ast
 from contextlib import ExitStack, contextmanager
+import errno
 import hashlib
 import importlib.util
 import io
@@ -330,6 +331,28 @@ class Sealing(unittest.TestCase):
                 image.check()
             image.close()
 
+    def test_memfd_timestamp_drift_refused_despite_unchanged_bytes_seals_and_flags(self):
+        for field in ("st_mtime_ns", "st_ctime_ns"):
+            kernel = FakeMemfd()
+            with self.subTest(field=field), ExitStack() as stack:
+                kernel.install(stack)
+                image = M.SealedImage(kernel.source, 1000)
+                try:
+                    original = M.identity(image.before)
+                    changed = kernel.info(412)
+                    setattr(changed, field, getattr(changed, field) + 1)
+                    with patch.object(M.os, "fstat", return_value=changed):
+                        with self.assertRaisesRegex(RuntimeError, "Owned immutable close-on-exec memfd required"):
+                            image.check()
+                    self.assertEqual(M.identity(image.before), original)
+                    self.assertEqual(bytes(kernel.raw), elf())
+                    self.assertEqual(kernel.seals, 15)
+                    M.os.get_inheritable.assert_called()
+                    self.assertFalse(M.os.get_inheritable.return_value)
+                    kernel.source.check.assert_called()
+                finally:
+                    image.close()
+
     def test_x64_elf_type_header_and_complete_hash_required(self):
         for offset, value in ((0, 0), (4, 1), (5, 2), (16, 1), (18, 0)):
             raw = bytearray(elf()); raw[offset] = value
@@ -352,14 +375,50 @@ class Sealing(unittest.TestCase):
             try:
                 image = M.SealedImage(source, os.getuid())
                 try:
-                    self.assertEqual(fcntl.fcntl(image.fd, fcntl.F_GET_SEALS), 15)
-                    for action in (lambda: os.write(image.fd, b"x"), lambda: os.ftruncate(image.fd, 1),
-                                   lambda: os.ftruncate(image.fd, 1024)):
-                        with self.assertRaises(OSError):
-                            action()
-                    image.check()
-                    self.assertEqual(M.identity(path.lstat()), before)
-                    self.assertEqual(path.read_bytes(), elf())
+                    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+                    def snapshot():
+                        info = os.fstat(image.fd)
+                        raw = os.pread(image.fd, len(elf()) + 1, 0)
+                        return {"identity": {key: getattr(info, key) for key in fields}, **M.pin(raw),
+                                "seals": fcntl.fcntl(image.fd, fcntl.F_GET_SEALS),
+                                "closeOnExec": not os.get_inheritable(image.fd)}
+                    diagnostic = {"scope": "pure-sealed-memfd-denied-syscalls", "candidateExecuted": False,
+                                  "releaseReady": False, "before": snapshot(), "attempts": []}
+                    try:
+                        for name, action in (("write", lambda: os.write(image.fd, b"x")),
+                                             ("shrink", lambda: os.ftruncate(image.fd, 1)),
+                                             ("grow", lambda: os.ftruncate(image.fd, 1024))):
+                            row = {"operation": name, "before": snapshot()}
+                            diagnostic["attempts"].append(row)
+                            with self.assertRaises(OSError) as refused:
+                                action()
+                            row.update(errno=refused.exception.errno, after=snapshot())
+                            diagnostic["after"] = row["after"]
+                            self.assertEqual(refused.exception.errno, errno.EPERM)
+                            info = os.fstat(image.fd)
+                            self.assertEqual(M.identity(info)[:-2], M.identity(image.before)[:-2])
+                            self.assertEqual(stat.S_IMODE(info.st_mode), 0o700)
+                            self.assertEqual(info.st_uid, os.getuid()); self.assertEqual(info.st_nlink, 0)
+                            self.assertEqual(info.st_size, len(elf()))
+                            self.assertEqual(os.pread(image.fd, len(elf()) + 1, 0), elf())
+                            self.assertEqual(row["after"]["seals"], 15); self.assertTrue(row["after"]["closeOnExec"])
+                            # Denied writes may still update kernel timestamps. Never
+                            # refresh the captured baseline or weaken the runtime guard.
+                            drifted = M.identity(info)[-2:] != M.identity(image.before)[-2:]
+                            row["timestampDriftFromCapture"] = drifted
+                            if drifted:
+                                with self.assertRaisesRegex(RuntimeError, "Owned immutable close-on-exec memfd required"):
+                                    image.check()
+                                row["guardResult"] = "refused-metadata-drift"
+                            else:
+                                image.check()
+                                row["guardResult"] = "accepted-unchanged-metadata"
+                        self.assertEqual(M.identity(path.lstat()), before)
+                        self.assertEqual(path.read_bytes(), elf())
+                    finally:
+                        raw = json.dumps(diagnostic, sort_keys=True, separators=(",", ":"), allow_nan=False)
+                        self.assertLessEqual(len(raw.encode("utf-8")), 8192)
+                        print("memfd-denied-syscalls " + raw, flush=True)
                 finally:
                     image.close()
             finally:
