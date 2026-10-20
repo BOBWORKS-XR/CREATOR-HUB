@@ -516,6 +516,40 @@ def direct_pages(d, pages, scenario):
     return {"projects": True, "mcp": True, "setup": True, "preferences": prefs}
 
 
+def driver_preflight(d, child, guard, neutral, helpers, native, webkit):
+    backend = None
+
+    def sockets_ready():
+        nonlocal backend
+        guard()
+        peers = [p for p in neutral.subtree(child.pid, helpers, native).values()
+                 if p["executable"] == "/usr/bin/WebKitWebDriver" and p["parentPid"] == child.pid]
+        require(len(peers) <= 1 and (backend is None or len(peers) == 1), "Owned system driver disappeared or duplicated")
+        if not peers:
+            return False
+        current = native.native_process(peers[0]["pid"], helpers)
+        require(current["parentPid"] == child.pid and current["uids"] == [os.getuid()] * 4
+                and current["kernelImageSha256"] == webkit["sha256"], "System driver image/parent/UID differs")
+        require(backend is None or current == backend, "System driver identity changed during startup")
+        backend = current
+        ready = neutral.listener(child.pid, 4444) and neutral.listener(backend["pid"], 4445)
+        guard()
+        return ready
+
+    # tauri-driver 2.1.0 spawns WebKit without awaiting its bind and forwards /status.
+    # https://github.com/tauri-apps/tauri/blob/tauri-driver-v2.1.0/crates/tauri-driver/src/server.rs
+    neutral.wait(sockets_ready)
+
+    def backend_guard():
+        guard()
+        require(native.native_process(backend["pid"], helpers) == backend and neutral.listener(child.pid, 4444)
+                and neutral.listener(backend["pid"], 4445), "Bound driver identity/socket changed")
+
+    d.guard = backend_guard
+    neutral.wait(lambda: d.request("GET", "/status")["ready"] is True)
+    return backend
+
+
 def session(folder, home, binding, *, old=False, reopened=False):
     neutral = load("native-linux-integrated-pages")
     helpers, native = neutral.helpers()
@@ -547,18 +581,9 @@ def session(folder, home, binding, *, old=False, reopened=False):
             readiness.check_logs(logs)
             require(child.poll() is None and native.native_process(child.pid, helpers) == identity
                     and wm.poll() is None and native.native_process(wm.pid, helpers) == wm_identity, "Owned tooling identity changed")
-        d.guard = tool_guard
-        neutral.wait(lambda: neutral.listener(child.pid, 4444) and d.request("GET", "/status")["ready"] is True)
-        peers = [p for p in neutral.subtree(child.pid, helpers, native).values() if p["executable"] == "/usr/bin/WebKitWebDriver" and p["parentPid"] == child.pid]
-        require(len(peers) == 1, "One owned system driver required")
-        backend = native.native_process(peers[0]["pid"], helpers)
-        require(backend["kernelImageSha256"] == webkit["sha256"] and neutral.listener(backend["pid"], 4445), "System driver image/socket differs")
+        backend = driver_preflight(d, child, tool_guard, neutral, helpers, native, webkit)
+        backend_guard = d.guard
         evidence["tools"] = {"driver": identity, "systemDriver": backend, "windowManager": wm_identity}
-        def backend_guard():
-            tool_guard()
-            require(native.native_process(backend["pid"], helpers) == backend and neutral.listener(child.pid, 4444)
-                    and neutral.listener(backend["pid"], 4445), "Bound driver identity/socket changed")
-        d.guard = backend_guard
         response = d.request("POST", "/session", {"capabilities": {"alwaysMatch": {"tauri:options": {"application": HUB, "args": []}}}})
         d.session = response["sessionId"]
         require(type(d.session) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", d.session), "Invalid session identity")

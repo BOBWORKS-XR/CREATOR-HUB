@@ -1,5 +1,7 @@
 """Pure fixtures and source/workflow contracts only. Never installs or opens GUI."""
+import ast
 import copy
+import http.client
 import importlib.util
 import io
 import json
@@ -236,6 +238,101 @@ class DirectPages(unittest.TestCase):
                                          "#suite-trigger", '#suite-menu [data-view="setup"]'])
         self.assertEqual(driver.guide_reads, 0)
         self.assertEqual(result["preferences"], dict.fromkeys(p.PREF_KEYS, False))
+
+
+class DriverReadiness(unittest.TestCase):
+    def startup(self, *, driver_at=1, backend_at=3, statuses=(True,), change=None, transport_error=False):
+        state = SimpleNamespace(tick=0, requests=[], statuses=iter(statuses), rows={}, guard_calls=0)
+        driver = dict(pid=100, parentPid=99, executable="/fixture/tauri-driver", uids=[1000] * 4,
+                      startTime="100", kernelImageSha256="d" * 64)
+        backend = dict(pid=101, parentPid=100, executable="/usr/bin/WebKitWebDriver", uids=[1000] * 4,
+                       startTime="101", kernelImageSha256="b" * 64)
+        state.rows = {99: dict(pid=99), 100: driver, 101: backend}
+        def process(pid, _):
+            return copy.deepcopy(state.rows[pid])
+        def listener(pid, port):
+            return (pid, port) == (100, 4444) and state.tick >= driver_at or (
+                (pid, port) == (101, 4445) and state.tick >= backend_at)
+        def wait(check):
+            for _ in range(8):
+                state.tick += 1
+                if change:
+                    change(state)
+                if check():
+                    return
+            raise RuntimeError("Read-only readiness deadline; no mutation retried")
+        def request(method, endpoint):
+            d.guard()
+            state.requests.append((method, endpoint, state.tick))
+            self.assertEqual((method, endpoint), ("GET", "/status"))
+            if not listener(100, 4444) or not listener(101, 4445) or transport_error:
+                raise http.client.RemoteDisconnected("Remote end closed connection without response")
+            result = {"ready": next(state.statuses)}
+            d.guard()
+            return result
+        def check_logs(_):
+            state.guard_calls += 1
+        d = SimpleNamespace(guard=lambda: None, request=request)
+        neutral = SimpleNamespace(wait=wait, listener=listener,
+                                  subtree=lambda *args: copy.deepcopy({k: v for k, v in state.rows.items() if k != 99}))
+        namespace = dict(vars(p), d=d, child=SimpleNamespace(pid=100, poll=lambda: None),
+                         wm=SimpleNamespace(pid=99, poll=lambda: None), native=SimpleNamespace(native_process=process),
+                         readiness=SimpleNamespace(check_logs=check_logs), logs=None, helpers=None, neutral=neutral,
+                         request={"driver": {"sha256": "d" * 64}}, webkit={"sha256": "b" * 64}, evidence={})
+        # Execute the production startup block only, stopping before POST /session.
+        node = next(n for n in ast.parse(Path(p.__file__).read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "session")
+        body = next(n for n in node.body if isinstance(n, ast.Try)).body
+        boundary = next(i for i, n in enumerate(body) if isinstance(n, ast.Assign)
+                        and any(isinstance(t, ast.Name) and t.id == "response" for t in n.targets))
+        code = compile(ast.Module(body=body[:boundary], type_ignores=[]), "owned-driver-preflight", "exec")
+        self.last_state = state
+        with mock.patch.object(p.os, "getuid", return_value=1000, create=True):
+            exec(code, namespace)
+        self.assertIs(namespace["backend_guard"], d.guard)
+        return state, d
+
+    def test_actual_startup_waits_for_both_staggered_listeners_before_first_status(self):
+        for driver_at, backend_at in ((1, 3), (3, 1)):
+            with self.subTest(driver_at=driver_at, backend_at=backend_at):
+                state, _ = self.startup(driver_at=driver_at, backend_at=backend_at)
+                self.assertEqual(len(state.requests), 1)
+                self.assertGreaterEqual(state.requests[0][2], max(driver_at, backend_at))
+                self.assertGreater(state.guard_calls, 2)
+
+    def test_missing_listener_never_sends_status_or_launches_root(self):
+        for driver_at, backend_at in ((99, 1), (1, 99)):
+            with self.subTest(driver_at=driver_at, backend_at=backend_at), self.assertRaisesRegex(RuntimeError, "Read-only readiness deadline"):
+                self.startup(driver_at=driver_at, backend_at=backend_at)
+            self.assertEqual(self.last_state.requests, [])
+
+    def test_backend_image_parent_uid_start_and_disappearance_refuse_before_status(self):
+        changes = (("kernelImageSha256", "x" * 64), ("parentPid", 999), ("uids", [0] * 4), ("startTime", "changed"))
+        for field, value in changes:
+            def changed(state):
+                if state.tick == 2:
+                    state.rows[101][field] = value
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                self.startup(driver_at=3, backend_at=3, change=changed)
+            self.assertEqual(self.last_state.requests, [])
+        def disappeared(state):
+            if state.tick == 2:
+                del state.rows[101]
+        with self.assertRaisesRegex(RuntimeError, "disappeared"):
+            self.startup(change=disappeared)
+        self.assertEqual(self.last_state.requests, [])
+
+    def test_status_false_is_readonly_but_transport_uncertainty_is_not_retried(self):
+        state, _ = self.startup(statuses=(False, True))
+        self.assertEqual([(method, path) for method, path, _ in state.requests], [("GET", "/status")] * 2)
+        with self.assertRaises(http.client.RemoteDisconnected):
+            self.startup(transport_error=True)
+        self.assertEqual(len(self.last_state.requests), 1)
+
+    def test_socket_identity_guard_remains_active_after_preflight(self):
+        state, driver = self.startup()
+        state.rows[101]["startTime"] = "replacement"
+        with self.assertRaisesRegex(RuntimeError, "Bound driver identity/socket changed"):
+            driver.guard()
 
 
 class Admission(unittest.TestCase):
