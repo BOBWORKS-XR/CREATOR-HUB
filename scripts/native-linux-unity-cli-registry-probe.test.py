@@ -1,6 +1,6 @@
 """Pure authority/parser/FD tests. No downloaded CLI or application is executed."""
 import ast
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import hashlib
 import importlib.util
 import io
@@ -592,7 +592,7 @@ class SourceContracts(unittest.TestCase):
         self.assertEqual(workflow["on"]["push"], {"branches": ["validation/linux-unity-registry-probe"]})
         request = workflow["on"]["workflow_dispatch"]["inputs"]["execution_request"]
         self.assertEqual(request["default"], "inspect-only")
-        self.assertEqual(request["options"], ["inspect-only", M.REQUEST])
+        self.assertEqual(request["options"], ["inspect-only", M.REQUEST, M.REGISTRATION_REQUEST])
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         self.assertEqual(set(workflow["jobs"]), {"probe"})
         job = workflow["jobs"]["probe"]
@@ -602,20 +602,348 @@ class SourceContracts(unittest.TestCase):
                       "github.event_name == 'workflow_dispatch'", "github.ref == '" + M.BRANCH + "'",
                       "github.workflow_ref == '" + M.WORKFLOW + "'", "inputs.execution_request == '" + M.REQUEST + "'"):
             self.assertIn(exact, job["if"])
+        self.assertIn("(inputs.execution_request == '" + M.REQUEST + "' || inputs.execution_request == '" + M.REGISTRATION_REQUEST + "')", job["if"])
         self.assertEqual(job["env"], {"UNITY_REGISTRY_PROBE_REQUEST": "${{ inputs.execution_request }}"})
         steps = job["steps"]
-        self.assertEqual(len(steps), 4)
+        self.assertEqual(len(steps), 5)
         self.assertEqual(steps[0]["with"], {"ref": "${{ github.sha }}", "persist-credentials": "false"})
         self.assertEqual([step["run"] for step in steps if "run" in step], [
             "/usr/bin/python3 -I -B scripts/native-linux-unity-cli-registry-probe.test.py",
-            "/usr/bin/python3 -I -B scripts/native-linux-unity-cli-registry-probe.py probe"])
+            "/usr/bin/python3 -I -B scripts/native-linux-unity-cli-registry-probe.py probe",
+            "/usr/bin/python3 -I -B scripts/native-linux-unity-cli-registry-probe.py registration-pagination"])
+        self.assertEqual(steps[2]["if"], "inputs.execution_request == '" + M.REQUEST + "'")
+        self.assertEqual(steps[3]["if"], "inputs.execution_request == '" + M.REGISTRATION_REQUEST + "'")
         self.assertEqual(steps[-1]["if"], "always()")
-        self.assertEqual(steps[-1]["with"]["path"], "${{ runner.temp }}/linux-unity-registry-probe/evidence/")
+        self.assertEqual(steps[-1]["with"]["path"].splitlines(), ["${{ runner.temp }}/linux-unity-registry-probe/evidence/",
+                                                               "${{ runner.temp }}/linux-unity-registry-pagination-probe/evidence/"])
         self.assertNotIn("secrets.", text)
         self.assertNotIn("contents: write", text)
         self.assertNotIn("runner.", json.dumps(job["env"]))
         with self.assertRaises(RuntimeError):
             M.admission({**environment(), "GITHUB_EVENT_NAME": "push"}, "Linux", "x86_64", 1000, 1000)
+
+
+class Registration(unittest.TestCase):
+    @staticmethod
+    def envelope(rows=None, **changes):
+        return json.dumps({"success": True, "command": "projects", "data": [] if rows is None else rows,
+                           "errors": [], "warnings": [], **changes}).encode()
+
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            portable_flags(stack)
+            root = Path(temporary).resolve() / M.REGISTRATION_ROOT
+            root.mkdir(mode=0o700)
+            for relative in ("home", "home/config", "home/data", "home/cache", "evidence", "runtime", "tmp", "tool"):
+                (root / relative).mkdir(mode=0o700)
+            if sys.platform == "win32":
+                # Windows filesystem modes are not Unix permission evidence.
+                stack.enter_context(patch.object(M, "private_directory", side_effect=lambda path, uid: os.mkdir(path, 0o700)))
+            yield root
+
+    def test_mode_admission_exact_context_and_cross_request_refusal(self):
+        env = {**environment(), "UNITY_REGISTRY_PROBE_REQUEST": M.REGISTRATION_REQUEST}
+        self.assertEqual(M.registration_admission(env, "Linux", "x86_64", 1000, 1000), 1000)
+        with self.assertRaises(RuntimeError):
+            M.admission(env, "Linux", "x86_64", 1000, 1000)
+        for name in env:
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                M.registration_admission({**env, name: "wrong"}, "Linux", "x86_64", 1000, 1000)
+        with self.assertRaises(RuntimeError):
+            M.registration_admission(environment(), "Linux", "x86_64", 1000, 1000)
+
+    def test_registration_context_refuses_root_foreign_platform_and_injection(self):
+        env = {**environment(), "UNITY_REGISTRY_PROBE_REQUEST": M.REGISTRATION_REQUEST}
+        for args in (("Linux", "x86_64", 0, 0), ("Linux", "x86_64", 1000, 0),
+                     ("Linux", "aarch64", 1000, 1000), ("Windows", "x86_64", 1000, 1000)):
+            with self.subTest(args=args), self.assertRaises(RuntimeError):
+                M.registration_admission(env, *args)
+        for name in ("LD_PRELOAD", "PYTHONPATH", "SSL_CERT_FILE", "https_proxy", "UNITY_NO_CONSENT_PROMPT", "HUB_TOKEN"):
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                M.registration_admission({**env, name: "unused"}, "Linux", "x86_64", 1000, 1000)
+
+    def test_main_routes_only_two_exact_phases_without_fallback(self):
+        env = environment()
+        with patch.object(M, "execute") as readonly, patch.object(M, "execute_registration") as registration:
+            M.main(["probe"], env); readonly.assert_called_once_with(env); registration.assert_not_called()
+            M.main(["registration-pagination"], env); registration.assert_called_once_with(env)
+            for argv in ([], ["inspect"], ["probe", "registration-pagination"], ["registration-pagination", "/foreign"]):
+                with self.subTest(argv=argv), self.assertRaises(RuntimeError):
+                    M.main(argv, env)
+            self.assertEqual(readonly.call_count, 1); self.assertEqual(registration.call_count, 1)
+
+    def test_exact_thirteen_new_synthetic_projects_and_fixed_file_bytes(self):
+        self.assertEqual(M.PROJECT_NAMES, tuple("probe-project-" + str(n).zfill(2) for n in range(1, 14)))
+        self.assertEqual(M.PROJECT_FILES, {
+            "Assets/Probe.txt": b"Synthetic Creator Hub CLI pagination fixture; no Editor execution.\n",
+            "Packages/manifest.json": b'{"dependencies":{}}\n',
+            "ProjectSettings/ProjectVersion.txt": b"m_EditorVersion: 6000.3.21f1\n"})
+        with self.fixture() as root:
+            M.seed_projects(root, 0 if sys.platform == "win32" else os.getuid())
+            self.assertEqual(set(path.name for path in (root / "home/projects").iterdir()), set(M.PROJECT_NAMES))
+            for project in M.registration_paths(root):
+                files = {path.relative_to(project).as_posix(): path.read_bytes() for path in project.rglob("*") if path.is_file()}
+                self.assertEqual(files, M.PROJECT_FILES)
+            with self.assertRaises(FileExistsError):
+                M.seed_projects(root, 0 if sys.platform == "win32" else os.getuid())
+
+    def test_path_derivation_refuses_relative_wrong_root_traversal_or_alias(self):
+        with self.fixture() as root:
+            paths = M.registration_paths(root)
+            self.assertEqual(len(set(paths)), 13)
+            self.assertTrue(all(path.parent == root / "home/projects" for path in paths))
+            for path in (Path("relative") / M.REGISTRATION_ROOT, root.parent, root / ".." / M.REGISTRATION_ROOT):
+                with self.subTest(path=path), self.assertRaises(RuntimeError):
+                    M.registration_paths(path)
+        fake = Mock()
+        fake.is_absolute.return_value = True; fake.name = M.REGISTRATION_ROOT; fake.parts = ("/", M.REGISTRATION_ROOT)
+        fake.resolve.return_value = Mock()
+        with self.assertRaises(RuntimeError):
+            M.registration_paths(fake)
+
+    def test_fixed_add_has_only_thirteen_known_absolute_paths_and_exact_flags(self):
+        with self.fixture() as root, patch.object(M, "project_inventory") as inventory, \
+                patch.object(M.os, "getuid", return_value=1000, create=True), patch.object(M, "_run_command") as command:
+            paths = tuple(str(path) for path in M.registration_paths(root))
+            add = ("register", ("projects", "add", *paths, *M.COMMANDS[-1][1][2:]))
+            M.run_registration_fixed(Mock(), add, root)
+            self.assertEqual(command.call_args.args[1], add)
+            self.assertEqual(len(paths), 13); inventory.assert_called_once_with(root, 1000)
+            M.run_registration_fixed(Mock(), ("list-current", M.COMMANDS[-1][1]), root)
+            M.run_registration_fixed(Mock(), ("list-all", (*M.COMMANDS[-1][1], "--all")), root)
+            self.assertEqual(command.call_args.args[1][1], (*M.COMMANDS[-1][1], "--all"))
+
+    def test_foreign_missing_duplicate_extra_path_flag_and_command_refused_before_launch(self):
+        with self.fixture() as root, patch.object(M, "_run_command") as command:
+            paths = tuple(str(path) for path in M.registration_paths(root))
+            flags = M.COMMANDS[-1][1][2:]
+            bad = (("register", ("projects", "add", *paths[:-1], *flags)),
+                   ("register", ("projects", "add", *paths, "/foreign", *flags)),
+                   ("register", ("projects", "add", *paths[:-1], paths[0], *flags)),
+                   ("register", ("projects", "add", *paths[:-1], paths[-1] + "/../foreign", *flags)),
+                   ("register", ("projects", "add", *paths, *flags, "--force")),
+                   ("hub-help", ("hub", "install")), ("list-all", ("projects", "list", "--watch")))
+            for specification in bad:
+                with self.subTest(specification=specification), self.assertRaises(RuntimeError):
+                    M.run_registration_fixed(Mock(), specification, root)
+            command.assert_not_called()
+
+    def test_unsafe_fixture_inventory_refuses_before_any_registration_input(self):
+        with self.fixture() as root, patch.object(M, "project_inventory", side_effect=RuntimeError("unsafe fixture")), \
+                patch.object(M.os, "getuid", return_value=1000, create=True), patch.object(M, "_run_command") as command:
+            add = ("register", ("projects", "add", *(str(path) for path in M.registration_paths(root)), *M.COMMANDS[-1][1][2:]))
+            with self.assertRaisesRegex(RuntimeError, "unsafe fixture"):
+                M.run_registration_fixed(Mock(), add, root)
+            command.assert_not_called()
+
+    def test_default_subset_vs_all_thirteen_and_unpaged_json_both_valid_observations(self):
+        with self.fixture() as root:
+            rows = [{"path": str(path)} for path in M.registration_paths(root)]
+            every = M.listed_projects(self.envelope(rows), root, all_projects=True)
+            self.assertEqual(every, set(M.PROJECT_NAMES))
+            self.assertEqual(len(M.listed_projects(self.envelope(rows[:10]), root, all_projects=False)), 10)
+            self.assertEqual(M.listed_projects(self.envelope(rows), root, all_projects=False), every)
+
+    def test_duplicate_foreign_noncanonical_unknown_shape_and_incomplete_all_refused(self):
+        with self.fixture() as root:
+            row = {"path": str(M.registration_paths(root)[0])}
+            for rows in ([row, row], [{"path": "/foreign"}], [{"path": row["path"] + "/../other"}],
+                         [{"path": 1}], [{"projectPath": row["path"]}], {}):
+                with self.subTest(rows=rows), self.assertRaises(RuntimeError):
+                    M.listed_projects(self.envelope(rows), root, all_projects=False)
+            with self.assertRaises(RuntimeError):
+                M.listed_projects(self.envelope([row]), root, all_projects=True)
+
+    def test_partial_failed_warning_duplicate_json_and_oversize_response_refused(self):
+        for changes in ({"success": False}, {"success": 1}, {"errors": ["partial"]}, {"warnings": ["skipped"]}):
+            with self.subTest(changes=changes), self.assertRaises(RuntimeError):
+                M.registration_json(self.envelope(**changes))
+        for raw in (b'{"success":false,"success":true,"errors":[],"warnings":[]}', b"NaN", b"\xff", b"\x1b",
+                    b" " * (M.STDOUT_LIMIT + 1)):
+            with self.subTest(size=len(raw)), self.assertRaises((RuntimeError, ValueError)):
+                M.registration_json(raw)
+
+    def sequence(self, failure=None, default_count=10):
+        with self.fixture() as root, ExitStack() as stack:
+            calls = []
+            report = {"commands": [], "registrationAttempted": False, "registrationReturnedSuccess": False,
+                      "projectContentsUnchanged": False, "paginationCompared": False, **M.FALSE}
+            help_text = b"Usage: unity [options] [command]\n  hub  Manage the Unity Hub application\n"
+            list_help = b"Usage: unity projects list [options]\n  --all  Print all projects without paging\n  --limit <n> Projects per page (default: 10)\n"
+            (root / "evidence/help.stdout").write_bytes(help_text)
+            (root / "evidence/list-help.stdout").write_bytes(list_help)
+            original_reader = M.read_regular
+            # Sequence policy is independent of Windows' lstat/fstat timestamp
+            # projection; the strict FD reader has separate real/mocked tests.
+            help_outputs = {root / "evidence/help.stdout": help_text, root / "evidence/list-help.stdout": list_help}
+            stack.enter_context(patch.object(M, "read_regular", side_effect=lambda path, limit, expected=None:
+                help_outputs[path] if path in help_outputs else original_reader(path, limit, expected)))
+            stack.enter_context(patch.object(M, "run_fixed", return_value={"mockedReadOnly": True}))
+            inventory = stack.enter_context(patch.object(M, "project_inventory", return_value={"fixture": {"kind": "file", "hash": "unchanged"}}))
+            if failure == "project-change":
+                inventory.side_effect = ({"fixture": "before"}, {"fixture": "after"})
+            if failure == "add-and-inventory":
+                inventory.side_effect = ({"fixture": "before"}, RuntimeError("later inventory failure"))
+            def run(tool, specification, passed_root):
+                self.assertEqual(root, passed_root)
+                calls.append(specification)
+                role = specification[0]
+                record = {"role": role, "exitCode": 0}
+                if role == "hub-help":
+                    raw = b"Usage: unity hub [command]\n"
+                elif role == "list-before":
+                    raw = self.envelope()
+                elif role == "register":
+                    if failure == "exit": record["exitCode"] = 1
+                    raw = self.envelope(errors=["partial"] if failure in ("partial", "add-and-inventory") else [])
+                else:
+                    paths = M.registration_paths(root)
+                    raw = self.envelope([{"path": str(path)} for path in (paths[:default_count] if role == "list-current" else paths)])
+                return record, raw
+            stack.enter_context(patch.object(M, "run_registration_fixed", side_effect=run))
+            if failure is None:
+                M.registration_sequence(Mock(), root, 0 if sys.platform == "win32" else os.getuid(), report)
+                self.assertTrue(report["paginationCompared"]); self.assertTrue(report["projectContentsUnchanged"])
+                self.assertEqual(report["currentCount"], default_count); self.assertEqual(report["allCount"], 13)
+                self.assertEqual(len(report["omittedFixtureIds"]), 13 - default_count)
+                self.assertEqual(report["jsonDefaultOmittedFixtures"], default_count != 13)
+                self.assertEqual([call[0] for call in calls], ["hub-help", "list-before", "register", "list-current", "list-all"])
+            else:
+                with self.assertRaises(RuntimeError) as raised:
+                    M.registration_sequence(Mock(), root, 0 if sys.platform == "win32" else os.getuid(), report)
+                if failure == "add-and-inventory":
+                    self.assertIn("partial result", str(raised.exception))
+                self.assertFalse(report["paginationCompared"])
+                if failure != "project-change":
+                    self.assertEqual([call[0] for call in calls], ["hub-help", "list-before", "register"], str(raised.exception))
+                if failure != "project-change":
+                    self.assertFalse(report["registrationReturnedSuccess"])
+            self.assertEqual(sum(call[0] == "register" for call in calls), 1)
+            self.assertTrue(report["registrationAttempted"])
+            self.assertTrue(all(report[name] is False for name in M.FALSE))
+            return report
+
+    def test_registration_then_compare_no_retry_or_root_acceptance(self):
+        self.sequence()
+
+    def test_unpaged_json_observed_without_forcing_ten_count(self):
+        self.sequence(default_count=13)
+
+    def test_failed_and_partial_registration_stop_before_both_lists(self):
+        for failure in ("exit", "partial", "add-and-inventory"):
+            with self.subTest(failure=failure):
+                report = self.sequence(failure=failure)
+                self.assertTrue("projectInventoryAfter" in report or "projectInventoryRefusal" in report)
+
+    def test_project_change_prevents_comparison_acceptance(self):
+        report = self.sequence(failure="project-change")
+        self.assertFalse(report["projectContentsUnchanged"])
+
+    def test_actual_help_must_advertise_pagination_and_hub_before_any_mutation(self):
+        with self.fixture() as root, patch.object(M, "run_fixed"), patch.object(M, "seed_projects") as seed, \
+                patch.object(M, "run_registration_fixed") as run:
+            (root / "evidence/help.stdout").write_bytes(b"Usage: unity\n")
+            with self.assertRaises(RuntimeError):
+                M.registration_sequence(Mock(), root, 1000, {"commands": []})
+            seed.assert_not_called(); run.assert_not_called()
+            (root / "evidence/help.stdout").write_bytes(b"Usage: unity\n  hub Manage the Unity Hub application\n")
+            (root / "evidence/list-help.stdout").write_bytes(b"Usage: unity projects list\n")
+            with self.assertRaises(RuntimeError):
+                M.registration_sequence(Mock(), root, 1000, {"commands": []})
+            seed.assert_not_called(); run.assert_not_called()
+
+    def test_source_fixture_and_root_current_arguments_remain_explicit(self):
+        source = (ROOT / "src-tauri/src/projects.rs").read_text(encoding="utf-8")
+        self.assertIn('cli(&["projects", "list"])', source)
+        self.assertIn('.args(["--json", "--non-interactive", "--no-banner", "--no-pager"])', source)
+        self.assertIn('entry["path"].as_str()', source)
+        controller = (HERE / "native-linux-unity-cli-registry-probe.py").read_text(encoding="utf-8")
+        self.assertNotIn('"projects-v1.json"', controller)
+        self.assertNotIn('"projects-v2.json"', controller)
+        self.assertNotIn('"hub", "install"', controller)
+
+    def test_actual_registration_launcher_uses_sealed_fd_exact_argv_and_closed_child_env(self):
+        with self.fixture() as root, patch.object(M, "project_inventory"), \
+                patch.object(M.os, "getuid", return_value=1000, create=True), \
+                patch.object(M, "read_regular", side_effect=(self.envelope(), b"")), \
+                patch.object(M.subprocess, "Popen") as spawn:
+            child = Mock(pid=42); child.wait.return_value = 0; spawn.return_value = child
+            image = Mock(fd=412)
+            args = ("projects", "add", *(str(path) for path in M.registration_paths(root)), *M.COMMANDS[-1][1][2:])
+            record, raw = M.run_registration_fixed(image, ("register", args), root)
+            self.assertEqual(spawn.call_args.args, (["/proc/self/fd/412", *args],))
+            self.assertEqual(spawn.call_args.kwargs["pass_fds"], (412,))
+            self.assertEqual(spawn.call_args.kwargs["env"], M.child_environment(root))
+            self.assertFalse(spawn.call_args.kwargs["shell"])
+            self.assertEqual(image.check.call_count, 2)
+            self.assertEqual(record["exitCode"], 0); self.assertEqual(raw, self.envelope())
+            child.wait.assert_called_once_with(timeout=M.COMMAND_SECONDS); child.kill.assert_not_called()
+
+    def test_registration_context_failure_precedes_all_creations_and_downloads(self):
+        with patch.object(M, "private_directory") as directory, patch.object(M, "download") as download, \
+                patch.object(M, "registration_sequence") as sequence, self.assertRaises(RuntimeError):
+            M.execute_registration(environment())
+        directory.assert_not_called(); download.assert_not_called(); sequence.assert_not_called()
+
+    def test_new_mode_stage_success_and_failure_receipts_keep_all_acceptance_false(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+                portable_flags(stack)
+                env = {**environment(), "UNITY_REGISTRY_PROBE_REQUEST": M.REGISTRATION_REQUEST,
+                       "GITHUB_WORKSPACE": str(ROOT), "RUNNER_TEMP": str(Path(temporary).resolve())}
+                source = Mock(before=SimpleNamespace(st_dev=1, st_ino=2))
+                image = Mock(before=SimpleNamespace(st_dev=3, st_ino=4, st_uid=1000, st_mode=stat.S_IFREG | 0o700), seals=15)
+                stack.enter_context(patch.object(M, "registration_admission", return_value=1000))
+                binding = stack.enter_context(patch.object(M, "source_binding", return_value={"fixed": "source"}))
+                stack.enter_context(patch.object(M, "protected_parent"))
+                stack.enter_context(patch.object(M, "private_directory", side_effect=lambda path, uid: os.mkdir(path, 0o700)))
+                download = stack.enter_context(patch.object(M, "download"))
+                stack.enter_context(patch.object(M, "HeldBinary", return_value=source))
+                sealed = stack.enter_context(patch.object(M, "SealedImage", return_value=image))
+                def sequence(tool, root, uid, report):
+                    self.assertIs(tool, image)
+                    self.assertEqual(root, Path(env["RUNNER_TEMP"]) / M.REGISTRATION_ROOT)
+                    report["registrationAttempted"] = True
+                    if failed:
+                        raise RuntimeError("partial registration")
+                    report.update(registrationReturnedSuccess=True, paginationCompared=True, projectContentsUnchanged=True)
+                stack.enter_context(patch.object(M, "registration_sequence", side_effect=sequence))
+                if failed:
+                    with self.assertRaisesRegex(RuntimeError, "partial registration"):
+                        M.execute_registration(env)
+                else:
+                    M.execute_registration(env)
+                report = json.loads((Path(env["RUNNER_TEMP"]) / M.REGISTRATION_ROOT / "evidence/report.json").read_bytes())
+                self.assertEqual(report["scope"], "cli-generated-registry-pagination-only")
+                self.assertEqual(report["probeCompleted"], not failed)
+                self.assertEqual(report["paginationCompared"], not failed)
+                self.assertEqual(report["genuineNonemptyFixture"], "deferred")
+                self.assertTrue(all(report[name] is False for name in M.FALSE))
+                self.assertEqual(report["tool"]["execution"], "sealed-memfd-cloexec")
+                sealed.assert_called_once_with(source, 1000)
+                source.close.assert_called_once(); image.close.assert_called_once()
+                download.assert_called_once(); self.assertEqual(binding.call_count, 1 if failed else 2)
+
+    @unittest.skipUnless(sys.platform == "linux", "Native Unix mode/link/inventory proof only; no CLI execution")
+    def test_real_unix_exact_project_inventory_rejects_links_extras_and_changed_content(self):
+        with self.fixture() as root:
+            uid = os.getuid()
+            M.seed_projects(root, uid)
+            before = M.project_inventory(root, uid)
+            self.assertEqual(len([v for v in before.values() if v["kind"] == "file"]), 39)
+            self.assertEqual(M.project_inventory(root, uid), before)
+            project = M.registration_paths(root)[0]
+            extra = project / "Assets/extra.txt"; extra.write_bytes(b"unknown")
+            with self.assertRaises(RuntimeError):
+                M.project_inventory(root, uid)
+            extra.unlink()
+            path = project / "Assets/Probe.txt"; path.write_bytes(b"changed")
+            with self.assertRaises(RuntimeError):
+                M.project_inventory(root, uid)
+            path.unlink(); path.symlink_to(project / "ProjectSettings/ProjectVersion.txt")
+            with self.assertRaises(RuntimeError):
+                M.project_inventory(root, uid)
 
 
 if __name__ == "__main__":

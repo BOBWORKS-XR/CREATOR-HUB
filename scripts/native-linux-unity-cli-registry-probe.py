@@ -1,4 +1,4 @@
-"""Finite beta.9 execution probe; no nonempty-registry or discovery acceptance."""
+"""Finite beta.9 read-only/private-registration probes; no Hub UI/discovery acceptance."""
 import hashlib
 from functools import partial
 import json
@@ -20,6 +20,12 @@ REPO_ID = "1364807512"
 BRANCH = "refs/heads/validation/linux-unity-registry-probe"
 WORKFLOW = REPO + "/.github/workflows/linux-unity-registry-probe.yml@" + BRANCH
 REQUEST = "execute-readonly-beta9"
+REGISTRATION_REQUEST = "execute-private-registration-pagination-beta9"
+REGISTRATION_ROOT = "linux-unity-registry-pagination-probe"
+PROJECT_NAMES = tuple("probe-project-" + str(index).zfill(2) for index in range(1, 14))
+PROJECT_FILES = {"Assets/Probe.txt": b"Synthetic Creator Hub CLI pagination fixture; no Editor execution.\n",
+                 "Packages/manifest.json": b'{"dependencies":{}}\n',
+                 "ProjectSettings/ProjectVersion.txt": b"m_EditorVersion: 6000.3.21f1\n"}
 VERSION = "1.0.0-beta.9"
 ASSET = {"filename": "unity-linux-x64", "size": 23515432,
          "sha256": "8c0d6e2435449c8be7f0e6b2ce6330bfc5f17a98aec4b659c859940455dd0fe5"}
@@ -127,6 +133,119 @@ def child_environment(root):
             "UNITY_NO_CONSENT_PROMPT": "1",
             "HOME": str(home), "XDG_CONFIG_HOME": str(home / "config"), "XDG_DATA_HOME": str(home / "data"),
             "XDG_CACHE_HOME": str(home / "cache"), "XDG_RUNTIME_DIR": str(root / "runtime"), "TMPDIR": str(root / "tmp")}
+
+
+def registration_admission(env, system=None, machine=None, uid=None, euid=None):
+    system = platform.system() if system is None else system
+    machine = platform.machine() if machine is None else machine
+    uid = getattr(os, "getuid", lambda: -1)() if uid is None else uid
+    euid = getattr(os, "geteuid", lambda: -1)() if euid is None else euid
+    require(system == "Linux" and machine == "x86_64" and type(uid) is int and uid > 0 and uid == euid,
+            "Unprivileged native Linux x86_64 runner required")
+    expected = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": REPO, "GITHUB_REPOSITORY_ID": REPO_ID,
+                "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": BRANCH, "GITHUB_WORKFLOW_REF": WORKFLOW,
+                "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
+                "UNITY_REGISTRY_PROBE_REQUEST": REGISTRATION_REQUEST}
+    require(all(env.get(key) == value for key, value in expected.items()), "Exact private registration context required")
+    require(re.fullmatch(r"[a-f0-9]{40}", env.get("GITHUB_SHA", ""))
+            and all(re.fullmatch(r"[1-9][0-9]*", env.get(key, "")) for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
+            "Exact source and run identity required")
+    forbidden = r"^(LD_|DYLD_|PYTHONPATH$|PYTHONHOME$|SSL_CERT_|CURL_CA_BUNDLE$|REQUESTS_CA_BUNDLE$|UNITY_|HUB_)"
+    require(not any((re.match(forbidden, key) and key != "UNITY_REGISTRY_PROBE_REQUEST")
+                    or key.lower().endswith("proxy") for key in env), "Inherited injection/trust/Unity overrides refused")
+    return uid
+
+
+def registration_paths(root):
+    require(root.is_absolute() and root.name == REGISTRATION_ROOT and len(str(root)) <= 3072
+            and ".." not in root.parts and root.resolve(strict=True) == root,
+            "Exact new private pagination root required")
+    return tuple(root / "home/projects" / name for name in PROJECT_NAMES)
+
+
+def new_private_file(path, raw):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        view = memoryview(raw)
+        while view:
+            count = os.write(fd, view)
+            require(count > 0, "Incomplete private evidence/fixture write")
+            view = view[count:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def seed_projects(root, uid):
+    paths = registration_paths(root)
+    private_directory(root / "home/projects", uid)
+    for project in paths:
+        for directory in (project, project / "Assets", project / "Packages", project / "ProjectSettings"):
+            private_directory(directory, uid)
+        for relative, raw in PROJECT_FILES.items():
+            new_private_file(project / relative, raw)
+
+
+def project_inventory(root, uid):
+    paths, result = registration_paths(root), {}
+    protected_parent(root, uid)
+    expected = {root / "home": {"config", "data", "cache", "projects"}, root / "home/projects": set(PROJECT_NAMES)}
+    for project in paths:
+        expected[project] = {"Assets", "Packages", "ProjectSettings"}
+        for directory in ("Assets", "Packages", "ProjectSettings"):
+            expected[project / directory] = {Path(name).name for name in PROJECT_FILES if name.startswith(directory + "/")}
+    for directory, children in expected.items():
+        info = directory.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == uid and stat.S_IMODE(info.st_mode) == 0o700
+                and directory.resolve(strict=True) == directory, "Private ordinary project ancestry required")
+        # HOME also contains CLI-owned registry/config data; only its own identity is retained.
+        if directory != root / "home":
+            names = set()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    require(len(names) < len(children) and entry.name in children, "Unexpected synthetic project inventory")
+                    names.add(entry.name)
+            require(names == children, "Synthetic project entry missing")
+            result[directory.relative_to(root / "home/projects").as_posix()] = {"kind": "directory", "stamp": identity(info)}
+    for project in paths:
+        for relative, raw in PROJECT_FILES.items():
+            path = project / relative
+            info = path.lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == uid and info.st_nlink == 1
+                    and stat.S_IMODE(info.st_mode) == 0o600, "Private single-link synthetic project file required")
+            read_regular(path, 4096, pin(raw))
+            require(identity(path.lstat()) == identity(info), "Synthetic project file changed during inventory")
+            result[path.relative_to(root / "home/projects").as_posix()] = {"kind": "file", "stamp": identity(info), **pin(raw)}
+    return result
+
+
+def registration_json(raw):
+    require(len(raw) <= STDOUT_LIMIT, "Bounded registration JSON required")
+    text = raw.decode("utf-8", errors="strict")
+    require(not re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text), "Unexpected registration output controls")
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            require(key not in value, "Ambiguous duplicate JSON member")
+            value[key] = item
+        return value
+    value = json.loads(text, object_pairs_hook=unique, parse_constant=lambda _: require(False, "Nonfinite JSON refused"))
+    require(type(value) is dict and value.get("success") is True and value.get("errors") == []
+            and value.get("warnings") == [], "CLI registration/list failure or partial result; no retry")
+    return value
+
+
+def listed_projects(raw, root, *, all_projects):
+    value, known = registration_json(raw), {str(path): path.name for path in registration_paths(root)}
+    rows = value.get("data")
+    require(type(rows) is list and len(rows) <= 13, "Expected bounded actual project row array")
+    found = set()
+    for row in rows:
+        require(type(row) is dict and type(row.get("path")) is str and row["path"] in known
+                and row["path"] not in found, "Unknown, duplicate or ambiguous project path refused")
+        found.add(row["path"])
+    require(not all_projects or found == set(known), "All-projects readback did not include the exact 13 fixtures")
+    return {known[path] for path in found}
 
 
 def source_binding(workspace):
@@ -285,6 +404,24 @@ def validate_output(role, raw):
 
 def run_fixed(tool, specification, root):
     require(specification in COMMANDS, "Only the six fixed help/read-only commands may execute")
+    record, stdout = _run_command(tool, specification, root)
+    require(record["exitCode"] == 0, "Fixed helper command failed: " + record["role"])
+    validate_output(record["role"], stdout)
+    return record
+
+
+def run_registration_fixed(tool, specification, root):
+    paths = registration_paths(root)
+    allowed = (("hub-help", ("hub", "--help")), ("list-before", COMMANDS[-1][1]),
+               ("register", ("projects", "add", *(str(path) for path in paths), *COMMANDS[-1][1][2:])),
+               ("list-current", COMMANDS[-1][1]), ("list-all", (*COMMANDS[-1][1], "--all")))
+    require(specification in allowed, "Only the fixed private registration/pagination commands may execute")
+    if specification[0] in ("register", "list-current", "list-all"):
+        project_inventory(root, os.getuid())
+    return _run_command(tool, specification, root)
+
+
+def _run_command(tool, specification, root):
     role, args = specification
     tool.check()
     evidence = root / "evidence"
@@ -310,9 +447,7 @@ def run_fixed(tool, specification, root):
             handle.close()
     stdout = read_regular(paths[0], STDOUT_LIMIT)
     stderr = read_regular(paths[1], STDERR_LIMIT)
-    require(code == 0, "Fixed helper command failed: " + role)
-    validate_output(role, stdout)
-    return {"role": role, "pid": pid, "exitCode": code, "stdout": pin(stdout), "stderr": pin(stderr)}
+    return {"role": role, "pid": pid, "exitCode": code, "stdout": pin(stdout), "stderr": pin(stderr)}, stdout
 
 
 def execute(env):
@@ -359,6 +494,108 @@ def execute(env):
             stream.write(raw)
 
 
+def registration_sequence(tool, root, uid, report):
+    for specification in COMMANDS[:5]:
+        report["commands"].append(run_fixed(tool, specification, root))
+    help_text = read_regular(root / "evidence/help.stdout", STDOUT_LIMIT).decode("utf-8")
+    require(re.search(r"^\s+hub\s+Manage the Unity Hub application\s*$", help_text, re.M),
+            "Actual pinned top-level help must advertise the Hub command")
+    list_help = read_regular(root / "evidence/list-help.stdout", STDOUT_LIMIT).decode("utf-8")
+    require("--all" in list_help and "Projects per page (default: 10)" in list_help,
+            "Actual beta.9 pagination help differs; no registration attempted")
+
+    def command(specification):
+        record, raw = run_registration_fixed(tool, specification, root)
+        report["commands"].append(record)
+        require(record["exitCode"] == 0, "Private probe command failed; no retry: " + record["role"])
+        return raw
+
+    hub_help = command(("hub-help", ("hub", "--help"))).decode("utf-8", errors="strict")
+    require(re.search(r"\bUsage:\s*unity\s+hub\b", hub_help, re.I), "Actual Hub-specific help required")
+    before_list = command(("list-before", COMMANDS[-1][1]))
+    validate_output("list", before_list)
+    registration_json(before_list)
+    seed_projects(root, uid)
+    before = project_inventory(root, uid)
+    before_raw = (json.dumps(before, sort_keys=True) + "\n").encode()
+    require(len(before_raw) <= 32768, "Bounded project inventory required")
+    new_private_file(root / "evidence/projects-before.json", before_raw)
+    report["projectInventoryBefore"] = pin(before_raw)
+    try:
+        report["registrationAttempted"] = True
+        registration_json(command(("register", ("projects", "add", *(str(path) for path in registration_paths(root)),
+                                                  *COMMANDS[-1][1][2:]))))
+        report["registrationReturnedSuccess"] = True
+        current = listed_projects(command(("list-current", COMMANDS[-1][1])), root, all_projects=False)
+        every = listed_projects(command(("list-all", (*COMMANDS[-1][1], "--all"))), root, all_projects=True)
+    finally:
+        original_failure = sys.exc_info()[0] is not None
+        try:
+            after = project_inventory(root, uid)
+            after_raw = (json.dumps(after, sort_keys=True) + "\n").encode()
+            require(len(after_raw) <= 32768, "Bounded project inventory required")
+            new_private_file(root / "evidence/projects-after.json", after_raw)
+            report["projectInventoryAfter"] = pin(after_raw)
+            require(after == before, "Synthetic project inventory changed; no acceptance")
+            report["projectContentsUnchanged"] = True
+        except Exception as error:
+            report["projectInventoryRefusal"] = type(error).__name__
+            if not original_failure:
+                raise
+    report.update(currentCount=len(current), allCount=len(every),
+                  currentFixtureIds=sorted(current), allFixtureIds=sorted(every), omittedFixtureIds=sorted(every - current),
+                  jsonDefaultOmittedFixtures=current != every, paginationCompared=True)
+
+
+def execute_registration(env):
+    uid = registration_admission(env)
+    workspace = Path(env["GITHUB_WORKSPACE"])
+    sources = source_binding(workspace)
+    parent = Path(env["RUNNER_TEMP"])
+    protected_parent(parent, uid)
+    root = parent / REGISTRATION_ROOT
+    private_directory(root, uid)
+    for name in ("evidence", "home", "home/config", "home/data", "home/cache", "runtime", "tmp", "tool"):
+        private_directory(root / name, uid)
+    report = {"schemaVersion": 1, "scope": "cli-generated-registry-pagination-only", "source": env["GITHUB_SHA"],
+              "runId": env["GITHUB_RUN_ID"], "runAttempt": env["GITHUB_RUN_ATTEMPT"], "sources": sources,
+              "version": VERSION, "asset": ASSET, "url": URL, "commands": [], "probeCompleted": False,
+              "registrationAttempted": False, "registrationReturnedSuccess": False, "paginationCompared": False,
+              "projectContentsUnchanged": False, "genuineNonemptyFixture": "deferred", **FALSE}
+    source, tool = None, None
+    try:
+        binary = root / "tool" / ASSET["filename"]
+        download(binary)
+        source = HeldBinary(binary, uid)
+        tool = SealedImage(source, uid)
+        report["tool"] = {"sourceDev": source.before.st_dev, "sourceIno": source.before.st_ino,
+                          "dev": tool.before.st_dev, "ino": tool.before.st_ino, "uid": tool.before.st_uid,
+                          "mode": stat.S_IMODE(tool.before.st_mode), "seals": tool.seals,
+                          "execution": "sealed-memfd-cloexec", "sourceRetained": True,
+                          **{key: ASSET[key] for key in ("size", "sha256")}}
+        registration_sequence(tool, root, uid, report)
+        require(source_binding(workspace) == sources, "Checked-out source changed during probe")
+        report["probeCompleted"] = True
+    except Exception as error:
+        report["refusal"] = type(error).__name__
+        raise
+    finally:
+        if tool is not None:
+            tool.close()
+        if source is not None:
+            source.close()
+        raw = (json.dumps(report, sort_keys=True, indent=2) + "\n").encode()
+        require(len(raw) <= 16384, "Bounded probe receipt required")
+        new_private_file(root / "evidence/report.json", raw)
+
+
+def main(argv, env):
+    require(argv in (["probe"], ["registration-pagination"]), "Only the two fixed manual probe phases exist")
+    if argv == ["probe"]:
+        execute(env)
+    else:
+        execute_registration(env)
+
+
 if __name__ == "__main__":
-    require(sys.argv == [sys.argv[0], "probe"], "Only the fixed manual probe phase exists")
-    execute(os.environ)
+    main(sys.argv[1:], os.environ)

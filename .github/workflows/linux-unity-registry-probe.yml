@@ -1,4 +1,4 @@
-name: Linux Unity beta9 read-only registry execution probe
+name: Linux Unity beta9 bounded registry execution probes
 
 on:
   push:
@@ -6,13 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       execution_request:
-        description: Run only the pinned CLI help and empty projects-list probe in a disposable HOME; not discovery acceptance
+        description: Pinned CLI in a disposable HOME; optional synthetic registration/pagination only, never discovery acceptance
         required: true
         default: inspect-only
         type: choice
         options:
           - inspect-only
           - execute-readonly-beta9
+          - execute-private-registration-pagination-beta9
 
 permissions:
   contents: read
@@ -23,7 +24,7 @@ jobs:
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
       github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/linux-unity-registry-probe' &&
       github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/linux-unity-registry-probe.yml@refs/heads/validation/linux-unity-registry-probe' &&
-      inputs.execution_request == 'execute-readonly-beta9'
+      (inputs.execution_request == 'execute-readonly-beta9' || inputs.execution_request == 'execute-private-registration-pagination-beta9')
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -36,12 +37,18 @@ jobs:
       - name: Mandatory pure authority, Python 3.10 AST and workflow YAML checks
         run: /usr/bin/python3 -I -B scripts/native-linux-unity-cli-registry-probe.test.py
       - name: Execute only the pinned beta9 helper and read-only list commands
+        if: inputs.execution_request == 'execute-readonly-beta9'
         run: /usr/bin/python3 -I -B scripts/native-linux-unity-cli-registry-probe.py probe
+      - name: Register only 13 private synthetic fixtures once and compare JSON pagination
+        if: inputs.execution_request == 'execute-private-registration-pagination-beta9'
+        run: /usr/bin/python3 -I -B scripts/native-linux-unity-cli-registry-probe.py registration-pagination
       - name: Retain bounded command output and scoped receipt only
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: linux-unity-registry-probe-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/linux-unity-registry-probe/evidence/
+          path: |
+            ${{ runner.temp }}/linux-unity-registry-probe/evidence/
+            ${{ runner.temp }}/linux-unity-registry-pagination-probe/evidence/
           if-no-files-found: warn
           retention-days: 7
