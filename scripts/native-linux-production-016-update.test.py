@@ -1217,6 +1217,7 @@ class Pure(unittest.TestCase):
                                 patch.object(M.os, "O_CLOEXEC", getattr(os, "O_CLOEXEC", 0), create=True),
                                 patch.object(M.os, "O_PATH", getattr(os, "O_PATH", 0x200000), create=True),
                                 patch.object(M.os, "open", side_effect=opened), patch.object(M.os, "lstat", side_effect=lstat),
+                                patch.object(M.Path, "lstat", autospec=True, side_effect=lstat),
                                 patch.object(M.os, "stat", side_effect=stat_at), patch.object(M.os, "fstat", side_effect=fstat),
                                 patch.object(M.os, "readlink", side_effect=readlink), patch.object(M.os, "unlink", side_effect=unlink),
                                 patch.object(M.os, "close", side_effect=closed), patch.object(M.os, "fsync", side_effect=fsync),
@@ -1238,6 +1239,14 @@ class Pure(unittest.TestCase):
             self.assertEqual(set(fixture.links), {"foreign.pem"})
             command.assert_called_once_with(["/usr/sbin/update-ca-certificates"], timeout=60)
             self.assertLess(fixture.events.index("journal-saved"), fixture.events.index("journal-fsynced"))
+
+    def test_alias_fixture_covers_path_lstat_with_python310_cached_stat_accessor(self):
+        cached_stat = os.stat
+        def path_stat(path, *, follow_symlinks=True):
+            return cached_stat(path, follow_symlinks=follow_symlinks)
+        with patch.object(M.Path, "stat", autospec=True, side_effect=path_stat), self.trust_alias_fixture() as fixture:
+            M.cleanup_owned_trust_aliases(fixture.arm, fixture.published)
+            self.assertEqual(fixture.removed, [fixture.hashed, fixture.pem])
 
     def test_alias_cleanup_refuses_original_foreign_type_target_extra_and_identity_changes_before_unlink(self):
         for fault in ("original-pem", "original-hash", "original-removed", "foreign-owner", "hardlink", "regular-pem", "wrong-target", "wrong-hash", "extra-link", "extra-hash", "wrong-publication", "replace-at-open", "retarget-before-unlink", "directory-owner"):
@@ -1322,6 +1331,7 @@ class Pure(unittest.TestCase):
                  patch.object(M.os, "getuid", return_value=0), patch.object(M.os, "geteuid", return_value=0), \
                  patch.object(M.os, "stat", side_effect=lambda *args, **kwargs: root_metadata(actual["stat"](*args, **kwargs))), \
                  patch.object(M.os, "lstat", side_effect=lambda *args, **kwargs: root_metadata(actual["lstat"](*args, **kwargs))), \
+                 patch.object(M.Path, "lstat", autospec=True, side_effect=lambda path: root_metadata(actual["lstat"](path))), \
                  patch.object(M.os, "fstat", side_effect=lambda fd: root_metadata(actual["fstat"](fd))), \
                  patch.object(M.os.path, "lexists", side_effect=lambda file: False if file == M.TLS_CERT else lexists(file)):
                 M.cleanup_owned_trust_aliases(arm, published)
