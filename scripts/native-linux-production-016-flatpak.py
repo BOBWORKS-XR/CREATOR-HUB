@@ -1281,9 +1281,56 @@ def mixed_worker_diagnostic(value):
     return copy.deepcopy(value)
 
 
+def foreign_worker_diagnostic(value):
+    def check(test): require(test, 'Typed cached foreign observation diagnostic required')
+    check(type(value) is dict and set(value) == {'readOnly', 'inputPermitted', 'authorityGranted', 'releaseReady',
+        'function', 'stage', 'line', 'subject', 'limit', 'heldCount', 'invocationMember', 'foreignMember',
+        'checks', 'stamps', 'protectedSha256', 'clock', 'cleanupConfirmed'}
+        and value['readOnly'] is True and all(value[k] is False for k in ('inputPermitted', 'authorityGranted', 'releaseReady'))
+        and value['function'] in ('ForeignSudoObservations.observe', 'ForeignSudoObservations.identity',
+            'ForeignSudoObservations.recheck', 'ForeignSudoObservations.close', 'InvocationImage.__init__',
+            'InvocationImage.directory', 'InvocationImage.check', 'InvocationImage.snapshot', 'InvocationImage.close',
+            'ProxyAssociationProc.read_at', 'inventory_probe', 'association_snapshot', 'association_snapshot_held',
+            'inventory_probe.budget', 'association_snapshot.budget', 'association_snapshot_held.budget')
+        and value['stage'] in ('budget-before', 'budget-after', 'admission', 'cap', 'pidfd-open', 'pidfd-live',
+            'proc-open', 'proc-type', 'identity', 'recheck', 'live-before', 'proc-before', 'stat-read', 'status-read',
+            'process-parse', 'process-shape', 'kernel-identity', 'image-before', 'image-after', 'row-recheck', 'close',
+            'protected-image', 'kernel-open', 'image-kind', 'image-alias', 'image-path', 'image-directory',
+            'image-open', 'image-snapshot', 'image-budget', 'image-file', 'image-read', 'image-eof', 'image-hash', 'image-close')
+        and type(value['line']) is int and 0 < value['line'] < 100000
+        and type(value['limit']) is int and value['limit'] == 4
+        and (value['heldCount'] is None or type(value['heldCount']) is int and 0 <= value['heldCount'] <= 4)
+        and all(value[k] is None or type(value[k]) is bool for k in ('invocationMember', 'foreignMember', 'cleanupConfirmed')))
+    subject = value['subject']
+    check(type(subject) is dict and set(subject) == {'pid', 'parentPid', 'startTime', 'uids', 'state', 'executableKind', 'executablePathSha256'}
+        and (subject['pid'] is None or type(subject['pid']) is int and 1 < subject['pid'] < 2**31)
+        and (subject['parentPid'] is None or type(subject['parentPid']) is int and 0 <= subject['parentPid'] < 2**31)
+        and (subject['startTime'] is None or type(subject['startTime']) is str and re.fullmatch(r'[0-9]{1,20}', subject['startTime']))
+        and (subject['uids'] is None or type(subject['uids']) is list and len(subject['uids']) == 4
+             and all(type(uid) is int and 0 <= uid < 2**32 for uid in subject['uids']))
+        and subject['state'] in (None, 'R', 'S', 'D', 'Z', 'X', 'x', 'T', 't', 'K', 'W', 'P', 'I', 'other')
+        and subject['executableKind'] in ('unread', 'sudo', 'python', 'bwrap', 'proxy', 'launcher', 'other'))
+    for digest in (subject['executablePathSha256'], value['protectedSha256']):
+        check(digest is None or type(digest) is str and re.fullmatch(r'[a-f0-9]{64}', digest))
+    check(type(value['checks']) is dict and set(value['checks']) <= {'open', 'pid_type', 'pid_range', 'unheld_invocation',
+        'uid_type', 'uid_count', 'uid_integers', 'uid_tuple', 'live_open', 'live_before', 'pid_prefix', 'tail',
+        'parent', 'start', 'uids', 'state', 'executable_match', 'live_after', 'row_match'}
+        and all(type(item) is bool for item in value['checks'].values())
+        and type(value['stamps']) is dict and set(value['stamps']) == {'procExpected', 'procHeldBefore', 'procNamedBefore',
+            'procHeldAfter', 'procNamedAfter', 'kernelHeld', 'kernelNamed', 'protectedImage', 'protectedAlias',
+            'aliasObserved', 'protectedNamed', 'parentHeld', 'parentNamed', 'fileObserved'})
+    for stamp in value['stamps'].values():
+        check(stamp is None or type(stamp) is list and len(stamp) in (5, 9)
+            and all(type(n) is int and 0 <= n < 2**64 for n in stamp))
+    check(type(value['clock']) is dict and set(value['clock']) == {'nowNs', 'expiresNs'}
+        and all(n is None or type(n) is int and 0 <= n < 2**64 for n in value['clock'].values())
+        and len(json_bytes(value)) <= 8192)
+    return copy.deepcopy(value)
+
+
 def root_worker_refusal(answer):
     error = RuntimeError('Complete protected root snapshot unavailable; no input')
-    if type(answer) is dict and answer.get('ok') is False and set(answer) <= {'ok', 'unavailable', 'stage', 'pid', 'probeCaller', 'inventoryFailure', 'mixedFailure'}:
+    if type(answer) is dict and answer.get('ok') is False and set(answer) <= {'ok', 'unavailable', 'stage', 'pid', 'probeCaller', 'inventoryFailure', 'mixedFailure', 'foreignFailure'}:
         value = dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
         if answer.get('unavailable') in ('ValueError', 'KeyError', 'TypeError', 'RuntimeError', 'PermissionError',
                                         'FileNotFoundError', 'ProcessLookupError', 'OSError'):
@@ -1348,6 +1395,10 @@ def root_worker_refusal(answer):
             pass
         try:
             value['mixedFailure'] = mixed_worker_diagnostic(answer.get('mixedFailure'))
+        except Exception:
+            pass
+        try:
+            value['foreignFailure'] = foreign_worker_diagnostic(answer.get('foreignFailure'))
         except Exception:
             pass
         error.root_proxy_diagnostic = value

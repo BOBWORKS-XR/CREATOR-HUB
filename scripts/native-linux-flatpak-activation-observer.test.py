@@ -995,6 +995,201 @@ class ForeignSudoTests(unittest.TestCase):
             self.assertNotIn(forbidden, text)
         self.assertIn("InvocationImage('sudo', self.budget)", text)
 
+    def test_foreign_cap_diagnostic_has_exact_count_member_uid_and_no_unreached_image_claim(self):
+        with self.fixture() as state:
+            for pid in range(1630, 1634): state.rows[pid] = {**state.rows[1629], 'pid': pid}
+            with self.assertRaises(ValueError) as caught:
+                with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                    M.complete_uid_inventory(state.budget, invocation=state.invocation, foreign=foreign)
+            detail = caught.exception.proxy_foreign_diagnostic
+            self.assertEqual((detail['function'], detail['stage'], detail['heldCount'], detail['limit']),
+                             ('ForeignSudoObservations.observe', 'cap', 4, 4))
+            self.assertEqual(detail['subject'], dict(pid=1633, parentPid=None, startTime=None,
+                uids=[1001, 0, 0, 0], state=None, executableKind='unread', executablePathSha256=None))
+            self.assertIs(detail['invocationMember'], False); self.assertIs(detail['foreignMember'], False)
+            self.assertTrue(detail['cleanupConfirmed']); self.assertEqual(state.pidfd.call_count, 4)
+            self.assertEqual(caught.exception.proxy_inventory_diagnostic['entryPid'], 1633)
+            self.assertNotIn('PRIVATE', M.json.dumps(detail)); self.assertLess(len(M.json.dumps(detail)), 8192)
+            self.assertTrue(Path(M.__file__).read_text().splitlines()[detail['line'] - 1].strip().startswith('require((_f_count'))
+
+    def test_foreign_diagnostic_distinguishes_kernel_proc_live_and_process_failures_without_extra_reads(self):
+        cases = (('exe', 'kernel-identity'), ('kernel', 'kernel-identity'), ('proc', 'proc-before'),
+                 ('exit', 'pidfd-live'), ('zombie', 'process-shape'), ('uid', 'process-shape'), ('permission', 'stat-read'))
+        for case, stage in cases:
+            with self.subTest(case=case), self.fixture() as state:
+                if case == 'exe': state.rows[1629]['executable'] = '/PRIVATE/foreign'
+                if case == 'kernel': state.replaced.add(1629)
+                if case == 'proc': state.proc_replaced.add(1629)
+                if case == 'exit': state.exited.add(1629)
+                if case == 'zombie': state.rows[1629]['state'] = 'Z'
+                if case == 'uid': state.rows[1629]['uids'] = [1001] * 4
+                read_error = PermissionError('PRIVATE_ORIGINAL')
+                with patch.object(M.ProxyAssociationProc, 'read_at', side_effect=read_error) if case == 'permission' else ExitStack():
+                    with self.assertRaises((ValueError, PermissionError)) as caught:
+                        with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                            if case == 'uid': foreign.observe(1629, [1001, 0, 0, 0])  # Status changed since the entry UID read.
+                            else: M.complete_uid_inventory(state.budget, invocation=state.invocation, foreign=foreign)
+                detail = caught.exception.proxy_foreign_diagnostic
+                self.assertEqual(detail['stage'], stage); self.assertTrue(detail['cleanupConfirmed'])
+                self.assertEqual(detail['subject']['pid'], 1629)
+                self.assertNotIn('PRIVATE', M.json.dumps(detail))
+                self.assertEqual(state.opens.call_count, 0 if case == 'exit' else 2)
+                self.assertEqual(state.reads, [] if case in ('proc', 'exit', 'permission') else [(1629, 'stat'), (1629, 'status')])
+                self.assertEqual(state.links, [1629] if case in ('exe', 'kernel') else [])
+                if case == 'exe':
+                    self.assertFalse(detail['checks']['executable_match'])
+                    self.assertEqual(detail['subject']['executableKind'], 'other')
+                    self.assertEqual(detail['subject']['executablePathSha256'], M.hashlib.sha256(b'/PRIVATE/foreign').hexdigest())
+                    self.assertIsNone(detail['stamps']['kernelHeld'])
+                if case == 'kernel':
+                    self.assertEqual(detail['subject']['executableKind'], 'sudo')
+                    self.assertNotEqual(detail['stamps']['kernelHeld'], detail['stamps']['protectedImage'])
+                    self.assertIsNone(detail['stamps']['kernelNamed'])
+                if case == 'proc': self.assertNotEqual(detail['stamps']['procHeldBefore'], detail['stamps']['procNamedBefore'])
+                if case == 'zombie': self.assertFalse(detail['checks']['state'])
+                if case == 'uid': self.assertFalse(detail['checks']['uids']); self.assertNotIn('state', detail['checks'])
+                if case == 'permission': self.assertIs(caught.exception, read_error)
+
+    def test_foreign_row_mutation_is_distinct_and_first_failure_is_not_overwritten_by_cleanup(self):
+        with self.fixture() as state:
+            def changed(number):
+                if number == 2: state.rows[1629]['parentPid'] = 999
+            state.on_scan = changed
+            with self.assertRaises(ValueError) as caught:
+                with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                    M.complete_uid_inventory(state.budget, invocation=state.invocation, foreign=foreign)
+            detail = caught.exception.proxy_foreign_diagnostic
+            self.assertEqual((detail['stage'], detail['subject']['parentPid']), ('row-recheck', 999))
+            self.assertFalse(detail['checks']['row_match']); self.assertTrue(detail['cleanupConfirmed'])
+            before = copy.deepcopy(detail)
+            with patch.object(M, 'foreign_diagnostic', side_effect=AssertionError('No second capture')):
+                M.capture_foreign_failure(caught.exception)
+            self.assertEqual(caught.exception.proxy_foreign_diagnostic, before)
+
+    def test_foreign_close_failure_retains_first_refusal_and_cleanup_uncertainty(self):
+        for original in (False, True):
+            with self.subTest(original=original), self.fixture() as state:
+                with self.assertRaises((ValueError, OSError)) as caught:
+                    with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                        foreign.observe(1629, [1001, 0, 0, 0]); state.close_bad = True
+                        if original:
+                            state.rows[1629]['state'] = 'Z'; foreign.recheck()
+                detail = caught.exception.proxy_foreign_diagnostic
+                self.assertEqual(detail['stage'], 'process-shape' if original else 'close')
+                self.assertFalse(detail['cleanupConfirmed']); self.assertTrue(caught.exception.invocation_cleanup_failed)
+                self.assertEqual(state.closes, [21629, 11629, 31629]); state.image.close.assert_called_once()
+
+    def test_foreign_diagnostic_failure_never_masks_original_or_repeats_proc_reads(self):
+        with self.fixture() as state, patch.object(M, 'foreign_diagnostic', side_effect=TypeError('PRIVATE_SERIALIZE')):
+            state.rows[1629]['state'] = 'Z'
+            with self.assertRaises(ValueError) as caught:
+                with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                    M.complete_uid_inventory(state.budget, invocation=state.invocation, foreign=foreign)
+            self.assertFalse(hasattr(caught.exception, 'proxy_foreign_diagnostic'))
+            self.assertEqual(caught.exception.proxy_inventory_diagnostic['entryPid'], 1629)
+            self.assertEqual(state.reads, [(1629, 'stat'), (1629, 'status')]); self.assertEqual(state.links, [])
+
+    def test_foreign_original_probe_budget_boundary_uses_one_existing_clock_read(self):
+        with self.fixture() as state, patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'), patch.object(M, 'InvocationChain') as chain:
+            chain.return_value.__enter__.return_value = state.invocation
+            clock = Mock(side_effect=[99, 99, 100])  # request, empty-holder pre-scan check, first observe
+            request = dict(schemaVersion=1, operation=M.PROBE_OPERATION, harnessSource='a' * 40, codeSha256='b' * 64,
+                sequence=1, nonce='c' * 64, expiresNs=100, caller=state.caller)
+            with self.assertRaises(ValueError) as caught: M.inventory_probe(request, clock=clock)
+            detail = caught.exception.proxy_foreign_diagnostic
+            self.assertEqual(detail['clock'], dict(nowNs=100, expiresNs=100))
+            self.assertEqual(detail['function'], 'inventory_probe.budget'); self.assertEqual(clock.call_count, 3)
+            self.assertIsNone(detail['heldCount']); self.assertTrue(detail['cleanupConfirmed'])
+            state.factory.assert_not_called(); state.pidfd.assert_called_once_with(state.caller['pid'])
+
+    def test_foreign_real_protected_image_failure_keeps_named_held_stamps_and_constructor_cleanup_marker(self):
+        image_class = M.InvocationImage
+        for cleanup_fails in (False, True):
+            with self.subTest(cleanup_fails=cleanup_fails), self.fixture() as state:
+                proc_open, proc_fstat, proc_stat, proc_close = M.os.open.side_effect, M.os.fstat.side_effect, M.os.stat.side_effect, M.os.close.side_effect
+                with InvocationImageTests().fixture() as package:
+                    package_open, package_fstat, package_stat = M.os.open.side_effect, M.os.fstat.side_effect, M.os.stat.side_effect
+                    def opened(name, flags, **kw):
+                        return (proc_open if name == 'exe' or str(name).startswith('/proc/') else package_open)(name, flags, **kw)
+                    def fstat(fd): return proc_fstat(fd) if fd >= 10000 else package_fstat(fd)
+                    def named(name, **kw):
+                        result = (proc_stat if name == 'exe' or str(name).startswith('/proc/') else package_stat)(name, **kw)
+                        if str(name) == 'sudo': return invocation_stat(999, result.st_mode, result.st_size)
+                        return result
+                    def closed(fd):
+                        if fd >= 10000: return proc_close(fd)
+                        if cleanup_fails: raise OSError('PRIVATE_IMAGE_CLOSE')
+                    package.close.side_effect = closed
+                    with patch.object(M, 'InvocationImage', image_class), patch.object(M.os, 'open', side_effect=opened), \
+                            patch.object(M.os, 'fstat', side_effect=fstat), patch.object(M.os, 'stat', side_effect=named):
+                        with self.assertRaises(ValueError) as caught:
+                            with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                                M.complete_uid_inventory(state.budget, invocation=state.invocation, foreign=foreign)
+                    detail = caught.exception.proxy_foreign_diagnostic
+                    self.assertEqual((detail['function'], detail['stage']), ('InvocationImage.check', 'image-file'))
+                    self.assertNotEqual(detail['stamps']['protectedImage'], detail['stamps']['protectedNamed'])
+                    self.assertEqual(detail['stamps']['fileObserved'], detail['stamps']['protectedImage'])
+                    self.assertEqual(detail['cleanupConfirmed'], not cleanup_fails)
+                    self.assertEqual(package.reads, []); self.assertEqual(state.reads, []); self.assertEqual(state.links, [])
+                    self.assertEqual(state.closes, [11629, 31629]); self.assertNotIn('PRIVATE', M.json.dumps(detail))
+
+    def test_foreign_refusal_root_serialization_keeps_original_context_and_all_cached_metadata(self):
+        with self.fixture() as state:
+            state.rows[1629]['executable'] = '/usr/bin/bwrap'
+            with self.assertRaises(ValueError) as caught:
+                with M.ForeignSudoObservations(state.invocation, state.budget) as foreign:
+                    M.complete_uid_inventory(state.budget, invocation=state.invocation, foreign=foreign)
+        error, output = caught.exception, io.StringIO()
+        with ExitStack() as stack:
+            for name in ('SIGALRM', 'ITIMER_REAL'): stack.enter_context(patch.object(M.signal, name, 0, create=True))
+            for name in ('signal', 'setitimer'): stack.enter_context(patch.object(M.signal, name, create=True))
+            for name in ('getuid', 'geteuid'): stack.enter_context(patch.object(M.os, name, return_value=0, create=True))
+            stack.enter_context(patch.dict(M.os.environ, {'SUDO_UID': '1001'}))
+            stack.enter_context(patch.object(M, 'PROXY_TOOL', Path(M.__file__)))
+            stack.enter_context(patch.object(M.sys, 'argv', ['observer.py', 'root-inventory-probe']))
+            stack.enter_context(patch.object(M.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(b'{"codeSha256":"fixed"}'))))
+            stack.enter_context(patch.object(M.sys, 'stdout', output)); stack.enter_context(patch.object(M, 'probe_request'))
+            stack.enter_context(patch.object(M, 'protected_tool')); stack.enter_context(patch.object(M, 'inventory_probe', side_effect=error))
+            with self.assertRaises(SystemExit) as raised: M.root_snapshot_main()
+            self.assertIs(raised.exception.__context__, error)
+        value = M.json.loads(output.getvalue())
+        self.assertFalse(value['ok']); self.assertEqual(value['foreignFailure'], error.proxy_foreign_diagnostic)
+        self.assertEqual(value['foreignFailure']['subject']['executableKind'], 'bwrap')
+        self.assertFalse(value['foreignFailure']['authorityGranted']); self.assertNotIn('PRIVATE', output.getvalue())
+        self.assertLess(len(output.getvalue().encode()), 16384)
+
+    def test_foreign_instrumentation_preserves_original_guard_ast_read_order_and_bounds(self):
+        # Hashes of ASTs from the independently retained immutable 29515016 native source.
+        expected = {'ForeignSudoObservations': '0504c22b2cd742fc3c871e7c64a1d0f39f2f52470ee078d8424d48683bd5f453',
+            'InvocationImage': 'e8062ed6adaa921ff9a21c1091b39e1e8a7284a81d35d714a92b950cae6fc953',
+            'inventory_probe': '561d4966cb785c874b19291a1340a4c58b7d67560c3c35b10913b1f963b4e822',
+            'association_snapshot': '4077170e6a6c843f1b391fcfdc2a70fd52c76bd01229fa6b105f121708288780',
+            'association_snapshot_held': 'cc7be1fd9217d87afbc0d387b75f330968cb997e6bdf8688beaaaa35ed8d0231'}
+        class StripDiagnostic(ast.NodeTransformer):
+            def visit_Assign(self, node):
+                if all(isinstance(n, ast.Name) and n.id == '_foreign_stage' for n in node.targets): return None
+                return self.generic_visit(node)
+            def visit_NamedExpr(self, node):
+                if isinstance(node.target, ast.Name) and (node.target.id.startswith('_f_') or node.target.id == '_inventory_now'):
+                    return self.visit(node.value)
+                return self.generic_visit(node)
+            def visit_Expr(self, node):
+                if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id in (
+                        'capture_foreign_failure', 'finish_foreign_cleanup'): return None
+                return self.generic_visit(node)
+            def visit_If(self, node):
+                node = self.generic_visit(node)
+                return node if node.body else None
+        tree = ast.parse(Path(M.__file__).read_text(), feature_version=(3, 10))
+        for name, digest in expected.items():
+            node = StripDiagnostic().visit(next(n for n in tree.body if getattr(n, 'name', None) == name))
+            self.assertEqual(M.hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest(), digest, name)
+        for name in ('capture_foreign_failure', 'foreign_diagnostic', 'finish_foreign_cleanup'):
+            node = next(n for n in tree.body if getattr(n, 'name', None) == name)
+            for call in (n for n in ast.walk(node) if isinstance(n, ast.Call)):
+                self.assertNotIn(ast.unparse(call.func), ('os.open', 'os.stat', 'os.fstat', 'os.readlink', 'os.read', 'os.pread',
+                    'os.pidfd_open', 'select.select', 'time.monotonic_ns', 'time.monotonic', 'budget', 'self.budget'))
+
 
 class InvocationImageTests(unittest.TestCase):
     @contextmanager

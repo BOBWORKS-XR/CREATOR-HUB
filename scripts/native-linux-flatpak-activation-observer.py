@@ -648,8 +648,144 @@ def probe_hop_detail(pid, tail=(), ids=()):
     return value
 
 
+FOREIGN_STAGES = ('budget-before', 'budget-after', 'admission', 'cap', 'pidfd-open', 'pidfd-live',
+    'proc-open', 'proc-type', 'identity', 'recheck', 'live-before', 'proc-before', 'stat-read', 'status-read',
+    'process-parse', 'process-shape', 'kernel-identity', 'image-before', 'image-after', 'row-recheck', 'close',
+    'protected-image', 'kernel-open', 'image-kind', 'image-alias', 'image-path', 'image-directory',
+    'image-open', 'image-snapshot', 'image-budget', 'image-file', 'image-read', 'image-eof', 'image-hash', 'image-close')
+FOREIGN_CHECKS = ('open', 'pid_type', 'pid_range', 'unheld_invocation', 'uid_type', 'uid_count',
+    'uid_integers', 'uid_tuple', 'live_open', 'live_before', 'pid_prefix', 'tail', 'parent', 'start', 'uids',
+    'state', 'executable_match', 'live_after', 'row_match')
+FOREIGN_STAMPS = ('procExpected', 'procHeldBefore', 'procNamedBefore', 'procHeldAfter', 'procNamedAfter',
+    'kernelHeld', 'kernelNamed', 'protectedImage', 'protectedAlias', 'aliasObserved', 'protectedNamed',
+    'parentHeld', 'parentNamed', 'fileObserved')
+
+
+def foreign_diagnostic(value):
+    require(type(value) is dict and set(value) == {'readOnly', 'inputPermitted', 'authorityGranted', 'releaseReady',
+        'function', 'stage', 'line', 'subject', 'limit', 'heldCount', 'invocationMember', 'foreignMember',
+        'checks', 'stamps', 'protectedSha256', 'clock', 'cleanupConfirmed'}
+        and value['readOnly'] is True and all(value[k] is False for k in ('inputPermitted', 'authorityGranted', 'releaseReady'))
+        and value['function'] in tuple(row[1] for row in FOREIGN_FAILURE_FUNCTIONS)
+        and value['stage'] in FOREIGN_STAGES and type(value['line']) is int and 0 < value['line'] < 100000
+        and type(value['limit']) is int and value['limit'] == 4
+        and (value['heldCount'] is None or type(value['heldCount']) is int and 0 <= value['heldCount'] <= 4)
+        and all(value[k] is None or type(value[k]) is bool for k in ('invocationMember', 'foreignMember', 'cleanupConfirmed')))
+    subject = value['subject']
+    require(type(subject) is dict and set(subject) == {'pid', 'parentPid', 'startTime', 'uids', 'state', 'executableKind', 'executablePathSha256'}
+        and (subject['pid'] is None or type(subject['pid']) is int and 1 < subject['pid'] < 2**31)
+        and (subject['parentPid'] is None or type(subject['parentPid']) is int and 0 <= subject['parentPid'] < 2**31)
+        and (subject['startTime'] is None or type(subject['startTime']) is str and re.fullmatch(r'[0-9]{1,20}', subject['startTime']))
+        and (subject['uids'] is None or type(subject['uids']) is list and len(subject['uids']) == 4
+             and all(type(uid) is int and 0 <= uid < 2**32 for uid in subject['uids']))
+        and subject['state'] in (None, 'R', 'S', 'D', 'Z', 'X', 'x', 'T', 't', 'K', 'W', 'P', 'I', 'other')
+        and subject['executableKind'] in ('unread', 'sudo', 'python', 'bwrap', 'proxy', 'launcher', 'other'))
+    for digest in (subject['executablePathSha256'], value['protectedSha256']):
+        require(digest is None or type(digest) is str and re.fullmatch(r'[a-f0-9]{64}', digest))
+    require(type(value['checks']) is dict and set(value['checks']) <= set(FOREIGN_CHECKS)
+        and all(type(item) is bool for item in value['checks'].values())
+        and type(value['stamps']) is dict and set(value['stamps']) == set(FOREIGN_STAMPS))
+    for stamp in value['stamps'].values():
+        require(stamp is None or type(stamp) is list and len(stamp) in (5, 9)
+            and all(type(n) is int and 0 <= n < 2**64 for n in stamp))
+    require(type(value['clock']) is dict and set(value['clock']) == {'nowNs', 'expiresNs'}
+        and all(n is None or type(n) is int and 0 <= n < 2**64 for n in value['clock'].values()))
+    return bounded(value, 8192)
+
+
+def capture_foreign_failure(error):
+    """Fixed code objects and cached operands only; never perform a diagnostic kernel read."""
+    try:
+        if getattr(error, 'proxy_foreign_attempted', False):
+            return
+        frames, trace, count = [], error.__traceback__, 0
+        while trace is not None and count < 32:
+            count += 1
+            match = next((row for row in FOREIGN_FAILURE_FUNCTIONS if row[0] is trace.tb_frame.f_code), None)
+            if match is not None:
+                frames.append((match[1], trace.tb_frame.f_locals, trace.tb_lineno))
+            trace = trace.tb_next
+        owners = [local['self'] for name, local, _ in frames if name.startswith('ForeignSudoObservations.')]
+        if trace is not None or not owners:
+            return
+        error.proxy_foreign_attempted = True
+        owner = owners[-1]
+        relevant = [(name, local, line) for name, local, line in frames if '_foreign_stage' in local]
+        _, last, _ = relevant[-1]
+        function, _, line = frames[-1]
+        value = dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False,
+            function=function, stage=last['_foreign_stage'], line=line, limit=owner.MAX_ROWS,
+            heldCount=None, invocationMember=None, foreignMember=None, checks={},
+            stamps=dict.fromkeys(FOREIGN_STAMPS), protectedSha256=None,
+            subject=dict(pid=None, parentPid=None, startTime=None, uids=None, state=None,
+                         executableKind='unread', executablePathSha256=None),
+            clock=dict(nowNs=None, expiresNs=None), cleanupConfirmed=False if getattr(error, 'invocation_cleanup_failed', False) else None)
+        stamp_locals = {'_f_proc_before': 'procHeldBefore', '_f_named_proc_before': 'procNamedBefore',
+            '_f_proc_after': 'procHeldAfter', '_f_named_proc_after': 'procNamedAfter', '_f_kernel': 'kernelHeld',
+            '_f_named_kernel': 'kernelNamed', '_f_alias': 'aliasObserved', '_f_named_image': 'protectedNamed',
+            '_f_parent_held': 'parentHeld', '_f_parent_named': 'parentNamed'}
+        image = owner.image
+        for name, local, _ in frames:
+            if name.startswith('InvocationImage.') and 'self' in local:
+                image = local['self']
+            for key in FOREIGN_CHECKS:
+                if type(local.get('_f_' + key)) is bool:
+                    value['checks'][key] = local['_f_' + key]
+            if type(local.get('_f_count')) is int: value['heldCount'] = local['_f_count']
+            if type(local.get('_f_unheld_invocation')) is bool: value['invocationMember'] = not local['_f_unheld_invocation']
+            if type(local.get('_f_new')) is bool: value['foreignMember'] = not local['_f_new']
+            if name.startswith('ForeignSudoObservations.'):
+                pid = local.get('pid')
+                if type(pid) is int and 1 < pid < 2**31:
+                    value['subject']['pid'] = pid
+                held = local.get('held', {})
+                if type(held) is dict:
+                    value['stamps']['procExpected'] = held.get('proc')
+                row = local.get('row', local.get('_f_current', held.get('row') if type(held) is dict else None))
+                if type(row) is dict:
+                    if value['subject']['pid'] is None and type(row.get('pid')) is int:
+                        value['subject']['pid'] = row['pid']
+                    for key in ('parentPid', 'startTime', 'uids', 'state'):
+                        value['subject'][key] = row.get(key)
+                elif type(local.get('ids')) is list and len(local['ids']) == 4:
+                    value['subject']['uids'] = local['ids']
+                executable = local.get('_f_executable')
+                if type(executable) is str and len(executable) <= 4096:
+                    value['subject']['executableKind'] = ('python' if re.fullmatch(r'/usr/bin/python3\.[0-9]{1,2}', executable)
+                        else {'/usr/bin/sudo': 'sudo', '/usr/bin/bwrap': 'bwrap', '/usr/bin/xdg-dbus-proxy': 'proxy',
+                              '/app/bin/creator-hub-flatpak-activate': 'launcher'}.get(executable, 'other'))
+                    if value['subject']['executableKind'] == 'other':
+                        value['subject']['executablePathSha256'] = hashlib.sha256(executable.encode('utf8')).hexdigest()
+            for source, target in stamp_locals.items():
+                if source in local: value['stamps'][target] = local[source]
+            if name == 'InvocationImage.check' and 'info' in local:
+                value['stamps']['fileObserved'] = ProxyAssociationProc.stamp(local['info'])
+            if type(local.get('_inventory_now')) is int: value['clock']['nowNs'] = local['_inventory_now']
+            request = local.get('request')
+            if type(request) is dict: value['clock']['expiresNs'] = request.get('expiresNs')
+        if image is not None:
+            value['stamps']['protectedImage'] = getattr(image, 'identity', None)
+            value['stamps']['protectedAlias'] = getattr(image, 'alias_identity', None)
+            value['protectedSha256'] = getattr(image, 'digest', None)
+        value['stamps'] = {key: list(stamp) if type(stamp) in (tuple, list) else None
+                           for key, stamp in value['stamps'].items()}
+        error.proxy_foreign_diagnostic = foreign_diagnostic(value)
+    except Exception:
+        pass  # A partial/invalid diagnostic cannot replace the original refusal.
+
+
+def finish_foreign_cleanup(error):
+    try:
+        detail = getattr(error, 'proxy_foreign_diagnostic', None)
+        if type(detail) is dict:
+            detail['cleanupConfirmed'] = not getattr(error, 'invocation_cleanup_failed', False)
+    except Exception:
+        pass
+
+
 def inventory_failure(error, scan, entry_pid=None, entry_uids=None):
     """Retain the first failure's fixed code location and explicitly typed existing operands only."""
+    capture_foreign_failure(error)
     try:
         if getattr(error, 'proxy_inventory_attempted', False):
             return
@@ -1038,23 +1174,29 @@ def probe_request(value, now):
 class InvocationImage:
     """Held fixed system package image, never a request-supplied executable."""
     def __init__(self, kind, budget):
+        _foreign_stage = 'image-kind'
         require(kind in ('python', 'sudo'))
         self.kind, self.budget, self.fd, self.parents = kind, budget, None, []
         self.alias = Path('/usr/bin/python3' if kind == 'python' else '/usr/bin/sudo')
+        _foreign_stage = 'image-alias'
         self.alias_identity = ProxyAssociationProc.stamp(self.alias.lstat())
         require(self.alias_identity[3] == self.alias_identity[4] == 0)
+        _foreign_stage = 'image-path'
         self.path = self.alias.resolve(strict=True)
         require(self.path.parent == Path('/usr/bin') and (self.path == self.alias if kind == 'sudo'
                 else re.fullmatch(r'python3\.[0-9]{1,2}', self.path.name)))
         try:
             parent = None
             for name in ('/', 'usr', 'bin'):
+                _foreign_stage = 'image-directory'
                 fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
                              **({'dir_fd': parent} if parent is not None else {}))
                 self.parents.append((parent, name, fd, self.directory(os.fstat(fd))))
                 parent = fd
+            _foreign_stage = 'image-open'
             self.fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
             self.identity = ProxyAssociationProc.stamp(os.fstat(self.fd))
+            _foreign_stage = 'image-snapshot'
             self.digest = self.snapshot()
         except Exception as error:
             try:
@@ -1065,34 +1207,45 @@ class InvocationImage:
 
     @staticmethod
     def directory(info):
+        _foreign_stage = 'image-directory'
         require(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0 and not info.st_mode & 0o7022)
         return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
 
     def check(self):
+        _foreign_stage = 'image-budget'
         self.budget()
+        _foreign_stage = 'image-alias'
         require(self.fd is not None and self.alias.resolve(strict=True) == self.path
-                and ProxyAssociationProc.stamp(self.alias.lstat()) == self.alias_identity)
+                and (_f_alias := ProxyAssociationProc.stamp(self.alias.lstat())) == self.alias_identity)
         for parent, name, fd, expected in self.parents:
-            require(self.directory(os.fstat(fd)) == expected == self.directory(os.stat(name, follow_symlinks=False,
-                    **({'dir_fd': parent} if parent is not None else {}))))
+            _foreign_stage = 'image-directory'
+            require((_f_parent_held := self.directory(os.fstat(fd))) == expected
+                    == (_f_parent_named := self.directory(os.stat(name, follow_symlinks=False,
+                    **({'dir_fd': parent} if parent is not None else {})))))
+        _foreign_stage = 'image-file'
         info = os.fstat(self.fd)
         require(stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0 and info.st_nlink >= 1
                 and stat.S_IMODE(info.st_mode) == (0o4755 if self.kind == 'sudo' else 0o755)
                 and 0 < info.st_size <= 64 * 1024**2 and ProxyAssociationProc.stamp(info) == self.identity
-                == ProxyAssociationProc.stamp(os.stat(self.path.name, dir_fd=self.parents[-1][2], follow_symlinks=False)))
+                == (_f_named_image := ProxyAssociationProc.stamp(os.stat(self.path.name, dir_fd=self.parents[-1][2], follow_symlinks=False))))
 
     def snapshot(self):
+        _foreign_stage = 'image-snapshot'
         self.check(); digest, offset = hashlib.sha256(), 0
         while offset < self.identity[6]:
+            _foreign_stage = 'image-read'
             self.budget(); raw = os.pread(self.fd, min(65536, self.identity[6] - offset), offset)
             require(raw); digest.update(raw); offset += len(raw)
+        _foreign_stage = 'image-eof'
         require(not os.pread(self.fd, 1, offset))
         self.check()
         result = digest.hexdigest()
+        _foreign_stage = 'image-hash'
         require(not hasattr(self, 'digest') or result == self.digest)
         return result
 
     def close(self):
+        _foreign_stage = 'image-close'
         failure = None
         for fd in ([self.fd] if self.fd is not None else []) + [row[2] for row in reversed(self.parents)]:
             try: os.close(fd)
@@ -1247,62 +1400,92 @@ class ForeignSudoObservations:
         self.held, self.image, self.closed = {}, None, False
 
     def identity(self, pid, held):
+        _foreign_stage = 'budget-before'
         self.budget()
-        require(not self.closed and not select.select([held['pidfd']], [], [], 0)[0])
+        _foreign_stage = 'live-before'
+        require((_f_open := not self.closed) and (_f_live_before := not select.select([held['pidfd']], [], [], 0)[0]))
         directory = held['directory']
-        require(ProxyAssociationProc.stamp(os.fstat(directory)) == held['proc']
-                == ProxyAssociationProc.stamp(os.stat(f'/proc/{pid}', follow_symlinks=False)))
+        _foreign_stage = 'proc-before'
+        require((_f_proc_before := ProxyAssociationProc.stamp(os.fstat(directory))) == held['proc']
+                == (_f_named_proc_before := ProxyAssociationProc.stamp(os.stat(f'/proc/{pid}', follow_symlinks=False))))
+        _foreign_stage = 'stat-read'
         raw, _ = ProxyAssociationProc.read_at(directory, 'stat', 4096)
+        _foreign_stage = 'status-read'
         status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
+        _foreign_stage = 'process-parse'
         text = raw.decode('utf-8'); tail = text[text.rfind(')') + 2:].split()
         ids = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
         row = probe_hop_detail(pid, tail, ids)
-        require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and row['parentPid'] is not None
-                and row['startTime'] is not None and row['uids'] == [PROXY_UID, 0, 0, 0]
-                and row['state'] in ('R', 'S', 'D', 'I', 'T', 't', 'K', 'W', 'P'))
-        require(os.readlink('exe', dir_fd=directory) == str(self.image.path)
-                and ProxyAssociationProc.stamp(os.fstat(held['kernel'])) == self.image.identity
-                == ProxyAssociationProc.stamp(os.stat('exe', dir_fd=directory))
-                and ProxyAssociationProc.stamp(os.fstat(directory)) == held['proc']
-                == ProxyAssociationProc.stamp(os.stat(f'/proc/{pid}', follow_symlinks=False))
-                and not select.select([held['pidfd']], [], [], 0)[0])
+        _foreign_stage = 'process-shape'
+        require((_f_pid_prefix := text.startswith(str(pid) + ' (')) and (_f_tail := len(tail) >= 20)
+                and (_f_parent := row['parentPid'] is not None) and (_f_start := row['startTime'] is not None)
+                and (_f_uids := row['uids'] == [PROXY_UID, 0, 0, 0])
+                and (_f_state := row['state'] in ('R', 'S', 'D', 'I', 'T', 't', 'K', 'W', 'P')))
+        _foreign_stage = 'kernel-identity'
+        require((_f_executable_match := (_f_executable := os.readlink('exe', dir_fd=directory)) == str(self.image.path))
+                and (_f_kernel := ProxyAssociationProc.stamp(os.fstat(held['kernel']))) == self.image.identity
+                == (_f_named_kernel := ProxyAssociationProc.stamp(os.stat('exe', dir_fd=directory)))
+                and (_f_proc_after := ProxyAssociationProc.stamp(os.fstat(directory))) == held['proc']
+                == (_f_named_proc_after := ProxyAssociationProc.stamp(os.stat(f'/proc/{pid}', follow_symlinks=False)))
+                and (_f_live_after := not select.select([held['pidfd']], [], [], 0)[0]))
+        _foreign_stage = 'budget-after'
         self.budget()
         return dict(pid=pid, parentPid=row['parentPid'], startTime=row['startTime'],
                     uids=list(row['uids']), executable=str(self.image.path))
 
     def observe(self, pid, ids):
+        _foreign_stage = 'budget-before'
         self.budget()
-        require(not self.closed and type(pid) is int and 1 < pid < 2**31 and pid not in self.invocation.held
-                and type(ids) is list and len(ids) == 4 and all(type(uid) is int for uid in ids)
-                and ids == [PROXY_UID, 0, 0, 0])
-        if pid not in self.held:
-            require(len(self.held) < self.MAX_ROWS)
+        _foreign_stage = 'admission'
+        require((_f_open := not self.closed) and (_f_pid_type := type(pid) is int) and (_f_pid_range := 1 < pid < 2**31)
+                and (_f_unheld_invocation := pid not in self.invocation.held)
+                and (_f_uid_type := type(ids) is list) and (_f_uid_count := len(ids) == 4)
+                and (_f_uid_integers := all(type(uid) is int for uid in ids))
+                and (_f_uid_tuple := ids == [PROXY_UID, 0, 0, 0]))
+        if (_f_new := pid not in self.held):
+            _foreign_stage = 'cap'
+            require((_f_count := len(self.held)) < self.MAX_ROWS)
             held = self.held[pid] = dict(fds=[])
+            _foreign_stage = 'pidfd-open'
             held['pidfd'] = os.pidfd_open(pid); held['fds'].append(held['pidfd'])
-            require(not select.select([held['pidfd']], [], [], 0)[0])
+            _foreign_stage = 'pidfd-live'
+            require((_f_live_open := not select.select([held['pidfd']], [], [], 0)[0]))
+            _foreign_stage = 'proc-open'
             held['directory'] = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             held['fds'].append(held['directory'])
+            _foreign_stage = 'proc-type'
             info = os.fstat(held['directory']); require(stat.S_ISDIR(info.st_mode))
             held['proc'] = ProxyAssociationProc.stamp(info)
             if self.image is None:
+                _foreign_stage = 'protected-image'
                 self.image = InvocationImage('sudo', self.budget)
+            _foreign_stage = 'kernel-open'
             held['kernel'] = os.open('exe', os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=held['directory'])
             held['fds'].append(held['kernel'])
+            _foreign_stage = 'identity'
             held['row'] = self.identity(pid, held)
+        _foreign_stage = 'recheck'
         self.recheck()
         return copy.deepcopy(self.held[pid]['row'])
 
     def recheck(self):
+        _foreign_stage = 'budget-before'
         self.budget(); require(not self.closed)
         if self.image is not None:
+            _foreign_stage = 'image-before'
             self.image.snapshot()
         for pid, held in self.held.items():
-            require(pid not in self.invocation.held and self.identity(pid, held) == held['row'])
+            _foreign_stage = 'row-recheck'
+            require((_f_unheld_invocation := pid not in self.invocation.held)
+                    and (_f_row_match := (_f_current := self.identity(pid, held)) == held['row']))
         if self.image is not None:
+            _foreign_stage = 'image-after'
             self.image.snapshot()
+        _foreign_stage = 'budget-after'
         self.budget()
 
     def close(self):
+        _foreign_stage = 'close'
         if self.closed:
             return
         self.closed, failure = True, None
@@ -1313,6 +1496,8 @@ class ForeignSudoObservations:
         if self.image is not None:
             try: self.image.close()
             except Exception as error: failure = failure or error
+        if failure is not None:
+            capture_foreign_failure(failure)
         self.held, self.image = {}, None
         if failure is not None:
             failure.invocation_cleanup_failed = True
@@ -1321,11 +1506,15 @@ class ForeignSudoObservations:
     def __enter__(self): return self
 
     def __exit__(self, kind, value, traceback):
+        if value is not None:
+            capture_foreign_failure(value)
         try:
             self.close()
         except Exception:
             if value is None: raise
             value.invocation_cleanup_failed = True
+        if value is not None:
+            finish_foreign_cleanup(value)
 
 
 def probe_caller_chain(caller):
@@ -1336,7 +1525,7 @@ def probe_caller_chain(caller):
 def inventory_probe(request, *, clock=time.monotonic_ns):
     probe_request(request, clock())
     def budget():
-        require(clock() < request['expiresNs'])
+        require((_inventory_now := clock()) < request['expiresNs'])
     fd = os.pidfd_open(request['caller']['pid'])
     stage = 'probe-caller-chain'
     try:
@@ -1395,7 +1584,7 @@ def association_snapshot(request, *, proc=None, read=root_process, inventory=com
                          runtime=PROXY_RUNTIME, clock=time.monotonic_ns):
     root_request(request, clock())
     def budget():
-        require(clock() < request['expiresNs'])
+        require((_inventory_now := clock()) < request['expiresNs'])
     with InvocationChain(request['caller'], budget) as invocation, ForeignSudoObservations(invocation, budget) as foreign:
         def current(budget):
             invocation.recheck()
@@ -1413,7 +1602,7 @@ def association_snapshot_held(request, *, proc, read, inventory, runtime, clock)
     root_request(request, clock())
     proc = ProxyAssociationProc() if proc is None else proc
     def budget():
-        require(clock() < request['expiresNs'])
+        require((_inventory_now := clock()) < request['expiresNs'])
     fds, instance, stage = [], None, 'complete-uid-inventory'
     try:
         candidates, scoped = inventory(budget)
@@ -1510,6 +1699,21 @@ INVENTORY_FAILURE_FUNCTIONS = (
 )
 
 
+FOREIGN_FAILURE_FUNCTIONS = (
+    *((getattr(ForeignSudoObservations, name).__code__, 'ForeignSudoObservations.' + name)
+      for name in ('observe', 'identity', 'recheck', 'close')),
+    *((getattr(InvocationImage, name).__code__, 'InvocationImage.' + name)
+      for name in ('__init__', 'directory', 'check', 'snapshot', 'close')),
+    (ProxyAssociationProc.read_at.__func__.__code__, 'ProxyAssociationProc.read_at'),
+    (inventory_probe.__code__, 'inventory_probe'),
+    (association_snapshot.__code__, 'association_snapshot'),
+    (association_snapshot_held.__code__, 'association_snapshot_held'),
+    *((next(code for code in owner.__code__.co_consts if getattr(code, 'co_name', None) == 'budget'), label)
+      for owner, label in ((inventory_probe, 'inventory_probe.budget'),
+        (association_snapshot, 'association_snapshot.budget'), (association_snapshot_held, 'association_snapshot_held.budget'))),
+)
+
+
 def root_snapshot_main():
     # This sole root entry point imports only stdlib and reads only fixed proc/runtime paths.
     # A missing stdin EOF cannot leave a privileged helper alive indefinitely.
@@ -1538,6 +1742,7 @@ def root_snapshot_main():
         answer = dict(request=request, ok=True, snapshot=data)
         sys.stdout.write(json.dumps(bounded(answer), allow_nan=False, ensure_ascii=True))
     except Exception as error:
+        capture_foreign_failure(error)
         refusal = dict(ok=False, unavailable=type(error).__name__, stage=getattr(error, 'proxy_snapshot_stage', 'root-entry'))
         pid = getattr(error, 'proxy_snapshot_pid', None)
         if type(pid) is int and 1 < pid < 2**31:
@@ -1558,6 +1763,14 @@ def root_snapshot_main():
         if type(detail) is dict:
             try:
                 refusal['mixedFailure'] = mixed_diagnostic(detail)
+            except Exception:
+                pass
+        detail = getattr(error, 'proxy_foreign_diagnostic', None)
+        if type(detail) is dict:
+            try:
+                if getattr(error, 'invocation_cleanup_failed', False):
+                    detail['cleanupConfirmed'] = False
+                refusal['foreignFailure'] = foreign_diagnostic(detail)
             except Exception:
                 pass
         sys.stdout.write(json.dumps(refusal))

@@ -1154,6 +1154,68 @@ class RootInventoryPreflightTests(unittest.TestCase):
             before=None, after=None, procIdentity=None, kernelImage=None, fixedSudoImage=None, fixedSudoSha256=None, live=None)
         self.assertEqual(M.mixed_worker_diagnostic(detail), detail)
 
+    def foreign_failure(self):
+        stamps = {key: None for key in ('procExpected', 'procHeldBefore', 'procNamedBefore', 'procHeldAfter',
+            'procNamedAfter', 'kernelHeld', 'kernelNamed', 'protectedImage', 'protectedAlias', 'aliasObserved',
+            'protectedNamed', 'parentHeld', 'parentNamed', 'fileObserved')}
+        stamps['protectedImage'] = [1, 50, stat.S_IFREG | 0o4755, 0, 0, 1, 64, 1, 1]
+        return dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False,
+            function='ForeignSudoObservations.observe', stage='cap', line=999, limit=4, heldCount=4,
+            invocationMember=False, foreignMember=False, checks={'unheld_invocation': True, 'uid_tuple': True},
+            stamps=stamps, protectedSha256='b' * 64, clock=dict(nowNs=None, expiresNs=100), cleanupConfirmed=True,
+            subject=dict(pid=12979, parentPid=None, startTime=None, uids=[1001, 0, 0, 0], state=None,
+                         executableKind='unread', executablePathSha256=None))
+
+    def test_foreign_observation_refusal_roundtrip_never_promotes_inventory_input_or_retries(self):
+        detail = self.foreign_failure()
+        with self.fixture() as state:
+            state.worker.side_effect = None
+            state.worker.return_value = SimpleNamespace(returncode=1, stderr=b'', stdout=M.json_bytes(dict(ok=False,
+                unavailable='ValueError', stage='complete-uid-inventory', inventoryFailure=self.inventory_failure(), foreignFailure=detail)))
+            with self.assertRaisesRegex(RuntimeError, 'no input'): M.root_inventory_preflight(Path('/fixed'))
+            state.worker.assert_called_once()
+            report = state.reports[0][1]
+            self.assertFalse(report['inventoryProbed']); self.assertNotIn('inventory', report)
+            self.assertEqual(report['workerCleanup']['foreignFailure'], detail)
+            for name in M.GATES: self.assertIs(report[name], False)
+
+    def test_foreign_diagnostic_closed_schema_matches_worker_and_refuses_sensitive_or_illtyped_operands(self):
+        with self.fixture() as state:
+            M.root_inventory_preflight(Path('/fixed'))
+            validators = (M.foreign_worker_diagnostic, state.module.foreign_diagnostic)
+            changes = (
+                lambda d: d.update(argv='PRIVATE'), lambda d: d.update(function='PRIVATE'), lambda d: d.update(stage='PRIVATE'),
+                lambda d: d.update(line=True), lambda d: d.update(readOnly=False), lambda d: d.update(authorityGranted=True),
+                lambda d: d.update(limit=5), lambda d: d.update(heldCount=True), lambda d: d.update(heldCount=5),
+                lambda d: d.update(invocationMember=1), lambda d: d.update(foreignMember=1), lambda d: d.update(cleanupConfirmed=1),
+                lambda d: d.update(protectedSha256='PRIVATE'), lambda d: d['subject'].update(executable='/PRIVATE'),
+                lambda d: d['subject'].update(pid=True), lambda d: d['subject'].update(parentPid=True),
+                lambda d: d['subject'].update(startTime='1' * 4096), lambda d: d['subject'].update(uids=[True] * 4),
+                lambda d: d['subject'].update(state='PRIVATE'), lambda d: d['subject'].update(executableKind='PRIVATE'),
+                lambda d: d['subject'].update(executablePathSha256='PRIVATE'), lambda d: d['checks'].update(extra=True),
+                lambda d: d['checks'].update(open=1), lambda d: d['stamps'].update(extra=[1] * 9),
+                lambda d: d['stamps'].update(kernelHeld=[True] * 9), lambda d: d['stamps'].update(kernelHeld=[1] * 10),
+                lambda d: d['clock'].update(extra=1), lambda d: d['clock'].update(nowNs=True))
+            for validate in validators:
+                value = self.foreign_failure(); detached = validate(value)
+                value['subject']['pid'] = 99; self.assertEqual(detached['subject']['pid'], 12979)
+                for change in changes:
+                    changed = self.foreign_failure(); change(changed)
+                    with self.subTest(validate=validate.__name__, change=change), self.assertRaises((ValueError, RuntimeError)):
+                        validate(changed)
+            for change in changes:
+                changed = self.foreign_failure(); change(changed)
+                error = M.root_worker_refusal(dict(ok=False, unavailable='ValueError', stage='complete-uid-inventory', foreignFailure=changed))
+                self.assertNotIn('foreignFailure', error.root_proxy_diagnostic); self.assertNotIn('PRIVATE', str(error.root_proxy_diagnostic))
+
+    def test_foreign_refusal_serialization_failure_preserves_original_error_and_no_cleanup_claim(self):
+        with patch.object(M, 'json_bytes', side_effect=OSError('PRIVATE_SERIALIZE')):
+            error = M.root_worker_refusal(dict(ok=False, unavailable='PermissionError', stage='complete-uid-inventory', foreignFailure=self.foreign_failure()))
+        self.assertIn('no input', str(error)); self.assertEqual(error.root_proxy_diagnostic, dict(readOnly=True,
+            inputPermitted=False, authorityGranted=False, releaseReady=False, type='PermissionError', stage='complete-uid-inventory'))
+        value = self.foreign_failure(); value.update(cleanupConfirmed=None, heldCount=None, invocationMember=None, foreignMember=None)
+        self.assertEqual(M.foreign_worker_diagnostic(value), value)
+
     def test_probe_accepts_only_before_expiry_including_after_final_protected_source_check(self):
         for delta in (-1, 0, 1, 'protected-check'):
             with self.subTest(delta=delta), self.fixture() as state:
