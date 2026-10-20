@@ -44,16 +44,16 @@ const BOOTSTRAP_BRANCH = 'refs/heads/validation/native-linux-production-016-flat
 const BOOTSTRAP_WORKFLOW = '.github/workflows/native-linux-production-016-flatpak.yml';
 const BOOTSTRAP_REQUEST = 'execute-production-bootstrap-activation-016';
 const BOOTSTRAP_PREFIX = '/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.16/';
-// Independently reviewed final producer39365532397 and its two real catalogue signatures.
+// Reviewed Root4d9 producer39435741602; metadata carrier39445160315/artifact12276935344.
 // These are transport restrictions, not signature or native-install acceptance.
 const BOOTSTRAP_FILES = Object.freeze(Object.fromEntries(Object.entries({
-  'creator-hub-linux-x86_64-portable.json': { size: 702, sha256: '097c2202cb1255b01306fcc6566bfe6b607bd1618b56152d8fc4299c2287257f' },
-  'creator-hub-linux-x86_64-portable.json.minisig': { size: 305, sha256: 'e1a04c5253a69b281735b40f608aa4dfd01556ec03dd38ea7cd35134b3f3e9fc' },
-  'creator-hub-linux-x86_64-0.1.16.portable-manifest.json': { size: 68007, sha256: '90712ac2e71b3337a714896ea36b1b5bc4e9abffdb2b18c3c41e1c62e24c7c52' },
-  'creator-hub-linux-x86_64-0.1.16.portable-manifest.json.minisig': { size: 305, sha256: 'ba7a0dace0b5338ca273daaf9fe5ae1c04aca3d75a3df344ad3f6d9751ff3815' },
-  'creator-hub-linux-x86_64-0.1.16.appdir.tar.gz': { size: 164408106, sha256: '0d2ef2683413f99da1c301b058e084025287f68d497a6d8384360eae96bf0f57' },
+  'creator-hub-linux-x86_64-portable.json': { size: 702, sha256: 'fa93c3e380716685e31ff5f90b2ed46ddf153864227e861465a96dddb318bde2' },
+  'creator-hub-linux-x86_64-portable.json.minisig': { size: 305, sha256: 'fffe83751416fb23be49a57336d25112f2940457398b9da695e3e60ac61fec25' },
+  'creator-hub-linux-x86_64-0.1.16.portable-manifest.json': { size: 68007, sha256: 'e999031faf52382dc93145e8195df50d9d86f6b4d3d138f3546881d74882e013' },
+  'creator-hub-linux-x86_64-0.1.16.portable-manifest.json.minisig': { size: 305, sha256: 'edfc1d1befcbcdd3074e878bacbb5122289ff0f0827dc6b9e098340195344e32' },
+  'creator-hub-linux-x86_64-0.1.16.appdir.tar.gz': { size: 164473696, sha256: 'a1df9859259bab9038bad737cadc0480c10a3a03ac388d16e589afbf364ebbf1' },
 }).map(([name, value]) => [name, Object.freeze(value)])));
-const BOOTSTRAP_ZIP = Object.freeze({ size: 451644129, sha256: 'a913ba30e7796c1d0f7a9337abd22d371d74c2e4c8130d23977c3add4c43dad1' });
+const BOOTSTRAP_ZIP = Object.freeze({ size: 451816231, sha256: '25ba6649c3886fd685c1dc7bab7f49e405569fe015674528529e9e3b901ccab5' });
 const UPDATE_BRANCH = 'refs/heads/validation/native-linux-production-016-update';
 const UPDATE_WORKFLOW = '.github/workflows/native-linux-production-016-update.yml';
 const UPDATE_SCENARIOS = Object.freeze({ deb: Object.freeze(['deb-native-cancel', 'deb-auth-cancel', 'deb-approve']),

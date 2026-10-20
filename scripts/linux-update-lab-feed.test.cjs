@@ -242,13 +242,13 @@ test('bootstrap016 is a distinct closed manual native profile, never an alias fo
 test('bootstrap016 routes and original ZIP are independently fixed; no feed, latest JSON, alias download or arbitrary route', () => {
   assert.equal(lab.BOOTSTRAP_PROFILE, '016-bootstrap');
   assert.deepEqual(lab.BOOTSTRAP_FILES, {
-    'creator-hub-linux-x86_64-portable.json': { size: 702, sha256: '097c2202cb1255b01306fcc6566bfe6b607bd1618b56152d8fc4299c2287257f' },
-    'creator-hub-linux-x86_64-portable.json.minisig': { size: 305, sha256: 'e1a04c5253a69b281735b40f608aa4dfd01556ec03dd38ea7cd35134b3f3e9fc' },
-    'creator-hub-linux-x86_64-0.1.16.portable-manifest.json': { size: 68007, sha256: '90712ac2e71b3337a714896ea36b1b5bc4e9abffdb2b18c3c41e1c62e24c7c52' },
-    'creator-hub-linux-x86_64-0.1.16.portable-manifest.json.minisig': { size: 305, sha256: 'ba7a0dace0b5338ca273daaf9fe5ae1c04aca3d75a3df344ad3f6d9751ff3815' },
-    'creator-hub-linux-x86_64-0.1.16.appdir.tar.gz': { size: 164408106, sha256: '0d2ef2683413f99da1c301b058e084025287f68d497a6d8384360eae96bf0f57' },
+    'creator-hub-linux-x86_64-portable.json': { size: 702, sha256: 'fa93c3e380716685e31ff5f90b2ed46ddf153864227e861465a96dddb318bde2' },
+    'creator-hub-linux-x86_64-portable.json.minisig': { size: 305, sha256: 'fffe83751416fb23be49a57336d25112f2940457398b9da695e3e60ac61fec25' },
+    'creator-hub-linux-x86_64-0.1.16.portable-manifest.json': { size: 68007, sha256: 'e999031faf52382dc93145e8195df50d9d86f6b4d3d138f3546881d74882e013' },
+    'creator-hub-linux-x86_64-0.1.16.portable-manifest.json.minisig': { size: 305, sha256: 'edfc1d1befcbcdd3074e878bacbb5122289ff0f0827dc6b9e098340195344e32' },
+    'creator-hub-linux-x86_64-0.1.16.appdir.tar.gz': { size: 164473696, sha256: 'a1df9859259bab9038bad737cadc0480c10a3a03ac388d16e589afbf364ebbf1' },
   });
-  assert.deepEqual(lab.BOOTSTRAP_ZIP, { size: 451644129, sha256: 'a913ba30e7796c1d0f7a9337abd22d371d74c2e4c8130d23977c3add4c43dad1' });
+  assert.deepEqual(lab.BOOTSTRAP_ZIP, { size: 451816231, sha256: '25ba6649c3886fd685c1dc7bab7f49e405569fe015674528529e9e3b901ccab5' });
   assert.equal(Object.keys(lab.BOOTSTRAP_FILES).length, 5);
   assert.ok(Object.isFrozen(lab.BOOTSTRAP_FILES) && Object.isFrozen(lab.BOOTSTRAP_ZIP));
   for (const [name, pin] of Object.entries(lab.BOOTSTRAP_FILES)) {
@@ -261,6 +261,14 @@ test('bootstrap016 routes and original ZIP are independently fixed; no feed, lat
   assert.ok(!lab.loadBootstrap016.toString().includes('FEED_PATH'));
   assert.equal(lab.FROM, '0.1.14'); assert.equal(lab.TO, '0.1.15');
   assert.equal(lab.loadContract.toString().includes('BOOTSTRAP'), false);
+});
+
+test('bootstrap016 ZIP role follows the Flatpak producer download and native stage, not the signed carrier', () => {
+  const controller = fs.readFileSync(path.join(__dirname, 'native-linux-production-016-flatpak.cjs'), 'utf8');
+  const stage = fs.readFileSync(path.join(__dirname, 'native-linux-production-016-flatpak.py'), 'utf8');
+  assert.ok(controller.includes("['portable.zip', p.artifactId, p.zip]"));
+  assert.ok(stage.includes('stage_zip(bound(root / "portable.zip", profile["portable"]["zip"], 768 * 1024 * 1024), profile["portable"]["files"], stage_root / "portable")'));
+  assert.notDeepEqual(lab.BOOTSTRAP_ZIP, { size: 451918673, sha256: '770319e80e752724d65c32e54283aab66e7cd2d119adac315d04bf2456dba817' });
 });
 
 test('historical contract, admission and neutral TLS engine retain their reviewed source exactly', () => {
@@ -447,25 +455,37 @@ test('bootstrap016 CLI cannot run on a local machine or inspect-only dispatch, b
   assert.ok(source.includes("process.stdin.destroy()"));
 });
 
-test('retained actual final signed bootstrap016 metadata matches all four fixed byte pins without key access', t => {
-  const directory = path.resolve(__dirname, '../artifacts/signed-final016-portable-39365532397');
+test('retained actual reviewed4d9 bootstrap016 metadata matches all four fixed byte pins without authenticating signatures', t => {
+  const directory = path.resolve(__dirname, '../artifacts/signed-reviewed016-portable-39435741602');
   if (!fs.existsSync(directory)) { t.skip('Actual metadata is supplied later by the signature-verified native lane'); return; }
   for (const [name, pin] of Object.entries(lab.BOOTSTRAP_FILES).filter(([name]) => !name.endsWith('.tar.gz'))) {
     const bytes = fs.readFileSync(path.join(directory, name)); assert.deepEqual({ size: bytes.length, sha256: hash(bytes) }, pin);
+    if (name.endsWith('.minisig')) {
+      assert.ok(bytes.toString('utf8').startsWith('untrusted comment:') && !bytes.includes(0), 'Plain minisig envelope only; no authenticity claim');
+    }
   }
+  const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'creator-hub-linux-x86_64-0.1.16.portable-manifest.json')));
+  assert.equal(manifest.sourceCommit, '4d9e073465928b9e00719d5ba594343281cd1280');
+  assert.equal(manifest.sourceTree, 'e338ffaea6ab359fb37a212f96ac2d6172b6484c');
 });
 
-test('bootstrap016 actual final package loads read-only and old ZIP/descriptor are refused without fallback', t => {
-  const directory = path.resolve(__dirname, '../artifacts/signed-final016-portable-39365532397');
-  const originalZip = path.resolve(__dirname, '../artifacts/release-016-updater-20261019/final016-portable-39365532397/original.zip');
-  const oldZip = path.resolve(__dirname, '../artifacts/release-016-updater-20261019/linux-production-portable-016-39352300183/original.zip');
-  const oldDescriptor = path.resolve(__dirname, '../artifacts/signed-private-portable016-39352300183/creator-hub-linux-x86_64-portable.json');
-  const required = [originalZip, oldZip, oldDescriptor, ...Object.keys(lab.BOOTSTRAP_FILES).map(name => path.join(directory, name))];
+test('bootstrap016 actual Flatpak unsigned producer ZIP loads read-only; old ff ZIP/all five files and signed carrier refuse without fallback', t => {
+  const directory = path.resolve(__dirname, '../artifacts/signed-reviewed016-portable-39435741602');
+  const originalZip = path.resolve(__dirname, '../artifacts/release-016-updater-20261019/reviewed016-portable-39435741602/original.zip');
+  const signedZip = path.resolve(__dirname, '../artifacts/release-016-updater-20261019/signed-private-portable016-carrier-39435741602.zip');
+  const profileFile = path.resolve(__dirname, '../artifacts/release-016-updater-20261019/reviewed016-flatpak-controller-profile.json');
+  const oldZip = path.resolve(__dirname, '../artifacts/release-016-updater-20261019/final016-portable-39365532397/original.zip');
+  const oldDirectory = path.resolve(__dirname, '../artifacts/signed-final016-portable-39365532397');
+  const names = Object.keys(lab.BOOTSTRAP_FILES);
+  const required = [originalZip, signedZip, profileFile, oldZip, ...[directory, oldDirectory].flatMap(folder => names.map(name => path.join(folder, name)))];
   if (!required.every(file => fs.existsSync(file))) {
     t.skip('Actual final and historical data-only inputs required; no synthetic package acceptance'); return;
   }
+  const profile = JSON.parse(fs.readFileSync(profileFile));
+  assert.equal(profile.portable.runId, 39435741602);
+  assert.equal(profile.portable.artifactId, 12273135520);
+  assert.deepEqual(lab.BOOTSTRAP_ZIP, profile.portable.zip, 'The native stage consumes this actual unsigned producer ZIP');
   const root = fs.realpathSync(directory), zipPath = path.join(root, 'portable.zip');
-  const descriptorPath = path.join(root, 'stage/signed/creator-hub-linux-x86_64-portable.json');
   const files = new Map([[zipPath, originalZip], ...Object.keys(lab.BOOTSTRAP_FILES).map(name => [
     path.join(root, 'stage', name.endsWith('.tar.gz') ? 'portable' : 'signed', name), path.join(root, name),
   ])]);
@@ -484,12 +504,21 @@ test('bootstrap016 actual final package loads read-only and old ZIP/descriptor a
   for (const name of ['publicDiscovery', 'nativeAcceptanceTested', 'signaturesVerifiedByHarness', 'signedUpdateAccepted', 'migrationAccepted', 'restartAccepted', 'releaseReady']) {
     assert.equal(lab.labReport(contract, lab.newState())[name], false);
   }
-  files.set(zipPath, oldZip); opened = 0;
-  assert.throws(() => lab.loadBootstrap016(root), { code: 'ERR_ASSERTION' });
-  assert.equal(opened, 0, 'Old ZIP must be refused at size admission, before any file open');
-  files.set(zipPath, originalZip); files.set(descriptorPath, oldDescriptor); opened = 0;
-  assert.throws(() => lab.loadBootstrap016(root), /Exact reviewed bootstrap bytes required/);
-  assert.equal(opened, 2, 'Same-size old descriptor must be refused by its hash before any other route');
+  for (const refusedZip of [oldZip, signedZip]) {
+    files.set(zipPath, refusedZip); opened = 0;
+    assert.throws(() => lab.loadBootstrap016(root), { code: 'ERR_ASSERTION' });
+    assert.equal(opened, 0, 'Only the original seven-member producer ZIP is admitted, before any file open');
+  }
+  files.set(zipPath, originalZip);
+  for (const [index, name] of names.entries()) {
+    const file = path.join(root, 'stage', name.endsWith('.tar.gz') ? 'portable' : 'signed', name);
+    const expectedFile = files.get(file);
+    files.set(file, path.join(oldDirectory, name)); opened = 0;
+    const sameSize = fs.statSync(path.join(oldDirectory, name)).size === lab.BOOTSTRAP_FILES[name].size;
+    assert.throws(() => lab.loadBootstrap016(root), sameSize ? /Exact reviewed bootstrap bytes required/ : { code: 'ERR_ASSERTION' }, name);
+    assert.equal(opened, index + 1 + Number(sameSize), 'Old input refuses before subsequent routes');
+    files.set(file, expectedFile);
+  }
 });
 
 test('loading exact fixed input files is bounded and read-only, never follows a linked input', t => {

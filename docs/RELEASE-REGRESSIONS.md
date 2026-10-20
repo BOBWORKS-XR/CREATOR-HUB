@@ -64,6 +64,7 @@ of defect-free releases. Source tests do not replace the installed checks below.
 | Windows Python 3.13 reports different ctime through lstat and fstat for the same synthetic file | Retained synthetic identity diagnostic; explicit Python 3.11 local harness preflight and mandatory native Linux checks | Keep this local interpreter limitation separate from Linux product behavior. Do not weaken Linux identity checks, call an unrun native case passed, or change the installed Windows app |
 | Python 3.10 readiness probe emits HTTP/1.0 CONNECT but the strict lab proxy requires HTTP/1.1 | Real portal run `39407350050`, exact request-length refusal and CPython source inspection | Correct the harness client with a bounded HTTP/1.1-capable implementation; preserve the proxy, TLS/hostname verification and exact download pins. Product networking was not reached |
 | An unknown accessibility exception leaks its raw message into a diagnostic report | Official Hub capture's first/final AX exception tests, 97 local passes and independent review | Retain bounded type/hash evidence, keep unknown failures fatal, and never expand the unavailable allowlist to avoid a refusal |
+| Flatpak transport admission pins the signed thirteen-file carrier instead of the unsigned producer ZIP actually staged as `portable.zip` | `scripts/linux-update-lab-feed.test.cjs`, actual downloader/stage call-chain regression | Bind the producer ZIP to `profile.portable.zip`; verify signed metadata from its separate four-file carrier. Reject substituting either container for the other before costly native work. Matching a copied checksum alone is not pipeline evidence |
 
 Native preflight also checks these captured boundaries:
 
@@ -76,6 +77,15 @@ Native preflight also checks these captured boundaries:
 - Pass one shared installation/preflight case before fanning out native scenarios.
   A common harness failure is not a reason to repeat every expensive lane or
   rebuild unchanged product bytes.
+- Native navigation names include the rendered badge, subtitle and current
+  status, not just the product heading. Run `direct_pages` through both menu
+  entries in the shared baseline case before signed-update/authentication
+  scenarios. Bind any matcher correction to captured owned nodes and the
+  exact packaged source; reject unknown suffixes and ambiguous controls.
+- Persist bounded startup/request progress before blocking observations, and
+  retain an already-read refused dialog graph before discarding its exception.
+  Preserve first failure and redact unknown bodies. Do not retry an uncertain
+  input or infer migration acceptance from a cancellation-only result.
 - Keep historical transport baselines explicit when the public registry advances.
   New Windows targets after 0.1.14 use its published pins; the historical public12
   and B05-to-private15 labs retain their original scope and cannot qualify 0.1.16.
