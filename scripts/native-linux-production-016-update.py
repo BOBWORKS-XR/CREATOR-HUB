@@ -1278,33 +1278,115 @@ def html_automation_environment(env):
     return {**env, "TAURI_WEBVIEW_AUTOMATION": "true", "WEBKIT_INSPECTOR_SERVER": "127.0.0.1:" + str(port)}, port
 
 
-def bind_html_owner(surface):
+def bind_html_owner(surface, *, diagnostic=None):
     """Bind only the native container and WebKit root, never enumerate HTML descendants."""
-    frame = wait(surface.native_frame)
-    reference = surface.references.identity(frame, surface)
-    require(surface.references.window in (None, reference), "Native frame wire identity changed")
-    surface.references.window = reference
-    pending, seen, web_roots = [(frame, 0)], set(), []
-    while pending:
-        node, depth = pending.pop()
-        require(depth < 8 and len(seen) < 16, "Bounded native WebView ownership envelope required")
-        node.clear_cache(); surface.node(node)
-        reference = tuple(surface.references.identity(node, surface))
-        require(reference not in seen, "Cyclic native WebView envelope")
-        if depth:
-            parent = node.get_parent()
-            require(parent is not None and tuple(surface.references.identity(parent, surface)) in seen,
-                    "Native WebView parent escaped bound frame")
-        seen.add(reference)
-        if node.get_process_id() != surface.pid:
-            require(surface.renderer is not None and node.get_process_id() == surface.renderer["pid"], "Unbound WebKit owner")
-            web_roots.append(reference)
-            continue
-        require(node.get_toolkit_name() == "gtk" and int(node.get_role()) in (20, 23), "Unknown native container before WebView")
-        pending.extend((child, depth + 1) for child in reversed(surface.helper.fresh_close_children(node, 8)))
-    require(len(web_roots) == 1 and surface.renderer is not None, "One bound WebKit root required")
-    surface.recheck(full=True)
-    return {"frame": surface.references.window, "webRoot": list(web_roots[0]), "renderer": surface.renderer}
+    deadline = time.monotonic() + 30
+    diagnostic = {} if diagnostic is None else diagnostic
+    diagnostic.update(schemaVersion=1, attempts=0, notReadyCount=0, firstNotReady=None)
+
+    def budget():
+        if time.monotonic() >= deadline:
+            diagnostic["outcome"] = "deadline"
+            raise RuntimeError("Native WebView readiness deadline")
+
+    def guard():
+        budget(); surface.recheck(full=True); budget()
+        require(windows(surface.x11) == [surface.window], "Only the bound Root frame may exist during WebView readiness")
+        budget()
+
+    def acquire():
+        diagnostic.update(phase="before-ownership", walkComplete=False, nodes=[], outcome="reading")
+        pending, seen, web_roots = [], set(), []
+        try:
+            guard()
+            diagnostic["phase"] = "native-frame"
+            frame = surface.native_frame()
+            budget()
+            if frame is None:
+                diagnostic["phase"] = "after-frame-ownership"
+                guard()
+                diagnostic["phase"] = "frame-not-ready"
+                return None
+            diagnostic["phase"] = "frame-wire"
+            frame_reference = surface.references.identity(frame, surface)
+            require(surface.references.window in (None, frame_reference), "Native frame wire identity changed")
+            surface.references.window = frame_reference
+            pending = [(frame, 0)]
+            while pending:
+                budget()
+                node, depth = pending.pop()
+                diagnostic["phase"] = "node-bound"
+                require(depth < 8 and len(seen) < 16, "Bounded native WebView ownership envelope required")
+                row = {"depth": depth, "reference": None, "pid": None, "role": None, "childCount": None}
+                diagnostic["nodes"].append(row)
+                diagnostic["phase"] = "node-owner"
+                node.clear_cache(); surface.node(node)
+                reference = tuple(surface.references.identity(node, surface))
+                row["reference"] = list(reference)
+                require(reference not in seen, "Cyclic native WebView envelope")
+                if depth:
+                    diagnostic["phase"] = "node-parent"
+                    parent = node.get_parent()
+                    require(parent is not None and tuple(surface.references.identity(parent, surface)) in seen,
+                            "Native WebView parent escaped bound frame")
+                seen.add(reference)
+                diagnostic["phase"] = "node-pid"
+                pid = node.get_process_id()
+                row["pid"] = pid if type(pid) is int and 0 < pid <= 2147483647 else None
+                if pid != surface.pid:
+                    require(surface.renderer is not None and node.get_process_id() == surface.renderer["pid"], "Unbound WebKit owner")
+                    web_roots.append(reference)
+                    continue
+                diagnostic["phase"] = "node-toolkit"
+                toolkit = node.get_toolkit_name()
+                journal_token_metadata(row, "toolkit", toolkit, ("gtk",))
+                role = None
+                if toolkit == "gtk":
+                    diagnostic["phase"] = "node-role"
+                    role = int(node.get_role())
+                    row["role"] = role if -2147483648 <= role <= 2147483647 else None
+                require(toolkit == "gtk" and role in (20, 23), "Unknown native container before WebView")
+                diagnostic["phase"] = "node-children"
+                budget()
+                children = surface.helper.fresh_close_children(node, 8)
+                row["childCount"] = len(children)
+                pending.extend((child, depth + 1) for child in reversed(children))
+            diagnostic.update(phase="cardinality", walkComplete=True)
+            require(len(web_roots) <= 1, "One bound WebKit root required")
+            require(web_roots or surface.renderer is None, "WebKit root missing after a renderer was bound")
+            diagnostic["phase"] = "final-ownership"
+            guard()
+            diagnostic["phase"] = "final-frame"
+            frame.clear_cache()
+            require(surface.references.identity(frame, surface) == frame_reference
+                    and surface.references.window == frame_reference, "Native frame wire identity changed after read")
+            budget()
+            if not web_roots:
+                diagnostic["phase"] = "web-root-not-ready"
+                return None
+            require(surface.renderer is not None, "One bound WebKit root required")
+            diagnostic["phase"] = "bound"
+            return {"frame": surface.references.window, "webRoot": list(web_roots[0]), "renderer": surface.renderer}
+        finally:
+            # Local facts only, including on refusal: never query AX or replace the first exception.
+            diagnostic.update(webRootCount=len(web_roots), rendererBound=surface.renderer is not None,
+                              visitedCount=len(seen), pendingCount=len(pending))
+
+    while True:
+        budget()
+        diagnostic["attempts"] += 1
+        result = acquire()
+        budget()
+        if result is not None:
+            diagnostic["outcome"] = "bound"
+            return result
+        diagnostic["notReadyCount"] += 1
+        diagnostic["outcome"] = "not-ready"
+        if diagnostic["firstNotReady"] is None:
+            diagnostic["firstNotReady"] = {key: diagnostic[key] for key in (
+                "phase", "walkComplete", "nodes", "webRootCount", "rendererBound", "visitedCount", "pendingCount")}
+        # Same existing readiness cadence, never a new or extended budget.
+        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
 
 
 class HtmlPages:
@@ -1394,7 +1476,7 @@ class HtmlPages:
         self.started = True
         self.evidence.update(probeReadOnly=True, probePassed=False, inputAttempts=[], detached=False, nativeAcceptance=False, **FALSE)
         self.evidence["phase"] = "native-envelope"
-        self.evidence["ownership"] = bind_html_owner(self.surface)
+        self.evidence["ownership"] = bind_html_owner(self.surface, diagnostic=self.evidence.setdefault("envelopeDiagnostic", {}))
         self.evidence["phase"] = "root-endpoint"
         wait(self.endpoint_ready)
         driver = BASE / "scripts/tauri-driver"

@@ -2980,7 +2980,7 @@ class HtmlAttachmentTests(unittest.TestCase):
             if defect == "cycle": children[id(filler)] = [frame]
             if defect == "two-webviews": children[id(filler)] = [web, extra]
             if defect == "unknown-gtk": filler.get_role.return_value = 43
-            surface = SimpleNamespace(pid=12, renderer=None, native_frame=Mock(return_value=frame), recheck=Mock(),
+            surface = SimpleNamespace(pid=12, window=20, x11=object(), renderer=None, native_frame=Mock(return_value=frame), recheck=Mock(),
                 references=SimpleNamespace(window=None, identity=lambda node, _: references[id(node)]), helper=SimpleNamespace())
             def bound(node):
                 pid = node.get_process_id()
@@ -2991,7 +2991,7 @@ class HtmlAttachmentTests(unittest.TestCase):
                 self.assertEqual(node.get_process_id(), 12, "Never enumerate WebKit HTML, including phantom MENU")
                 return children[id(node)]
             surface.helper.fresh_close_children = Mock(side_effect=known_children)
-            with self.subTest(defect=defect), patch.object(M, "wait", side_effect=lambda check: check()):
+            with self.subTest(defect=defect), patch.object(M, "windows", return_value=[20]):
                 if defect:
                     with self.assertRaises(RuntimeError): M.bind_html_owner(surface)
                 else:
@@ -2999,7 +2999,8 @@ class HtmlAttachmentTests(unittest.TestCase):
                     self.assertEqual(result["webRoot"], [":1.2", "/web"])
                     self.assertEqual(surface.node.call_count, 3)
                     self.assertEqual(surface.helper.fresh_close_children.call_count, 2)
-                    surface.recheck.assert_called_once_with(full=True)
+                    self.assertEqual(surface.recheck.call_count, 2)
+                    self.assertTrue(all(call.kwargs == {"full": True} for call in surface.recheck.call_args_list))
 
     def test_changed_root_renderer_or_bus_at_probe_completion_cannot_enable_clicks(self):
         state = self.fixture()
@@ -3050,6 +3051,274 @@ class HtmlAttachmentTests(unittest.TestCase):
             self.assertNotIn(forbidden, literals)
         self.assertNotIn('surface.snapshot(', ast.unparse(html))
         self.assertIn("range(1, 9)", source)
+
+
+class EnvelopeDiagnosticTests(unittest.TestCase):
+    def fixture(self, *, ready_after=1, web_count=1):
+        frame, filler, web, extra = [Mock() for _ in range(4)]
+        refs = {id(frame): [":1.1", "/frame"], id(filler): [":1.1", "/filler"],
+                id(web): [":1.2", "/web"], id(extra): [":1.2", "/extra"]}
+        pids = {id(frame): 12, id(filler): 12, id(web): 13, id(extra): 13}
+        for node, role, parent in ((frame, 23, None), (filler, 20, frame), (web, 20, filler), (extra, 20, filler)):
+            node.get_process_id.return_value = pids[id(node)]
+            node.get_role.return_value = role; node.get_toolkit_name.return_value = "gtk"
+            node.get_parent.return_value = parent
+        surface = SimpleNamespace(pid=12, window=20, x11=object(), renderer=None, recheck=Mock(),
+            references=SimpleNamespace(window=None, identity=lambda node, owner: refs[id(node)]), helper=SimpleNamespace())
+        state = SimpleNamespace(surface=surface, frame=frame, filler=filler, web=web, extra=extra,
+                                frame_reads=0, ready=False, child_counts=[], now=0.0, sleeps=[])
+        def native_frame():
+            state.frame_reads += 1
+            state.ready = ready_after is not None and state.frame_reads >= ready_after
+            return frame
+        surface.native_frame = Mock(side_effect=native_frame)
+        def owner(node):
+            pid = pids[id(node)]
+            M.require(pid in (12, 13), "Foreign fixture node")
+            if pid == 13: surface.renderer = {"pid": 13}
+        surface.node = Mock(side_effect=owner)
+        def children(node, limit):
+            self.assertEqual(limit, 8)
+            self.assertEqual(pids[id(node)], 12, "Never read HTML descendants")
+            values = [filler] if node is frame else ([web, extra][:web_count] if state.ready else [])
+            state.child_counts.append(len(values))
+            return values
+        surface.helper.fresh_close_children = Mock(side_effect=children)
+        return state
+
+    @contextmanager
+    def acquisition(self, state):
+        def sleep(seconds):
+            self.assertGreater(seconds, 0); self.assertLessEqual(seconds, 0.05)
+            state.sleeps.append(seconds); state.now += seconds
+        with patch.object(M.time, "monotonic", side_effect=lambda: state.now), patch.object(M.time, "sleep", side_effect=sleep), \
+                patch.object(M, "windows", return_value=[state.surface.window]) as inventory:
+            yield inventory
+
+    def test_zero_one_and_multiple_cardinality_are_retained_without_conflation(self):
+        for ready_after, count in ((None, 1), (1, 1), (1, 2)):
+            state = self.fixture(ready_after=ready_after, web_count=count); diagnostic = {}
+            with self.subTest(ready_after=ready_after, count=count), self.acquisition(state):
+                if ready_after == 1 and count == 1:
+                    M.bind_html_owner(state.surface, diagnostic=diagnostic)
+                    self.assertEqual(diagnostic["phase"], "bound")
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "Native WebView readiness deadline" if ready_after is None else "One bound WebKit root required"):
+                        M.bind_html_owner(state.surface, diagnostic=diagnostic)
+                    self.assertEqual(diagnostic["phase"], "web-root-not-ready" if ready_after is None else "cardinality")
+                expected = 0 if ready_after is None else count
+                self.assertEqual(diagnostic["webRootCount"], expected)
+                self.assertIs(diagnostic["rendererBound"], ready_after is not None)
+                self.assertTrue(diagnostic["walkComplete"])
+                if ready_after is None:
+                    self.assertGreater(state.frame_reads, 1); self.assertLessEqual(state.frame_reads, 601)
+                    self.assertEqual(diagnostic["outcome"], "deadline")
+                    self.assertEqual(diagnostic["firstNotReady"]["webRootCount"], 0)
+                else:
+                    self.assertEqual(state.frame_reads, 1)
+                self.assertEqual(diagnostic["nodes"][0], {"depth": 0, "reference": [":1.1", "/frame"],
+                    "pid": 12, "role": 23, "toolkit": "gtk", "childCount": 1})
+                self.assertEqual(diagnostic["nodes"][1]["childCount"], expected)
+                for row in diagnostic["nodes"][2:]:
+                    self.assertIsNone(row["role"]); self.assertIsNone(row["childCount"])
+                    self.assertNotIn("toolkit", row)
+                self.assertLess(len(json.dumps(diagnostic)), 4096)
+
+    def test_diagnostics_use_only_original_getters_and_never_query_text_or_attributes(self):
+        state = self.fixture(); diagnostic = {}
+        with self.acquisition(state): M.bind_html_owner(state.surface, diagnostic=diagnostic)
+        for node in (state.frame, state.filler):
+            node.get_process_id.assert_called_once(); node.get_toolkit_name.assert_called_once()
+            node.get_role.assert_called_once()
+        self.assertEqual(state.web.get_process_id.call_count, 2)
+        state.web.get_role.assert_not_called(); state.web.get_toolkit_name.assert_not_called()
+        for node in (state.frame, state.filler, state.web, state.extra):
+            node.get_name.assert_not_called(); node.get_description.assert_not_called()
+            node.get_attributes.assert_not_called(); node.get_state_set.assert_not_called()
+            node.get_child_count.assert_not_called(); node.get_child_at_index.assert_not_called()
+        self.assertEqual(state.surface.helper.fresh_close_children.call_count, 2)
+
+    def test_partial_child_read_keeps_same_exception_and_never_invents_zero_count(self):
+        state = self.fixture(); diagnostic = {}
+        original = RuntimeError("SYNTHETIC_PRIVATE_CHILD_ERROR")
+        child_reader = state.surface.helper.fresh_close_children.side_effect
+        def failed(node, limit):
+            if node is state.filler: raise original
+            return child_reader(node, limit)
+        state.surface.helper.fresh_close_children.side_effect = failed
+        with self.acquisition(state), self.assertRaises(RuntimeError) as caught:
+            M.bind_html_owner(state.surface, diagnostic=diagnostic)
+        self.assertIs(caught.exception, original)
+        self.assertFalse(diagnostic["walkComplete"]); self.assertEqual(diagnostic["phase"], "node-children")
+        self.assertIsNone(diagnostic["nodes"][-1]["childCount"])
+        self.assertNotIn("SYNTHETIC_PRIVATE", json.dumps(diagnostic))
+        self.assertEqual(state.frame_reads, 1)
+        state.surface.recheck.assert_called_once_with(full=True)
+
+    def test_unknown_toolkit_is_hashed_and_short_circuit_role_read_is_preserved(self):
+        state = self.fixture(); diagnostic = {}
+        private = "SYNTHETIC_PRIVATE_TOOLKIT"
+        state.filler.get_toolkit_name.return_value = private
+        with self.acquisition(state), self.assertRaisesRegex(RuntimeError, "Unknown native container before WebView"):
+            M.bind_html_owner(state.surface, diagnostic=diagnostic)
+        row = diagnostic["nodes"][-1]
+        self.assertEqual(row["toolkitSha256"], hashlib.sha256(private.encode()).hexdigest())
+        self.assertNotIn(private, json.dumps(diagnostic))
+        self.assertFalse(diagnostic["walkComplete"]); state.filler.get_role.assert_not_called()
+        self.assertIsNone(row["role"]); self.assertIsNone(row["childCount"])
+
+    def test_envelope_refusal_survives_start_and_is_retained_before_any_tool_launch(self):
+        state = self.fixture(ready_after=None)
+        pages = M.load("native-linux-integrated-pages")
+        html = M.HtmlPages(state.surface, Mock(pid=12), pages, {"size": 4, "sha256": "a" * 64}, 41000, {}, {})
+        with self.acquisition(state), patch.object(M.subprocess, "Popen") as launch, self.assertRaisesRegex(RuntimeError, "Native WebView readiness deadline"):
+            html.start()
+        self.assertEqual(html.evidence["envelopeDiagnostic"]["webRootCount"], 0)
+        self.assertFalse(html.evidence["envelopeDiagnostic"]["rendererBound"])
+        self.assertEqual(html.evidence["phase"], "native-envelope")
+        self.assertEqual(html.evidence["inputAttempts"], [])
+        self.assertFalse(html.probed); launch.assert_not_called()
+
+    def test_complete_zero_then_one_is_ready_under_one_original_deadline(self):
+        state = self.fixture(ready_after=2); diagnostic = {}
+        # The real strict reader makes both count reads in each coherent snapshot.
+        reader = M.load("native-unix-window").fresh_close_children
+        state.frame.get_child_count.return_value = 1
+        state.frame.get_child_at_index.return_value = state.filler
+        state.filler.get_child_count.side_effect = lambda: 1 if state.ready else 0
+        state.filler.get_child_at_index.return_value = state.web
+        state.surface.helper.fresh_close_children = Mock(side_effect=reader)
+        with self.acquisition(state) as inventory:
+            result = M.bind_html_owner(state.surface, diagnostic=diagnostic)
+        self.assertEqual(result["webRoot"], [":1.2", "/web"])
+        self.assertEqual((diagnostic["attempts"], diagnostic["notReadyCount"]), (2, 1))
+        self.assertEqual(state.frame_reads, 2); self.assertEqual(state.sleeps, [0.05])
+        self.assertEqual(state.surface.recheck.call_count, 4); self.assertEqual(inventory.call_count, 4)
+        self.assertEqual(state.filler.get_child_count.call_count, 4)
+        self.assertEqual(state.filler.get_child_at_index.call_count, 1)
+        self.assertEqual(diagnostic["firstNotReady"]["nodes"][1]["childCount"], 0)
+        self.assertEqual(diagnostic["nodes"][1]["childCount"], 1)
+        self.assertIsNot(diagnostic["firstNotReady"]["nodes"], diagnostic["nodes"])
+        self.assertEqual(diagnostic["outcome"], "bound")
+        state.web.get_child_count.assert_not_called(); state.web.get_attributes.assert_not_called()
+
+    def test_native_frame_loading_consumes_the_same_budget_not_an_additional_window(self):
+        state = self.fixture(ready_after=2); diagnostic = {}
+        def almost_expired_frame():
+            state.frame_reads += 1; state.now = 29.99
+            return None
+        state.surface.native_frame.side_effect = almost_expired_frame
+        with self.acquisition(state), self.assertRaisesRegex(RuntimeError, "Native WebView readiness deadline"):
+            M.bind_html_owner(state.surface, diagnostic=diagnostic)
+        self.assertEqual(state.frame_reads, 1); self.assertEqual(state.now, 30)
+        self.assertEqual(diagnostic["firstNotReady"]["phase"], "frame-not-ready")
+        self.assertEqual(diagnostic["firstNotReady"]["nodes"], [])
+        self.assertEqual(state.surface.recheck.call_count, 2)
+
+    def test_absent_frame_can_become_one_root_with_full_guards_on_both_reads(self):
+        state = self.fixture(ready_after=2); diagnostic = {}
+        original = state.surface.native_frame.side_effect
+        def first_absent():
+            frame = original()
+            return None if state.frame_reads == 1 else frame
+        state.surface.native_frame.side_effect = first_absent
+        with self.acquisition(state): result = M.bind_html_owner(state.surface, diagnostic=diagnostic)
+        self.assertEqual(result["webRoot"], [":1.2", "/web"])
+        self.assertEqual(diagnostic["firstNotReady"]["phase"], "frame-not-ready")
+        self.assertEqual(state.surface.recheck.call_count, 4)
+
+    def test_zero_then_partial_foreign_multiple_or_frame_change_refuses_without_retry(self):
+        for defect in ("partial", "foreign-node", "multiple", "frame-wire", "root-bus-loss", "foreign-window"):
+            state = self.fixture(ready_after=2, web_count=2 if defect == "multiple" else 1); diagnostic = {}
+            error = RuntimeError("Original finite ownership/read refusal")
+            original_owner, original_children = state.surface.node.side_effect, state.surface.helper.fresh_close_children.side_effect
+            if defect == "partial":
+                def children(node, limit):
+                    if state.frame_reads == 2 and node is state.filler: raise error
+                    return original_children(node, limit)
+                state.surface.helper.fresh_close_children.side_effect = children
+            if defect == "foreign-node":
+                def owner(node):
+                    if node is state.web: raise error
+                    return original_owner(node)
+                state.surface.node.side_effect = owner
+            if defect == "frame-wire":
+                identity = state.surface.references.identity
+                state.surface.references.identity = lambda node, owner: ([":1.1", "/changed"]
+                    if state.frame_reads == 2 and node is state.frame else identity(node, owner))
+            if defect == "root-bus-loss":
+                calls = []
+                def guard(**kwargs):
+                    calls.append(kwargs)
+                    if len(calls) == 3: raise error
+                state.surface.recheck.side_effect = guard
+            with self.subTest(defect=defect), self.acquisition(state) as inventory:
+                if defect == "foreign-window": inventory.side_effect = [[20], [20], [20, 21]]
+                with self.assertRaises(RuntimeError) as caught:
+                    M.bind_html_owner(state.surface, diagnostic=diagnostic)
+            if defect in ("partial", "foreign-node", "root-bus-loss"): self.assertIs(caught.exception, error)
+            self.assertEqual(diagnostic["notReadyCount"], 1); self.assertEqual(diagnostic["attempts"], 2)
+            self.assertEqual(state.sleeps, [0.05])
+            self.assertEqual(diagnostic["firstNotReady"]["webRootCount"], 0)
+            self.assertEqual(diagnostic["firstNotReady"]["nodes"][1]["childCount"], 0)
+            self.assertIs(diagnostic["rendererBound"], defect == "multiple")
+
+    def test_zero_after_an_existing_renderer_binding_is_never_startup_not_ready(self):
+        state = self.fixture(ready_after=None); diagnostic = {}
+        state.surface.renderer = {"pid": 13}
+        with self.acquisition(state), self.assertRaisesRegex(RuntimeError, "WebKit root missing after a renderer was bound"):
+            M.bind_html_owner(state.surface, diagnostic=diagnostic)
+        self.assertEqual(state.frame_reads, 1); self.assertEqual(state.sleeps, [])
+        self.assertIsNone(diagnostic["firstNotReady"])
+
+    def test_foreign_modal_or_post_read_root_frame_loss_never_qualifies_or_launches(self):
+        for defect in ("pre-window", "post-window", "post-root", "post-frame-wire"):
+            state = self.fixture(); diagnostic = {}; error = RuntimeError("Bound Root ownership changed after read")
+            if defect == "post-root":
+                calls = []
+                def root_guard(**kwargs):
+                    calls.append(kwargs)
+                    if len(calls) == 2: raise error
+                state.surface.recheck.side_effect = root_guard
+            if defect == "post-frame-wire":
+                identity = state.surface.references.identity
+                state.surface.references.identity = lambda node, owner: ([":1.1", "/foreign-frame"]
+                    if diagnostic.get("phase") == "final-frame" else identity(node, owner))
+            pages = M.load("native-linux-integrated-pages")
+            html = M.HtmlPages(state.surface, Mock(pid=12), pages, {"size": 4, "sha256": "a" * 64}, 41000, {}, {"envelopeDiagnostic": diagnostic})
+            with self.subTest(defect=defect), self.acquisition(state) as inventory, patch.object(M.subprocess, "Popen") as launch:
+                if defect == "pre-window": inventory.return_value = [20, 21]
+                if defect == "post-window": inventory.side_effect = [[20], [20, 21]]
+                with self.assertRaises(RuntimeError) as caught: html.start()
+            if defect == "post-root": self.assertIs(caught.exception, error)
+            self.assertEqual(state.frame_reads, 0 if defect == "pre-window" else 1)
+            self.assertEqual(diagnostic["notReadyCount"], 0); self.assertIsNone(diagnostic["firstNotReady"])
+            self.assertFalse(html.probed); self.assertEqual(html.evidence["inputAttempts"], [])
+            self.assertEqual(state.sleeps, []); launch.assert_not_called()
+
+    def test_positive_result_after_pre_guard_post_guard_or_frame_budget_expiry_cannot_launch(self):
+        for expiry in ("before-frame", "post-guard", "post-frame"):
+            state = self.fixture(); diagnostic = {}
+            calls = []
+            def recheck(**kwargs):
+                calls.append(kwargs)
+                if len(calls) == (1 if expiry == "before-frame" else 2) and expiry != "post-frame": state.now = 30
+            state.surface.recheck.side_effect = recheck
+            if expiry == "post-frame":
+                identity = state.surface.references.identity
+                def timed_identity(node, owner):
+                    if diagnostic.get("phase") == "final-frame": state.now = 30
+                    return identity(node, owner)
+                state.surface.references.identity = timed_identity
+            pages = M.load("native-linux-integrated-pages")
+            html = M.HtmlPages(state.surface, Mock(pid=12), pages, {"size": 4, "sha256": "a" * 64}, 41000, {}, {"envelopeDiagnostic": diagnostic})
+            with self.subTest(expiry=expiry), self.acquisition(state), patch.object(M.subprocess, "Popen") as launch, \
+                    self.assertRaisesRegex(RuntimeError, "Native WebView readiness deadline"):
+                html.start()
+            self.assertEqual(diagnostic["outcome"], "deadline")
+            self.assertFalse(html.probed); self.assertEqual(html.evidence["inputAttempts"], [])
+            self.assertEqual(state.frame_reads, 0 if expiry == "before-frame" else 1)
+            self.assertEqual(diagnostic["notReadyCount"], 0); launch.assert_not_called()
 
 
 class GenuineGiBinding(unittest.TestCase):
