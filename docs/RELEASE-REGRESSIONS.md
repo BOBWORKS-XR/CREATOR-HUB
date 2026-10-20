@@ -35,6 +35,13 @@ of defect-free releases. Source tests do not replace the installed checks below.
 | A connection-reset event is counted as a rejected updater request | `scripts/self-update-lab-feed.test.cjs` reset/non-reset/secret-bound diagnostics | Retain bounded reset-event counts separately; all actual policy refusals and non-reset parser/TLS errors still fail. Native incoming16 run `39326247460` served all five routes with zero refusals; this is controlled discovery, not public-feed acceptance |
 | Retirement fixtures miss the real Hub/Setup/MCP stores or omit preservation checks after failure | `scripts/linux-deb-retention-sdk.test.cjs`, `scripts/linux-deb-helper-transaction-sdk.test.cjs` | Eleven actual/legacy/unknown-file sentinels with exact bytes, inode, permissions and ownership, checked after success, refusal and owned-client close. Native mechanism evidence is still required |
 | A portable host profile is attached to an older Root without its startup checks | `scripts/build-unified.test.cjs`, `scripts/linux-016-portable-package.test.cjs` | Actual compiled features, locked package version, source tree, ELF bytes and final AppDir inventory must bind; no profile from an older package, and no installation/Flatpak claim from packaging alone |
+| An ordinary AppImage is trapped in restricted Flatpak-support setup, even after completion | Root launch/alias tests and `scripts/flatpak-native-activation.test.cjs` | Ordinary filename opens normal Hub; exact-version setup alias selects only the restricted role. Verify both filenames on the same byte-identical image. Filename/environment hints never authorize installation |
+| Newly registered setup/recovery commands lack generated permissions or trusted-main-window grants | `scripts/command-permissions.test.cjs` | Real packaged setup and retained-update controls work; wildcard windows, remote grants and sandbox command-bridge routes remain refused |
+| Interrupted first installation is adopted or replayed using only a local marker | Native portable bootstrap/resume tests and Root single-step model tests | Signed external generation, running kernel image, origin and directory identities must agree; Cancel writes nothing; each later step needs a fresh review and explicit consent; uncertain outcomes retain evidence |
+| An actual dynamic ICU data ELF is rejected solely because DT_NEEDED is empty | `scripts/linux-016-portable-package.test.cjs` dynamic-table regressions | Valid complete NULL-terminated dynamic tables may have zero dependencies; empty, failed, truncated and malformed tool output still refuse. Never remove the dynamic-table evidence requirement |
+| Incomplete host prerequisites or primary-file-only ABI checks hide transitive requirements | Explicit pinned host classification and whole-closure ABI tests in the portable packager | Every required provider/tag is recorded, unknown names refuse, target providers are independently inspected, then actual graphics/loader/native operation is tested. Names or highest version alone are not compatibility proof |
+| Production assembly incorrectly requires the mutually exclusive development flag | `scripts/assemble-unix-payload.test.cjs` exact production-profile regression | Preflight the actual production flag tuple before expensive compilation; reject conflicting, missing and non-boolean selections without weakening payload verification |
+| Synthetic GTK map notifications repeat before a valid callback and fail the fixture reader | `scripts/native-unix-window-fixture.test.py` retained-event replay | Each widget announces its first map once; a fresh retry widget still announces. Keep event ordering and ownership checks strict; repeat the real synthetic native-dialog flow |
 | Fresh Windows checkout changes exact Unix protocol/source bytes, or runs CLI tests before their binary exists | `scripts/checkout-contracts.test.cjs`, `scripts/linux-deb-helper.test.cjs`; five explicit LF attributes | A fresh CRLF checkout passes the script suite; build the refusal-only helper before assertions, without enabling transaction features |
 | Frozen-source tests pass locally but fail on shallow Actions history; private fixture metadata outgrows a file-count assumption | `scripts/native-linux-update-flow.test.py` | Fetch only the exact frozen source before fixture tests; bound private metadata bytes while preserving exact selected asset IDs, hashes and signatures; native outcomes remain separately required |
 | Disposable Linux fixture source sits beneath a world-writable runner ancestor | Exact public path/UID/GID/mode refusal and measured-ancestry workflow regression | Record original metadata before changes; secure only enumerated root-owned runner fixture/policy ancestors and recheck inode/ownership; do not relax the application guard or modify user machines |
@@ -56,6 +63,11 @@ Native preflight also checks these captured boundaries:
 - Once the stock authentication agent is bound, recheck its exact unique bus
   owner/PID/UID and root authority. Do not enumerate unrelated transient bus
   callers while observing dismissal. A lost bound agent still refuses.
+- Flatpak Host1 `Start()` acknowledges activation, not host version, image
+  identity or release qualification. The contract permits compatible native
+  updates without replacing the launcher. Bind the actual owner PID/start/UID,
+  kernel image and window independently; do not infer a match from the reply or
+  add a speculative version handshake merely because a private older host works.
 - Preserve unrelated dpkg diversions/statoverrides. The experimental helper's
   target-scoped parser and protected-parent snapshot are implemented but not
   natively accepted. Run the unprivileged metadata gate before packages or
@@ -70,8 +82,10 @@ Native preflight also checks these captured boundaries:
   These bounded older-package results do not accept final 0.1.16 or Flatpak.
   See [the current release gates](RELEASE-NEXT-NON-MAC.md) and the historical
   [source audit](LINUX-UPDATE-AUDIT-014.md).
-- Linux legacy retirement helper is nondefault experimental source, not enabled
-  production migration. Setup and other package formats need their own contracts.
+- Linux legacy retirement has distinct nondefault development and production
+  profiles. The production protocol/helper/policy are implemented, but final
+  native migration/authentication qualification remains open. Other package
+  formats cannot inherit the DEB retirement result.
 - Flatpak package/GUI/stdio fixtures do not prove access to existing host settings,
   AI configuration, Unity projects, migration or a supported update remote.
 - New product bytes must repeat relevant native acceptance. Passed older packages

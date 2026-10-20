@@ -2419,7 +2419,22 @@ mod tests {
         assert!(body.contains("Cancelling a later system prompt does not undo earlier cleanup"));
         assert!(body.contains("Continuing also accepts the unknown custom-GUI integration risk"));
         assert!(body.contains("These TEST ONLY packages are not release acceptance"));
-        assert!(body.contains("#[cfg(all(target_os = \"linux\", not(feature = \"experimental-linux-migration\")))]\n            require_no_retirement"));
+        let guarded_call = "#[cfg(all(target_os = \"linux\", not(feature = \"experimental-linux-migration\")))]\n            require_no_retirement";
+        let has_guarded_call = |source: &str| source.replace("\r\n", "\n").contains(guarded_call);
+        assert!(has_guarded_call(body));
+        for newline in ["\n", "\r\n"] {
+            let fixture = guarded_call.replace('\n', newline);
+            assert!(has_guarded_call(&fixture));
+            let wrong_guard = fixture.replace(
+                "not(feature = \"experimental-linux-migration\")",
+                "feature = \"experimental-linux-migration\"",
+            );
+            assert!(!has_guarded_call(&wrong_guard));
+            assert!(!has_guarded_call(&fixture.replace(
+                "require_no_retirement",
+                "unrelated_call(); require_no_retirement",
+            )));
+        }
         let native = include_str!("convergence_linux.rs");
         let originals = native
             .split("impl Originals {")

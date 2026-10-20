@@ -32,15 +32,108 @@ not approval of untested packages or a publication receipt.
    update and automatic restart against the final new candidate. Local read-only
    page tests do not replace these release gates.
 2. Linux DEB: actual system cancellation, authorized signed installation,
-   automatic restart and preservation; production legacy-app retirement remains
-   experimental/default-refused. RPM/AppImage automatic replacement remains
-   unsupported and must not be advertised as accepted.
+   automatic restart and preservation against final production bytes. Production
+   retirement is explicitly opt-in and still needs native qualification.
+   RPM replacement and the new signed portable updater must not be advertised
+   as accepted before their respective actual flow tests pass.
 3. Flatpak: qualify disclosure Cancel, owned warm/cold activation, host version
    binding, signed update/reactivation and safe removal. The native-window
-   launcher currently depends on a DEB-installed host, not a self-contained
-   SteamOS package. The tested Deck lacks required WebKit libraries.
+   launcher needs separately approved native support. The signed portable host
+   path is implemented but not yet qualified on SteamOS; a launcher unit-test
+   pass or availability of desktop runtimes does not satisfy that requirement.
 4. Publish all requested non-Mac platforms only after their final exact bytes
    pass. Preserve original failed reports and historical release assets.
+
+### Current Evidence, 2026-10-20
+
+- The exact Windows candidate passed fresh installation, guarded NSIS upgrade,
+  signed public-0.1.14-to-0.1.16 update with automatic restart, and the native
+  single-guide migration/retirement scenario. Runs `39323383380`, `39322268458`,
+  `39326247460` and `39329339764` bind those separate scopes. Migration checks
+  verified exact backups, missing-project import without duplicates, current
+  preferences/selection/unknown fields, unrelated client entries, retained old
+  runtime and SDK transport reconnects after normal close/relaunch. Controlled
+  discovery and SDK clients are not public-feed or actual AI-app acceptance.
+- Linux integrated Root assembly `39329425701` passed with the fresh signed
+  private payload from `39326776585`. This is the default-off portable host
+  prototype, not the new portable updater or a release qualification.
+  Native selector/registration run `39330707905` passed 72 Linux tests and
+  strict Clippy. Restart-coordinator run `39336614036` passed default and
+  experimental Linux tests and strict Clippy after a retained, reproduced
+  reset/EOF failure. This does not prove signed AppRun/Root update lifecycles.
+- AppDir sidecar `39331187141` completed Tauri bundling but refused GTK's
+  `Polkit-1.0.typelib` through an overbroad path filter. The narrow correction
+  permits only two regular, non-executable GObject metadata files; privileged
+  policies/helpers and unreviewed libraries remain refused. A second narrow
+  correction admits only the exact required GIO TLS module. Run `39335641660`
+  then refused writable copyright/schema data in the original AppImage. The
+  original image and metadata are retained; a transport-only permission
+  normalization is being tested without changing system sources or relaxing
+  final inventory admission. Complete inventory, ABI and size checks remain open.
+- Native Linux pages/deferral runs `39331784190` and `39331788410` stopped in an
+  invalid pre-map readiness caller. Corrected runs `39332819755` and
+  `39332823259` verified the owned singleton Root and terms acceptance, then
+  stopped at a strict dynamic-project-row lookup. Neither original failure
+  captured the later UI. Presence-first waiting and independent bounded UI/
+  owned bitmap failure captures are now tested. Later runs `39335592008` and
+  `39334250739` passed direct pages/normal manual relaunch and guide deferral,
+  respectively, using the exact existing package. Preferences, client files and
+  projects remained exact; only the two source-required completed read records
+  per new Root session were appended in the pages scenario. These are not native
+  approval, signed-update, Flatpak or physical SteamOS/EGL acceptance.
+- Linux single-guide cleanup is implemented, but production retirement protocol,
+  package/policy and native approval/recovery qualification remain open. The
+  production protocol, package builder, fixed authentication policy and portable
+  updater/recovery controls are implemented. Feature CI `39345006862` at
+  `c4bddc4` passed native Linux strict lint and Root tests: 455 host-mode tests,
+  474 portable-updater tests and 474 production-profile tests, each with 14
+  ignored tests. These are library checks, not installed app acceptance.
+- Origin-bound first-install recovery at `f77f29e` passed native Linux run
+  `39343572836`: 111 default and 136 restart-enabled library tests, plus selector
+  tests and strict lint. Recovery advances only one explicitly reviewed step.
+  The final Root caller also passed native compilation in `39345006862`.
+  Missing UI command grants were reproduced and corrected at `1d9d7ed`;
+  all five command-permission checks pass. A production assembly profile mismatch
+  was reproduced before correction at `354b890`; all 27 handoff tests then pass.
+- Portable package run `39341933523` completed bundling and original/canonical
+  inventories, then rejected a valid ICU data ELF with zero `DT_NEEDED` entries.
+  The actual retained library and LLVM readelf output establish a valid dynamic
+  section and NULL terminator. The parser correction rejects absent, failed,
+  truncated or malformed output; its suite passes 52 tests with 14 Unix-only
+  tests skipped locally. Static inspection of all 157 unique packaged ELFs
+  passed dynamic parsing. Eighteen desktop host dependencies are now classified
+  against pinned upstream exclusion evidence; whole-closure version requirements
+  replace the incomplete seven-primary-file analysis. The updated suite passes
+  58 tests with 14 Unix-only skips. This is not a runtime compatibility pass.
+- The Steam Deck is reachable again at its known SSH address. Read-only checks
+  identify SteamOS 3.8.16, GNOME Platform 50 and no installed Hub Flatpak. Its
+  linker cache has x86_64 providers for the 18 observed dependencies. Bounded
+  readelf captures of 26 host libraries have stable before/after stats and hashes;
+  all 65 required host tags and 3,732 attributable strong versioned import
+  occurrences are present. Unversioned and ambiguous imports, actual loader and
+  graphics behavior remain unverified. No Deck settings or packages were changed.
+  Signed selector packaging, final production
+  migration/update/restart and SteamOS/Flatpak acceptance remain open.
+- Public Linux's incoming baseline is 0.1.12 and needs a manual first upgrade;
+  public 0.1.14 is Windows-only. A genuinely compiled private 0.1.17 target is
+  needed to prove final 0.1.16's outgoing update flow; an old renamed binary or
+  replacement version field cannot supply that evidence.
+- The complete browser suite passed 436 tests. Independent review caught and
+  corrected ordinary AppImages being trapped in setup before packaging. Only
+  the dedicated, exact-version Native Support filename (including bounded normal
+  browser duplicate suffixes) selects restricted setup; that hint grants no
+  installation authority. Its alias must be byte-identical to the ordinary
+  AppImage and both launch roles need real native acceptance.
+- Production Root assembly `39345920645` at `c13cb9e` is running after the native
+  feature pass; it reuses the original signed 0.1.16 private payload. No build
+  success or installer acceptance is inferred. Production input/staging gates
+  separately bind raw Root, packaged ELF, source tree, helper/policy/service,
+  resources and both build proofs before execution. Their inspection workflow
+  cannot install apps or claim migration/update/Flatpak acceptance.
+- Clean source CI `39329938286` passed all six non-Mac jobs. The existing public
+  Windows release and user installation remain unchanged. The existing private
+  validation draft is transport only and was not published; no Mac job or new
+  public release/tag was created.
 
 ## Source Validation
 
