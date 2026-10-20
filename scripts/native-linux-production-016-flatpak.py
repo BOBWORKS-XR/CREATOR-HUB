@@ -25,7 +25,6 @@ import sys
 import tarfile
 import tempfile
 import time
-import urllib.request
 import zipfile
 import zlib
 
@@ -530,14 +529,32 @@ def loopback_proxy(value):
 
 def bootstrap_transport_ready(root, review, proxy):
     # Normal system chain/hostname validation, unchanged production URLs, no public-discovery claim.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({'https': loopback_proxy(proxy)}))
+    proxy = loopback_proxy(proxy)
     prefix = "https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.16/"
-    for name in (DESCRIPTOR, DESCRIPTOR + ".minisig", MANIFEST, MANIFEST + ".minisig"):
-        expected = review["signed"]["files"][name]
-        with opener.open(prefix + name, timeout=30) as response:
-            require(response.status == 200 and response.url == prefix + name, "Exact lab transport refused")
-            raw = response.read(expected["size"] + 1)
-        require(len(raw) == expected["size"] and hashlib.sha256(raw).hexdigest() == expected["sha256"], "Lab URL differs from reviewed signed input")
+    image = PortalImage('curl')
+    try:
+        for name in (DESCRIPTOR, DESCRIPTOR + ".minisig", MANIFEST, MANIFEST + ".minisig"):
+            expected = review["signed"]["files"][name]
+            require(type(expected) is dict and set(expected) == {'size', 'sha256'} and type(expected['size']) is int
+                    and 0 < expected['size'] <= 2 * 1024 * 1024 and type(expected['sha256']) is str
+                    and re.fullmatch('[a-f0-9]{64}', expected['sha256']), 'Bounded exact readiness pin required')
+            require(image.snapshot() == image.pin, 'Readiness curl image changed')
+            value = command(['/usr/bin/curl', '--disable', '--silent', '--show-error', '--fail', '--http1.1',
+                '--proto', '=https', '--proto-redir', '=https', '--no-location', '--max-redirs', '0', '--retry', '0',
+                '--proxy', proxy, '--noproxy', '', '--tlsv1.2', '--connect-timeout', '10', '--max-time', '30',
+                '--max-filesize', str(expected['size']), '--write-out', '\n%{json}', '--url', prefix + name],
+                env=clean_environment(root), timeout=35, limit=expected['size'] + 16384)
+            require(image.snapshot() == image.pin, 'Readiness curl image changed during transfer')
+            size = expected['size']
+            require(size < len(value) <= size + 16384 and value[size:size + 1] == b'\n', 'Bounded curl body and metadata required')
+            raw, metadata = value[:size], parse(value[size + 1:])
+            require(type(metadata) is dict and all(type(metadata.get(key)) is int and metadata[key] == expected_value
+                    for key, expected_value in (('http_code', 200), ('http_connect', 200), ('num_redirects', 0), ('ssl_verify_result', 0)))
+                    and metadata.get('http_version') == '1.1' and metadata.get('url_effective') == prefix + name,
+                    'Exact verified HTTP/1.1 lab transport refused')
+            require(hashlib.sha256(raw).hexdigest() == expected['sha256'], 'Lab URL differs from reviewed signed input')
+    finally:
+        image.close()
 
 
 def protected_trust_parent(path):
@@ -1826,8 +1843,9 @@ def portal_provider(role):
 class PortalImage(K.HeldImage):
     """Held package image from a finite protected system path, never a caller path."""
     def __init__(self, role):
-        require(role in (*PORTAL_PROVIDERS, 'python'), 'Only fixed portal system images allowed')
-        original = Path('/usr/bin/python3' if role == 'python' else PORTAL_PROVIDERS[role][0])
+        require(role in (*PORTAL_PROVIDERS, 'python', 'curl'), 'Only fixed portal/readiness system images allowed')
+        system = {'python': '/usr/bin/python3', 'curl': '/usr/bin/curl'}
+        original = Path(system[role] if role in system else PORTAL_PROVIDERS[role][0])
         self.fd, self.parents, self.alias = None, [], None
         try:
             if role == 'python':

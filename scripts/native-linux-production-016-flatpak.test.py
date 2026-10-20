@@ -1887,6 +1887,137 @@ class DiagnosticTests(unittest.TestCase):
                 self.assertEqual(calls, [False], 'Oversized peer image was hashed')
 
 
+class ReadinessClientTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self, change=None):
+        names = (M.DESCRIPTOR, M.DESCRIPTOR + '.minisig', M.MANIFEST, M.MANIFEST + '.minisig')
+        bodies = {name: ('signed fixture ' + str(index)).encode() for index, name in enumerate(names)}
+        review = {'signed': {'files': {name: pin(raw) for name, raw in bodies.items()}}}
+        root, proxy = Path('/private/fixture'), 'http://127.0.0.1:12345'
+        image = Mock(pin=({'synthetic': 'protected curl'}, 'a' * 64))
+        image.snapshot.return_value = image.pin
+        calls = []
+        def command(args, **kwargs):
+            calls.append((args, kwargs))
+            name = names[len(calls) - 1]
+            metadata = {'http_code': 200, 'http_connect': 200, 'http_version': '1.1', 'num_redirects': 0,
+                        'ssl_verify_result': 0, 'url_effective': 'https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.16/' + name}
+            raw = bodies[name] + b'\n' + M.json_bytes(metadata)
+            return change(raw, metadata, bodies[name]) if change else raw
+        with patch.object(M, 'PortalImage', return_value=image) as image_open, patch.object(M, 'command', side_effect=command) as run, \
+                patch.object(M.socket, 'create_connection', side_effect=AssertionError('Pure test must not open any socket')):
+            yield SimpleNamespace(root=root, proxy=proxy, image=image, image_open=image_open,
+                                  run=run, calls=calls, review=review, bodies=bodies)
+
+    def test_fixed_curl_http11_exact_urls_system_tls_and_no_redirects_or_user_configuration(self):
+        before = {**ENV, 'HTTPS_PROXY': 'http://foreign', 'NO_PROXY': '*', 'CURL_CA_BUNDLE': '/foreign', 'GH_TOKEN': 'never-copy'}
+        with patch.dict(M.os.environ, before, clear=True), self.fixture() as f:
+            M.bootstrap_transport_ready(f.root, f.review, f.proxy)
+            self.assertEqual(dict(M.os.environ), before)
+            f.image_open.assert_called_once_with('curl')
+            self.assertEqual(len(f.calls), 4)
+            self.assertEqual(f.image.snapshot.call_count, 8)
+            f.image.close.assert_called_once()
+            for (args, kwargs), (name, body) in zip(f.calls, f.bodies.items()):
+                expected = ['/usr/bin/curl', '--disable', '--silent', '--show-error', '--fail', '--http1.1',
+                    '--proto', '=https', '--proto-redir', '=https', '--no-location', '--max-redirs', '0', '--retry', '0',
+                    '--proxy', f.proxy, '--noproxy', '', '--tlsv1.2', '--connect-timeout', '10', '--max-time', '30',
+                    '--max-filesize', str(len(body)), '--write-out', '\n%{json}', '--url',
+                    'https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.16/' + name]
+                self.assertEqual(args, expected)
+                self.assertEqual(kwargs, {'env': M.clean_environment(f.root), 'timeout': 35, 'limit': len(body) + 16384})
+                for forbidden in ('--insecure', '-k', '--location', '--http1.0', '--proxy-http1.0', '--cacert', '--config'):
+                    self.assertNotIn(forbidden, args)
+                for key in ('CURL_CA_BUNDLE', 'SSL_CERT_FILE', 'HTTPS_PROXY', 'GH_TOKEN', 'NO_PROXY'):
+                    self.assertNotIn(key, kwargs['env'])
+
+    def test_http10_redirect_wrong_url_and_tls_verification_fail_without_fallback(self):
+        for field, value in (('http_version', '1.0'), ('http_code', 302), ('http_connect', 407), ('num_redirects', 1),
+                             ('url_effective', 'https://foreign.invalid/'), ('ssl_verify_result', 60), ('ssl_verify_result', False)):
+            def change(_raw, metadata, body):
+                return body + b'\n' + M.json_bytes({**metadata, field: value})
+            with self.subTest(field=field, value=value), self.fixture(change) as f:
+                with self.assertRaises(RuntimeError):
+                    M.bootstrap_transport_ready(f.root, f.review, f.proxy)
+                self.assertEqual(len(f.calls), 1); f.image.close.assert_called_once()
+
+    def test_missing_malformed_oversized_metadata_and_wrong_size_or_hash_fail(self):
+        changes = (lambda raw, metadata, body: body, lambda raw, metadata, body: body + b'\nnot-json',
+                   lambda raw, metadata, body: body + b'\n' + M.json_bytes({}),
+                   lambda raw, metadata, body: body + b'\n' + b'x' * 16385,
+                   lambda raw, metadata, body: body[:-1] + b'\n' + M.json_bytes(metadata),
+                   lambda raw, metadata, body: body + b'x\n' + M.json_bytes(metadata),
+                   lambda raw, metadata, body: b'x' * len(body) + b'\n' + M.json_bytes(metadata))
+        for change in changes:
+            with self.subTest(change=change), self.fixture(change) as f:
+                with self.assertRaises((RuntimeError, ValueError)):
+                    M.bootstrap_transport_ready(f.root, f.review, f.proxy)
+                self.assertEqual(len(f.calls), 1); f.image.close.assert_called_once()
+
+    def test_missing_unprotected_or_changed_curl_never_gets_a_readiness_pass(self):
+        with self.fixture() as f:
+            f.image_open.side_effect = FileNotFoundError('/usr/bin/curl')
+            with self.assertRaises(FileNotFoundError):
+                M.bootstrap_transport_ready(f.root, f.review, f.proxy)
+            f.run.assert_not_called()
+        with self.fixture() as f:
+            f.image.snapshot.side_effect = RuntimeError('Unprotected curl image')
+            with self.assertRaisesRegex(RuntimeError, 'Unprotected'):
+                M.bootstrap_transport_ready(f.root, f.review, f.proxy)
+            f.run.assert_not_called(); f.image.close.assert_called_once()
+        with self.fixture() as f:
+            f.image.snapshot.side_effect = [f.image.pin, ({'changed': True}, 'b' * 64)]
+            with self.assertRaises(RuntimeError):
+                M.bootstrap_transport_ready(f.root, f.review, f.proxy)
+            self.assertEqual(len(f.calls), 1); f.image.close.assert_called_once()
+
+    def test_curl_uses_only_the_existing_protected_system_image_boundary(self):
+        directory = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
+        content = SimpleNamespace(st_dev=1, st_ino=3, st_size=64, st_mode=stat.S_IFREG | 0o755, st_uid=0, st_gid=0,
+                                  st_mtime_ns=1, st_ctime_ns=2, st_nlink=1)
+        with patch.object(M.os, 'O_NOFOLLOW', 0x20000, create=True), patch.object(M.os, 'O_DIRECTORY', 0x10000, create=True), \
+                patch.object(M.os, 'O_CLOEXEC', 0x80000, create=True), patch.object(M.os, 'O_NONBLOCK', 0x800, create=True), \
+                patch.object(M.os, 'open', side_effect=[10, 11, 12, 13]) as opened, patch.object(M.os, 'close') as close, \
+                patch.object(M.os, 'fstat', side_effect=lambda fd: content if fd == 13 else directory), \
+                patch.object(M.os, 'stat', side_effect=lambda name, **_: content if name == 'curl' else directory), \
+                patch.object(M.K.HeldImage, 'snapshot', return_value=({'synthetic': 'held image'}, 'a' * 64)):
+            image = M.PortalImage('curl')
+            self.assertEqual(image.path.replace('\\', '/'), '/usr/bin/curl')
+            self.assertEqual([call.args[0] for call in opened.call_args_list], ['/', 'usr', 'bin', 'curl'])
+            self.assertTrue(all(call.args[1] & M.os.O_NOFOLLOW for call in opened.call_args_list))
+            with patch.object(M.os, 'fstat', side_effect=lambda fd: SimpleNamespace(**{**vars(content), 'st_mode': stat.S_IFREG | 0o777})
+                              if fd == 13 else directory), self.assertRaises(RuntimeError):
+                image.snapshot()
+            image.close()
+            self.assertEqual([call.args[0] for call in close.call_args_list], [13, 12, 11, 10])
+        with patch.object(M.os, 'open') as opened, patch.object(M.os, 'execve') as execute:
+            with self.assertRaises(RuntimeError):
+                M.PortalImage('/tmp/curl')
+            with self.assertRaises(RuntimeError):
+                M.portal_provider('curl')
+            opened.assert_not_called(); execute.assert_not_called()
+
+    def test_client_failure_is_not_retried_and_never_changes_system_trust(self):
+        with self.fixture() as f, patch.object(M, 'prepare_tls') as trust:
+            f.run.side_effect = RuntimeError('curl certificate or transfer failure')
+            with self.assertRaisesRegex(RuntimeError, 'curl certificate'):
+                M.bootstrap_transport_ready(f.root, f.review, f.proxy)
+            self.assertEqual(f.run.call_count, 1); trust.assert_not_called(); f.image.close.assert_called_once()
+
+    def test_foreign_proxy_and_invalid_pin_refuse_before_any_transfer(self):
+        for proxy in ('http://localhost:12345', 'http://127.0.0.1:0', 'http://foreign:443'):
+            with self.subTest(proxy=proxy), self.fixture() as f, self.assertRaises(RuntimeError):
+                M.bootstrap_transport_ready(f.root, f.review, proxy)
+            f.run.assert_not_called()
+        for bad in ({'size': True, 'sha256': 'a' * 64}, {'size': 2 * 1024 * 1024 + 1, 'sha256': 'a' * 64},
+                    {'size': 5, 'sha256': 'wrong'}):
+            with self.subTest(pin=bad), self.fixture() as f:
+                f.review['signed']['files'][M.DESCRIPTOR] = bad
+                with self.assertRaises(RuntimeError):
+                    M.bootstrap_transport_ready(f.root, f.review, f.proxy)
+                f.run.assert_not_called()
+
+
 class RealPortalTests(unittest.TestCase):
     @contextmanager
     def capture_fixture(self, frames=None):
