@@ -251,12 +251,14 @@ class LauncherKeyboardTests(unittest.TestCase):
             session.report = {'coldActivationAccepted': True, 'coldRoot': native_root, 'coldRootWindow': 200, 'coldHost1Owner': {'pid': 40, 'name': ':1.42'},
                               'coldRootXres': session.x11.inspect(200)}
             session.portal_calls = [{'url': M.PORTAL_URL, 'browserOpened': False, 'downloadAttempted': False, 'senderUid': 1001}]
-            def bind_warm(helper, native, x11, observed, window, owner, owner_probe):
+            def bind_warm(helper, native, x11, observed, window, owner, owner_probe, *, cold_xres):
                 # Integration adapter fixture only; real FD/XRes/Host1 binding is exercised in the helper suite.
+                self.assertEqual(cold_xres, session.report['coldRootXres'])
+                M.require(x11.inspect(window) == cold_xres, 'Qualified cold XRes record changed before companion binding')
                 companion = object.__new__(M.K.WarmRoot)
                 companion.helper, companion.native, companion.x11 = helper, native, x11
                 companion.process, companion.window, companion.owner = copy.deepcopy(observed), window, copy.deepcopy(owner)
-                companion.window_owner = copy.deepcopy(x11.inspect(window))
+                companion.window_owner = copy.deepcopy(cold_xres)
                 companion.held = SimpleNamespace(close=lambda: None)
                 def verify():
                     M.require(companion.held is not None and owner_probe() == companion.owner
@@ -488,7 +490,19 @@ class LauncherKeyboardTests(unittest.TestCase):
             self.assertEqual(record['keyboard']['warmCompanion']['managedWindows'], [200, 100])
             self.assertEqual(record['keyboard']['warmCompanion']['binding']['hostOwner'], session.report['coldHost1Owner'])
             self.assertEqual(record['keyboard']['warmCompanion']['binding']['root'], session.report['coldRoot'])
+            self.assertEqual(record['keyboard']['warmCompanion']['binding']['xres'], session.report['coldRootXres'])
             self.assertIsNone(state.companions[0].held)
+
+    def test_warm_controller_passes_the_actual_cold_development_preview_title(self):
+        with self.fixture('Open Creator Hub', 'warm') as (session, state, _):
+            inspect = session.x11.inspect
+            session.x11.inspect = lambda window: {**inspect(window), 'title': 'Creator Hub - Development Preview'} if window == 200 else inspect(window)
+            session.report['coldRootXres'] = session.x11.inspect(200)
+            session.flatpak('Open Creator Hub', 'warm')
+            self.assertEqual(state.sends, ['Enter'])
+            record = M.parse((session.root / 'warm-outcome-gtk.json').read_bytes())
+            self.assertTrue(record['outcomeVerified'])
+            self.assertEqual(record['keyboard']['warmCompanion']['binding']['xres'], session.report['coldRootXres'])
 
     def test_warm_outcome_requires_the_original_signed_root_even_if_exit_was_observed(self):
         with self.fixture('Open Creator Hub', 'warm') as (session, state, _):

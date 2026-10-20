@@ -877,6 +877,7 @@ class WarmCompanionTests(unittest.TestCase):
         self.root = process(321, 1, '90', '/approved/AppDir/usr/bin/creator-hub')
         self.owner = {'name': ':1.40', 'pid': 321}
         self.xres = {'pid': 321, 'client': 901, 'title': 'Creator Hub', 'mapped': True}
+        self.cold_xres = copy.deepcopy(self.xres)
         self.counts = {'native': 0, 'owner': 0, 'image': 0, 'xres': 0}
         self.images = []
         self.held_result = lambda: (copy.deepcopy(self.root['image']), 'a' * 64)
@@ -909,7 +910,8 @@ class WarmCompanionTests(unittest.TestCase):
     def bind(self):
         with patch.object(M.sys, 'platform', 'linux'), patch.object(M.platform, 'machine', return_value='x86_64'), \
                 patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.os, 'geteuid', return_value=1001, create=True):
-            return M.bind_warm_root(None, self.native, self.x11, self.root, 789, self.owner, self.owner_probe, image_open=self.image_open)
+            return M.bind_warm_root(None, self.native, self.x11, self.root, 789, self.owner, self.owner_probe,
+                                    cold_xres=self.cold_xres, image_open=self.image_open)
 
     def attempt(self):
         companion = self.bind()
@@ -937,6 +939,40 @@ class WarmCompanionTests(unittest.TestCase):
         attempt.close(); attempt.close()
         self.assertTrue(all(image.closed for image in self.images))
         with self.assertRaises(RuntimeError): companion.verify()
+
+    def test_actual_cold_receipt_title_is_bound_without_a_title_allowlist(self):
+        # Run 39411925207 qualified this cold window before warm admission refused its branding.
+        self.root['pid'] = self.owner['pid'] = 7460
+        self.xres = {'pid': 7460, 'client': 14680064, 'title': 'Creator Hub - Development Preview', 'mapped': True}
+        self.cold_xres = copy.deepcopy(self.xres)
+        self.native.native_process = lambda pid, helper: copy.deepcopy(self.root)
+        self.image_open = lambda pid: SimpleNamespace(snapshot=lambda: self.current_result(), close=lambda: None)
+        companion = self.bind()
+        self.assertEqual(companion.evidence['xres'], self.cold_xres)
+        companion.verify()
+        self.cold_xres['title'] = 'Caller mutated the retained record'
+        self.assertEqual(companion.evidence['xres']['title'], 'Creator Hub - Development Preview')
+        companion.close()
+
+    def test_cold_record_must_be_exact_before_any_image_or_input_is_opened(self):
+        mutations = ({'pid': 322}, {'pid': True}, {'client': 902}, {'client': True}, {'client': 2**32},
+                     {'title': 'Creator Hub - Development Preview'}, {'title': ''}, {'title': 'x' * 4097},
+                     {'mapped': False}, {'mapped': 1}, {'extra': True})
+        for change in mutations:
+            self.setUp(); self.cold_xres.update(change)
+            with self.subTest(change=change), self.assertRaises(RuntimeError): self.bind()
+            self.assertEqual(self.images, [])
+        for value in (None, [], {}, {'pid': 321}):
+            self.setUp(); self.cold_xres = value
+            with self.subTest(value=value), self.assertRaises(RuntimeError): self.bind()
+            self.assertEqual(self.images, [])
+
+    def test_cold_record_is_required_even_when_live_window_matches_old_title(self):
+        with patch.object(M.sys, 'platform', 'linux'), patch.object(M.platform, 'machine', return_value='x86_64'), \
+                patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.os, 'geteuid', return_value=1001, create=True):
+            with self.assertRaises(TypeError):
+                M.bind_warm_root(None, self.native, self.x11, self.root, 789, self.owner, self.owner_probe, image_open=self.image_open)
+        self.assertEqual(self.images, [])
 
     def test_companion_never_authorizes_escape_shift_tab_or_repeated_attempt(self):
         for sequence in ('Escape', 'ShiftTabSpace'):

@@ -1391,7 +1391,7 @@ class Session:
                 require(cold['kernelImageSha256'] == self.review['portable']['root']['sha256'] and cold['executable'] == str(expected),
                         "Warm companion is not the independently signed cold generation")
                 companion = K.bind_warm_root(self.helper, self.native, self.x11, cold, self.report['coldRootWindow'],
-                                             self.report['coldHost1Owner'], self.host_owner)
+                                             self.report['coldHost1Owner'], self.host_owner, cold_xres=self.report['coldRootXres'])
                 require(companion.evidence['xres'] == self.report['coldRootXres'], "Cold Root XRes owner changed before warm input")
             options = {} if companion is None else {'warm_companion': companion}
             attempt = K.capture(self.helper, self.native, self.x11, client, self.flatpak_origin, self.flatpak_guard, window, **options)

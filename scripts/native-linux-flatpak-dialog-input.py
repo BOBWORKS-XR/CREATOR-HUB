@@ -250,7 +250,7 @@ class OwnedLauncher:
 
 class WarmRoot:
     """Opaque, single native Root companion; never a window/process allowlist."""
-    def __init__(self, helper, native, x11, process, window, owner, owner_probe, *, _authority=None, image_open=HeldImage):
+    def __init__(self, helper, native, x11, process, window, owner, owner_probe, *, cold_xres=None, _authority=None, image_open=HeldImage):
         require(_authority is _WARM_ROOT_AUTHORITY, "Use the finite native Root binding factory")
         validate_process(process, full=True)
         require(process['executable'].endswith('/AppDir/usr/bin/creator-hub')
@@ -259,11 +259,17 @@ class WarmRoot:
                 and owner['pid'] == process['pid'] and type(owner['name']) is str
                 and len(owner['name']) <= 255 and re.fullmatch(r':[0-9]+\.[0-9]+', owner['name']) and callable(owner_probe),
                 "Exact Host1 unique owner must belong to this native Root")
+        require(type(cold_xres) is dict and set(cold_xres) == {'pid', 'client', 'title', 'mapped'}
+                and type(cold_xres['pid']) is int and cold_xres['pid'] == process['pid']
+                and type(cold_xres['client']) is int and 0 < cold_xres['client'] < 2**32
+                and type(cold_xres['title']) is str and 0 < len(cold_xres['title']) <= 4096
+                and cold_xres['mapped'] is True, "Exact qualified cold Root XRes record required")
         self.helper, self.native, self.x11 = helper, native, x11
         self.process, self.window, self.owner = copy.deepcopy(process), xid(window), copy.deepcopy(owner)
+        self.window_owner = copy.deepcopy(cold_xres)
         self.owner_probe, self.image_open, self.held = owner_probe, image_open, None
         try:
-            self.window_owner = self.window_identity()
+            self.window_identity()
             self.held = image_open(process['pid'])
             self.verify()
         except Exception:
@@ -273,9 +279,8 @@ class WarmRoot:
     def window_identity(self):
         value = self.x11.inspect(self.window)
         require(type(value) is dict and set(value) == {'pid', 'client', 'title', 'mapped'}
-                and type(value['pid']) is int and value['pid'] == self.process['pid']
-                and type(value['client']) is int and value['client'] > 0
-                and value['title'] == 'Creator Hub' and value['mapped'] is True,
+                and type(value['pid']) is int and type(value['client']) is int
+                and type(value['title']) is str and value['mapped'] is True and value == self.window_owner,
                 "Exact mapped XRes-owned native Root companion required")
         return value
 
@@ -306,13 +311,13 @@ class WarmRoot:
             held.close()
 
 
-def bind_warm_root(helper, native, x11, process, window, owner, owner_probe, *, image_open=HeldImage):
-    """Caller binds the signed cold generation and closes this token on any failure."""
+def bind_warm_root(helper, native, x11, process, window, owner, owner_probe, *, cold_xres, image_open=HeldImage):
+    """Bind the signed cold generation and its already qualified exact window record."""
     require(sys.platform == 'linux' and platform.machine() == 'x86_64' and os.geteuid() == os.getuid() > 0,
             "Unprivileged native Linux x86_64 controller required")
     require(type(process) is dict and process.get('uids') == [os.getuid()] * 4, "Native Root/controller UID differs")
     return WarmRoot(helper, native, x11, process, window, owner, owner_probe,
-                    _authority=_WARM_ROOT_AUTHORITY, image_open=image_open)
+                    cold_xres=cold_xres, _authority=_WARM_ROOT_AUTHORITY, image_open=image_open)
 
 
 class KeyEvent(C.Structure):
