@@ -1159,6 +1159,139 @@ def inventory_permission_capture(error, helper):
     return result
 
 
+def failed_process_attribution(child, helper):
+    result = {"scope": "failed-pid-and-immediate-parent-only", "readOnly": True,
+              "validationAuthority": False, "stable": False, "status": "unknown"}
+    def error_row(error):
+        return {"type": type(error).__name__, "errno": error.errno if isinstance(error, OSError) else None}
+    def observe(pid, expected=None, *, executable=True):
+        row, directory = {"pid": pid, "stable": False, "status": "unknown"}, None
+        try:
+            path = Path(f"/proc/{pid}")
+            directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+            def read(leaf, limit):
+                before = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= limit,
+                        "Nonordinary bounded proc metadata")
+                with os.fdopen(os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=directory), "rb") as stream:
+                    require(metadata_stamp(os.fstat(stream.fileno())) == metadata_stamp(before), "Proc metadata FD changed")
+                    raw = stream.read(limit + 1)
+                    require(len(raw) <= limit and metadata_stamp(os.fstat(stream.fileno())) == metadata_stamp(before), "Proc metadata changed/oversized")
+                require(metadata_stamp(os.stat(leaf, dir_fd=directory, follow_symlinks=False)) == metadata_stamp(before), "Proc metadata pathname changed")
+                return raw
+            def snapshot():
+                info = os.fstat(directory)
+                require(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == UID
+                        and metadata_stamp(info) == metadata_stamp(path.lstat()), "Fixture proc directory changed")
+                raw = read("stat", 4096).decode("utf-8")
+                start, parent = helper.parse_start(raw, pid), int(raw[raw.rfind(")") + 2:].split()[1])
+                allowed = ("Name", "State", "PPid", "Uid", "Gid", "Threads", "NoNewPrivs",
+                           "CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb", "Seccomp")
+                fields = {}
+                for line in read("status", 16384).splitlines():
+                    key, separator, value = line.partition(b":")
+                    if key not in tuple(name.encode("ascii") for name in allowed):
+                        continue
+                    name, value = key.decode("ascii"), value.strip().decode("utf-8")
+                    require(separator and name not in fields and 0 < len(value) <= 256, "Ambiguous status field")
+                    if name in ("Uid", "Gid"):
+                        require(re.fullmatch(r"[0-9]{1,10}(?:[ \t]+[0-9]{1,10}){3}", value), "Invalid credential tuple")
+                        value = [int(part) for part in value.split()]
+                    elif name.startswith("Cap"):
+                        require(re.fullmatch(r"[a-fA-F0-9]{1,16}", value), "Invalid capability metadata")
+                    elif name not in ("Name", "State"):
+                        require(re.fullmatch(r"[0-9]{1,20}", value), "Invalid numeric status metadata")
+                        value = int(value)
+                    else:
+                        require(not re.search(r"[\x00-\x1f\x7f]", value), "Control character in status metadata")
+                    fields[name] = value
+                require(set(fields) == set(allowed) and fields["Uid"] == fields["Gid"] == [UID] * 4
+                        and fields["PPid"] == parent, "Exact fixture status unavailable")
+                require(metadata_stamp(os.fstat(directory)) == metadata_stamp(info) == metadata_stamp(path.lstat()), "Proc directory changed")
+                return {"procDirectory": metadata_row(path.as_posix(), info), "startTime": start,
+                        "parentPid": parent, "Uid": fields["Uid"], "Gid": fields["Gid"]}, fields
+            row["before"], row["statusBefore"] = snapshot()
+            require(expected is None or row["before"] == expected, "Retained failure tuple changed")
+            if executable:
+                try:
+                    # Follow only this kernel magiclink through the held proc FD, never its reported pathname.
+                    target = os.readlink("exe", dir_fd=directory)
+                    require(target.startswith("/") and len(target.encode("utf-8")) <= 4096
+                            and not re.search(r"[\x00-\x1f\x7f]", target), "Unbounded executable path")
+                    with os.fdopen(os.open("exe", os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=directory), "rb") as stream:
+                        before = os.fstat(stream.fileno())
+                        require(stat.S_ISREG(before.st_mode) and 0 <= before.st_size <= 64 * 1024 * 1024, "Nonordinary/oversized executable")
+                        require(metadata_stamp(os.stat("exe", dir_fd=directory, follow_symlinks=True)) == metadata_stamp(before), "Executable target changed")
+                        sha, total = hashlib.sha256(), 0
+                        while True:
+                            raw = stream.read(min(1048576, 64 * 1024 * 1024 - total + 1))
+                            if not raw:
+                                break
+                            total += len(raw)
+                            require(total <= 64 * 1024 * 1024, "Executable stream exceeded bound")
+                            sha.update(raw)
+                        after = os.fstat(stream.fileno())
+                        require(total == before.st_size and metadata_stamp(before) == metadata_stamp(after)
+                                == metadata_stamp(os.stat("exe", dir_fd=directory, follow_symlinks=True))
+                                and os.readlink("exe", dir_fd=directory) == target, "Executable changed during capture")
+                    row["executable"] = {"status": "captured", "path": target, "sha256": sha.hexdigest(),
+                                         "before": metadata_row(target, before), "after": metadata_row(target, after)}
+                except Exception as error:
+                    row["executable"] = {"status": "unknown", "error": error_row(error)}
+            row["after"], row["statusAfter"] = snapshot()
+            require(row["before"] == row["after"], "Process identity changed during capture")
+            row["stable"] = True
+            if not executable or row["executable"]["status"] == "captured":
+                row["status"] = "captured"
+        except Exception as error:
+            row["error"] = error_row(error)
+        finally:
+            if directory is not None:
+                os.close(directory)
+        return row
+    try:
+        require(os.getuid() == os.geteuid() == 0, "Root-only failure attribution")
+        code = child.poll() if child is not None else None
+        require(type(code) is int and code != 0, "Just-failed session child required")
+        candidates = []
+        for role in ("first", "reopened"):
+            file = BASE / "result" / role / "session.json"
+            if os.path.lexists(file):
+                receipt = P.parse(read_file(file, 65536, uid=UID, mode=0o600))
+                if receipt.get("startupRefused", {}).get("type") == "PermissionError":
+                    candidates.append((role, receipt["processInventoryRefusal"]))
+        require(len(candidates) == 1, "One failed-session receipt required")
+        role, capture = candidates[0]
+        pid, expected = capture["pid"], capture["before"]
+        require(type(pid) is int and 1 <= pid <= 2147483647 and type(capture["errno"]) is int
+                and capture["errno"] in (1, 13) and capture["readOnly"] is True and capture["stable"] is True
+                and expected == capture["after"], "Unstable or non-permission failure tuple")
+        for saved in (expected, capture["after"]):
+            keys(saved, ("procDirectory", "startTime", "parentPid", "Uid", "Gid"))
+            keys(saved["procDirectory"], ("path", "type", "uid", "gid", "mode", "nlink", "dev", "ino", "size", "mtimeNs", "ctimeNs"))
+            require(all(type(value) is int for key, value in saved["procDirectory"].items() if key not in ("path", "type"))
+                    and all(type(value) is int for name in ("Uid", "Gid") for value in saved[name])
+                    and type(saved["parentPid"]) is int and type(saved["startTime"]) is str,
+                    "Failure tuple types differ")
+        require(expected["Uid"] == expected["Gid"] == [UID] * 4
+                and type(expected["parentPid"]) is int and 1 <= expected["parentPid"] <= 2147483647
+                and expected["parentPid"] != pid and type(expected["startTime"]) is str
+                and re.fullmatch(r"[0-9]{1,20}", expected["startTime"])
+                and expected["procDirectory"]["path"] == f"/proc/{pid}"
+                and expected["procDirectory"]["uid"] == expected["procDirectory"]["gid"] == UID,
+                "Exact fixture failure identity required")
+        result.update(receipt=role, errno=capture["errno"])
+        result["failed"] = observe(pid, expected)
+        require(result["failed"]["stable"], "Failed PID identity unavailable")
+        result["parent"] = observe(expected["parentPid"])
+        result["failedRecheck"] = observe(pid, expected, executable=False)
+        if all(result[name]["status"] == "captured" for name in ("failed", "parent", "failedRecheck")):
+            result.update(status="captured", stable=True)
+    except Exception as error:
+        result["error"] = error_row(error)
+    return result
+
+
 def verified_route(home, binding):
     router, server = route(home)
     active = P.parse(read_file(home / "data/creator-hub/mcp-route-v1/linux-x86_64/active.json", 16384))
@@ -1779,7 +1912,7 @@ def broker(env):
     polkit.admin_config()
     polkit.credential_tools(BASE)
     require(polkit.fixture_credential("status") == "L", "Fresh locked synthetic account required")
-    secret = payload = logs = None
+    secret = payload = logs = child = None
     record = {"scope": "production-016-disposable-migration", "scenario": scenario, "harnessSource": env["GITHUB_SHA"],
               "inputProofs": 0, "fixtureRelocked": False, "scenarioPassed": False, **FLAGS}
     context, relock, failure = {}, False, None
@@ -1821,6 +1954,11 @@ def broker(env):
     except Exception as error:
         failure = error
         record["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        try:
+            record["failedProcessAttribution"] = failed_process_attribution(child, helper)
+        except Exception as capture_error:
+            record["failedProcessAttribution"] = {"status": "unknown", "readOnly": True, "validationAuthority": False,
+                                                  "error": {"type": type(capture_error).__name__}}
     finally:
         wipe(secret); wipe(payload)
         if logs is not None:

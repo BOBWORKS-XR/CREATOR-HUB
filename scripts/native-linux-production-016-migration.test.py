@@ -411,6 +411,203 @@ def permission_capture_fixture(*, statuses=None, starts=("12345", "12345"), fail
         assert not fixture.fds, "Permission diagnostic leaked an FD"
 
 
+@contextmanager
+def attribution_fixture():
+    fixture = SimpleNamespace(fds={}, opened=[], reads=[], links=[], next_fd=100, failure=None, phase={}, receipts={})
+    fixture.helper = M.load("native-unix-window")
+    def info(pid, leaf=None):
+        value = SimpleNamespace(st_dev=23, st_ino=pid * 10 + {None: 0, "stat": 1, "status": 2, "exe": 3}[leaf],
+                                st_mode=(M.stat.S_IFDIR | 0o555) if leaf is None else M.stat.S_IFREG | 0o444,
+                                st_uid=M.UID, st_gid=M.UID, st_nlink=9 if leaf is None else 1,
+                                st_size=len(image(pid)) if leaf == "exe" else 0, st_mtime_ns=2, st_ctime_ns=3)
+        if leaf is None and fixture.failure == "directory-owner": value.st_uid = 0
+        if leaf is None and fixture.failure == "directory-inode": value.st_ino += 1
+        if leaf == "stat" and fixture.failure == "stat-link": value.st_mode = M.stat.S_IFLNK | 0o777
+        return value
+    def image(pid):
+        return f"SYNTHETIC-ELF-{pid}".encode()
+    def identity(pid):
+        return {"procDirectory": M.metadata_row(f"/proc/{pid}", info(pid)), "startTime": str(pid * 10),
+                "parentPid": 5175 if pid == 5176 else 5000, "Uid": [M.UID] * 4, "Gid": [M.UID] * 4}
+    fixture.identity, fixture.image = identity, image
+    fixture.capture = {"pid": 5176, "errno": 13, "readOnly": True, "stable": True,
+                       "before": identity(5176), "after": identity(5176)}
+    fixture.receipts["first"] = {"startupRefused": {"type": "PermissionError"}, "processInventoryRefusal": fixture.capture}
+    def identify(path, fd=None):
+        if fd is None:
+            match = re.fullmatch(r"/proc/(5176|5175)", Path(path).as_posix())
+            assert match, f"Unapproved proc path: {path}"
+            return int(match[1]), None
+        pid, directory = fixture.fds[fd]
+        assert directory is None and path in ("stat", "status", "exe")
+        return pid, path
+    def opened(path, flags, *, dir_fd=None):
+        pid, leaf = identify(path, dir_fd)
+        assert flags & M.os.O_CLOEXEC and flags & M.os.O_NONBLOCK
+        assert not flags & (M.os.O_WRONLY | M.os.O_RDWR | M.os.O_CREAT | M.os.O_TRUNC)
+        assert bool(flags & M.os.O_NOFOLLOW) == (leaf != "exe")
+        if leaf is None:
+            assert flags & M.os.O_DIRECTORY
+        if fixture.failure == "gone" and leaf is None: raise ProcessLookupError(3, "synthetic")
+        if fixture.failure == "denied" and leaf == "exe": raise PermissionError(13, "synthetic")
+        fixture.next_fd += 1; fd = fixture.next_fd
+        fixture.fds[fd] = (pid, leaf); fixture.opened.append((pid, leaf))
+        return fd
+    def named(path, *, dir_fd=None, follow_symlinks=False):
+        pid, leaf = identify(path, dir_fd)
+        assert follow_symlinks == (leaf == "exe")
+        value = info(pid, leaf)
+        if fixture.failure == "path-replaced" and leaf == "exe" and (pid, leaf) in fixture.reads: value.st_ino += 1
+        return value
+    def fstat(fd):
+        pid, leaf = fixture.fds[fd]; value = info(pid, leaf)
+        if leaf == "exe":
+            if fixture.failure == "oversized": value.st_size = 64 * 1024 * 1024 + 1
+            if fixture.failure == "special": value.st_mode = M.stat.S_IFIFO | 0o444
+            if fixture.failure == "fd-replaced" and (pid, leaf) in fixture.reads: value.st_ino += 1
+        return value
+    def raw(pid, leaf):
+        current = identity(pid)
+        phase = fixture.phase.get(pid, 0)
+        if fixture.failure == "start" and pid == 5176: current["startTime"] = "99999"
+        if fixture.failure == "parent" and pid == 5176: current["parentPid"] = 5001
+        if fixture.failure == "parent-reused" and pid == 5175 and phase: current["startTime"] = "99999"
+        if fixture.failure == "reparented" and pid == 5176 and phase >= 2: current["parentPid"] = 5001
+        if leaf == "stat":
+            return (f"{pid} (RAW-COMM-DO-NOT-EXPORT) " + " ".join(["S", str(current["parentPid"]), *["0"] * 17, current["startTime"]])).encode()
+        if leaf == "exe": return image(pid)
+        fixture.phase[pid] = phase + 1
+        ids = {name: [M.UID] * 4 for name in ("Uid", "Gid")}
+        if fixture.failure in ("uid", "gid") and pid == 5176: ids[fixture.failure.capitalize()][1] = 0
+        result = (f"Name:\tfixture-{pid}\nState:\tS (sleeping)\nPPid:\t{current['parentPid']}\n" +
+                  "".join(f"{key}:\t" + "\t".join(map(str, value)) + "\n" for key, value in ids.items()) +
+                  "Threads:\t1\nNoNewPrivs:\t0\n" +
+                  "".join(key + ":\t0000000000000000\n" for key in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")) +
+                  "Seccomp:\t0\nUNAPPROVED:\tDO-NOT-EXPORT\n").encode()
+        if fixture.failure == "status-duplicate": result += b"Name:\tduplicate\n"
+        if fixture.failure == "status-oversized": result += b"x" * 16385
+        return result
+    def fdopen(fd, mode):
+        assert mode == "rb"
+        pid, leaf = fixture.fds[fd]
+        class Stream(io.BytesIO):
+            def fileno(self): return fd
+            def read(self, limit=-1):
+                assert 0 < limit <= 1048576
+                fixture.reads.append((pid, leaf)); return super().read(limit)
+            def close(self):
+                fixture.fds.pop(fd, None); super().close()
+        return Stream(raw(pid, leaf))
+    def link(path, *, dir_fd):
+        pid, leaf = identify(path, dir_fd); assert leaf == "exe"
+        fixture.links.append(pid)
+        return f"/synthetic/executable-{pid}" + ("-replaced" if fixture.failure == "link-replaced" and (pid, leaf) in fixture.reads else "")
+    def receipt(path, limit, **kwargs):
+        assert path in (M.BASE / "result/first/session.json", M.BASE / "result/reopened/session.json")
+        assert limit == 65536 and kwargs == {"uid": M.UID, "mode": 0o600}
+        return json.dumps(fixture.receipts[path.parent.name]).encode()
+    with ExitStack() as stack:
+        stack.enter_context(patch.multiple(M.os, O_DIRECTORY=0x10000, O_NOFOLLOW=0x20000, O_CLOEXEC=0x40000,
+                                          O_NONBLOCK=0x80000, getuid=lambda: 0, geteuid=lambda: 0, create=True))
+        for name, value in (("open", opened), ("stat", named), ("lstat", named), ("fstat", fstat), ("fdopen", fdopen),
+                            ("readlink", link), ("close", lambda fd: fixture.fds.pop(fd))):
+            stack.enter_context(patch.object(M.os, name, value))
+        stack.enter_context(patch.object(M.os.path, "lexists", side_effect=lambda path: Path(path).parent.name in fixture.receipts))
+        stack.enter_context(patch.object(M, "read_file", side_effect=receipt))
+        stack.enter_context(patch.object(M.subprocess, "run", side_effect=AssertionError("No execution")))
+        yield fixture
+        assert not fixture.fds, "Root attribution leaked an FD"
+
+
+class FailedProcessAttributionTests(unittest.TestCase):
+    def test_exact_failed_tuple_and_immediate_parent_only_with_held_executable_hashes(self):
+        with attribution_fixture() as f:
+            result = M.failed_process_attribution(Mock(poll=lambda: 1), f.helper)
+            self.assertEqual({pid for pid, _ in f.opened}, {5176, 5175})
+            self.assertEqual([pid for pid, leaf in f.opened if leaf == "exe"], [5176, 5175])
+        self.assertEqual(result["status"], "captured")
+        self.assertTrue(result["stable"]); self.assertTrue(result["readOnly"])
+        self.assertFalse(result["validationAuthority"])
+        allowed = {"Name", "State", "PPid", "Uid", "Gid", "Threads", "NoNewPrivs", "CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb", "Seccomp"}
+        for role, pid in (("failed", 5176), ("parent", 5175)):
+            row = result[role]
+            self.assertEqual(row["before"], f.identity(pid)); self.assertEqual(row["after"], f.identity(pid))
+            self.assertEqual(set(row["statusBefore"]), allowed); self.assertEqual(set(row["statusAfter"]), allowed)
+            self.assertEqual(row["executable"]["sha256"], M.digest(f.image(pid)))
+            self.assertEqual(row["executable"]["path"], f"/synthetic/executable-{pid}")
+            self.assertEqual(row["executable"]["before"], row["executable"]["after"])
+        output = json.dumps(result)
+        for sentinel in ("DO-NOT-EXPORT", "RAW-COMM", "SYNTHETIC-ELF", "Dumpable", "cmdline", "environ"):
+            self.assertNotIn(sentinel, output)
+        self.assertLess(len(output.encode()), 32768)
+
+    def test_receipt_must_be_unique_stable_and_the_just_failed_child_must_have_exited(self):
+        for failure in ("missing", "ambiguous", "unstable", "mixed", "pid", "errno", "float-metadata", "float-after", "extra-metadata", "no-child", "running", "success"):
+            with self.subTest(failure=failure), attribution_fixture() as f:
+                child = Mock(poll=lambda: 1)
+                if failure == "missing": f.receipts.clear()
+                if failure == "ambiguous": f.receipts["reopened"] = copy.deepcopy(f.receipts["first"])
+                if failure == "unstable": f.capture["after"]["startTime"] = "999"
+                if failure == "mixed":
+                    for phase in ("before", "after"): f.capture[phase]["Uid"][1] = 0
+                if failure == "pid": f.capture["pid"] = True
+                if failure == "errno": f.capture["errno"] = 2
+                if failure == "float-metadata":
+                    for phase in ("before", "after"): f.capture[phase]["procDirectory"]["mode"] = 365.0
+                if failure == "float-after": f.capture["after"]["procDirectory"]["ctimeNs"] = 3.0
+                if failure == "extra-metadata":
+                    for phase in ("before", "after"): f.capture[phase]["procDirectory"]["extra"] = 1
+                if failure == "no-child": child = None
+                if failure == "running": child.poll = lambda: None
+                if failure == "success": child.poll = lambda: 0
+                result = M.failed_process_attribution(child, f.helper)
+                self.assertEqual(result["status"], "unknown"); self.assertFalse(result["stable"])
+                self.assertFalse(f.opened)
+
+    def test_live_tuple_mismatch_blocks_executable_reads(self):
+        for failure in ("uid", "gid", "start", "parent", "directory-owner", "directory-inode", "stat-link", "status-duplicate", "status-oversized"):
+            with self.subTest(failure=failure), attribution_fixture() as f:
+                f.failure = failure
+                result = M.failed_process_attribution(Mock(poll=lambda: 1), f.helper)
+                self.assertEqual(result["status"], "unknown"); self.assertFalse(result["stable"])
+                self.assertFalse(any(leaf == "exe" for _, leaf in f.opened))
+
+    def test_nonroot_broker_cannot_read_receipts_or_proc(self):
+        with attribution_fixture() as f, patch.object(M.os, "geteuid", return_value=M.UID), patch.object(M, "read_file") as read:
+            result = M.failed_process_attribution(Mock(poll=lambda: 1), f.helper)
+            self.assertEqual(result["status"], "unknown"); self.assertFalse(f.opened)
+            read.assert_not_called()
+
+    def test_denied_gone_oversize_special_or_replaced_images_remain_unknown_and_close_fds(self):
+        for failure in ("denied", "gone", "oversized", "special", "fd-replaced", "path-replaced", "link-replaced", "parent-reused", "reparented"):
+            with self.subTest(failure=failure), attribution_fixture() as f:
+                f.failure = failure
+                result = M.failed_process_attribution(Mock(poll=lambda: 1), f.helper)
+                self.assertEqual(result["status"], "unknown"); self.assertFalse(result["stable"])
+                if failure == "denied": self.assertEqual(result["failed"]["executable"]["error"]["errno"], 13)
+                if failure == "gone": self.assertEqual(result["failed"]["error"]["errno"], 3)
+                if failure in ("oversized", "special"): self.assertFalse(any(leaf == "exe" for _, leaf in f.reads))
+                if failure == "denied":
+                    self.assertEqual(result["failed"]["before"], result["failed"]["after"])
+                    self.assertEqual(result["parent"]["before"], result["parent"]["after"])
+
+    def test_root_broker_capture_precedes_cleanup_and_never_replaces_original_failure(self):
+        source = ast.parse((HERE / "native-linux-production-016-migration.py").read_text())
+        broker = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "broker")
+        handler = next(node for node in broker.body if isinstance(node, ast.Try)).handlers[0]
+        block = compile(ast.fix_missing_locations(ast.Module(body=handler.body, type_ignores=[])), "broker-except", "exec")
+        for diagnostic in ({"status": "unknown"}, RuntimeError("diagnostic-only failure")):
+            original = RuntimeError("Synthetic session failed/unknown; no signal or retry requested")
+            record = {"scenarioPassed": False, **M.FLAGS}
+            callback = Mock(**({"side_effect": diagnostic} if isinstance(diagnostic, Exception) else {"return_value": diagnostic}))
+            scope = {"error": original, "record": record, "child": Mock(), "helper": Mock(), "failed_process_attribution": callback}
+            exec(block, scope)
+            self.assertIs(scope["failure"], original); callback.assert_called_once_with(scope["child"], scope["helper"])
+            self.assertEqual(record["refusal"], {"type": "RuntimeError", "message": str(original)})
+            self.assertFalse(record["scenarioPassed"]); self.assertTrue(all(record[key] is False for key in M.FLAGS))
+            self.assertIn("failedProcessAttribution", record)
+
+
 class DriverReadinessTests(unittest.TestCase):
     def startup(self, *, driver_at=1, backend_at=3, appears_at=1, statuses=(True,), change=None, transport_error=False):
         state = SimpleNamespace(tick=0, requests=[], statuses=iter(statuses), rows={}, closed=set())
